@@ -1,11 +1,13 @@
-#[path = "authority_permit.rs"]
-mod authority_permit;
 mod host;
 
 use anyhow::{bail, Context, Result};
-use authority_permit::PermitWatch;
 use clap::Parser;
-use std::{path::PathBuf, str::FromStr, time::{Duration, Instant}};
+use std::{
+    path::PathBuf,
+    str::FromStr,
+    time::{Duration, Instant},
+};
+use swarm_cli::authority_permit::PermitWatch;
 use swarm_consensus::AuthorityGeneration;
 use swarm_core::{DataPaths, PeerIdentity};
 use swarm_protocol::WorldId;
@@ -105,12 +107,7 @@ async fn host_once(paths: &DataPaths, storage: &Storage, args: &Args, world: Wor
     .await
 }
 
-async fn wait_until_ready(
-    paths: &DataPaths,
-    storage: &Storage,
-    identity: &PeerIdentity,
-    world: WorldId,
-) -> Result<()> {
+async fn wait_until_ready(paths: &DataPaths, storage: &Storage, identity: &PeerIdentity, world: WorldId) -> Result<()> {
     let mut watched_generation = None;
     let mut permit_watch = None;
     loop {
