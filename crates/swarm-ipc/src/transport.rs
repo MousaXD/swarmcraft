@@ -105,15 +105,12 @@ impl FabricBridgeListener {
         if !peer.ip().is_loopback() {
             return Err(IpcTransportError::NonLoopbackPeer);
         }
-        let (read, mut write) = stream.into_split();
+        let (read, write) = stream.into_split();
         let mut reader = BufReader::new(read);
         let auth = read_line_bounded(&mut reader).await?;
         if auth != format!("AUTH\t{}", self.token) {
             return Err(IpcTransportError::AuthenticationFailed);
         }
-        write.write_all(b"AUTH_OK\n").await?;
-        write.flush().await?;
-
         let info = parse_world_info(&read_line_bounded(&mut reader).await?)?;
         Ok(FabricSession { reader, writer: write, world_info: info })
     }
@@ -221,10 +218,6 @@ mod tests {
             let (read, mut write) = stream.into_split();
             let mut reader = BufReader::new(read);
             write.write_all(format!("AUTH\t{}\n", config.token()).as_bytes()).await.unwrap();
-            write.flush().await.unwrap();
-            let mut auth_ok = String::new();
-            reader.read_line(&mut auth_ok).await.unwrap();
-            assert_eq!(auth_ok.trim(), "AUTH_OK");
             write
                 .write_all(
                     format!(
