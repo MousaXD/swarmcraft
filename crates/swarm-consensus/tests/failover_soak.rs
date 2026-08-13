@@ -46,10 +46,7 @@ fn one_thousand_forced_crashes_preserve_single_authority_and_monotonic_fencing()
         assert_eq!(sim.authority(), Some(successor));
         assert_eq!(sim.epoch(), old_epoch + 1);
         assert_eq!(sim.fencing_token(), old_token + 1);
-        assert_eq!(
-            sim.renew_authority_lease(old_authority, old_token, now_ms),
-            Err(SimError::StaleGeneration)
-        );
+        assert_eq!(sim.renew_authority_lease(old_authority, old_token, now_ms), Err(SimError::StaleGeneration));
 
         sim.set_online(old_authority, true).unwrap();
     }
