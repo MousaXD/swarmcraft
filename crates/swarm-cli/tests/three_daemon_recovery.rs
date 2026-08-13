@@ -11,8 +11,8 @@ use swarm_cli::authority_permit::permit_path;
 use swarm_core::{create_world_genesis, DataPaths, PeerIdentity};
 use swarm_network::load_or_create_transport_key;
 use swarm_protocol::{
-    EpochMode, EpochRecordV1, MembershipRecordV1, PeerId, SnapshotManifestV1, WorldDescriptorV1, WorldMemberV1,
-    WorldId, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    EpochMode, EpochRecordV1, MembershipRecordV1, SnapshotManifestV1, WorldDescriptorV1, WorldId, WorldMemberV1,
+    PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 use tempfile::TempDir;
@@ -147,13 +147,8 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     let b = peer_fixture();
     let c = peer_fixture();
 
-    let (world, genesis) = create_world_genesis(
-        &a.identity,
-        "26.1.2".into(),
-        "0.19.3".into(),
-        b"three-daemon-recovery",
-    )
-    .unwrap();
+    let (world, genesis) =
+        create_world_genesis(&a.identity, "26.1.2".into(), "0.19.3".into(), b"three-daemon-recovery").unwrap();
     let metadata = WorldMetadataV1 {
         storage_schema_version: STORAGE_SCHEMA_VERSION,
         display_name: "three-daemon-recovery".into(),
@@ -234,7 +229,8 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     let _daemon_c = spawn_daemon(&c, &[a_addr.clone(), b_addr.clone()]);
 
     wait_until("initial authority quorum permit", Duration::from_secs(20), || {
-        permit_generation(&a, world).is_some_and(|(epoch, fencing, heartbeat)| epoch == 1 && fencing == 1 && heartbeat >= 2)
+        permit_generation(&a, world)
+            .is_some_and(|(epoch, fencing, heartbeat)| epoch == 1 && fencing == 1 && heartbeat >= 2)
     });
 
     daemon_a.stop();
