@@ -10,6 +10,8 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.HexFormat;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -25,12 +27,16 @@ public final class SwarmCraftMod implements ModInitializer {
     public static final String MOD_ID = "swarmcraft";
     private static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration PERMIT_START_TIMEOUT = Duration.ofSeconds(15);
+    private static final Duration PERMIT_TIMEOUT = Duration.ofSeconds(6);
+    private static final Duration PERMIT_POLL_INTERVAL = Duration.ofMillis(250);
     private static volatile Bridge bridge;
+    private static volatile PermitGuard permitGuard;
 
     @Override
     public void onInitialize() {
         ServerLifecycleEvents.SERVER_STARTED.register(SwarmCraftMod::serverStarted);
-        ServerLifecycleEvents.SERVER_STOPPING.register(server -> closeBridge());
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> closeRuntimeGuards());
     }
 
     private static void serverStarted(MinecraftServer server) {
@@ -50,16 +56,146 @@ public final class SwarmCraftMod implements ModInitializer {
             Bridge next = new Bridge(server, address, Integer.parseInt(port), token);
             next.start();
             bridge = next;
+
+            String worldDirectory = valueOrEmpty(System.getenv("SWARMCRAFT_WORLD_DIR"));
+            PermitGuard guard = PermitGuard.createIfRequired(server, worldDirectory);
+            if (guard != null) {
+                guard.start();
+                permitGuard = guard;
+            }
         } catch (Exception error) {
             LOGGER.error("Unable to start SwarmCraft lifecycle bridge", error);
         }
     }
 
-    private static void closeBridge() {
+    private static void closeRuntimeGuards() {
         Bridge current = bridge;
         bridge = null;
         if (current != null) {
             current.close();
+        }
+        PermitGuard guard = permitGuard;
+        permitGuard = null;
+        if (guard != null) {
+            guard.close();
+        }
+    }
+
+    private static final class PermitGuard implements AutoCloseable {
+        private final MinecraftServer server;
+        private final Path permitPath;
+        private final AtomicBoolean closed = new AtomicBoolean();
+        private String lastPermit;
+        private long lastChangeNanos;
+        private final long startedNanos = System.nanoTime();
+        private boolean livePermitObserved;
+
+        private PermitGuard(MinecraftServer server, Path permitPath) {
+            this.server = server;
+            this.permitPath = permitPath;
+        }
+
+        private static PermitGuard createIfRequired(MinecraftServer server, String worldDirectory) throws IOException {
+            if (worldDirectory.isBlank()) {
+                return null;
+            }
+            Path world = Path.of(worldDirectory).toAbsolutePath().normalize();
+            Path worldIdDirectory = world.getParent();
+            Path runtimeDirectory = worldIdDirectory == null ? null : worldIdDirectory.getParent();
+            Path dataRoot = runtimeDirectory == null ? null : runtimeDirectory.getParent();
+            if (worldIdDirectory == null || dataRoot == null || worldIdDirectory.getFileName() == null) {
+                throw new IOException("cannot derive SwarmCraft data root from world directory");
+            }
+            String worldHex = worldIdDirectory.getFileName().toString();
+            Path descriptor = dataRoot.resolve("worlds").resolve(worldHex).resolve("metadata").resolve("descriptor.json");
+            if (countMembers(descriptor) <= 1) {
+                return null;
+            }
+            Path permit = dataRoot.resolve("control").resolve(worldHex).resolve("authority.permit");
+            LOGGER.info("SwarmCraft authority permit guard enabled for multi-member world {}", worldHex);
+            return new PermitGuard(server, permit);
+        }
+
+        private static int countMembers(Path descriptor) throws IOException {
+            String json = Files.readString(descriptor, StandardCharsets.UTF_8);
+            int count = 0;
+            int offset = 0;
+            String needle = "\"peer_id\"";
+            while ((offset = json.indexOf(needle, offset)) >= 0) {
+                count++;
+                offset += needle.length();
+            }
+            return count;
+        }
+
+        private void start() {
+            Thread watcher = new Thread(this::watchLoop, "swarmcraft-authority-permit");
+            watcher.setDaemon(true);
+            watcher.start();
+        }
+
+        private void watchLoop() {
+            while (!closed.get()) {
+                long now = System.nanoTime();
+                observePermit(now);
+                if (!livePermitObserved && elapsed(startedNanos, now).compareTo(PERMIT_START_TIMEOUT) >= 0) {
+                    expire("no changing authority permit arrived before startup timeout");
+                    return;
+                }
+                if (livePermitObserved && elapsed(lastChangeNanos, now).compareTo(PERMIT_TIMEOUT) >= 0) {
+                    expire("authority permit heartbeat expired");
+                    return;
+                }
+                try {
+                    Thread.sleep(PERMIT_POLL_INTERVAL.toMillis());
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }
+
+        private void observePermit(long now) {
+            try {
+                String current = Files.readString(permitPath, StandardCharsets.UTF_8).trim();
+                if (current.isBlank()) {
+                    return;
+                }
+                if (lastPermit == null) {
+                    lastPermit = current;
+                    return;
+                }
+                if (!lastPermit.equals(current)) {
+                    lastPermit = current;
+                    lastChangeNanos = now;
+                    livePermitObserved = true;
+                }
+            } catch (IOException ignored) {
+            }
+        }
+
+        private void expire(String reason) {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
+            LOGGER.error("SwarmCraft authority permit lost: {}. Saving then terminating non-canonically.", reason);
+            server.execute(() -> {
+                try {
+                    saveEverything(server);
+                } catch (Exception error) {
+                    LOGGER.error("Unable to save before authority permit termination", error);
+                }
+                System.exit(75);
+            });
+        }
+
+        private static Duration elapsed(long start, long end) {
+            return Duration.ofNanos(Math.max(0L, end - start));
+        }
+
+        @Override
+        public void close() {
+            closed.set(true);
         }
     }
 
