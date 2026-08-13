@@ -14,13 +14,8 @@ async fn real_host_process_restores_launches_and_commits_mutated_world() {
     let paths = DataPaths::from_root(temp.path().join("data"));
     let storage = Storage::open(paths.root.clone()).unwrap();
     let identity = PeerIdentity::load_or_create(&paths).unwrap();
-    let (world, genesis) = create_world_genesis(
-        &identity,
-        "26.1.2".into(),
-        "0.19.3".into(),
-        b"runtime-process-smoke",
-    )
-    .unwrap();
+    let (world, genesis) =
+        create_world_genesis(&identity, "26.1.2".into(), "0.19.3".into(), b"runtime-process-smoke").unwrap();
 
     storage
         .create_world(&WorldMetadataV1 {
@@ -105,13 +100,7 @@ with socket.create_connection((host, port), timeout=5) as connection:
     host::run(
         &paths,
         &storage,
-        host::HostOptions {
-            world,
-            java: mock,
-            server_jar: dummy_server,
-            mod_jar: dummy_mod,
-            accept_eula: true,
-        },
+        host::HostOptions { world, java: mock, server_jar: dummy_server, mod_jar: dummy_mod, accept_eula: true },
     )
     .await
     .unwrap();
