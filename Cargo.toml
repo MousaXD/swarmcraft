@@ -9,6 +9,7 @@ members = [
   "crates/swarm-ipc",
   "crates/swarm-cli",
 ]
+exclude = ["apps/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
