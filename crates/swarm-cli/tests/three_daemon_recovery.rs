@@ -28,6 +28,16 @@ struct PeerFixture {
     transport_peer: String,
 }
 
+struct CanonicalReplicaSeed<'a> {
+    metadata: &'a WorldMetadataV1,
+    descriptor: &'a WorldDescriptorV1,
+    membership: &'a MembershipRecordV1,
+    epoch: &'a EpochRecordV1,
+    manifest: &'a SnapshotManifestV1,
+    source: &'a std::path::Path,
+    authority: &'a PeerIdentity,
+}
+
 struct ManagedChild(Child);
 
 impl ManagedChild {
@@ -98,37 +108,28 @@ fn member(identity: &PeerIdentity) -> WorldMemberV1 {
     }
 }
 
-fn install_canonical_replica(
-    peer: &PeerFixture,
-    metadata: &WorldMetadataV1,
-    descriptor: &WorldDescriptorV1,
-    membership: &MembershipRecordV1,
-    epoch: &EpochRecordV1,
-    manifest: &SnapshotManifestV1,
-    source: &std::path::Path,
-    authority: &PeerIdentity,
-) {
-    peer.storage.create_world(metadata).unwrap();
-    peer.storage.save_world_descriptor(descriptor).unwrap();
-    peer.storage.save_membership_record(membership).unwrap();
-    peer.storage.save_epoch_record(epoch).unwrap();
+fn install_canonical_replica(peer: &PeerFixture, seed: &CanonicalReplicaSeed<'_>) {
+    peer.storage.create_world(seed.metadata).unwrap();
+    peer.storage.save_world_descriptor(seed.descriptor).unwrap();
+    peer.storage.save_membership_record(seed.membership).unwrap();
+    peer.storage.save_epoch_record(seed.epoch).unwrap();
     let mut local = peer
         .storage
         .snapshot_directory(
-            source,
+            seed.source,
             SnapshotContext {
-                world: metadata.world_id,
-                snapshot_number: manifest.snapshot_number,
-                epoch: manifest.epoch,
-                sequence: manifest.sequence,
-                previous_snapshot_hash: manifest.previous_snapshot_hash,
-                authority_peer_id: authority.peer_id(),
-                authority_public_key: authority.public_key(),
+                world: seed.metadata.world_id,
+                snapshot_number: seed.manifest.snapshot_number,
+                epoch: seed.manifest.epoch,
+                sequence: seed.manifest.sequence,
+                previous_snapshot_hash: seed.manifest.previous_snapshot_hash,
+                authority_peer_id: seed.authority.peer_id(),
+                authority_public_key: seed.authority.public_key(),
             },
         )
         .unwrap();
-    authority.sign_snapshot(&mut local).unwrap();
-    assert_eq!(local.manifest_hash().unwrap(), manifest.manifest_hash().unwrap());
+    seed.authority.sign_snapshot(&mut local).unwrap();
+    assert_eq!(local.manifest_hash().unwrap(), seed.manifest.manifest_hash().unwrap());
     peer.storage.commit_snapshot(&local).unwrap();
 }
 
@@ -214,8 +215,17 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     };
     epoch.signature = a.identity.sign(&epoch.signing_bytes().unwrap());
 
+    let seed = CanonicalReplicaSeed {
+        metadata: &metadata,
+        descriptor: &descriptor,
+        membership: &membership,
+        epoch: &epoch,
+        manifest: &manifest,
+        source: &source,
+        authority: &a.identity,
+    };
     for peer in [&a, &b, &c] {
-        install_canonical_replica(peer, &metadata, &descriptor, &membership, &epoch, &manifest, &source, &a.identity);
+        install_canonical_replica(peer, &seed);
     }
 
     let a_addr = transport_address(&a);
