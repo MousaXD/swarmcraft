@@ -3,7 +3,7 @@
 mod runtime;
 
 use runtime::RuntimeProcesses;
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 use tauri_plugin_shell::ShellExt;
 
 async fn run_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, String> {
@@ -149,6 +149,7 @@ async fn recover_world(app: AppHandle, world: String, snapshot: u64, destination
 #[tauri::command(rename_all = "camelCase")]
 fn host_world(
     app: AppHandle,
+    processes: State<'_, RuntimeProcesses>,
     world: String,
     java: String,
     server_jar: String,
@@ -161,24 +162,20 @@ fn host_world(
     if !accept_eula {
         return Err("Minecraft server EULA acceptance is required before hosting".into());
     }
-    let (_events, child) = app
-        .shell()
-        .sidecar("swarmcraft-host")
-        .map_err(|error| error.to_string())?
-        .args([
-            "--world",
-            world.as_str(),
-            "--java",
-            java.as_str(),
-            "--server-jar",
-            server_jar.as_str(),
-            "--mod-jar",
-            mod_jar.as_str(),
-            "--accept-eula",
-        ])
-        .spawn()
-        .map_err(|error| error.to_string())?;
-    Ok(child.pid())
+    processes.start_host(
+        &app,
+        vec![
+            "--world".into(),
+            world,
+            "--java".into(),
+            java,
+            "--server-jar".into(),
+            server_jar,
+            "--mod-jar".into(),
+            mod_jar,
+            "--accept-eula".into(),
+        ],
+    )
 }
 
 fn main() {
