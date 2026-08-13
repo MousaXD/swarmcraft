@@ -1,0 +1,18 @@
+[package]
+name = "swarmcraft-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/MousaXD/swarmcraft"
+build = "build.rs"
+
+[[bin]]
+name = "swarmcraft-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
