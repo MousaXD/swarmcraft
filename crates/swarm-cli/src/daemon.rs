@@ -17,7 +17,7 @@ use swarm_network::{
 };
 use swarm_protocol::{
     AuthorityLeaseGrantV1, BlobDescriptor, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, PeerId,
-    SnapshotManifestV1, TransferPhase, WorldId, WorldStatusV1, PROTOCOL_VERSION,
+    SnapshotManifestV1, TransferPhase, WorldDescriptorV1, WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
 use swarm_storage::Storage;
 use tokio::time::MissedTickBehavior;
@@ -31,6 +31,8 @@ const STATUS_FRESHNESS: Duration = Duration::from_secs(3);
 enum OutboundContext {
     Manifest { world: WorldId, snapshot_number: u64 },
     Lease { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
+    Reservation { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
+    Epoch { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
     Status { world: WorldId, peer: PeerId },
 }
 
@@ -56,6 +58,8 @@ struct ObservedStatus {
 struct LeaseRuntime {
     authenticated_peers: HashMap<TransportPeerId, PeerId>,
     lease_acks: HashMap<(WorldId, PeerId), LeaseAck>,
+    reservation_acks: HashMap<(WorldId, PeerId), AuthorityGeneration>,
+    epoch_acks: HashMap<(WorldId, PeerId), AuthorityGeneration>,
     permit_heartbeats: HashMap<WorldId, u64>,
     inbound_leases: HashMap<WorldId, InboundLease>,
     peer_status: HashMap<(WorldId, PeerId), ObservedStatus>,
@@ -71,6 +75,16 @@ struct HandlerContext<'a> {
 struct RequestState<'a> {
     pending_manifests: &'a mut HashMap<WorldId, SnapshotManifestV1>,
     leases: &'a mut LeaseRuntime,
+    now: Instant,
+}
+
+struct LocalAuthorityContext<'a> {
+    paths: &'a DataPaths,
+    storage: &'a Storage,
+    identity: &'a PeerIdentity,
+    descriptor: &'a WorldDescriptorV1,
+    epoch: &'a EpochRecordV1,
+    generation: AuthorityGeneration,
     now: Instant,
 }
 
@@ -158,6 +172,12 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                                 OutboundContext::Lease { world, peer, .. } => {
                                     leases.lease_acks.remove(&(world, peer));
                                 }
+                                OutboundContext::Reservation { world, peer, .. } => {
+                                    leases.reservation_acks.remove(&(world, peer));
+                                }
+                                OutboundContext::Epoch { world, peer, .. } => {
+                                    leases.epoch_acks.remove(&(world, peer));
+                                }
                                 OutboundContext::Status { world, peer } => {
                                     leases.peer_status.remove(&(world, peer));
                                 }
@@ -169,6 +189,8 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                     NetworkEvent::Disconnected { transport_peer } => {
                         if let Some(application_peer) = leases.authenticated_peers.remove(&transport_peer) {
                             leases.lease_acks.retain(|(_, peer), _| *peer != application_peer);
+                            leases.reservation_acks.retain(|(_, peer), _| *peer != application_peer);
+                            leases.epoch_acks.retain(|(_, peer), _| *peer != application_peer);
                             leases.peer_status.retain(|(_, peer), _| *peer != application_peer);
                         }
                         info!(transport = %transport_peer, "peer disconnected");
@@ -232,17 +254,16 @@ fn maintain_authority_leases(
                 clear_permit(paths, world)?;
                 continue;
             }
-            maintain_local_authority(
+            let context = LocalAuthorityContext {
                 paths,
                 storage,
                 identity,
-                node,
-                outbound,
-                runtime,
-                &descriptor,
+                descriptor: &descriptor,
+                epoch: &epoch,
                 generation,
                 now,
-            )?;
+            };
+            maintain_local_authority(&context, node, outbound, runtime)?;
             continue;
         }
 
@@ -277,7 +298,8 @@ fn maintain_authority_leases(
             banned: false,
         }];
 
-        for member in descriptor.members.iter().filter(|member| member.peer_id != identity.peer_id() && !member.banned) {
+        for member in descriptor.members.iter().filter(|member| member.peer_id != identity.peer_id() && !member.banned)
+        {
             if !runtime.authenticated_peers.values().any(|peer| *peer == member.peer_id) {
                 continue;
             }
@@ -322,9 +344,7 @@ fn maintain_authority_leases(
             epoch: generation.epoch.saturating_add(1),
             fencing_token: generation.fencing_token.saturating_add(1),
         };
-        let mut reservation = signed_lease(identity, world, recovery_generation)?;
-        reservation.lease_duration_ms = AUTHORITY_LEASE_DURATION_MS;
-        identity.sign_lease(&mut reservation)?;
+        let reservation = signed_lease(identity, world, recovery_generation)?;
         if !storage.reserve_recovery(&reservation)? {
             continue;
         }
@@ -333,25 +353,20 @@ fn maintain_authority_leases(
             if *application_peer == identity.peer_id() || !visible_peers.contains(application_peer) {
                 continue;
             }
-            if lease_request_pending(outbound, world, *application_peer, recovery_generation) {
+            if reservation_request_pending(outbound, world, *application_peer, recovery_generation) {
                 continue;
             }
             let request_id = node.send_request(transport_peer, WireRequest::LeaseGrant(reservation.clone()))?;
             outbound.insert(
                 request_key(&request_id),
-                OutboundContext::Lease { world, peer: *application_peer, generation: recovery_generation },
+                OutboundContext::Reservation { world, peer: *application_peer, generation: recovery_generation },
             );
         }
 
         let confirmed = 1 + visible_peers
             .iter()
             .filter(|peer| **peer != identity.peer_id())
-            .filter(|peer| {
-                runtime
-                    .lease_acks
-                    .get(&(world, **peer))
-                    .is_some_and(|ack| ack.generation == recovery_generation)
-            })
+            .filter(|peer| runtime.reservation_acks.get(&(world, **peer)) == Some(&recovery_generation))
             .count();
         if !has_quorum(member_count, confirmed) {
             continue;
@@ -360,13 +375,20 @@ fn maintain_authority_leases(
         let next = promote_recovery_epoch(storage, identity, &epoch, &latest)?;
         ensure_recovery_artifacts(storage, identity, &next)?;
         runtime.lease_acks.retain(|(ack_world, _), _| *ack_world != world);
+        runtime.reservation_acks.retain(|(ack_world, _), _| *ack_world != world);
+        runtime.epoch_acks.retain(|(ack_world, _), _| *ack_world != world);
         runtime.inbound_leases.remove(&world);
         runtime.recovery_replication_sent.retain(|(replica_world, _)| *replica_world != world);
         storage.clear_recovery_reservation(world)?;
         for (transport_peer, application_peer) in &runtime.authenticated_peers {
-            if *application_peer != identity.peer_id() && visible_peers.contains(application_peer) {
-                node.send_request(transport_peer, WireRequest::Epoch(next.clone()))?;
+            if *application_peer == identity.peer_id() || !visible_peers.contains(application_peer) {
+                continue;
             }
+            let request_id = node.send_request(transport_peer, WireRequest::Epoch(next.clone()))?;
+            outbound.insert(
+                request_key(&request_id),
+                OutboundContext::Epoch { world, peer: *application_peer, generation: recovery_generation },
+            );
         }
         info!(world = %world, epoch = next.epoch_number, peer = %identity.peer_id(), "authority recovered after quorum reservation");
     }
@@ -374,60 +396,103 @@ fn maintain_authority_leases(
 }
 
 fn maintain_local_authority(
-    paths: &DataPaths,
-    storage: &Storage,
-    identity: &PeerIdentity,
+    context: &LocalAuthorityContext<'_>,
     node: &mut SwarmNode,
     outbound: &mut HashMap<String, OutboundContext>,
     runtime: &mut LeaseRuntime,
-    descriptor: &swarm_protocol::WorldDescriptorV1,
-    generation: AuthorityGeneration,
-    now: Instant,
 ) -> Result<()> {
-    let world = descriptor.world_id;
-    let lease = signed_lease(identity, world, generation)?;
+    let world = context.descriptor.world_id;
+    if context.epoch.mode == EpochMode::Recovery && !maintain_recovery_epoch_quorum(context, node, outbound, runtime)? {
+        clear_permit(context.paths, world)?;
+        return Ok(());
+    }
+
+    let lease = signed_lease(context.identity, world, context.generation)?;
     for (transport_peer, application_peer) in &runtime.authenticated_peers {
-        let Some(member) = descriptor.member(*application_peer) else {
+        let Some(member) = context.descriptor.member(*application_peer) else {
             continue;
         };
-        if member.banned || *application_peer == identity.peer_id() {
+        if member.banned || *application_peer == context.identity.peer_id() {
             continue;
         }
-        if lease_request_pending(outbound, world, *application_peer, generation) {
+        if lease_request_pending(outbound, world, *application_peer, context.generation) {
             continue;
         }
         let request_id = node.send_request(transport_peer, WireRequest::LeaseGrant(lease.clone()))?;
         outbound.insert(
             request_key(&request_id),
-            OutboundContext::Lease { world, peer: *application_peer, generation },
+            OutboundContext::Lease { world, peer: *application_peer, generation: context.generation },
         );
     }
 
-    let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
+    let member_count = context.descriptor.members.iter().filter(|member| !member.banned).count();
     let fresh_window = Duration::from_millis(AUTHORITY_LEASE_DURATION_MS);
-    let confirmed = 1 + descriptor
+    let confirmed = 1 + context
+        .descriptor
         .members
         .iter()
-        .filter(|member| member.peer_id != identity.peer_id() && !member.banned)
+        .filter(|member| member.peer_id != context.identity.peer_id() && !member.banned)
         .filter(|member| runtime.authenticated_peers.values().any(|peer| *peer == member.peer_id))
         .filter(|member| {
             runtime.lease_acks.get(&(world, member.peer_id)).is_some_and(|ack| {
-                ack.generation == generation && now.saturating_duration_since(ack.observed_at) < fresh_window
+                ack.generation == context.generation && context.now.saturating_duration_since(ack.observed_at) < fresh_window
             })
         })
         .count();
     if has_quorum(member_count, confirmed) {
         let heartbeat = runtime.permit_heartbeats.entry(world).or_default();
         *heartbeat = heartbeat.saturating_add(1);
-        refresh_permit(paths, world, generation, *heartbeat)?;
+        refresh_permit(context.paths, world, context.generation, *heartbeat)?;
     } else {
-        clear_permit(paths, world)?;
+        clear_permit(context.paths, world)?;
     }
-    storage.clear_recovery_reservation(world)?;
+    context.storage.clear_recovery_reservation(world)?;
     Ok(())
 }
 
-fn signed_lease(identity: &PeerIdentity, world: WorldId, generation: AuthorityGeneration) -> Result<AuthorityLeaseGrantV1> {
+fn maintain_recovery_epoch_quorum(
+    context: &LocalAuthorityContext<'_>,
+    node: &mut SwarmNode,
+    outbound: &mut HashMap<String, OutboundContext>,
+    runtime: &mut LeaseRuntime,
+) -> Result<bool> {
+    let world = context.descriptor.world_id;
+    for (transport_peer, application_peer) in &runtime.authenticated_peers {
+        let Some(member) = context.descriptor.member(*application_peer) else {
+            continue;
+        };
+        if member.banned || *application_peer == context.identity.peer_id() {
+            continue;
+        }
+        if runtime.epoch_acks.get(&(world, *application_peer)) == Some(&context.generation)
+            || epoch_request_pending(outbound, world, *application_peer, context.generation)
+        {
+            continue;
+        }
+        let request_id = node.send_request(transport_peer, WireRequest::Epoch(context.epoch.clone()))?;
+        outbound.insert(
+            request_key(&request_id),
+            OutboundContext::Epoch { world, peer: *application_peer, generation: context.generation },
+        );
+    }
+
+    let member_count = context.descriptor.members.iter().filter(|member| !member.banned).count();
+    let confirmed = 1 + context
+        .descriptor
+        .members
+        .iter()
+        .filter(|member| member.peer_id != context.identity.peer_id() && !member.banned)
+        .filter(|member| runtime.authenticated_peers.values().any(|peer| *peer == member.peer_id))
+        .filter(|member| runtime.epoch_acks.get(&(world, member.peer_id)) == Some(&context.generation))
+        .count();
+    Ok(has_quorum(member_count, confirmed))
+}
+
+fn signed_lease(
+    identity: &PeerIdentity,
+    world: WorldId,
+    generation: AuthorityGeneration,
+) -> Result<AuthorityLeaseGrantV1> {
     let mut lease = AuthorityLeaseGrantV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
@@ -448,7 +513,7 @@ fn request_world_statuses(
     node: &mut SwarmNode,
     outbound: &mut HashMap<String, OutboundContext>,
     runtime: &LeaseRuntime,
-    descriptor: &swarm_protocol::WorldDescriptorV1,
+    descriptor: &WorldDescriptorV1,
     local_peer: PeerId,
 ) -> Result<()> {
     storage.load_world(descriptor.world_id)?;
@@ -459,7 +524,8 @@ fn request_world_statuses(
         if status_request_pending(outbound, descriptor.world_id, *application_peer) {
             continue;
         }
-        let request_id = node.send_request(transport_peer, WireRequest::WorldStatus { world_id: descriptor.world_id })?;
+        let request_id =
+            node.send_request(transport_peer, WireRequest::WorldStatus { world_id: descriptor.world_id })?;
         outbound.insert(
             request_key(&request_id),
             OutboundContext::Status { world: descriptor.world_id, peer: *application_peer },
@@ -560,6 +626,8 @@ fn ensure_recovery_artifacts(storage: &Storage, identity: &PeerIdentity, epoch: 
 
 fn clear_runtime_world(runtime: &mut LeaseRuntime, world: WorldId) {
     runtime.lease_acks.retain(|(ack_world, _), _| *ack_world != world);
+    runtime.reservation_acks.retain(|(ack_world, _), _| *ack_world != world);
+    runtime.epoch_acks.retain(|(ack_world, _), _| *ack_world != world);
     runtime.peer_status.retain(|(status_world, _), _| *status_world != world);
     runtime.permit_heartbeats.remove(&world);
     runtime.inbound_leases.remove(&world);
@@ -577,6 +645,42 @@ fn lease_request_pending(
         matches!(
             context,
             OutboundContext::Lease {
+                world: request_world,
+                peer: request_peer,
+                generation: request_generation,
+            } if *request_world == world && *request_peer == peer && *request_generation == generation
+        )
+    })
+}
+
+fn reservation_request_pending(
+    outbound: &HashMap<String, OutboundContext>,
+    world: WorldId,
+    peer: PeerId,
+    generation: AuthorityGeneration,
+) -> bool {
+    outbound.values().any(|context| {
+        matches!(
+            context,
+            OutboundContext::Reservation {
+                world: request_world,
+                peer: request_peer,
+                generation: request_generation,
+            } if *request_world == world && *request_peer == peer && *request_generation == generation
+        )
+    })
+}
+
+fn epoch_request_pending(
+    outbound: &HashMap<String, OutboundContext>,
+    world: WorldId,
+    peer: PeerId,
+    generation: AuthorityGeneration,
+) -> bool {
+    outbound.values().any(|context| {
+        matches!(
+            context,
+            OutboundContext::Epoch {
                 world: request_world,
                 peer: request_peer,
                 generation: request_generation,
@@ -818,10 +922,8 @@ fn handle_request(
         }
         WireRequest::BlobChunk { world_id, hash, encoding, offset, data, finished } => {
             authorize_member(storage, world_id, application_peer)?;
-            let manifest = state
-                .pending_manifests
-                .get(&world_id)
-                .context("blob chunk arrived without a negotiated manifest")?;
+            let manifest =
+                state.pending_manifests.get(&world_id).context("blob chunk arrived without a negotiated manifest")?;
             let descriptor =
                 find_descriptor(manifest, hash).context("blob hash is not referenced by negotiated manifest")?;
             if descriptor.encoding != encoding {
@@ -960,7 +1062,8 @@ fn handle_request(
                 return Err(anyhow!("lease duration does not match the preview authority policy"));
             }
             let epoch = storage.load_epoch_record(lease.world_id)?;
-            let current_generation = AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token };
+            let current_generation =
+                AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token };
             let received_generation = AuthorityGeneration { epoch: lease.epoch, fencing_token: lease.fencing_token };
             if received_generation == current_generation {
                 if lease.authority_peer_id != epoch.authority_peer_id
@@ -969,10 +1072,10 @@ fn handle_request(
                     return Err(anyhow!("lease does not match the accepted authority epoch"));
                 }
                 let expires_at = state.now + Duration::from_millis(lease.lease_duration_ms);
-                state.leases.inbound_leases.insert(
-                    lease.world_id,
-                    InboundLease { generation: current_generation, expires_at },
-                );
+                state
+                    .leases
+                    .inbound_leases
+                    .insert(lease.world_id, InboundLease { generation: current_generation, expires_at });
                 state.leases.recovery_not_before.insert(lease.world_id, expires_at + RECOVERY_SETTLE_DELAY);
             } else if received_generation
                 == (AuthorityGeneration {
@@ -1079,9 +1182,7 @@ fn handle_response(
             Some(OutboundContext::Lease { world, peer, generation }),
             WireResponse::LeaseAccepted { epoch, fencing_token },
         ) => {
-            if epoch != generation.epoch || fencing_token != generation.fencing_token {
-                return Err(anyhow!("lease acknowledgement generation mismatch"));
-            }
+            validate_generation_response(generation, epoch, fencing_token, "lease")?;
             runtime.lease_acks.insert((world, peer), LeaseAck { generation, observed_at: now });
             if let Ok(epoch_record) = storage.load_epoch_record(world) {
                 if epoch_record.mode == EpochMode::Recovery
@@ -1100,6 +1201,20 @@ fn handle_response(
                 }
             }
         }
+        (
+            Some(OutboundContext::Reservation { world, peer, generation }),
+            WireResponse::LeaseAccepted { epoch, fencing_token },
+        ) => {
+            validate_generation_response(generation, epoch, fencing_token, "recovery reservation")?;
+            runtime.reservation_acks.insert((world, peer), generation);
+        }
+        (
+            Some(OutboundContext::Epoch { world, peer, generation }),
+            WireResponse::EpochAccepted { epoch, fencing_token },
+        ) => {
+            validate_generation_response(generation, epoch, fencing_token, "epoch")?;
+            runtime.epoch_acks.insert((world, peer), generation);
+        }
         (Some(OutboundContext::Status { world, peer }), WireResponse::WorldStatus(Some(status))) => {
             if status.world_id != world {
                 return Err(anyhow!("world status response references the wrong world"));
@@ -1111,6 +1226,18 @@ fn handle_response(
         }
         (_, WireResponse::Error { code, message }) => warn!(%code, %message, "peer rejected request"),
         _ => {}
+    }
+    Ok(())
+}
+
+fn validate_generation_response(
+    generation: AuthorityGeneration,
+    epoch: u64,
+    fencing_token: u64,
+    kind: &str,
+) -> Result<()> {
+    if epoch != generation.epoch || fencing_token != generation.fencing_token {
+        return Err(anyhow!("{kind} acknowledgement generation mismatch"));
     }
     Ok(())
 }
