@@ -1,0 +1,12 @@
+[package]
+name = "swarm-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+postcard.workspace = true
+serde.workspace = true
+swarm-protocol = { path = "../swarm-protocol" }
