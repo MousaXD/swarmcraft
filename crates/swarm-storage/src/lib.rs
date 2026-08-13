@@ -1,13 +1,13 @@
 //! Crash-safe content-addressed storage and directory snapshots.
 
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::fs::File;
 use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
 };
-#[cfg(unix)]
-use std::fs::File;
 use swarm_protocol::{
     BlobDescriptor, BlobEncoding, Hash32, PeerId, SnapshotManifestV1, WorldGenesisV1, WorldId, STORAGE_SCHEMA_VERSION,
 };
