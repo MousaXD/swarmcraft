@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SwarmCraft</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">SWARMCRAFT PREVIEW</p>
+      <h1>Your Minecraft world, carried by the swarm.</h1>
+      <p class="sub">Replicate verified snapshots, hand authority to another peer, sleep with everyone offline, and wake later.</p>
+    </header>
+
+    <section class="card actions">
+      <div>
+        <h2>Local node</h2>
+        <p id="identity">Not initialized</p>
+      </div>
+      <button id="init">Initialize</button>
+      <button id="refresh">Refresh worlds</button>
+    </section>
+
+    <section class="card">
+      <h2>Worlds</h2>
+      <pre id="worlds">No data yet.</pre>
+    </section>
+
+    <section class="card form-card">
+      <h2>Host verified world</h2>
+      <label>World ID <input id="world" placeholder="scworld:…" /></label>
+      <label>Java executable <input id="java" value="java" /></label>
+      <label>Fabric server jar <input id="serverJar" placeholder="/path/to/fabric-server.jar" /></label>
+      <label>SwarmCraft Fabric mod jar <input id="modJar" placeholder="/path/to/swarmcraft-fabric.jar" /></label>
+      <label class="check"><input id="eula" type="checkbox" /> I have reviewed and accept the Minecraft server EULA.</label>
+      <button id="host">Start authority runtime</button>
+      <p id="status"></p>
+    </section>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
