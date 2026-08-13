@@ -2,11 +2,13 @@ use anyhow::{anyhow, Context, Result};
 use std::{
     collections::HashMap,
     fmt::Debug,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use swarm_cli::authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL};
+use swarm_consensus::{has_quorum, AuthorityGeneration};
 use swarm_core::{
     lifecycle::{verify_join_request_signature, verify_leave_request_signature, verify_sleep_record_signature},
-    verify_invite_signature, verify_lease_signature, verify_membership_signature, verify_signature,
+    random_nonce, verify_invite_signature, verify_lease_signature, verify_membership_signature, verify_signature,
     verify_snapshot_signature, verify_transfer_signature, DataPaths, PeerIdentity,
 };
 use swarm_network::{
@@ -14,15 +16,32 @@ use swarm_network::{
     TransportPeerId, WireRequest, WireResponse, MAX_BLOB_CHUNK,
 };
 use swarm_protocol::{
-    BlobDescriptor, EpochRecordV1, Hash32, MembershipRecordV1, PeerId, SnapshotManifestV1, TransferPhase, WorldId,
-    WorldStatusV1,
+    AuthorityLeaseGrantV1, BlobDescriptor, EpochRecordV1, Hash32, MembershipRecordV1, PeerId, SnapshotManifestV1,
+    TransferPhase, WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
 use swarm_storage::Storage;
+use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
+
+const AUTHORITY_LEASE_DURATION_MS: u64 = 5_000;
 
 #[derive(Debug, Clone)]
 enum OutboundContext {
-    Manifest { world: WorldId, snapshot_number: u64 },
+    Manifest {
+        world: WorldId,
+        snapshot_number: u64,
+    },
+    Lease {
+        world: WorldId,
+        peer: PeerId,
+        generation: AuthorityGeneration,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LeaseAck {
+    generation: AuthorityGeneration,
+    observed_at: Instant,
 }
 
 struct HandlerContext<'a> {
@@ -50,49 +69,207 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
 
     let mut pending_manifests: HashMap<WorldId, SnapshotManifestV1> = HashMap::new();
     let mut outbound: HashMap<String, OutboundContext> = HashMap::new();
+    let mut authenticated_peers: HashMap<TransportPeerId, PeerId> = HashMap::new();
+    let mut lease_acks: HashMap<(WorldId, PeerId), LeaseAck> = HashMap::new();
+    let mut permit_heartbeats: HashMap<WorldId, u64> = HashMap::new();
+    let mut lease_tick = tokio::time::interval(PERMIT_HEARTBEAT_INTERVAL);
+    lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
-        match node.next_event().await? {
-            NetworkEvent::Listening { address } => info!(%address, "daemon listening"),
-            NetworkEvent::Authenticated { transport_peer, application_peer } => {
-                info!(transport = %transport_peer, peer = %application_peer, "peer authenticated");
-                push_pending_membership_requests(storage, &mut node, &transport_peer, application_peer)?;
-                push_known_worlds(storage, &mut node, &transport_peer, application_peer, &mut outbound)?;
-            }
-            NetworkEvent::InboundRequest { transport_peer, request, channel } => {
-                let application_peer = node
-                    .application_peer(&transport_peer)
-                    .context("authenticated request lost application peer mapping")?;
-                let context = HandlerContext { identity: &identity, storage };
-                handle_request(
-                    &context,
+        tokio::select! {
+            _ = lease_tick.tick() => {
+                maintain_authority_leases(
+                    paths,
+                    storage,
+                    &identity,
                     &mut node,
-                    transport_peer,
-                    application_peer,
-                    request,
-                    channel,
-                    &mut pending_manifests,
+                    &authenticated_peers,
+                    &mut outbound,
+                    &mut lease_acks,
+                    &mut permit_heartbeats,
+                    Instant::now(),
                 )?;
             }
-            NetworkEvent::Response { transport_peer, request_id, response } => {
-                let context = outbound.remove(&request_key(&request_id));
-                handle_response(storage, &mut node, &transport_peer, context, response)?;
-            }
-            NetworkEvent::OutboundFailure { transport_peer, request_id, error } => {
-                outbound.remove(&request_key(&request_id));
-                warn!(transport = %transport_peer, %error, "outbound peer request failed; replication will renegotiate after reconnect");
-            }
-            NetworkEvent::Disconnected { transport_peer } => {
-                info!(transport = %transport_peer, "peer disconnected");
-            }
-            NetworkEvent::Connected { transport_peer } => {
-                info!(transport = %transport_peer, "transport connected; waiting for signed PeerHello");
-            }
-            NetworkEvent::Discovered { transport_peer, address } => {
-                info!(transport = %transport_peer, %address, "peer discovered");
+            event = node.next_event() => {
+                match event? {
+                    NetworkEvent::Listening { address } => info!(%address, "daemon listening"),
+                    NetworkEvent::Authenticated { transport_peer, application_peer } => {
+                        authenticated_peers.insert(transport_peer, application_peer);
+                        info!(transport = %transport_peer, peer = %application_peer, "peer authenticated");
+                        push_pending_membership_requests(storage, &mut node, &transport_peer, application_peer)?;
+                        push_known_worlds(storage, &mut node, &transport_peer, application_peer, &mut outbound)?;
+                    }
+                    NetworkEvent::InboundRequest { transport_peer, request, channel } => {
+                        let application_peer = node
+                            .application_peer(&transport_peer)
+                            .context("authenticated request lost application peer mapping")?;
+                        let context = HandlerContext { identity: &identity, storage };
+                        handle_request(
+                            &context,
+                            &mut node,
+                            transport_peer,
+                            application_peer,
+                            request,
+                            channel,
+                            &mut pending_manifests,
+                        )?;
+                    }
+                    NetworkEvent::Response { transport_peer, request_id, response } => {
+                        let context = outbound.remove(&request_key(&request_id));
+                        handle_response(
+                            storage,
+                            &mut node,
+                            &transport_peer,
+                            context,
+                            response,
+                            &mut lease_acks,
+                            Instant::now(),
+                        )?;
+                    }
+                    NetworkEvent::OutboundFailure { transport_peer, request_id, error } => {
+                        if let Some(OutboundContext::Lease { world, peer, .. }) = outbound.remove(&request_key(&request_id)) {
+                            lease_acks.remove(&(world, peer));
+                        }
+                        warn!(transport = %transport_peer, %error, "outbound peer request failed; replication will renegotiate after reconnect");
+                    }
+                    NetworkEvent::Disconnected { transport_peer } => {
+                        if let Some(application_peer) = authenticated_peers.remove(&transport_peer) {
+                            lease_acks.retain(|(_, peer), _| *peer != application_peer);
+                        }
+                        info!(transport = %transport_peer, "peer disconnected");
+                    }
+                    NetworkEvent::Connected { transport_peer } => {
+                        info!(transport = %transport_peer, "transport connected; waiting for signed PeerHello");
+                    }
+                    NetworkEvent::Discovered { transport_peer, address } => {
+                        info!(transport = %transport_peer, %address, "peer discovered");
+                    }
+                }
             }
         }
     }
+}
+
+fn maintain_authority_leases(
+    paths: &DataPaths,
+    storage: &Storage,
+    identity: &PeerIdentity,
+    node: &mut SwarmNode,
+    authenticated_peers: &HashMap<TransportPeerId, PeerId>,
+    outbound: &mut HashMap<String, OutboundContext>,
+    lease_acks: &mut HashMap<(WorldId, PeerId), LeaseAck>,
+    permit_heartbeats: &mut HashMap<WorldId, u64>,
+    now: Instant,
+) -> Result<()> {
+    for metadata in storage.list_worlds()? {
+        let world = metadata.world_id;
+        if storage.load_sleep_record(world).is_ok() {
+            clear_permit(paths, world)?;
+            lease_acks.retain(|(ack_world, _), _| *ack_world != world);
+            permit_heartbeats.remove(&world);
+            continue;
+        }
+
+        let Ok(descriptor) = storage.load_world_descriptor(world) else {
+            clear_permit(paths, world)?;
+            continue;
+        };
+        let Some(local_member) = descriptor.member(identity.peer_id()) else {
+            clear_permit(paths, world)?;
+            continue;
+        };
+        if local_member.banned || !local_member.authority_eligible || local_member.public_key != identity.public_key() {
+            clear_permit(paths, world)?;
+            continue;
+        }
+
+        let Ok(epoch) = storage.load_epoch_record(world) else {
+            clear_permit(paths, world)?;
+            continue;
+        };
+        if epoch.authority_peer_id != identity.peer_id() || epoch.authority_public_key != identity.public_key() {
+            clear_permit(paths, world)?;
+            permit_heartbeats.remove(&world);
+            continue;
+        }
+
+        let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
+        if member_count <= 1 {
+            clear_permit(paths, world)?;
+            continue;
+        }
+
+        let generation = AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token };
+        let mut lease = AuthorityLeaseGrantV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            epoch: generation.epoch,
+            fencing_token: generation.fencing_token,
+            lease_duration_ms: AUTHORITY_LEASE_DURATION_MS,
+            authority_peer_id: identity.peer_id(),
+            authority_public_key: identity.public_key(),
+            nonce: random_nonce(),
+            signature: Vec::new(),
+        };
+        identity.sign_lease(&mut lease)?;
+
+        for (transport_peer, application_peer) in authenticated_peers {
+            let Some(member) = descriptor.member(*application_peer) else {
+                continue;
+            };
+            if member.banned || *application_peer == identity.peer_id() {
+                continue;
+            }
+            if lease_request_pending(outbound, world, *application_peer, generation) {
+                continue;
+            }
+            let request_id = node.send_request(transport_peer, WireRequest::LeaseGrant(lease.clone()))?;
+            outbound.insert(
+                request_key(&request_id),
+                OutboundContext::Lease { world, peer: *application_peer, generation },
+            );
+        }
+
+        let fresh_window = Duration::from_millis(AUTHORITY_LEASE_DURATION_MS);
+        let confirmed = 1 + descriptor
+            .members
+            .iter()
+            .filter(|member| member.peer_id != identity.peer_id() && !member.banned)
+            .filter(|member| authenticated_peers.values().any(|peer| *peer == member.peer_id))
+            .filter(|member| {
+                lease_acks.get(&(world, member.peer_id)).is_some_and(|ack| {
+                    ack.generation == generation && now.saturating_duration_since(ack.observed_at) < fresh_window
+                })
+            })
+            .count();
+
+        if has_quorum(member_count, confirmed) {
+            let heartbeat = permit_heartbeats.entry(world).or_default();
+            *heartbeat = heartbeat.saturating_add(1);
+            refresh_permit(paths, world, generation, *heartbeat)?;
+        } else {
+            clear_permit(paths, world)?;
+        }
+    }
+    Ok(())
+}
+
+fn lease_request_pending(
+    outbound: &HashMap<String, OutboundContext>,
+    world: WorldId,
+    peer: PeerId,
+    generation: AuthorityGeneration,
+) -> bool {
+    outbound.values().any(|context| {
+        matches!(
+            context,
+            OutboundContext::Lease {
+                world: request_world,
+                peer: request_peer,
+                generation: request_generation,
+            } if *request_world == world && *request_peer == peer && *request_generation == generation
+        )
+    })
 }
 
 fn dial_pending_invite_bootstraps(storage: &Storage, node: &mut SwarmNode) -> Result<()> {
@@ -473,6 +650,8 @@ fn handle_response(
     transport_peer: &TransportPeerId,
     context: Option<OutboundContext>,
     response: WireResponse,
+    lease_acks: &mut HashMap<(WorldId, PeerId), LeaseAck>,
+    now: Instant,
 ) -> Result<()> {
     match (context, response) {
         (
@@ -508,6 +687,15 @@ fn handle_response(
                     offset = offset.saturating_add(chunk_len);
                 }
             }
+        }
+        (
+            Some(OutboundContext::Lease { world, peer, generation }),
+            WireResponse::LeaseAccepted { epoch, fencing_token },
+        ) => {
+            if epoch != generation.epoch || fencing_token != generation.fencing_token {
+                return Err(anyhow!("lease acknowledgement generation mismatch"));
+            }
+            lease_acks.insert((world, peer), LeaseAck { generation, observed_at: now });
         }
         (_, WireResponse::Error { code, message }) => warn!(%code, %message, "peer rejected request"),
         _ => {}
