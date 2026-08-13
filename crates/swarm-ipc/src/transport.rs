@@ -1,11 +1,19 @@
 use hex::{decode, encode};
 use rand_core::{OsRng, RngCore};
-use std::{fmt, net::{IpAddr, Ipv4Addr, SocketAddr}, str::FromStr, time::Duration};
+use std::{
+    fmt,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    str::FromStr,
+    time::Duration,
+};
 use swarm_protocol::Hash32;
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{tcp::{OwnedReadHalf, OwnedWriteHalf}, TcpListener},
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpListener,
+    },
     time::timeout,
 };
 
@@ -88,17 +96,12 @@ impl FabricBridgeListener {
 
     pub fn launch_config(&self) -> Result<IpcLaunchConfig, IpcTransportError> {
         let address = self.listener.local_addr()?;
-        Ok(IpcLaunchConfig {
-            host: address.ip().to_string(),
-            port: address.port(),
-            token: self.token.clone(),
-        })
+        Ok(IpcLaunchConfig { host: address.ip().to_string(), port: address.port(), token: self.token.clone() })
     }
 
     pub async fn accept(&self, deadline: Duration) -> Result<FabricSession, IpcTransportError> {
-        let (stream, peer) = timeout(deadline, self.listener.accept())
-            .await
-            .map_err(|_| IpcTransportError::Timeout)??;
+        let (stream, peer) =
+            timeout(deadline, self.listener.accept()).await.map_err(|_| IpcTransportError::Timeout)??;
         if !peer.ip().is_loopback() {
             return Err(IpcTransportError::NonLoopbackPeer);
         }
@@ -131,11 +134,7 @@ impl FabricSession {
         self.request("SAVE_BARRIER", "SAVE_COMPLETE", request_id, deadline).await
     }
 
-    pub async fn prepare_shutdown(
-        &mut self,
-        request_id: u64,
-        deadline: Duration,
-    ) -> Result<(), IpcTransportError> {
+    pub async fn prepare_shutdown(&mut self, request_id: u64, deadline: Duration) -> Result<(), IpcTransportError> {
         self.request("PREPARE_SHUTDOWN", "READY_FOR_SHUTDOWN", request_id, deadline).await
     }
 
@@ -148,14 +147,11 @@ impl FabricSession {
     ) -> Result<(), IpcTransportError> {
         self.writer.write_all(format!("{command}\t{request_id}\n").as_bytes()).await?;
         self.writer.flush().await?;
-        let line = timeout(deadline, read_line_bounded(&mut self.reader))
-            .await
-            .map_err(|_| IpcTransportError::Timeout)??;
+        let line =
+            timeout(deadline, read_line_bounded(&mut self.reader)).await.map_err(|_| IpcTransportError::Timeout)??;
         let fields = line.split('\t').collect::<Vec<_>>();
         if fields.len() >= 3 && fields[0] == "ERROR" {
-            let remote_request = fields[1]
-                .parse::<u64>()
-                .map_err(|_| IpcTransportError::Malformed(line.clone()))?;
+            let remote_request = fields[1].parse::<u64>().map_err(|_| IpcTransportError::Malformed(line.clone()))?;
             return Err(IpcTransportError::RemoteError { request_id: remote_request, code: fields[2].to_owned() });
         }
         if fields.len() != 2 || fields[0] != expected || fields[1] != request_id.to_string() {
@@ -211,7 +207,10 @@ fn decode_hex_string(value: &str) -> Result<String, IpcTransportError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::{io::{AsyncBufReadExt, BufReader}, net::TcpStream};
+    use tokio::{
+        io::{AsyncBufReadExt, BufReader},
+        net::TcpStream,
+    };
 
     #[tokio::test]
     async fn authenticated_bridge_reports_info_and_completes_save_barrier() {
@@ -227,7 +226,16 @@ mod tests {
             reader.read_line(&mut auth_ok).await.unwrap();
             assert_eq!(auth_ok.trim(), "AUTH_OK");
             write
-                .write_all(format!("WORLD_INFO\t{}\t{}\t{}\t{}\n", encode("26.1.2"), encode("0.19.3"), encode("/world"), Hash32([7; 32])).as_bytes())
+                .write_all(
+                    format!(
+                        "WORLD_INFO\t{}\t{}\t{}\t{}\n",
+                        encode("26.1.2"),
+                        encode("0.19.3"),
+                        encode("/world"),
+                        Hash32([7; 32])
+                    )
+                    .as_bytes(),
+                )
                 .await
                 .unwrap();
             write.flush().await.unwrap();
