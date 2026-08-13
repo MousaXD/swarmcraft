@@ -54,3 +54,22 @@ pub struct SleepRecordV1 {
     pub authority_public_key: [u8; 32],
     pub signature: Vec<u8>,
 }
+
+impl SleepRecordV1 {
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, ProtocolError> {
+        let unsigned = (
+            self.protocol_version,
+            self.world_id,
+            self.latest_snapshot_hash,
+            self.epoch,
+            self.fencing_token,
+            self.authority_peer_id,
+            self.authority_public_key,
+        );
+        let encoded = postcard::to_allocvec(&unsigned)?;
+        let mut bytes = Vec::with_capacity(SLEEP_SIGN_DOMAIN.len() + encoded.len());
+        bytes.extend_from_slice(SLEEP_SIGN_DOMAIN);
+        bytes.extend_from_slice(&encoded);
+        Ok(bytes)
+    }
+}
