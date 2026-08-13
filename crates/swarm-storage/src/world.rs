@@ -4,7 +4,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-use swarm_protocol::{MembershipRecordV1, WorldDescriptorV1, WorldId};
+use swarm_protocol::{JoinRequestV1, MembershipRecordV1, WorldDescriptorV1, WorldId};
 
 impl Storage {
     pub fn save_world_descriptor(&self, descriptor: &WorldDescriptorV1) -> Result<(), StorageError> {
@@ -39,8 +39,31 @@ impl Storage {
         Ok(record)
     }
 
+    pub fn save_pending_join(&self, request: &JoinRequestV1) -> Result<(), StorageError> {
+        let bytes = postcard::to_allocvec(request)?;
+        atomic_write(&self.world_protocol_path(request.world_id, "pending-join.postcard"), &bytes)
+    }
+
+    pub fn load_pending_join(&self, world: WorldId) -> Result<JoinRequestV1, StorageError> {
+        let path = self.world_protocol_path(world, "pending-join.postcard");
+        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let request: JoinRequestV1 = postcard::from_bytes(&bytes)?;
+        if request.world_id != world {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(request)
+    }
+
+    pub fn clear_pending_join(&self, world: WorldId) -> Result<(), StorageError> {
+        let path = self.world_protocol_path(world, "pending-join.postcard");
+        if path.exists() {
+            fs::remove_file(&path).map_err(|error| io_error(&path, error))?;
+        }
+        Ok(())
+    }
+
     pub fn remove_local_membership(&self, world: WorldId) -> Result<(), StorageError> {
-        for name in ["descriptor.json", "membership.postcard"] {
+        for name in ["descriptor.json", "membership.postcard", "pending-join.postcard"] {
             let path = self.world_protocol_path(world, name);
             if path.exists() {
                 fs::remove_file(&path).map_err(|error| io_error(&path, error))?;
