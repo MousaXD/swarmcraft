@@ -138,6 +138,9 @@ public final class SwarmCraftMod implements ModInitializer {
             try {
                 saveEverything(server);
                 send((shutdown ? "READY_FOR_SHUTDOWN" : "SAVE_COMPLETE") + "\t" + requestId);
+                if (shutdown) {
+                    requestServerStop(server);
+                }
             } catch (Exception error) {
                 LOGGER.error("SwarmCraft save barrier failed", error);
                 try {
@@ -179,6 +182,26 @@ public final class SwarmCraftMod implements ModInitializer {
         if (result instanceof Boolean success && !success) {
             throw new IOException("Minecraft reported an unsuccessful save");
         }
+    }
+
+    private static void requestServerStop(MinecraftServer server) throws Exception {
+        for (String name : new String[] {"stopServer", "stop", "halt"}) {
+            try {
+                Method method = server.getClass().getMethod(name);
+                method.setAccessible(true);
+                method.invoke(server);
+                return;
+            } catch (NoSuchMethodException ignored) {
+            }
+            try {
+                Method method = server.getClass().getMethod(name, boolean.class);
+                method.setAccessible(true);
+                method.invoke(server, false);
+                return;
+            } catch (NoSuchMethodException ignored) {
+            }
+        }
+        throw new NoSuchMethodException("MinecraftServer has no supported stop method");
     }
 
     private static Method findBooleanSaveMethod(Class<?> type) throws NoSuchMethodException {
