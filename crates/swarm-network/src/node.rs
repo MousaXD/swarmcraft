@@ -31,23 +31,11 @@ struct Behaviour {
 
 #[derive(Debug)]
 pub enum NetworkEvent {
-    Listening {
-        address: Multiaddr,
-    },
-    Discovered {
-        transport_peer: TransportPeerId,
-        address: Multiaddr,
-    },
-    Connected {
-        transport_peer: TransportPeerId,
-    },
-    Disconnected {
-        transport_peer: TransportPeerId,
-    },
-    Authenticated {
-        transport_peer: TransportPeerId,
-        application_peer: PeerId,
-    },
+    Listening { address: Multiaddr },
+    Discovered { transport_peer: TransportPeerId, address: Multiaddr },
+    Connected { transport_peer: TransportPeerId },
+    Disconnected { transport_peer: TransportPeerId },
+    Authenticated { transport_peer: TransportPeerId, application_peer: PeerId },
     InboundRequest {
         transport_peer: TransportPeerId,
         request: WireRequest,
@@ -145,6 +133,15 @@ impl SwarmNode {
         self.swarm.behaviour_mut().kad.add_address(&peer, address);
     }
 
+    pub fn add_bootstrap_address(&mut self, address: Multiaddr) -> Result<TransportPeerId> {
+        let peer = transport_peer_from_address(&address).context("bootstrap address must contain /p2p/<peer-id>")?;
+        self.add_bootstrap_peer(peer, address.clone());
+        if !self.swarm.is_connected(&peer) {
+            self.swarm.dial(address).context("failed to dial bootstrap peer")?;
+        }
+        Ok(peer)
+    }
+
     pub fn bootstrap(&mut self) -> Result<()> {
         self.swarm.behaviour_mut().kad.bootstrap().map(|_| ()).context("Kademlia bootstrap failed")
     }
@@ -160,6 +157,12 @@ impl SwarmNode {
             .listen_on(relay_address.with(Protocol::P2pCircuit))
             .map(|_| ())
             .context("failed to request relay reservation")
+    }
+
+    pub fn configure_relay_address(&mut self, address: Multiaddr) -> Result<TransportPeerId> {
+        let peer = transport_peer_from_address(&address).context("relay address must contain /p2p/<peer-id>")?;
+        self.configure_relay(peer, address)?;
+        Ok(peer)
     }
 
     pub fn dial_via_relay(
@@ -323,4 +326,11 @@ fn ensure_peer_suffix(mut address: Multiaddr, peer: TransportPeerId) -> Multiadd
         address.push(Protocol::P2p(peer));
     }
     address
+}
+
+fn transport_peer_from_address(address: &Multiaddr) -> Option<TransportPeerId> {
+    address.iter().filter_map(|protocol| match protocol {
+        Protocol::P2p(peer) => Some(peer),
+        _ => None,
+    }).last()
 }
