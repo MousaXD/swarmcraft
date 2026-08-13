@@ -11,11 +11,13 @@ use libp2p::{
     swarm::{dial_opts::DialOpts, NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId as TransportPeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, env, time::Duration};
 use swarm_protocol::{PeerHelloV1, PeerId, PROTOCOL_VERSION};
 use tracing::{debug, info, warn};
 
 pub const WIRE_PROTOCOL: &str = "/swarmcraft/1";
+pub const BOOTSTRAP_ENV: &str = "SWARMCRAFT_BOOTSTRAP";
+pub const RELAY_ENV: &str = "SWARMCRAFT_RELAY";
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
@@ -118,7 +120,9 @@ impl SwarmNode {
             })?
             .build();
 
-        Ok(Self { swarm, local_hello, authenticated: HashMap::new() })
+        let mut node = Self { swarm, local_hello, authenticated: HashMap::new() };
+        node.configure_from_environment()?;
+        Ok(node)
     }
 
     pub fn local_transport_peer_id(&self) -> TransportPeerId {
@@ -134,6 +138,9 @@ impl SwarmNode {
     }
 
     pub fn dial(&mut self, address: Multiaddr) -> Result<()> {
+        if let Some(peer) = transport_peer_from_address(&address) {
+            self.swarm.behaviour_mut().kad.add_address(&peer, address.clone());
+        }
         self.swarm.dial(address).context("failed to dial peer")
     }
 
@@ -191,6 +198,21 @@ impl SwarmNode {
 
     pub fn add_autonat_server(&mut self, peer: TransportPeerId, address: Multiaddr) {
         self.swarm.behaviour_mut().auto_nat.add_server(peer, Some(address));
+    }
+
+    pub fn configure_from_environment(&mut self) -> Result<()> {
+        let bootstraps = configured_multiaddrs(BOOTSTRAP_ENV)?;
+        for address in &bootstraps {
+            self.add_bootstrap_address(address.clone())?;
+        }
+        if !bootstraps.is_empty() {
+            self.bootstrap()?;
+        }
+
+        for address in configured_multiaddrs(RELAY_ENV)? {
+            self.configure_relay_address(address)?;
+        }
+        Ok(())
     }
 
     pub fn send_request(
@@ -330,6 +352,19 @@ impl SwarmNode {
             }
         }
     }
+}
+
+fn configured_multiaddrs(name: &str) -> Result<Vec<Multiaddr>> {
+    let Some(value) = env::var_os(name) else {
+        return Ok(Vec::new());
+    };
+    let value = value.to_string_lossy();
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.parse::<Multiaddr>().with_context(|| format!("invalid {name} multiaddress: {value}")))
+        .collect()
 }
 
 fn ensure_peer_suffix(mut address: Multiaddr, peer: TransportPeerId) -> Multiaddr {
