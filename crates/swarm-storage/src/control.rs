@@ -4,7 +4,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-use swarm_protocol::{AuthorityTransferV1, EpochRecordV1, SleepRecordV1, WorldId};
+use swarm_protocol::{AuthorityLeaseGrantV1, AuthorityTransferV1, EpochRecordV1, SleepRecordV1, WorldId};
 
 impl Storage {
     pub fn save_epoch_record(&self, record: &EpochRecordV1) -> Result<(), StorageError> {
@@ -20,6 +20,25 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
         Ok(record)
+    }
+
+    pub fn save_recovery_reservation(&self, reservation: &AuthorityLeaseGrantV1) -> Result<(), StorageError> {
+        let bytes = postcard::to_allocvec(reservation)?;
+        atomic_write(&self.control_path(reservation.world_id, "recovery-reservation.postcard"), &bytes)
+    }
+
+    pub fn load_recovery_reservation(&self, world: WorldId) -> Result<AuthorityLeaseGrantV1, StorageError> {
+        let path = self.control_path(world, "recovery-reservation.postcard");
+        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let reservation: AuthorityLeaseGrantV1 = postcard::from_bytes(&bytes)?;
+        if reservation.world_id != world {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(reservation)
+    }
+
+    pub fn clear_recovery_reservation(&self, world: WorldId) -> Result<(), StorageError> {
+        remove_if_present(&self.control_path(world, "recovery-reservation.postcard"))
     }
 
     pub fn save_transfer_record(&self, transfer: &AuthorityTransferV1) -> Result<(), StorageError> {
@@ -53,16 +72,19 @@ impl Storage {
     }
 
     pub fn clear_sleep_record(&self, world: WorldId) -> Result<(), StorageError> {
-        let path = self.control_path(world, "sleep.postcard");
-        if path.exists() {
-            fs::remove_file(&path).map_err(|error| io_error(&path, error))?;
-        }
-        Ok(())
+        remove_if_present(&self.control_path(world, "sleep.postcard"))
     }
 
     fn control_path(&self, world: WorldId, name: &str) -> PathBuf {
         self.world_dir(world).join("metadata").join(name)
     }
+}
+
+fn remove_if_present(path: &Path) -> Result<(), StorageError> {
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| io_error(path, error))?;
+    }
+    Ok(())
 }
 
 fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
@@ -122,5 +144,28 @@ mod tests {
         let loaded = store.load_epoch_record(world).unwrap();
         assert_eq!(loaded.epoch_number, 4);
         assert_eq!(loaded.fencing_token, 11);
+    }
+
+    #[test]
+    fn recovery_reservation_round_trip_is_durable() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([4; 32]);
+        fs::create_dir_all(store.world_dir(world).join("metadata")).unwrap();
+        let reservation = AuthorityLeaseGrantV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            epoch: 8,
+            fencing_token: 12,
+            lease_duration_ms: 5_000,
+            authority_peer_id: PeerId([6; 32]),
+            authority_public_key: [6; 32],
+            nonce: [3; 32],
+            signature: vec![2; 64],
+        };
+        store.save_recovery_reservation(&reservation).unwrap();
+        assert_eq!(store.load_recovery_reservation(world).unwrap(), reservation);
+        store.clear_recovery_reservation(world).unwrap();
+        assert!(store.load_recovery_reservation(world).is_err());
     }
 }
