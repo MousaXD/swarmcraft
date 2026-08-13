@@ -49,7 +49,7 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri -> target
       - name: Check desktop shell
-        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked=false
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
 
   fabric:
     name: Fabric server mod
