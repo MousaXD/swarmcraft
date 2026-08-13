@@ -59,17 +59,11 @@ fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
+    let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
     fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
     let tmp = path.with_extension("tmp");
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&tmp)
-        .map_err(|error| io_error(&tmp, error))?;
+    let mut file =
+        OpenOptions::new().create(true).truncate(true).write(true).open(&tmp).map_err(|error| io_error(&tmp, error))?;
     file.write_all(bytes).map_err(|error| io_error(&tmp, error))?;
     file.sync_all().map_err(|error| io_error(&tmp, error))?;
     drop(file);
@@ -80,9 +74,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
 fn sync_parent(parent: &Path) -> Result<(), StorageError> {
     #[cfg(unix)]
     {
-        fs::File::open(parent)
-            .and_then(|file| file.sync_all())
-            .map_err(|error| io_error(parent, error))?;
+        fs::File::open(parent).and_then(|file| file.sync_all()).map_err(|error| io_error(parent, error))?;
     }
     #[cfg(not(unix))]
     {
