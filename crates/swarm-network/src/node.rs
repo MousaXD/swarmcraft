@@ -89,10 +89,11 @@ pub struct SwarmNode {
 impl SwarmNode {
     pub fn new(transport_key: Keypair, local_hello: PeerHelloV1) -> Result<Self> {
         verify_peer_hello(&local_hello).context("local peer hello must be valid before networking starts")?;
+        let behaviour = Behaviour::new(&transport_key)?;
         let swarm = SwarmBuilder::with_existing_identity(transport_key)
             .with_tokio()
             .with_quic()
-            .with_behaviour(Behaviour::new)?
+            .with_behaviour(move |_| behaviour)?
             .build();
         Ok(Self { swarm, local_hello, authenticated: HashMap::new() })
     }
@@ -235,7 +236,7 @@ impl SwarmNode {
                             return Ok(NetworkEvent::Response { transport_peer: peer, request_id, response });
                         }
                     },
-                    request_response::Event::OutboundFailure { peer, request_id, error } => {
+                    request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
                         return Ok(NetworkEvent::OutboundFailure {
                             transport_peer: peer,
                             request_id,
