@@ -168,7 +168,7 @@ impl SwarmNode {
                     return Ok(NetworkEvent::Disconnected { transport_peer: peer_id });
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
-                    for (peer, address) in peers {
+                    if let Some((peer, address)) = peers.into_iter().next() {
                         debug!(transport_peer = %peer, %address, "mDNS discovered peer");
                         self.swarm.behaviour_mut().kad.add_address(&peer, address.clone());
                         if !self.swarm.is_connected(&peer) {
@@ -250,8 +250,7 @@ impl SwarmNode {
                 },
                 SwarmEvent::Behaviour(BehaviourEvent::Kad(_))
                 | SwarmEvent::Behaviour(BehaviourEvent::Ping(_))
-                | SwarmEvent::Behaviour(BehaviourEvent::Identify(_))
-                | SwarmEvent::Behaviour(BehaviourEvent::Mdns(_)) => {}
+                | SwarmEvent::Behaviour(BehaviourEvent::Identify(_)) => {}
                 other => debug!(event = ?other, "network event"),
             }
         }
