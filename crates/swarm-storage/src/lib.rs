@@ -2,18 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
-    path::{Component, Path, PathBuf},
+    io::Write,
+    path::{Path, PathBuf},
 };
 use swarm_protocol::{
-    snapshot_state_root, BlobDescriptor, BlobEncoding, Hash32, PeerId, SnapshotEntry, SnapshotManifestV1,
-    WorldGenesisV1, WorldId, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    BlobDescriptor, BlobEncoding, Hash32, PeerId, SnapshotManifestV1, WorldGenesisV1, WorldId, STORAGE_SCHEMA_VERSION,
 };
 use thiserror::Error;
 use tracing::debug;
-use walkdir::WalkDir;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -206,54 +203,11 @@ impl Storage {
         source: &Path,
         context: SnapshotContext,
     ) -> Result<SnapshotManifestV1, StorageError> {
-        if !source.is_dir() {
-            return Err(StorageError::SourceNotDirectory(source.to_path_buf()));
-        }
-        let mut files = Vec::new();
-        for entry in WalkDir::new(source).follow_links(false) {
-            let entry =
-                entry.map_err(|e| io_error(e.path().unwrap_or(source), std::io::Error::other(e.to_string())))?;
-            let path = entry.path();
-            if entry.file_type().is_symlink() {
-                return Err(StorageError::SymlinkUnsupported(path.to_path_buf()));
-            }
-            if entry.file_type().is_file() {
-                files.push(path.to_path_buf());
-            }
-        }
-        files.sort();
-
-        let mut entries = Vec::with_capacity(files.len());
-        for path in files {
-            let relative = path.strip_prefix(source).expect("walkdir entries stay beneath root");
-            let relative = portable_relative_path(relative)?;
-            let mut bytes = Vec::new();
-            File::open(&path).and_then(|mut file| file.read_to_end(&mut bytes)).map_err(|e| io_error(&path, e))?;
-            let blob = self.put_blob(context.world, &bytes)?;
-            entries.push(SnapshotEntry { path: relative, blob });
-        }
-        entries.sort_by(|a, b| a.path.cmp(&b.path));
-        let state_root = snapshot_state_root(&entries)?;
-        Ok(SnapshotManifestV1 {
-            protocol_version: PROTOCOL_VERSION,
-            world_id: context.world,
-            snapshot_number: context.snapshot_number,
-            epoch: context.epoch,
-            sequence: context.sequence,
-            previous_snapshot_hash: context.previous_snapshot_hash,
-            entries,
-            state_root,
-            authority_peer_id: context.authority_peer_id,
-            authority_public_key: context.authority_public_key,
-            signature: Vec::new(),
-        })
+        self.snapshot_directory_streaming(source, context)
     }
 
     pub fn commit_snapshot(&self, manifest: &SnapshotManifestV1) -> Result<(), StorageError> {
-        self.verify_snapshot(manifest)?;
-        let path = self.snapshot_path(manifest.world_id, manifest.snapshot_number);
-        let bytes = postcard::to_allocvec(manifest)?;
-        atomic_write(&path, &bytes)
+        self.commit_snapshot_streaming(manifest)
     }
 
     pub fn load_snapshot(&self, world: WorldId, number: u64) -> Result<SnapshotManifestV1, StorageError> {
@@ -292,36 +246,11 @@ impl Storage {
     }
 
     pub fn verify_snapshot(&self, manifest: &SnapshotManifestV1) -> Result<(), StorageError> {
-        if manifest.protocol_version != PROTOCOL_VERSION {
-            return Err(StorageError::UnsupportedProtocol(manifest.protocol_version));
-        }
-        let mut seen = BTreeSet::new();
-        for entry in &manifest.entries {
-            validate_portable_path(&entry.path)?;
-            if !seen.insert(entry.path.as_str()) {
-                return Err(StorageError::UnsafeRelativePath(entry.path.clone()));
-            }
-            self.read_blob(manifest.world_id, &entry.blob)?;
-        }
-        if snapshot_state_root(&manifest.entries)? != manifest.state_root {
-            return Err(StorageError::StateRootMismatch);
-        }
-        Ok(())
+        self.verify_snapshot_streaming(manifest)
     }
 
     pub fn restore_snapshot(&self, manifest: &SnapshotManifestV1, destination: &Path) -> Result<(), StorageError> {
-        self.verify_snapshot(manifest)?;
-        fs::create_dir_all(destination).map_err(|e| io_error(destination, e))?;
-        for entry in &manifest.entries {
-            validate_portable_path(&entry.path)?;
-            let output = destination.join(entry.path.replace('/', std::path::MAIN_SEPARATOR_STR));
-            if let Some(parent) = output.parent() {
-                fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
-            }
-            let bytes = self.read_blob(manifest.world_id, &entry.blob)?;
-            atomic_write(&output, &bytes)?;
-        }
-        Ok(())
+        self.restore_snapshot_streaming(manifest, destination)
     }
 
     pub fn next_snapshot_number(&self, world: WorldId) -> Result<u64, StorageError> {
@@ -341,21 +270,7 @@ impl Storage {
     }
 }
 
-fn portable_relative_path(path: &Path) -> Result<String, StorageError> {
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => {
-                parts.push(part.to_str().ok_or_else(|| StorageError::NonUtf8Path(path.to_path_buf()))?.to_owned())
-            }
-            _ => return Err(StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned())),
-        }
-    }
-    let value = parts.join("/");
-    validate_portable_path(&value)?;
-    Ok(value)
-}
-
+#[cfg(test)]
 fn validate_portable_path(path: &str) -> Result<(), StorageError> {
     if path.is_empty()
         || path.starts_with('/')
