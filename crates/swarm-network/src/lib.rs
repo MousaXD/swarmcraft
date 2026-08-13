@@ -4,6 +4,8 @@ mod node;
 mod transport;
 pub mod wire;
 
+pub use libp2p::request_response::ResponseChannel;
+pub use libp2p::PeerId as TransportPeerId;
 pub use node::{NetworkEvent, SwarmNode, WIRE_PROTOCOL};
 pub use transport::{generate_transport_key, load_or_create_transport_key};
 pub use wire::{
