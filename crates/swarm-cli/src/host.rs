@@ -5,9 +5,7 @@ use std::{
     process::{Child, Command, ExitStatus},
     time::Duration,
 };
-use swarm_core::{
-    lifecycle::verify_sleep_record_signature, verify_snapshot_signature, DataPaths, PeerIdentity,
-};
+use swarm_core::{lifecycle::verify_sleep_record_signature, verify_snapshot_signature, DataPaths, PeerIdentity};
 use swarm_ipc::FabricBridgeListener;
 use swarm_protocol::{EpochMode, EpochRecordV1, Hash32, SleepRecordV1, WorldId, PROTOCOL_VERSION};
 use swarm_storage::{SnapshotContext, Storage};
@@ -169,7 +167,10 @@ fn prepare_authority_epoch(
             }
             Ok(epoch)
         }
-        Err(_) if latest.authority_peer_id == identity.peer_id() && latest.authority_public_key == identity.public_key() => {
+        Err(_)
+            if latest.authority_peer_id == identity.peer_id()
+                && latest.authority_public_key == identity.public_key() =>
+        {
             let mut epoch = EpochRecordV1 {
                 protocol_version: PROTOCOL_VERSION,
                 world_id: world,
