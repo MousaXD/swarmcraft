@@ -27,21 +27,21 @@ const AUTHORITY_LEASE_DURATION_MS: u64 = 5_000;
 
 #[derive(Debug, Clone)]
 enum OutboundContext {
-    Manifest {
-        world: WorldId,
-        snapshot_number: u64,
-    },
-    Lease {
-        world: WorldId,
-        peer: PeerId,
-        generation: AuthorityGeneration,
-    },
+    Manifest { world: WorldId, snapshot_number: u64 },
+    Lease { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
 }
 
 #[derive(Debug, Clone, Copy)]
 struct LeaseAck {
     generation: AuthorityGeneration,
     observed_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct LeaseRuntime {
+    authenticated_peers: HashMap<TransportPeerId, PeerId>,
+    lease_acks: HashMap<(WorldId, PeerId), LeaseAck>,
+    permit_heartbeats: HashMap<WorldId, u64>,
 }
 
 struct HandlerContext<'a> {
@@ -69,9 +69,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
 
     let mut pending_manifests: HashMap<WorldId, SnapshotManifestV1> = HashMap::new();
     let mut outbound: HashMap<String, OutboundContext> = HashMap::new();
-    let mut authenticated_peers: HashMap<TransportPeerId, PeerId> = HashMap::new();
-    let mut lease_acks: HashMap<(WorldId, PeerId), LeaseAck> = HashMap::new();
-    let mut permit_heartbeats: HashMap<WorldId, u64> = HashMap::new();
+    let mut leases = LeaseRuntime::default();
     let mut lease_tick = tokio::time::interval(PERMIT_HEARTBEAT_INTERVAL);
     lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -83,10 +81,8 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                     storage,
                     &identity,
                     &mut node,
-                    &authenticated_peers,
                     &mut outbound,
-                    &mut lease_acks,
-                    &mut permit_heartbeats,
+                    &mut leases,
                     Instant::now(),
                 )?;
             }
@@ -94,7 +90,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                 match event? {
                     NetworkEvent::Listening { address } => info!(%address, "daemon listening"),
                     NetworkEvent::Authenticated { transport_peer, application_peer } => {
-                        authenticated_peers.insert(transport_peer, application_peer);
+                        leases.authenticated_peers.insert(transport_peer, application_peer);
                         info!(transport = %transport_peer, peer = %application_peer, "peer authenticated");
                         push_pending_membership_requests(storage, &mut node, &transport_peer, application_peer)?;
                         push_known_worlds(storage, &mut node, &transport_peer, application_peer, &mut outbound)?;
@@ -122,19 +118,19 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                             &transport_peer,
                             context,
                             response,
-                            &mut lease_acks,
+                            &mut leases.lease_acks,
                             Instant::now(),
                         )?;
                     }
                     NetworkEvent::OutboundFailure { transport_peer, request_id, error } => {
                         if let Some(OutboundContext::Lease { world, peer, .. }) = outbound.remove(&request_key(&request_id)) {
-                            lease_acks.remove(&(world, peer));
+                            leases.lease_acks.remove(&(world, peer));
                         }
                         warn!(transport = %transport_peer, %error, "outbound peer request failed; replication will renegotiate after reconnect");
                     }
                     NetworkEvent::Disconnected { transport_peer } => {
-                        if let Some(application_peer) = authenticated_peers.remove(&transport_peer) {
-                            lease_acks.retain(|(_, peer), _| *peer != application_peer);
+                        if let Some(application_peer) = leases.authenticated_peers.remove(&transport_peer) {
+                            leases.lease_acks.retain(|(_, peer), _| *peer != application_peer);
                         }
                         info!(transport = %transport_peer, "peer disconnected");
                     }
@@ -155,18 +151,16 @@ fn maintain_authority_leases(
     storage: &Storage,
     identity: &PeerIdentity,
     node: &mut SwarmNode,
-    authenticated_peers: &HashMap<TransportPeerId, PeerId>,
     outbound: &mut HashMap<String, OutboundContext>,
-    lease_acks: &mut HashMap<(WorldId, PeerId), LeaseAck>,
-    permit_heartbeats: &mut HashMap<WorldId, u64>,
+    runtime: &mut LeaseRuntime,
     now: Instant,
 ) -> Result<()> {
     for metadata in storage.list_worlds()? {
         let world = metadata.world_id;
         if storage.load_sleep_record(world).is_ok() {
             clear_permit(paths, world)?;
-            lease_acks.retain(|(ack_world, _), _| *ack_world != world);
-            permit_heartbeats.remove(&world);
+            runtime.lease_acks.retain(|(ack_world, _), _| *ack_world != world);
+            runtime.permit_heartbeats.remove(&world);
             continue;
         }
 
@@ -189,7 +183,7 @@ fn maintain_authority_leases(
         };
         if epoch.authority_peer_id != identity.peer_id() || epoch.authority_public_key != identity.public_key() {
             clear_permit(paths, world)?;
-            permit_heartbeats.remove(&world);
+            runtime.permit_heartbeats.remove(&world);
             continue;
         }
 
@@ -213,7 +207,7 @@ fn maintain_authority_leases(
         };
         identity.sign_lease(&mut lease)?;
 
-        for (transport_peer, application_peer) in authenticated_peers {
+        for (transport_peer, application_peer) in &runtime.authenticated_peers {
             let Some(member) = descriptor.member(*application_peer) else {
                 continue;
             };
@@ -235,16 +229,16 @@ fn maintain_authority_leases(
             .members
             .iter()
             .filter(|member| member.peer_id != identity.peer_id() && !member.banned)
-            .filter(|member| authenticated_peers.values().any(|peer| *peer == member.peer_id))
+            .filter(|member| runtime.authenticated_peers.values().any(|peer| *peer == member.peer_id))
             .filter(|member| {
-                lease_acks.get(&(world, member.peer_id)).is_some_and(|ack| {
+                runtime.lease_acks.get(&(world, member.peer_id)).is_some_and(|ack| {
                     ack.generation == generation && now.saturating_duration_since(ack.observed_at) < fresh_window
                 })
             })
             .count();
 
         if has_quorum(member_count, confirmed) {
-            let heartbeat = permit_heartbeats.entry(world).or_default();
+            let heartbeat = runtime.permit_heartbeats.entry(world).or_default();
             *heartbeat = heartbeat.saturating_add(1);
             refresh_permit(paths, world, generation, *heartbeat)?;
         } else {
