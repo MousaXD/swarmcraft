@@ -30,7 +30,7 @@ pub enum WireRequest {
     Ping { nonce: u64 },
     WorldStatus { world_id: WorldId },
     WorldDescriptor { world_id: WorldId },
-    JoinRequest(JoinRequestV1),
+    JoinRequest(Box<JoinRequestV1>),
     SnapshotManifest(SnapshotManifestV1),
     MissingBlobs { world_id: WorldId, snapshot_number: u64, hashes: Vec<Hash32> },
     BlobChunk { world_id: WorldId, hash: Hash32, encoding: BlobEncoding, offset: u64, data: Vec<u8>, finished: bool },
