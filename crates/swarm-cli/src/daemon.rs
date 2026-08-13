@@ -1,14 +1,22 @@
 use anyhow::{anyhow, Context, Result};
-use std::{collections::HashMap, fmt::Debug};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use swarm_core::{
-    verify_lease_signature, verify_membership_signature, verify_snapshot_signature, verify_transfer_signature,
-    DataPaths, PeerIdentity,
+    lifecycle::{verify_join_request_signature, verify_sleep_record_signature},
+    verify_invite_signature, verify_lease_signature, verify_membership_signature, verify_signature, verify_snapshot_signature,
+    verify_transfer_signature, DataPaths, PeerIdentity,
 };
 use swarm_network::{
     load_or_create_transport_key, BlobResumeV1, NetworkEvent, ReplicaAckV1, ResponseChannel, SwarmNode,
     TransportPeerId, WireRequest, WireResponse, MAX_BLOB_CHUNK,
 };
-use swarm_protocol::{BlobDescriptor, Hash32, PeerId, SnapshotManifestV1, WorldId, WorldStatusV1};
+use swarm_protocol::{
+    BlobDescriptor, EpochRecordV1, Hash32, MembershipRecordV1, PeerId, SnapshotManifestV1, TransferPhase, WorldId,
+    WorldStatusV1,
+};
 use swarm_storage::Storage;
 use tracing::{info, warn};
 
@@ -25,6 +33,8 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
         "membership-v1".into(),
         "authority-transfer-v1".into(),
         "authority-lease-v1".into(),
+        "epoch-v1".into(),
+        "sleep-wake-v1".into(),
     ])?;
     let mut node = SwarmNode::new(transport_key, hello)?;
     node.listen(listen.parse().context("invalid QUIC listen multiaddress")?)?;
@@ -45,6 +55,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                     .application_peer(&transport_peer)
                     .context("authenticated request lost application peer mapping")?;
                 handle_request(
+                    &identity,
                     storage,
                     &mut node,
                     transport_peer,
@@ -90,6 +101,15 @@ fn push_known_worlds(
         if let Ok(membership) = storage.load_membership_record(metadata.world_id) {
             let _ = node.send_request(transport_peer, WireRequest::Membership(membership))?;
         }
+        if let Ok(epoch) = storage.load_epoch_record(metadata.world_id) {
+            let _ = node.send_request(transport_peer, WireRequest::Epoch(epoch))?;
+        }
+        if let Ok(transfer) = storage.load_transfer_record(metadata.world_id) {
+            let _ = node.send_request(transport_peer, WireRequest::AuthorityTransfer(transfer))?;
+        }
+        if let Ok(sleep) = storage.load_sleep_record(metadata.world_id) {
+            let _ = node.send_request(transport_peer, WireRequest::Sleep(sleep))?;
+        }
         if let Some(manifest) = storage.latest_snapshot(metadata.world_id)? {
             verify_snapshot_signature(&manifest)?;
             let id = node.send_request(transport_peer, WireRequest::SnapshotManifest(manifest.clone()))?;
@@ -103,6 +123,7 @@ fn push_known_worlds(
 }
 
 fn handle_request(
+    identity: &PeerIdentity,
     storage: &Storage,
     node: &mut SwarmNode,
     transport_peer: TransportPeerId,
@@ -120,6 +141,61 @@ fn handle_request(
         WireRequest::WorldDescriptor { world_id } => {
             let descriptor = storage.load_world_descriptor(world_id).ok();
             node.respond(channel, WireResponse::WorldDescriptor(descriptor))?;
+        }
+        WireRequest::JoinRequest(request) => {
+            let request = *request;
+            if application_peer != request.joining_member.peer_id {
+                return Err(anyhow!("join request transport identity does not match joining peer"));
+            }
+            verify_join_request_signature(&request)?;
+            verify_invite_signature(&request.invite)?;
+            if request.invite.expires_unix_ms < unix_millis()? {
+                return Err(anyhow!("invite has expired"));
+            }
+            let world = request.world_id;
+            let metadata = storage.load_world(world)?;
+            if request.invite.genesis.world_id()? != world
+                || request.invite.genesis.compatibility_fingerprint != metadata.genesis.compatibility_fingerprint
+            {
+                return Err(anyhow!("invite does not match local world genesis"));
+            }
+            let mut descriptor = storage.load_world_descriptor(world)?;
+            let inviter = descriptor
+                .member(request.invite.inviter_peer_id)
+                .context("invite signer is not a current world member")?;
+            if inviter.banned || inviter.public_key != request.invite.inviter_public_key {
+                return Err(anyhow!("invite signer is banned or key does not match current membership"));
+            }
+            let current = storage.load_membership_record(world)?;
+            verify_membership_signature(&current)?;
+            if current.authority_peer_id != identity.peer_id() || current.authority_public_key != identity.public_key() {
+                return Err(anyhow!("only the current local authority may accept a join request"));
+            }
+            if let Some(member) = descriptor.member(request.joining_member.peer_id) {
+                if member.public_key != request.joining_member.public_key || member.banned {
+                    return Err(anyhow!("joining peer conflicts with existing membership"));
+                }
+                node.respond(channel, WireResponse::JoinAccepted { membership_sequence: current.sequence })?;
+            } else {
+                let previous_hash = Some(current.record_hash()?);
+                descriptor.members.push(request.joining_member.clone());
+                descriptor.normalize();
+                let mut next = MembershipRecordV1 {
+                    protocol_version: current.protocol_version,
+                    world_id: world,
+                    epoch: current.epoch,
+                    sequence: current.sequence.saturating_add(1),
+                    previous_membership_hash: previous_hash,
+                    members: descriptor.members.clone(),
+                    authority_peer_id: identity.peer_id(),
+                    authority_public_key: identity.public_key(),
+                    signature: Vec::new(),
+                };
+                identity.sign_membership(&mut next)?;
+                storage.save_world_descriptor(&descriptor)?;
+                storage.save_membership_record(&next)?;
+                node.respond(channel, WireResponse::JoinAccepted { membership_sequence: next.sequence })?;
+            }
         }
         WireRequest::SnapshotManifest(manifest) => {
             authorize_manifest(storage, application_peer, &manifest)?;
@@ -182,9 +258,7 @@ fn handle_request(
             verify_membership_signature(&record)?;
             authorize_member(storage, record.world_id, record.authority_peer_id)?;
             if let Ok(current) = storage.load_membership_record(record.world_id) {
-                if record.epoch < current.epoch
-                    || (record.epoch == current.epoch && record.sequence <= current.sequence)
-                {
+                if record.epoch < current.epoch || (record.epoch == current.epoch && record.sequence <= current.sequence) {
                     return Err(anyhow!("stale membership record rejected"));
                 }
             }
@@ -195,17 +269,80 @@ fn handle_request(
             storage.save_world_descriptor(&descriptor)?;
             node.respond(channel, WireResponse::MembershipAccepted { sequence: record.sequence })?;
         }
+        WireRequest::Epoch(record) => {
+            authorize_epoch(storage, application_peer, &record)?;
+            if let Ok(current) = storage.load_epoch_record(record.world_id) {
+                if record.epoch_number != current.epoch_number.saturating_add(1)
+                    || record.fencing_token != current.fencing_token.saturating_add(1)
+                {
+                    return Err(anyhow!("epoch and fencing token must advance exactly once"));
+                }
+            } else if let Some(latest) = storage.latest_snapshot(record.world_id)? {
+                if record.epoch_number < latest.epoch || record.fencing_token == 0 {
+                    return Err(anyhow!("epoch record is older than the local canonical snapshot"));
+                }
+            }
+            storage.save_epoch_record(&record)?;
+            storage.clear_sleep_record(record.world_id)?;
+            node.respond(
+                channel,
+                WireResponse::EpochAccepted { epoch: record.epoch_number, fencing_token: record.fencing_token },
+            )?;
+        }
         WireRequest::AuthorityTransfer(transfer) => {
             verify_transfer_signature(&transfer)?;
             authorize_member(storage, transfer.world_id, transfer.signer_peer_id)?;
+            validate_transfer(storage, &transfer)?;
+            storage.save_transfer_record(&transfer)?;
             node.respond(channel, WireResponse::TransferAccepted)?;
         }
         WireRequest::LeaseGrant(lease) => {
             verify_lease_signature(&lease)?;
+            if application_peer != lease.authority_peer_id {
+                return Err(anyhow!("lease sender is not the signed authority"));
+            }
             authorize_member(storage, lease.world_id, lease.authority_peer_id)?;
+            let descriptor = storage.load_world_descriptor(lease.world_id)?;
+            let member = descriptor.member(lease.authority_peer_id).context("lease authority is not a member")?;
+            if !member.authority_eligible || member.banned || member.public_key != lease.authority_public_key {
+                return Err(anyhow!("lease authority is not eligible or key does not match membership"));
+            }
+            if let Ok(epoch) = storage.load_epoch_record(lease.world_id) {
+                if lease.epoch != epoch.epoch_number || lease.fencing_token != epoch.fencing_token {
+                    return Err(anyhow!("lease generation does not match accepted epoch"));
+                }
+            }
             node.respond(
                 channel,
                 WireResponse::LeaseAccepted { epoch: lease.epoch, fencing_token: lease.fencing_token },
+            )?;
+        }
+        WireRequest::Sleep(record) => {
+            if application_peer != record.authority_peer_id {
+                return Err(anyhow!("sleep sender is not the signed authority"));
+            }
+            verify_sleep_record_signature(&record)?;
+            authorize_member(storage, record.world_id, record.authority_peer_id)?;
+            let descriptor = storage.load_world_descriptor(record.world_id)?;
+            let member = descriptor.member(record.authority_peer_id).context("sleep authority is not a member")?;
+            if member.public_key != record.authority_public_key || !member.authority_eligible || member.banned {
+                return Err(anyhow!("sleep authority is not eligible or key does not match membership"));
+            }
+            let epoch = storage.load_epoch_record(record.world_id)?;
+            if record.epoch != epoch.epoch_number
+                || record.fencing_token != epoch.fencing_token
+                || record.authority_peer_id != epoch.authority_peer_id
+            {
+                return Err(anyhow!("sleep record does not match the accepted authority generation"));
+            }
+            let latest = storage.latest_snapshot(record.world_id)?.context("cannot sleep a world without a snapshot")?;
+            if latest.manifest_hash()? != record.latest_snapshot_hash {
+                return Err(anyhow!("sleep record does not reference the exact latest snapshot"));
+            }
+            storage.save_sleep_record(&record)?;
+            node.respond(
+                channel,
+                WireResponse::SleepAccepted { epoch: record.epoch, fencing_token: record.fencing_token },
             )?;
         }
         WireRequest::Hello(_) => return Err(anyhow!("PeerHello is handled by the network authentication layer")),
@@ -277,6 +414,82 @@ fn authorize_manifest(storage: &Storage, sender: PeerId, manifest: &SnapshotMani
             return Err(anyhow!("stale snapshot manifest rejected"));
         }
     }
+    if let Ok(epoch) = storage.load_epoch_record(manifest.world_id) {
+        if manifest.epoch != epoch.epoch_number || manifest.authority_peer_id != epoch.authority_peer_id {
+            return Err(anyhow!("snapshot does not belong to the accepted authority epoch"));
+        }
+    }
+    Ok(())
+}
+
+fn authorize_epoch(storage: &Storage, sender: PeerId, record: &EpochRecordV1) -> Result<()> {
+    if sender != record.authority_peer_id {
+        return Err(anyhow!("epoch sender is not the signed authority"));
+    }
+    authorize_member(storage, record.world_id, record.authority_peer_id)?;
+    let descriptor = storage.load_world_descriptor(record.world_id)?;
+    let authority = descriptor.member(record.authority_peer_id).context("epoch authority is not a member")?;
+    if authority.banned || !authority.authority_eligible || authority.public_key != record.authority_public_key {
+        return Err(anyhow!("epoch authority is not eligible or key does not match membership"));
+    }
+    verify_signature(
+        record.authority_peer_id,
+        record.authority_public_key,
+        &record.signing_bytes()?,
+        &record.signature,
+    )?;
+    let latest = storage.latest_snapshot(record.world_id)?.context("cannot accept an authority epoch without a base snapshot")?;
+    if latest.state_root != record.base_state_hash {
+        return Err(anyhow!("epoch base state hash does not match the latest verified snapshot"));
+    }
+    Ok(())
+}
+
+fn validate_transfer(storage: &Storage, transfer: &swarm_protocol::AuthorityTransferV1) -> Result<()> {
+    let descriptor = storage.load_world_descriptor(transfer.world_id)?;
+    let from = descriptor.member(transfer.from_peer_id).context("transfer source is not a world member")?;
+    let to = descriptor.member(transfer.to_peer_id).context("transfer target is not a world member")?;
+    if from.banned || to.banned || !to.authority_eligible {
+        return Err(anyhow!("transfer participants are banned or target is not authority eligible"));
+    }
+    let expected_signer = match transfer.phase {
+        TransferPhase::Prepared | TransferPhase::Committed => transfer.from_peer_id,
+        TransferPhase::Accepted => transfer.to_peer_id,
+    };
+    if transfer.signer_peer_id != expected_signer {
+        return Err(anyhow!("transfer phase was signed by the wrong participant"));
+    }
+    let signer = descriptor.member(transfer.signer_peer_id).context("transfer signer is not a member")?;
+    if signer.public_key != transfer.signer_public_key {
+        return Err(anyhow!("transfer signer key does not match membership"));
+    }
+    let latest = storage.latest_snapshot(transfer.world_id)?.context("cannot transfer authority without a snapshot")?;
+    if latest.manifest_hash()? != transfer.base_snapshot_hash {
+        return Err(anyhow!("transfer does not reference the exact latest snapshot"));
+    }
+    if let Ok(epoch) = storage.load_epoch_record(transfer.world_id) {
+        if transfer.next_epoch != epoch.epoch_number.saturating_add(1)
+            || transfer.next_fencing_token != epoch.fencing_token.saturating_add(1)
+        {
+            return Err(anyhow!("transfer generation does not advance the accepted epoch exactly once"));
+        }
+    }
+    if let Ok(previous) = storage.load_transfer_record(transfer.world_id) {
+        let valid_progression = matches!(
+            (previous.phase, transfer.phase),
+            (TransferPhase::Prepared, TransferPhase::Accepted) | (TransferPhase::Accepted, TransferPhase::Committed)
+        );
+        let same_transfer = previous.from_peer_id == transfer.from_peer_id
+            && previous.to_peer_id == transfer.to_peer_id
+            && previous.base_snapshot_hash == transfer.base_snapshot_hash
+            && previous.next_epoch == transfer.next_epoch
+            && previous.next_fencing_token == transfer.next_fencing_token;
+        if !valid_progression || !same_transfer {
+            return Err(anyhow!("authority transfer does not continue the persisted transfer state"));
+        }
+    } else if transfer.phase != TransferPhase::Prepared {
+        return Err(anyhow!("authority transfer must begin in the prepared phase"));
+    }
     Ok(())
 }
 
@@ -316,9 +529,10 @@ fn world_status(storage: &Storage, world: WorldId, local_peer: PeerId) -> Result
         .ok()
         .and_then(|descriptor| descriptor.member(local_peer).cloned())
         .is_some_and(|member| member.authority_eligible && !member.banned);
+    let epoch = storage.load_epoch_record(world).ok();
     Ok(Some(WorldStatusV1 {
         world_id: world,
-        epoch: latest.as_ref().map_or(0, |manifest| manifest.epoch),
+        epoch: epoch.as_ref().map_or_else(|| latest.as_ref().map_or(0, |manifest| manifest.epoch), |record| record.epoch_number),
         sequence: latest.as_ref().map_or(0, |manifest| manifest.sequence),
         latest_snapshot: latest.as_ref().map(|manifest| manifest.manifest_hash()).transpose()?,
         state_hash: latest.as_ref().map(|manifest| manifest.state_root),
@@ -329,6 +543,11 @@ fn world_status(storage: &Storage, world: WorldId, local_peer: PeerId) -> Result
 
 fn find_descriptor(manifest: &SnapshotManifestV1, hash: Hash32) -> Option<&BlobDescriptor> {
     manifest.entries.iter().find(|entry| entry.blob.hash == hash).map(|entry| &entry.blob)
+}
+
+fn unix_millis() -> Result<u64> {
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).context("system clock is before Unix epoch")?;
+    Ok(duration.as_millis().try_into().unwrap_or(u64::MAX))
 }
 
 fn request_key(value: &impl Debug) -> String {
