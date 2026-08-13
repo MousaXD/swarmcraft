@@ -21,7 +21,7 @@ fn eligible(peer: u8, epoch: u64, sequence: u64) -> AuthorityCandidate {
 }
 
 #[test]
-fn crash_takeover_waits_for_monotonic_lease_and_solo_delay() {
+fn crash_takeover_waits_for_monotonic_lease_and_requires_quorum() {
     let start = Instant::now();
     let lease = LeaseTracker::new(5, 9, Duration::from_secs(10), start);
     let candidate = TakeoverCandidate { candidate: eligible(2, 5, 10), snapshot_hash: Hash32([7; 32]), peer_votes: 1 };
@@ -32,13 +32,12 @@ fn crash_takeover_waits_for_monotonic_lease_and_solo_delay() {
     );
     assert_eq!(
         evaluate_crash_takeover(&lease, &candidate, Hash32([7; 32]), start + Duration::from_secs(20), policy),
-        Err(LeaseError::SoloDelay)
+        Err(LeaseError::NoQuorum)
     );
-    let generation =
-        evaluate_crash_takeover(&lease, &candidate, Hash32([7; 32]), start + Duration::from_secs(26), policy).unwrap();
-    assert_eq!(generation.epoch, 6);
-    assert_eq!(generation.fencing_token, 10);
-    assert_eq!(generation.mode, TakeoverMode::Solo);
+    assert_eq!(
+        evaluate_crash_takeover(&lease, &candidate, Hash32([7; 32]), start + Duration::from_secs(200), policy),
+        Err(LeaseError::NoQuorum)
+    );
 }
 
 #[test]
