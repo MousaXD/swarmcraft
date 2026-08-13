@@ -11,7 +11,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Base64;
+import java.util.HexFormat;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import net.fabricmc.api.ModInitializer;
@@ -203,7 +203,7 @@ public final class SwarmCraftMod implements ModInitializer {
     }
 
     private static String encode(String value) {
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(value.getBytes(StandardCharsets.UTF_8));
+        return HexFormat.of().formatHex(value.getBytes(StandardCharsets.UTF_8));
     }
 
     private static String valueOrEmpty(String value) {
