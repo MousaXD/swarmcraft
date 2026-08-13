@@ -435,7 +435,8 @@ fn maintain_local_authority(
         .filter(|member| runtime.authenticated_peers.values().any(|peer| *peer == member.peer_id))
         .filter(|member| {
             runtime.lease_acks.get(&(world, member.peer_id)).is_some_and(|ack| {
-                ack.generation == context.generation && context.now.saturating_duration_since(ack.observed_at) < fresh_window
+                ack.generation == context.generation
+                    && context.now.saturating_duration_since(ack.observed_at) < fresh_window
             })
         })
         .count();
