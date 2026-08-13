@@ -41,9 +41,7 @@ impl Storage {
         if !path.exists() {
             return Ok(0);
         }
-        fs::metadata(&path)
-            .map(|metadata| metadata.len())
-            .map_err(|source| StorageError::Io { path, source }.into())
+        fs::metadata(&path).map(|metadata| metadata.len()).map_err(|source| StorageError::Io { path, source }.into())
     }
 
     pub fn read_encoded_blob_chunk(
@@ -149,9 +147,7 @@ fn verify_encoded_blob(path: &Path, descriptor: &BlobDescriptor) -> Result<(), R
     let mut total = 0u64;
     let mut buffer = [0u8; 1024 * 1024];
     loop {
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|source| StorageError::Io { path: path.to_path_buf(), source })?;
+        let read = reader.read(&mut buffer).map_err(|source| StorageError::Io { path: path.to_path_buf(), source })?;
         if read == 0 {
             break;
         }
