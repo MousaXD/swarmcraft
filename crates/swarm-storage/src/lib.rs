@@ -201,7 +201,11 @@ impl Storage {
         Ok(bytes)
     }
 
-    pub fn snapshot_directory(&self, source: &Path, context: SnapshotContext) -> Result<SnapshotManifestV1, StorageError> {
+    pub fn snapshot_directory(
+        &self,
+        source: &Path,
+        context: SnapshotContext,
+    ) -> Result<SnapshotManifestV1, StorageError> {
         if !source.is_dir() {
             return Err(StorageError::SourceNotDirectory(source.to_path_buf()));
         }
