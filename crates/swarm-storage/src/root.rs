@@ -2,5 +2,6 @@
 mod base;
 pub use base::*;
 
+pub mod control;
 pub mod replica;
 pub mod world;
