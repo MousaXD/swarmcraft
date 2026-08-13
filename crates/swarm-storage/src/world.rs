@@ -4,7 +4,9 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-use swarm_protocol::{MembershipRecordV1, WorldDescriptorV1, WorldId};
+use swarm_protocol::{
+    AuthorityTransferV1, EpochRecordV1, MembershipRecordV1, SleepRecordV1, WorldDescriptorV1, WorldId,
+};
 
 impl Storage {
     pub fn save_world_descriptor(&self, descriptor: &WorldDescriptorV1) -> Result<(), StorageError> {
