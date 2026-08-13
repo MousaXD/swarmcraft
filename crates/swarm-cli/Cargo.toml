@@ -20,6 +20,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 swarm-consensus = { path = "../swarm-consensus" }
 swarm-core = { path = "../swarm-core" }
+swarm-ipc = { path = "../swarm-ipc" }
 swarm-network = { path = "../swarm-network" }
 swarm-protocol = { path = "../swarm-protocol" }
 swarm-storage = { path = "../swarm-storage" }
