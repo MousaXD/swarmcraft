@@ -25,6 +25,11 @@ enum OutboundContext {
     Manifest { world: WorldId, snapshot_number: u64 },
 }
 
+struct HandlerContext<'a> {
+    identity: &'a PeerIdentity,
+    storage: &'a Storage,
+}
+
 pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<()> {
     let identity = PeerIdentity::load_or_create(paths)?;
     let transport_key = load_or_create_transport_key(&paths.transport_key())?;
@@ -54,9 +59,9 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                 let application_peer = node
                     .application_peer(&transport_peer)
                     .context("authenticated request lost application peer mapping")?;
+                let context = HandlerContext { identity: &identity, storage };
                 handle_request(
-                    &identity,
-                    storage,
+                    &context,
                     &mut node,
                     transport_peer,
                     application_peer,
@@ -123,8 +128,7 @@ fn push_known_worlds(
 }
 
 fn handle_request(
-    identity: &PeerIdentity,
-    storage: &Storage,
+    context: &HandlerContext<'_>,
     node: &mut SwarmNode,
     transport_peer: TransportPeerId,
     application_peer: PeerId,
@@ -132,6 +136,8 @@ fn handle_request(
     channel: ResponseChannel<WireResponse>,
     pending_manifests: &mut HashMap<WorldId, SnapshotManifestV1>,
 ) -> Result<()> {
+    let identity = context.identity;
+    let storage = context.storage;
     match request {
         WireRequest::Ping { nonce } => node.respond(channel, WireResponse::Pong { nonce })?,
         WireRequest::WorldStatus { world_id } => {
