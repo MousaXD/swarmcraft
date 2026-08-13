@@ -29,6 +29,16 @@
       <pre id="worlds">No data yet.</pre>
     </section>
 
+    <section class="card form-card">
+      <h2>Replication daemon</h2>
+      <label>Listen multiaddress <input id="daemonListen" value="/ip4/0.0.0.0/udp/0/quic-v1" /></label>
+      <div class="button-row">
+        <button id="startDaemon">Start daemon</button>
+        <button id="stopDaemon" class="danger">Stop daemon</button>
+      </div>
+      <p class="hint">Internet bootstrap and relay can also be supplied through SWARMCRAFT_BOOTSTRAP and SWARMCRAFT_RELAY.</p>
+    </section>
+
     <div class="grid two">
       <section class="card form-card">
         <h2>Create world</h2>
@@ -82,7 +92,10 @@
       <label>Fabric server jar <input id="serverJar" placeholder="/path/to/fabric-server.jar" /></label>
       <label>SwarmCraft Fabric mod jar <input id="modJar" placeholder="/path/to/swarmcraft-fabric.jar" /></label>
       <label class="check"><input id="eula" type="checkbox" /> I have reviewed and accept the Minecraft server EULA.</label>
-      <button id="host">Start authority runtime</button>
+      <div class="button-row">
+        <button id="host">Start authority runtime</button>
+        <button id="stopHost" class="danger">Stop authority runtime</button>
+      </div>
       <p class="hint">For multi-peer crash recovery, keep the replication daemon running. The authority permit fences stale servers.</p>
     </section>
 
