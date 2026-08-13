@@ -1,0 +1,12 @@
+[package]
+name = "swarm-network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ed25519-dalek.workspace = true
+thiserror.workspace = true
+swarm-protocol = { path = "../swarm-protocol" }

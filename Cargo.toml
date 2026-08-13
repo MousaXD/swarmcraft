@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/swarm-protocol",
+  "crates/swarm-core",
+  "crates/swarm-storage",
+  "crates/swarm-consensus",
+  "crates/swarm-network",
+  "crates/swarm-ipc",
+  "crates/swarm-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+repository = "https://github.com/MousaXD/swarmcraft"
+
+[workspace.dependencies]
+anyhow = "1.0"
+blake3 = "1.5"
+clap = { version = "4.5", features = ["derive", "env"] }
+directories = "5.0"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+hex = "0.4"
+postcard = { version = "1.0", features = ["alloc"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+walkdir = "2.5"
+zstd = "0.13"
+tempfile = "3.12"
