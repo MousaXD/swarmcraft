@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
-use swarm_protocol::{BlobEncoding, Hash32, PeerHelloV1, SnapshotManifestV1, WorldId, WorldStatusV1};
+use swarm_protocol::{
+    AuthorityLeaseGrantV1, AuthorityTransferV1, BlobEncoding, EpochRecordV1, Hash32, JoinRequestV1, MembershipRecordV1,
+    PeerHelloV1, SleepRecordV1, SnapshotManifestV1, WorldDescriptorV1, WorldId, WorldStatusV1,
+};
 use thiserror::Error;
 
 pub const MAX_BLOB_CHUNK: usize = 256 * 1024;
 pub const MAX_MISSING_BLOBS: usize = 16_384;
+pub const MAX_WORLD_MEMBERS: usize = 1_024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicaAckV1 {
@@ -15,14 +19,27 @@ pub struct ReplicaAckV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobResumeV1 {
+    pub hash: Hash32,
+    pub offset: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WireRequest {
     Hello(PeerHelloV1),
     Ping { nonce: u64 },
     WorldStatus { world_id: WorldId },
+    WorldDescriptor { world_id: WorldId },
+    JoinRequest(Box<JoinRequestV1>),
     SnapshotManifest(SnapshotManifestV1),
     MissingBlobs { world_id: WorldId, snapshot_number: u64, hashes: Vec<Hash32> },
     BlobChunk { world_id: WorldId, hash: Hash32, encoding: BlobEncoding, offset: u64, data: Vec<u8>, finished: bool },
     ReplicaAck(ReplicaAckV1),
+    Membership(MembershipRecordV1),
+    Epoch(EpochRecordV1),
+    AuthorityTransfer(AuthorityTransferV1),
+    LeaseGrant(AuthorityLeaseGrantV1),
+    Sleep(SleepRecordV1),
 }
 
 impl WireRequest {
@@ -34,6 +51,9 @@ impl WireRequest {
             Self::MissingBlobs { hashes, .. } if hashes.len() > MAX_MISSING_BLOBS => {
                 Err(WireLimitError::TooManyBlobHashes(hashes.len()))
             }
+            Self::Membership(record) if record.members.len() > MAX_WORLD_MEMBERS => {
+                Err(WireLimitError::TooManyMembers(record.members.len()))
+            }
             _ => Ok(()),
         }
     }
@@ -44,10 +64,17 @@ pub enum WireResponse {
     HelloAccepted { protocol_version: u16 },
     Pong { nonce: u64 },
     WorldStatus(Option<WorldStatusV1>),
-    ManifestAccepted { snapshot_number: u64, missing: Vec<Hash32> },
-    MissingBlobs(Vec<Hash32>),
+    WorldDescriptor(Option<WorldDescriptorV1>),
+    JoinAccepted { membership_sequence: u64 },
+    ManifestAccepted { snapshot_number: u64, missing: Vec<BlobResumeV1> },
+    MissingBlobs(Vec<BlobResumeV1>),
     BlobChunkAccepted { hash: Hash32, next_offset: u64 },
     ReplicaAckAccepted,
+    MembershipAccepted { sequence: u64 },
+    EpochAccepted { epoch: u64, fencing_token: u64 },
+    TransferAccepted,
+    LeaseAccepted { epoch: u64, fencing_token: u64 },
+    SleepAccepted { epoch: u64, fencing_token: u64 },
     Error { code: String, message: String },
 }
 
@@ -57,6 +84,8 @@ pub enum WireLimitError {
     BlobChunkTooLarge(usize),
     #[error("missing-blob request contains {0} hashes; maximum is {MAX_MISSING_BLOBS}")]
     TooManyBlobHashes(usize),
+    #[error("membership record contains {0} peers; maximum is {MAX_WORLD_MEMBERS}")]
+    TooManyMembers(usize),
 }
 
 #[cfg(test)]

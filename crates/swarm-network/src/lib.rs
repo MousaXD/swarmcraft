@@ -4,9 +4,14 @@ mod node;
 mod transport;
 pub mod wire;
 
+pub use libp2p::request_response::ResponseChannel;
+pub use libp2p::PeerId as TransportPeerId;
 pub use node::{NetworkEvent, SwarmNode, WIRE_PROTOCOL};
 pub use transport::{generate_transport_key, load_or_create_transport_key};
-pub use wire::{ReplicaAckV1, WireLimitError, WireRequest, WireResponse, MAX_BLOB_CHUNK, MAX_MISSING_BLOBS};
+pub use wire::{
+    BlobResumeV1, ReplicaAckV1, WireLimitError, WireRequest, WireResponse, MAX_BLOB_CHUNK, MAX_MISSING_BLOBS,
+    MAX_WORLD_MEMBERS,
+};
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use swarm_protocol::{peer_id_from_public_key, PeerHelloV1, PROTOCOL_VERSION};

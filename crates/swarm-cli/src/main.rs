@@ -1,8 +1,13 @@
+mod daemon;
+mod invite;
+
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
-use swarm_core::{create_world_genesis, verify_snapshot_signature, DataPaths, PeerIdentity};
-use swarm_protocol::{WorldId, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION};
+use swarm_core::{create_world_genesis, random_nonce, verify_snapshot_signature, DataPaths, PeerIdentity};
+use swarm_protocol::{
+    InviteV1, MembershipRecordV1, WorldDescriptorV1, WorldId, WorldMemberV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+};
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -23,10 +28,34 @@ enum Command {
     Init,
     /// Display this device's persistent cryptographic peer identity.
     Identity,
+    /// Run the authenticated QUIC replication coordinator.
+    Daemon {
+        #[arg(long, default_value = "/ip4/0.0.0.0/udp/0/quic-v1")]
+        listen: String,
+    },
     /// Manage replicated worlds.
     World {
         #[command(subcommand)]
         command: WorldCommand,
+    },
+    /// Create signed world invitations.
+    Invite {
+        #[command(subcommand)]
+        command: InviteCommand,
+    },
+    /// Display the authorized peers for a world.
+    Peers { world: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum InviteCommand {
+    /// Create an expiring signed invitation for an existing world.
+    Create {
+        world: String,
+        #[arg(long, default_value_t = 60)]
+        expires_minutes: u64,
+        #[arg(long = "bootstrap")]
+        bootstrap_addrs: Vec<String>,
     },
 }
 
@@ -44,6 +73,10 @@ enum WorldCommand {
         #[arg(long, default_value = "vanilla-fabric")]
         compatibility: String,
     },
+    /// Join a world using a signed scinvite token.
+    Join { invite: String },
+    /// Stop local participation without deleting replicated world data.
+    Leave { world: String },
     /// List locally known worlds.
     List,
     /// Show local world and snapshot status.
@@ -99,7 +132,12 @@ fn main() -> Result<()> {
             println!("Peer ID: {}", identity.peer_id());
             println!("Public key: {}", hex_string(&identity.public_key()));
         }
+        Command::Daemon { listen } => {
+            tokio::runtime::Runtime::new()?.block_on(daemon::run(&paths, &storage, &listen))?;
+        }
         Command::World { command } => handle_world(command, &paths, &storage)?,
+        Command::Invite { command } => handle_invite(command, &paths, &storage)?,
+        Command::Peers { world } => show_peers(parse_world(&world)?, &storage)?,
     }
     Ok(())
 }
@@ -114,10 +152,73 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 storage_schema_version: STORAGE_SCHEMA_VERSION,
                 display_name: name.clone(),
                 world_id,
-                genesis,
+                genesis: genesis.clone(),
             })?;
+            let descriptor = WorldDescriptorV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id,
+                compatibility_fingerprint: genesis.compatibility_fingerprint,
+                members: vec![local_member(&identity)],
+                preferred_replication_factor: 2,
+            };
+            storage.save_world_descriptor(&descriptor)?;
+            let mut membership = MembershipRecordV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id,
+                epoch: 0,
+                sequence: 0,
+                previous_membership_hash: None,
+                members: descriptor.members.clone(),
+                authority_peer_id: identity.peer_id(),
+                authority_public_key: identity.public_key(),
+                signature: Vec::new(),
+            };
+            identity.sign_membership(&mut membership)?;
+            storage.save_membership_record(&membership)?;
             println!("Created world: {name}");
             println!("World ID: {world_id}");
+        }
+        WorldCommand::Join { invite: value } => {
+            let invite = invite::decode(&value)?;
+            let identity = PeerIdentity::load_or_create(paths)?;
+            if storage.load_world(invite.world_id).is_err() {
+                storage.create_world(&WorldMetadataV1 {
+                    storage_schema_version: STORAGE_SCHEMA_VERSION,
+                    display_name: invite.display_name.clone(),
+                    world_id: invite.world_id,
+                    genesis: invite.genesis.clone(),
+                })?;
+            }
+            let mut descriptor = WorldDescriptorV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id: invite.world_id,
+                compatibility_fingerprint: invite.genesis.compatibility_fingerprint,
+                members: vec![
+                    WorldMemberV1 {
+                        peer_id: invite.inviter_peer_id,
+                        public_key: invite.inviter_public_key,
+                        authority_eligible: true,
+                        banned: false,
+                    },
+                    local_member(&identity),
+                ],
+                preferred_replication_factor: 2,
+            };
+            descriptor.normalize();
+            storage.save_world_descriptor(&descriptor)?;
+            println!("Joined world: {}", invite.display_name);
+            println!("World ID: {}", invite.world_id);
+            if !invite.bootstrap_addrs.is_empty() {
+                println!("Bootstrap addresses: {}", invite.bootstrap_addrs.join(", "));
+            }
+        }
+        WorldCommand::Leave { world } => {
+            let world = parse_world(&world)?;
+            let identity = PeerIdentity::load_or_create(paths)?;
+            let mut descriptor = storage.load_world_descriptor(world)?;
+            descriptor.members.retain(|member| member.peer_id != identity.peer_id());
+            storage.save_world_descriptor(&descriptor)?;
+            println!("Local peer left {world}; replicated snapshots were kept on disk.");
         }
         WorldCommand::List => {
             let worlds = storage.list_worlds()?;
@@ -138,6 +239,10 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             println!("Minecraft: {}", metadata.genesis.minecraft_version);
             println!("Fabric loader: {}", metadata.genesis.fabric_loader_version);
             println!("Compatibility: {}", metadata.genesis.compatibility_fingerprint);
+            if let Ok(descriptor) = storage.load_world_descriptor(world) {
+                println!("Authorized peers: {}", descriptor.members.len());
+                println!("Preferred replicas: {}", descriptor.preferred_replication_factor);
+            }
             match latest {
                 Some(snapshot) => {
                     println!("Latest snapshot: {}", snapshot.snapshot_number);
@@ -228,6 +333,59 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
         }
     }
     Ok(())
+}
+
+fn handle_invite(command: InviteCommand, paths: &DataPaths, storage: &Storage) -> Result<()> {
+    match command {
+        InviteCommand::Create { world, expires_minutes, bootstrap_addrs } => {
+            let world = parse_world(&world)?;
+            let metadata = storage.load_world(world)?;
+            let descriptor = storage.load_world_descriptor(world)?;
+            let identity = PeerIdentity::load_or_create(paths)?;
+            let member =
+                descriptor.member(identity.peer_id()).context("this peer is not an authorized member of the world")?;
+            if member.banned {
+                bail!("this peer is banned from the world");
+            }
+            let lifetime_ms = expires_minutes.saturating_mul(60_000);
+            let mut invite = InviteV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id: world,
+                display_name: metadata.display_name,
+                genesis: metadata.genesis,
+                inviter_peer_id: identity.peer_id(),
+                inviter_public_key: identity.public_key(),
+                bootstrap_addrs,
+                expires_unix_ms: invite::unix_time_ms()?.saturating_add(lifetime_ms),
+                nonce: random_nonce(),
+                signature: Vec::new(),
+            };
+            identity.sign_invite(&mut invite)?;
+            println!("{}", invite::encode(&invite)?);
+        }
+    }
+    Ok(())
+}
+
+fn show_peers(world: WorldId, storage: &Storage) -> Result<()> {
+    let descriptor = storage.load_world_descriptor(world)?;
+    if descriptor.members.is_empty() {
+        println!("No authorized peers.");
+        return Ok(());
+    }
+    for member in descriptor.members {
+        println!("{} authority_eligible={} banned={}", member.peer_id, member.authority_eligible, member.banned);
+    }
+    Ok(())
+}
+
+fn local_member(identity: &PeerIdentity) -> WorldMemberV1 {
+    WorldMemberV1 {
+        peer_id: identity.peer_id(),
+        public_key: identity.public_key(),
+        authority_eligible: true,
+        banned: false,
+    }
 }
 
 fn parse_world(value: &str) -> Result<WorldId> {

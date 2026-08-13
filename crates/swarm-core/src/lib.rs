@@ -9,7 +9,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use swarm_protocol::{
-    peer_id_from_public_key, Hash32, PeerId, SnapshotManifestV1, WorldGenesisV1, WorldId, PROTOCOL_VERSION,
+    peer_id_from_public_key, AuthorityLeaseGrantV1, AuthorityTransferV1, Hash32, InviteV1, MembershipRecordV1,
+    PeerHelloV1, PeerId, SnapshotManifestV1, WorldGenesisV1, WorldId, PROTOCOL_VERSION,
 };
 use thiserror::Error;
 
@@ -34,7 +35,15 @@ pub enum CoreError {
 }
 
 fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> CoreError {
-    CoreError::Io { path: path.into(), source }
+    StorageErrorMarker::map(path, source)
+}
+
+struct StorageErrorMarker;
+
+impl StorageErrorMarker {
+    fn map(path: impl Into<PathBuf>, source: std::io::Error) -> CoreError {
+        CoreError::Io { path: path.into(), source }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +67,10 @@ impl DataPaths {
 
     pub fn identity_key(&self) -> PathBuf {
         self.identity_dir().join("peer.key")
+    }
+
+    pub fn transport_key(&self) -> PathBuf {
+        self.identity_dir().join("transport.key")
     }
 
     pub fn worlds_dir(&self) -> PathBuf {
@@ -125,6 +138,57 @@ impl PeerIdentity {
         manifest.signature = self.sign(&manifest.signing_bytes()?);
         Ok(())
     }
+
+    pub fn sign_membership(&self, record: &mut MembershipRecordV1) -> Result<(), CoreError> {
+        record.authority_public_key = self.public_key();
+        record.authority_peer_id = self.peer_id();
+        record.signature.clear();
+        record.signature = self.sign(&record.signing_bytes()?);
+        Ok(())
+    }
+
+    pub fn sign_invite(&self, invite: &mut InviteV1) -> Result<(), CoreError> {
+        invite.inviter_public_key = self.public_key();
+        invite.inviter_peer_id = self.peer_id();
+        invite.signature.clear();
+        invite.signature = self.sign(&invite.signing_bytes()?);
+        Ok(())
+    }
+
+    pub fn sign_transfer(&self, transfer: &mut AuthorityTransferV1) -> Result<(), CoreError> {
+        transfer.signer_public_key = self.public_key();
+        transfer.signer_peer_id = self.peer_id();
+        transfer.signature.clear();
+        transfer.signature = self.sign(&transfer.signing_bytes()?);
+        Ok(())
+    }
+
+    pub fn sign_lease(&self, lease: &mut AuthorityLeaseGrantV1) -> Result<(), CoreError> {
+        lease.authority_public_key = self.public_key();
+        lease.authority_peer_id = self.peer_id();
+        lease.signature.clear();
+        lease.signature = self.sign(&lease.signing_bytes()?);
+        Ok(())
+    }
+
+    pub fn signed_peer_hello(&self, capabilities: Vec<String>) -> Result<PeerHelloV1, CoreError> {
+        let mut hello = PeerHelloV1 {
+            peer_id: self.peer_id(),
+            public_key: self.public_key(),
+            protocol_versions: vec![PROTOCOL_VERSION],
+            capabilities,
+            nonce: random_nonce(),
+            signature: Vec::new(),
+        };
+        hello.signature = self.sign(&hello.signing_bytes()?);
+        Ok(hello)
+    }
+}
+
+pub fn random_nonce() -> [u8; 32] {
+    let mut nonce = [0u8; 32];
+    OsRng.fill_bytes(&mut nonce);
+    nonce
 }
 
 pub fn verify_signature(
@@ -150,22 +214,40 @@ pub fn verify_snapshot_signature(manifest: &SnapshotManifestV1) -> Result<(), Co
     )
 }
 
+pub fn verify_membership_signature(record: &MembershipRecordV1) -> Result<(), CoreError> {
+    verify_signature(record.authority_peer_id, record.authority_public_key, &record.signing_bytes()?, &record.signature)
+}
+
+pub fn verify_invite_signature(invite: &InviteV1) -> Result<(), CoreError> {
+    verify_signature(invite.inviter_peer_id, invite.inviter_public_key, &invite.signing_bytes()?, &invite.signature)
+}
+
+pub fn verify_transfer_signature(transfer: &AuthorityTransferV1) -> Result<(), CoreError> {
+    verify_signature(
+        transfer.signer_peer_id,
+        transfer.signer_public_key,
+        &transfer.signing_bytes()?,
+        &transfer.signature,
+    )
+}
+
+pub fn verify_lease_signature(lease: &AuthorityLeaseGrantV1) -> Result<(), CoreError> {
+    verify_signature(lease.authority_peer_id, lease.authority_public_key, &lease.signing_bytes()?, &lease.signature)
+}
+
 pub fn create_world_genesis(
     identity: &PeerIdentity,
     minecraft_version: String,
     fabric_loader_version: String,
     compatibility_material: &[u8],
 ) -> Result<(WorldId, WorldGenesisV1), CoreError> {
-    let mut nonce = [0u8; 32];
-    let mut rng = OsRng;
-    rng.fill_bytes(&mut nonce);
     let compatibility_fingerprint = Hash32(*blake3::hash(compatibility_material).as_bytes());
     let genesis = WorldGenesisV1 {
         protocol_version: PROTOCOL_VERSION,
         minecraft_version,
         fabric_loader_version,
         compatibility_fingerprint,
-        creation_nonce: nonce,
+        creation_nonce: random_nonce(),
         creator_public_key: identity.public_key(),
         initial_membership: vec![identity.peer_id()],
     };
@@ -233,5 +315,12 @@ mod tests {
         let sig = a.sign(msg);
         assert!(verify_signature(a.peer_id(), a.public_key(), msg, &sig).is_ok());
         assert!(verify_signature(b.peer_id(), a.public_key(), msg, &sig).is_err());
+    }
+
+    #[test]
+    fn signed_peer_hello_verifies() {
+        let identity = PeerIdentity::generate();
+        let hello = identity.signed_peer_hello(vec!["snapshot-replication-v1".into()]).unwrap();
+        verify_signature(hello.peer_id, hello.public_key, &hello.signing_bytes().unwrap(), &hello.signature).unwrap();
     }
 }
