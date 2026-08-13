@@ -44,6 +44,16 @@ async function refreshWorlds() {
   $('worlds').textContent = String(result || 'No local worlds.');
 }
 
+async function startDaemon() {
+  const pid = await action('Starting replication daemon…', 'start_daemon', { listen: $('daemonListen').value.trim() });
+  setOutput(`Replication daemon started. PID ${pid}.`);
+}
+
+async function stopDaemon() {
+  await action('Stopping replication daemon…', 'stop_daemon');
+  setOutput('Replication daemon stopped.');
+}
+
 async function createWorld() {
   const result = await action('Creating canonical world identity…', 'create_world', {
     name: $('createName').value.trim(),
@@ -57,9 +67,7 @@ async function createWorld() {
 }
 
 async function joinWorld() {
-  const result = await action('Staging signed join request…', 'join_world', {
-    invite: $('joinInvite').value.trim(),
-  });
+  const result = await action('Staging signed join request…', 'join_world', { invite: $('joinInvite').value.trim() });
   const match = String(result).match(/World ID:\s*(scworld:[^\s]+)/);
   if (match) $('world').value = match[1];
   await refreshWorlds();
@@ -86,10 +94,7 @@ async function leaveWorld() {
 }
 
 async function createInvite() {
-  const bootstrapAddrs = $('bootstrapAddrs').value
-    .split('\n')
-    .map((value) => value.trim())
-    .filter(Boolean);
+  const bootstrapAddrs = $('bootstrapAddrs').value.split('\n').map((value) => value.trim()).filter(Boolean);
   await action('Creating signed authority invite…', 'create_invite', {
     world: worldId(),
     expiresMinutes: Number($('inviteMinutes').value || 60),
@@ -123,10 +128,17 @@ async function hostWorld() {
   setOutput(`Authority runtime started. PID ${pid}.`);
 }
 
+async function stopHost() {
+  await action('Stopping authority runtime…', 'stop_host');
+  setOutput('Authority runtime stopped.');
+}
+
 const bindings = [
   ['init', initialize],
   ['identityButton', showIdentity],
   ['refresh', refreshWorlds],
+  ['startDaemon', startDaemon],
+  ['stopDaemon', stopDaemon],
   ['createWorld', createWorld],
   ['joinWorld', joinWorld],
   ['worldStatus', worldStatus],
@@ -137,6 +149,7 @@ const bindings = [
   ['exportWorld', exportWorld],
   ['recoverWorld', recoverWorld],
   ['host', hostWorld],
+  ['stopHost', stopHost],
 ];
 for (const [id, handler] of bindings) {
   $(id).addEventListener('click', () => handler().catch(() => {}));
