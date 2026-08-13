@@ -446,6 +446,14 @@ fn maintain_local_authority(
         refresh_permit(context.paths, world, context.generation, *heartbeat)?;
     } else {
         clear_permit(context.paths, world)?;
+        request_world_statuses(
+            context.storage,
+            node,
+            outbound,
+            runtime,
+            context.descriptor,
+            context.identity.peer_id(),
+        )?;
     }
     context.storage.clear_recovery_reservation(world)?;
     Ok(())
@@ -545,6 +553,50 @@ fn recovery_window_open(runtime: &LeaseRuntime, world: WorldId, generation: Auth
         }
     }
     runtime.recovery_not_before.get(&world).is_some_and(|deadline| now >= *deadline)
+}
+
+fn recovery_catchup_has_quorum(
+    storage: &Storage,
+    runtime: &LeaseRuntime,
+    record: &EpochRecordV1,
+    now: Instant,
+) -> Result<bool> {
+    let descriptor = storage.load_world_descriptor(record.world_id)?;
+    let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
+    let Some(candidate_observation) = runtime.peer_status.get(&(record.world_id, record.authority_peer_id)) else {
+        return Ok(false);
+    };
+    if now.saturating_duration_since(candidate_observation.observed_at) > STATUS_FRESHNESS {
+        return Ok(false);
+    }
+    let canonical = &candidate_observation.status;
+    if canonical.world_id != record.world_id
+        || canonical.epoch != record.epoch_number
+        || canonical.latest_snapshot.is_none()
+        || canonical.state_hash != Some(record.base_state_hash)
+        || canonical.compatibility_fingerprint != descriptor.compatibility_fingerprint
+    {
+        return Ok(false);
+    }
+
+    let confirmed = descriptor
+        .members
+        .iter()
+        .filter(|member| !member.banned)
+        .filter(|member| runtime.authenticated_peers.values().any(|peer| *peer == member.peer_id))
+        .filter(|member| {
+            runtime.peer_status.get(&(record.world_id, member.peer_id)).is_some_and(|observed| {
+                now.saturating_duration_since(observed.observed_at) <= STATUS_FRESHNESS
+                    && observed.status.world_id == canonical.world_id
+                    && observed.status.epoch == canonical.epoch
+                    && observed.status.sequence == canonical.sequence
+                    && observed.status.latest_snapshot == canonical.latest_snapshot
+                    && observed.status.state_hash == canonical.state_hash
+                    && observed.status.compatibility_fingerprint == canonical.compatibility_fingerprint
+            })
+        })
+        .count();
+    Ok(has_quorum(member_count, confirmed))
 }
 
 fn promote_recovery_epoch(
@@ -1015,14 +1067,19 @@ fn handle_request(
                     return Err(anyhow!("epoch and fencing token must advance exactly once"));
                 }
                 if record.mode == EpochMode::Recovery {
-                    let reservation = storage.load_recovery_reservation(record.world_id)?;
-                    if reservation.epoch != record.epoch_number
-                        || reservation.fencing_token != record.fencing_token
-                        || reservation.authority_peer_id != record.authority_peer_id
-                        || reservation.authority_public_key != record.authority_public_key
-                        || record.previous_epoch_hash != Some(epoch_record_hash(&current)?)
+                    let reserved = storage.load_recovery_reservation(record.world_id).is_ok_and(|reservation| {
+                        reservation.epoch == record.epoch_number
+                            && reservation.fencing_token == record.fencing_token
+                            && reservation.authority_peer_id == record.authority_peer_id
+                            && reservation.authority_public_key == record.authority_public_key
+                    });
+                    let previous_matches = record.previous_epoch_hash == Some(epoch_record_hash(&current)?);
+                    if !previous_matches
+                        || (!reserved && !recovery_catchup_has_quorum(storage, state.leases, &record, state.now)?)
                     {
-                        return Err(anyhow!("recovery epoch does not match the durable next-generation reservation"));
+                        return Err(anyhow!(
+                            "recovery epoch lacks a matching durable reservation or fresh majority catch-up proof"
+                        ));
                     }
                 }
             } else if let Some(latest) = storage.latest_snapshot(record.world_id)? {
