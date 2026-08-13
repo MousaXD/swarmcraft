@@ -46,11 +46,23 @@ impl Behaviour {
 
 #[derive(Debug)]
 pub enum NetworkEvent {
-    Listening { address: Multiaddr },
-    Discovered { transport_peer: TransportPeerId, address: Multiaddr },
-    Connected { transport_peer: TransportPeerId },
-    Disconnected { transport_peer: TransportPeerId },
-    Authenticated { transport_peer: TransportPeerId, application_peer: PeerId },
+    Listening {
+        address: Multiaddr,
+    },
+    Discovered {
+        transport_peer: TransportPeerId,
+        address: Multiaddr,
+    },
+    Connected {
+        transport_peer: TransportPeerId,
+    },
+    Disconnected {
+        transport_peer: TransportPeerId,
+    },
+    Authenticated {
+        transport_peer: TransportPeerId,
+        application_peer: PeerId,
+    },
     InboundRequest {
         transport_peer: TransportPeerId,
         request: WireRequest,
