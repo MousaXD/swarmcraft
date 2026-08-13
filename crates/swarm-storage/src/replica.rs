@@ -1,7 +1,8 @@
 use crate::{Storage, StorageError};
 use std::{
     collections::BTreeSet,
-    fs,
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom},
     path::PathBuf,
 };
 use swarm_protocol::{BlobDescriptor, BlobEncoding, SnapshotManifestV1, WorldId};
@@ -43,6 +44,25 @@ impl Storage {
         fs::metadata(&path)
             .map(|metadata| metadata.len())
             .map_err(|source| StorageError::Io { path, source }.into())
+    }
+
+    pub fn read_encoded_blob_chunk(
+        &self,
+        world: WorldId,
+        descriptor: &BlobDescriptor,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<(Vec<u8>, bool), ReplicationError> {
+        if offset > descriptor.encoded_size {
+            return Err(ReplicationError::OffsetMismatch { expected: descriptor.encoded_size, received: offset });
+        }
+        let path = blob_path(self, world, descriptor);
+        let mut file = File::open(&path).map_err(|source| StorageError::Io { path: path.clone(), source })?;
+        file.seek(SeekFrom::Start(offset)).map_err(|source| StorageError::Io { path: path.clone(), source })?;
+        let requested = (descriptor.encoded_size - offset).min(max_bytes as u64) as usize;
+        let mut data = vec![0u8; requested];
+        file.read_exact(&mut data).map_err(|source| StorageError::Io { path, source })?;
+        Ok((data, offset + requested as u64 == descriptor.encoded_size))
     }
 }
 
