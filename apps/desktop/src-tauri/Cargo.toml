@@ -12,6 +12,7 @@ name = "swarmcraft-desktop"
 path = "src/main.rs"
 
 [build-dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png", "ico"] }
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
