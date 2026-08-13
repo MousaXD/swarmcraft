@@ -102,7 +102,10 @@ fn failed_snapshot_does_not_publish_a_manifest() {
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink("missing-target", source.join("unsafe-link")).unwrap();
-        assert!(matches!(storage.snapshot_directory(&source, context(world)), Err(StorageError::SymlinkUnsupported(_))));
+        assert!(matches!(
+            storage.snapshot_directory(&source, context(world)),
+            Err(StorageError::SymlinkUnsupported(_))
+        ));
         assert!(storage.latest_snapshot(world).unwrap().is_none());
     }
 
