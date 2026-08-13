@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 use swarm_protocol::{
-    AuthorityLeaseGrantV1, AuthorityTransferV1, BlobEncoding, EpochRecordV1, Hash32, JoinRequestV1,
-    MembershipRecordV1, PeerHelloV1, SleepRecordV1, SnapshotManifestV1, WorldDescriptorV1, WorldId,
-    WorldStatusV1,
+    AuthorityLeaseGrantV1, AuthorityTransferV1, BlobEncoding, EpochRecordV1, Hash32, JoinRequestV1, MembershipRecordV1,
+    PeerHelloV1, SleepRecordV1, SnapshotManifestV1, WorldDescriptorV1, WorldId, WorldStatusV1,
 };
 use thiserror::Error;
 
@@ -34,14 +33,7 @@ pub enum WireRequest {
     JoinRequest(JoinRequestV1),
     SnapshotManifest(SnapshotManifestV1),
     MissingBlobs { world_id: WorldId, snapshot_number: u64, hashes: Vec<Hash32> },
-    BlobChunk {
-        world_id: WorldId,
-        hash: Hash32,
-        encoding: BlobEncoding,
-        offset: u64,
-        data: Vec<u8>,
-        finished: bool,
-    },
+    BlobChunk { world_id: WorldId, hash: Hash32, encoding: BlobEncoding, offset: u64, data: Vec<u8>, finished: bool },
     ReplicaAck(ReplicaAckV1),
     Membership(MembershipRecordV1),
     Epoch(EpochRecordV1),
