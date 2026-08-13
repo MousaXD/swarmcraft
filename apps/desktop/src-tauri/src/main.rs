@@ -19,14 +19,128 @@ async fn run_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, Stri
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+fn require_value(value: String, label: &str) -> Result<String, String> {
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        Err(format!("{label} is required"))
+    } else {
+        Ok(value)
+    }
+}
+
 #[tauri::command]
 async fn initialize_node(app: AppHandle) -> Result<String, String> {
     run_cli(&app, vec!["init".into()]).await
 }
 
 #[tauri::command]
+async fn node_identity(app: AppHandle) -> Result<String, String> {
+    run_cli(&app, vec!["identity".into()]).await
+}
+
+#[tauri::command]
 async fn list_worlds(app: AppHandle) -> Result<String, String> {
     run_cli(&app, vec!["world".into(), "list".into()]).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn create_world(
+    app: AppHandle,
+    name: String,
+    minecraft: String,
+    fabric_loader: String,
+    compatibility: String,
+) -> Result<String, String> {
+    let name = require_value(name, "World name")?;
+    let minecraft = require_value(minecraft, "Minecraft version")?;
+    let fabric_loader = require_value(fabric_loader, "Fabric loader version")?;
+    let compatibility = require_value(compatibility, "Compatibility fingerprint material")?;
+    run_cli(
+        &app,
+        vec![
+            "world".into(),
+            "create".into(),
+            "--name".into(),
+            name,
+            "--minecraft".into(),
+            minecraft,
+            "--fabric-loader".into(),
+            fabric_loader,
+            "--compatibility".into(),
+            compatibility,
+        ],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn join_world(app: AppHandle, invite: String) -> Result<String, String> {
+    let invite = require_value(invite, "Invite")?;
+    run_cli(&app, vec!["world".into(), "join".into(), invite]).await
+}
+
+#[tauri::command]
+async fn leave_world(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "leave".into(), world]).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn create_invite(
+    app: AppHandle,
+    world: String,
+    expires_minutes: u64,
+    bootstrap_addrs: Vec<String>,
+) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    let mut arguments = vec![
+        "invite".into(),
+        "create".into(),
+        world,
+        "--expires-minutes".into(),
+        expires_minutes.max(1).to_string(),
+    ];
+    for address in bootstrap_addrs.into_iter().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
+        arguments.push("--bootstrap".into());
+        arguments.push(address);
+    }
+    run_cli(&app, arguments).await
+}
+
+#[tauri::command]
+async fn world_status(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "status".into(), world]).await
+}
+
+#[tauri::command]
+async fn world_peers(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["peers".into(), world]).await
+}
+
+#[tauri::command]
+async fn verify_world(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "verify".into(), world]).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn export_world(app: AppHandle, world: String, destination: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    let destination = require_value(destination, "Export destination")?;
+    run_cli(&app, vec!["world".into(), "export".into(), world, destination]).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn recover_world(app: AppHandle, world: String, snapshot: u64, destination: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    let destination = require_value(destination, "Recovery destination")?;
+    run_cli(
+        &app,
+        vec!["world".into(), "recover".into(), world, snapshot.to_string(), destination],
+    )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -67,7 +181,21 @@ fn host_world(
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![initialize_node, list_worlds, host_world])
+        .invoke_handler(tauri::generate_handler![
+            initialize_node,
+            node_identity,
+            list_worlds,
+            create_world,
+            join_world,
+            leave_world,
+            create_invite,
+            world_status,
+            world_peers,
+            verify_world,
+            export_world,
+            recover_world,
+            host_world
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run SwarmCraft desktop application");
 }
