@@ -28,13 +28,7 @@ impl JoinRequestV1 {
     }
 
     pub fn signing_bytes(&self) -> Result<Vec<u8>, ProtocolError> {
-        let unsigned = (
-            self.protocol_version,
-            self.world_id,
-            &self.invite,
-            &self.joining_member,
-            self.nonce,
-        );
+        let unsigned = (self.protocol_version, self.world_id, &self.invite, &self.joining_member, self.nonce);
         let encoded = postcard::to_allocvec(&unsigned)?;
         let mut bytes = Vec::with_capacity(JOIN_SIGN_DOMAIN.len() + encoded.len());
         bytes.extend_from_slice(JOIN_SIGN_DOMAIN);
