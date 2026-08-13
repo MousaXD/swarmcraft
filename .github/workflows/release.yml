@@ -19,11 +19,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - name: Build Rust binaries
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Build Rust runtimes
         run: cargo build --release --workspace
-      - name: Build desktop shell
-        run: cargo build --release --manifest-path apps/desktop/src-tauri/Cargo.toml
-      - name: Package Linux bundle
+      - name: Stage Tauri sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
+          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+      - name: Build native Linux packages
+        working-directory: apps/desktop
+        run: cargo tauri build --bundles deb,appimage --ci
+      - name: Package Linux portable bundle
         shell: bash
         run: |
           set -euo pipefail
@@ -34,12 +45,17 @@ jobs:
           cp apps/desktop/src-tauri/target/release/swarmcraft-desktop "dist/$bundle/"
           cp README.md LICENSE "dist/$bundle/"
           tar -C dist -czf "dist/$bundle.tar.gz" "$bundle"
-          (cd dist && sha256sum "$bundle.tar.gz" > "$bundle.tar.gz.sha256")
+          find apps/desktop/src-tauri/target/release/bundle -type f \( -name '*.deb' -o -name '*.AppImage' \) -exec cp {} dist/ \;
+          for file in dist/*.tar.gz dist/*.deb dist/*.AppImage; do
+            sha256sum "$file" > "$file.sha256"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: linux-preview
           path: |
             dist/*.tar.gz
+            dist/*.deb
+            dist/*.AppImage
             dist/*.sha256
           if-no-files-found: error
 
@@ -49,11 +65,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build Rust binaries
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Build Rust runtimes
         run: cargo build --release --workspace
-      - name: Build desktop shell
-        run: cargo build --release --manifest-path apps/desktop/src-tauri/Cargo.toml
-      - name: Package Windows bundle
+      - name: Stage Tauri sidecars
+        shell: pwsh
+        run: |
+          $target = (rustc --print host-tuple).Trim()
+          New-Item -ItemType Directory -Force -Path apps/desktop/src-tauri/binaries | Out-Null
+          Copy-Item target/release/swarmcraft.exe "apps/desktop/src-tauri/binaries/swarmcraft-$target.exe"
+          Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"
+      - name: Build native Windows installer
+        working-directory: apps/desktop
+        run: cargo tauri build --bundles nsis --ci
+      - name: Package Windows portable bundle
         shell: pwsh
         run: |
           $bundle = "swarmcraft-$env:GITHUB_REF_NAME-windows-x86_64"
@@ -63,13 +89,17 @@ jobs:
           Copy-Item apps/desktop/src-tauri/target/release/swarmcraft-desktop.exe "dist/$bundle/"
           Copy-Item README.md, LICENSE "dist/$bundle/"
           Compress-Archive -Path "dist/$bundle/*" -DestinationPath "dist/$bundle.zip"
-          $hash = (Get-FileHash "dist/$bundle.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $bundle.zip" | Set-Content -NoNewline "dist/$bundle.zip.sha256"
+          Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis -File -Filter *.exe | Copy-Item -Destination dist
+          Get-ChildItem dist -File | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Set-Content -NoNewline "$($_.FullName).sha256"
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: windows-preview
           path: |
             dist/*.zip
+            dist/*.exe
             dist/*.sha256
           if-no-files-found: error
 
