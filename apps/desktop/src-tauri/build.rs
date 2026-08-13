@@ -7,13 +7,35 @@ const FALLBACK_ICON_PNG: &[u8] = &[
 ];
 
 fn main() {
-    let icon_path = Path::new("icons/icon.png");
-    if !icon_path.exists() {
-        if let Some(parent) = icon_path.parent() {
-            fs::create_dir_all(parent).expect("create Tauri icon directory");
-        }
-        fs::write(icon_path, FALLBACK_ICON_PNG).expect("write fallback Tauri icon");
+    let icon_dir = Path::new("icons");
+    fs::create_dir_all(icon_dir).expect("create Tauri icon directory");
+
+    let png_path = icon_dir.join("icon.png");
+    if !png_path.exists() {
+        fs::write(&png_path, FALLBACK_ICON_PNG).expect("write fallback Tauri PNG icon");
+    }
+
+    let ico_path = icon_dir.join("icon.ico");
+    if !ico_path.exists() {
+        fs::write(&ico_path, fallback_ico()).expect("write fallback Tauri ICO icon");
     }
 
     tauri_build::build()
+}
+
+fn fallback_ico() -> Vec<u8> {
+    let mut ico = Vec::with_capacity(22 + FALLBACK_ICON_PNG.len());
+    ico.extend_from_slice(&0u16.to_le_bytes());
+    ico.extend_from_slice(&1u16.to_le_bytes());
+    ico.extend_from_slice(&1u16.to_le_bytes());
+    ico.push(1);
+    ico.push(1);
+    ico.push(0);
+    ico.push(0);
+    ico.extend_from_slice(&1u16.to_le_bytes());
+    ico.extend_from_slice(&32u16.to_le_bytes());
+    ico.extend_from_slice(&(FALLBACK_ICON_PNG.len() as u32).to_le_bytes());
+    ico.extend_from_slice(&22u32.to_le_bytes());
+    ico.extend_from_slice(FALLBACK_ICON_PNG);
+    ico
 }
