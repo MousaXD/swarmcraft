@@ -4,9 +4,12 @@ mod invite;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
-use swarm_core::{create_world_genesis, random_nonce, verify_snapshot_signature, DataPaths, PeerIdentity};
+use swarm_core::{
+    create_world_genesis, random_nonce, verify_membership_signature, verify_snapshot_signature, DataPaths, PeerIdentity,
+};
 use swarm_protocol::{
-    InviteV1, MembershipRecordV1, WorldDescriptorV1, WorldId, WorldMemberV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    InviteV1, JoinRequestV1, LeaveRequestV1, MembershipRecordV1, WorldDescriptorV1, WorldId, WorldMemberV1,
+    PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 use tracing::info;
@@ -28,7 +31,7 @@ enum Command {
     Init,
     /// Display this device's persistent cryptographic peer identity.
     Identity,
-    /// Run the authenticated QUIC replication coordinator.
+    /// Run the authenticated replication coordinator.
     Daemon {
         #[arg(long, default_value = "/ip4/0.0.0.0/udp/0/quic-v1")]
         listen: String,
@@ -73,9 +76,9 @@ enum WorldCommand {
         #[arg(long, default_value = "vanilla-fabric")]
         compatibility: String,
     },
-    /// Join a world using a signed scinvite token.
+    /// Stage a signed authority-mediated join request from a scinvite token.
     Join { invite: String },
-    /// Stop local participation without deleting replicated world data.
+    /// Stage a signed authority-mediated leave request without deleting replicated data.
     Leave { world: String },
     /// List locally known worlds.
     List,
@@ -189,25 +192,32 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                     genesis: invite.genesis.clone(),
                 })?;
             }
-            let mut descriptor = WorldDescriptorV1 {
+            let descriptor = WorldDescriptorV1 {
                 protocol_version: PROTOCOL_VERSION,
                 world_id: invite.world_id,
                 compatibility_fingerprint: invite.genesis.compatibility_fingerprint,
-                members: vec![
-                    WorldMemberV1 {
-                        peer_id: invite.inviter_peer_id,
-                        public_key: invite.inviter_public_key,
-                        authority_eligible: true,
-                        banned: false,
-                    },
-                    local_member(&identity),
-                ],
+                members: vec![WorldMemberV1 {
+                    peer_id: invite.inviter_peer_id,
+                    public_key: invite.inviter_public_key,
+                    authority_eligible: true,
+                    banned: false,
+                }],
                 preferred_replication_factor: 2,
             };
-            descriptor.normalize();
             storage.save_world_descriptor(&descriptor)?;
-            println!("Joined world: {}", invite.display_name);
+            let mut request = JoinRequestV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id: invite.world_id,
+                invite: invite.clone(),
+                joining_member: local_member(&identity),
+                nonce: random_nonce(),
+                signature: Vec::new(),
+            };
+            identity.sign_join_request(&mut request)?;
+            storage.save_pending_join(&request)?;
+            println!("Join request staged for: {}", invite.display_name);
             println!("World ID: {}", invite.world_id);
+            println!("Run `swarmcraft daemon` to contact the authority and complete membership.");
             if !invite.bootstrap_addrs.is_empty() {
                 println!("Bootstrap addresses: {}", invite.bootstrap_addrs.join(", "));
             }
@@ -215,10 +225,29 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
         WorldCommand::Leave { world } => {
             let world = parse_world(&world)?;
             let identity = PeerIdentity::load_or_create(paths)?;
-            let mut descriptor = storage.load_world_descriptor(world)?;
-            descriptor.members.retain(|member| member.peer_id != identity.peer_id());
-            storage.save_world_descriptor(&descriptor)?;
-            println!("Local peer left {world}; replicated snapshots were kept on disk.");
+            let descriptor = storage.load_world_descriptor(world)?;
+            let local = descriptor.member(identity.peer_id()).context("this peer is not an authorized world member")?;
+            if local.banned || local.public_key != identity.public_key() {
+                bail!("local identity does not match canonical membership");
+            }
+            let membership = storage.load_membership_record(world)?;
+            verify_membership_signature(&membership)?;
+            if membership.authority_peer_id == identity.peer_id() {
+                bail!("the current authority must transfer authority before leaving");
+            }
+            let mut request = LeaveRequestV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id: world,
+                membership_hash: membership.record_hash()?,
+                leaving_peer_id: identity.peer_id(),
+                leaving_public_key: identity.public_key(),
+                nonce: random_nonce(),
+                signature: Vec::new(),
+            };
+            identity.sign_leave_request(&mut request)?;
+            storage.save_pending_leave(&request)?;
+            println!("Leave request staged for {world}; replicated snapshots remain on disk.");
+            println!("Run `swarmcraft daemon` to have the current authority commit the membership change.");
         }
         WorldCommand::List => {
             let worlds = storage.list_worlds()?;
@@ -341,11 +370,18 @@ fn handle_invite(command: InviteCommand, paths: &DataPaths, storage: &Storage) -
             let world = parse_world(&world)?;
             let metadata = storage.load_world(world)?;
             let descriptor = storage.load_world_descriptor(world)?;
+            let membership = storage.load_membership_record(world)?;
+            verify_membership_signature(&membership)?;
             let identity = PeerIdentity::load_or_create(paths)?;
             let member =
                 descriptor.member(identity.peer_id()).context("this peer is not an authorized member of the world")?;
-            if member.banned {
-                bail!("this peer is banned from the world");
+            if member.banned || member.public_key != identity.public_key() {
+                bail!("this peer is banned or its key does not match membership");
+            }
+            if membership.authority_peer_id != identity.peer_id()
+                || membership.authority_public_key != identity.public_key()
+            {
+                bail!("only the current authority may create join invitations");
             }
             let lifetime_ms = expires_minutes.saturating_mul(60_000);
             let mut invite = InviteV1 {
