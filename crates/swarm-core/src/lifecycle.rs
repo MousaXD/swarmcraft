@@ -1,10 +1,18 @@
 use crate::{verify_signature, CoreError, PeerIdentity};
-use swarm_protocol::{JoinRequestV1, SleepRecordV1};
+use swarm_protocol::{JoinRequestV1, LeaveRequestV1, SleepRecordV1};
 
 impl PeerIdentity {
     pub fn sign_join_request(&self, request: &mut JoinRequestV1) -> Result<(), CoreError> {
         request.joining_member.peer_id = self.peer_id();
         request.joining_member.public_key = self.public_key();
+        request.signature.clear();
+        request.signature = self.sign(&request.signing_bytes()?);
+        Ok(())
+    }
+
+    pub fn sign_leave_request(&self, request: &mut LeaveRequestV1) -> Result<(), CoreError> {
+        request.leaving_peer_id = self.peer_id();
+        request.leaving_public_key = self.public_key();
         request.signature.clear();
         request.signature = self.sign(&request.signing_bytes()?);
         Ok(())
@@ -31,6 +39,18 @@ pub fn verify_join_request_signature(request: &JoinRequestV1) -> Result<(), Core
     )
 }
 
+pub fn verify_leave_request_signature(request: &LeaveRequestV1) -> Result<(), CoreError> {
+    if !request.validate_shape() {
+        return Err(CoreError::SignatureInvalid);
+    }
+    verify_signature(
+        request.leaving_peer_id,
+        request.leaving_public_key,
+        &request.signing_bytes()?,
+        &request.signature,
+    )
+}
+
 pub fn verify_sleep_record_signature(record: &SleepRecordV1) -> Result<(), CoreError> {
     verify_signature(record.authority_peer_id, record.authority_public_key, &record.signing_bytes()?, &record.signature)
 }
@@ -39,7 +59,9 @@ pub fn verify_sleep_record_signature(record: &SleepRecordV1) -> Result<(), CoreE
 mod tests {
     use super::*;
     use crate::random_nonce;
-    use swarm_protocol::{Hash32, InviteV1, PeerId, WorldGenesisV1, WorldId, WorldMemberV1, PROTOCOL_VERSION};
+    use swarm_protocol::{
+        Hash32, InviteV1, PeerId, WorldGenesisV1, WorldId, WorldMemberV1, PROTOCOL_VERSION,
+    };
 
     #[test]
     fn join_request_proves_joining_key_control() {
@@ -83,6 +105,24 @@ mod tests {
         };
         joining.sign_join_request(&mut request).unwrap();
         verify_join_request_signature(&request).unwrap();
+    }
+
+    #[test]
+    fn leave_request_rejects_modified_membership_hash() {
+        let peer = PeerIdentity::generate();
+        let mut request = LeaveRequestV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: WorldId([1; 32]),
+            membership_hash: Hash32([2; 32]),
+            leaving_peer_id: peer.peer_id(),
+            leaving_public_key: peer.public_key(),
+            nonce: random_nonce(),
+            signature: Vec::new(),
+        };
+        peer.sign_leave_request(&mut request).unwrap();
+        verify_leave_request_signature(&request).unwrap();
+        request.membership_hash = Hash32([3; 32]);
+        assert!(verify_leave_request_signature(&request).is_err());
     }
 
     #[test]
