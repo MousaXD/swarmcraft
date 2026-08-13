@@ -48,6 +48,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri -> target
+      - name: Build bundled runtimes
+        run: cargo build --release -p swarm-cli
+      - name: Stage Linux sidecars
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
+          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+      - name: Stage Windows sidecars
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $target = (rustc --print host-tuple).Trim()
+          New-Item -ItemType Directory -Force -Path apps/desktop/src-tauri/binaries | Out-Null
+          Copy-Item target/release/swarmcraft.exe "apps/desktop/src-tauri/binaries/swarmcraft-$target.exe"
+          Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"
       - name: Check desktop shell
         run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
 

@@ -22,6 +22,10 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "externalBin": [
+      "binaries/swarmcraft",
+      "binaries/swarmcraft-host"
+    ]
   }
 }
