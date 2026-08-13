@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod runtime;
+
+use runtime::RuntimeProcesses;
 use tauri::AppHandle;
 use tauri_plugin_shell::ShellExt;
 
@@ -181,6 +184,7 @@ fn host_world(
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .manage(RuntimeProcesses::default())
         .invoke_handler(tauri::generate_handler![
             initialize_node,
             node_identity,
