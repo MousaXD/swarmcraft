@@ -5,6 +5,8 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
 };
+use tauri::AppHandle;
+use tauri_plugin_shell::ShellExt;
 
 fn binary_path(environment: &str, fallback_name: &str) -> Result<PathBuf, String> {
     if let Some(path) = env::var_os(environment) {
@@ -16,26 +18,30 @@ fn binary_path(environment: &str, fallback_name: &str) -> Result<PathBuf, String
     Ok(directory.join(format!("{fallback_name}{suffix}")))
 }
 
-fn run_cli(arguments: &[&str]) -> Result<String, String> {
-    let binary = binary_path("SWARMCRAFT_CLI_PATH", "swarmcraft")?;
-    let output = Command::new(&binary)
+async fn run_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, String> {
+    let output = app
+        .shell()
+        .sidecar("swarmcraft")
+        .map_err(|error| error.to_string())?
         .args(arguments)
         .output()
-        .map_err(|error| format!("failed to run {}: {error}", binary.display()))?;
+        .await
+        .map_err(|error| error.to_string())?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if error.is_empty() { "SwarmCraft CLI command failed".into() } else { error });
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 #[tauri::command]
-fn initialize_node() -> Result<String, String> {
-    run_cli(&["init"])
+async fn initialize_node(app: AppHandle) -> Result<String, String> {
+    run_cli(&app, vec!["init".into()]).await
 }
 
 #[tauri::command]
-fn list_worlds() -> Result<String, String> {
-    run_cli(&["world", "list"])
+async fn list_worlds(app: AppHandle) -> Result<String, String> {
+    run_cli(&app, vec!["world".into(), "list".into()]).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -75,6 +81,7 @@ fn host_world(
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![initialize_node, list_worlds, host_world])
         .run(tauri::generate_context!())
         .expect("failed to run SwarmCraft desktop application");
