@@ -2,4 +2,4 @@
 mod base;
 pub use base::*;
 
-mod lifecycle;
+pub mod lifecycle;
