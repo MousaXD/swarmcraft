@@ -36,7 +36,7 @@ fn preview_three_peer_failover_sleep_and_wake_flow() {
     sim.install_snapshot(c, snapshot_two).unwrap();
 
     sim.set_online(a, true).unwrap();
-    assert_eq!(sim.attempt_takeover(a, 10_000, 2), Err(SimError::InvalidReplica));
+    assert_eq!(sim.attempt_takeover(a, 10_000, 2), Err(SimError::AuthorityVisible));
     sim.install_snapshot(a, snapshot_two).unwrap();
 
     sim.set_online(a, false).unwrap();
@@ -51,6 +51,6 @@ fn preview_three_peer_failover_sleep_and_wake_flow() {
     assert_eq!(sim.fencing_token(), 3);
 
     sim.set_online(b, true).unwrap();
-    assert_eq!(sim.attempt_takeover(b, 55_000, 3), Err(SimError::NoQuorum));
+    assert_eq!(sim.attempt_takeover(b, 55_000, 3), Err(SimError::AuthorityVisible));
     assert_eq!(sim.authority(), Some(c));
 }
