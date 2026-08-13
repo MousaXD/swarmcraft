@@ -1,7 +1,12 @@
-//! Transport-independent handshake validation.
-//!
-//! QUIC, mDNS, DHT, hole punching, and relay transport land in Stage 3/11. Keeping handshake
-//! validation independent lets those transports share one authentication rule.
+//! Encrypted peer transport, discovery, authentication, and bounded replication messages.
+
+mod node;
+mod transport;
+pub mod wire;
+
+pub use node::{NetworkEvent, SwarmNode, WIRE_PROTOCOL};
+pub use transport::{generate_transport_key, load_or_create_transport_key};
+pub use wire::{ReplicaAckV1, WireLimitError, WireRequest, WireResponse, MAX_BLOB_CHUNK, MAX_MISSING_BLOBS};
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use swarm_protocol::{peer_id_from_public_key, PeerHelloV1, PROTOCOL_VERSION};
