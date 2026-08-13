@@ -20,19 +20,8 @@ pub enum WireRequest {
     Ping { nonce: u64 },
     WorldStatus { world_id: WorldId },
     SnapshotManifest(SnapshotManifestV1),
-    MissingBlobs {
-        world_id: WorldId,
-        snapshot_number: u64,
-        hashes: Vec<Hash32>,
-    },
-    BlobChunk {
-        world_id: WorldId,
-        hash: Hash32,
-        encoding: BlobEncoding,
-        offset: u64,
-        data: Vec<u8>,
-        finished: bool,
-    },
+    MissingBlobs { world_id: WorldId, snapshot_number: u64, hashes: Vec<Hash32> },
+    BlobChunk { world_id: WorldId, hash: Hash32, encoding: BlobEncoding, offset: u64, data: Vec<u8>, finished: bool },
     ReplicaAck(ReplicaAckV1),
 }
 
@@ -84,10 +73,7 @@ mod tests {
             data: vec![0; MAX_BLOB_CHUNK + 1],
             finished: false,
         };
-        assert_eq!(
-            request.validate_limits(),
-            Err(WireLimitError::BlobChunkTooLarge(MAX_BLOB_CHUNK + 1))
-        );
+        assert_eq!(request.validate_limits(), Err(WireLimitError::BlobChunkTooLarge(MAX_BLOB_CHUNK + 1)));
     }
 
     #[test]
@@ -97,9 +83,6 @@ mod tests {
             snapshot_number: 4,
             hashes: vec![Hash32([2; 32]); MAX_MISSING_BLOBS + 1],
         };
-        assert_eq!(
-            request.validate_limits(),
-            Err(WireLimitError::TooManyBlobHashes(MAX_MISSING_BLOBS + 1))
-        );
+        assert_eq!(request.validate_limits(), Err(WireLimitError::TooManyBlobHashes(MAX_MISSING_BLOBS + 1)));
     }
 }
