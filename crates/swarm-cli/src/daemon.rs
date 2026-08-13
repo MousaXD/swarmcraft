@@ -6,8 +6,8 @@ use std::{
 };
 use swarm_core::{
     lifecycle::{verify_join_request_signature, verify_sleep_record_signature},
-    verify_invite_signature, verify_lease_signature, verify_membership_signature, verify_signature, verify_snapshot_signature,
-    verify_transfer_signature, DataPaths, PeerIdentity,
+    verify_invite_signature, verify_lease_signature, verify_membership_signature, verify_signature,
+    verify_snapshot_signature, verify_transfer_signature, DataPaths, PeerIdentity,
 };
 use swarm_network::{
     load_or_create_transport_key, BlobResumeV1, NetworkEvent, ReplicaAckV1, ResponseChannel, SwarmNode,
@@ -168,7 +168,8 @@ fn handle_request(
             }
             let current = storage.load_membership_record(world)?;
             verify_membership_signature(&current)?;
-            if current.authority_peer_id != identity.peer_id() || current.authority_public_key != identity.public_key() {
+            if current.authority_peer_id != identity.peer_id() || current.authority_public_key != identity.public_key()
+            {
                 return Err(anyhow!("only the current local authority may accept a join request"));
             }
             if let Some(member) = descriptor.member(request.joining_member.peer_id) {
@@ -258,7 +259,9 @@ fn handle_request(
             verify_membership_signature(&record)?;
             authorize_member(storage, record.world_id, record.authority_peer_id)?;
             if let Ok(current) = storage.load_membership_record(record.world_id) {
-                if record.epoch < current.epoch || (record.epoch == current.epoch && record.sequence <= current.sequence) {
+                if record.epoch < current.epoch
+                    || (record.epoch == current.epoch && record.sequence <= current.sequence)
+                {
                     return Err(anyhow!("stale membership record rejected"));
                 }
             }
@@ -335,7 +338,8 @@ fn handle_request(
             {
                 return Err(anyhow!("sleep record does not match the accepted authority generation"));
             }
-            let latest = storage.latest_snapshot(record.world_id)?.context("cannot sleep a world without a snapshot")?;
+            let latest =
+                storage.latest_snapshot(record.world_id)?.context("cannot sleep a world without a snapshot")?;
             if latest.manifest_hash()? != record.latest_snapshot_hash {
                 return Err(anyhow!("sleep record does not reference the exact latest snapshot"));
             }
@@ -438,7 +442,9 @@ fn authorize_epoch(storage: &Storage, sender: PeerId, record: &EpochRecordV1) ->
         &record.signing_bytes()?,
         &record.signature,
     )?;
-    let latest = storage.latest_snapshot(record.world_id)?.context("cannot accept an authority epoch without a base snapshot")?;
+    let latest = storage
+        .latest_snapshot(record.world_id)?
+        .context("cannot accept an authority epoch without a base snapshot")?;
     if latest.state_root != record.base_state_hash {
         return Err(anyhow!("epoch base state hash does not match the latest verified snapshot"));
     }
@@ -532,7 +538,9 @@ fn world_status(storage: &Storage, world: WorldId, local_peer: PeerId) -> Result
     let epoch = storage.load_epoch_record(world).ok();
     Ok(Some(WorldStatusV1 {
         world_id: world,
-        epoch: epoch.as_ref().map_or_else(|| latest.as_ref().map_or(0, |manifest| manifest.epoch), |record| record.epoch_number),
+        epoch: epoch
+            .as_ref()
+            .map_or_else(|| latest.as_ref().map_or(0, |manifest| manifest.epoch), |record| record.epoch_number),
         sequence: latest.as_ref().map_or(0, |manifest| manifest.sequence),
         latest_snapshot: latest.as_ref().map(|manifest| manifest.manifest_hash()).transpose()?,
         state_hash: latest.as_ref().map(|manifest| manifest.state_root),
