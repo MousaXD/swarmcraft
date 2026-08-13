@@ -32,12 +32,7 @@ pub fn verify_join_request_signature(request: &JoinRequestV1) -> Result<(), Core
 }
 
 pub fn verify_sleep_record_signature(record: &SleepRecordV1) -> Result<(), CoreError> {
-    verify_signature(
-        record.authority_peer_id,
-        record.authority_public_key,
-        &record.signing_bytes()?,
-        &record.signature,
-    )
+    verify_signature(record.authority_peer_id, record.authority_public_key, &record.signing_bytes()?, &record.signature)
 }
 
 #[cfg(test)]
