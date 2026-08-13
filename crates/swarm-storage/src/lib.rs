@@ -2,10 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
 };
+#[cfg(unix)]
+use std::fs::File;
 use swarm_protocol::{
     BlobDescriptor, BlobEncoding, Hash32, PeerId, SnapshotManifestV1, WorldGenesisV1, WorldId, STORAGE_SCHEMA_VERSION,
 };
