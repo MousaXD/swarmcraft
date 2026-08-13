@@ -13,7 +13,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/MousaXD/swarmcraft"
 
@@ -25,7 +25,7 @@ directories = "5.0"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 futures = "0.3"
 hex = "0.4"
-libp2p = { version = "0.56", default-features = false, features = ["cbor", "identify", "kad", "macros", "mdns", "ping", "quic", "request-response", "tokio"] }
+libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "b4c6d6dcaccbae6c69bc5e579a50478911c6f157", default-features = false, features = ["cbor", "identify", "kad", "macros", "mdns", "ping", "quic", "request-response", "tokio"] }
 postcard = { version = "1.0", features = ["alloc"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1.0", features = ["derive"] }
