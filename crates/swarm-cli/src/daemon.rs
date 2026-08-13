@@ -5,8 +5,8 @@ use swarm_core::{
     PeerIdentity,
 };
 use swarm_network::{
-    load_or_create_transport_key, BlobResumeV1, NetworkEvent, ReplicaAckV1, SwarmNode, WireRequest, WireResponse,
-    MAX_BLOB_CHUNK,
+    load_or_create_transport_key, BlobResumeV1, NetworkEvent, ReplicaAckV1, ResponseChannel, SwarmNode,
+    TransportPeerId, WireRequest, WireResponse, MAX_BLOB_CHUNK,
 };
 use swarm_protocol::{BlobDescriptor, Hash32, PeerId, SnapshotManifestV1, WorldId, WorldStatusV1};
 use swarm_storage::Storage;
@@ -78,11 +78,10 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
 fn push_known_worlds(
     storage: &Storage,
     node: &mut SwarmNode,
-    transport_peer: &impl std::borrow::Borrow<libp2p::PeerId>,
+    transport_peer: &TransportPeerId,
     application_peer: PeerId,
     outbound: &mut HashMap<String, OutboundContext>,
 ) -> Result<()> {
-    let transport_peer = transport_peer.borrow();
     for metadata in storage.list_worlds()? {
         let Ok(descriptor) = storage.load_world_descriptor(metadata.world_id) else { continue };
         if descriptor.member(application_peer).is_none() {
@@ -106,10 +105,10 @@ fn push_known_worlds(
 fn handle_request(
     storage: &Storage,
     node: &mut SwarmNode,
-    transport_peer: libp2p::PeerId,
+    transport_peer: TransportPeerId,
     application_peer: PeerId,
     request: WireRequest,
-    channel: libp2p::request_response::ResponseChannel<WireResponse>,
+    channel: ResponseChannel<WireResponse>,
     pending_manifests: &mut HashMap<WorldId, SnapshotManifestV1>,
 ) -> Result<()> {
     match request {
@@ -210,7 +209,7 @@ fn handle_request(
 fn handle_response(
     storage: &Storage,
     node: &mut SwarmNode,
-    transport_peer: &libp2p::PeerId,
+    transport_peer: &TransportPeerId,
     context: Option<OutboundContext>,
     response: WireResponse,
 ) -> Result<()> {
@@ -225,6 +224,7 @@ fn handle_response(
                 let mut offset = resume.offset;
                 loop {
                     let (data, finished) = storage.read_encoded_blob_chunk(world, descriptor, offset, MAX_BLOB_CHUNK)?;
+                    let chunk_len = data.len() as u64;
                     node.send_request(
                         transport_peer,
                         WireRequest::BlobChunk {
@@ -239,7 +239,7 @@ fn handle_response(
                     if finished {
                         break;
                     }
-                    offset = offset.saturating_add(MAX_BLOB_CHUNK as u64).min(descriptor.encoded_size);
+                    offset = offset.saturating_add(chunk_len);
                 }
             }
         }
@@ -280,7 +280,7 @@ fn authorize_member(storage: &Storage, world: WorldId, peer: PeerId) -> Result<(
 fn finalize_and_ack(
     storage: &Storage,
     node: &mut SwarmNode,
-    transport_peer: &libp2p::PeerId,
+    transport_peer: &TransportPeerId,
     manifest: &SnapshotManifestV1,
 ) -> Result<()> {
     verify_snapshot_signature(manifest)?;
