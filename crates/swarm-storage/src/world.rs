@@ -4,9 +4,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-use swarm_protocol::{
-    AuthorityTransferV1, EpochRecordV1, MembershipRecordV1, SleepRecordV1, WorldDescriptorV1, WorldId,
-};
+use swarm_protocol::{MembershipRecordV1, WorldDescriptorV1, WorldId};
 
 impl Storage {
     pub fn save_world_descriptor(&self, descriptor: &WorldDescriptorV1) -> Result<(), StorageError> {
@@ -35,21 +33,6 @@ impl Storage {
         let path = self.world_protocol_path(world, "membership.postcard");
         let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
         let record: MembershipRecordV1 = postcard::from_bytes(&bytes)?;
-        if record.world_id != world {
-            return Err(StorageError::WorldMetadataMismatch);
-        }
-        Ok(record)
-    }
-
-    pub fn save_epoch_record(&self, record: &EpochRecordV1) -> Result<(), StorageError> {
-        let bytes = postcard::to_allocvec(record)?;
-        atomic_write(&self.world_protocol_path(record.world_id, "epoch.postcard"), &bytes)
-    }
-
-    pub fn load_epoch_record(&self, world: WorldId) -> Result<EpochRecordV1, StorageError> {
-        let path = self.world_protocol_path(world, "epoch.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
-        let record: EpochRecordV1 = postcard::from_bytes(&bytes)?;
         if record.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
         }
