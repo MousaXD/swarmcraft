@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+path = "src/root.rs"
+
 [dependencies]
 blake3.workspace = true
 hex.workspace = true
