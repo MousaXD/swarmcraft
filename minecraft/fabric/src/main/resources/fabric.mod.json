@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "swarmcraft",
+  "version": "${version}",
+  "name": "SwarmCraft",
+  "description": "Thin Minecraft server lifecycle bridge for SwarmCraft decentralized world persistence.",
+  "authors": ["SwarmCraft contributors"],
+  "contact": {
+    "sources": "https://github.com/MousaXD/swarmcraft",
+    "issues": "https://github.com/MousaXD/swarmcraft/issues"
+  },
+  "license": "Apache-2.0",
+  "environment": "server",
+  "entrypoints": {
+    "main": ["dev.swarmcraft.fabric.SwarmCraftMod"]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~26.1.2",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}
