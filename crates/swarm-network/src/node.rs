@@ -1,6 +1,7 @@
 use crate::{verify_peer_hello, wire::WireRequest, wire::WireResponse};
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
+use libp2p::multiaddr::Protocol;
 use libp2p::{
     autonat, dcutr, identify,
     identity::Keypair,
@@ -10,7 +11,6 @@ use libp2p::{
     swarm::{dial_opts::DialOpts, NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId as TransportPeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
-use libp2p::multiaddr::Protocol;
 use std::{collections::HashMap, time::Duration};
 use swarm_protocol::{PeerHelloV1, PeerId, PROTOCOL_VERSION};
 use tracing::{debug, info, warn};
@@ -31,11 +31,23 @@ struct Behaviour {
 
 #[derive(Debug)]
 pub enum NetworkEvent {
-    Listening { address: Multiaddr },
-    Discovered { transport_peer: TransportPeerId, address: Multiaddr },
-    Connected { transport_peer: TransportPeerId },
-    Disconnected { transport_peer: TransportPeerId },
-    Authenticated { transport_peer: TransportPeerId, application_peer: PeerId },
+    Listening {
+        address: Multiaddr,
+    },
+    Discovered {
+        transport_peer: TransportPeerId,
+        address: Multiaddr,
+    },
+    Connected {
+        transport_peer: TransportPeerId,
+    },
+    Disconnected {
+        transport_peer: TransportPeerId,
+    },
+    Authenticated {
+        transport_peer: TransportPeerId,
+        application_peer: PeerId,
+    },
     InboundRequest {
         transport_peer: TransportPeerId,
         request: WireRequest,
@@ -72,7 +84,8 @@ impl SwarmNode {
         );
         let mdns =
             mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer).context("failed to initialize mDNS")?;
-        let identify = identify::Behaviour::new(identify::Config::new(WIRE_PROTOCOL.to_owned(), transport_key.public()));
+        let identify =
+            identify::Behaviour::new(identify::Config::new(WIRE_PROTOCOL.to_owned(), transport_key.public()));
         let mut kad_config = kad::Config::default();
         kad_config.set_query_timeout(Duration::from_secs(30));
         let kad = kad::Behaviour::with_config(local_peer, MemoryStore::new(local_peer), kad_config);
@@ -171,9 +184,8 @@ impl SwarmNode {
         relay_address: Multiaddr,
         remote_peer: TransportPeerId,
     ) -> Result<()> {
-        let address = ensure_peer_suffix(relay_address, relay_peer)
-            .with(Protocol::P2pCircuit)
-            .with(Protocol::P2p(remote_peer));
+        let address =
+            ensure_peer_suffix(relay_address, relay_peer).with(Protocol::P2pCircuit).with(Protocol::P2p(remote_peer));
         self.swarm.dial(address).context("failed to dial peer through relay")
     }
 
@@ -329,8 +341,11 @@ fn ensure_peer_suffix(mut address: Multiaddr, peer: TransportPeerId) -> Multiadd
 }
 
 fn transport_peer_from_address(address: &Multiaddr) -> Option<TransportPeerId> {
-    address.iter().filter_map(|protocol| match protocol {
-        Protocol::P2p(peer) => Some(peer),
-        _ => None,
-    }).last()
+    address
+        .iter()
+        .filter_map(|protocol| match protocol {
+            Protocol::P2p(peer) => Some(peer),
+            _ => None,
+        })
+        .last()
 }
