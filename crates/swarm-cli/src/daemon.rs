@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use swarm_core::{
-    lifecycle::{verify_join_request_signature, verify_sleep_record_signature},
+    lifecycle::{verify_join_request_signature, verify_leave_request_signature, verify_sleep_record_signature},
     verify_invite_signature, verify_lease_signature, verify_membership_signature, verify_signature,
     verify_snapshot_signature, verify_transfer_signature, DataPaths, PeerIdentity,
 };
@@ -36,13 +36,16 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
     let hello = identity.signed_peer_hello(vec![
         "snapshot-replication-v1".into(),
         "membership-v1".into(),
+        "membership-leave-v1".into(),
         "authority-transfer-v1".into(),
         "authority-lease-v1".into(),
         "epoch-v1".into(),
         "sleep-wake-v1".into(),
+        "relay-dcutr-v1".into(),
     ])?;
     let mut node = SwarmNode::new(transport_key, hello)?;
-    node.listen(listen.parse().context("invalid QUIC listen multiaddress")?)?;
+    node.listen(listen.parse().context("invalid listen multiaddress")?)?;
+    dial_pending_invite_bootstraps(storage, &mut node)?;
     info!(peer = %identity.peer_id(), %listen, "SwarmCraft daemon starting");
 
     let mut pending_manifests: HashMap<WorldId, SnapshotManifestV1> = HashMap::new();
@@ -53,6 +56,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
             NetworkEvent::Listening { address } => info!(%address, "daemon listening"),
             NetworkEvent::Authenticated { transport_peer, application_peer } => {
                 info!(transport = %transport_peer, peer = %application_peer, "peer authenticated");
+                push_pending_membership_requests(storage, &mut node, &transport_peer, application_peer)?;
                 push_known_worlds(storage, &mut node, &transport_peer, application_peer, &mut outbound)?;
             }
             NetworkEvent::InboundRequest { transport_peer, request, channel } => {
@@ -89,6 +93,46 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
             }
         }
     }
+}
+
+fn dial_pending_invite_bootstraps(storage: &Storage, node: &mut SwarmNode) -> Result<()> {
+    for metadata in storage.list_worlds()? {
+        let Ok(request) = storage.load_pending_join(metadata.world_id) else { continue };
+        for value in request.invite.bootstrap_addrs {
+            match value.parse() {
+                Ok(address) => {
+                    if let Err(error) = node.dial(address) {
+                        warn!(world = %metadata.world_id, %value, %error, "invite bootstrap dial failed");
+                    }
+                }
+                Err(error) => warn!(world = %metadata.world_id, %value, %error, "invalid invite bootstrap address"),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn push_pending_membership_requests(
+    storage: &Storage,
+    node: &mut SwarmNode,
+    transport_peer: &TransportPeerId,
+    application_peer: PeerId,
+) -> Result<()> {
+    for metadata in storage.list_worlds()? {
+        if let Ok(join) = storage.load_pending_join(metadata.world_id) {
+            if join.invite.inviter_peer_id == application_peer {
+                node.send_request(transport_peer, WireRequest::JoinRequest(Box::new(join)))?;
+            }
+        }
+        if let Ok(leave) = storage.load_pending_leave(metadata.world_id) {
+            if let Ok(membership) = storage.load_membership_record(metadata.world_id) {
+                if membership.authority_peer_id == application_peer {
+                    node.send_request(transport_peer, WireRequest::LeaveRequest(Box::new(leave)))?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn push_known_worlds(
@@ -165,6 +209,16 @@ fn handle_request(
             {
                 return Err(anyhow!("invite does not match local world genesis"));
             }
+            let current = storage.load_membership_record(world)?;
+            verify_membership_signature(&current)?;
+            if current.authority_peer_id != identity.peer_id() || current.authority_public_key != identity.public_key() {
+                return Err(anyhow!("only the current local authority may accept a join request"));
+            }
+            if request.invite.inviter_peer_id != current.authority_peer_id
+                || request.invite.inviter_public_key != current.authority_public_key
+            {
+                return Err(anyhow!("join invite was not issued by the current authority"));
+            }
             let mut descriptor = storage.load_world_descriptor(world)?;
             let inviter = descriptor
                 .member(request.invite.inviter_peer_id)
@@ -172,17 +226,11 @@ fn handle_request(
             if inviter.banned || inviter.public_key != request.invite.inviter_public_key {
                 return Err(anyhow!("invite signer is banned or key does not match current membership"));
             }
-            let current = storage.load_membership_record(world)?;
-            verify_membership_signature(&current)?;
-            if current.authority_peer_id != identity.peer_id() || current.authority_public_key != identity.public_key()
-            {
-                return Err(anyhow!("only the current local authority may accept a join request"));
-            }
-            if let Some(member) = descriptor.member(request.joining_member.peer_id) {
+            let canonical = if let Some(member) = descriptor.member(request.joining_member.peer_id) {
                 if member.public_key != request.joining_member.public_key || member.banned {
                     return Err(anyhow!("joining peer conflicts with existing membership"));
                 }
-                node.respond(channel, WireResponse::JoinAccepted { membership_sequence: current.sequence })?;
+                current
             } else {
                 let previous_hash = Some(current.record_hash()?);
                 descriptor.members.push(request.joining_member.clone());
@@ -201,8 +249,53 @@ fn handle_request(
                 identity.sign_membership(&mut next)?;
                 storage.save_world_descriptor(&descriptor)?;
                 storage.save_membership_record(&next)?;
-                node.respond(channel, WireResponse::JoinAccepted { membership_sequence: next.sequence })?;
+                next
+            };
+            node.respond(channel, WireResponse::JoinAccepted { membership_sequence: canonical.sequence })?;
+            node.send_request(&transport_peer, WireRequest::Membership(canonical))?;
+        }
+        WireRequest::LeaveRequest(request) => {
+            let request = *request;
+            if application_peer != request.leaving_peer_id {
+                return Err(anyhow!("leave request transport identity does not match leaving peer"));
             }
+            verify_leave_request_signature(&request)?;
+            let current = storage.load_membership_record(request.world_id)?;
+            verify_membership_signature(&current)?;
+            if current.authority_peer_id != identity.peer_id() || current.authority_public_key != identity.public_key() {
+                return Err(anyhow!("only the current local authority may accept a leave request"));
+            }
+            if request.leaving_peer_id == current.authority_peer_id {
+                return Err(anyhow!("authority must transfer authority before leaving"));
+            }
+            if current.record_hash()? != request.membership_hash {
+                return Err(anyhow!("leave request references stale membership"));
+            }
+            let mut descriptor = storage.load_world_descriptor(request.world_id)?;
+            let leaving = descriptor
+                .member(request.leaving_peer_id)
+                .context("leaving peer is not a current world member")?;
+            if leaving.banned || leaving.public_key != request.leaving_public_key {
+                return Err(anyhow!("leaving peer key does not match current membership"));
+            }
+            descriptor.members.retain(|member| member.peer_id != request.leaving_peer_id);
+            descriptor.normalize();
+            let mut next = MembershipRecordV1 {
+                protocol_version: current.protocol_version,
+                world_id: current.world_id,
+                epoch: current.epoch,
+                sequence: current.sequence.saturating_add(1),
+                previous_membership_hash: Some(current.record_hash()?),
+                members: descriptor.members.clone(),
+                authority_peer_id: identity.peer_id(),
+                authority_public_key: identity.public_key(),
+                signature: Vec::new(),
+            };
+            identity.sign_membership(&mut next)?;
+            storage.save_world_descriptor(&descriptor)?;
+            storage.save_membership_record(&next)?;
+            node.respond(channel, WireResponse::LeaveAccepted { membership_sequence: next.sequence })?;
+            node.send_request(&transport_peer, WireRequest::Membership(next))?;
         }
         WireRequest::SnapshotManifest(manifest) => {
             authorize_manifest(storage, application_peer, &manifest)?;
@@ -265,9 +358,7 @@ fn handle_request(
             verify_membership_signature(&record)?;
             authorize_member(storage, record.world_id, record.authority_peer_id)?;
             if let Ok(current) = storage.load_membership_record(record.world_id) {
-                if record.epoch < current.epoch
-                    || (record.epoch == current.epoch && record.sequence <= current.sequence)
-                {
+                if record.epoch < current.epoch || (record.epoch == current.epoch && record.sequence <= current.sequence) {
                     return Err(anyhow!("stale membership record rejected"));
                 }
             }
@@ -276,6 +367,19 @@ fn handle_request(
             descriptor.normalize();
             storage.save_membership_record(&record)?;
             storage.save_world_descriptor(&descriptor)?;
+            if let Ok(join) = storage.load_pending_join(record.world_id) {
+                if descriptor
+                    .member(join.joining_member.peer_id)
+                    .is_some_and(|member| member.public_key == join.joining_member.public_key && !member.banned)
+                {
+                    storage.clear_pending_join(record.world_id)?;
+                }
+            }
+            if let Ok(leave) = storage.load_pending_leave(record.world_id) {
+                if descriptor.member(leave.leaving_peer_id).is_none() {
+                    storage.clear_pending_leave(record.world_id)?;
+                }
+            }
             node.respond(channel, WireResponse::MembershipAccepted { sequence: record.sequence })?;
         }
         WireRequest::Epoch(record) => {
@@ -344,8 +448,7 @@ fn handle_request(
             {
                 return Err(anyhow!("sleep record does not match the accepted authority generation"));
             }
-            let latest =
-                storage.latest_snapshot(record.world_id)?.context("cannot sleep a world without a snapshot")?;
+            let latest = storage.latest_snapshot(record.world_id)?.context("cannot sleep a world without a snapshot")?;
             if latest.manifest_hash()? != record.latest_snapshot_hash {
                 return Err(anyhow!("sleep record does not reference the exact latest snapshot"));
             }
@@ -381,8 +484,7 @@ fn handle_response(
                     .context("peer requested blob not referenced by manifest")?;
                 let mut offset = resume.offset;
                 loop {
-                    let (data, finished) =
-                        storage.read_encoded_blob_chunk(world, descriptor, offset, MAX_BLOB_CHUNK)?;
+                    let (data, finished) = storage.read_encoded_blob_chunk(world, descriptor, offset, MAX_BLOB_CHUNK)?;
                     let chunk_len = data.len() as u64;
                     node.send_request(
                         transport_peer,
