@@ -63,6 +63,17 @@ pub struct WorldMetadataV1 {
     pub genesis: WorldGenesisV1,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotContext {
+    pub world: WorldId,
+    pub snapshot_number: u64,
+    pub epoch: u64,
+    pub sequence: u64,
+    pub previous_snapshot_hash: Option<Hash32>,
+    pub authority_peer_id: PeerId,
+    pub authority_public_key: [u8; 32],
+}
+
 #[derive(Debug, Clone)]
 pub struct Storage {
     root: PathBuf,
@@ -190,17 +201,7 @@ impl Storage {
         Ok(bytes)
     }
 
-    pub fn snapshot_directory(
-        &self,
-        world: WorldId,
-        source: &Path,
-        snapshot_number: u64,
-        epoch: u64,
-        sequence: u64,
-        previous_snapshot_hash: Option<Hash32>,
-        authority_peer_id: PeerId,
-        authority_public_key: [u8; 32],
-    ) -> Result<SnapshotManifestV1, StorageError> {
+    pub fn snapshot_directory(&self, source: &Path, context: SnapshotContext) -> Result<SnapshotManifestV1, StorageError> {
         if !source.is_dir() {
             return Err(StorageError::SourceNotDirectory(source.to_path_buf()));
         }
@@ -224,22 +225,22 @@ impl Storage {
             let relative = portable_relative_path(relative)?;
             let mut bytes = Vec::new();
             File::open(&path).and_then(|mut file| file.read_to_end(&mut bytes)).map_err(|e| io_error(&path, e))?;
-            let blob = self.put_blob(world, &bytes)?;
+            let blob = self.put_blob(context.world, &bytes)?;
             entries.push(SnapshotEntry { path: relative, blob });
         }
         entries.sort_by(|a, b| a.path.cmp(&b.path));
         let state_root = snapshot_state_root(&entries)?;
         Ok(SnapshotManifestV1 {
             protocol_version: PROTOCOL_VERSION,
-            world_id: world,
-            snapshot_number,
-            epoch,
-            sequence,
-            previous_snapshot_hash,
+            world_id: context.world,
+            snapshot_number: context.snapshot_number,
+            epoch: context.epoch,
+            sequence: context.sequence,
+            previous_snapshot_hash: context.previous_snapshot_hash,
             entries,
             state_root,
-            authority_peer_id,
-            authority_public_key,
+            authority_peer_id: context.authority_peer_id,
+            authority_public_key: context.authority_public_key,
             signature: Vec::new(),
         })
     }
@@ -404,7 +405,20 @@ mod tests {
         fs::write(source.join("level.dat"), b"level").unwrap();
         fs::write(source.join("region/r.0.0.mca"), b"region-data").unwrap();
         let store = Storage::open(tmp.path().join("data")).unwrap();
-        let mut manifest = store.snapshot_directory(world(), &source, 1, 1, 0, None, PeerId([2; 32]), [3; 32]).unwrap();
+        let mut manifest = store
+            .snapshot_directory(
+                &source,
+                SnapshotContext {
+                    world: world(),
+                    snapshot_number: 1,
+                    epoch: 1,
+                    sequence: 0,
+                    previous_snapshot_hash: None,
+                    authority_peer_id: PeerId([2; 32]),
+                    authority_public_key: [3; 32],
+                },
+            )
+            .unwrap();
         manifest.signature = vec![0; 64];
         store.commit_snapshot(&manifest).unwrap();
 

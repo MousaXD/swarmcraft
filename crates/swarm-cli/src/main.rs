@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
 use swarm_core::{create_world_genesis, verify_snapshot_signature, DataPaths, PeerIdentity};
 use swarm_protocol::{WorldId, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION};
-use swarm_storage::{Storage, WorldMetadataV1};
+use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -158,14 +158,16 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             let previous_hash = previous.as_ref().map(|m| m.manifest_hash()).transpose()?;
             info!(world = %world, snapshot = number, source = %source.display(), "building snapshot");
             let mut manifest = storage.snapshot_directory(
-                world,
                 &source,
-                number,
-                epoch,
-                sequence,
-                previous_hash,
-                identity.peer_id(),
-                identity.public_key(),
+                SnapshotContext {
+                    world,
+                    snapshot_number: number,
+                    epoch,
+                    sequence,
+                    previous_snapshot_hash: previous_hash,
+                    authority_peer_id: identity.peer_id(),
+                    authority_public_key: identity.public_key(),
+                },
             )?;
             identity.sign_snapshot(&mut manifest)?;
             storage.commit_snapshot(&manifest)?;
