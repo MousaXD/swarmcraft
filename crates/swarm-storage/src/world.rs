@@ -1,5 +1,9 @@
-use crate::{atomic_write, io_error, Storage, StorageError};
-use std::{fs, path::PathBuf};
+use crate::{Storage, StorageError};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
 use swarm_protocol::{MembershipRecordV1, WorldDescriptorV1, WorldId};
 
 impl Storage {
@@ -48,6 +52,43 @@ impl Storage {
     fn world_protocol_path(&self, world: WorldId, name: &str) -> PathBuf {
         self.world_dir(world).join("metadata").join(name)
     }
+}
+
+fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
+    StorageError::Io { path: path.into(), source }
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
+    fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
+    let tmp = path.with_extension("tmp");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&tmp)
+        .map_err(|error| io_error(&tmp, error))?;
+    file.write_all(bytes).map_err(|error| io_error(&tmp, error))?;
+    file.sync_all().map_err(|error| io_error(&tmp, error))?;
+    drop(file);
+    fs::rename(&tmp, path).map_err(|error| io_error(path, error))?;
+    sync_parent(parent)
+}
+
+fn sync_parent(parent: &Path) -> Result<(), StorageError> {
+    #[cfg(unix)]
+    {
+        fs::File::open(parent)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| io_error(parent, error))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = parent;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
