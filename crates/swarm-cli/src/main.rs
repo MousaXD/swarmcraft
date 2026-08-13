@@ -1,3 +1,4 @@
+mod daemon;
 mod invite;
 
 use anyhow::{bail, Context, Result};
@@ -30,6 +31,11 @@ enum Command {
     Init,
     /// Display this device's persistent cryptographic peer identity.
     Identity,
+    /// Run the authenticated QUIC replication coordinator.
+    Daemon {
+        #[arg(long, default_value = "/ip4/0.0.0.0/udp/0/quic-v1")]
+        listen: String,
+    },
     /// Manage replicated worlds.
     World {
         #[command(subcommand)]
@@ -128,6 +134,9 @@ fn main() -> Result<()> {
             let identity = PeerIdentity::load_or_create(&paths)?;
             println!("Peer ID: {}", identity.peer_id());
             println!("Public key: {}", hex_string(&identity.public_key()));
+        }
+        Command::Daemon { listen } => {
+            tokio::runtime::Runtime::new()?.block_on(daemon::run(&paths, &storage, &listen))?;
         }
         Command::World { command } => handle_world(command, &paths, &storage)?,
         Command::Invite { command } => handle_invite(command, &paths, &storage)?,
