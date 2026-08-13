@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod runtime;
+mod runtime_commands;
 
 use runtime::RuntimeProcesses;
+use runtime_commands::{start_daemon, stop_daemon, stop_host};
 use tauri::{AppHandle, State};
 use tauri_plugin_shell::ShellExt;
 
@@ -195,6 +197,9 @@ fn main() {
             verify_world,
             export_world,
             recover_world,
+            start_daemon,
+            stop_daemon,
+            stop_host,
             host_world
         ])
         .run(tauri::generate_context!())
