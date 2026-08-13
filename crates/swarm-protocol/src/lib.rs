@@ -11,7 +11,7 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub const STORAGE_SCHEMA_VERSION: u16 = 1;
 
 const WORLD_GENESIS_DOMAIN: &[u8] = b"swarmcraft/world-genesis/v1\0";
-const BLOB_DOMAIN: &[u8] = b"swarmcraft/blob/v1\0";
+pub const BLOB_HASH_DOMAIN: &[u8] = b"swarmcraft/blob/v1\0";
 const SNAPSHOT_STATE_DOMAIN: &[u8] = b"swarmcraft/snapshot-state/v1\0";
 const SNAPSHOT_SIGN_DOMAIN: &[u8] = b"swarmcraft/snapshot-sign/v1\0";
 const SNAPSHOT_HASH_DOMAIN: &[u8] = b"swarmcraft/snapshot/v1\0";
@@ -105,7 +105,6 @@ fn parse_32(kind: &'static str, value: &str) -> Result<[u8; 32], ProtocolError> 
 }
 
 pub fn peer_id_from_public_key(public_key: &[u8; 32]) -> PeerId {
-    // Peer identity intentionally hashes only the public key. The scpeer prefix is presentation only.
     PeerId(*blake3::hash(public_key).as_bytes())
 }
 
@@ -143,13 +142,12 @@ pub struct BlobDescriptor {
 
 impl BlobDescriptor {
     pub fn hash_uncompressed(bytes: &[u8]) -> Hash32 {
-        Hash32::from_domain_bytes(BLOB_DOMAIN, bytes)
+        Hash32::from_domain_bytes(BLOB_HASH_DOMAIN, bytes)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotEntry {
-    /// UTF-8 relative path using `/` separators. Absolute and parent paths are forbidden.
     pub path: String,
     pub blob: BlobDescriptor,
 }
@@ -250,7 +248,6 @@ pub struct AuthorityLeaseV1 {
     pub world_id: WorldId,
     pub epoch: u64,
     pub fencing_token: u64,
-    /// Duration negotiated by the protocol. Local monotonic clocks decide expiry.
     pub lease_duration_ms: u64,
 }
 
