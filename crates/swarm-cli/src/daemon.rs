@@ -356,7 +356,7 @@ fn handle_request(
     match request {
         WireRequest::Ping { nonce } => node.respond(channel, WireResponse::Pong { nonce })?,
         WireRequest::WorldStatus { world_id } => {
-            let status = world_status(storage, world_id, application_peer)?;
+            let status = world_status(storage, world_id, identity.peer_id())?;
             node.respond(channel, WireResponse::WorldStatus(status))?;
         }
         WireRequest::WorldDescriptor { world_id } => {
@@ -559,6 +559,13 @@ fn handle_request(
         WireRequest::Epoch(record) => {
             authorize_epoch(storage, application_peer, &record)?;
             if let Ok(current) = storage.load_epoch_record(record.world_id) {
+                if record == current {
+                    node.respond(
+                        channel,
+                        WireResponse::EpochAccepted { epoch: record.epoch_number, fencing_token: record.fencing_token },
+                    )?;
+                    return Ok(());
+                }
                 if record.epoch_number != current.epoch_number.saturating_add(1)
                     || record.fencing_token != current.fencing_token.saturating_add(1)
                 {
@@ -594,10 +601,13 @@ fn handle_request(
             if !member.authority_eligible || member.banned || member.public_key != lease.authority_public_key {
                 return Err(anyhow!("lease authority is not eligible or key does not match membership"));
             }
-            if let Ok(epoch) = storage.load_epoch_record(lease.world_id) {
-                if lease.epoch != epoch.epoch_number || lease.fencing_token != epoch.fencing_token {
-                    return Err(anyhow!("lease generation does not match accepted epoch"));
-                }
+            let epoch = storage.load_epoch_record(lease.world_id)?;
+            if lease.epoch != epoch.epoch_number
+                || lease.fencing_token != epoch.fencing_token
+                || lease.authority_peer_id != epoch.authority_peer_id
+                || lease.authority_public_key != epoch.authority_public_key
+            {
+                return Err(anyhow!("lease does not match the accepted authority epoch"));
             }
             node.respond(
                 channel,
