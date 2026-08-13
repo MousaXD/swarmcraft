@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use swarm_protocol::{
-    AuthorityLeaseGrantV1, AuthorityTransferV1, BlobEncoding, Hash32, MembershipRecordV1, PeerHelloV1,
-    SnapshotManifestV1, WorldDescriptorV1, WorldId, WorldStatusV1,
+    AuthorityLeaseGrantV1, AuthorityTransferV1, BlobEncoding, EpochRecordV1, Hash32, JoinRequestV1,
+    MembershipRecordV1, PeerHelloV1, SleepRecordV1, SnapshotManifestV1, WorldDescriptorV1, WorldId,
+    WorldStatusV1,
 };
 use thiserror::Error;
 
@@ -30,13 +31,23 @@ pub enum WireRequest {
     Ping { nonce: u64 },
     WorldStatus { world_id: WorldId },
     WorldDescriptor { world_id: WorldId },
+    JoinRequest(JoinRequestV1),
     SnapshotManifest(SnapshotManifestV1),
     MissingBlobs { world_id: WorldId, snapshot_number: u64, hashes: Vec<Hash32> },
-    BlobChunk { world_id: WorldId, hash: Hash32, encoding: BlobEncoding, offset: u64, data: Vec<u8>, finished: bool },
+    BlobChunk {
+        world_id: WorldId,
+        hash: Hash32,
+        encoding: BlobEncoding,
+        offset: u64,
+        data: Vec<u8>,
+        finished: bool,
+    },
     ReplicaAck(ReplicaAckV1),
     Membership(MembershipRecordV1),
+    Epoch(EpochRecordV1),
     AuthorityTransfer(AuthorityTransferV1),
     LeaseGrant(AuthorityLeaseGrantV1),
+    Sleep(SleepRecordV1),
 }
 
 impl WireRequest {
@@ -62,13 +73,16 @@ pub enum WireResponse {
     Pong { nonce: u64 },
     WorldStatus(Option<WorldStatusV1>),
     WorldDescriptor(Option<WorldDescriptorV1>),
+    JoinAccepted { membership_sequence: u64 },
     ManifestAccepted { snapshot_number: u64, missing: Vec<BlobResumeV1> },
     MissingBlobs(Vec<BlobResumeV1>),
     BlobChunkAccepted { hash: Hash32, next_offset: u64 },
     ReplicaAckAccepted,
     MembershipAccepted { sequence: u64 },
+    EpochAccepted { epoch: u64, fencing_token: u64 },
     TransferAccepted,
     LeaseAccepted { epoch: u64, fencing_token: u64 },
+    SleepAccepted { epoch: u64, fencing_token: u64 },
     Error { code: String, message: String },
 }
 
