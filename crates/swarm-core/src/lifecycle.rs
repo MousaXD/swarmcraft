@@ -43,12 +43,7 @@ pub fn verify_leave_request_signature(request: &LeaveRequestV1) -> Result<(), Co
     if !request.validate_shape() {
         return Err(CoreError::SignatureInvalid);
     }
-    verify_signature(
-        request.leaving_peer_id,
-        request.leaving_public_key,
-        &request.signing_bytes()?,
-        &request.signature,
-    )
+    verify_signature(request.leaving_peer_id, request.leaving_public_key, &request.signing_bytes()?, &request.signature)
 }
 
 pub fn verify_sleep_record_signature(record: &SleepRecordV1) -> Result<(), CoreError> {
@@ -59,9 +54,7 @@ pub fn verify_sleep_record_signature(record: &SleepRecordV1) -> Result<(), CoreE
 mod tests {
     use super::*;
     use crate::random_nonce;
-    use swarm_protocol::{
-        Hash32, InviteV1, PeerId, WorldGenesisV1, WorldId, WorldMemberV1, PROTOCOL_VERSION,
-    };
+    use swarm_protocol::{Hash32, InviteV1, PeerId, WorldGenesisV1, WorldId, WorldMemberV1, PROTOCOL_VERSION};
 
     #[test]
     fn join_request_proves_joining_key_control() {
