@@ -27,8 +27,8 @@ impl Storage {
 
         let mut files = Vec::new();
         for entry in WalkDir::new(source).follow_links(false) {
-            let entry =
-                entry.map_err(|error| io_error(error.path().unwrap_or(source), std::io::Error::other(error.to_string())))?;
+            let entry = entry
+                .map_err(|error| io_error(error.path().unwrap_or(source), std::io::Error::other(error.to_string())))?;
             let path = entry.path();
             if entry.file_type().is_symlink() {
                 return Err(StorageError::SymlinkUnsupported(path.to_path_buf()));
@@ -63,16 +63,12 @@ impl Storage {
         })
     }
 
-    pub fn put_file_blob_streaming(
-        &self,
-        world: WorldId,
-        source: &Path,
-    ) -> Result<BlobDescriptor, StorageError> {
+    pub fn put_file_blob_streaming(&self, world: WorldId, source: &Path) -> Result<BlobDescriptor, StorageError> {
         let blob_dir = self.world_dir(world).join("blobs");
         fs::create_dir_all(&blob_dir).map_err(|error| io_error(&blob_dir, error))?;
         let (temporary_path, temporary_file) = create_unique_temp(&blob_dir, "blob", "zst")?;
-        let mut encoder = zstd::stream::write::Encoder::new(temporary_file, 3)
-            .map_err(|error| io_error(&temporary_path, error))?;
+        let mut encoder =
+            zstd::stream::write::Encoder::new(temporary_file, 3).map_err(|error| io_error(&temporary_path, error))?;
         let mut input = File::open(source).map_err(|error| io_error(source, error))?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(BLOB_HASH_DOMAIN);
@@ -85,9 +81,7 @@ impl Storage {
                 break;
             }
             hasher.update(&buffer[..read]);
-            encoder
-                .write_all(&buffer[..read])
-                .map_err(|error| io_error(&temporary_path, error))?;
+            encoder.write_all(&buffer[..read]).map_err(|error| io_error(&temporary_path, error))?;
             uncompressed_size = uncompressed_size.saturating_add(read as u64);
         }
 
@@ -97,12 +91,7 @@ impl Storage {
         drop(encoded_file);
 
         let hash = Hash32(*hasher.finalize().as_bytes());
-        let mut descriptor = BlobDescriptor {
-            hash,
-            uncompressed_size,
-            encoded_size,
-            encoding: BlobEncoding::Zstd,
-        };
+        let mut descriptor = BlobDescriptor { hash, uncompressed_size, encoded_size, encoding: BlobEncoding::Zstd };
         let final_path = blob_path(self, world, &descriptor);
 
         if final_path.exists() {
@@ -121,11 +110,7 @@ impl Storage {
         Ok(descriptor)
     }
 
-    pub fn verify_blob_streaming(
-        &self,
-        world: WorldId,
-        descriptor: &BlobDescriptor,
-    ) -> Result<(), StorageError> {
+    pub fn verify_blob_streaming(&self, world: WorldId, descriptor: &BlobDescriptor) -> Result<(), StorageError> {
         verify_encoded_blob_streaming(&blob_path(self, world, descriptor), descriptor)
     }
 
@@ -186,17 +171,16 @@ fn restore_blob_streaming(
 ) -> Result<(), StorageError> {
     let encoded_path = blob_path(storage, world, descriptor);
     ensure_encoded_size(&encoded_path, descriptor)?;
-    let parent = output
-        .parent()
-        .ok_or_else(|| StorageError::UnsafeRelativePath(output.to_string_lossy().into_owned()))?;
+    let parent =
+        output.parent().ok_or_else(|| StorageError::UnsafeRelativePath(output.to_string_lossy().into_owned()))?;
     fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
     let (temporary_path, mut temporary_file) = create_unique_temp(parent, "restore", "tmp")?;
     let encoded = File::open(&encoded_path).map_err(|error| io_error(&encoded_path, error))?;
     let mut reader: Box<dyn Read> = match descriptor.encoding {
         BlobEncoding::Raw => Box::new(encoded),
-        BlobEncoding::Zstd => Box::new(
-            zstd::stream::read::Decoder::new(encoded).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?,
-        ),
+        BlobEncoding::Zstd => {
+            Box::new(zstd::stream::read::Decoder::new(encoded).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?)
+        }
     };
     let mut hasher = blake3::Hasher::new();
     hasher.update(BLOB_HASH_DOMAIN);
@@ -208,9 +192,7 @@ fn restore_blob_streaming(
             break;
         }
         hasher.update(&buffer[..read]);
-        temporary_file
-            .write_all(&buffer[..read])
-            .map_err(|error| io_error(&temporary_path, error))?;
+        temporary_file.write_all(&buffer[..read]).map_err(|error| io_error(&temporary_path, error))?;
         total = total.saturating_add(read as u64);
     }
     if total != descriptor.uncompressed_size || Hash32(*hasher.finalize().as_bytes()) != descriptor.hash {
@@ -231,9 +213,9 @@ fn verify_encoded_blob_streaming(path: &Path, descriptor: &BlobDescriptor) -> Re
     let encoded = File::open(path).map_err(|error| io_error(path, error))?;
     let mut reader: Box<dyn Read> = match descriptor.encoding {
         BlobEncoding::Raw => Box::new(encoded),
-        BlobEncoding::Zstd => Box::new(
-            zstd::stream::read::Decoder::new(encoded).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?,
-        ),
+        BlobEncoding::Zstd => {
+            Box::new(zstd::stream::read::Decoder::new(encoded).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?)
+        }
     };
     let mut hasher = blake3::Hasher::new();
     hasher.update(BLOB_HASH_DOMAIN);
@@ -314,9 +296,7 @@ fn create_unique_temp(parent: &Path, prefix: &str, extension: &str) -> Result<(P
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
+    let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
     fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
     let (temporary_path, mut temporary_file) = create_unique_temp(parent, "atomic", "tmp")?;
     temporary_file.write_all(bytes).map_err(|error| io_error(&temporary_path, error))?;
@@ -401,10 +381,7 @@ mod tests {
         storage.commit_snapshot_streaming(&manifest).unwrap();
         storage.verify_snapshot_streaming(&manifest).unwrap();
         storage.restore_snapshot_streaming(&manifest, &restore).unwrap();
-        assert_eq!(
-            fs::metadata(restore.join("region/r.0.0.mca")).unwrap().len(),
-            32 * 1024 * 1024
-        );
+        assert_eq!(fs::metadata(restore.join("region/r.0.0.mca")).unwrap().len(), 32 * 1024 * 1024);
 
         let descriptor = &manifest.entries[0].blob;
         let blob = blob_path(&storage, world, descriptor);
