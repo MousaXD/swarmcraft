@@ -1,6 +1,4 @@
-use swarm_consensus::{
-    elect_authority_with_quorum, has_quorum, AuthorityCandidate, AuthorityGeneration, LeaseTracker,
-};
+use swarm_consensus::{elect_authority_with_quorum, has_quorum, AuthorityCandidate, AuthorityGeneration, LeaseTracker};
 use swarm_protocol::PeerId;
 
 const LEASE_MS: u64 = 3_000;
@@ -121,11 +119,7 @@ impl Cluster {
 
     fn elect_expired_partitions(&mut self) {
         for partition in [0, 1] {
-            if self
-                .peers
-                .iter()
-                .any(|peer| peer.partition == partition && peer.active_authority(self.now_ms))
-            {
+            if self.peers.iter().any(|peer| peer.partition == partition && peer.active_authority(self.now_ms)) {
                 continue;
             }
 
@@ -175,10 +169,7 @@ impl Cluster {
             let Some(authority_generation) = peer.authority else {
                 continue;
             };
-            if peer
-                .lease
-                .observed()
-                .is_some_and(|lease| lease.generation > authority_generation)
+            if peer.lease.observed().is_some_and(|lease| lease.generation > authority_generation)
                 || peer.lease.is_expired(self.now_ms)
             {
                 peer.authority = None;
