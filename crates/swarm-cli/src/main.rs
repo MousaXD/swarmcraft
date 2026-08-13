@@ -66,11 +66,7 @@ enum WorldCommand {
         snapshot: Option<u64>,
     },
     /// Restore a selected snapshot into a normal Minecraft world folder.
-    Recover {
-        world: String,
-        snapshot: u64,
-        destination: PathBuf,
-    },
+    Recover { world: String, snapshot: u64, destination: PathBuf },
     /// Export the newest valid snapshot as a normal Minecraft world folder.
     Export { world: String, destination: PathBuf },
 }
@@ -112,12 +108,8 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
     match command {
         WorldCommand::Create { name, minecraft, fabric_loader, compatibility } => {
             let identity = PeerIdentity::load_or_create(paths)?;
-            let (world_id, genesis) = create_world_genesis(
-                &identity,
-                minecraft,
-                fabric_loader,
-                compatibility.as_bytes(),
-            )?;
+            let (world_id, genesis) =
+                create_world_genesis(&identity, minecraft, fabric_loader, compatibility.as_bytes())?;
             storage.create_world(&WorldMetadataV1 {
                 storage_schema_version: STORAGE_SCHEMA_VERSION,
                 display_name: name.clone(),
@@ -242,8 +234,8 @@ fn parse_world(value: &str) -> Result<WorldId> {
 
 fn ensure_empty_or_missing(path: &std::path::Path) -> Result<()> {
     if path.exists() {
-        let mut entries = std::fs::read_dir(path)
-            .with_context(|| format!("cannot inspect destination {}", path.display()))?;
+        let mut entries =
+            std::fs::read_dir(path).with_context(|| format!("cannot inspect destination {}", path.display()))?;
         if entries.next().is_some() {
             bail!("destination must be empty or missing: {}", path.display());
         }

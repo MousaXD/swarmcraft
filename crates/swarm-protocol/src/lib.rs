@@ -64,9 +64,7 @@ impl FromStr for Hash32 {
 
 macro_rules! id_type {
     ($name:ident, $prefix:literal, $kind:literal) => {
-        #[derive(
-            Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
-        )]
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
         pub struct $name(pub [u8; 32]);
 
         impl $name {
@@ -102,16 +100,8 @@ id_type!(PeerId, "scpeer:", "peer");
 id_type!(WorldId, "scworld:", "world");
 
 fn parse_32(kind: &'static str, value: &str) -> Result<[u8; 32], ProtocolError> {
-    let bytes = hex::decode(value).map_err(|_| ProtocolError::InvalidIdentifier {
-        kind,
-        value: value.to_owned(),
-    })?;
-    bytes
-        .try_into()
-        .map_err(|_| ProtocolError::InvalidIdentifier {
-            kind,
-            value: value.to_owned(),
-        })
+    let bytes = hex::decode(value).map_err(|_| ProtocolError::InvalidIdentifier { kind, value: value.to_owned() })?;
+    bytes.try_into().map_err(|_| ProtocolError::InvalidIdentifier { kind, value: value.to_owned() })
 }
 
 pub fn peer_id_from_public_key(public_key: &[u8; 32]) -> PeerId {
@@ -276,13 +266,7 @@ pub struct PeerHelloV1 {
 
 impl PeerHelloV1 {
     pub fn signing_bytes(&self) -> Result<Vec<u8>, ProtocolError> {
-        let unsigned = (
-            self.peer_id,
-            self.public_key,
-            &self.protocol_versions,
-            &self.capabilities,
-            self.nonce,
-        );
+        let unsigned = (self.peer_id, self.public_key, &self.protocol_versions, &self.capabilities, self.nonce);
         let encoded = postcard::to_allocvec(&unsigned)?;
         let mut bytes = Vec::with_capacity(PEER_HELLO_SIGN_DOMAIN.len() + encoded.len());
         bytes.extend_from_slice(PEER_HELLO_SIGN_DOMAIN);

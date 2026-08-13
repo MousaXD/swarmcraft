@@ -25,9 +25,17 @@ pub enum IpcResponseV1 {
         world_directory: String,
         compatibility_fingerprint: Hash32,
     },
-    SaveComplete { request_id: u64 },
-    ReadyForShutdown { request_id: u64 },
-    Error { request_id: Option<u64>, code: String, message: String },
+    SaveComplete {
+        request_id: u64,
+    },
+    ReadyForShutdown {
+        request_id: u64,
+    },
+    Error {
+        request_id: Option<u64>,
+        code: String,
+        message: String,
+    },
 }
 
 pub fn encode_request(request: &IpcRequestV1) -> Result<Vec<u8>, postcard::Error> {

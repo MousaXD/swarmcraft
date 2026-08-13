@@ -8,8 +8,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 use swarm_protocol::{
-    snapshot_state_root, BlobDescriptor, BlobEncoding, Hash32, PeerId, SnapshotEntry,
-    SnapshotManifestV1, WorldGenesisV1, WorldId, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    snapshot_state_root, BlobDescriptor, BlobEncoding, Hash32, PeerId, SnapshotEntry, SnapshotManifestV1,
+    WorldGenesisV1, WorldId, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use thiserror::Error;
 use tracing::debug;
@@ -178,8 +178,9 @@ impl Storage {
         }
         let bytes = match descriptor.encoding {
             BlobEncoding::Raw => encoded,
-            BlobEncoding::Zstd => zstd::stream::decode_all(encoded.as_slice())
-                .map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?,
+            BlobEncoding::Zstd => {
+                zstd::stream::decode_all(encoded.as_slice()).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?
+            }
         };
         if bytes.len() as u64 != descriptor.uncompressed_size
             || BlobDescriptor::hash_uncompressed(&bytes) != descriptor.hash
@@ -205,7 +206,8 @@ impl Storage {
         }
         let mut files = Vec::new();
         for entry in WalkDir::new(source).follow_links(false) {
-            let entry = entry.map_err(|e| io_error(e.path().unwrap_or(source), std::io::Error::other(e.to_string())))?;
+            let entry =
+                entry.map_err(|e| io_error(e.path().unwrap_or(source), std::io::Error::other(e.to_string())))?;
             let path = entry.path();
             if entry.file_type().is_symlink() {
                 return Err(StorageError::SymlinkUnsupported(path.to_path_buf()));
@@ -221,9 +223,7 @@ impl Storage {
             let relative = path.strip_prefix(source).expect("walkdir entries stay beneath root");
             let relative = portable_relative_path(relative)?;
             let mut bytes = Vec::new();
-            File::open(&path)
-                .and_then(|mut file| file.read_to_end(&mut bytes))
-                .map_err(|e| io_error(&path, e))?;
+            File::open(&path).and_then(|mut file| file.read_to_end(&mut bytes)).map_err(|e| io_error(&path, e))?;
             let blob = self.put_blob(world, &bytes)?;
             entries.push(SnapshotEntry { path: relative, blob });
         }
@@ -304,11 +304,7 @@ impl Storage {
         Ok(())
     }
 
-    pub fn restore_snapshot(
-        &self,
-        manifest: &SnapshotManifestV1,
-        destination: &Path,
-    ) -> Result<(), StorageError> {
+    pub fn restore_snapshot(&self, manifest: &SnapshotManifestV1, destination: &Path) -> Result<(), StorageError> {
         self.verify_snapshot(manifest)?;
         fs::create_dir_all(destination).map_err(|e| io_error(destination, e))?;
         for entry in &manifest.entries {
@@ -344,11 +340,9 @@ fn portable_relative_path(path: &Path) -> Result<String, StorageError> {
     let mut parts = Vec::new();
     for component in path.components() {
         match component {
-            Component::Normal(part) => parts.push(
-                part.to_str()
-                    .ok_or_else(|| StorageError::NonUtf8Path(path.to_path_buf()))?
-                    .to_owned(),
-            ),
+            Component::Normal(part) => {
+                parts.push(part.to_str().ok_or_else(|| StorageError::NonUtf8Path(path.to_path_buf()))?.to_owned())
+            }
             _ => return Err(StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned())),
         }
     }
@@ -371,18 +365,12 @@ fn validate_portable_path(path: &str) -> Result<(), StorageError> {
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
+    let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
     fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
     let tmp = path.with_extension(format!("{}.tmp", path.extension().and_then(|x| x.to_str()).unwrap_or("data")));
     debug!(path = %path.display(), bytes = bytes.len(), "atomic write");
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&tmp)
-        .map_err(|e| io_error(&tmp, e))?;
+    let mut file =
+        OpenOptions::new().create(true).truncate(true).write(true).open(&tmp).map_err(|e| io_error(&tmp, e))?;
     file.write_all(bytes).map_err(|e| io_error(&tmp, e))?;
     file.sync_all().map_err(|e| io_error(&tmp, e))?;
     drop(file);
@@ -391,11 +379,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn sync_parent(parent: &Path) -> Result<(), StorageError> {
+fn sync_parent(_parent: &Path) -> Result<(), StorageError> {
     #[cfg(unix)]
     {
-        let file = File::open(parent).map_err(|e| io_error(parent, e))?;
-        file.sync_all().map_err(|e| io_error(parent, e))?;
+        let file = File::open(_parent).map_err(|e| io_error(_parent, e))?;
+        file.sync_all().map_err(|e| io_error(_parent, e))?;
     }
     Ok(())
 }
@@ -416,9 +404,7 @@ mod tests {
         fs::write(source.join("level.dat"), b"level").unwrap();
         fs::write(source.join("region/r.0.0.mca"), b"region-data").unwrap();
         let store = Storage::open(tmp.path().join("data")).unwrap();
-        let mut manifest = store
-            .snapshot_directory(world(), &source, 1, 1, 0, None, PeerId([2; 32]), [3; 32])
-            .unwrap();
+        let mut manifest = store.snapshot_directory(world(), &source, 1, 1, 0, None, PeerId([2; 32]), [3; 32]).unwrap();
         manifest.signature = vec![0; 64];
         store.commit_snapshot(&manifest).unwrap();
 

@@ -9,8 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use swarm_protocol::{
-    peer_id_from_public_key, Hash32, PeerId, SnapshotManifestV1, WorldGenesisV1, WorldId,
-    PROTOCOL_VERSION,
+    peer_id_from_public_key, Hash32, PeerId, SnapshotManifestV1, WorldGenesisV1, WorldId, PROTOCOL_VERSION,
 };
 use thiserror::Error;
 
@@ -79,9 +78,7 @@ pub struct PeerIdentity {
 
 impl std::fmt::Debug for PeerIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PeerIdentity")
-            .field("peer_id", &self.peer_id())
-            .finish_non_exhaustive()
+        f.debug_struct("PeerIdentity").field("peer_id", &self.peer_id()).finish_non_exhaustive()
     }
 }
 
@@ -99,10 +96,8 @@ impl PeerIdentity {
         let key_path = paths.identity_key();
         if key_path.exists() {
             let bytes = fs::read(&key_path).map_err(|e| io_error(&key_path, e))?;
-            let secret: [u8; 32] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| CoreError::InvalidIdentityKey(bytes.len()))?;
+            let secret: [u8; 32] =
+                bytes.as_slice().try_into().map_err(|_| CoreError::InvalidIdentityKey(bytes.len()))?;
             return Ok(Self::from_secret_bytes(secret));
         }
 
@@ -143,9 +138,7 @@ pub fn verify_signature(
     }
     let verifying_key = VerifyingKey::from_bytes(&public_key).map_err(|_| CoreError::SignatureInvalid)?;
     let signature = Signature::from_slice(signature).map_err(|_| CoreError::SignatureInvalid)?;
-    verifying_key
-        .verify(message, &signature)
-        .map_err(|_| CoreError::SignatureInvalid)
+    verifying_key.verify(message, &signature).map_err(|_| CoreError::SignatureInvalid)
 }
 
 pub fn verify_snapshot_signature(manifest: &SnapshotManifestV1) -> Result<(), CoreError> {
@@ -181,7 +174,7 @@ pub fn create_world_genesis(
 }
 
 fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
-    let parent = path.parent().ok_or_else(|| CoreError::DataDirectoryUnavailable)?;
+    let parent = path.parent().ok_or(CoreError::DataDirectoryUnavailable)?;
     fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
     let tmp = path.with_extension("tmp");
 
@@ -198,12 +191,8 @@ fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
     };
 
     #[cfg(not(unix))]
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&tmp)
-        .map_err(|e| io_error(&tmp, e))?;
+    let mut file =
+        OpenOptions::new().create(true).write(true).truncate(true).open(&tmp).map_err(|e| io_error(&tmp, e))?;
 
     file.write_all(bytes).map_err(|e| io_error(&tmp, e))?;
     file.sync_all().map_err(|e| io_error(&tmp, e))?;
@@ -213,11 +202,11 @@ fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
     Ok(())
 }
 
-fn sync_parent(parent: &Path) -> Result<(), CoreError> {
+fn sync_parent(_parent: &Path) -> Result<(), CoreError> {
     #[cfg(unix)]
     {
-        let file = fs::File::open(parent).map_err(|e| io_error(parent, e))?;
-        file.sync_all().map_err(|e| io_error(parent, e))?;
+        let file = fs::File::open(_parent).map_err(|e| io_error(_parent, e))?;
+        file.sync_all().map_err(|e| io_error(_parent, e))?;
     }
     Ok(())
 }

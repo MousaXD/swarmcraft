@@ -30,10 +30,7 @@ pub fn elect_authority(candidates: &[AuthorityCandidate]) -> Result<PeerId, Elec
     candidates
         .iter()
         .filter(|candidate| {
-            candidate.compatible
-                && candidate.authority_eligible
-                && candidate.snapshot_complete
-                && !candidate.banned
+            candidate.compatible && candidate.authority_eligible && candidate.snapshot_complete && !candidate.banned
         })
         .max_by(|a, b| {
             a.accepted_epoch
@@ -94,9 +91,33 @@ mod tests {
     #[test]
     fn election_uses_latest_complete_state_then_stable_tie_break() {
         let candidates = vec![
-            AuthorityCandidate { peer_id: PeerId([9; 32]), accepted_epoch: 4, canonical_sequence: 10, snapshot_complete: true, compatible: true, authority_eligible: true, banned: false },
-            AuthorityCandidate { peer_id: PeerId([2; 32]), accepted_epoch: 5, canonical_sequence: 3, snapshot_complete: true, compatible: true, authority_eligible: true, banned: false },
-            AuthorityCandidate { peer_id: PeerId([1; 32]), accepted_epoch: 5, canonical_sequence: 3, snapshot_complete: true, compatible: true, authority_eligible: true, banned: false },
+            AuthorityCandidate {
+                peer_id: PeerId([9; 32]),
+                accepted_epoch: 4,
+                canonical_sequence: 10,
+                snapshot_complete: true,
+                compatible: true,
+                authority_eligible: true,
+                banned: false,
+            },
+            AuthorityCandidate {
+                peer_id: PeerId([2; 32]),
+                accepted_epoch: 5,
+                canonical_sequence: 3,
+                snapshot_complete: true,
+                compatible: true,
+                authority_eligible: true,
+                banned: false,
+            },
+            AuthorityCandidate {
+                peer_id: PeerId([1; 32]),
+                accepted_epoch: 5,
+                canonical_sequence: 3,
+                snapshot_complete: true,
+                compatible: true,
+                authority_eligible: true,
+                banned: false,
+            },
         ];
         assert_eq!(elect_authority(&candidates).unwrap(), PeerId([1; 32]));
     }
