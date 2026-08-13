@@ -1,0 +1,34 @@
+name: Format migration branch
+
+on:
+  push:
+    branches:
+      - feat/migration-core
+
+permissions:
+  contents: write
+
+jobs:
+  rustfmt:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/migration-core
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format Rust workspace
+        run: cargo fmt --all
+      - name: Commit formatting if needed
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add '*.rs'
+          git commit -m "style: apply rustfmt"
+          git push origin HEAD:feat/migration-core
