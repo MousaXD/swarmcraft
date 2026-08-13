@@ -34,8 +34,8 @@ impl Behaviour {
                 .with_request_timeout(Duration::from_secs(30))
                 .with_max_concurrent_streams(128),
         );
-        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer)
-            .context("failed to initialize mDNS")?;
+        let mdns =
+            mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer).context("failed to initialize mDNS")?;
         let identify = identify::Behaviour::new(identify::Config::new(WIRE_PROTOCOL.to_owned(), key.public()));
         let mut kad_config = kad::Config::default();
         kad_config.set_query_timeout(Duration::from_secs(30));
@@ -46,23 +46,11 @@ impl Behaviour {
 
 #[derive(Debug)]
 pub enum NetworkEvent {
-    Listening {
-        address: Multiaddr,
-    },
-    Discovered {
-        transport_peer: TransportPeerId,
-        address: Multiaddr,
-    },
-    Connected {
-        transport_peer: TransportPeerId,
-    },
-    Disconnected {
-        transport_peer: TransportPeerId,
-    },
-    Authenticated {
-        transport_peer: TransportPeerId,
-        application_peer: PeerId,
-    },
+    Listening { address: Multiaddr },
+    Discovered { transport_peer: TransportPeerId, address: Multiaddr },
+    Connected { transport_peer: TransportPeerId },
+    Disconnected { transport_peer: TransportPeerId },
+    Authenticated { transport_peer: TransportPeerId, application_peer: PeerId },
     InboundRequest {
         transport_peer: TransportPeerId,
         request: WireRequest,
@@ -115,9 +103,7 @@ impl SwarmNode {
 
     pub fn dial_known_peer(&mut self, peer: TransportPeerId, address: Multiaddr) -> Result<()> {
         self.swarm.behaviour_mut().kad.add_address(&peer, address.clone());
-        self.swarm
-            .dial(DialOpts::peer_id(peer).addresses(vec![address]).build())
-            .context("failed to dial known peer")
+        self.swarm.dial(DialOpts::peer_id(peer).addresses(vec![address]).build()).context("failed to dial known peer")
     }
 
     pub fn add_bootstrap_peer(&mut self, peer: TransportPeerId, address: Multiaddr) {
@@ -185,7 +171,9 @@ impl SwarmNode {
                         self.swarm.behaviour_mut().kad.remove_address(&peer, &address);
                     }
                 }
-                SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
+                SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received {
+                    peer_id, info, ..
+                })) => {
                     for address in info.listen_addrs {
                         self.swarm.behaviour_mut().kad.add_address(&peer_id, address);
                     }
@@ -218,11 +206,7 @@ impl SwarmNode {
                                     }
                                 },
                                 request if self.authenticated.contains_key(&peer) => {
-                                    return Ok(NetworkEvent::InboundRequest {
-                                        transport_peer: peer,
-                                        request,
-                                        channel,
-                                    });
+                                    return Ok(NetworkEvent::InboundRequest { transport_peer: peer, request, channel });
                                 }
                                 _ => {
                                     self.respond(
@@ -236,11 +220,7 @@ impl SwarmNode {
                             }
                         }
                         request_response::Message::Response { request_id, response } => {
-                            return Ok(NetworkEvent::Response {
-                                transport_peer: peer,
-                                request_id,
-                                response,
-                            });
+                            return Ok(NetworkEvent::Response { transport_peer: peer, request_id, response });
                         }
                     },
                     request_response::Event::OutboundFailure { peer, request_id, error } => {
