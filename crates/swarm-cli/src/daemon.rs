@@ -211,7 +211,8 @@ fn handle_request(
             }
             let current = storage.load_membership_record(world)?;
             verify_membership_signature(&current)?;
-            if current.authority_peer_id != identity.peer_id() || current.authority_public_key != identity.public_key() {
+            if current.authority_peer_id != identity.peer_id() || current.authority_public_key != identity.public_key()
+            {
                 return Err(anyhow!("only the current local authority may accept a join request"));
             }
             if request.invite.inviter_peer_id != current.authority_peer_id
@@ -262,7 +263,8 @@ fn handle_request(
             verify_leave_request_signature(&request)?;
             let current = storage.load_membership_record(request.world_id)?;
             verify_membership_signature(&current)?;
-            if current.authority_peer_id != identity.peer_id() || current.authority_public_key != identity.public_key() {
+            if current.authority_peer_id != identity.peer_id() || current.authority_public_key != identity.public_key()
+            {
                 return Err(anyhow!("only the current local authority may accept a leave request"));
             }
             if request.leaving_peer_id == current.authority_peer_id {
@@ -272,9 +274,8 @@ fn handle_request(
                 return Err(anyhow!("leave request references stale membership"));
             }
             let mut descriptor = storage.load_world_descriptor(request.world_id)?;
-            let leaving = descriptor
-                .member(request.leaving_peer_id)
-                .context("leaving peer is not a current world member")?;
+            let leaving =
+                descriptor.member(request.leaving_peer_id).context("leaving peer is not a current world member")?;
             if leaving.banned || leaving.public_key != request.leaving_public_key {
                 return Err(anyhow!("leaving peer key does not match current membership"));
             }
@@ -358,7 +359,9 @@ fn handle_request(
             verify_membership_signature(&record)?;
             authorize_member(storage, record.world_id, record.authority_peer_id)?;
             if let Ok(current) = storage.load_membership_record(record.world_id) {
-                if record.epoch < current.epoch || (record.epoch == current.epoch && record.sequence <= current.sequence) {
+                if record.epoch < current.epoch
+                    || (record.epoch == current.epoch && record.sequence <= current.sequence)
+                {
                     return Err(anyhow!("stale membership record rejected"));
                 }
             }
@@ -448,7 +451,8 @@ fn handle_request(
             {
                 return Err(anyhow!("sleep record does not match the accepted authority generation"));
             }
-            let latest = storage.latest_snapshot(record.world_id)?.context("cannot sleep a world without a snapshot")?;
+            let latest =
+                storage.latest_snapshot(record.world_id)?.context("cannot sleep a world without a snapshot")?;
             if latest.manifest_hash()? != record.latest_snapshot_hash {
                 return Err(anyhow!("sleep record does not reference the exact latest snapshot"));
             }
@@ -484,7 +488,8 @@ fn handle_response(
                     .context("peer requested blob not referenced by manifest")?;
                 let mut offset = resume.offset;
                 loop {
-                    let (data, finished) = storage.read_encoded_blob_chunk(world, descriptor, offset, MAX_BLOB_CHUNK)?;
+                    let (data, finished) =
+                        storage.read_encoded_blob_chunk(world, descriptor, offset, MAX_BLOB_CHUNK)?;
                     let chunk_len = data.len() as u64;
                     node.send_request(
                         transport_peer,
