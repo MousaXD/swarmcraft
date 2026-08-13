@@ -41,6 +41,21 @@ impl Storage {
         Ok(record)
     }
 
+    pub fn save_epoch_record(&self, record: &EpochRecordV1) -> Result<(), StorageError> {
+        let bytes = postcard::to_allocvec(record)?;
+        atomic_write(&self.world_protocol_path(record.world_id, "epoch.postcard"), &bytes)
+    }
+
+    pub fn load_epoch_record(&self, world: WorldId) -> Result<EpochRecordV1, StorageError> {
+        let path = self.world_protocol_path(world, "epoch.postcard");
+        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let record: EpochRecordV1 = postcard::from_bytes(&bytes)?;
+        if record.world_id != world {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(record)
+    }
+
     pub fn remove_local_membership(&self, world: WorldId) -> Result<(), StorageError> {
         for name in ["descriptor.json", "membership.postcard"] {
             let path = self.world_protocol_path(world, name);
