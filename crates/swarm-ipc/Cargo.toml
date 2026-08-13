@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+hex.workspace = true
 postcard.workspace = true
+rand_core.workspace = true
 serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net"] }
 swarm-protocol = { path = "../swarm-protocol" }
