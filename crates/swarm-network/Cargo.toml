@@ -7,6 +7,16 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 ed25519-dalek.workspace = true
+futures.workspace = true
+libp2p.workspace = true
+serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 swarm-protocol = { path = "../swarm-protocol" }
+
+[dev-dependencies]
+rand_core.workspace = true
+tempfile.workspace = true
