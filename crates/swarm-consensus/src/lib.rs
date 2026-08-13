@@ -56,7 +56,11 @@ pub fn elect_authority_with_quorum(
 }
 
 pub const fn quorum_size(member_count: usize) -> usize {
-    if member_count == 0 { 0 } else { member_count / 2 + 1 }
+    if member_count == 0 {
+        0
+    } else {
+        member_count / 2 + 1
+    }
 }
 
 pub const fn has_quorum(member_count: usize, visible_member_count: usize) -> bool {
@@ -104,10 +108,8 @@ impl LeaseTracker {
                 return Err(LeaseError::StaleGeneration { received: generation, accepted: current.generation });
             }
         }
-        let observed = ObservedLease {
-            generation,
-            expires_at_millis: monotonic_now_ms.saturating_add(lease_duration_ms),
-        };
+        let observed =
+            ObservedLease { generation, expires_at_millis: monotonic_now_ms.saturating_add(lease_duration_ms) };
         self.observed = Some(observed);
         Ok(observed)
     }
@@ -117,7 +119,10 @@ impl LeaseTracker {
     }
 
     pub fn is_expired(&self, monotonic_now_ms: u64) -> bool {
-        self.observed.is_none_or(|lease| monotonic_now_ms >= lease.expires_at_millis)
+        match self.observed {
+            Some(lease) => monotonic_now_ms >= lease.expires_at_millis,
+            None => true,
+        }
     }
 }
 
