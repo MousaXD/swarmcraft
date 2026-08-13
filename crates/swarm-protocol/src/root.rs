@@ -1,4 +1,3 @@
-include!("lib.rs");
-
-mod lifecycle;
-pub use lifecycle::{JoinRequestV1, SleepRecordV1};
+#[path = "lib.rs"]
+mod base;
+pub use base::*;
