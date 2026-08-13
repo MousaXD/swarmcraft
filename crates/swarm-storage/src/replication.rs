@@ -39,11 +39,7 @@ impl Storage {
         path.is_file() && verify_encoded_blob_path(&path, descriptor).is_ok()
     }
 
-    pub fn partial_blob_offset(
-        &self,
-        world: WorldId,
-        descriptor: &BlobDescriptor,
-    ) -> Result<u64, ReplicationError> {
+    pub fn partial_blob_offset(&self, world: WorldId, descriptor: &BlobDescriptor) -> Result<u64, ReplicationError> {
         let path = self.partial_blob_path(world, descriptor);
         if !path.exists() {
             return Ok(0);
@@ -148,9 +144,9 @@ fn verify_encoded_blob_path(path: &Path, descriptor: &BlobDescriptor) -> Result<
     let file = File::open(path).map_err(|error| io_error(path, error))?;
     let mut reader: Box<dyn Read> = match descriptor.encoding {
         BlobEncoding::Raw => Box::new(file),
-        BlobEncoding::Zstd => Box::new(
-            zstd::stream::read::Decoder::new(file).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?,
-        ),
+        BlobEncoding::Zstd => {
+            Box::new(zstd::stream::read::Decoder::new(file).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?)
+        }
     };
     let mut hasher = blake3::Hasher::new();
     hasher.update(BLOB_HASH_DOMAIN);
@@ -216,12 +212,9 @@ mod tests {
                 let replica = Storage::open(&replica_root).unwrap();
                 assert_eq!(replica.partial_blob_offset(world(), &descriptor).unwrap(), offset);
                 loop {
-                    let (chunk, finished) = authority
-                        .read_encoded_blob_chunk(world(), &descriptor, offset, 1024)
-                        .unwrap();
-                    offset = replica
-                        .receive_blob_chunk(world(), &descriptor, offset, &chunk, finished)
-                        .unwrap();
+                    let (chunk, finished) =
+                        authority.read_encoded_blob_chunk(world(), &descriptor, offset, 1024).unwrap();
+                    offset = replica.receive_blob_chunk(world(), &descriptor, offset, &chunk, finished).unwrap();
                     if finished {
                         break;
                     }

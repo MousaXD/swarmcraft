@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use std::{collections::HashMap, fmt::Debug};
 use swarm_core::{
-    verify_lease_signature, verify_membership_signature, verify_snapshot_signature, verify_transfer_signature, DataPaths,
-    PeerIdentity,
+    verify_lease_signature, verify_membership_signature, verify_snapshot_signature, verify_transfer_signature,
+    DataPaths, PeerIdentity,
 };
 use swarm_network::{
     load_or_create_transport_key, BlobResumeV1, NetworkEvent, ReplicaAckV1, ResponseChannel, SwarmNode,
@@ -145,8 +145,10 @@ fn handle_request(
         }
         WireRequest::BlobChunk { world_id, hash, encoding, offset, data, finished } => {
             authorize_member(storage, world_id, application_peer)?;
-            let manifest = pending_manifests.get(&world_id).context("blob chunk arrived without a negotiated manifest")?;
-            let descriptor = find_descriptor(manifest, hash).context("blob hash is not referenced by negotiated manifest")?;
+            let manifest =
+                pending_manifests.get(&world_id).context("blob chunk arrived without a negotiated manifest")?;
+            let descriptor =
+                find_descriptor(manifest, hash).context("blob hash is not referenced by negotiated manifest")?;
             if descriptor.encoding != encoding {
                 return Err(anyhow!("blob encoding does not match manifest"));
             }
@@ -180,7 +182,9 @@ fn handle_request(
             verify_membership_signature(&record)?;
             authorize_member(storage, record.world_id, record.authority_peer_id)?;
             if let Ok(current) = storage.load_membership_record(record.world_id) {
-                if record.epoch < current.epoch || (record.epoch == current.epoch && record.sequence <= current.sequence) {
+                if record.epoch < current.epoch
+                    || (record.epoch == current.epoch && record.sequence <= current.sequence)
+                {
                     return Err(anyhow!("stale membership record rejected"));
                 }
             }
@@ -199,7 +203,10 @@ fn handle_request(
         WireRequest::LeaseGrant(lease) => {
             verify_lease_signature(&lease)?;
             authorize_member(storage, lease.world_id, lease.authority_peer_id)?;
-            node.respond(channel, WireResponse::LeaseAccepted { epoch: lease.epoch, fencing_token: lease.fencing_token })?;
+            node.respond(
+                channel,
+                WireResponse::LeaseAccepted { epoch: lease.epoch, fencing_token: lease.fencing_token },
+            )?;
         }
         WireRequest::Hello(_) => return Err(anyhow!("PeerHello is handled by the network authentication layer")),
     }
@@ -214,16 +221,21 @@ fn handle_response(
     response: WireResponse,
 ) -> Result<()> {
     match (context, response) {
-        (Some(OutboundContext::Manifest { world, snapshot_number }), WireResponse::ManifestAccepted { snapshot_number: accepted, missing }) => {
+        (
+            Some(OutboundContext::Manifest { world, snapshot_number }),
+            WireResponse::ManifestAccepted { snapshot_number: accepted, missing },
+        ) => {
             if accepted != snapshot_number {
                 return Err(anyhow!("manifest response snapshot number mismatch"));
             }
             let manifest = storage.load_snapshot(world, snapshot_number)?;
             for resume in missing {
-                let descriptor = find_descriptor(&manifest, resume.hash).context("peer requested blob not referenced by manifest")?;
+                let descriptor = find_descriptor(&manifest, resume.hash)
+                    .context("peer requested blob not referenced by manifest")?;
                 let mut offset = resume.offset;
                 loop {
-                    let (data, finished) = storage.read_encoded_blob_chunk(world, descriptor, offset, MAX_BLOB_CHUNK)?;
+                    let (data, finished) =
+                        storage.read_encoded_blob_chunk(world, descriptor, offset, MAX_BLOB_CHUNK)?;
                     let chunk_len = data.len() as u64;
                     node.send_request(
                         transport_peer,

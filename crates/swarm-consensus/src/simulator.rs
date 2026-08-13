@@ -71,22 +71,39 @@ impl FailureSimulator {
         }
     }
 
-    pub fn state(&self) -> &SimWorldState { &self.state }
-    pub fn epoch(&self) -> u64 { self.epoch }
-    pub fn fencing_token(&self) -> u64 { self.fencing.accepted_token() }
+    pub fn state(&self) -> &SimWorldState {
+        &self.state
+    }
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub fn fencing_token(&self) -> u64 {
+        self.fencing.accepted_token()
+    }
     pub fn authority(&self) -> Option<PeerId> {
-        match self.state { SimWorldState::Active { authority } => Some(authority), SimWorldState::Sleeping => None }
+        match self.state {
+            SimWorldState::Active { authority } => Some(authority),
+            SimWorldState::Sleeping => None,
+        }
     }
 
     pub fn set_online(&mut self, peer: PeerId, online: bool) -> Result<(), SimError> {
         self.peers.get_mut(&peer).ok_or(SimError::UnknownPeer)?.online = online;
-        if !online && self.peers.values().all(|candidate| !candidate.online) { self.state = SimWorldState::Sleeping; }
+        if !online && self.peers.values().all(|candidate| !candidate.online) {
+            self.state = SimWorldState::Sleeping;
+        }
         Ok(())
     }
 
     pub fn set_partitioned(&mut self, peer: PeerId, partitioned: bool) -> Result<(), SimError> {
-        if !self.peers.contains_key(&peer) { return Err(SimError::UnknownPeer); }
-        if partitioned { self.isolated.insert(peer); } else { self.isolated.remove(&peer); }
+        if !self.peers.contains_key(&peer) {
+            return Err(SimError::UnknownPeer);
+        }
+        if partitioned {
+            self.isolated.insert(peer);
+        } else {
+            self.isolated.remove(&peer);
+        }
         Ok(())
     }
 
@@ -105,7 +122,9 @@ impl FailureSimulator {
     }
 
     pub fn publish_snapshot(&mut self, authority: PeerId, hash: Hash32) -> Result<(), SimError> {
-        if self.authority() != Some(authority) { return Err(SimError::StaleGeneration); }
+        if self.authority() != Some(authority) {
+            return Err(SimError::StaleGeneration);
+        }
         let peer = self.peers.get_mut(&authority).ok_or(SimError::UnknownPeer)?;
         peer.snapshot_hash = hash;
         peer.complete_snapshot = true;
@@ -122,7 +141,9 @@ impl FailureSimulator {
     }
 
     pub fn attempt_takeover(&mut self, candidate: PeerId, now_ms: u64, quorum_size: usize) -> Result<(), SimError> {
-        if now_ms < self.lease_expires_ms { return Err(SimError::LeaseActive); }
+        if now_ms < self.lease_expires_ms {
+            return Err(SimError::LeaseActive);
+        }
         let candidate_state = self.peers.get(&candidate).ok_or(SimError::UnknownPeer)?;
         if !candidate_state.online
             || self.isolated.contains(&candidate)
@@ -134,9 +155,16 @@ impl FailureSimulator {
         {
             return Err(SimError::InvalidReplica);
         }
-        let visible_votes = self.peers.values().filter(|peer| {
-            peer.online && !self.isolated.contains(&peer.peer_id) && peer.snapshot_hash == self.latest_snapshot_hash && peer.complete_snapshot
-        }).count();
+        let visible_votes = self
+            .peers
+            .values()
+            .filter(|peer| {
+                peer.online
+                    && !self.isolated.contains(&peer.peer_id)
+                    && peer.snapshot_hash == self.latest_snapshot_hash
+                    && peer.complete_snapshot
+            })
+            .count();
         if visible_votes < quorum_size && now_ms < self.lease_expires_ms.saturating_add(self.solo_extra_delay_ms) {
             return Err(SimError::NoQuorum);
         }
@@ -148,9 +176,14 @@ impl FailureSimulator {
     }
 
     pub fn wake(&mut self, candidate: PeerId, now_ms: u64) -> Result<(), SimError> {
-        if self.state != SimWorldState::Sleeping { return Err(SimError::StaleGeneration); }
+        if self.state != SimWorldState::Sleeping {
+            return Err(SimError::StaleGeneration);
+        }
         let candidate_state = self.peers.get(&candidate).ok_or(SimError::UnknownPeer)?;
-        if !candidate_state.online || !candidate_state.complete_snapshot || candidate_state.snapshot_hash != self.latest_snapshot_hash {
+        if !candidate_state.online
+            || !candidate_state.complete_snapshot
+            || candidate_state.snapshot_hash != self.latest_snapshot_hash
+        {
             return Err(SimError::InvalidReplica);
         }
         self.epoch += 1;
@@ -166,7 +199,15 @@ mod tests {
     use super::*;
 
     fn peer(id: u8, hash: Hash32) -> SimPeer {
-        SimPeer { peer_id: PeerId([id; 32]), online: true, complete_snapshot: true, compatible: true, authority_eligible: true, banned: false, snapshot_hash: hash }
+        SimPeer {
+            peer_id: PeerId([id; 32]),
+            online: true,
+            complete_snapshot: true,
+            compatible: true,
+            authority_eligible: true,
+            banned: false,
+            snapshot_hash: hash,
+        }
     }
 
     #[test]

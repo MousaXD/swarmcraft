@@ -4,12 +4,9 @@ mod invite;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
-use swarm_core::{
-    create_world_genesis, random_nonce, verify_snapshot_signature, DataPaths, PeerIdentity,
-};
+use swarm_core::{create_world_genesis, random_nonce, verify_snapshot_signature, DataPaths, PeerIdentity};
 use swarm_protocol::{
-    InviteV1, MembershipRecordV1, WorldDescriptorV1, WorldId, WorldMemberV1, PROTOCOL_VERSION,
-    STORAGE_SCHEMA_VERSION,
+    InviteV1, MembershipRecordV1, WorldDescriptorV1, WorldId, WorldMemberV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 use tracing::info;
@@ -345,9 +342,8 @@ fn handle_invite(command: InviteCommand, paths: &DataPaths, storage: &Storage) -
             let metadata = storage.load_world(world)?;
             let descriptor = storage.load_world_descriptor(world)?;
             let identity = PeerIdentity::load_or_create(paths)?;
-            let member = descriptor
-                .member(identity.peer_id())
-                .context("this peer is not an authorized member of the world")?;
+            let member =
+                descriptor.member(identity.peer_id()).context("this peer is not an authorized member of the world")?;
             if member.banned {
                 bail!("this peer is banned from the world");
             }
@@ -378,10 +374,7 @@ fn show_peers(world: WorldId, storage: &Storage) -> Result<()> {
         return Ok(());
     }
     for member in descriptor.members {
-        println!(
-            "{} authority_eligible={} banned={}",
-            member.peer_id, member.authority_eligible, member.banned
-        );
+        println!("{} authority_eligible={} banned={}", member.peer_id, member.authority_eligible, member.banned);
     }
     Ok(())
 }

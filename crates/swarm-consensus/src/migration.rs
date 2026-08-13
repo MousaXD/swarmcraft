@@ -16,10 +16,18 @@ impl LeaseTracker {
         Self { epoch, fencing_token, duration, expires_at: now + duration }
     }
 
-    pub fn epoch(&self) -> u64 { self.epoch }
-    pub fn fencing_token(&self) -> u64 { self.fencing_token }
-    pub fn expires_at(&self) -> Instant { self.expires_at }
-    pub fn is_expired(&self, now: Instant) -> bool { now >= self.expires_at }
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub fn fencing_token(&self) -> u64 {
+        self.fencing_token
+    }
+    pub fn expires_at(&self) -> Instant {
+        self.expires_at
+    }
+    pub fn is_expired(&self, now: Instant) -> bool {
+        now >= self.expires_at
+    }
 
     pub fn renew(&mut self, epoch: u64, fencing_token: u64, now: Instant) -> Result<(), LeaseError> {
         if epoch != self.epoch || fencing_token != self.fencing_token {
@@ -45,7 +53,10 @@ pub enum LeaseError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TakeoverMode { Quorum, Solo }
+pub enum TakeoverMode {
+    Quorum,
+    Solo,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct TakeoverPolicy {
@@ -82,7 +93,9 @@ pub fn evaluate_crash_takeover(
     now: Instant,
     policy: TakeoverPolicy,
 ) -> Result<AuthorityGeneration, LeaseError> {
-    if !current_lease.is_expired(now) { return Err(LeaseError::NotExpired); }
+    if !current_lease.is_expired(now) {
+        return Err(LeaseError::NotExpired);
+    }
     if !candidate.candidate.snapshot_complete || candidate.snapshot_hash != required_snapshot_hash {
         return Err(LeaseError::SnapshotNotReady);
     }
@@ -92,7 +105,9 @@ pub fn evaluate_crash_takeover(
     let mode = if candidate.peer_votes >= policy.quorum_size {
         TakeoverMode::Quorum
     } else {
-        if now < current_lease.expires_at() + policy.solo_extra_delay { return Err(LeaseError::SoloDelay); }
+        if now < current_lease.expires_at() + policy.solo_extra_delay {
+            return Err(LeaseError::SoloDelay);
+        }
         TakeoverMode::Solo
     };
     Ok(AuthorityGeneration {
@@ -125,23 +140,52 @@ pub enum TransferError {
 }
 
 impl ManualTransferState {
-    pub fn prepare(from_peer: PeerId, to_peer: PeerId, snapshot_hash: Hash32, current_epoch: u64, current_fencing_token: u64) -> Self {
-        Self { from_peer, to_peer, snapshot_hash, next_epoch: current_epoch + 1, next_fencing_token: current_fencing_token + 1, phase: TransferPhase::Prepared }
+    pub fn prepare(
+        from_peer: PeerId,
+        to_peer: PeerId,
+        snapshot_hash: Hash32,
+        current_epoch: u64,
+        current_fencing_token: u64,
+    ) -> Self {
+        Self {
+            from_peer,
+            to_peer,
+            snapshot_hash,
+            next_epoch: current_epoch + 1,
+            next_fencing_token: current_fencing_token + 1,
+            phase: TransferPhase::Prepared,
+        }
     }
 
     pub fn accept(&mut self, accepting_peer: PeerId, target_snapshot_hash: Hash32) -> Result<(), TransferError> {
-        if self.phase != TransferPhase::Prepared { return Err(TransferError::WrongPhase); }
-        if accepting_peer != self.to_peer { return Err(TransferError::WrongPeer); }
-        if target_snapshot_hash != self.snapshot_hash { return Err(TransferError::SnapshotNotReady); }
+        if self.phase != TransferPhase::Prepared {
+            return Err(TransferError::WrongPhase);
+        }
+        if accepting_peer != self.to_peer {
+            return Err(TransferError::WrongPeer);
+        }
+        if target_snapshot_hash != self.snapshot_hash {
+            return Err(TransferError::SnapshotNotReady);
+        }
         self.phase = TransferPhase::Accepted;
         Ok(())
     }
 
     pub fn commit(&mut self, committing_peer: PeerId) -> Result<AuthorityGeneration, TransferError> {
-        if self.phase != TransferPhase::Accepted { return Err(TransferError::WrongPhase); }
-        if committing_peer != self.from_peer { return Err(TransferError::WrongPeer); }
+        if self.phase != TransferPhase::Accepted {
+            return Err(TransferError::WrongPhase);
+        }
+        if committing_peer != self.from_peer {
+            return Err(TransferError::WrongPeer);
+        }
         self.phase = TransferPhase::Committed;
-        Ok(AuthorityGeneration { authority_peer_id: self.to_peer, epoch: self.next_epoch, fencing_token: self.next_fencing_token, base_snapshot_hash: self.snapshot_hash, mode: TakeoverMode::Quorum })
+        Ok(AuthorityGeneration {
+            authority_peer_id: self.to_peer,
+            epoch: self.next_epoch,
+            fencing_token: self.next_fencing_token,
+            base_snapshot_hash: self.snapshot_hash,
+            mode: TakeoverMode::Quorum,
+        })
     }
 }
 
@@ -160,10 +204,24 @@ impl WorldRuntimeState {
         *self = Self::Sleeping { latest_snapshot_hash, epoch, fencing_token };
     }
 
-    pub fn wake(&mut self, candidate: PeerId, candidate_snapshot_hash: Hash32) -> Result<AuthorityGeneration, LeaseError> {
-        let Self::Sleeping { latest_snapshot_hash, epoch, fencing_token } = self else { return Err(LeaseError::WrongAuthorityGeneration); };
-        if candidate_snapshot_hash != *latest_snapshot_hash { return Err(LeaseError::SnapshotNotReady); }
-        let generation = AuthorityGeneration { authority_peer_id: candidate, epoch: *epoch + 1, fencing_token: *fencing_token + 1, base_snapshot_hash: *latest_snapshot_hash, mode: TakeoverMode::Solo };
+    pub fn wake(
+        &mut self,
+        candidate: PeerId,
+        candidate_snapshot_hash: Hash32,
+    ) -> Result<AuthorityGeneration, LeaseError> {
+        let Self::Sleeping { latest_snapshot_hash, epoch, fencing_token } = self else {
+            return Err(LeaseError::WrongAuthorityGeneration);
+        };
+        if candidate_snapshot_hash != *latest_snapshot_hash {
+            return Err(LeaseError::SnapshotNotReady);
+        }
+        let generation = AuthorityGeneration {
+            authority_peer_id: candidate,
+            epoch: *epoch + 1,
+            fencing_token: *fencing_token + 1,
+            base_snapshot_hash: *latest_snapshot_hash,
+            mode: TakeoverMode::Solo,
+        };
         *self = Self::Active(generation.clone());
         Ok(generation)
     }

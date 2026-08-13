@@ -65,8 +65,18 @@ mod tests {
             world_id: world,
             compatibility_fingerprint: Hash32([6; 32]),
             members: vec![
-                WorldMemberV1 { peer_id: PeerId([8; 32]), public_key: [8; 32], authority_eligible: true, banned: false },
-                WorldMemberV1 { peer_id: PeerId([2; 32]), public_key: [2; 32], authority_eligible: true, banned: false },
+                WorldMemberV1 {
+                    peer_id: PeerId([8; 32]),
+                    public_key: [8; 32],
+                    authority_eligible: true,
+                    banned: false,
+                },
+                WorldMemberV1 {
+                    peer_id: PeerId([2; 32]),
+                    public_key: [2; 32],
+                    authority_eligible: true,
+                    banned: false,
+                },
             ],
             preferred_replication_factor: 2,
         };

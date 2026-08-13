@@ -215,21 +215,11 @@ pub fn verify_snapshot_signature(manifest: &SnapshotManifestV1) -> Result<(), Co
 }
 
 pub fn verify_membership_signature(record: &MembershipRecordV1) -> Result<(), CoreError> {
-    verify_signature(
-        record.authority_peer_id,
-        record.authority_public_key,
-        &record.signing_bytes()?,
-        &record.signature,
-    )
+    verify_signature(record.authority_peer_id, record.authority_public_key, &record.signing_bytes()?, &record.signature)
 }
 
 pub fn verify_invite_signature(invite: &InviteV1) -> Result<(), CoreError> {
-    verify_signature(
-        invite.inviter_peer_id,
-        invite.inviter_public_key,
-        &invite.signing_bytes()?,
-        &invite.signature,
-    )
+    verify_signature(invite.inviter_peer_id, invite.inviter_public_key, &invite.signing_bytes()?, &invite.signature)
 }
 
 pub fn verify_transfer_signature(transfer: &AuthorityTransferV1) -> Result<(), CoreError> {
@@ -242,12 +232,7 @@ pub fn verify_transfer_signature(transfer: &AuthorityTransferV1) -> Result<(), C
 }
 
 pub fn verify_lease_signature(lease: &AuthorityLeaseGrantV1) -> Result<(), CoreError> {
-    verify_signature(
-        lease.authority_peer_id,
-        lease.authority_public_key,
-        &lease.signing_bytes()?,
-        &lease.signature,
-    )
+    verify_signature(lease.authority_peer_id, lease.authority_public_key, &lease.signing_bytes()?, &lease.signature)
 }
 
 pub fn create_world_genesis(
