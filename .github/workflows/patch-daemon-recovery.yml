@@ -20,68 +20,49 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
+          import re
+
           path = Path('crates/swarm-cli/src/daemon.rs')
           source = path.read_text()
-          changes = [
-              (
-                  '''struct RequestState<'a> {
-              pending_manifests: &'a mut HashMap<WorldId, SnapshotManifestV1>,
-              leases: &'a mut LeaseRuntime,
-              now: Instant,
-          }''',
-                  '''struct RequestState<'a> {
-              pending_manifests: &'a mut HashMap<WorldId, SnapshotManifestV1>,
-              outbound: &'a mut HashMap<String, OutboundContext>,
-              leases: &'a mut LeaseRuntime,
-              now: Instant,
-          }'''
-              ),
-              (
-                  '''let mut state = RequestState {
-                              pending_manifests: &mut pending_manifests,
-                              leases: &mut leases,
-                              now: Instant::now(),
-                          };''',
-                  '''let mut state = RequestState {
-                              pending_manifests: &mut pending_manifests,
-                              outbound: &mut outbound,
-                              leases: &mut leases,
-                              now: Instant::now(),
-                          };'''
-              ),
-              (
-                  '''                        handle_request(
-                            &context,
-                            &mut node,
-                            transport_peer,
-                            application_peer,
-                            request,
-                            channel,
-                            &mut state,
-                        )?;''',
-                  '''                        if let Err(error) = handle_request(
-                            &context,
-                            &mut node,
-                            transport_peer,
-                            application_peer,
-                            request,
-                            channel,
-                            &mut state,
-                        ) {
-                            warn!(peer = %application_peer, %error, "inbound authenticated request rejected");
-                        }'''
-              ),
-              (
-                  '''node.respond(channel, WireResponse::JoinAccepted { membership_sequence: canonical.sequence })?;
-                      node.send_request(&transport_peer, WireRequest::Membership(canonical))?;''',
-                  '''node.respond(channel, WireResponse::JoinAccepted { membership_sequence: canonical.sequence })?;
-                      push_known_worlds(storage, node, &transport_peer, application_peer, state.outbound)?;'''
-              ),
-          ]
-          for old, new in changes:
-              if old not in source:
-                  raise SystemExit('expected patch block not found:\n' + old)
-              source = source.replace(old, new, 1)
+
+          def replace_once(pattern, replacement, label):
+              global source
+              source, count = re.subn(pattern, replacement, source, count=1, flags=re.MULTILINE)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected one match, found {count}')
+
+          replace_once(
+              r"(struct RequestState<'a> \{\n\s*pending_manifests: &'a mut HashMap<WorldId, SnapshotManifestV1>,\n)(\s*leases: &'a mut LeaseRuntime,)",
+              r"\1    outbound: &'a mut HashMap<String, OutboundContext>,\n\2",
+              'RequestState outbound field',
+          )
+          replace_once(
+              r"(let mut state = RequestState \{\n\s*pending_manifests: &mut pending_manifests,\n)(\s*leases: &mut leases,)",
+              r"\1                        outbound: &mut outbound,\n\2",
+              'RequestState outbound value',
+          )
+          replace_once(
+              r"\s*handle_request\(\n\s*&context,\n\s*&mut node,\n\s*transport_peer,\n\s*application_peer,\n\s*request,\n\s*channel,\n\s*&mut state,\n\s*\)\?;",
+              '''
+                      if let Err(error) = handle_request(
+                          &context,
+                          &mut node,
+                          transport_peer,
+                          application_peer,
+                          request,
+                          channel,
+                          &mut state,
+                      ) {
+                          warn!(peer = %application_peer, %error, "inbound authenticated request rejected");
+                      }''',
+              'nonfatal inbound request handling',
+          )
+          replace_once(
+              r"node\.respond\(channel, WireResponse::JoinAccepted \{ membership_sequence: canonical\.sequence \}\)\?;\n\s*node\.send_request\(&transport_peer, WireRequest::Membership\(canonical\)\)\?;",
+              '''node.respond(channel, WireResponse::JoinAccepted { membership_sequence: canonical.sequence })?;
+                      push_known_worlds(storage, node, &transport_peer, application_peer, state.outbound)?;''',
+              'live join replication',
+          )
           path.write_text(source)
       - name: Format and commit exact patch
         shell: bash
