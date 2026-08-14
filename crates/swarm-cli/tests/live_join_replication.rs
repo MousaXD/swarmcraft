@@ -168,6 +168,7 @@ fn authority_accepts_live_join_and_replicates_without_reconnect() {
     a.storage.save_epoch_record(&epoch).unwrap();
 
     b.storage.create_world(&metadata).unwrap();
+    b.storage.save_world_descriptor(&descriptor).unwrap();
     let mut invite = InviteV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
