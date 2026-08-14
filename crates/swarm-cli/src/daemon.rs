@@ -74,6 +74,7 @@ struct HandlerContext<'a> {
 
 struct RequestState<'a> {
     pending_manifests: &'a mut HashMap<WorldId, SnapshotManifestV1>,
+    outbound: &'a mut HashMap<String, OutboundContext>,
     leases: &'a mut LeaseRuntime,
     now: Instant,
 }
@@ -141,18 +142,21 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                         let context = HandlerContext { identity: &identity, storage };
                         let mut state = RequestState {
                             pending_manifests: &mut pending_manifests,
+                        outbound: &mut outbound,
                             leases: &mut leases,
                             now: Instant::now(),
                         };
-                        handle_request(
-                            &context,
-                            &mut node,
-                            transport_peer,
-                            application_peer,
-                            request,
-                            channel,
-                            &mut state,
-                        )?;
+            if let Err(error) = handle_request(
+                &context,
+                &mut node,
+                transport_peer,
+                application_peer,
+                request,
+                channel,
+                &mut state,
+            ) {
+                warn!(peer = %application_peer, %error, "inbound authenticated request rejected");
+            }
                     }
                     NetworkEvent::Response { transport_peer, request_id, response } => {
                         let context = outbound.remove(&request_key(&request_id));
@@ -906,7 +910,7 @@ fn handle_request(
                 next
             };
             node.respond(channel, WireResponse::JoinAccepted { membership_sequence: canonical.sequence })?;
-            node.send_request(&transport_peer, WireRequest::Membership(canonical))?;
+            push_known_worlds(storage, node, &transport_peer, application_peer, state.outbound)?;
         }
         WireRequest::LeaveRequest(request) => {
             let request = *request;
