@@ -5,6 +5,7 @@ pub use base::*;
 use serde::{Deserialize, Serialize};
 
 const JOIN_SIGN_DOMAIN: &[u8] = b"swarmcraft/join-request/v1\0";
+const LEAVE_SIGN_DOMAIN: &[u8] = b"swarmcraft/leave-request/v1\0";
 const SLEEP_SIGN_DOMAIN: &[u8] = b"swarmcraft/sleep-record/v1\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +33,40 @@ impl JoinRequestV1 {
         let encoded = postcard::to_allocvec(&unsigned)?;
         let mut bytes = Vec::with_capacity(JOIN_SIGN_DOMAIN.len() + encoded.len());
         bytes.extend_from_slice(JOIN_SIGN_DOMAIN);
+        bytes.extend_from_slice(&encoded);
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaveRequestV1 {
+    pub protocol_version: u16,
+    pub world_id: WorldId,
+    pub membership_hash: Hash32,
+    pub leaving_peer_id: PeerId,
+    pub leaving_public_key: [u8; 32],
+    pub nonce: [u8; 32],
+    pub signature: Vec<u8>,
+}
+
+impl LeaveRequestV1 {
+    pub fn validate_shape(&self) -> bool {
+        self.protocol_version == PROTOCOL_VERSION
+            && peer_id_from_public_key(&self.leaving_public_key) == self.leaving_peer_id
+    }
+
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, ProtocolError> {
+        let unsigned = (
+            self.protocol_version,
+            self.world_id,
+            self.membership_hash,
+            self.leaving_peer_id,
+            self.leaving_public_key,
+            self.nonce,
+        );
+        let encoded = postcard::to_allocvec(&unsigned)?;
+        let mut bytes = Vec::with_capacity(LEAVE_SIGN_DOMAIN.len() + encoded.len());
+        bytes.extend_from_slice(LEAVE_SIGN_DOMAIN);
         bytes.extend_from_slice(&encoded);
         Ok(bytes)
     }

@@ -30,6 +30,89 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
+  desktop:
+    name: Desktop package (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Build bundled runtimes
+        run: cargo build --release -p swarm-cli
+      - name: Stage Linux sidecars
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
+          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+          "apps/desktop/src-tauri/binaries/swarmcraft-$target" --version
+          "apps/desktop/src-tauri/binaries/swarmcraft-host-$target" --version
+      - name: Stage Windows sidecars
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $target = (rustc --print host-tuple).Trim()
+          New-Item -ItemType Directory -Force -Path apps/desktop/src-tauri/binaries | Out-Null
+          Copy-Item target/release/swarmcraft.exe "apps/desktop/src-tauri/binaries/swarmcraft-$target.exe"
+          Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"
+          & "apps/desktop/src-tauri/binaries/swarmcraft-$target.exe" --version
+          & "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe" --version
+      - name: Build Linux DEB and AppImage
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        run: cargo tauri build --bundles deb,appimage --ci
+      - name: Build Windows NSIS installer
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        run: cargo tauri build --bundles nsis --ci
+      - name: Upload native packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: swarmcraft-desktop-${{ matrix.os }}
+          path: apps/desktop/src-tauri/target/release/bundle/**
+          if-no-files-found: error
+
+  fabric:
+    name: Fabric server mod
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: minecraft/fabric
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+      - name: Build Fabric mod
+        run: gradle build --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swarmcraft-fabric
+          path: minecraft/fabric/build/libs/*.jar
+          if-no-files-found: error
+
   dependency-audit:
     name: Rust dependency audit
     runs-on: ubuntu-latest

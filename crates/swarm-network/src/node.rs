@@ -1,20 +1,23 @@
 use crate::{verify_peer_hello, wire::WireRequest, wire::WireResponse};
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
+use libp2p::multiaddr::Protocol;
 use libp2p::{
-    identify,
+    autonat, dcutr, identify,
     identity::Keypair,
     kad::{self, store::MemoryStore},
-    mdns, ping,
+    mdns, noise, ping, relay,
     request_response::{self, cbor, ProtocolSupport},
     swarm::{dial_opts::DialOpts, NetworkBehaviour, SwarmEvent},
-    Multiaddr, PeerId as TransportPeerId, StreamProtocol, Swarm, SwarmBuilder,
+    tcp, yamux, Multiaddr, PeerId as TransportPeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, env, time::Duration};
 use swarm_protocol::{PeerHelloV1, PeerId, PROTOCOL_VERSION};
 use tracing::{debug, info, warn};
 
 pub const WIRE_PROTOCOL: &str = "/swarmcraft/1";
+pub const BOOTSTRAP_ENV: &str = "SWARMCRAFT_BOOTSTRAP";
+pub const RELAY_ENV: &str = "SWARMCRAFT_RELAY";
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
@@ -23,25 +26,9 @@ struct Behaviour {
     identify: identify::Behaviour,
     ping: ping::Behaviour,
     kad: kad::Behaviour<MemoryStore>,
-}
-
-impl Behaviour {
-    fn new(key: &Keypair) -> Result<Self> {
-        let local_peer = key.public().to_peer_id();
-        let request_response = cbor::Behaviour::new(
-            [(StreamProtocol::new(WIRE_PROTOCOL), ProtocolSupport::Full)],
-            request_response::Config::default()
-                .with_request_timeout(Duration::from_secs(30))
-                .with_max_concurrent_streams(128),
-        );
-        let mdns =
-            mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer).context("failed to initialize mDNS")?;
-        let identify = identify::Behaviour::new(identify::Config::new(WIRE_PROTOCOL.to_owned(), key.public()));
-        let mut kad_config = kad::Config::default();
-        kad_config.set_query_timeout(Duration::from_secs(30));
-        let kad = kad::Behaviour::with_config(local_peer, MemoryStore::new(local_peer), kad_config);
-        Ok(Self { request_response, mdns, identify, ping: ping::Behaviour::default(), kad })
-    }
+    relay_client: relay::client::Behaviour,
+    dcutr: dcutr::Behaviour,
+    auto_nat: autonat::Behaviour,
 }
 
 #[derive(Debug)]
@@ -89,13 +76,53 @@ pub struct SwarmNode {
 impl SwarmNode {
     pub fn new(transport_key: Keypair, local_hello: PeerHelloV1) -> Result<Self> {
         verify_peer_hello(&local_hello).context("local peer hello must be valid before networking starts")?;
-        let behaviour = Behaviour::new(&transport_key)?;
+
+        let local_peer = transport_key.public().to_peer_id();
+        let request_response = cbor::Behaviour::new(
+            [(StreamProtocol::new(WIRE_PROTOCOL), ProtocolSupport::Full)],
+            request_response::Config::default()
+                .with_request_timeout(Duration::from_secs(30))
+                .with_max_concurrent_streams(128),
+        );
+        let mdns =
+            mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer).context("failed to initialize mDNS")?;
+        let identify =
+            identify::Behaviour::new(identify::Config::new(WIRE_PROTOCOL.to_owned(), transport_key.public()));
+        let mut kad_config = kad::Config::default();
+        kad_config.set_query_timeout(Duration::from_secs(30));
+        let kad = kad::Behaviour::with_config(local_peer, MemoryStore::new(local_peer), kad_config);
+        let dcutr = dcutr::Behaviour::new(local_peer);
+        let auto_nat = autonat::Behaviour::new(
+            local_peer,
+            autonat::Config {
+                retry_interval: Duration::from_secs(15),
+                refresh_interval: Duration::from_secs(60),
+                boot_delay: Duration::from_secs(5),
+                ..Default::default()
+            },
+        );
+
         let swarm = SwarmBuilder::with_existing_identity(transport_key)
             .with_tokio()
+            .with_tcp(tcp::Config::default().nodelay(true), noise::Config::new, yamux::Config::default)?
             .with_quic()
-            .with_behaviour(move |_| behaviour)?
+            .with_dns()?
+            .with_relay_client(noise::Config::new, yamux::Config::default)?
+            .with_behaviour(move |_, relay_client| Behaviour {
+                request_response,
+                mdns,
+                identify,
+                ping: ping::Behaviour::default(),
+                kad,
+                relay_client,
+                dcutr,
+                auto_nat,
+            })?
             .build();
-        Ok(Self { swarm, local_hello, authenticated: HashMap::new() })
+
+        let mut node = Self { swarm, local_hello, authenticated: HashMap::new() };
+        node.configure_from_environment()?;
+        Ok(node)
     }
 
     pub fn local_transport_peer_id(&self) -> TransportPeerId {
@@ -111,6 +138,9 @@ impl SwarmNode {
     }
 
     pub fn dial(&mut self, address: Multiaddr) -> Result<()> {
+        if let Some(peer) = transport_peer_from_address(&address) {
+            self.swarm.behaviour_mut().kad.add_address(&peer, address.clone());
+        }
         self.swarm.dial(address).context("failed to dial peer")
     }
 
@@ -123,8 +153,66 @@ impl SwarmNode {
         self.swarm.behaviour_mut().kad.add_address(&peer, address);
     }
 
+    pub fn add_bootstrap_address(&mut self, address: Multiaddr) -> Result<TransportPeerId> {
+        let peer = transport_peer_from_address(&address).context("bootstrap address must contain /p2p/<peer-id>")?;
+        self.add_bootstrap_peer(peer, address.clone());
+        if !self.swarm.is_connected(&peer) {
+            self.swarm.dial(address).context("failed to dial bootstrap peer")?;
+        }
+        Ok(peer)
+    }
+
     pub fn bootstrap(&mut self) -> Result<()> {
         self.swarm.behaviour_mut().kad.bootstrap().map(|_| ()).context("Kademlia bootstrap failed")
+    }
+
+    pub fn configure_relay(&mut self, relay_peer: TransportPeerId, relay_address: Multiaddr) -> Result<()> {
+        let relay_address = ensure_peer_suffix(relay_address, relay_peer);
+        self.swarm.behaviour_mut().kad.add_address(&relay_peer, relay_address.clone());
+        self.swarm.behaviour_mut().auto_nat.add_server(relay_peer, Some(relay_address.clone()));
+        if !self.swarm.is_connected(&relay_peer) {
+            self.swarm.dial(relay_address.clone()).context("failed to dial relay")?;
+        }
+        self.swarm
+            .listen_on(relay_address.with(Protocol::P2pCircuit))
+            .map(|_| ())
+            .context("failed to request relay reservation")
+    }
+
+    pub fn configure_relay_address(&mut self, address: Multiaddr) -> Result<TransportPeerId> {
+        let peer = transport_peer_from_address(&address).context("relay address must contain /p2p/<peer-id>")?;
+        self.configure_relay(peer, address)?;
+        Ok(peer)
+    }
+
+    pub fn dial_via_relay(
+        &mut self,
+        relay_peer: TransportPeerId,
+        relay_address: Multiaddr,
+        remote_peer: TransportPeerId,
+    ) -> Result<()> {
+        let address =
+            ensure_peer_suffix(relay_address, relay_peer).with(Protocol::P2pCircuit).with(Protocol::P2p(remote_peer));
+        self.swarm.dial(address).context("failed to dial peer through relay")
+    }
+
+    pub fn add_autonat_server(&mut self, peer: TransportPeerId, address: Multiaddr) {
+        self.swarm.behaviour_mut().auto_nat.add_server(peer, Some(address));
+    }
+
+    pub fn configure_from_environment(&mut self) -> Result<()> {
+        let bootstraps = configured_multiaddrs(BOOTSTRAP_ENV)?;
+        for address in &bootstraps {
+            self.add_bootstrap_address(address.clone())?;
+        }
+        if !bootstraps.is_empty() {
+            self.bootstrap()?;
+        }
+
+        for address in configured_multiaddrs(RELAY_ENV)? {
+            self.configure_relay_address(address)?;
+        }
+        Ok(())
     }
 
     pub fn send_request(
@@ -248,6 +336,15 @@ impl SwarmNode {
                     }
                     request_response::Event::ResponseSent { .. } => {}
                 },
+                SwarmEvent::Behaviour(BehaviourEvent::RelayClient(event)) => {
+                    debug!(?event, "relay client event");
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Dcutr(event)) => {
+                    info!(?event, "DCUtR hole-punch event");
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::AutoNat(event)) => {
+                    debug!(?event, "AutoNAT event");
+                }
                 SwarmEvent::Behaviour(BehaviourEvent::Kad(_))
                 | SwarmEvent::Behaviour(BehaviourEvent::Ping(_))
                 | SwarmEvent::Behaviour(BehaviourEvent::Identify(_)) => {}
@@ -255,4 +352,35 @@ impl SwarmNode {
             }
         }
     }
+}
+
+fn configured_multiaddrs(name: &str) -> Result<Vec<Multiaddr>> {
+    let Some(value) = env::var_os(name) else {
+        return Ok(Vec::new());
+    };
+    let value = value.to_string_lossy();
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.parse::<Multiaddr>().with_context(|| format!("invalid {name} multiaddress: {value}")))
+        .collect()
+}
+
+fn ensure_peer_suffix(mut address: Multiaddr, peer: TransportPeerId) -> Multiaddr {
+    let has_peer = address.iter().any(|protocol| matches!(protocol, Protocol::P2p(value) if value == peer));
+    if !has_peer {
+        address.push(Protocol::P2p(peer));
+    }
+    address
+}
+
+fn transport_peer_from_address(address: &Multiaddr) -> Option<TransportPeerId> {
+    address
+        .iter()
+        .filter_map(|protocol| match protocol {
+            Protocol::P2p(peer) => Some(peer),
+            _ => None,
+        })
+        .last()
 }

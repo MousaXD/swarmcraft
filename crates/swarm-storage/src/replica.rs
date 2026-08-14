@@ -109,7 +109,7 @@ impl Storage {
         if !self.missing_blobs(manifest).is_empty() {
             return Err(ReplicationError::Incomplete(manifest.snapshot_number));
         }
-        self.commit_snapshot(manifest)?;
+        self.commit_snapshot_streaming(manifest)?;
         Ok(())
     }
 }

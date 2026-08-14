@@ -1,0 +1,154 @@
+name: Preview Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Linux preview bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Build Rust runtimes
+        run: cargo build --release --workspace
+      - name: Stage Tauri sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
+          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+      - name: Build native Linux packages
+        working-directory: apps/desktop
+        run: cargo tauri build --bundles deb,appimage --ci
+      - name: Package Linux portable bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="swarmcraft-${GITHUB_REF_NAME}-linux-x86_64"
+          mkdir -p "dist/$bundle"
+          cp target/release/swarmcraft "dist/$bundle/"
+          cp target/release/swarmcraft-host "dist/$bundle/"
+          cp apps/desktop/src-tauri/target/release/swarmcraft-desktop "dist/$bundle/"
+          cp README.md LICENSE "dist/$bundle/"
+          tar -C dist -czf "dist/$bundle.tar.gz" "$bundle"
+          find apps/desktop/src-tauri/target/release/bundle -type f \( -name '*.deb' -o -name '*.AppImage' \) -exec cp {} dist/ \;
+          for file in dist/*.tar.gz dist/*.deb dist/*.AppImage; do
+            sha256sum "$file" > "$file.sha256"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-preview
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.sha256
+          if-no-files-found: error
+
+  windows:
+    name: Windows preview bundle
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Build Rust runtimes
+        run: cargo build --release --workspace
+      - name: Stage Tauri sidecars
+        shell: pwsh
+        run: |
+          $target = (rustc --print host-tuple).Trim()
+          New-Item -ItemType Directory -Force -Path apps/desktop/src-tauri/binaries | Out-Null
+          Copy-Item target/release/swarmcraft.exe "apps/desktop/src-tauri/binaries/swarmcraft-$target.exe"
+          Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"
+      - name: Build native Windows installer
+        working-directory: apps/desktop
+        run: cargo tauri build --bundles nsis --ci
+      - name: Package Windows portable bundle
+        shell: pwsh
+        run: |
+          $bundle = "swarmcraft-$env:GITHUB_REF_NAME-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path "dist/$bundle" | Out-Null
+          Copy-Item target/release/swarmcraft.exe "dist/$bundle/"
+          Copy-Item target/release/swarmcraft-host.exe "dist/$bundle/"
+          Copy-Item apps/desktop/src-tauri/target/release/swarmcraft-desktop.exe "dist/$bundle/"
+          Copy-Item README.md, LICENSE "dist/$bundle/"
+          Compress-Archive -Path "dist/$bundle/*" -DestinationPath "dist/$bundle.zip"
+          Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis -File -Filter *.exe | Copy-Item -Destination dist
+          Get-ChildItem dist -File | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Set-Content -NoNewline "$($_.FullName).sha256"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-preview
+          path: |
+            dist/*.zip
+            dist/*.exe
+            dist/*.sha256
+          if-no-files-found: error
+
+  fabric:
+    name: Fabric bridge jar
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: minecraft/fabric
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+      - name: Build Fabric bridge
+        run: gradle build --stacktrace
+      - name: Stage Fabric jar and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ../../dist
+          cp build/libs/swarmcraft-fabric-0.1.0-preview.jar ../../dist/
+          (cd ../../dist && sha256sum swarmcraft-fabric-0.1.0-preview.jar > swarmcraft-fabric-0.1.0-preview.jar.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fabric-preview
+          path: |
+            dist/*.jar
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub prerelease
+    needs: [linux, windows, fabric]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Collect release assets
+        run: |
+          mkdir release-assets
+          find dist -type f -exec cp {} release-assets/ \;
+          ls -la release-assets
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --prerelease --generate-notes --title "SwarmCraft $GITHUB_REF_NAME"

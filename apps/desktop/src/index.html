@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SwarmCraft</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">SWARMCRAFT v0.1.0 PREVIEW</p>
+      <h1>Your Minecraft world, carried by the swarm.</h1>
+      <p class="sub">Verified replicas, one fenced authority, quorum-backed crash recovery, durable sleep, and wake from any surviving canonical replica.</p>
+    </header>
+
+    <section class="card actions">
+      <div>
+        <h2>Local node</h2>
+        <pre id="identity">Not initialized.</pre>
+      </div>
+      <button id="init">Initialize</button>
+      <button id="identityButton" class="secondary">Identity</button>
+      <button id="refresh">Refresh worlds</button>
+    </section>
+
+    <section class="card">
+      <h2>Local worlds</h2>
+      <pre id="worlds">No data yet.</pre>
+    </section>
+
+    <section class="card form-card">
+      <h2>Replication daemon</h2>
+      <label>Listen multiaddress <input id="daemonListen" value="/ip4/0.0.0.0/udp/0/quic-v1" /></label>
+      <div class="button-row">
+        <button id="startDaemon">Start daemon</button>
+        <button id="stopDaemon" class="danger">Stop daemon</button>
+      </div>
+      <p class="hint">Internet bootstrap and relay can also be supplied through SWARMCRAFT_BOOTSTRAP and SWARMCRAFT_RELAY.</p>
+    </section>
+
+    <div class="grid two">
+      <section class="card form-card">
+        <h2>Create world</h2>
+        <label>Name <input id="createName" placeholder="My swarm world" /></label>
+        <label>Minecraft <input id="createMinecraft" value="26.1.2" /></label>
+        <label>Fabric loader <input id="createLoader" value="0.19.3" /></label>
+        <label>Compatibility material <input id="createCompatibility" value="vanilla-fabric" /></label>
+        <button id="createWorld">Create</button>
+      </section>
+
+      <section class="card form-card">
+        <h2>Join world</h2>
+        <label>Signed invite <textarea id="joinInvite" rows="6" placeholder="scinvite:…"></textarea></label>
+        <button id="joinWorld">Stage join request</button>
+        <p class="hint">The daemon contacts the current authority. Joining never self-authorizes locally.</p>
+      </section>
+    </div>
+
+    <section class="card form-card">
+      <h2>World control</h2>
+      <label>World ID <input id="world" placeholder="scworld:…" /></label>
+      <div class="button-row">
+        <button id="worldStatus">Status</button>
+        <button id="worldPeers" class="secondary">Peers</button>
+        <button id="verifyWorld" class="secondary">Verify</button>
+        <button id="leaveWorld" class="danger">Leave</button>
+      </div>
+
+      <div class="grid two compact">
+        <div class="form-card inset">
+          <h3>Create invite</h3>
+          <label>Expires in minutes <input id="inviteMinutes" type="number" min="1" value="60" /></label>
+          <label>Bootstrap addresses, one per line <textarea id="bootstrapAddrs" rows="3" placeholder="/ip4/…/p2p/…"></textarea></label>
+          <button id="createInvite">Create signed invite</button>
+        </div>
+        <div class="form-card inset">
+          <h3>Recovery / export</h3>
+          <label>Destination <input id="destination" placeholder="/path/to/world-export" /></label>
+          <label>Snapshot number <input id="snapshotNumber" type="number" min="1" value="1" /></label>
+          <div class="button-row">
+            <button id="exportWorld">Export latest</button>
+            <button id="recoverWorld" class="secondary">Recover snapshot</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card form-card">
+      <h2>Authority runtime</h2>
+      <label>Java executable <input id="java" value="java" /></label>
+      <label>Fabric server jar <input id="serverJar" placeholder="/path/to/fabric-server.jar" /></label>
+      <label>SwarmCraft Fabric mod jar <input id="modJar" placeholder="/path/to/swarmcraft-fabric.jar" /></label>
+      <label class="check"><input id="eula" type="checkbox" /> I have reviewed and accept the Minecraft server EULA.</label>
+      <div class="button-row">
+        <button id="host">Start authority runtime</button>
+        <button id="stopHost" class="danger">Stop authority runtime</button>
+      </div>
+      <p class="hint">For multi-peer crash recovery, keep the replication daemon running. The authority permit fences stale servers.</p>
+    </section>
+
+    <section class="card console-card">
+      <div class="console-head">
+        <h2>Output</h2>
+        <span id="status">Ready.</span>
+      </div>
+      <pre id="output">SwarmCraft preview control surface ready.</pre>
+    </section>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

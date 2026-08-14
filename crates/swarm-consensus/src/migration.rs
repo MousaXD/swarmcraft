@@ -48,8 +48,8 @@ pub enum LeaseError {
     SnapshotNotReady,
     #[error("candidate is incompatible or not authority eligible")]
     Ineligible,
-    #[error("solo takeover delay has not elapsed")]
-    SoloDelay,
+    #[error("automatic crash takeover requires the configured quorum")]
+    NoQuorum,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,12 +61,11 @@ pub enum TakeoverMode {
 #[derive(Debug, Clone, Copy)]
 pub struct TakeoverPolicy {
     pub quorum_size: usize,
-    pub solo_extra_delay: Duration,
 }
 
 impl Default for TakeoverPolicy {
     fn default() -> Self {
-        Self { quorum_size: 2, solo_extra_delay: Duration::from_secs(15) }
+        Self { quorum_size: 2 }
     }
 }
 
@@ -102,20 +101,15 @@ pub fn evaluate_crash_takeover(
     if !candidate.candidate.compatible || !candidate.candidate.authority_eligible || candidate.candidate.banned {
         return Err(LeaseError::Ineligible);
     }
-    let mode = if candidate.peer_votes >= policy.quorum_size {
-        TakeoverMode::Quorum
-    } else {
-        if now < current_lease.expires_at() + policy.solo_extra_delay {
-            return Err(LeaseError::SoloDelay);
-        }
-        TakeoverMode::Solo
-    };
+    if candidate.peer_votes < policy.quorum_size {
+        return Err(LeaseError::NoQuorum);
+    }
     Ok(AuthorityGeneration {
         authority_peer_id: candidate.candidate.peer_id,
         epoch: current_lease.epoch() + 1,
         fencing_token: current_lease.fencing_token() + 1,
         base_snapshot_hash: required_snapshot_hash,
-        mode,
+        mode: TakeoverMode::Quorum,
     })
 }
 
