@@ -1325,9 +1325,7 @@ fn authorize_manifest(storage: &Storage, sender: PeerId, manifest: &SnapshotMani
 }
 
 fn authorize_epoch(storage: &Storage, sender: PeerId, record: &EpochRecordV1) -> Result<()> {
-    if sender != record.authority_peer_id {
-        return Err(anyhow!("epoch sender is not the signed authority"));
-    }
+    authorize_member(storage, record.world_id, sender)?;
     authorize_member(storage, record.world_id, record.authority_peer_id)?;
     let descriptor = storage.load_world_descriptor(record.world_id)?;
     let authority = descriptor.member(record.authority_peer_id).context("epoch authority is not a member")?;
