@@ -10,7 +10,7 @@ use std::{
 use swarm_core::{create_world_genesis, random_nonce, DataPaths, PeerIdentity};
 use swarm_network::load_or_create_transport_key;
 use swarm_protocol::{
-    EpochMode, EpochRecordV1, InviteV1, JoinRequestV1, MembershipRecordV1, WorldDescriptorV1, WorldId, WorldMemberV1,
+    EpochMode, EpochRecordV1, InviteV1, JoinRequestV1, MembershipRecordV1, WorldDescriptorV1, WorldMemberV1,
     PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
