@@ -7,7 +7,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use swarm_core::{create_world_genesis, lifecycle::sign_join_request, random_nonce, DataPaths, PeerIdentity};
+use swarm_core::{create_world_genesis, random_nonce, DataPaths, PeerIdentity};
 use swarm_network::load_or_create_transport_key;
 use swarm_protocol::{
     EpochMode, EpochRecordV1, InviteV1, JoinRequestV1, MembershipRecordV1, WorldDescriptorV1, WorldId, WorldMemberV1,
@@ -185,12 +185,11 @@ fn authority_accepts_live_join_and_replicates_without_reconnect() {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
         invite,
-        joining_peer_id: b.identity.peer_id(),
-        joining_public_key: b.identity.public_key(),
-        authority_eligible: true,
+        joining_member: member(&b.identity),
+        nonce: random_nonce(),
         signature: Vec::new(),
     };
-    sign_join_request(&b.identity, &mut join).unwrap();
+    b.identity.sign_join_request(&mut join).unwrap();
     b.storage.save_pending_join(&join).unwrap();
 
     let _daemon_a = spawn_daemon(&a);
