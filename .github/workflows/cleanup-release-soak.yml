@@ -1,0 +1,27 @@
+name: One-shot release soak cleanup
+
+on:
+  push:
+    branches: [feat/runtime-release]
+    paths: ['.github/workflows/cleanup-release-soak.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/runtime-release
+          fetch-depth: 0
+      - name: Remove temporary release workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/storage-release-soak.yml .github/workflows/cleanup-release-soak.yml
+          git config user.name 'MousaXD'
+          git config user.email '101021011+MousaXD@users.noreply.github.com'
+          git commit -m 'chore: remove temporary release soak workflows'
+          git push origin HEAD:feat/runtime-release
