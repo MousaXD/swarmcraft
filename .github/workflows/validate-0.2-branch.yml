@@ -21,7 +21,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for script in .github/scripts/fix_state_test_ids.py .github/scripts/apply_v020_runtime.py; do
+          for script in \
+            .github/scripts/fix_state_test_ids.py \
+            .github/scripts/apply_v020_runtime.py \
+            .github/scripts/apply_v020_solo.py; do
             if [[ -f "$script" ]]; then
               python "$script"
             fi
@@ -33,7 +36,7 @@ jobs:
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add -A
-            git commit -m 'feat(runtime): wire 0.2 compatibility and diagnostics'
+            git commit -m 'feat(consensus): wire explicit solo mode and runtime compatibility'
             git push origin HEAD:feat/swarmcraft-0.2.0
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           fi
