@@ -5,9 +5,16 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use swarm_cli::authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL};
-use swarm_consensus::{elect_authority, has_quorum, AuthorityCandidate, AuthorityGeneration};
+use swarm_consensus::{
+    elect_authority, has_quorum, reconcile_solo_history, validate_recovery_certificate_shape, AuthorityCandidate,
+    AuthorityGeneration, SoloReconciliation,
+};
 use swarm_core::{
     lifecycle::{verify_join_request_signature, verify_leave_request_signature, verify_sleep_record_signature},
+    protocol_v2::{
+        sign_recovery_ballot, sign_recovery_vote, verify_recovery_ballot_signature, verify_recovery_vote_signature,
+        verify_solo_branch_signature, verify_world_config_signature,
+    },
     random_nonce, verify_invite_signature, verify_lease_signature, verify_membership_signature, verify_signature,
     verify_snapshot_signature, verify_transfer_signature, DataPaths, PeerIdentity,
 };
@@ -17,9 +24,10 @@ use swarm_network::{
 };
 use swarm_protocol::{
     AuthorityLeaseGrantV1, BlobDescriptor, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, PeerId,
-    SnapshotManifestV1, TransferPhase, WorldDescriptorV1, WorldId, WorldStatusV1, PROTOCOL_VERSION,
+    RecoveryBallotV1, RecoveryCertificateV1, RecoveryVoteV1, SnapshotManifestV1, TransferPhase, WorldDescriptorV1,
+    WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
-use swarm_storage::Storage;
+use swarm_storage::{RecoveryPromiseResult, Storage};
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
@@ -31,7 +39,7 @@ const STATUS_FRESHNESS: Duration = Duration::from_secs(3);
 enum OutboundContext {
     Manifest { world: WorldId, snapshot_number: u64 },
     Lease { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
-    Reservation { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
+    RecoveryBallot { world: WorldId, peer: PeerId, ballot_hash: Hash32 },
     Epoch { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
     Status { world: WorldId, peer: PeerId },
 }
@@ -58,7 +66,9 @@ struct ObservedStatus {
 struct LeaseRuntime {
     authenticated_peers: HashMap<TransportPeerId, PeerId>,
     lease_acks: HashMap<(WorldId, PeerId), LeaseAck>,
-    reservation_acks: HashMap<(WorldId, PeerId), AuthorityGeneration>,
+    recovery_ballots: HashMap<WorldId, RecoveryBallotV1>,
+    recovery_votes: HashMap<(WorldId, PeerId), RecoveryVoteV1>,
+    recovery_round_floor: HashMap<WorldId, u64>,
     epoch_acks: HashMap<(WorldId, PeerId), AuthorityGeneration>,
     permit_heartbeats: HashMap<WorldId, u64>,
     inbound_leases: HashMap<WorldId, InboundLease>,
@@ -101,6 +111,10 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
         "epoch-v1".into(),
         "sleep-wake-v1".into(),
         "relay-dcutr-v1".into(),
+        "recovery-ballot-v1".into(),
+        "world-config-v1".into(),
+        "solo-history-v1".into(),
+        "background-replica-v1".into(),
     ])?;
     let mut node = SwarmNode::new(transport_key, hello)?;
     node.listen(listen.parse().context("invalid listen multiaddress")?)?;
@@ -176,8 +190,8 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                                 OutboundContext::Lease { world, peer, .. } => {
                                     leases.lease_acks.remove(&(world, peer));
                                 }
-                                OutboundContext::Reservation { world, peer, .. } => {
-                                    leases.reservation_acks.remove(&(world, peer));
+                                OutboundContext::RecoveryBallot { world, peer, .. } => {
+                                    leases.recovery_votes.remove(&(world, peer));
                                 }
                                 OutboundContext::Epoch { world, peer, .. } => {
                                     leases.epoch_acks.remove(&(world, peer));
@@ -193,7 +207,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                     NetworkEvent::Disconnected { transport_peer } => {
                         if let Some(application_peer) = leases.authenticated_peers.remove(&transport_peer) {
                             leases.lease_acks.retain(|(_, peer), _| *peer != application_peer);
-                            leases.reservation_acks.retain(|(_, peer), _| *peer != application_peer);
+                            leases.recovery_votes.retain(|(_, peer), _| *peer != application_peer);
                             leases.epoch_acks.retain(|(_, peer), _| *peer != application_peer);
                             leases.peer_status.retain(|(_, peer), _| *peer != application_peer);
                         }
@@ -348,54 +362,158 @@ fn maintain_authority_leases(
             epoch: generation.epoch.saturating_add(1),
             fencing_token: generation.fencing_token.saturating_add(1),
         };
-        let reservation = signed_lease(identity, world, recovery_generation)?;
-        if !storage.reserve_recovery(&reservation)? {
-            continue;
-        }
-
-        for (transport_peer, application_peer) in &runtime.authenticated_peers {
-            if *application_peer == identity.peer_id() || !visible_peers.contains(application_peer) {
-                continue;
-            }
-            if reservation_request_pending(outbound, world, *application_peer, recovery_generation) {
-                continue;
-            }
-            let request_id = node.send_request(transport_peer, WireRequest::LeaseGrant(reservation.clone()))?;
-            outbound.insert(
-                request_key(&request_id),
-                OutboundContext::Reservation { world, peer: *application_peer, generation: recovery_generation },
-            );
-        }
-
-        let confirmed = 1 + visible_peers
-            .iter()
-            .filter(|peer| **peer != identity.peer_id())
-            .filter(|peer| runtime.reservation_acks.get(&(world, **peer)) == Some(&recovery_generation))
-            .count();
-        if !has_quorum(member_count, confirmed) {
-            continue;
-        }
-
-        let next = promote_recovery_epoch(storage, identity, &epoch, &latest)?;
-        ensure_recovery_artifacts(storage, identity, &next)?;
-        runtime.lease_acks.retain(|(ack_world, _), _| *ack_world != world);
-        runtime.reservation_acks.retain(|(ack_world, _), _| *ack_world != world);
-        runtime.epoch_acks.retain(|(ack_world, _), _| *ack_world != world);
-        runtime.inbound_leases.remove(&world);
-        runtime.recovery_replication_sent.retain(|(replica_world, _)| *replica_world != world);
-        storage.clear_recovery_reservation(world)?;
-        for (transport_peer, application_peer) in &runtime.authenticated_peers {
-            if *application_peer == identity.peer_id() || !visible_peers.contains(application_peer) {
-                continue;
-            }
-            let request_id = node.send_request(transport_peer, WireRequest::Epoch(next.clone()))?;
-            outbound.insert(
-                request_key(&request_id),
-                OutboundContext::Epoch { world, peer: *application_peer, generation: recovery_generation },
-            );
-        }
-        info!(world = %world, epoch = next.epoch_number, peer = %identity.peer_id(), "authority recovered after quorum reservation");
+        drive_recovery_ballot(
+            storage,
+            identity,
+            node,
+            outbound,
+            runtime,
+            &descriptor,
+            &epoch,
+            &latest,
+            &visible_peers,
+            recovery_generation,
+        )?;
     }
+    Ok(())
+}
+
+fn drive_recovery_ballot(
+    storage: &Storage,
+    identity: &PeerIdentity,
+    node: &mut SwarmNode,
+    outbound: &mut HashMap<String, OutboundContext>,
+    runtime: &mut LeaseRuntime,
+    descriptor: &WorldDescriptorV1,
+    previous: &EpochRecordV1,
+    latest: &SnapshotManifestV1,
+    visible_peers: &[PeerId],
+    recovery_generation: AuthorityGeneration,
+) -> Result<()> {
+    let world = descriptor.world_id;
+    let base_snapshot_hash = latest.manifest_hash()?;
+    let membership = storage.load_membership_record(world)?;
+    verify_membership_signature(&membership)?;
+    let membership_hash = membership.record_hash()?;
+    let durable_round = storage.load_recovery_promise(world).map_or(0, |promise| promise.ballot.round);
+    let floor = runtime.recovery_round_floor.get(&world).copied().unwrap_or(0).max(durable_round);
+    let active_is_usable = runtime.recovery_ballots.get(&world).is_some_and(|ballot| {
+        ballot.base_epoch == previous.epoch_number
+            && ballot.base_fencing_token == previous.fencing_token
+            && ballot.target_epoch == recovery_generation.epoch
+            && ballot.target_fencing_token == recovery_generation.fencing_token
+            && ballot.candidate_peer_id == identity.peer_id()
+            && ballot.base_snapshot_hash == base_snapshot_hash
+            && ballot.base_state_hash == latest.state_root
+            && ballot.membership_hash == membership_hash
+            && ballot.round >= floor
+    });
+
+    if !active_is_usable {
+        let round = floor.saturating_add(1).max(1);
+        let mut ballot = RecoveryBallotV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            base_epoch: previous.epoch_number,
+            base_fencing_token: previous.fencing_token,
+            target_epoch: recovery_generation.epoch,
+            target_fencing_token: recovery_generation.fencing_token,
+            round,
+            candidate_peer_id: identity.peer_id(),
+            candidate_public_key: identity.public_key(),
+            base_snapshot_hash,
+            base_state_hash: latest.state_root,
+            membership_hash,
+            signature: Vec::new(),
+        };
+        sign_recovery_ballot(identity, &mut ballot)?;
+        let mut local_vote = RecoveryVoteV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            ballot_hash: ballot.ballot_hash()?,
+            base_epoch: ballot.base_epoch,
+            target_epoch: ballot.target_epoch,
+            round: ballot.round,
+            candidate_peer_id: ballot.candidate_peer_id,
+            voter_peer_id: identity.peer_id(),
+            voter_public_key: identity.public_key(),
+            signature: Vec::new(),
+        };
+        sign_recovery_vote(identity, &mut local_vote)?;
+        match storage.promise_recovery_ballot(&ballot, &local_vote)? {
+            RecoveryPromiseResult::Accepted => {}
+            RecoveryPromiseResult::Idempotent => {
+                local_vote = storage.load_recovery_promise(world)?.vote;
+            }
+            RecoveryPromiseResult::Rejected { highest_round } => {
+                runtime.recovery_round_floor.insert(world, highest_round);
+                return Ok(());
+            }
+        }
+        runtime.recovery_votes.retain(|(vote_world, _), _| *vote_world != world);
+        runtime.recovery_votes.insert((world, identity.peer_id()), local_vote);
+        runtime.recovery_ballots.insert(world, ballot);
+    }
+
+    let ballot = runtime.recovery_ballots.get(&world).context("active recovery ballot disappeared")?.clone();
+    let ballot_hash = ballot.ballot_hash()?;
+    for (transport_peer, application_peer) in &runtime.authenticated_peers {
+        if *application_peer == identity.peer_id() || !visible_peers.contains(application_peer) {
+            continue;
+        }
+        if recovery_ballot_request_pending(outbound, world, *application_peer, ballot_hash) {
+            continue;
+        }
+        let request_id = node.send_request(transport_peer, WireRequest::RecoveryBallot(Box::new(ballot.clone())))?;
+        outbound.insert(
+            request_key(&request_id),
+            OutboundContext::RecoveryBallot { world, peer: *application_peer, ballot_hash },
+        );
+    }
+
+    let members =
+        descriptor.members.iter().filter(|member| !member.banned).map(|member| member.peer_id).collect::<Vec<_>>();
+    let votes = runtime
+        .recovery_votes
+        .iter()
+        .filter(|((vote_world, _), vote)| *vote_world == world && vote.matches_ballot(&ballot).unwrap_or(false))
+        .map(|(_, vote)| vote.clone())
+        .collect::<Vec<_>>();
+    if !has_quorum(members.len(), votes.len()) {
+        return Ok(());
+    }
+    let certificate = RecoveryCertificateV1 { ballot: ballot.clone(), votes };
+    validate_recovery_certificate_shape(&certificate, &members)?;
+    for vote in &certificate.votes {
+        verify_recovery_vote_signature(vote)?;
+    }
+
+    // Persist the quorum proof before the epoch. A crash between these writes can
+    // safely retry promotion; the proof itself never grants an older round power.
+    storage.save_recovery_certificate(&certificate)?;
+    let next = promote_recovery_epoch(storage, identity, previous, latest)?;
+    let _ = storage.clear_recovery_promise_after_epoch_advance(world, next.epoch_number)?;
+    runtime.lease_acks.retain(|(ack_world, _), _| *ack_world != world);
+    runtime.epoch_acks.retain(|(ack_world, _), _| *ack_world != world);
+    runtime.inbound_leases.remove(&world);
+    runtime.recovery_replication_sent.retain(|(replica_world, _)| *replica_world != world);
+    runtime.recovery_ballots.remove(&world);
+    runtime.recovery_votes.retain(|(vote_world, _), _| *vote_world != world);
+
+    for (transport_peer, application_peer) in &runtime.authenticated_peers {
+        if *application_peer == identity.peer_id() || !visible_peers.contains(application_peer) {
+            continue;
+        }
+        let request_id = node.send_request(
+            transport_peer,
+            WireRequest::RecoveryEpoch { record: next.clone(), certificate: Box::new(certificate.clone()) },
+        )?;
+        outbound.insert(
+            request_key(&request_id),
+            OutboundContext::Epoch { world, peer: *application_peer, generation: recovery_generation },
+        );
+    }
+    info!(world = %world, epoch = next.epoch_number, round = ballot.round, peer = %identity.peer_id(), "authority recovered with durable quorum ballot");
     Ok(())
 }
 
@@ -460,6 +578,7 @@ fn maintain_local_authority(
         )?;
     }
     context.storage.clear_recovery_reservation(world)?;
+    let _ = context.storage.clear_recovery_promise_after_epoch_advance(world, context.epoch.epoch_number)?;
     Ok(())
 }
 
@@ -470,6 +589,16 @@ fn maintain_recovery_epoch_quorum(
     runtime: &mut LeaseRuntime,
 ) -> Result<bool> {
     let world = context.descriptor.world_id;
+    let certificate = context
+        .storage
+        .load_recovery_certificate(world)
+        .context("accepted recovery epoch is missing its durable quorum certificate")?;
+    if certificate.ballot.target_epoch != context.generation.epoch
+        || certificate.ballot.target_fencing_token != context.generation.fencing_token
+        || certificate.ballot.candidate_peer_id != context.identity.peer_id()
+    {
+        return Err(anyhow!("durable recovery certificate does not match the accepted recovery generation"));
+    }
     for (transport_peer, application_peer) in &runtime.authenticated_peers {
         let Some(member) = context.descriptor.member(*application_peer) else {
             continue;
@@ -482,7 +611,10 @@ fn maintain_recovery_epoch_quorum(
         {
             continue;
         }
-        let request_id = node.send_request(transport_peer, WireRequest::Epoch(context.epoch.clone()))?;
+        let request_id = node.send_request(
+            transport_peer,
+            WireRequest::RecoveryEpoch { record: context.epoch.clone(), certificate: Box::new(certificate.clone()) },
+        )?;
         outbound.insert(
             request_key(&request_id),
             OutboundContext::Epoch { world, peer: *application_peer, generation: context.generation },
@@ -559,50 +691,6 @@ fn recovery_window_open(runtime: &LeaseRuntime, world: WorldId, generation: Auth
     runtime.recovery_not_before.get(&world).is_some_and(|deadline| now >= *deadline)
 }
 
-fn recovery_catchup_has_quorum(
-    storage: &Storage,
-    runtime: &LeaseRuntime,
-    record: &EpochRecordV1,
-    now: Instant,
-) -> Result<bool> {
-    let descriptor = storage.load_world_descriptor(record.world_id)?;
-    let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
-    let Some(candidate_observation) = runtime.peer_status.get(&(record.world_id, record.authority_peer_id)) else {
-        return Ok(false);
-    };
-    if now.saturating_duration_since(candidate_observation.observed_at) > STATUS_FRESHNESS {
-        return Ok(false);
-    }
-    let canonical = &candidate_observation.status;
-    if canonical.world_id != record.world_id
-        || canonical.epoch != record.epoch_number
-        || canonical.latest_snapshot.is_none()
-        || canonical.state_hash != Some(record.base_state_hash)
-        || canonical.compatibility_fingerprint != descriptor.compatibility_fingerprint
-    {
-        return Ok(false);
-    }
-
-    let confirmed = descriptor
-        .members
-        .iter()
-        .filter(|member| !member.banned)
-        .filter(|member| runtime.authenticated_peers.values().any(|peer| *peer == member.peer_id))
-        .filter(|member| {
-            runtime.peer_status.get(&(record.world_id, member.peer_id)).is_some_and(|observed| {
-                now.saturating_duration_since(observed.observed_at) <= STATUS_FRESHNESS
-                    && observed.status.world_id == canonical.world_id
-                    && observed.status.epoch == canonical.epoch
-                    && observed.status.sequence == canonical.sequence
-                    && observed.status.latest_snapshot == canonical.latest_snapshot
-                    && observed.status.state_hash == canonical.state_hash
-                    && observed.status.compatibility_fingerprint == canonical.compatibility_fingerprint
-            })
-        })
-        .count();
-    Ok(has_quorum(member_count, confirmed))
-}
-
 fn promote_recovery_epoch(
     storage: &Storage,
     identity: &PeerIdentity,
@@ -619,7 +707,7 @@ fn promote_recovery_epoch(
         authority_public_key: identity.public_key(),
         mode: EpochMode::Recovery,
         fencing_token: previous.fencing_token.saturating_add(1),
-        reason: "automatic crash recovery after authority lease expiry".into(),
+        reason: "automatic crash recovery after durable quorum ballot".into(),
         signature: Vec::new(),
     };
     next.signature = identity.sign(&next.signing_bytes()?);
@@ -683,7 +771,9 @@ fn ensure_recovery_artifacts(storage: &Storage, identity: &PeerIdentity, epoch: 
 
 fn clear_runtime_world(runtime: &mut LeaseRuntime, world: WorldId) {
     runtime.lease_acks.retain(|(ack_world, _), _| *ack_world != world);
-    runtime.reservation_acks.retain(|(ack_world, _), _| *ack_world != world);
+    runtime.recovery_ballots.remove(&world);
+    runtime.recovery_votes.retain(|(ack_world, _), _| *ack_world != world);
+    runtime.recovery_round_floor.remove(&world);
     runtime.epoch_acks.retain(|(ack_world, _), _| *ack_world != world);
     runtime.peer_status.retain(|(status_world, _), _| *status_world != world);
     runtime.permit_heartbeats.remove(&world);
@@ -710,20 +800,20 @@ fn lease_request_pending(
     })
 }
 
-fn reservation_request_pending(
+fn recovery_ballot_request_pending(
     outbound: &HashMap<String, OutboundContext>,
     world: WorldId,
     peer: PeerId,
-    generation: AuthorityGeneration,
+    ballot_hash: Hash32,
 ) -> bool {
     outbound.values().any(|context| {
         matches!(
             context,
-            OutboundContext::Reservation {
+            OutboundContext::RecoveryBallot {
                 world: request_world,
                 peer: request_peer,
-                generation: request_generation,
-            } if *request_world == world && *request_peer == peer && *request_generation == generation
+                ballot_hash: request_hash,
+            } if *request_world == world && *request_peer == peer && *request_hash == ballot_hash
         )
     })
 }
@@ -804,8 +894,23 @@ fn push_known_worlds(
         if descriptor.member(application_peer).is_none() {
             continue;
         }
+        if let Ok(config) = storage.load_world_config(metadata.world_id) {
+            let _ = node.send_request(transport_peer, WireRequest::WorldConfig(Box::new(config)))?;
+        }
+        if let Ok(branch) = storage.load_solo_branch(metadata.world_id) {
+            let _ = node.send_request(transport_peer, WireRequest::SoloBranch(Box::new(branch)))?;
+        }
         if let Ok(epoch) = storage.load_epoch_record(metadata.world_id) {
-            let _ = node.send_request(transport_peer, WireRequest::Epoch(epoch))?;
+            if epoch.mode == EpochMode::Recovery {
+                if let Ok(certificate) = storage.load_recovery_certificate(metadata.world_id) {
+                    let _ = node.send_request(
+                        transport_peer,
+                        WireRequest::RecoveryEpoch { record: epoch, certificate: Box::new(certificate) },
+                    )?;
+                }
+            } else {
+                let _ = node.send_request(transport_peer, WireRequest::Epoch(epoch))?;
+            }
         }
         if let Ok(membership) = storage.load_membership_record(metadata.world_id) {
             let _ = node.send_request(transport_peer, WireRequest::Membership(membership))?;
@@ -1055,7 +1160,161 @@ fn handle_request(
             }
             node.respond(channel, WireResponse::MembershipAccepted { sequence: record.sequence })?;
         }
+        WireRequest::WorldConfig(config) => {
+            let config = *config;
+            verify_world_config_signature(&config)?;
+            authorize_member(storage, config.world_id, application_peer)?;
+            authorize_member(storage, config.world_id, config.authority_peer_id)?;
+            if application_peer != config.authority_peer_id {
+                return Err(anyhow!("world config must be sent by its signed authority"));
+            }
+            storage.save_world_config(&config)?;
+            node.respond(channel, WireResponse::WorldConfigAccepted { sequence: config.sequence })?;
+        }
+        WireRequest::SoloBranch(branch) => {
+            let branch = *branch;
+            verify_solo_branch_signature(&branch)?;
+            authorize_member(storage, branch.world_id, application_peer)?;
+            authorize_member(storage, branch.world_id, branch.authority_peer_id)?;
+            if application_peer != branch.authority_peer_id {
+                return Err(anyhow!("solo branch must be sent by its signed authority"));
+            }
+            if let Ok(local) = storage.load_solo_branch(branch.world_id) {
+                match reconcile_solo_history(&local, &branch)? {
+                    SoloReconciliation::Equivalent | SoloReconciliation::KeepLocal => {}
+                    SoloReconciliation::AdoptRemote => storage.save_solo_branch(&branch)?,
+                    SoloReconciliation::Conflict => {
+                        storage.preserve_solo_conflict(&local)?;
+                        storage.preserve_solo_conflict(&branch)?;
+                        node.respond(
+                            channel,
+                            WireResponse::Error {
+                                code: "SOLO_HISTORY_CONFLICT".into(),
+                                message: "independently advanced solo histories were preserved; manual resolution is required".into(),
+                            },
+                        )?;
+                        return Ok(());
+                    }
+                }
+            } else {
+                storage.save_solo_branch(&branch)?;
+            }
+            node.respond(channel, WireResponse::SoloBranchAccepted)?;
+        }
+        WireRequest::RecoveryBallot(ballot) => {
+            let ballot = *ballot;
+            if application_peer != ballot.candidate_peer_id {
+                return Err(anyhow!("recovery ballot sender is not the signed candidate"));
+            }
+            verify_recovery_ballot_signature(&ballot)?;
+            let descriptor = storage.load_world_descriptor(ballot.world_id)?;
+            let candidate =
+                descriptor.member(ballot.candidate_peer_id).context("recovery candidate is not a member")?;
+            if candidate.banned || !candidate.authority_eligible || candidate.public_key != ballot.candidate_public_key
+            {
+                return Err(anyhow!(
+                    "recovery candidate is not authority eligible or its key does not match membership"
+                ));
+            }
+            let current = storage.load_epoch_record(ballot.world_id)?;
+            if ballot.base_epoch != current.epoch_number
+                || ballot.base_fencing_token != current.fencing_token
+                || ballot.target_epoch != current.epoch_number.saturating_add(1)
+                || ballot.target_fencing_token != current.fencing_token.saturating_add(1)
+            {
+                return Err(anyhow!("recovery ballot does not target the next accepted generation"));
+            }
+            if state.leases.authenticated_peers.values().any(|peer| *peer == current.authority_peer_id) {
+                return Err(anyhow!("cannot vote for recovery while the accepted authority is connected"));
+            }
+            let generation = AuthorityGeneration { epoch: current.epoch_number, fencing_token: current.fencing_token };
+            if !recovery_window_open(state.leases, ballot.world_id, generation, state.now) {
+                return Err(anyhow!("cannot vote for recovery before the accepted authority lease expires"));
+            }
+            let latest =
+                storage.latest_snapshot(ballot.world_id)?.context("recovery ballot has no canonical base snapshot")?;
+            if latest.manifest_hash()? != ballot.base_snapshot_hash || latest.state_root != ballot.base_state_hash {
+                return Err(anyhow!("recovery ballot canonical base does not match the latest verified snapshot"));
+            }
+            let membership = storage.load_membership_record(ballot.world_id)?;
+            verify_membership_signature(&membership)?;
+            if membership.record_hash()? != ballot.membership_hash {
+                return Err(anyhow!("recovery ballot membership hash is stale"));
+            }
+            let mut vote = RecoveryVoteV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id: ballot.world_id,
+                ballot_hash: ballot.ballot_hash()?,
+                base_epoch: ballot.base_epoch,
+                target_epoch: ballot.target_epoch,
+                round: ballot.round,
+                candidate_peer_id: ballot.candidate_peer_id,
+                voter_peer_id: identity.peer_id(),
+                voter_public_key: identity.public_key(),
+                signature: Vec::new(),
+            };
+            sign_recovery_vote(identity, &mut vote)?;
+            match storage.promise_recovery_ballot(&ballot, &vote)? {
+                RecoveryPromiseResult::Accepted => node.respond(channel, WireResponse::RecoveryVote(Box::new(vote)))?,
+                RecoveryPromiseResult::Idempotent => {
+                    let durable = storage.load_recovery_promise(ballot.world_id)?;
+                    node.respond(channel, WireResponse::RecoveryVote(Box::new(durable.vote)))?;
+                }
+                RecoveryPromiseResult::Rejected { highest_round } => node.respond(
+                    channel,
+                    WireResponse::RecoveryRejected {
+                        highest_round,
+                        reason: "durable recovery promise rejects stale or conflicting ballot".into(),
+                    },
+                )?,
+            }
+        }
+        WireRequest::RecoveryEpoch { record, certificate } => {
+            let certificate = *certificate;
+            validate_recovery_epoch(storage, application_peer, &record, &certificate)?;
+            if let Ok(current) = storage.load_epoch_record(record.world_id) {
+                if record == current {
+                    storage.save_recovery_certificate(&certificate)?;
+                    let _ = storage.clear_recovery_promise_after_epoch_advance(record.world_id, record.epoch_number)?;
+                    node.respond(
+                        channel,
+                        WireResponse::EpochAccepted { epoch: record.epoch_number, fencing_token: record.fencing_token },
+                    )?;
+                    return Ok(());
+                }
+                if record.epoch_number != current.epoch_number.saturating_add(1)
+                    || record.fencing_token != current.fencing_token.saturating_add(1)
+                    || record.previous_epoch_hash != Some(epoch_record_hash(&current)?)
+                {
+                    return Err(anyhow!("certified recovery epoch does not directly extend the accepted epoch"));
+                }
+            }
+            if let Ok(promise) = storage.load_recovery_promise(record.world_id) {
+                if promise.ballot.round > certificate.ballot.round {
+                    return Err(anyhow!("certified recovery epoch is stale relative to a newer durable promise"));
+                }
+                if promise.ballot.round == certificate.ballot.round
+                    && promise.ballot.ballot_hash()? != certificate.ballot.ballot_hash()?
+                {
+                    return Err(anyhow!(
+                        "certified recovery epoch conflicts with this peer's durable same-round promise"
+                    ));
+                }
+            }
+            storage.save_recovery_certificate(&certificate)?;
+            storage.save_epoch_record(&record)?;
+            storage.clear_sleep_record(record.world_id)?;
+            let _ = storage.clear_recovery_promise_after_epoch_advance(record.world_id, record.epoch_number)?;
+            state.leases.inbound_leases.remove(&record.world_id);
+            node.respond(
+                channel,
+                WireResponse::EpochAccepted { epoch: record.epoch_number, fencing_token: record.fencing_token },
+            )?;
+        }
         WireRequest::Epoch(record) => {
+            if record.mode == EpochMode::Recovery {
+                return Err(anyhow!("recovery epoch requires a durable quorum certificate"));
+            }
             authorize_epoch(storage, application_peer, &record)?;
             if let Ok(current) = storage.load_epoch_record(record.world_id) {
                 if record == current {
@@ -1070,22 +1329,6 @@ fn handle_request(
                 {
                     return Err(anyhow!("epoch and fencing token must advance exactly once"));
                 }
-                if record.mode == EpochMode::Recovery {
-                    let reserved = storage.load_recovery_reservation(record.world_id).is_ok_and(|reservation| {
-                        reservation.epoch == record.epoch_number
-                            && reservation.fencing_token == record.fencing_token
-                            && reservation.authority_peer_id == record.authority_peer_id
-                            && reservation.authority_public_key == record.authority_public_key
-                    });
-                    let previous_matches = record.previous_epoch_hash == Some(epoch_record_hash(&current)?);
-                    if !previous_matches
-                        || (!reserved && !recovery_catchup_has_quorum(storage, state.leases, &record, state.now)?)
-                    {
-                        return Err(anyhow!(
-                            "recovery epoch lacks a matching durable reservation or fresh majority catch-up proof"
-                        ));
-                    }
-                }
             } else if let Some(latest) = storage.latest_snapshot(record.world_id)? {
                 if record.epoch_number < latest.epoch || record.fencing_token == 0 {
                     return Err(anyhow!("epoch record is older than the local canonical snapshot"));
@@ -1093,10 +1336,6 @@ fn handle_request(
             }
             storage.save_epoch_record(&record)?;
             storage.clear_sleep_record(record.world_id)?;
-            if record.mode == EpochMode::Recovery {
-                storage.clear_recovery_reservation(record.world_id)?;
-                state.leases.inbound_leases.remove(&record.world_id);
-            }
             node.respond(
                 channel,
                 WireResponse::EpochAccepted { epoch: record.epoch_number, fencing_token: record.fencing_token },
@@ -1121,42 +1360,26 @@ fn handle_request(
                 return Err(anyhow!("lease authority is not eligible or key does not match membership"));
             }
             if lease.lease_duration_ms != AUTHORITY_LEASE_DURATION_MS {
-                return Err(anyhow!("lease duration does not match the preview authority policy"));
+                return Err(anyhow!("lease duration does not match the authority policy"));
             }
             let epoch = storage.load_epoch_record(lease.world_id)?;
             let current_generation =
                 AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token };
             let received_generation = AuthorityGeneration { epoch: lease.epoch, fencing_token: lease.fencing_token };
-            if received_generation == current_generation {
-                if lease.authority_peer_id != epoch.authority_peer_id
-                    || lease.authority_public_key != epoch.authority_public_key
-                {
-                    return Err(anyhow!("lease does not match the accepted authority epoch"));
-                }
-                let expires_at = state.now + Duration::from_millis(lease.lease_duration_ms);
-                state
-                    .leases
-                    .inbound_leases
-                    .insert(lease.world_id, InboundLease { generation: current_generation, expires_at });
-                state.leases.recovery_not_before.insert(lease.world_id, expires_at + RECOVERY_SETTLE_DELAY);
-            } else if received_generation
-                == (AuthorityGeneration {
-                    epoch: current_generation.epoch.saturating_add(1),
-                    fencing_token: current_generation.fencing_token.saturating_add(1),
-                })
-            {
-                if state.leases.authenticated_peers.values().any(|peer| *peer == epoch.authority_peer_id) {
-                    return Err(anyhow!("cannot reserve a successor while the accepted authority is still connected"));
-                }
-                if !recovery_window_open(state.leases, lease.world_id, current_generation, state.now) {
-                    return Err(anyhow!("cannot reserve a successor before the accepted authority lease expires"));
-                }
-                if !storage.reserve_recovery(&lease)? {
-                    return Err(anyhow!("next authority generation is already reserved for another peer"));
-                }
-            } else {
-                return Err(anyhow!("lease generation does not match the accepted or next authority generation"));
+            if received_generation != current_generation {
+                return Err(anyhow!("future authority generations require a recovery ballot, not a lease reservation"));
             }
+            if lease.authority_peer_id != epoch.authority_peer_id
+                || lease.authority_public_key != epoch.authority_public_key
+            {
+                return Err(anyhow!("lease does not match the accepted authority epoch"));
+            }
+            let expires_at = state.now + Duration::from_millis(lease.lease_duration_ms);
+            state
+                .leases
+                .inbound_leases
+                .insert(lease.world_id, InboundLease { generation: current_generation, expires_at });
+            state.leases.recovery_not_before.insert(lease.world_id, expires_at + RECOVERY_SETTLE_DELAY);
             node.respond(
                 channel,
                 WireResponse::LeaseAccepted { epoch: lease.epoch, fencing_token: lease.fencing_token },
@@ -1263,12 +1486,36 @@ fn handle_response(
                 }
             }
         }
+        (Some(OutboundContext::RecoveryBallot { world, peer, ballot_hash }), WireResponse::RecoveryVote(vote)) => {
+            let vote = *vote;
+            verify_recovery_vote_signature(&vote)?;
+            let Some(ballot) = runtime.recovery_ballots.get(&world) else {
+                return Ok(());
+            };
+            if ballot.ballot_hash()? != ballot_hash || !vote.matches_ballot(ballot)? || vote.voter_peer_id != peer {
+                return Err(anyhow!("recovery vote does not match the active ballot or authenticated peer"));
+            }
+            runtime.recovery_votes.insert((world, peer), vote);
+        }
         (
-            Some(OutboundContext::Reservation { world, peer, generation }),
-            WireResponse::LeaseAccepted { epoch, fencing_token },
+            Some(OutboundContext::RecoveryBallot { world, ballot_hash, .. }),
+            WireResponse::RecoveryRejected { highest_round, reason },
         ) => {
-            validate_generation_response(generation, epoch, fencing_token, "recovery reservation")?;
-            runtime.reservation_acks.insert((world, peer), generation);
+            warn!(world = %world, %highest_round, %reason, "peer rejected recovery ballot");
+            let active_round = runtime
+                .recovery_ballots
+                .get(&world)
+                .filter(|ballot| ballot.ballot_hash().ok() == Some(ballot_hash))
+                .map_or(0, |ballot| ballot.round);
+            if highest_round >= active_round {
+                runtime
+                    .recovery_round_floor
+                    .entry(world)
+                    .and_modify(|round| *round = (*round).max(highest_round))
+                    .or_insert(highest_round);
+                runtime.recovery_ballots.remove(&world);
+                runtime.recovery_votes.retain(|(vote_world, _), _| *vote_world != world);
+            }
         }
         (
             Some(OutboundContext::Epoch { world, peer, generation }),
@@ -1324,6 +1571,45 @@ fn authorize_manifest(storage: &Storage, sender: PeerId, manifest: &SnapshotMani
         if manifest.epoch != epoch.epoch_number || manifest.authority_peer_id != epoch.authority_peer_id {
             return Err(anyhow!("snapshot does not belong to the accepted authority epoch"));
         }
+    }
+    Ok(())
+}
+
+fn validate_recovery_epoch(
+    storage: &Storage,
+    sender: PeerId,
+    record: &EpochRecordV1,
+    certificate: &RecoveryCertificateV1,
+) -> Result<()> {
+    if record.mode != EpochMode::Recovery {
+        return Err(anyhow!("recovery certificate attached to a non-recovery epoch"));
+    }
+    authorize_epoch(storage, sender, record)?;
+    let ballot = &certificate.ballot;
+    verify_recovery_ballot_signature(ballot)?;
+    if sender != ballot.candidate_peer_id
+        || record.authority_peer_id != ballot.candidate_peer_id
+        || record.authority_public_key != ballot.candidate_public_key
+        || record.epoch_number != ballot.target_epoch
+        || record.fencing_token != ballot.target_fencing_token
+        || record.base_state_hash != ballot.base_state_hash
+    {
+        return Err(anyhow!("recovery epoch does not match its signed ballot"));
+    }
+    let latest = storage.latest_snapshot(record.world_id)?.context("recovery epoch has no canonical base snapshot")?;
+    if latest.manifest_hash()? != ballot.base_snapshot_hash || latest.state_root != ballot.base_state_hash {
+        return Err(anyhow!("recovery certificate canonical base does not match local verified history"));
+    }
+    let membership = storage.load_membership_record(record.world_id)?;
+    verify_membership_signature(&membership)?;
+    if membership.record_hash()? != ballot.membership_hash {
+        return Err(anyhow!("recovery certificate membership hash is stale"));
+    }
+    let canonical_members =
+        membership.members.iter().filter(|member| !member.banned).map(|member| member.peer_id).collect::<Vec<_>>();
+    validate_recovery_certificate_shape(certificate, &canonical_members)?;
+    for vote in &certificate.votes {
+        verify_recovery_vote_signature(vote)?;
     }
     Ok(())
 }
