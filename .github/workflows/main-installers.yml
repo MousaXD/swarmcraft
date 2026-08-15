@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: main-desktop-installers-${{ github.ref }}
@@ -146,3 +146,54 @@ jobs:
             dist/*.dmg.sha256
           if-no-files-found: error
           retention-days: 14
+
+  publish:
+    name: Publish rolling main release
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: swarmcraft-*-${{ github.sha }}
+          path: release-assets
+          merge-multiple: true
+      - name: List release assets
+        run: |
+          set -euo pipefail
+          find release-assets -maxdepth 1 -type f -print
+          test -n "$(find release-assets -maxdepth 1 -type f -print -quit)"
+      - name: Publish SwarmCraft Main Snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view main-latest >/dev/null 2>&1; then
+            gh release delete main-latest --cleanup-tag --yes
+          fi
+
+          cat > release-notes.md <<EOF
+          Automated desktop build from \`main\`.
+
+          Commit: \`${GITHUB_SHA}\`
+
+          Installers included:
+          - Linux Debian package (\`.deb\`)
+          - Windows NSIS installer (\`.exe\`)
+          - macOS Apple Silicon disk image (\`.dmg\`)
+          - macOS Intel disk image (\`.dmg\`)
+          - SHA-256 checksum files
+
+          This is an automated development snapshot and may be replaced by the next push to \`main\`.
+          EOF
+
+          gh release create main-latest release-assets/* \
+            --target "$GITHUB_SHA" \
+            --title "SwarmCraft Main Snapshot" \
+            --notes-file release-notes.md \
+            --prerelease
