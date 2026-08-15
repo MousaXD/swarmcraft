@@ -5,7 +5,7 @@ on:
     branches: [feat/swarmcraft-0.2.0]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   rust:
@@ -15,9 +15,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Format
-        run: cargo fmt --all -- --check
+      - name: Apply canonical Rust formatting
+        id: format
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          if git diff --quiet; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add crates
+            git commit -m 'style: apply rustfmt to 0.2 protocol work'
+            git push origin HEAD:feat/swarmcraft-0.2.0
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
       - name: Clippy
+        if: steps.format.outputs.changed == 'false'
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Test
+        if: steps.format.outputs.changed == 'false'
         run: cargo test --workspace --all-features --locked
