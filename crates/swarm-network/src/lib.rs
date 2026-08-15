@@ -1,16 +1,18 @@
 //! Encrypted peer transport, discovery, authentication, and bounded replication messages.
 
+mod diagnostics;
 mod node;
 mod transport;
 pub mod wire;
 
+pub use diagnostics::{ConnectivityDiagnosticsV1, HolePunchStateV1, NatStatusV1};
 pub use libp2p::request_response::ResponseChannel;
 pub use libp2p::PeerId as TransportPeerId;
 pub use node::{NetworkEvent, SwarmNode, WIRE_PROTOCOL};
 pub use transport::{generate_transport_key, load_or_create_transport_key};
 pub use wire::{
     BlobResumeV1, ReplicaAckV1, WireLimitError, WireRequest, WireResponse, MAX_BLOB_CHUNK, MAX_MISSING_BLOBS,
-    MAX_WORLD_MEMBERS,
+    MAX_RECOVERY_VOTES, MAX_WORLD_ARTIFACTS, MAX_WORLD_MEMBERS,
 };
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
