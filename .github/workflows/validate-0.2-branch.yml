@@ -7,6 +7,7 @@ on:
 permissions:
   contents: write
 
+# Temporary branch harness. Remove before merge.
 jobs:
   rust:
     runs-on: ubuntu-latest
