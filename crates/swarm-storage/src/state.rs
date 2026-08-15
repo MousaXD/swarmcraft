@@ -263,6 +263,7 @@ mod tests {
     }
 
     fn ballot(world: WorldId, candidate: u8, round: u64) -> RecoveryBallotV1 {
+        let candidate_public_key = [candidate; 32];
         RecoveryBallotV1 {
             protocol_version: PROTOCOL_VERSION,
             world_id: world,
@@ -271,8 +272,8 @@ mod tests {
             target_epoch: 5,
             target_fencing_token: 9,
             round,
-            candidate_peer_id: PeerId([candidate; 32]),
-            candidate_public_key: [candidate; 32],
+            candidate_peer_id: peer_id_from_public_key(&candidate_public_key),
+            candidate_public_key,
             base_snapshot_hash: Hash32([3; 32]),
             base_state_hash: Hash32([4; 32]),
             membership_hash: Hash32([5; 32]),
@@ -281,6 +282,7 @@ mod tests {
     }
 
     fn vote(ballot: &RecoveryBallotV1, voter: u8) -> RecoveryVoteV1 {
+        let voter_public_key = [voter; 32];
         RecoveryVoteV1 {
             protocol_version: PROTOCOL_VERSION,
             world_id: ballot.world_id,
@@ -289,8 +291,8 @@ mod tests {
             target_epoch: ballot.target_epoch,
             round: ballot.round,
             candidate_peer_id: ballot.candidate_peer_id,
-            voter_peer_id: PeerId([voter; 32]),
-            voter_public_key: [voter; 32],
+            voter_peer_id: peer_id_from_public_key(&voter_public_key),
+            voter_public_key,
             signature: Vec::new(),
         }
     }
