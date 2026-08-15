@@ -1,7 +1,6 @@
 use crate::{random_nonce, verify_signature, CoreError, PeerIdentity};
 use swarm_protocol::{
-    Hash32, RecoveryBallotV1, RecoveryVoteV1, SoloBranchV1, WorldConfigV1, WorldGenesisV1, WorldId,
-    PROTOCOL_VERSION,
+    Hash32, RecoveryBallotV1, RecoveryVoteV1, SoloBranchV1, WorldConfigV1, WorldGenesisV1, WorldId, PROTOCOL_VERSION,
 };
 
 pub fn create_world_genesis_with_fingerprint(
@@ -103,13 +102,8 @@ mod tests {
     fn explicit_compatibility_fingerprint_is_embedded_in_genesis() {
         let identity = PeerIdentity::from_secret_bytes([8; 32]);
         let fingerprint = Hash32([5; 32]);
-        let (_, genesis) = create_world_genesis_with_fingerprint(
-            &identity,
-            "1.21.8".into(),
-            "0.17.2".into(),
-            fingerprint,
-        )
-        .unwrap();
+        let (_, genesis) =
+            create_world_genesis_with_fingerprint(&identity, "1.21.8".into(), "0.17.2".into(), fingerprint).unwrap();
         assert_eq!(genesis.compatibility_fingerprint, fingerprint);
     }
 }
