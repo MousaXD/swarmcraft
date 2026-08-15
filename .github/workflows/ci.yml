@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -26,16 +26,42 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Test
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --locked
+
+  acceptance:
+    name: Acceptance (process-level)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Live join replication
+        run: cargo test -p swarm-cli --test live_join_replication --locked
+      - name: Host process lifecycle
+        run: cargo test -p swarm-cli --test host_process --locked
+      - name: Three-daemon recovery
+        run: cargo test -p swarm-cli --test three_daemon_recovery --locked
 
   desktop:
-    name: Desktop package (${{ matrix.os }})
+    name: Desktop package (${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            label: linux
+            bundle: deb,appimage
+          - os: windows-latest
+            label: windows
+            bundle: nsis
+          - os: macos-latest
+            label: macos-arm64
+            bundle: dmg
+          - os: macos-15-intel
+            label: macos-x86_64
+            bundle: dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -53,9 +79,9 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version 2.11.4 --locked
       - name: Build bundled runtimes
-        run: cargo build --release -p swarm-cli
-      - name: Stage Linux sidecars
-        if: runner.os == 'Linux'
+        run: cargo build --release -p swarm-cli --locked
+      - name: Stage Unix sidecars
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -75,18 +101,13 @@ jobs:
           Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"
           & "apps/desktop/src-tauri/binaries/swarmcraft-$target.exe" --version
           & "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe" --version
-      - name: Build Linux DEB and AppImage
-        if: runner.os == 'Linux'
+      - name: Build native desktop package
         working-directory: apps/desktop
-        run: cargo tauri build --bundles deb,appimage --ci
-      - name: Build Windows NSIS installer
-        if: runner.os == 'Windows'
-        working-directory: apps/desktop
-        run: cargo tauri build --bundles nsis --ci
+        run: cargo tauri build --bundles ${{ matrix.bundle }} --ci
       - name: Upload native packages
         uses: actions/upload-artifact@v4
         with:
-          name: swarmcraft-desktop-${{ matrix.os }}
+          name: swarmcraft-desktop-${{ matrix.label }}
           path: apps/desktop/src-tauri/target/release/bundle/**
           if-no-files-found: error
 
@@ -122,8 +143,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Generate lockfile
-        run: cargo generate-lockfile
+      - name: Verify committed lockfile is current
+        run: cargo metadata --locked --format-version 1 --no-deps > /dev/null
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
