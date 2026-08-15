@@ -5,9 +5,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-use swarm_protocol::{
-    peer_id_from_public_key, RecoveryBallotV1, RecoveryVoteV1, SoloBranchV1, WorldConfigV1, WorldId,
-};
+use swarm_protocol::{peer_id_from_public_key, RecoveryBallotV1, RecoveryVoteV1, SoloBranchV1, WorldConfigV1, WorldId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DurableRecoveryPromiseV1 {
@@ -63,7 +61,10 @@ impl Storage {
         let path = self.control_path_v2(world, "recovery-promise.postcard");
         let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
         let promise: DurableRecoveryPromiseV1 = postcard::from_bytes(&bytes)?;
-        if promise.ballot.world_id != world || promise.vote.world_id != world || !promise.vote.matches_ballot(&promise.ballot)? {
+        if promise.ballot.world_id != world
+            || promise.vote.world_id != world
+            || !promise.vote.matches_ballot(&promise.ballot)?
+        {
             return Err(StorageError::WorldMetadataMismatch);
         }
         Ok(promise)
@@ -171,10 +172,7 @@ impl Storage {
 
     pub fn set_background_seeding(&self, world: WorldId, enabled: bool) -> Result<(), StorageError> {
         self.load_world(world)?;
-        atomic_write(
-            &self.control_path_v2(world, "background-seeding"),
-            if enabled { b"1\n" } else { b"0\n" },
-        )
+        atomic_write(&self.control_path_v2(world, "background-seeding"), if enabled { b"1\n" } else { b"0\n" })
     }
 
     pub fn background_seeding_enabled(&self, world: WorldId) -> Result<bool, StorageError> {

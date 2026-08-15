@@ -10,12 +10,7 @@ pub fn sign_recovery_ballot(identity: &PeerIdentity, ballot: &mut RecoveryBallot
 }
 
 pub fn verify_recovery_ballot_signature(ballot: &RecoveryBallotV1) -> Result<(), CoreError> {
-    verify_signature(
-        ballot.candidate_peer_id,
-        ballot.candidate_public_key,
-        &ballot.signing_bytes()?,
-        &ballot.signature,
-    )
+    verify_signature(ballot.candidate_peer_id, ballot.candidate_public_key, &ballot.signing_bytes()?, &ballot.signature)
 }
 
 pub fn sign_recovery_vote(identity: &PeerIdentity, vote: &mut RecoveryVoteV1) -> Result<(), CoreError> {
@@ -39,12 +34,7 @@ pub fn sign_world_config(identity: &PeerIdentity, config: &mut WorldConfigV1) ->
 }
 
 pub fn verify_world_config_signature(config: &WorldConfigV1) -> Result<(), CoreError> {
-    verify_signature(
-        config.authority_peer_id,
-        config.authority_public_key,
-        &config.signing_bytes()?,
-        &config.signature,
-    )
+    verify_signature(config.authority_peer_id, config.authority_public_key, &config.signing_bytes()?, &config.signature)
 }
 
 pub fn sign_solo_branch(identity: &PeerIdentity, branch: &mut SoloBranchV1) -> Result<(), CoreError> {
@@ -56,12 +46,7 @@ pub fn sign_solo_branch(identity: &PeerIdentity, branch: &mut SoloBranchV1) -> R
 }
 
 pub fn verify_solo_branch_signature(branch: &SoloBranchV1) -> Result<(), CoreError> {
-    verify_signature(
-        branch.authority_peer_id,
-        branch.authority_public_key,
-        &branch.signing_bytes()?,
-        &branch.signature,
-    )
+    verify_signature(branch.authority_peer_id, branch.authority_public_key, &branch.signing_bytes()?, &branch.signature)
 }
 
 #[cfg(test)]

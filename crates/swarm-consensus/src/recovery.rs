@@ -175,10 +175,7 @@ mod tests {
         let bob = ballot(2, 1);
         let mut charlie = ballot(3, 2);
         charlie.base_state_hash = Hash32([9; 32]);
-        assert_eq!(
-            evaluate_recovery_ballot(Some(&bob), &charlie),
-            Err(RecoveryBallotError::CanonicalBaseChanged)
-        );
+        assert_eq!(evaluate_recovery_ballot(Some(&bob), &charlie), Err(RecoveryBallotError::CanonicalBaseChanged));
     }
 
     #[test]
