@@ -5,10 +5,13 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
 use swarm_core::{
-    create_world_genesis, random_nonce, verify_membership_signature, verify_snapshot_signature, DataPaths, PeerIdentity,
+    create_world_genesis_with_fingerprint, random_nonce, sign_world_config, verify_membership_signature,
+    verify_snapshot_signature, DataPaths, PeerIdentity,
 };
 use swarm_protocol::{
-    InviteV1, JoinRequestV1, LeaveRequestV1, MembershipRecordV1, WorldDescriptorV1, WorldId, WorldMemberV1,
+    ArtifactRequirementV1, ArtifactSideV1, AuthorityPolicyV1, EpochMode, Hash32, InviteV1, JoinRequestV1,
+    LeaveRequestV1, MembershipPolicyV1, MembershipRecordV1, RuntimeCompatibilityManifestV1, WorldConfigV1,
+    WorldDescriptorV1, WorldId, WorldMemberV1, WorldPresentationV1, WorldSafetyLevelV1, WorldVisibilityV1,
     PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
@@ -72,9 +75,12 @@ enum WorldCommand {
         minecraft: String,
         #[arg(long, default_value = "unknown")]
         fabric_loader: String,
-        /// Stable compatibility material, for example a sorted mod/datapack fingerprint string.
+        /// Legacy exact compatibility material retained for CLI compatibility. Prefer the canonical manifest shown by `world compatibility`.
         #[arg(long, default_value = "vanilla-fabric")]
         compatibility: String,
+        /// private, unlisted, or public.
+        #[arg(long, default_value = "private")]
+        visibility: String,
     },
     /// Stage a signed authority-mediated join request from a scinvite token.
     Join { invite: String },
@@ -84,6 +90,12 @@ enum WorldCommand {
     List,
     /// Show local world and snapshot status.
     Status { world: String },
+    /// Inspect the canonical execution compatibility manifest and authority eligibility.
+    Compatibility { world: String },
+    /// Enable or disable background replica seeding while Minecraft is off.
+    Seed { world: String, enabled: bool },
+    /// List preserved conflicting solo-history branches requiring manual resolution.
+    Conflicts { world: String },
     /// Create and commit a signed snapshot from a quiescent directory.
     Snapshot {
         world: String,
@@ -147,10 +159,30 @@ fn main() -> Result<()> {
 
 fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> Result<()> {
     match command {
-        WorldCommand::Create { name, minecraft, fabric_loader, compatibility } => {
+        WorldCommand::Create { name, minecraft, fabric_loader, compatibility, visibility } => {
             let identity = PeerIdentity::load_or_create(paths)?;
+            let visibility = parse_visibility(&visibility)?;
+            let legacy_hash =
+                Hash32::from_domain_bytes(b"swarmcraft/legacy-compatibility/v1\0", compatibility.as_bytes());
+            let manifest = RuntimeCompatibilityManifestV1 {
+                minecraft_version: minecraft.clone(),
+                loader_id: "fabric".into(),
+                loader_version: fabric_loader.clone(),
+                swarmcraft_protocol_version: PROTOCOL_VERSION,
+                fabric_adapter_version: env!("CARGO_PKG_VERSION").into(),
+                required_server_mods: vec![ArtifactRequirementV1 {
+                    artifact_id: "swarmcraft.legacy-compatibility".into(),
+                    version: "1".into(),
+                    artifact_hash: legacy_hash,
+                    side: ArtifactSideV1::Server,
+                    provider_hint: None,
+                }],
+                required_client_mods: Vec::new(),
+                datapacks: Vec::new(),
+            };
+            let fingerprint = manifest.fingerprint()?;
             let (world_id, genesis) =
-                create_world_genesis(&identity, minecraft, fabric_loader, compatibility.as_bytes())?;
+                create_world_genesis_with_fingerprint(&identity, minecraft, fabric_loader, fingerprint)?;
             storage.create_world(&WorldMetadataV1 {
                 storage_schema_version: STORAGE_SCHEMA_VERSION,
                 display_name: name.clone(),
@@ -178,6 +210,31 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             };
             identity.sign_membership(&mut membership)?;
             storage.save_membership_record(&membership)?;
+            let mut config = WorldConfigV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id,
+                sequence: 1,
+                previous_config_hash: None,
+                compatibility: manifest,
+                visibility,
+                authority_policy: AuthorityPolicyV1 {
+                    allow_solo_advancement: true,
+                    preferred_replication_factor: descriptor.preferred_replication_factor,
+                },
+                membership_policy: MembershipPolicyV1::InviteOnly,
+                presentation: WorldPresentationV1 {
+                    name: name.clone(),
+                    description: String::new(),
+                    tags: Vec::new(),
+                    icon_hash: None,
+                    approximate_region: None,
+                },
+                authority_peer_id: identity.peer_id(),
+                authority_public_key: identity.public_key(),
+                signature: Vec::new(),
+            };
+            sign_world_config(&identity, &mut config)?;
+            storage.save_world_config(&config)?;
             println!("Created world: {name}");
             println!("World ID: {world_id}");
         }
@@ -209,7 +266,7 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 protocol_version: PROTOCOL_VERSION,
                 world_id: invite.world_id,
                 invite: invite.clone(),
-                joining_member: local_member(&identity),
+                joining_member: local_storage_member(&identity),
                 nonce: random_nonce(),
                 signature: Vec::new(),
             };
@@ -268,10 +325,28 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             println!("Minecraft: {}", metadata.genesis.minecraft_version);
             println!("Fabric loader: {}", metadata.genesis.fabric_loader_version);
             println!("Compatibility: {}", metadata.genesis.compatibility_fingerprint);
+            if let Ok(config) = storage.load_world_config(world) {
+                println!("Visibility: {:?}", config.visibility);
+                println!("Compatibility manifest: {}", config.compatibility_fingerprint()?);
+            } else {
+                println!("Visibility: unknown (configuration not synchronized)");
+            }
             if let Ok(descriptor) = storage.load_world_descriptor(world) {
                 println!("Authorized peers: {}", descriptor.members.len());
                 println!("Preferred replicas: {}", descriptor.preferred_replication_factor);
             }
+            let conflict = !storage.list_solo_conflicts(world)?.is_empty();
+            let solo = storage.load_epoch_record(world).is_ok_and(|epoch| epoch.mode == EpochMode::Solo)
+                || storage.load_solo_branch(world).is_ok();
+            let safety = if conflict {
+                WorldSafetyLevelV1::Conflict
+            } else if solo {
+                WorldSafetyLevelV1::SoloUnreplicated
+            } else {
+                WorldSafetyLevelV1::Canonical
+            };
+            println!("Safety: {:?}", safety);
+            println!("Background seeding: {}", storage.background_seeding_enabled(world)?);
             match latest {
                 Some(snapshot) => {
                     println!("Latest snapshot: {}", snapshot.snapshot_number);
@@ -281,6 +356,65 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                     println!("Authority: {}", snapshot.authority_peer_id);
                 }
                 None => println!("Latest snapshot: none"),
+            }
+        }
+        WorldCommand::Compatibility { world } => {
+            let world = parse_world(&world)?;
+            let metadata = storage.load_world(world)?;
+            match storage.load_world_config(world) {
+                Ok(config) => {
+                    let fingerprint = config.compatibility_fingerprint()?;
+                    println!("Compatibility fingerprint: {fingerprint}");
+                    println!("Minecraft: {}", config.compatibility.minecraft_version);
+                    println!("Loader: {} {}", config.compatibility.loader_id, config.compatibility.loader_version);
+                    println!("Fabric adapter: {}", config.compatibility.fabric_adapter_version);
+                    println!("Server mods: {}", config.compatibility.required_server_mods.len());
+                    println!("Client mods: {}", config.compatibility.required_client_mods.len());
+                    println!("Datapacks: {}", config.compatibility.datapacks.len());
+                    println!("Genesis match: {}", fingerprint == metadata.genesis.compatibility_fingerprint);
+                    let identity = PeerIdentity::load_or_create(paths)?;
+                    let eligible = storage
+                        .load_world_descriptor(world)
+                        .ok()
+                        .and_then(|descriptor| descriptor.member(identity.peer_id()).cloned())
+                        .is_some_and(|member| member.authority_eligible && !member.banned);
+                    if eligible && fingerprint == metadata.genesis.compatibility_fingerprint {
+                        println!("Authority eligibility: Compatible");
+                    } else {
+                        println!("Authority eligibility: Replica only: not authority eligible");
+                    }
+                }
+                Err(_) => {
+                    println!("Compatibility manifest: not yet synchronized");
+                    println!("Authority eligibility: Replica only: not authority eligible");
+                }
+            }
+        }
+        WorldCommand::Seed { world, enabled } => {
+            let world = parse_world(&world)?;
+            storage.set_background_seeding(world, enabled)?;
+            println!("Background seeding: {}", if enabled { "enabled" } else { "disabled" });
+        }
+        WorldCommand::Conflicts { world } => {
+            let world = parse_world(&world)?;
+            let conflicts = storage.list_solo_conflicts(world)?;
+            if conflicts.is_empty() {
+                println!("Solo history conflicts: none");
+            } else {
+                println!("Solo history conflicts: {}", conflicts.len());
+                for branch in conflicts {
+                    println!(
+                        "{} writer={} epoch={} seq={} state={}",
+                        branch.branch_hash()?,
+                        branch.authority_peer_id,
+                        branch.head_epoch,
+                        branch.head_sequence,
+                        branch.state_hash
+                    );
+                }
+                println!(
+                    "No automatic Minecraft world merge is attempted; preserve both branches until manually resolved."
+                );
             }
         }
         WorldCommand::Snapshot { world, source, epoch, sequence } => {
@@ -421,6 +555,24 @@ fn local_member(identity: &PeerIdentity) -> WorldMemberV1 {
         public_key: identity.public_key(),
         authority_eligible: true,
         banned: false,
+    }
+}
+
+fn local_storage_member(identity: &PeerIdentity) -> WorldMemberV1 {
+    WorldMemberV1 {
+        peer_id: identity.peer_id(),
+        public_key: identity.public_key(),
+        authority_eligible: false,
+        banned: false,
+    }
+}
+
+fn parse_visibility(value: &str) -> Result<WorldVisibilityV1> {
+    match value.to_ascii_lowercase().as_str() {
+        "private" => Ok(WorldVisibilityV1::Private),
+        "unlisted" => Ok(WorldVisibilityV1::Unlisted),
+        "public" => Ok(WorldVisibilityV1::Public),
+        _ => bail!("visibility must be private, unlisted, or public"),
     }
 }
 
