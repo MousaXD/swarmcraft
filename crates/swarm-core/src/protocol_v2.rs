@@ -1,5 +1,26 @@
-use crate::{verify_signature, CoreError, PeerIdentity};
-use swarm_protocol::{RecoveryBallotV1, RecoveryVoteV1, SoloBranchV1, WorldConfigV1};
+use crate::{random_nonce, verify_signature, CoreError, PeerIdentity};
+use swarm_protocol::{
+    Hash32, RecoveryBallotV1, RecoveryVoteV1, SoloBranchV1, WorldConfigV1, WorldGenesisV1, WorldId,
+    PROTOCOL_VERSION,
+};
+
+pub fn create_world_genesis_with_fingerprint(
+    identity: &PeerIdentity,
+    minecraft_version: String,
+    fabric_loader_version: String,
+    compatibility_fingerprint: Hash32,
+) -> Result<(WorldId, WorldGenesisV1), CoreError> {
+    let genesis = WorldGenesisV1 {
+        protocol_version: PROTOCOL_VERSION,
+        minecraft_version,
+        fabric_loader_version,
+        compatibility_fingerprint,
+        creation_nonce: random_nonce(),
+        creator_public_key: identity.public_key(),
+        initial_membership: vec![identity.peer_id()],
+    };
+    Ok((genesis.world_id()?, genesis))
+}
 
 pub fn sign_recovery_ballot(identity: &PeerIdentity, ballot: &mut RecoveryBallotV1) -> Result<(), CoreError> {
     ballot.candidate_peer_id = identity.peer_id();
@@ -52,7 +73,7 @@ pub fn verify_solo_branch_signature(branch: &SoloBranchV1) -> Result<(), CoreErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use swarm_protocol::{Hash32, PeerId, WorldId, PROTOCOL_VERSION};
+    use swarm_protocol::{PeerId, WorldId};
 
     #[test]
     fn recovery_ballot_signature_binds_round() {
@@ -76,5 +97,19 @@ mod tests {
         verify_recovery_ballot_signature(&ballot).unwrap();
         ballot.round += 1;
         assert!(verify_recovery_ballot_signature(&ballot).is_err());
+    }
+
+    #[test]
+    fn explicit_compatibility_fingerprint_is_embedded_in_genesis() {
+        let identity = PeerIdentity::from_secret_bytes([8; 32]);
+        let fingerprint = Hash32([5; 32]);
+        let (_, genesis) = create_world_genesis_with_fingerprint(
+            &identity,
+            "1.21.8".into(),
+            "0.17.2".into(),
+            fingerprint,
+        )
+        .unwrap();
+        assert_eq!(genesis.compatibility_fingerprint, fingerprint);
     }
 }
