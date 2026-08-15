@@ -1,0 +1,148 @@
+name: Main Desktop Installers
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: main-desktop-installers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux .deb
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Build Rust runtimes
+        run: cargo build --release --workspace
+      - name: Stage Tauri sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
+          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+      - name: Build Debian installer
+        working-directory: apps/desktop
+        run: cargo tauri build --bundles deb --ci
+      - name: Stage Debian artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find apps/desktop/src-tauri/target/release/bundle/deb -type f -name '*.deb' -exec cp {} dist/ \;
+          test -n "$(find dist -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          for file in dist/*.deb; do
+            sha256sum "$file" > "$file.sha256"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swarmcraft-linux-deb-${{ github.sha }}
+          path: |
+            dist/*.deb
+            dist/*.deb.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows .exe installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Build Rust runtimes
+        run: cargo build --release --workspace
+      - name: Stage Tauri sidecars
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = (rustc --print host-tuple).Trim()
+          New-Item -ItemType Directory -Force -Path apps/desktop/src-tauri/binaries | Out-Null
+          Copy-Item target/release/swarmcraft.exe "apps/desktop/src-tauri/binaries/swarmcraft-$target.exe"
+          Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"
+      - name: Build Windows installer
+        working-directory: apps/desktop
+        run: cargo tauri build --bundles nsis --ci
+      - name: Stage Windows artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis -File -Filter *.exe | Copy-Item -Destination dist
+          if (-not (Get-ChildItem dist -File -Filter *.exe)) { throw 'No NSIS .exe installer produced' }
+          Get-ChildItem dist -File -Filter *.exe | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Set-Content -NoNewline "$($_.FullName).sha256"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swarmcraft-windows-exe-${{ github.sha }}
+          path: |
+            dist/*.exe
+            dist/*.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: macOS .dmg (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Build Rust runtimes
+        run: cargo build --release --workspace
+      - name: Stage Tauri sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
+          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+      - name: Build macOS installer
+        working-directory: apps/desktop
+        run: cargo tauri build --bundles dmg --ci --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
+      - name: Stage macOS artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find apps/desktop/src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -exec cp {} dist/ \;
+          test -n "$(find dist -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          for file in dist/*.dmg; do
+            shasum -a 256 "$file" > "$file.sha256"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swarmcraft-macos-${{ matrix.arch }}-dmg-${{ github.sha }}
+          path: |
+            dist/*.dmg
+            dist/*.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14
