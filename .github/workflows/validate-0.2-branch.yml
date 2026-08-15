@@ -7,6 +7,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: validate-swarmcraft-0.2
+  cancel-in-progress: true
+
 # Temporary branch harness. Remove before merge.
 jobs:
   rust:
