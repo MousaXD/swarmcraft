@@ -231,6 +231,7 @@ fn newer_successor_recovers_after_first_successor_dies_with_durable_votes() {
 
     let a_addr = transport_address(&a);
     let survivors = [&b, &c, &d, &e];
+    let survivor_addrs = survivors.iter().map(|peer| transport_address(peer)).collect::<Vec<_>>();
     let first_successor_id = survivors.iter().map(|peer| peer.identity.peer_id()).min().unwrap();
     let first_index = survivors.iter().position(|peer| peer.identity.peer_id() == first_successor_id).unwrap();
 
@@ -238,7 +239,10 @@ fn newer_successor_recovers_after_first_successor_dies_with_durable_votes() {
     thread::sleep(Duration::from_secs(1));
     let mut survivor_daemons = Vec::new();
     for (index, peer) in survivors.iter().enumerate() {
-        survivor_daemons.push(spawn_daemon(peer, std::slice::from_ref(&a_addr), index == first_index));
+        let mut bootstraps = Vec::with_capacity(index + 1);
+        bootstraps.push(a_addr.clone());
+        bootstraps.extend(survivor_addrs.iter().take(index).cloned());
+        survivor_daemons.push(spawn_daemon(peer, &bootstraps, index == first_index));
         thread::sleep(Duration::from_millis(350));
     }
 
