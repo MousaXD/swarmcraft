@@ -1,0 +1,125 @@
+name: Temporary version bump 0.2.1
+
+on:
+  push:
+    branches:
+      - redesign/desktop-frontend-overhaul
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: redesign/desktop-frontend-overhaul
+          fetch-depth: 0
+
+      - name: Bump application metadata to 0.2.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          import re
+
+          old = "0.2.0"
+          new = "0.2.1"
+
+          def replace_once(path: str, before: str, after: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              if before not in text:
+                  raise SystemExit(f"expected text not found in {path}: {before!r}")
+              p.write_text(text.replace(before, after, 1), encoding="utf-8")
+
+          replace_once(
+              "Cargo.toml",
+              f'[workspace.package]\nversion = "{old}"',
+              f'[workspace.package]\nversion = "{new}"',
+          )
+          replace_once(
+              "apps/desktop/src-tauri/Cargo.toml",
+              f'version = "{old}"',
+              f'version = "{new}"',
+          )
+
+          tauri_path = Path("apps/desktop/src-tauri/tauri.conf.json")
+          tauri = json.loads(tauri_path.read_text(encoding="utf-8"))
+          if tauri.get("version") != old:
+              raise SystemExit(f"unexpected Tauri version: {tauri.get('version')!r}")
+          tauri["version"] = new
+          tauri_path.write_text(json.dumps(tauri, indent=2) + "\n", encoding="utf-8")
+
+          replace_once(
+              "minecraft/fabric/gradle.properties",
+              f"mod_version={old}",
+              f"mod_version={new}",
+          )
+
+          guard_path = Path("scripts/check_release_version.py")
+          guard = guard_path.read_text(encoding="utf-8")
+          guard = guard.replace('EXPECTED_APP = "0.2.0"', 'EXPECTED_APP = "0.2.1"')
+          guard = guard.replace("0\\.2\\.0", "0\\.2\\.1")
+          guard = guard.replace("0.2.0", "0.2.1")
+          guard_path.write_text(guard, encoding="utf-8")
+
+          lock_path = Path("Cargo.lock")
+          lock = lock_path.read_text(encoding="utf-8")
+          owned = {
+              "swarm-cli",
+              "swarm-consensus",
+              "swarm-core",
+              "swarm-ipc",
+              "swarm-network",
+              "swarm-protocol",
+              "swarm-storage",
+          }
+          chunks = lock.split("[[package]]")
+          seen = set()
+          for i in range(1, len(chunks)):
+              block = chunks[i]
+              match = re.search(r'\nname = "([^"]+)"', block)
+              if not match or match.group(1) not in owned:
+                  continue
+              name = match.group(1)
+              seen.add(name)
+              updated, count = re.subn(
+                  r'(?m)^version = "0\.2\.0"$',
+                  'version = "0.2.1"',
+                  block,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit(f"could not bump Cargo.lock package {name}")
+              chunks[i] = updated
+          if seen != owned:
+              raise SystemExit(f"workspace packages missing from Cargo.lock: {sorted(owned - seen)}")
+          lock_path.write_text("[[package]]".join(chunks), encoding="utf-8")
+          PY
+
+      - name: Verify coherent version metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check_release_version.py
+          cargo metadata --locked --format-version 1 --no-deps > /dev/null
+          git diff --check
+
+      - name: Commit version bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "No version changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock apps/desktop/src-tauri/Cargo.toml apps/desktop/src-tauri/tauri.conf.json minecraft/fabric/gradle.properties scripts/check_release_version.py
+          git commit -m "chore: bump version to 0.2.1"
+          git push origin HEAD:redesign/desktop-frontend-overhaul
