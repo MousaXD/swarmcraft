@@ -52,6 +52,21 @@ Required scenarios include:
 
 This gate protects the distinction between durable peer identity and transient network connections.
 
+### Network impairment and resume
+
+Normal CI also runs an impaired-link QUIC transfer gate:
+
+- 64 MiB is transferred through the real libp2p request/response path;
+- loopback traffic is shaped with latency variation, packet loss and a bandwidth limit;
+- the sender is hard-restarted every 16 MiB;
+- the receiver deliberately commits the final chunk before each restart while the sender loses the acknowledgement;
+- the restarted sender reloads the same transport identity and re-authenticates the same application identity;
+- `MissingBlobs` resume negotiation returns the receiver's committed offset;
+- transfer continues without replaying already committed data;
+- every received chunk is checked against the deterministic source payload.
+
+This gate catches reconnect/resume regressions on ordinary pull requests without forcing the full multi-gigabyte profile into every CI job.
+
 ### Snapshot swarm reconstruction
 
 - an original peer creates a verified snapshot and replicates it to two peers;
@@ -105,6 +120,35 @@ This scenario closes the known v0.1 preview liveness limitation. It is now a per
 - compatible returning history is accepted safely;
 - independently advanced solo histories are detected as divergent;
 - conflicting branches are preserved and never silently merged.
+
+---
+
+## Multi-gigabyte network soak
+
+The separate `Network Soak` workflow is a permanent Phase 1 transport gate for networking/storage changes and also runs weekly.
+
+Default profile:
+
+- 2 GiB transferred through real QUIC/libp2p request/response messages;
+- maximum protocol blob chunk size of 256 KiB;
+- 0.2% synthetic packet loss;
+- 250 Mbit/s bandwidth shaping;
+- light latency/jitter shaping so the job remains volume-focused rather than becoming thousands of artificial sequential RTTs;
+- a hard sender restart every 256 MiB;
+- deliberately lost acknowledgement at every restart boundary;
+- durable transport identity reload and signed application re-authentication;
+- exact committed-offset resume negotiation after every restart;
+- deterministic byte-for-byte chunk verification;
+- uploaded workflow artifacts containing the tested commit/profile, qdisc configuration and test output.
+
+The first passing default-profile evidence added with this gate is:
+
+- workflow: `Network Soak`;
+- run: `31966815821`;
+- tested commit: `50a072f0d3e32d6c67d836a9725b5d88078d102c`;
+- result: **PASS**.
+
+Manual dispatch can run 1 GiB, 2 GiB or 5 GiB profiles with configurable restart intervals. Green soak evidence proves sustained synthetic transport/reconnect behavior; it does not certify arbitrary residential NAT or carrier networks.
 
 ---
 
@@ -174,7 +218,7 @@ The repository has historical large-world streaming evidence:
 
 Repeat or expand this evidence when storage algorithms materially change.
 
-The permanent snapshot-swarm reconstruction gate proves source failover, corruption rejection and resume semantics, but it does not replace a sustained multi-gigabyte network-transfer soak.
+The permanent snapshot-swarm reconstruction gate proves source failover, corruption rejection and cross-replica resume semantics. The network soak separately proves that the QUIC transfer/reconnect path survives sustained multi-gigabyte volume and repeated interruptions.
 
 ---
 
@@ -184,7 +228,7 @@ Green CI does **not** prove all real-world deployment conditions.
 
 Still requiring broader/manual evidence:
 
-- sustained interrupted multi-gigabyte network-transfer campaigns;
+- longer-duration and wider-profile network soak campaigns beyond the permanent default profile;
 - production-quality parallel multi-source scheduling and retention/GC policy;
 - repeated long-duration Minecraft crash/host-migration campaigns;
 - disk-full and hardware corruption scenarios;
