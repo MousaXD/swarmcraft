@@ -279,7 +279,7 @@ impl SwarmNode {
                     // the live route left.
                     let previous = self.active_connections.insert(peer_id, connection_id);
                     let defer_hello = previous
-                        .filter(|previous| *previous != connection_id && num_established > 1)
+                        .filter(|previous| *previous != connection_id && num_established.get() > 1)
                         .is_some_and(|previous| self.swarm.close_connection(previous));
                     if !defer_hello {
                         self.swarm
