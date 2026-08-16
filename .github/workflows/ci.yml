@@ -52,6 +52,28 @@ jobs:
       - name: Solo history acceptance and divergence detection
         run: cargo test -p swarm-consensus --test solo_history_acceptance --locked
 
+  network-impairment:
+    name: Network impairment (QUIC resume)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile interrupted transfer gate
+        run: cargo test -p swarm-network --test network_transfer_soak --locked --no-run
+      - name: Apply WAN-like loopback impairment
+        run: |
+          set -euxo pipefail
+          command -v tc
+          sudo tc qdisc replace dev lo root netem delay 12ms 4ms distribution normal loss 0.5% rate 100mbit
+          tc qdisc show dev lo
+      - name: Interrupted QUIC transfer with lost acknowledgements
+        run: cargo test -p swarm-network --test network_transfer_soak interrupted_quic_transfer_resumes_after_lost_ack --locked -- --ignored --nocapture
+      - name: Remove loopback impairment
+        if: always()
+        run: sudo tc qdisc del dev lo root || true
+
   desktop:
     name: Desktop package (${{ matrix.label }})
     strategy:

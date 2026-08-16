@@ -69,6 +69,8 @@ The largest missing product milestone is connecting **safe authority recovery** 
 - Live join followed by immediate snapshot replication without requiring a reconnect.
 - Fourth-peer reconstruction from surviving replicas is covered by a permanent acceptance gate.
 - Corrupt replica data is rejected, and poisoned partial blobs are discarded so a clean retry can proceed from another replica.
+- A permanent impaired-network gate proves reconnect/resume behavior under latency variation, packet loss and bandwidth shaping.
+- A path-scoped and weekly multi-gigabyte QUIC soak defaults to 2 GiB, repeatedly hard-restarts the sender, deliberately loses acknowledgements, re-authenticates the durable peer identity and resumes from the receiver's committed offset.
 
 ### Authority, recovery and safety
 
@@ -142,6 +144,8 @@ The largest missing product milestone is connecting **safe authority recovery** 
   - three-daemon hard-kill authority recovery;
   - recovery successor disappearing before epoch promotion;
   - solo-history acceptance and divergence detection.
+- Dedicated QUIC impairment gate with latency variation, packet loss, bandwidth limiting, repeated hard restarts and lost-ack resume recovery.
+- Multi-gigabyte interrupted QUIC soak on networking/storage pull requests and matching `main` changes, plus weekly and manual profiles.
 - Fabric server mod build.
 - Native desktop package builds for Linux, Windows and macOS.
 - Rolling `main-latest` development snapshot workflow.
@@ -193,8 +197,7 @@ Still incomplete relative to the mature roadmap target:
 
 - a production scheduler that downloads different missing blobs from multiple peers in parallel rather than relying on sequential source fallback;
 - snapshot retention policy maturity;
-- safe garbage collection of blobs no longer referenced by retained snapshots;
-- larger sustained network-transfer soak coverage beyond the existing storage streaming evidence.
+- safe garbage collection of blobs no longer referenced by retained snapshots.
 
 ### NAT traversal and internet usability
 
@@ -243,7 +246,7 @@ The roadmap is intentionally aspirational and phases have not landed in a perfec
 | Phase | Current assessment | Notes |
 | --- | --- | --- |
 | 0 — Research/protocol skeleton | Complete for preview | Core identity, storage, signed state and deterministic protocol machinery are established. |
-| 1 — Peer networking | Mostly complete | Core networking and hard-restart recovery are permanently gated; large interrupted network-transfer soak and broader field validation remain. |
+| 1 — Peer networking | Complete for preview | Authenticated networking, durable reconnect, resume semantics and impaired multi-GiB transfer are permanently gated; representative NAT/carrier certification is tracked in Phase 9. |
 | 2 — Snapshot swarm | Mostly complete | Fourth-peer reconstruction, corruption rejection and cross-replica resume are gated; parallel scheduling plus retention/GC maturity remain. |
 | 3 — Minecraft save integration | Complete for preview | Fabric IPC, restore, save barrier and final snapshot flow are implemented and tested. |
 | 4 — Manual host migration | Partial | State-machine support exists; complete user/runtime transfer workflow does not. |
@@ -253,7 +256,7 @@ The roadmap is intentionally aspirational and phases have not landed in a perfec
 | 8 — Better replication | Early/partial | Background replica support exists; incremental/journal/erasure-code work remains. |
 | 9 — NAT/public usability | Partial | Protocol support exists; representative field certification does not. |
 | 10 — UX | Partial | Desktop UI exists; launcher/runtime automation and lobby experience remain. |
-| 11 — Production hardening | Partial | CI/audit/process recovery are strong; fuzzing/soak/signing/field validation remain. |
+| 11 — Production hardening | Partial | CI/audit/process recovery are strong; fuzzing, longer soak campaigns, signing and field validation remain. |
 | 12 — Distributed simulation | Not implemented | Deliberately future research. |
 
 ---
@@ -282,6 +285,7 @@ When describing SwarmCraft externally:
 Safe claims:
 
 - authenticated decentralized world replication is implemented;
+- peer reconnect/resume behavior is permanently tested under synthetic impairment and multi-gigabyte transfer;
 - signed snapshots and world history are implemented;
 - quorum-backed authority recovery and fencing are implemented;
 - solo-history conflict preservation is implemented;
