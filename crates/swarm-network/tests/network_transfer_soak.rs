@@ -2,8 +2,8 @@ use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
 use std::{env, path::Path, time::Duration};
 use swarm_network::{
-    load_or_create_transport_key, BlobResumeV1, NetworkEvent, SwarmNode, TransportPeerId, WireRequest,
-    WireResponse, MAX_BLOB_CHUNK,
+    load_or_create_transport_key, BlobResumeV1, NetworkEvent, SwarmNode, TransportPeerId, WireRequest, WireResponse,
+    MAX_BLOB_CHUNK,
 };
 use swarm_protocol::{peer_id_from_public_key, BlobEncoding, Hash32, PeerHelloV1, PeerId, WorldId, PROTOCOL_VERSION};
 use tempfile::tempdir;
@@ -31,10 +31,7 @@ fn synthetic_chunk(offset: u64, len: usize) -> Vec<u8> {
     let mut data = vec![0_u8; len];
     for (index, block) in data.chunks_mut(8).enumerate() {
         let absolute = offset.wrapping_add((index as u64) * 8);
-        let word = absolute
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .rotate_left((absolute as u32) & 31)
-            .to_le_bytes();
+        let word = absolute.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left((absolute as u32) & 31).to_le_bytes();
         block.copy_from_slice(&word[..block.len()]);
     }
     data
@@ -99,11 +96,7 @@ async fn query_resume_offset(
     let request_id = sender
         .send_request(
             &receiver_transport,
-            WireRequest::MissingBlobs {
-                world_id: transfer.world,
-                snapshot_number: 1,
-                hashes: vec![transfer.hash],
-            },
+            WireRequest::MissingBlobs { world_id: transfer.world, snapshot_number: 1, hashes: vec![transfer.hash] },
         )
         .unwrap();
 
@@ -357,10 +350,7 @@ async fn run_interrupted_transfer(total_bytes: u64, restart_every: u64, chunk_by
     receiver.listen("/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()).unwrap();
     let listen = listen_address(&mut receiver).await;
 
-    let transfer = TransferIdentity {
-        world: WorldId([0x53; 32]),
-        hash: Hash32([0xA7; 32]),
-    };
+    let transfer = TransferIdentity { world: WorldId([0x53; 32]), hash: Hash32([0xA7; 32]) };
     let mut sender = new_sender(&sender_transport_path, &sender_app_key, 3, &listen).await;
     let sender_transport = sender.local_transport_peer_id();
     wait_for_authentication(&mut receiver, &mut sender, receiver_app, sender_app).await;
@@ -391,26 +381,20 @@ async fn run_interrupted_transfer(total_bytes: u64, restart_every: u64, chunk_by
                 drop(sender);
                 restarts += 1;
 
-                sender = new_sender(
-                    &sender_transport_path,
-                    &sender_app_key,
-                    3_u8.wrapping_add(restarts as u8),
-                    &listen,
-                )
-                .await;
+                sender =
+                    new_sender(&sender_transport_path, &sender_app_key, 3_u8.wrapping_add(restarts as u8), &listen)
+                        .await;
                 assert_eq!(sender.local_transport_peer_id(), sender_transport);
                 wait_for_authentication(&mut receiver, &mut sender, receiver_app, sender_app).await;
                 assert_eq!(receiver.application_peer(&sender_transport), Some(sender_app));
 
-                let resume = query_resume_offset(
-                    &mut sender,
-                    &mut receiver,
-                    receiver_transport,
-                    &transfer,
-                    committed_offset,
-                )
-                .await;
-                assert_eq!(resume, committed_offset, "reconnect must resume after receiver-committed data even when its ack was lost");
+                let resume =
+                    query_resume_offset(&mut sender, &mut receiver, receiver_transport, &transfer, committed_offset)
+                        .await;
+                assert_eq!(
+                    resume, committed_offset,
+                    "reconnect must resume after receiver-committed data even when its ack was lost"
+                );
                 next_restart = committed_offset.saturating_add(restart_every);
                 break;
             }
