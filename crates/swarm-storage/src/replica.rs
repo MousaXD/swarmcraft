@@ -55,6 +55,10 @@ impl Storage {
             return Err(ReplicationError::OffsetMismatch { expected: descriptor.encoded_size, received: offset });
         }
         let path = blob_path(self, world, descriptor);
+        let metadata = fs::metadata(&path).map_err(|source| StorageError::Io { path: path.clone(), source })?;
+        if metadata.len() != descriptor.encoded_size {
+            return Err(StorageError::BlobCorrupt(descriptor.hash).into());
+        }
         let mut file = File::open(&path).map_err(|source| StorageError::Io { path: path.clone(), source })?;
         file.seek(SeekFrom::Start(offset)).map_err(|source| StorageError::Io { path: path.clone(), source })?;
         let requested = (descriptor.encoded_size - offset).min(max_bytes as u64) as usize;
@@ -95,7 +99,14 @@ impl Storage {
             if next != descriptor.encoded_size {
                 return Err(ReplicationError::SizeMismatch { expected: descriptor.encoded_size, received: next });
             }
-            verify_encoded_blob(&partial, descriptor)?;
+            if let Err(error) = verify_encoded_blob(&partial, descriptor) {
+                match fs::remove_file(&partial) {
+                    Ok(()) => {}
+                    Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(source) => return Err(StorageError::Io { path: partial, source }.into()),
+                }
+                return Err(error);
+            }
             let final_path = blob_path(self, world, descriptor);
             if final_path.exists() {
                 fs::remove_file(&final_path).map_err(|source| StorageError::Io { path: final_path.clone(), source })?;
