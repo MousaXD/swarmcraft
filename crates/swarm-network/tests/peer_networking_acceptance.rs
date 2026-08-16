@@ -1,7 +1,9 @@
 use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
 use std::time::Duration;
-use swarm_network::{load_or_create_transport_key, NetworkEvent, SwarmNode, TransportPeerId, WireRequest, WireResponse};
+use swarm_network::{
+    load_or_create_transport_key, NetworkEvent, SwarmNode, TransportPeerId, WireRequest, WireResponse,
+};
 use swarm_protocol::{peer_id_from_public_key, PeerHelloV1, PeerId, PROTOCOL_VERSION};
 use tempfile::tempdir;
 use tokio::time::timeout;
@@ -20,12 +22,7 @@ fn signed_hello(key: &SigningKey, nonce: u8) -> PeerHelloV1 {
     hello
 }
 
-async fn wait_for_authentication(
-    a: &mut SwarmNode,
-    b: &mut SwarmNode,
-    app_a: PeerId,
-    app_b: PeerId,
-) {
+async fn wait_for_authentication(a: &mut SwarmNode, b: &mut SwarmNode, app_a: PeerId, app_b: PeerId) {
     let mut a_saw_b = false;
     let mut b_saw_a = false;
     timeout(Duration::from_secs(15), async {
