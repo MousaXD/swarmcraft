@@ -111,7 +111,7 @@ p { line-height: 1.45; }
 .world-row-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 650; }
 .world-row-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font: 10px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .world-row-meta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--text-muted); font-size: 11px; }
-.world-row-meta span { white-space: nowrap; }
+.world-row-meta span { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 
 .status-badge { display: inline-flex; align-items: center; min-height: 22px; max-width: 150px; padding: 2px 7px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text-secondary); font-size: 10px; font-weight: 700; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .status-badge::before { content: "●"; margin-right: 5px; font-size: 8px; color: var(--text-muted); }
