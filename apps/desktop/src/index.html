@@ -18,26 +18,11 @@
       </div>
 
       <nav class="nav-stack" aria-label="Workspace">
-        <button id="navWorlds" class="nav-item is-active" type="button" data-view="worlds" aria-current="page">
-          <span class="nav-icon" aria-hidden="true">◆</span>
-          <span>Worlds</span>
-        </button>
-        <button id="openCreate" class="nav-item" type="button" data-view="create">
-          <span class="nav-icon" aria-hidden="true">＋</span>
-          <span>Create world</span>
-        </button>
-        <button id="openJoin" class="nav-item" type="button" data-view="join">
-          <span class="nav-icon" aria-hidden="true">↳</span>
-          <span>Join world</span>
-        </button>
-        <button id="navActivity" class="nav-item" type="button" data-view="activity">
-          <span class="nav-icon" aria-hidden="true">≡</span>
-          <span>Activity</span>
-        </button>
-        <button id="navDiagnostics" class="nav-item" type="button" data-view="diagnostics">
-          <span class="nav-icon" aria-hidden="true">⋯</span>
-          <span>Diagnostics</span>
-        </button>
+        <button id="navWorlds" class="nav-item is-active" type="button" data-view="worlds" aria-current="page">Worlds</button>
+        <button id="openCreate" class="nav-item" type="button" data-view="create">Create world</button>
+        <button id="openJoin" class="nav-item" type="button" data-view="join">Join world</button>
+        <button id="navActivity" class="nav-item" type="button" data-view="activity">Activity</button>
+        <button id="navDiagnostics" class="nav-item" type="button" data-view="diagnostics">Diagnostics</button>
       </nav>
 
       <div class="sidebar-node">
@@ -78,7 +63,6 @@
 
               <div id="worldCards" class="world-list" aria-live="polite">
                 <div class="empty-state">
-                  <div class="empty-symbol" aria-hidden="true">◇</div>
                   <h3>No worlds loaded</h3>
                   <p>Create a new world or join one with a signed invitation.</p>
                   <div class="button-row">
@@ -92,9 +76,8 @@
             <section id="selectedPanel" class="world-detail" aria-label="Selected world">
               <input id="world" type="hidden" />
               <div id="noSelection" class="selection-empty">
-                <div class="empty-symbol" aria-hidden="true">◆</div>
                 <h2>Select a world</h2>
-                <p>Choose a world to inspect safety, authority, replication, compatibility, and play controls.</p>
+                <p>Choose a world to inspect safety, snapshot authority, membership, compatibility, and play controls.</p>
               </div>
 
               <div id="selectionContent" class="selection-content" hidden>
@@ -106,39 +89,42 @@
                     </div>
                     <p id="selectedWorldId" class="machine-line"></p>
                   </div>
-                  <button id="playWorld" class="button button-primary play-button" type="button">Play</button>
+                  <div class="play-control">
+                    <button id="playWorld" class="button button-primary play-button" type="button" disabled>Play</button>
+                    <span id="playAvailability" class="play-availability">Compatibility must be known before Play is available.</span>
+                  </div>
                 </div>
 
-                <p id="selectedSummary" class="safety-summary">Select a world to inspect its canonical state.</p>
+                <p id="selectedSummary" class="safety-summary">Select a world to inspect its safety state.</p>
 
                 <dl class="fact-grid">
                   <div class="fact">
-                    <dt>Authority</dt>
+                    <dt>Latest snapshot authority</dt>
                     <dd id="selectedAuthority">Unknown</dd>
                   </div>
                   <div class="fact">
-                    <dt>Replicas</dt>
-                    <dd id="selectedReplicas">Unknown</dd>
+                    <dt>Members</dt>
+                    <dd id="selectedMembers">Unknown</dd>
                   </div>
                   <div class="fact">
                     <dt>Minecraft</dt>
                     <dd id="selectedMinecraft">Unknown</dd>
                   </div>
                   <div class="fact">
-                    <dt>Checkpoint</dt>
+                    <dt>Latest checkpoint</dt>
                     <dd id="selectedCheckpoint">None</dd>
                   </div>
                 </dl>
 
                 <div class="compatibility-block">
-                  <span class="field-label">Compatibility</span>
+                  <span class="field-label">Compatibility / authority eligibility</span>
                   <p id="selectedCompatibility">Compatibility not synchronized.</p>
                 </div>
 
                 <div id="worldNotice" class="inline-notice" role="status" aria-live="polite" hidden></div>
 
                 <div class="detail-actions" aria-label="World actions">
-                  <button id="worldPeers" class="button button-secondary" type="button">Replicas</button>
+                  <button id="worldPeers" class="button button-secondary" type="button">Authorized members</button>
                   <button id="worldCompatibility" class="button button-secondary" type="button">Compatibility</button>
                   <button id="worldStatus" class="button button-subtle" type="button">Full status</button>
                   <button id="gracefulSleep" class="button button-subtle" type="button">Sleep gracefully</button>
@@ -260,6 +246,15 @@
             </div>
           </div>
 
+          <section id="diagnosticWorldContext" class="diagnostic-world-context" aria-live="polite">
+            <div class="context-copy">
+              <span class="context-label">Operating on</span>
+              <strong id="diagnosticWorldName">Select a world first</strong>
+              <span id="diagnosticWorldId" class="machine-line">World-specific controls are unavailable.</span>
+            </div>
+            <span id="diagnosticSafety" class="status-badge neutral" hidden>Unknown</span>
+          </section>
+
           <div class="diagnostic-sections">
             <section class="diagnostic-section" id="localNodeSection">
               <div class="section-title-row">
@@ -276,11 +271,11 @@
               <div class="section-title-row">
                 <div><h3>Replication</h3><p>Background snapshot availability for the selected world.</p></div>
               </div>
-              <p class="helper">Incompatible peers may remain storage-only. Storage availability does not imply authority eligibility.</p>
+              <p class="helper">Incompatible members may remain storage-only. Storage availability does not imply authority eligibility or current connectivity.</p>
               <div class="button-row">
-                <button id="seedOn" class="button button-secondary" type="button">Enable seeding</button>
-                <button id="seedOff" class="button button-subtle" type="button">Disable seeding</button>
-                <button id="verifyWorld" class="button button-secondary" type="button">Verify storage</button>
+                <button id="seedOn" class="button button-secondary world-required" type="button">Enable seeding</button>
+                <button id="seedOff" class="button button-subtle world-required" type="button">Disable seeding</button>
+                <button id="verifyWorld" class="button button-secondary world-required" type="button">Verify storage</button>
               </div>
             </section>
 
@@ -313,13 +308,14 @@
                   <textarea id="bootstrapAddrs" class="machine-input" rows="3" placeholder="/ip4/…/p2p/…"></textarea>
                 </div>
               </div>
-              <button id="createInvite" class="button button-secondary" type="button">Create signed invite</button>
+              <button id="createInvite" class="button button-secondary world-required" type="button">Create signed invite</button>
             </section>
 
             <section class="diagnostic-section" id="runtimeSection">
               <div class="section-title-row">
                 <div><h3>Authority runtime</h3><p>Required executable paths for Play and manual runtime control.</p></div>
               </div>
+              <div id="runtimeNotice" class="inline-notice" role="status" aria-live="polite" hidden></div>
               <div class="field">
                 <label for="java">Java executable</label>
                 <input id="java" class="machine-input" value="java" />
@@ -334,12 +330,13 @@
               </div>
               <label class="check-row" for="eula"><input id="eula" type="checkbox" /> <span>I accept the Minecraft server EULA.</span></label>
               <div class="button-row">
-                <button id="host" class="button button-secondary" type="button">Start runtime</button>
+                <button id="host" class="button button-secondary world-required authority-required" type="button">Start runtime</button>
                 <button id="stopHost" class="button button-subtle" type="button">Stop runtime</button>
               </div>
+              <p id="runtimeEligibilityHint" class="helper">Select an authority-eligible world to start the runtime.</p>
             </section>
 
-            <section class="diagnostic-section danger-zone" id="recoverySection">
+            <section class="diagnostic-section" id="recoverySection">
               <div class="section-title-row">
                 <div><h3>Recovery / export</h3><p>Copy verified state or recover a specific snapshot.</p></div>
               </div>
@@ -352,8 +349,8 @@
                 <input id="snapshotNumber" type="number" min="1" value="1" />
               </div>
               <div class="button-row">
-                <button id="exportWorld" class="button button-secondary" type="button">Export latest</button>
-                <button id="recoverWorld" class="button button-warning" type="button">Recover snapshot</button>
+                <button id="exportWorld" class="button button-secondary world-required" type="button">Export latest</button>
+                <button id="recoverWorld" class="button button-warning world-required" type="button">Recover snapshot</button>
               </div>
             </section>
           </div>
