@@ -2,7 +2,7 @@ use crate::{Storage, StorageError};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    path::{Path, PathBuf},
+    path::Path,
 };
 use swarm_protocol::{RecoveryCertificateV1, WorldId};
 
