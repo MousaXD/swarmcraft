@@ -1,0 +1,26 @@
+[1m[92m    Updating[0m crates.io index
+[1m[92m    Checking[0m swarm-protocol v0.1.0 (/home/runner/work/swarmcraft/swarmcraft/crates/swarm-protocol)
+[1m[92m    Checking[0m swarm-consensus v0.1.0 (/home/runner/work/swarmcraft/swarmcraft/crates/swarm-consensus)
+[1m[92m    Checking[0m swarm-storage v0.1.0 (/home/runner/work/swarmcraft/swarmcraft/crates/swarm-storage)
+[1m[92m    Checking[0m swarm-core v0.1.0 (/home/runner/work/swarmcraft/swarmcraft/crates/swarm-core)
+[1m[92m    Checking[0m swarm-ipc v0.1.0 (/home/runner/work/swarmcraft/swarmcraft/crates/swarm-ipc)
+[1m[92m    Checking[0m swarm-network v0.1.0 (/home/runner/work/swarmcraft/swarmcraft/crates/swarm-network)
+[1m[91merror[E0308][0m[1m: mismatched types[0m
+   [1m[94m--> [0mcrates/swarm-network/src/node.rs:282:92
+    [1m[94m|[0m
+[1m[94m282[0m [1m[94m|[0m                         .filter(|previous| *previous != connection_id && num_established > 1)
+    [1m[94m|[0m                                                                          [1m[94m---------------[0m   [1m[91m^[0m [1m[91mexpected `NonZero<u32>`, found integer[0m
+    [1m[94m|[0m                                                                          [1m[94m|[0m
+    [1m[94m|[0m                                                                          [1m[94mexpected because this is `std::num::NonZero<u32>`[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: expected struct `[1m[35mstd::num::NonZero<u32>[0m`
+                 found type `[1m[35m{integer}[0m`
+[1m[96mhelp[0m: consider calling `NonZero::new`
+    [1m[94m|[0m
+[1m[94m282[0m [1m[94m| [0m                        .filter(|previous| *previous != connection_id && num_established > [92mNonZero::new([0m1[92m).unwrap()[0m)
+    [1m[94m|[0m                                                                                            [92m+++++++++++++[0m [92m++++++++++[0m
+
+[1mFor more information about this error, try `rustc --explain E0308`.[0m
+[1m[91merror[0m: could not compile `swarm-network` (lib test) due to 1 previous error
+[1m[33mwarning[0m: build failed, waiting for other jobs to finish...
+[1m[91merror[0m: could not compile `swarm-network` (lib) due to 1 previous error

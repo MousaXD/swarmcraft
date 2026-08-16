@@ -27,7 +27,7 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version 2.11.4 --locked
       - name: Build Rust runtimes
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace --locked
       - name: Stage Tauri sidecars
         shell: bash
         run: |
@@ -67,7 +67,7 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version 2.11.4 --locked
       - name: Build Rust runtimes
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace --locked
       - name: Stage Tauri sidecars
         shell: pwsh
         run: |
@@ -116,7 +116,7 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version 2.11.4 --locked
       - name: Build Rust runtimes
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace --locked
       - name: Stage Tauri sidecars
         shell: bash
         run: |
@@ -125,7 +125,7 @@ jobs:
           mkdir -p apps/desktop/src-tauri/binaries
           cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
           cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
-      - name: Build macOS installer
+      - name: Build unsigned development macOS installer
         working-directory: apps/desktop
         run: cargo tauri build --bundles dmg --ci --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
       - name: Stage macOS artifact
@@ -178,7 +178,7 @@ jobs:
           fi
 
           cat > release-notes.md <<EOF
-          Automated desktop build from \`main\`.
+          Automated development snapshot from \`main\`.
 
           Commit: \`${GITHUB_SHA}\`
 
@@ -189,7 +189,12 @@ jobs:
           - macOS Intel disk image (\`.dmg\`)
           - SHA-256 checksum files
 
-          This is an automated development snapshot and may be replaced by the next push to \`main\`.
+          Signing status:
+          - Linux: checksum-protected development package
+          - Windows: unsigned development snapshot
+          - macOS: ad-hoc signed development snapshot, not notarized
+
+          This rolling development release may be replaced by the next push to \`main\`.
           EOF
 
           gh release create main-latest release-assets/* \

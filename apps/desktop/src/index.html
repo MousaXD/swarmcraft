@@ -8,103 +8,163 @@
 </head>
 <body>
   <main>
-    <header>
-      <p class="eyebrow">SWARMCRAFT v0.1.0 PREVIEW</p>
-      <h1>Your Minecraft world, carried by the swarm.</h1>
-      <p class="sub">Verified replicas, one fenced authority, quorum-backed crash recovery, durable sleep, and wake from any surviving canonical replica.</p>
+    <header class="hero">
+      <div>
+        <p class="eyebrow">SWARMCRAFT 0.2</p>
+        <h1>SwarmCraft</h1>
+        <p class="sub">Your worlds stay playable across trusted replicas, with explicit safety when the network gets weird.</p>
+      </div>
+      <div class="hero-actions">
+        <button id="refresh">Refresh</button>
+        <button id="openCreate" class="secondary">Create World</button>
+        <button id="openJoin" class="secondary">Join World</button>
+      </div>
     </header>
 
-    <section class="card actions">
+    <section class="section-head">
       <div>
-        <h2>Local node</h2>
-        <pre id="identity">Not initialized.</pre>
+        <p class="eyebrow">MY WORLDS</p>
+        <h2>Continue playing</h2>
       </div>
-      <button id="init">Initialize</button>
-      <button id="identityButton" class="secondary">Identity</button>
-      <button id="refresh">Refresh worlds</button>
+      <span id="nodeBadge" class="badge neutral">Local node</span>
+    </section>
+    <section id="worldCards" class="world-grid">
+      <article class="world-card empty-card">
+        <h3>No worlds loaded yet</h3>
+        <p>Create a world or join one with a signed invite.</p>
+      </article>
     </section>
 
-    <section class="card">
-      <h2>Local worlds</h2>
-      <pre id="worlds">No data yet.</pre>
-    </section>
-
-    <section class="card form-card">
-      <h2>Replication daemon</h2>
-      <label>Listen multiaddress <input id="daemonListen" value="/ip4/0.0.0.0/udp/0/quic-v1" /></label>
-      <div class="button-row">
-        <button id="startDaemon">Start daemon</button>
-        <button id="stopDaemon" class="danger">Stop daemon</button>
-      </div>
-      <p class="hint">Internet bootstrap and relay can also be supplied through SWARMCRAFT_BOOTSTRAP and SWARMCRAFT_RELAY.</p>
-    </section>
-
-    <div class="grid two">
-      <section class="card form-card">
-        <h2>Create world</h2>
-        <label>Name <input id="createName" placeholder="My swarm world" /></label>
-        <label>Minecraft <input id="createMinecraft" value="26.1.2" /></label>
-        <label>Fabric loader <input id="createLoader" value="0.19.3" /></label>
-        <label>Compatibility material <input id="createCompatibility" value="vanilla-fabric" /></label>
-        <button id="createWorld">Create</button>
+    <div class="grid two flows">
+      <section id="createPanel" class="card form-card">
+        <div class="card-title">
+          <div><p class="eyebrow">NEW</p><h2>Create World</h2></div>
+          <span class="badge safe">Private by default</span>
+        </div>
+        <label>Name <input id="createName" placeholder="Friends SMP" /></label>
+        <div class="grid two compact">
+          <label>Minecraft <input id="createMinecraft" value="26.1.2" /></label>
+          <label>Fabric loader <input id="createLoader" value="0.19.3" /></label>
+        </div>
+        <label>Visibility
+          <select id="createVisibility">
+            <option value="private">Private</option>
+            <option value="unlisted">Unlisted</option>
+            <option value="public">Public</option>
+          </select>
+        </label>
+        <label>Compatibility profile <input id="createCompatibility" value="vanilla-fabric" /></label>
+        <p class="hint">The world stores a signed compatibility manifest. Exact mod IDs, versions and hashes remain canonical metadata, not display names.</p>
+        <button id="createWorld">Create World</button>
       </section>
 
-      <section class="card form-card">
-        <h2>Join world</h2>
-        <label>Signed invite <textarea id="joinInvite" rows="6" placeholder="scinvite:…"></textarea></label>
-        <button id="joinWorld">Stage join request</button>
-        <p class="hint">The daemon contacts the current authority. Joining never self-authorizes locally.</p>
+      <section id="joinPanel" class="card form-card">
+        <div class="card-title">
+          <div><p class="eyebrow">JOIN</p><h2>Join World</h2></div>
+          <span class="badge neutral">Authority approved</span>
+        </div>
+        <label>Signed invite <textarea id="joinInvite" rows="7" placeholder="scinvite:…"></textarea></label>
+        <button id="joinWorld">Join via Invite</button>
+        <div class="divider"><span>or</span></div>
+        <label>World ID <input id="joinWorldId" placeholder="scworld:…" /></label>
+        <button id="joinWorldIdButton" class="secondary">Join via World ID</button>
+        <p class="hint">Private worlds still require a signed invitation. World-ID discovery never bypasses canonical membership.</p>
       </section>
     </div>
 
-    <section class="card form-card">
-      <h2>World control</h2>
-      <label>World ID <input id="world" placeholder="scworld:…" /></label>
-      <div class="button-row">
-        <button id="worldStatus">Status</button>
-        <button id="worldPeers" class="secondary">Peers</button>
-        <button id="verifyWorld" class="secondary">Verify</button>
-        <button id="leaveWorld" class="danger">Leave</button>
+    <section id="selectedPanel" class="card selected-card">
+      <div class="card-title">
+        <div><p class="eyebrow">SELECTED WORLD</p><h2 id="selectedName">Choose a world</h2></div>
+        <span id="selectedSafety" class="badge neutral">No selection</span>
       </div>
+      <input id="world" type="hidden" />
+      <p id="selectedSummary" class="selected-summary">Pick a world card to inspect safety, replicas and play controls.</p>
+      <div class="button-row">
+        <button id="playWorld">Play</button>
+        <button id="gracefulSleep" class="secondary">Sleep Gracefully</button>
+        <button id="worldPeers" class="secondary">View Replicas</button>
+        <button id="worldCompatibility" class="secondary">Compatibility</button>
+        <button id="worldConflicts" class="warning">Resolve Conflict</button>
+        <button id="leaveWorld" class="danger">Leave World</button>
+      </div>
+    </section>
 
-      <div class="grid two compact">
-        <div class="form-card inset">
-          <h3>Create invite</h3>
-          <label>Expires in minutes <input id="inviteMinutes" type="number" min="1" value="60" /></label>
-          <label>Bootstrap addresses, one per line <textarea id="bootstrapAddrs" rows="3" placeholder="/ip4/…/p2p/…"></textarea></label>
-          <button id="createInvite">Create signed invite</button>
-        </div>
-        <div class="form-card inset">
+    <details class="card diagnostics">
+      <summary>
+        <div><p class="eyebrow">ADVANCED</p><h2>Diagnostics</h2></div>
+        <span class="hint">Networking, verification, recovery and runtime controls</span>
+      </summary>
+
+      <div class="diagnostic-grid">
+        <section class="inset form-card">
+          <h3>Local node</h3>
+          <pre id="identity">Not initialized.</pre>
+          <div class="button-row">
+            <button id="init">Initialize</button>
+            <button id="identityButton" class="secondary">Identity</button>
+          </div>
+        </section>
+
+        <section class="inset form-card">
+          <h3>Background replica</h3>
+          <p class="hint">Keep snapshots available while Minecraft is off. Incompatible peers remain storage-only.</p>
+          <div class="button-row">
+            <button id="seedOn">Enable seeding</button>
+            <button id="seedOff" class="secondary">Disable seeding</button>
+          </div>
+        </section>
+
+        <section class="inset form-card">
+          <h3>Replication daemon</h3>
+          <label>Listen multiaddress <input id="daemonListen" value="/ip4/0.0.0.0/udp/0/quic-v1" /></label>
+          <div class="button-row">
+            <button id="startDaemon">Start</button>
+            <button id="stopDaemon" class="danger">Stop</button>
+          </div>
+          <p class="hint">Connectivity fallback is LAN/direct → public address → DCUtR hole punch → relay. Relays are transport helpers, never canonical world authorities.</p>
+        </section>
+
+        <section class="inset form-card">
+          <h3>Verify / invite</h3>
+          <div class="button-row">
+            <button id="worldStatus">World Status</button>
+            <button id="verifyWorld" class="secondary">Verify Storage</button>
+          </div>
+          <label>Invite expiry (minutes) <input id="inviteMinutes" type="number" min="1" value="60" /></label>
+          <label>Bootstrap addresses <textarea id="bootstrapAddrs" rows="3" placeholder="/ip4/…/p2p/…"></textarea></label>
+          <button id="createInvite" class="secondary">Create Signed Invite</button>
+        </section>
+
+        <section class="inset form-card">
+          <h3>Authority runtime</h3>
+          <label>Java executable <input id="java" value="java" /></label>
+          <label>Fabric server jar <input id="serverJar" placeholder="/path/to/fabric-server.jar" /></label>
+          <label>SwarmCraft Fabric mod jar <input id="modJar" placeholder="/path/to/swarmcraft-fabric.jar" /></label>
+          <label class="check"><input id="eula" type="checkbox" /> I accept the Minecraft server EULA.</label>
+          <div class="button-row">
+            <button id="host">Start Runtime</button>
+            <button id="stopHost" class="danger">Stop Runtime</button>
+          </div>
+        </section>
+
+        <section class="inset form-card">
           <h3>Recovery / export</h3>
           <label>Destination <input id="destination" placeholder="/path/to/world-export" /></label>
           <label>Snapshot number <input id="snapshotNumber" type="number" min="1" value="1" /></label>
           <div class="button-row">
-            <button id="exportWorld">Export latest</button>
-            <button id="recoverWorld" class="secondary">Recover snapshot</button>
+            <button id="exportWorld">Export Latest</button>
+            <button id="recoverWorld" class="secondary">Recover Snapshot</button>
           </div>
-        </div>
+        </section>
       </div>
-    </section>
-
-    <section class="card form-card">
-      <h2>Authority runtime</h2>
-      <label>Java executable <input id="java" value="java" /></label>
-      <label>Fabric server jar <input id="serverJar" placeholder="/path/to/fabric-server.jar" /></label>
-      <label>SwarmCraft Fabric mod jar <input id="modJar" placeholder="/path/to/swarmcraft-fabric.jar" /></label>
-      <label class="check"><input id="eula" type="checkbox" /> I have reviewed and accept the Minecraft server EULA.</label>
-      <div class="button-row">
-        <button id="host">Start authority runtime</button>
-        <button id="stopHost" class="danger">Stop authority runtime</button>
-      </div>
-      <p class="hint">For multi-peer crash recovery, keep the replication daemon running. The authority permit fences stale servers.</p>
-    </section>
+    </details>
 
     <section class="card console-card">
       <div class="console-head">
-        <h2>Output</h2>
+        <h2>Activity</h2>
         <span id="status">Ready.</span>
       </div>
-      <pre id="output">SwarmCraft preview control surface ready.</pre>
+      <pre id="output">SwarmCraft is ready.</pre>
     </section>
   </main>
   <script type="module" src="./app.js"></script>

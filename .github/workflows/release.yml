@@ -1,4 +1,4 @@
-name: Preview Release
+name: Release
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   linux:
-    name: Linux preview bundle
+    name: Linux release bundle
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +22,7 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version 2.11.4 --locked
       - name: Build Rust runtimes
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace --locked
       - name: Stage Tauri sidecars
         shell: bash
         run: |
@@ -34,73 +34,164 @@ jobs:
       - name: Build native Linux packages
         working-directory: apps/desktop
         run: cargo tauri build --bundles deb,appimage --ci
-      - name: Package Linux portable bundle
+      - name: Stage Linux packages
         shell: bash
         run: |
           set -euo pipefail
-          bundle="swarmcraft-${GITHUB_REF_NAME}-linux-x86_64"
-          mkdir -p "dist/$bundle"
-          cp target/release/swarmcraft "dist/$bundle/"
-          cp target/release/swarmcraft-host "dist/$bundle/"
-          cp apps/desktop/src-tauri/target/release/swarmcraft-desktop "dist/$bundle/"
-          cp README.md LICENSE "dist/$bundle/"
-          tar -C dist -czf "dist/$bundle.tar.gz" "$bundle"
+          mkdir -p dist
           find apps/desktop/src-tauri/target/release/bundle -type f \( -name '*.deb' -o -name '*.AppImage' \) -exec cp {} dist/ \;
-          for file in dist/*.tar.gz dist/*.deb dist/*.AppImage; do
+          test -n "$(find dist -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "$(find dist -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+          for file in dist/*.deb dist/*.AppImage; do
             sha256sum "$file" > "$file.sha256"
           done
+          printf '%s\n' 'checksum-protected Linux release package; package signing is not configured' > dist/SIGNING_STATUS_LINUX.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-preview
-          path: |
-            dist/*.tar.gz
-            dist/*.deb
-            dist/*.AppImage
-            dist/*.sha256
+          name: linux-release
+          path: dist/*
           if-no-files-found: error
 
   windows:
-    name: Windows preview bundle
+    name: Windows release bundle
     runs-on: windows-latest
+    env:
+      WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version 2.11.4 --locked
       - name: Build Rust runtimes
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace --locked
       - name: Stage Tauri sidecars
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $target = (rustc --print host-tuple).Trim()
           New-Item -ItemType Directory -Force -Path apps/desktop/src-tauri/binaries | Out-Null
           Copy-Item target/release/swarmcraft.exe "apps/desktop/src-tauri/binaries/swarmcraft-$target.exe"
           Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"
+      - name: Authenticode-sign bundled executables when certificate is configured
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
+            Write-Host 'WINDOWS_CERTIFICATE_BASE64 is not configured; building an unsigned Windows package.'
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'swarmcraft-release.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) { throw 'signtool.exe was not found on the Windows runner' }
+          $targets = @(
+            'target/release/swarmcraft.exe',
+            'target/release/swarmcraft-host.exe'
+          ) + (Get-ChildItem apps/desktop/src-tauri/binaries -File -Filter *.exe | ForEach-Object FullName)
+          foreach ($target in $targets) {
+            & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $target
+          }
       - name: Build native Windows installer
         working-directory: apps/desktop
         run: cargo tauri build --bundles nsis --ci
-      - name: Package Windows portable bundle
+      - name: Stage and optionally sign Windows installer
         shell: pwsh
         run: |
-          $bundle = "swarmcraft-$env:GITHUB_REF_NAME-windows-x86_64"
-          New-Item -ItemType Directory -Force -Path "dist/$bundle" | Out-Null
-          Copy-Item target/release/swarmcraft.exe "dist/$bundle/"
-          Copy-Item target/release/swarmcraft-host.exe "dist/$bundle/"
-          Copy-Item apps/desktop/src-tauri/target/release/swarmcraft-desktop.exe "dist/$bundle/"
-          Copy-Item README.md, LICENSE "dist/$bundle/"
-          Compress-Archive -Path "dist/$bundle/*" -DestinationPath "dist/$bundle.zip"
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
           Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis -File -Filter *.exe | Copy-Item -Destination dist
-          Get-ChildItem dist -File | ForEach-Object {
+          if (-not (Get-ChildItem dist -File -Filter *.exe)) { throw 'No NSIS .exe installer produced' }
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
+            $pfx = Join-Path $env:RUNNER_TEMP 'swarmcraft-release.pfx'
+            if (-not (Test-Path $pfx)) {
+              [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+            }
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+            Get-ChildItem dist -File -Filter *.exe | ForEach-Object {
+              & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+            }
+            'Authenticode signed with repository-provided release certificate.' | Set-Content dist/SIGNING_STATUS_WINDOWS.txt
+            Remove-Item $pfx -Force
+          } else {
+            'Unsigned preview: configure WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD to enable Authenticode signing.' | Set-Content dist/SIGNING_STATUS_WINDOWS.txt
+          }
+          Get-ChildItem dist -File -Filter *.exe | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $($_.Name)" | Set-Content -NoNewline "$($_.FullName).sha256"
           }
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-preview
-          path: |
-            dist/*.zip
-            dist/*.exe
-            dist/*.sha256
+          name: windows-release
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS release bundle (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Build Rust runtimes
+        run: cargo build --release --workspace --locked
+      - name: Stage Tauri sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
+          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+      - name: Build signed/notarized macOS installer when Apple credentials are configured
+        if: env.APPLE_CERTIFICATE != '' && env.APPLE_SIGNING_IDENTITY != ''
+        working-directory: apps/desktop
+        run: cargo tauri build --bundles dmg --ci
+      - name: Build ad-hoc macOS installer when Apple credentials are unavailable
+        if: env.APPLE_CERTIFICATE == '' || env.APPLE_SIGNING_IDENTITY == ''
+        working-directory: apps/desktop
+        run: cargo tauri build --bundles dmg --ci --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
+      - name: Stage macOS package and signing status
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find apps/desktop/src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -exec cp {} dist/ \;
+          test -n "$(find dist -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          if [[ -n "${APPLE_CERTIFICATE:-}" && -n "${APPLE_SIGNING_IDENTITY:-}" && -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
+            printf '%s\n' 'Developer ID signing and notarization credentials were configured for this build.' > "dist/SIGNING_STATUS_MACOS_${{ matrix.arch }}.txt"
+          elif [[ -n "${APPLE_CERTIFICATE:-}" && -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+            printf '%s\n' 'Developer ID signing credentials were configured; notarization credentials were incomplete.' > "dist/SIGNING_STATUS_MACOS_${{ matrix.arch }}.txt"
+          else
+            printf '%s\n' 'Ad-hoc signed preview: Apple Developer ID credentials were not configured; this build is not notarized.' > "dist/SIGNING_STATUS_MACOS_${{ matrix.arch }}.txt"
+          fi
+          for file in dist/*.dmg; do
+            shasum -a 256 "$file" > "$file.sha256"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-release
+          path: dist/*
           if-no-files-found: error
 
   fabric:
@@ -125,30 +216,44 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ../../dist
-          cp build/libs/swarmcraft-fabric-0.1.0-preview.jar ../../dist/
-          (cd ../../dist && sha256sum swarmcraft-fabric-0.1.0-preview.jar > swarmcraft-fabric-0.1.0-preview.jar.sha256)
+          jar="$(find build/libs -maxdepth 1 -type f -name 'swarmcraft-fabric-*.jar' ! -name '*-sources.jar' -print -quit)"
+          test -n "$jar"
+          cp "$jar" ../../dist/
+          (cd ../../dist && sha256sum "$(basename "$jar")" > "$(basename "$jar").sha256")
       - uses: actions/upload-artifact@v4
         with:
-          name: fabric-preview
+          name: fabric-release
           path: |
             dist/*.jar
             dist/*.sha256
           if-no-files-found: error
 
   publish:
-    name: Publish GitHub prerelease
-    needs: [linux, windows, fabric]
+    name: Publish GitHub release
+    needs: [linux, windows, macos, fabric]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
       - name: Collect release assets
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir release-assets
           find dist -type f -exec cp {} release-assets/ \;
+          test -n "$(find release-assets -maxdepth 1 -type f -print -quit)"
           ls -la release-assets
-      - name: Publish prerelease
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release-assets/* --prerelease --generate-notes --title "SwarmCraft $GITHUB_REF_NAME"
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes='docs/RELEASE_NOTES_v0.2.0.md'
+          if [[ "$GITHUB_REF_NAME" != 'v0.2.0' || ! -f "$notes" ]]; then
+            gh release create "$GITHUB_REF_NAME" release-assets/* --generate-notes --title "SwarmCraft $GITHUB_REF_NAME"
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* --notes-file "$notes" --title "SwarmCraft 0.2.0"
+          fi

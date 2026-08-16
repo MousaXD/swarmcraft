@@ -55,11 +55,13 @@ async fn create_world(
     minecraft: String,
     fabric_loader: String,
     compatibility: String,
+    visibility: String,
 ) -> Result<String, String> {
     let name = require_value(name, "World name")?;
     let minecraft = require_value(minecraft, "Minecraft version")?;
     let fabric_loader = require_value(fabric_loader, "Fabric loader version")?;
-    let compatibility = require_value(compatibility, "Compatibility fingerprint material")?;
+    let compatibility = require_value(compatibility, "Compatibility profile")?;
+    let visibility = require_value(visibility, "Visibility")?;
     run_cli(
         &app,
         vec![
@@ -73,6 +75,8 @@ async fn create_world(
             fabric_loader,
             "--compatibility".into(),
             compatibility,
+            "--visibility".into(),
+            visibility,
         ],
     )
     .await
@@ -116,6 +120,24 @@ async fn create_invite(
 async fn world_status(app: AppHandle, world: String) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
     run_cli(&app, vec!["world".into(), "status".into(), world]).await
+}
+
+#[tauri::command]
+async fn world_compatibility(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "compatibility".into(), world]).await
+}
+
+#[tauri::command]
+async fn world_conflicts(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "conflicts".into(), world]).await
+}
+
+#[tauri::command]
+async fn set_background_seeding(app: AppHandle, world: String, enabled: bool) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "seed".into(), world, enabled.to_string()]).await
 }
 
 #[tauri::command]
@@ -193,6 +215,9 @@ fn main() {
             leave_world,
             create_invite,
             world_status,
+            world_compatibility,
+            world_conflicts,
+            set_background_seeding,
             world_peers,
             verify_world,
             export_world,
