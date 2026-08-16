@@ -80,7 +80,7 @@ fn spawn_daemon(peer: &PeerFixture, bootstraps: &[String], pause_after_certifica
         .arg("daemon")
         .arg("--listen")
         .arg(format!("/ip4/127.0.0.1/udp/{}/quic-v1", peer.port))
-        .env("RUST_LOG", "info")
+        .env("RUST_LOG", "warn")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
     if !bootstraps.is_empty() {
@@ -289,8 +289,9 @@ fn newer_successor_recovers_after_first_successor_dies_with_durable_votes() {
             .is_some_and(|(epoch, fencing, heartbeat)| epoch == 2 && fencing == 2 && heartbeat >= 2)
     });
 
-    let remaining_addrs = remaining.iter().map(|peer| transport_address(peer)).collect::<Vec<_>>();
-    let mut restarted_first = spawn_daemon(first_successor, &remaining_addrs, false);
+    let authority_addr = transport_address(second_successor);
+    let authority_bootstrap = vec![authority_addr];
+    let mut restarted_first = spawn_daemon(first_successor, &authority_bootstrap, false);
     wait_until("stale first successor adopting newer certified recovery", Duration::from_secs(40), || {
         first_successor.storage.load_epoch_record(world).is_ok_and(|record| {
             record.epoch_number == 2 && record.fencing_token == 2 && record.authority_peer_id == second_successor_id
@@ -299,7 +300,7 @@ fn newer_successor_recovers_after_first_successor_dies_with_durable_votes() {
     assert!(permit_generation(first_successor, world).is_none());
     restarted_first.stop();
 
-    let mut restarted_a = spawn_daemon(&a, &remaining_addrs, false);
+    let mut restarted_a = spawn_daemon(&a, &authority_bootstrap, false);
     wait_until("original stale authority adopting accepted recovery", Duration::from_secs(40), || {
         a.storage.load_epoch_record(world).is_ok_and(|record| {
             record.epoch_number == 2 && record.fencing_token == 2 && record.authority_peer_id == second_successor_id
