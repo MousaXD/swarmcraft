@@ -1,5 +1,7 @@
-# Final v0.1.0-preview verification
+# Final Preview Verification Marker
 
-This marker is intentionally small. It triggers the permanent pull-request CI matrix after temporary release-soak workflows have completed and been removed.
+This marker exists to exercise the permanent pull-request CI matrix after temporary or one-off validation work has completed.
 
-A merge is allowed only when the branch passes all permanent gates documented in `docs/RELEASE_GATES.md`, including cross-platform Rust checks, real loopback daemon acceptance tests, Fabric, RustSec, and native desktop packages.
+A preview merge is allowed only when the final branch commit passes the permanent gates documented in `docs/RELEASE_GATES.md`, including cross-platform Rust checks, process-level daemon/recovery acceptance tests, Fabric, RustSec and native desktop packaging.
+
+This file is version-neutral on purpose. Historical release-specific evidence belongs in release notes or `docs/RELEASE_GATES.md`, not in the permanent marker.

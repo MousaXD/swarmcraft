@@ -1,14 +1,34 @@
 # SwarmCraft Roadmap
 
-This roadmap intentionally starts with the smallest architecture that can prove the idea.
+This roadmap describes the order in which SwarmCraft's architecture and product should mature. It is **not** a claim that implementation landed in perfectly linear phase order.
 
-The order matters.
+For the exact current-code assessment, use [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md).
 
-Trying to build distributed chunk simulation before reliable recovery would create a spectacular pile of very advanced bugs.
+## Current 0.2.1 position
+
+| Phase | Status | Summary |
+| --- | --- | --- |
+| 0 — Research and protocol skeleton | ✅ Preview-complete | Identity, protocol, signed records, durable storage and deterministic state are established. |
+| 1 — Peer networking | 🟢 Mostly complete | Authenticated libp2p/QUIC, mDNS, Kademlia, AutoNAT, DCUtR and relay code exist. |
+| 2 — Snapshot swarm | 🟢 Mostly complete | Real resumable snapshot replication exists; multi-source/retention maturity remains. |
+| 3 — Minecraft save integration | ✅ Preview-complete | Fabric IPC, restore, save barriers and final snapshot commit are implemented/tested. |
+| 4 — Manual host migration | 🟠 Partial | Transfer state machinery exists; complete CLI/desktop/runtime handoff does not. |
+| 5 — Automatic host migration | 🟡 Control plane complete | Election, quorum recovery and fencing work; automatic successor Minecraft launch/reconnect remains. |
+| 6 — World sleep/wake | 🟢 Mostly complete internally | Durable sleep/wake semantics exist; orchestration still exposes runtime plumbing. |
+| 7 — Solo mode | ✅ Preview-complete | Explicit solo history, reconciliation and divergence preservation are implemented/tested. |
+| 8 — Better replication | 🟠 Early/partial | Background replica support exists; incremental/journal/erasure-code work remains. |
+| 9 — NAT/public usability | 🟠 Partial | Protocol support exists; representative real-network certification remains. |
+| 10 — UX | 🟠 Partial | Desktop app exists; automatic runtime preparation and lobby UX remain. |
+| 11 — Production hardening | 🟠 Partial | Strong CI/recovery/audit gates exist; fuzzing, field validation and signing operations remain. |
+| 12 — Distributed simulation | ⚪ Future research | Not implemented by design. |
+
+The most important MVP gap is now the bridge between **safe authority recovery** and **automatic Minecraft runtime migration/player reconnection**.
 
 ---
 
 # Phase 0: Research and protocol skeleton
+
+**Status: preview-complete, with continuing protocol hardening.**
 
 Goal:
 
@@ -17,27 +37,26 @@ Goal:
 Tasks:
 
 - define project terminology;
-- choose repository structure;
-- choose license;
-- define world ID;
-- define peer ID;
+- choose repository structure and license;
+- define world ID and peer ID;
 - define canonical encoding;
-- prototype signed records;
-- prototype content-addressed blobs;
-- implement local durable log;
-- create deterministic fake-peer simulator;
-- write failure scenarios.
+- implement signed records;
+- implement content-addressed blobs;
+- implement local durable storage/history;
+- build deterministic failure scenarios and tests.
 
 Exit criteria:
 
-- two fake peers can exchange signed state;
+- peers can exchange and validate signed state;
 - corrupted blobs are rejected;
 - stale history is detectable;
-- simulator can create partitions/crashes.
+- failure/recovery behavior can be tested deterministically.
 
 ---
 
 # Phase 1: Peer networking
+
+**Status: mostly complete.**
 
 Goal:
 
@@ -45,26 +64,30 @@ Goal:
 
 Tasks:
 
-- QUIC/libp2p prototype;
-- peer handshake;
+- QUIC/libp2p transport;
+- signed peer handshake;
 - encrypted transport;
 - LAN mDNS discovery;
 - direct peer addresses;
 - reconnect logic;
 - capability negotiation;
-- rate limits;
+- bounded request sizes/rate protections;
 - resumable blob transfer.
 
 Exit criteria:
 
-- two peers exchange a 1 GB synthetic snapshot reliably;
+- peers can transfer large synthetic snapshots reliably;
 - transfer resumes after connection loss;
-- hash corruption is detected;
-- peer identity remains stable.
+- corruption is detected;
+- application peer identity remains stable independently of network address.
+
+Current implementation includes libp2p/QUIC, mDNS, Kademlia, AutoNAT, DCUtR and relay support. Public-network behavior still requires field validation; see [docs/NETWORK_VALIDATION.md](docs/NETWORK_VALIDATION.md).
 
 ---
 
 # Phase 2: Snapshot swarm
+
+**Status: mostly complete.**
 
 Goal:
 
@@ -75,24 +98,26 @@ Tasks:
 - snapshot manifests;
 - content-addressed blobs;
 - Zstd compression;
-- parallel peer downloads;
+- resumable/parallel peer downloads;
 - snapshot retention;
 - integrity verification;
 - local garbage collection;
-- replica inventory exchange.
+- replica inventory/acknowledgement exchange.
 
 Exit criteria:
 
-- three peers hold the same snapshot;
-- one peer is deleted;
-- a fourth peer reconstructs the world from the remaining two;
-- corrupted replica data is ignored.
+- multiple peers hold the same verified snapshot;
+- loss of one replica does not destroy the world;
+- a new peer can reconstruct the world from surviving replicas;
+- corrupt replica data is ignored.
 
-This phase can be built without Minecraft integration.
+Real live-join replication and resumable blob negotiation are implemented. Multi-source reconstruction strategy and retention/GC maturity remain areas for improvement.
 
 ---
 
 # Phase 3: Minecraft save integration
+
+**Status: preview-complete.**
 
 Goal:
 
@@ -100,27 +125,30 @@ Goal:
 
 Tasks:
 
-- Fabric mod skeleton;
-- local IPC;
-- detect server lifecycle;
-- request save barrier;
-- export consistent world snapshot;
-- restore snapshot;
+- Fabric mod integration;
+- local authenticated IPC;
+- server lifecycle detection;
+- save barrier;
+- consistent world snapshot export;
+- snapshot restore;
 - Minecraft/mod compatibility fingerprint;
-- integration tests with temporary worlds.
+- process-level integration tests.
 
 Exit criteria:
 
-- create world;
-- play;
-- snapshot;
-- shut Minecraft down;
-- restore on another machine;
-- world opens correctly.
+- create/play a world;
+- request a safe save;
+- snapshot and shut Minecraft down;
+- restore on another runtime;
+- commit a final verified snapshot.
+
+The current Fabric bridge and host process implement these foundations.
 
 ---
 
 # Phase 4: Manual host migration
+
+**Status: partial.**
 
 Goal:
 
@@ -128,27 +156,31 @@ Goal:
 
 Tasks:
 
-- authority record;
+- authority transfer record/state machine;
 - graceful authority relinquish;
 - final checkpoint;
 - target restore;
-- automatic server launch/attachment;
-- player reconnection flow.
+- automatic target server launch/attachment;
+- player reconnection flow;
+- CLI and desktop UX.
 
 Exit criteria:
 
 1. Alice hosts.
 2. Bob is synchronized.
-3. Alice selects "transfer authority."
-4. Bob becomes authority.
-5. Alice reconnects to Bob.
-6. No world-file copying is performed manually.
+3. Alice selects **Transfer authority**.
+4. Bob accepts and becomes authority.
+5. Bob's Minecraft runtime starts safely.
+6. Alice/players reconnect to Bob.
+7. No manual world-file copying occurs.
 
-At this point the central concept is already visible.
+Transfer state-machine primitives exist, but the complete player-facing flow does not yet.
 
 ---
 
 # Phase 5: Automatic host migration
+
+**Status: distributed control plane implemented; end-to-end product flow partial.**
 
 Goal:
 
@@ -162,20 +194,26 @@ Tasks:
 - fencing tokens;
 - election algorithm;
 - stale authority rejection;
-- crash recovery.
+- durable recovery ballots/certificates;
+- automatic successor runtime launch;
+- player reconnection.
 
 Exit criteria:
 
-- kill Alice's process;
-- Bob takes authority;
-- world resumes from the latest safe checkpoint;
-- Alice comes back and cannot write using stale authority.
+- hard-kill Alice's process;
+- Bob safely wins authority from the latest accepted state;
+- Bob's Minecraft runtime starts automatically;
+- gameplay can resume without manual world copying;
+- Alice returns and cannot write using stale authority;
+- repeated crash/recovery cycles preserve safety and liveness.
 
-Test hundreds/thousands of forced crashes.
+Quorum election, fencing, durable recovery ballots and stale-peer protection are implemented and covered by process-level tests. Automatic Minecraft launch/reconnection on the elected successor is the critical remaining integration step.
 
 ---
 
 # Phase 6: World sleep/wake
+
+**Status: mostly implemented internally.**
 
 Goal:
 
@@ -185,30 +223,33 @@ Tasks:
 
 - durable shutdown state;
 - latest-state comparison on startup;
-- peer discovery after full outage;
+- discovery after full outage;
 - canonical recovery;
-- world wake flow.
+- safe world wake;
+- player-friendly wake orchestration.
 
 Exit criteria:
 
-1. Alice, Bob, Charlie synchronize.
-2. Everyone shuts down.
+1. Alice, Bob and Charlie synchronize.
+2. Everyone shuts down cleanly.
 3. Alice remains offline.
-4. Bob comes back tomorrow.
-5. Bob restores world.
+4. Bob returns later.
+5. Bob restores/wakes the latest accepted world.
 6. Charlie joins later and synchronizes.
 
 No permanent VPS is involved.
 
-This is the milestone where SwarmCraft becomes a true serverless-hosting experience.
+Durable sleep records and wake generation checks exist. The remaining work is making the multi-peer wake experience automatic and ordinary-player friendly.
 
 ---
 
 # Phase 7: Solo mode
 
+**Status: preview-complete.**
+
 Goal:
 
-> A single player can advance the world.
+> A world whose signed policy permits it can advance with one player while representing the reduced safety honestly.
 
 Tasks:
 
@@ -217,75 +258,94 @@ Tasks:
 - reconciliation rules;
 - solo-history conflict detection;
 - branch preservation;
-- manual conflict recovery UI.
+- manual conflict recovery UX.
 
 Exit criteria:
 
-- Alice plays alone;
-- Bob returns and safely accepts Alice's history;
-- synthetic competing solo branches are detected and never silently merged.
+- Alice plays alone under an explicit solo policy;
+- Bob returns and safely accepts compatible Alice history;
+- independently advanced solo branches are detected and never silently merged;
+- both conflicting branches remain recoverable.
+
+The protocol/runtime and acceptance tests cover the core safety behavior. Conflict-recovery UX can continue to improve.
 
 ---
 
 # Phase 8: Better replication
 
+**Status: early/partial.**
+
 Goal:
 
-> Minimize the amount of progress at risk.
+> Minimize the amount of progress at risk and reduce replication cost.
 
-Research:
+Research/work:
 
 - operation journal;
 - incremental region replication;
-- fs-level journal awareness;
+- filesystem-level journal awareness;
 - high-frequency metadata replication;
-- background replica daemon;
-- erasure coding.
+- background replica daemon behavior;
+- erasure coding;
+- better replica placement/retention.
 
 Exit criteria:
 
 - authority crash loses at most a configured recovery window under normal conditions;
-- recovery point is clearly reported.
+- recovery point is clearly reported;
+- replication cost scales better than repeated full-world checkpoints.
+
+Background seeding exists today; the lower-loss incremental strategies remain future work.
 
 ---
 
 # Phase 9: NAT traversal and public usability
 
+**Status: protocol support implemented; field validation incomplete.**
+
 Goal:
 
-> Normal players can use SwarmCraft without configuring routers.
+> Normal players can connect without manually configuring routers in representative environments.
 
 Tasks:
 
 - hole punching;
 - multiple discovery sources;
 - optional community relays;
-- relay encryption;
+- encrypted relay transport;
 - bootstrap node list;
 - relay self-hosting docs;
-- connection diagnostics.
+- connection diagnostics;
+- representative network validation.
 
 Exit criteria:
 
-- works across representative home NAT environments;
-- no single relay is mandatory.
+- works across a documented matrix of representative home NAT/CGNAT/mobile/IPv6 environments;
+- relay fallback is demonstrated where direct paths fail;
+- no single relay is authoritative or mandatory for world survival.
+
+Do not mark this phase complete merely because AutoNAT/DCUtR/relay code exists. See [docs/NETWORK_VALIDATION.md](docs/NETWORK_VALIDATION.md).
 
 ---
 
 # Phase 10: UX
 
+**Status: partial, with a real desktop app now shipping in preview builds.**
+
 Goal:
 
-> It stops feeling like distributed-systems research.
+> SwarmCraft stops feeling like a distributed-systems research console.
 
-Possible UI:
+Current desktop capabilities include world creation/joining, invites, safety/compatibility state, play/host controls, background seeding, conflict inspection and diagnostics.
+
+The intended mature experience should converge toward:
 
 ```text
 World: Slop SMP
 Status: Healthy
 
 Authority:
-  Mousa-PC
+  temporary / mostly invisible
 
 Online:
   4 peers
@@ -300,11 +360,12 @@ World safety:
   HIGH
 ```
 
-Buttons:
+Desired primary actions:
 
 ```text
 Join
 Invite
+Play
 Seed in background
 Transfer authority
 View replicas
@@ -312,32 +373,47 @@ Create recovery snapshot
 Diagnostics
 ```
 
+Major remaining UX work:
+
+- automatic Java/Minecraft/Fabric preparation;
+- mod/datapack compatibility acquisition flow;
+- automatic host migration/reconnection UX;
+- public/friend discovery/lobby;
+- reducing manual runtime paths and diagnostics to advanced-only surfaces.
+
 ---
 
 # Phase 11: Production hardening
 
-Tasks:
+**Status: partial.**
+
+Work includes:
 
 - fuzzing;
 - property-based protocol tests;
-- soak tests;
-- crash injection;
-- disk corruption tests;
+- long soak tests;
+- repeated crash injection;
+- disk-full/corruption tests;
 - protocol downgrade tests;
 - malicious-peer tests;
 - dependency audit;
-- signed releases;
+- signed/notarized releases;
 - metrics;
 - log redaction;
-- backup/recovery documentation.
+- backup/recovery documentation;
+- representative real-network validation.
 
-No major architecture should be considered production-ready before this phase.
+Current CI already includes strict Rust gates, dependency audit, process-level recovery scenarios, Fabric builds and cross-platform desktop packaging. That is strong preview evidence, not production certification.
+
+No major architecture should be considered production-ready before this phase is substantially complete.
 
 ---
 
 # Phase 12: Distributed simulation research
 
-Only now explore:
+**Status: not implemented; intentionally future research.**
+
+Only after replication, migration and recovery are solid should SwarmCraft explore:
 
 > Can multiple peers simultaneously simulate different parts of one Minecraft world?
 
@@ -363,15 +439,15 @@ Research topics:
 - global game state;
 - mod compatibility.
 
-This may ultimately require a custom server implementation or deep modifications beyond a Fabric mod.
+This may require a custom server implementation or modifications far beyond the current Fabric lifecycle bridge.
 
-Treat it as a new research track, not an MVP requirement.
+Treat it as a separate research track, not an MVP requirement.
 
 ---
 
 # First public demo target
 
-The ideal first demo video:
+The central demo remains:
 
 ```text
 Alice starts a world.
@@ -380,9 +456,11 @@ Charlie joins.
 
 Alice's computer is hard-killed.
 
-Bob automatically becomes host.
+Bob safely wins authority.
+Bob's Minecraft runtime starts automatically.
+Players continue on Bob.
 
-Alice restarts and reconnects.
+Alice restarts and reconnects as a synchronized peer.
 
 Everyone exits Minecraft.
 
@@ -394,14 +472,14 @@ No VPS.
 
 No manual world copying.
 
-No permanent host.
+No stale authority silently rewriting history.
 
-That demonstration alone would communicate the project better than fifty pages of theory.
+When that complete flow is repeatable under crashes and packet loss, SwarmCraft has proven its central product idea.
 
 ---
 
 # Definition of success
 
-SwarmCraft succeeds when this sentence becomes true:
+SwarmCraft succeeds when this sentence becomes operationally true, not merely true in a data-structure unit test:
 
 > If one valid replicated copy of the world survives, the community can bring the world back.

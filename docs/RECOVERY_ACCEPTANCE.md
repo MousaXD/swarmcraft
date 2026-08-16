@@ -1,61 +1,125 @@
-# Authority recovery acceptance checklist
+# Authority Recovery Acceptance Checklist
 
-This checklist turns the v0.1.0-preview crash-recovery contract into reproducible acceptance scenarios.
+This checklist turns the current 0.2.x crash-recovery contract into reproducible acceptance scenarios.
 
-## Automated checks
+It distinguishes **control-plane recovery correctness** from the still-incomplete **automatic Minecraft host-handoff product flow**.
 
-The normal CI matrix must pass on Linux and Windows before any manual recovery demo is considered valid:
+## Automated baseline
+
+The permanent CI matrix must pass on the final commit.
+
+Core gates include:
 
 ```text
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --all-features --locked
 ```
 
-The Fabric server mod, desktop shell, and RustSec dependency audit must also remain green.
+Platform-specific Rust gates, Fabric build, RustSec and desktop package jobs must also remain green according to `docs/RELEASE_GATES.md`.
 
-The consensus suite includes a deterministic 1,000-crash soak. Every completed migration must advance epoch and fencing token exactly once and the previous token must fail renewal.
+---
 
-## Three-peer hard-crash scenario
+## Permanent process-level recovery tests
 
-Use three canonical members: Alice, Bob, and Charlie. All three start from the same verified snapshot and compatibility fingerprint.
+The repository CI currently includes dedicated acceptance tests for:
 
-1. Start all three daemons and standby host supervisors.
-2. Confirm Alice owns the accepted epoch and only Alice's Minecraft runtime is active.
-3. Confirm Alice receives a changing multi-member `authority.permit` from fresh lease quorum.
-4. Hard-kill Alice without a graceful sleep record.
-5. Bob and Charlie must not recover before Alice's last lease expires plus the recovery settle delay.
-6. Bob and Charlie exchange fresh `WorldStatusV1` and must agree on the exact canonical epoch, sequence, snapshot hash, state root, and compatibility fingerprint.
-7. The deterministic election must choose the same successor on both survivors.
-8. The chosen successor must obtain a durable next-generation reservation majority.
-9. Reservation quorum alone must not create a live authority permit.
-10. The successor publishes exactly one Recovery epoch with epoch and fencing token incremented by one.
-11. Recovery-epoch quorum alone must still not create a live authority permit.
-12. The successor creates the zero-change promotion snapshot and promoted membership record in the new epoch.
-13. The successor obtains fresh current-generation lease quorum.
-14. Only now may the local permit heartbeat begin changing and the standby host launch Minecraft.
-15. At no point may two Minecraft authorities be simultaneously permitted to write canonical state.
+- live join plus immediate snapshot replication;
+- host process/Fabric lifecycle;
+- three-daemon hard-kill recovery;
+- recovery successor dying before epoch promotion;
+- solo-history acceptance and divergence detection.
+
+These tests exercise real processes/local networking rather than only in-memory state machines.
+
+---
+
+## Three-member hard-crash control-plane scenario
+
+Use three canonical non-banned members: Alice, Bob and Charlie. All start from the same verified canonical snapshot, membership and compatibility fingerprint.
+
+1. Start the peer daemons and establish authenticated connectivity.
+2. Confirm Alice owns the accepted authority generation.
+3. Confirm Alice's multi-member authority permit is refreshed only while fresh lease quorum exists.
+4. Hard-kill Alice without creating a graceful sleep record.
+5. Bob/Charlie must not recover before the configured recovery window opens.
+6. Survivors exchange fresh `WorldStatusV1` state.
+7. Recovery participants must agree on the exact canonical base used by the algorithm: epoch, sequence, snapshot hash, state root and compatibility fingerprint.
+8. A visible canonical majority must exist.
+9. Deterministic candidate ranking must select the same eligible successor from the same view.
+10. The successor creates a signed recovery ballot anchored to that exact base.
+11. Each voter persists its recovery promise before its vote is considered durable.
+12. The successor must collect a valid majority of votes matching one ballot/round.
+13. The recovery certificate must be persisted before epoch promotion.
+14. The new Recovery epoch must advance epoch and fencing token monotonically.
+15. Peers must reject stale/invalid recovery records that lack the required proof or canonical base agreement.
+16. The accepted recovery authority must still obtain/maintain the required fresh lease quorum before its local authority permit remains live.
+17. At no point may two different authority generations both hold valid current write permission.
+
+Expected result:
+
+- one recovery generation becomes accepted;
+- the previous authority generation is fenced;
+- canonical snapshot/history identity is preserved;
+- normal replication can continue from the recovered generation.
+
+---
+
+## Recovery successor dies scenario
+
+This is a permanent regression scenario for the 0.2 ballot design.
+
+1. Start a recovery attempt from a valid canonical base.
+2. Allow the first candidate/round to become durably promised by some participants.
+3. Kill or otherwise abandon that candidate before the Recovery epoch is successfully promoted.
+4. A later eligible candidate proposes a **strictly higher recovery round on the same canonical base**.
+5. Durable promises must reject attempts to resurrect an older/lower round after an intersecting quorum has advanced.
+6. The new candidate collects a fresh majority certificate.
+7. Recovery completes without lowering quorum requirements.
+
+Expected result:
+
+- safety is preserved;
+- the abandoned old round cannot later become authoritative;
+- liveness can recover through the higher round.
+
+This replaces the v0.1 preview behavior that could safely stall after an abandoned reservation.
+
+---
 
 ## Old-authority restart scenario
 
-Continue from the previous scenario after Bob or Charlie has recovered the world.
+Continue after Bob or Charlie has recovered the world.
 
-1. Restart Alice's daemon and standby supervisor with Alice's old local epoch still on disk.
-2. Alice must not restart Minecraft from the stale epoch.
-3. Alice requests fresh world status from connected canonical members because it cannot obtain quorum for its old lease.
-4. Alice may adopt the immediately next Recovery epoch only after directly observing a fresh canonical majority already agreeing on the exact promoted state.
-5. Alice is not counted as part of that majority until it adopts the recovered epoch.
-6. Alice then receives the promoted membership and snapshot through authenticated replication.
-7. Alice remains a replica/standby unless a later canonical authority transition selects it.
-8. Alice's old fencing token must remain invalid.
+1. Restart Alice with old local epoch/fencing state still on disk.
+2. Alice must not regain a live multi-member authority permit for the stale generation.
+3. Old lease/fencing state must not renew against the newer accepted generation.
+4. Alice must observe/synchronize accepted current world state through authenticated protocol paths.
+5. Recovery epoch/certificate and canonical snapshot/membership/configuration must validate before Alice treats them as current.
+6. Alice remains a replica unless a later valid authority transition selects it.
+
+Expected result:
+
+- Alice converges to the newer accepted state;
+- no stale-authority write is accepted merely because Alice was previously valid.
+
+---
 
 ## Partition scenario
 
-1. Start Alice as authority with Bob and Charlie as replicas.
-2. Isolate Alice from Bob and Charlie while keeping Alice's process alive.
-3. Alice's permit must stop changing when it loses fresh quorum, causing Fabric fencing rather than continued canonical writes.
-4. Bob and Charlie may recover only after the old lease-expiry window and only if they form the canonical majority.
-5. When the partition heals, Alice must converge to the newer Recovery epoch and must not regain authority from its stale generation.
+1. Start Alice as accepted authority with Bob and Charlie as canonical replicas.
+2. Isolate Alice from Bob/Charlie while keeping Alice alive.
+3. Alice must stop receiving enough fresh lease acknowledgements to maintain quorum.
+4. Alice's local permit eventually stops changing and the Fabric permit guard fences the Minecraft runtime.
+5. Bob and Charlie may recover only after the recovery window opens and only if they form the required canonical majority on one exact base.
+6. When the partition heals, Alice must converge to the newer accepted generation and remain unable to revive its stale fencing token.
+
+Expected result:
+
+- the minority partition cannot continue normal quorum-backed canonical writes indefinitely;
+- majority recovery does not require trusting wall-clock ordering or "last writer wins."
+
+---
 
 ## No-quorum scenario
 
@@ -64,37 +128,98 @@ For a three-member canonical world, leave only one member visible after an uncle
 Expected result:
 
 - no automatic crash takeover;
-- no `SOLO` fallback regardless of elapsed wall-clock time;
-- no live authority permit;
-- no Minecraft authority launch.
+- no quorum threshold reduction;
+- no generic `SOLO` fallback for this unclean multi-member crash;
+- no current-generation live authority permit;
+- no claim that canonical recovery succeeded.
 
 Safety intentionally wins over availability here.
 
+---
+
 ## Clean sleep/wake scenario
 
-This is intentionally different from crash recovery.
+Clean sleep is intentionally different from crash recovery.
 
 1. Gracefully stop the active authority through the Fabric shutdown barrier.
-2. Commit the final snapshot and signed sleep record.
-3. Take every peer offline.
-4. Bring back one eligible peer that holds the exact sleeping snapshot.
-5. That peer may wake the world in `SOLO` mode because the previous authority explicitly relinquished canonical ownership.
-6. Epoch and fencing token still advance monotonically.
+2. Commit the final verified signed snapshot.
+3. Persist the signed sleep record.
+4. Take every peer offline.
+5. Bring back one eligible peer holding the exact sleeping snapshot.
+6. Wake logic must reject a stale replica whose latest snapshot does not match the sleeping state.
+7. A valid wake advances epoch/fencing monotonically and clears durable sleep state as appropriate.
 
-## Second failure during recovery
+Expected result:
 
-If the chosen successor obtains durable next-generation reservations and then dies before Recovery epoch quorum, the current preview must stall safely instead of time-expiring the reservation and risking split brain.
+- no crash-recovery ballot is required merely because everyone was intentionally offline;
+- wake starts from the exact durable sleeping checkpoint.
 
-This known liveness limitation is acceptable for v0.1.0-preview only if it remains documented in `docs/AUTHORITY_RECOVERY.md`. A later recovery-round/ballot mechanism should address it without weakening majority intersection.
+---
+
+## Solo-history scenario
+
+For a world whose signed configuration explicitly allows solo advancement:
+
+1. Lose quorum without treating the situation as an unclean automatic crash takeover by an arbitrary peer.
+2. The accepted authority may enter explicit solo mode only through the signed world policy/runtime rules.
+3. Persist signed solo branch ancestry/head state.
+4. Advance snapshots while clearly reporting reduced durability/safety.
+5. Reconnect a compatible peer with matching ancestry.
+6. Compatible history may reconcile and return to quorum-backed operation.
+
+Expected result:
+
+- solo progress is never mislabeled as quorum-backed safety;
+- compatible solo history can be adopted safely.
+
+---
+
+## Divergent solo branches
+
+1. Construct or reproduce independently advanced solo branches from a shared base.
+2. Reconnect the branches.
+3. The runtime must detect that neither branch is a simple compatible continuation of the other.
+4. Both branches must remain preserved for recovery/manual resolution.
+5. No automatic semantic Minecraft merge is attempted.
+
+Expected result:
+
+- visible conflict state;
+- no silent last-writer-wins replacement;
+- no destroyed branch merely to make the UI look healthy.
+
+---
+
+## Product-level host migration scenario
+
+This is the **remaining MVP integration target**, not yet a fully automated permanent acceptance gate.
+
+The desired end-to-end scenario is:
+
+1. Alice runs the authoritative Minecraft world.
+2. Bob holds a verified synchronized replica and is authority eligible.
+3. Alice's process/machine is hard-killed.
+4. Bob wins control-plane recovery safely using the ballot/certificate protocol.
+5. Bob's host supervisor automatically restores/launches the correct Minecraft/Fabric runtime.
+6. Players are redirected/reconnected to Bob.
+7. Gameplay continues from the accepted safe checkpoint.
+8. Alice later returns as a stale peer and synchronizes without regaining old authority.
+
+Until steps 5 and 6 are automatic and repeatedly tested, documentation must say **automatic authority recovery is implemented** rather than **seamless Minecraft host migration is complete**.
+
+---
 
 ## Release acceptance
 
-A preview build is not ready to merge/release until:
+A preview change touching recovery/authority code is not ready until:
 
-- the full CI matrix is green on the final commit;
-- the deterministic failure and 1,000-crash soak tests pass;
-- the three-peer hard-crash scenario completes end to end;
-- the old-authority restart scenario converges correctly;
-- the no-quorum scenario never starts an authority;
-- the clean sleep/wake scenario still works;
-- Windows and Linux packaged builds can run the daemon, standby supervisor, and Fabric bridge together.
+- the full relevant CI matrix is green on the final commit;
+- process-level recovery tests pass;
+- successor-dies recovery remains live and safe;
+- stale-authority behavior remains fenced;
+- no-quorum behavior does not invent availability;
+- clean sleep/wake behavior still validates exact snapshot state;
+- solo-history divergence remains preserved rather than silently merged;
+- documentation is updated if the safety contract changes.
+
+See `docs/AUTHORITY_RECOVERY.md`, `docs/RELEASE_GATES.md` and `docs/IMPLEMENTATION_STATUS.md`.
