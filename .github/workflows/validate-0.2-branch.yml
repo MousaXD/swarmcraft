@@ -26,17 +26,17 @@ jobs:
         shell: bash
         run: |
           set +e
-          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings 2>&1 | tee .github/clippy-failure.log
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings 2>&1 | tee .github/clippy-failure.txt
           status=${PIPESTATUS[0]}
           set -e
           if [[ "$status" -ne 0 ]]; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add .github/clippy-failure.log
-            git commit -m 'ci: capture temporary clippy failure log'
+            git add .github/clippy-failure.txt
+            git commit -m 'ci: capture temporary clippy failure diagnostics'
             git push origin HEAD:feat/swarmcraft-0.2.0
             exit "$status"
           fi
-          rm -f .github/clippy-failure.log
+          rm -f .github/clippy-failure.txt
       - name: Test
         run: cargo test --workspace --all-features --locked
