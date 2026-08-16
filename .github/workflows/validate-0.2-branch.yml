@@ -20,33 +20,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply staged branch migrations and canonical Rust formatting
-        id: format
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
         shell: bash
         run: |
-          set -euo pipefail
-          for script in \
-            .github/scripts/fix_state_test_ids.py \
-            .github/scripts/apply_v020_runtime.py \
-            .github/scripts/apply_v020_solo.py; do
-            if [[ -f "$script" ]]; then
-              python "$script"
-            fi
-          done
-          cargo fmt --all
-          if git diff --quiet; then
-            echo 'changed=false' >> "$GITHUB_OUTPUT"
-          else
+          set +e
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings 2>&1 | tee .github/clippy-failure.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [[ "$status" -ne 0 ]]; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add -A
-            git commit -m 'feat(consensus): wire explicit solo mode and runtime compatibility'
+            git add .github/clippy-failure.log
+            git commit -m 'ci: capture temporary clippy failure log'
             git push origin HEAD:feat/swarmcraft-0.2.0
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            exit "$status"
           fi
-      - name: Clippy
-        if: steps.format.outputs.changed == 'false'
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          rm -f .github/clippy-failure.log
       - name: Test
-        if: steps.format.outputs.changed == 'false'
         run: cargo test --workspace --all-features --locked
