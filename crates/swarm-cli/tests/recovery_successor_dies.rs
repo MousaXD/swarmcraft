@@ -39,12 +39,23 @@ struct CanonicalReplicaSeed<'a> {
     authority: &'a PeerIdentity,
 }
 
-struct ManagedChild(Child);
+struct ManagedChild {
+    child: Child,
+    log_path: std::path::PathBuf,
+}
 
 impl ManagedChild {
     fn stop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    fn status(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().unwrap()
+    }
+
+    fn log(&self) -> String {
+        fs::read_to_string(&self.log_path).unwrap_or_else(|error| format!("<failed to read daemon log: {error}>"))
     }
 }
 
@@ -73,6 +84,9 @@ fn transport_address(peer: &PeerFixture) -> String {
 }
 
 fn spawn_daemon(peer: &PeerFixture, bootstraps: &[String], pause_after_certificate: bool) -> ManagedChild {
+    let log_path = peer.paths.root.join("recovery-acceptance-daemon.log");
+    let log = fs::File::create(&log_path).unwrap();
+    let log_err = log.try_clone().unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_swarmcraft"));
     command
         .arg("--data-dir")
@@ -80,16 +94,16 @@ fn spawn_daemon(peer: &PeerFixture, bootstraps: &[String], pause_after_certifica
         .arg("daemon")
         .arg("--listen")
         .arg(format!("/ip4/127.0.0.1/udp/{}/quic-v1", peer.port))
-        .env("RUST_LOG", "warn")
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
     if !bootstraps.is_empty() {
         command.env("SWARMCRAFT_BOOTSTRAP", bootstraps.join(","));
     }
     if pause_after_certificate {
         command.env("SWARMCRAFT_TEST_PAUSE_AFTER_RECOVERY_CERTIFICATE_MS", RECOVERY_PAUSE_MS.to_string());
     }
-    ManagedChild(command.spawn().unwrap())
+    ManagedChild { child: command.spawn().unwrap(), log_path }
 }
 
 fn wait_until(label: &str, timeout: Duration, mut predicate: impl FnMut() -> bool) {
@@ -101,6 +115,25 @@ fn wait_until(label: &str, timeout: Duration, mut predicate: impl FnMut() -> boo
         thread::sleep(WAIT_STEP);
     }
     panic!("timed out waiting for {label}");
+}
+
+fn wait_until_with_daemon(
+    label: &str,
+    timeout: Duration,
+    daemon: &mut ManagedChild,
+    mut predicate: impl FnMut() -> bool,
+) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if predicate() {
+            return;
+        }
+        if let Some(status) = daemon.status() {
+            panic!("daemon exited while waiting for {label}: {status}\n{}", daemon.log());
+        }
+        thread::sleep(WAIT_STEP);
+    }
+    panic!("timed out waiting for {label}\n{}", daemon.log());
 }
 
 fn member(identity: &PeerIdentity) -> WorldMemberV1 {
@@ -292,20 +325,34 @@ fn newer_successor_recovers_after_first_successor_dies_with_durable_votes() {
     let authority_addr = transport_address(second_successor);
     let authority_bootstrap = vec![authority_addr];
     let mut restarted_first = spawn_daemon(first_successor, &authority_bootstrap, false);
-    wait_until("stale first successor adopting newer certified recovery", Duration::from_secs(40), || {
-        first_successor.storage.load_epoch_record(world).is_ok_and(|record| {
-            record.epoch_number == 2 && record.fencing_token == 2 && record.authority_peer_id == second_successor_id
-        })
-    });
+    wait_until_with_daemon(
+        "stale first successor adopting newer certified recovery",
+        Duration::from_secs(40),
+        &mut restarted_first,
+        || {
+            first_successor.storage.load_epoch_record(world).is_ok_and(|record| {
+                record.epoch_number == 2
+                    && record.fencing_token == 2
+                    && record.authority_peer_id == second_successor_id
+            })
+        },
+    );
     assert!(permit_generation(first_successor, world).is_none());
     restarted_first.stop();
 
     let mut restarted_a = spawn_daemon(&a, &authority_bootstrap, false);
-    wait_until("original stale authority adopting accepted recovery", Duration::from_secs(40), || {
-        a.storage.load_epoch_record(world).is_ok_and(|record| {
-            record.epoch_number == 2 && record.fencing_token == 2 && record.authority_peer_id == second_successor_id
-        })
-    });
+    wait_until_with_daemon(
+        "original stale authority adopting accepted recovery",
+        Duration::from_secs(40),
+        &mut restarted_a,
+        || {
+            a.storage.load_epoch_record(world).is_ok_and(|record| {
+                record.epoch_number == 2
+                    && record.fencing_token == 2
+                    && record.authority_peer_id == second_successor_id
+            })
+        },
+    );
     assert!(permit_generation(&a, world).is_none());
     restarted_a.stop();
 }
