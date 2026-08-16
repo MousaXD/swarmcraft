@@ -272,9 +272,15 @@ impl SwarmNode {
                         .send_request(&peer_id, WireRequest::Hello(self.local_hello.clone()));
                     return Ok(NetworkEvent::Connected { transport_peer: peer_id });
                 }
-                SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                    self.authenticated.remove(&peer_id);
-                    return Ok(NetworkEvent::Disconnected { transport_peer: peer_id });
+                SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
+                    // A peer can have multiple libp2p connections at once, especially
+                    // during reconnects. Closing an older connection must not erase
+                    // authentication established by a newer live connection.
+                    if num_established == 0 {
+                        self.authenticated.remove(&peer_id);
+                        return Ok(NetworkEvent::Disconnected { transport_peer: peer_id });
+                    }
+                    debug!(transport_peer = %peer_id, remaining_connections = num_established, "peer connection closed; keeping authentication for remaining connection");
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
                     if let Some((peer, address)) = peers.into_iter().next() {
