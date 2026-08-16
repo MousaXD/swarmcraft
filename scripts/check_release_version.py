@@ -20,10 +20,10 @@ with (ROOT / "Cargo.toml").open("rb") as handle:
 if cargo.get("workspace", {}).get("package", {}).get("version") != EXPECTED_APP:
     fail("workspace.package.version is not 0.2.0")
 
-with (ROOT / "apps/desktop/package.json").open(encoding="utf-8") as handle:
-    package = json.load(handle)
-if package.get("version") != EXPECTED_APP:
-    fail("apps/desktop/package.json version is not 0.2.0")
+with (ROOT / "apps/desktop/src-tauri/Cargo.toml").open("rb") as handle:
+    desktop = tomllib.load(handle)
+if desktop.get("package", {}).get("version") != EXPECTED_APP:
+    fail("desktop Cargo.toml package.version is not 0.2.0")
 
 with (ROOT / "apps/desktop/src-tauri/tauri.conf.json").open(encoding="utf-8") as handle:
     tauri = json.load(handle)
@@ -47,13 +47,19 @@ owned = {
     "swarm-network",
     "swarm-protocol",
     "swarm-storage",
-    "swarmcraft-desktop",
 }
+seen = set()
 for block in lock.split("[[package]]")[1:]:
     name = re.search(r'\nname = "([^"]+)"', block)
     version = re.search(r'\nversion = "([^"]+)"', block)
-    if name and name.group(1) in owned and version and version.group(1) != EXPECTED_APP:
-        fail(f"Cargo.lock package {name.group(1)} is {version.group(1)}, expected {EXPECTED_APP}")
+    if name and name.group(1) in owned:
+        seen.add(name.group(1))
+        if not version or version.group(1) != EXPECTED_APP:
+            actual = version.group(1) if version else "missing"
+            fail(f"Cargo.lock package {name.group(1)} is {actual}, expected {EXPECTED_APP}")
+missing = owned - seen
+if missing:
+    fail(f"Cargo.lock is missing workspace packages: {', '.join(sorted(missing))}")
 
 protocol = (ROOT / "crates/swarm-protocol/src/lib.rs").read_text(encoding="utf-8")
 if not re.search(rf"pub const PROTOCOL_VERSION:\s*u16\s*=\s*{EXPECTED_PROTOCOL}\s*;", protocol):
