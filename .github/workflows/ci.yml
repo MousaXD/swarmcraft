@@ -37,6 +37,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Peer networking hard reconnect
+        run: cargo test -p swarm-network --test peer_networking_acceptance --locked
+      - name: Snapshot swarm reconstruction
+        run: cargo test -p swarm-storage --test snapshot_swarm_acceptance --locked
       - name: Live join replication
         run: cargo test -p swarm-cli --test live_join_replication --locked
       - name: Host process lifecycle
