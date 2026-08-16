@@ -331,9 +331,7 @@ fn newer_successor_recovers_after_first_successor_dies_with_durable_votes() {
         &mut restarted_first,
         || {
             first_successor.storage.load_epoch_record(world).is_ok_and(|record| {
-                record.epoch_number == 2
-                    && record.fencing_token == 2
-                    && record.authority_peer_id == second_successor_id
+                record.epoch_number == 2 && record.fencing_token == 2 && record.authority_peer_id == second_successor_id
             })
         },
     );
@@ -347,9 +345,7 @@ fn newer_successor_recovers_after_first_successor_dies_with_durable_votes() {
         &mut restarted_a,
         || {
             a.storage.load_epoch_record(world).is_ok_and(|record| {
-                record.epoch_number == 2
-                    && record.fencing_token == 2
-                    && record.authority_peer_id == second_successor_id
+                record.epoch_number == 2 && record.fencing_token == 2 && record.authority_peer_id == second_successor_id
             })
         },
     );
