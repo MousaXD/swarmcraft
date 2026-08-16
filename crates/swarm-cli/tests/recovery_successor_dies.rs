@@ -80,7 +80,7 @@ fn spawn_daemon(peer: &PeerFixture, bootstraps: &[String], pause_after_certifica
         .arg("daemon")
         .arg("--listen")
         .arg(format!("/ip4/127.0.0.1/udp/{}/quic-v1", peer.port))
-        .env("RUST_LOG", "warn")
+        .env("RUST_LOG", "info")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
     if !bootstraps.is_empty() {
