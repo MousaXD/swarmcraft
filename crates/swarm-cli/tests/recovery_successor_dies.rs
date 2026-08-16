@@ -152,13 +152,9 @@ fn newer_successor_recovers_after_first_successor_dies_with_durable_votes() {
     let e = peer_fixture();
     let peers = [&a, &b, &c, &d, &e];
 
-    let (world, genesis) = create_world_genesis(
-        &a.identity,
-        "26.1.2".into(),
-        "0.19.3".into(),
-        b"five-daemon-recovery-successor-dies",
-    )
-    .unwrap();
+    let (world, genesis) =
+        create_world_genesis(&a.identity, "26.1.2".into(), "0.19.3".into(), b"five-daemon-recovery-successor-dies")
+            .unwrap();
     let metadata = WorldMetadataV1 {
         storage_schema_version: STORAGE_SCHEMA_VERSION,
         display_name: "five-daemon-recovery-successor-dies".into(),
@@ -247,7 +243,8 @@ fn newer_successor_recovers_after_first_successor_dies_with_durable_votes() {
     }
 
     wait_until("initial five-member authority quorum permit", Duration::from_secs(30), || {
-        permit_generation(&a, world).is_some_and(|(epoch, fencing, heartbeat)| epoch == 1 && fencing == 1 && heartbeat >= 2)
+        permit_generation(&a, world)
+            .is_some_and(|(epoch, fencing, heartbeat)| epoch == 1 && fencing == 1 && heartbeat >= 2)
     });
     daemon_a.stop();
 

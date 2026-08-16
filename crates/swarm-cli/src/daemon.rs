@@ -506,6 +506,12 @@ fn drive_recovery_ballot(
     // Persist the quorum proof before the epoch. A crash between these writes can
     // safely retry promotion; the proof itself never grants an older round power.
     storage.save_recovery_certificate(&certificate)?;
+    #[cfg(debug_assertions)]
+    if let Ok(delay_ms) = std::env::var("SWARMCRAFT_TEST_PAUSE_AFTER_RECOVERY_CERTIFICATE_MS") {
+        if let Ok(delay_ms) = delay_ms.parse::<u64>() {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+        }
+    }
     let next = promote_recovery_epoch(storage, identity, previous, latest)?;
     let _ = storage.clear_recovery_promise_after_epoch_advance(world, next.epoch_number)?;
     runtime.lease_acks.retain(|(ack_world, _), _| *ack_world != world);
