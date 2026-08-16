@@ -1,0 +1,86 @@
+name: Network Soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      gib:
+        description: Total transfer size in GiB
+        required: true
+        default: '2'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '5'
+      restart_mib:
+        description: Force a sender restart after this many MiB
+        required: true
+        default: '256'
+        type: choice
+        options:
+          - '128'
+          - '256'
+          - '512'
+  schedule:
+    - cron: '17 3 * * 0'
+
+permissions:
+  contents: read
+
+jobs:
+  interrupted-quic-soak:
+    name: Interrupted QUIC multi-GiB soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Resolve soak profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          gib='${{ inputs.gib }}'
+          restart_mib='${{ inputs.restart_mib }}'
+          if [[ -z "$gib" ]]; then gib=2; fi
+          if [[ -z "$restart_mib" ]]; then restart_mib=256; fi
+          echo "SWARMCRAFT_NETWORK_SOAK_GIB=$gib" >> "$GITHUB_ENV"
+          echo "SWARMCRAFT_NETWORK_SOAK_RESTART_MIB=$restart_mib" >> "$GITHUB_ENV"
+      - name: Compile network soak before impairment
+        run: cargo test --release -p swarm-network --test network_transfer_soak --locked --no-run
+      - name: Apply sustained WAN-like impairment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          command -v tc
+          sudo tc qdisc replace dev lo root netem delay 8ms 3ms distribution normal loss 0.2% rate 250mbit
+          tc qdisc show dev lo | tee network-soak-qdisc.txt
+      - name: Record soak metadata
+        shell: bash
+        run: |
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "transfer_gib=$SWARMCRAFT_NETWORK_SOAK_GIB"
+            echo "restart_mib=$SWARMCRAFT_NETWORK_SOAK_RESTART_MIB"
+            echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } | tee network-soak-metadata.txt
+      - name: Multi-gigabyte interrupted QUIC transfer
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --release -p swarm-network --test network_transfer_soak multi_gib_interrupted_quic_transfer_soak --locked -- --ignored --nocapture 2>&1 | tee network-soak.log
+      - name: Remove loopback impairment
+        if: always()
+        run: sudo tc qdisc del dev lo root || true
+      - name: Upload soak evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-soak-${{ github.sha }}
+          path: |
+            network-soak.log
+            network-soak-metadata.txt
+            network-soak-qdisc.txt
+          if-no-files-found: warn
