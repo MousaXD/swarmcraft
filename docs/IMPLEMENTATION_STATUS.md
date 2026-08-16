@@ -51,6 +51,8 @@ The largest missing product milestone is connecting **safe authority recovery** 
 
 - libp2p runtime with TCP/Noise/Yamux and QUIC support.
 - Authenticated signed application peer handshake on top of transport identity.
+- Persisted transport identity across hard peer restarts.
+- Replacement connections can supersede stale libp2p connections without losing application authentication.
 - LAN mDNS discovery.
 - Kademlia address/discovery support.
 - Bootstrap peer configuration.
@@ -62,8 +64,11 @@ The largest missing product milestone is connecting **safe authority recovery** 
 - Snapshot manifest negotiation.
 - Missing-blob negotiation.
 - Chunked blob transfer with resume offsets.
+- Resume state is content-addressed and can continue from a different replica holding the same blob.
 - Replica acknowledgements.
 - Live join followed by immediate snapshot replication without requiring a reconnect.
+- Fourth-peer reconstruction from surviving replicas is covered by a permanent acceptance gate.
+- Corrupt replica data is rejected, and poisoned partial blobs are discarded so a clean retry can proceed from another replica.
 
 ### Authority, recovery and safety
 
@@ -130,6 +135,8 @@ The largest missing product milestone is connecting **safe authority recovery** 
 - Formatting and strict Clippy gates.
 - RustSec dependency audit against the committed lockfile.
 - Process-level acceptance tests for:
+  - hard peer restart with stable transport identity, re-authentication and authenticated request recovery;
+  - fourth-peer snapshot reconstruction from surviving replicas, including missing/corrupt-source fallback and cross-replica resume;
   - live join and immediate replication;
   - host lifecycle and final sleep snapshot;
   - three-daemon hard-kill authority recovery;
@@ -180,13 +187,14 @@ Still missing:
 
 ### Snapshot swarm breadth
 
-Snapshot replication, corruption checks and resumable blob transfer exist.
+The roadmap-shaped fourth-peer reconstruction scenario is now automated: a source replica can disappear, surviving replicas can have asymmetric availability, corrupt data is rejected, a partial transfer can resume from a different replica, and the new peer restores the exact verified world.
 
-Still incomplete relative to the roadmap:
+Still incomplete relative to the mature roadmap target:
 
-- parallel multi-source reconstruction as a polished replication strategy;
-- retention/garbage-collection policy maturity;
-- explicit automated proof of the roadmap scenario where a fourth peer reconstructs a world from multiple surviving replicas.
+- a production scheduler that downloads different missing blobs from multiple peers in parallel rather than relying on sequential source fallback;
+- snapshot retention policy maturity;
+- safe garbage collection of blobs no longer referenced by retained snapshots;
+- larger sustained network-transfer soak coverage beyond the existing storage streaming evidence.
 
 ### NAT traversal and internet usability
 
@@ -235,8 +243,8 @@ The roadmap is intentionally aspirational and phases have not landed in a perfec
 | Phase | Current assessment | Notes |
 | --- | --- | --- |
 | 0 — Research/protocol skeleton | Complete for preview | Core identity, storage, signed state and deterministic protocol machinery are established. |
-| 1 — Peer networking | Mostly complete | Core networking stack is implemented; exact 1 GiB resume exit criterion is not the main permanent CI gate. |
-| 2 — Snapshot swarm | Mostly complete | Real replication exists; multi-source reconstruction/retention maturity remains. |
+| 1 — Peer networking | Mostly complete | Core networking and hard-restart recovery are permanently gated; large interrupted network-transfer soak and broader field validation remain. |
+| 2 — Snapshot swarm | Mostly complete | Fourth-peer reconstruction, corruption rejection and cross-replica resume are gated; parallel scheduling plus retention/GC maturity remain. |
 | 3 — Minecraft save integration | Complete for preview | Fabric IPC, restore, save barrier and final snapshot flow are implemented and tested. |
 | 4 — Manual host migration | Partial | State-machine support exists; complete user/runtime transfer workflow does not. |
 | 5 — Automatic host migration | Control plane complete, product flow partial | Recovery/election/fencing are real; successor Minecraft launch + player reconnect remain. |

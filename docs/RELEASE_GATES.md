@@ -41,6 +41,30 @@ The normal CI workflow includes real process/network scenarios rather than relyi
 
 Required scenarios include:
 
+### Peer networking hard reconnect
+
+- two independent QUIC/libp2p peers authenticate using signed application identities;
+- the restarting peer reloads the same persisted transport identity;
+- a replacement connection is allowed to race the dead connection from the previous process;
+- the live replacement connection becomes canonical without the stale connection erasing application authentication;
+- signed application authentication is re-established after restart;
+- authenticated request/response traffic succeeds after the reconnect.
+
+This gate protects the distinction between durable peer identity and transient network connections.
+
+### Snapshot swarm reconstruction
+
+- an original peer creates a verified snapshot and replicates it to two peers;
+- the original peer disappears completely;
+- one surviving replica is missing a blob;
+- another surviving replica contains a same-size but corrupt encoded blob;
+- the corrupt source is rejected by content verification;
+- a failed final blob verification discards the poisoned partial file so another source can retry from offset zero;
+- a partial blob begun from one surviving replica can resume from another replica holding the same content-addressed blob;
+- a fourth peer reconstructs, finalizes, verifies and restores the exact original world from the surviving replicas.
+
+This is the permanent executable form of the roadmap's three-peer to fourth-peer reconstruction criterion.
+
 ### Live join and replication
 
 - start independent peer daemons;
@@ -150,6 +174,8 @@ The repository has historical large-world streaming evidence:
 
 Repeat or expand this evidence when storage algorithms materially change.
 
+The permanent snapshot-swarm reconstruction gate proves source failover, corruption rejection and resume semantics, but it does not replace a sustained multi-gigabyte network-transfer soak.
+
 ---
 
 ## Gates not yet equivalent to production certification
@@ -158,6 +184,8 @@ Green CI does **not** prove all real-world deployment conditions.
 
 Still requiring broader/manual evidence:
 
+- sustained interrupted multi-gigabyte network-transfer campaigns;
+- production-quality parallel multi-source scheduling and retention/GC policy;
 - repeated long-duration Minecraft crash/host-migration campaigns;
 - disk-full and hardware corruption scenarios;
 - hostile/malicious peer campaigns;
