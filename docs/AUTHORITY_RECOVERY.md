@@ -1,191 +1,260 @@
-# Authority recovery in v0.1.0-preview
+# Authority Recovery in SwarmCraft 0.2.x
 
-This document describes the authority crash-recovery path implemented by the preview runtime.
+This document describes the crash-recovery path implemented by the current preview runtime.
 
-The preview has one Minecraft simulation authority at a time. It does not distribute ticks or chunks across authorities.
+SwarmCraft has one Minecraft simulation authority per world at a time. It does not distribute ticks or chunks across multiple simultaneous authorities.
 
-## Safety goal
+The recovery design prioritizes **canonical safety first, then liveness**. A peer does not become authoritative merely because it noticed a failure first.
 
-After an unclean authority failure, SwarmCraft must not start a replacement Minecraft authority merely because one peer noticed the failure first.
+## Recovery overview
 
-A replacement becomes live only after three distinct majority gates:
+For a multi-member world, the normal path is:
 
-1. next-generation reservation;
-2. recovery-epoch acceptance;
-3. live authority-lease acknowledgement.
+```text
+current authority
+    |
+    | signed leases + fresh quorum acknowledgements
+    v
+live authority permit
 
-These acknowledgements are intentionally tracked separately. Passing an earlier gate cannot be reused as proof for a later gate.
+current authority disappears
+    |
+    v
+lease/recovery delay expires
+    |
+    v
+survivors compare canonical state
+    |
+    v
+deterministic eligible successor
+    |
+    v
+signed durable recovery ballot
+    |
+    v
+majority votes / recovery certificate
+    |
+    v
+new Recovery epoch + higher fencing token
+    |
+    v
+fresh current-generation lease quorum
+    |
+    v
+live authority permit
+```
 
-## Normal authority lease
+The ballot/certificate step is durable and monotonic. It replaced the v0.1 preview's single next-generation reservation mechanism.
 
-For a multi-member world, the current authority periodically sends a signed `AuthorityLeaseGrantV1` for the accepted `(epoch, fencing_token)` generation.
+---
 
-A replica accepts the lease only when:
+## Normal authority leases
 
-- the sender is the authenticated application peer in the signed lease;
-- the peer is a non-banned, authority-eligible member with the expected public key;
-- the generation exactly matches the locally accepted epoch;
-- the lease peer/key exactly matches the locally accepted epoch authority;
-- the lease duration matches the preview policy.
+For a multi-member world, the accepted authority periodically sends a signed `AuthorityLeaseGrantV1` for the exact accepted `(epoch, fencing_token)` generation.
 
-The authority counts only fresh acknowledgements from the canonical membership. It refreshes the local `authority.permit` heartbeat only while a majority is fresh.
+A replica accepts the lease only when protocol, membership, identity and generation checks succeed.
 
-The Fabric bridge watches that permit. If the permit stops changing, the old Minecraft authority is fenced and stopped rather than continuing to write canonical state.
+The authority counts fresh acknowledgements from non-banned canonical members. A local `authority.permit` heartbeat is refreshed only while the required quorum is fresh.
+
+The Fabric bridge watches this permit for multi-member worlds. If the permit stops changing, the Minecraft process is fenced and terminated rather than being allowed to continue writing as if it still held canonical authority.
+
+This permit is a local runtime enforcement mechanism. It does not replace the signed canonical epoch/lease state.
+
+---
 
 ## Crash detection
 
-A replica considers crash recovery only when all of the following are true:
+A replica considers recovery only when all relevant safety conditions are satisfied, including:
 
 - the accepted authority is no longer an authenticated connected peer;
-- the last accepted authority lease has expired locally;
-- the recovery settle delay has elapsed;
 - the world is not in durable sleep;
-- the local peer is an eligible member;
-- the canonical world has more than one active member.
+- the local peer is a non-banned, authority-eligible member;
+- the recovery delay/window has opened;
+- enough peers are visible to satisfy quorum;
+- the candidate has a verified local copy of the canonical snapshot.
 
-Lease expiry uses local monotonic time. Wall-clock timestamps are not used to decide whether an authority lease expired.
+Recovery does not use wall-clock timestamps as canonical ordering. Runtime expiry/delay decisions use local monotonic time, while canonical authority ordering comes from epochs, fencing tokens, signed records and recovery rounds.
+
+---
 
 ## Canonical recovery view
 
-Survivors exchange `WorldStatusV1` and include a peer in the recovery view only when its fresh status agrees exactly on:
+Survivors exchange fresh `WorldStatusV1` state.
+
+A peer is included in the recovery view only when its status agrees with the candidate's accepted canonical base on the critical fields used by recovery, including:
 
 - world ID;
 - accepted epoch;
-- latest snapshot sequence;
+- canonical sequence;
 - latest snapshot hash;
 - state root;
 - compatibility fingerprint.
 
-The candidate itself must hold the verified canonical snapshot locally.
+Peers that are stale, incompatible, banned, storage-only or otherwise authority-ineligible do not become candidates merely because they are reachable.
 
-A crash recovery attempt requires a visible majority of the canonical non-banned membership. Automatic crash recovery never falls back to solo mode.
+Automatic crash recovery requires a visible majority of the canonical active membership. It does **not** silently fall back to solo mode after an unclean authority crash.
 
-Among eligible visible candidates with the same canonical state, the existing deterministic authority election chooses one successor. The stable peer-ID tie-break means peers with the same view choose the same candidate.
+Among eligible candidates with the same accepted state, deterministic authority ranking chooses the successor.
 
-## Gate 1: durable next-generation reservation
+---
 
-The candidate creates a signed `AuthorityLeaseGrantV1` for exactly:
+## Durable recovery ballot
+
+The elected candidate creates a signed `RecoveryBallotV1` anchored to one exact canonical base.
+
+The ballot binds at least:
+
+- world ID;
+- base epoch and fencing token;
+- target epoch and fencing token;
+- monotonically increasing recovery round;
+- candidate peer identity/public key;
+- canonical base snapshot hash;
+- canonical base state hash;
+- canonical membership hash.
+
+The target generation advances monotonically from the accepted base.
+
+A ballot is not permission to run Minecraft. It is a proposal to recover a specific canonical base into a specific next authority generation.
+
+---
+
+## Durable promises and votes
+
+Each voter validates the ballot and persists its highest accepted recovery promise before allowing that vote to matter.
+
+A recovery promise prevents a peer from later helping an older/incompatible round gain authority.
+
+Important properties:
+
+- the round is monotonic for the same recovery base;
+- a higher valid round can supersede an abandoned earlier candidate/round;
+- old rounds become stale once an intersecting majority has moved forward;
+- a ballot on a different canonical base is not interchangeable with the current recovery attempt;
+- votes are signed and bound to the ballot/candidate/round.
+
+The local candidate also persists its own promise/vote through the same durable path.
+
+---
+
+## Recovery certificate
+
+Once the candidate collects a quorum of valid votes matching the ballot, it builds a `RecoveryCertificateV1`.
+
+The runtime validates the certificate shape against canonical membership and verifies the included signatures.
+
+The certificate is persisted **before** the new recovery epoch is promoted.
+
+That ordering matters: a crash after the certificate write but before epoch promotion can retry safely without granting an older recovery round authority.
+
+---
+
+## Recovery epoch
+
+After a valid durable certificate exists, the candidate promotes a new `EpochRecordV1` in recovery mode.
+
+The new record advances:
 
 ```text
-next_epoch = current_epoch + 1
-next_fencing_token = current_fencing_token + 1
+epoch        = base_epoch + 1
+fencing      = base_fencing_token + 1
 ```
 
-During recovery this signed lease is used as a next-generation reservation, not as permission to run Minecraft.
+and remains anchored to the verified canonical base state.
 
-Each accepting peer persists the reservation at:
+The recovery epoch is replicated together with its quorum certificate. A peer must not accept a recovery epoch merely because the record is correctly signed by the candidate; the recovery proof matters.
 
-```text
-worlds/<world>/metadata/recovery-reservation.postcard
-```
+---
 
-Persistence provides the important one-successor-per-generation rule across daemon restarts:
+## Recovery authority remains quorum-dependent
 
-- an older generation cannot overwrite a newer reservation;
-- the same candidate/generation may be replayed idempotently;
-- a different candidate cannot replace the same reserved generation;
-- a later generation may supersede an older reservation only after canonical state has advanced.
+Winning the recovery ballot is not a permanent blank check.
 
-The candidate must receive a majority of reservation acknowledgements before creating the recovery epoch.
+While running in Recovery mode, the accepted authority must continue to satisfy the runtime's recovery/quorum requirements and obtain fresh current-generation lease acknowledgements before the local authority permit remains live.
 
-A reservation acknowledgement is not an epoch acknowledgement and is not a live lease acknowledgement.
+If the required quorum disappears, the local permit is cleared and the Minecraft authority is fenced rather than continuing indefinitely from a partition minority.
 
-## Gate 2: recovery epoch quorum
+This keeps three separate concepts distinct:
 
-After reservation quorum, the candidate creates a signed `EpochRecordV1` with:
+- **elected recovery successor**;
+- **accepted recovery epoch with quorum proof**;
+- **currently live Minecraft authority with fresh lease quorum**.
 
-```text
-mode = RECOVERY
-epoch = previous_epoch + 1
-fencing_token = previous_fencing_token + 1
-previous_epoch_hash = hash(previous_epoch_record)
-base_state_hash = latest_verified_snapshot.state_root
-```
+---
 
-A replica accepts a Recovery epoch only when it matches the durable next-generation reservation and advances epoch/fencing exactly once.
+## What happens if the elected successor dies?
 
-Exact epoch replay is idempotent so a daemon can reconnect or restart and collect acknowledgement again without manufacturing another generation.
+This changed materially from v0.1.
 
-The recovered authority does not mint a permit after writing its own epoch. It must first receive `EpochAccepted` from a canonical majority.
+The old preview could safely stall if a successor died after durable reservation but before recovery completed.
 
-This separate gate prevents reservation acknowledgements from being mistaken for proof that peers accepted the new epoch.
+Current 0.2.x recovery uses monotonic ballots/promises. If an earlier recovery attempt is abandoned, a later valid candidate can propose a **strictly higher round on the same canonical base** and collect a new majority certificate.
 
-## Promotion snapshot and membership
+Majority intersection plus durable promises prevents the abandoned older round from later becoming valid again after an intersecting quorum has advanced.
 
-The Recovery epoch is based on the last verified canonical snapshot. Before Minecraft starts, the recovered authority creates a zero-change promotion snapshot in the new epoch:
+This behavior is covered by the process-level `recovery_successor_dies` acceptance test and is treated as a permanent regression gate.
 
-- a new snapshot number;
-- a new sequence;
-- `previous_snapshot_hash` pointing to the old canonical snapshot;
-- the same verified state root;
-- the same content-addressed blob descriptors;
-- the new authority identity and signature.
+---
 
-No Minecraft data is mutated by this promotion. Existing verified blobs are reused.
+## Returning stale authority
 
-The authority also promotes the membership record into the new epoch and signs it as the accepted authority. Recovery artifact creation is idempotent, allowing the daemon to reconstruct the promotion after a local restart.
+When the old authority returns, its earlier epoch/fencing token is stale.
 
-## Gate 3: live authority lease quorum
+It must not regain canonical write permission simply because it still has old local files or a previously valid signature.
 
-Only after Recovery epoch quorum does the new authority send ordinary current-generation leases.
+The returning peer synchronizes from accepted current state through authenticated replication/recovery rules. Old-generation lease/permit state cannot renew the newer accepted authority generation.
 
-These responses are stored in a separate live-lease acknowledgement map and must be fresh.
+The safety rule is simple:
 
-Only a fresh canonical majority can refresh `authority.permit`.
+> A valid signature from an old authority does not make an old generation current.
 
-The standby host process requires both:
+---
 
-- local ownership of the accepted authority epoch;
-- a changing multi-member authority permit.
+## Network partition behavior
 
-Therefore Minecraft starts only after all three recovery gates have succeeded.
+For a multi-member canonical world, a partition minority must not continue claiming normal quorum-backed authority.
 
-## Fencing the previous authority
+If the current authority loses fresh quorum, its permit eventually stops and the Fabric runtime is fenced.
 
-When the Recovery epoch is accepted, both epoch and fencing token increase.
+A surviving partition can recover only when it can form the required canonical majority and agree on the exact accepted base state.
 
-Any old authority operating with the previous fencing token is stale. Even if it later reconnects, its generation cannot be renewed as the current authority generation.
+Automatic crash recovery never lowers the quorum threshold merely because availability is poor.
 
-The deterministic failure simulator asserts that the previous authority cannot renew after the recovery epoch advances.
+Solo mode is a separate, explicitly signed world-policy path and is not a generic escape hatch for unclean multi-member authority failure.
 
-## Durable sleep is different from crash recovery
+---
 
-`SOLO` remains valid for a world that was cleanly placed into durable sleep and then woken from the exact latest sleeping snapshot.
+## Clean sleep/wake is different from crash recovery
 
-It is not an automatic crash-recovery fallback.
+A graceful world shutdown produces a signed durable sleep record after the final verified snapshot is committed.
 
-This distinction is intentional:
+Wake is therefore not treated as an unclean missing-authority election. An eligible peer that holds the exact sleeping snapshot can advance the world through the wake logic with monotonically increasing epoch/fencing state.
 
-- clean sleep contains explicit canonical relinquishment evidence;
-- an unclean crash does not.
+The current host/runtime supports this durable sleep/wake foundation.
 
-## Deterministic failure tests
+---
 
-The simulator covers at least these invariants:
+## Product boundary
 
-- recovery before lease expiry is rejected;
-- an accepted authority that is still visible blocks recovery;
-- corrupt or divergent replicas cannot take over;
-- automatic crash recovery never falls back to solo;
-- reservation quorum alone cannot activate the successor;
-- epoch quorum without live-lease quorum cannot activate the successor;
-- the old fencing token cannot renew after the Recovery epoch advances;
-- a conflicting candidate cannot replace an in-progress reserved generation;
-- the deterministic candidate tie-break rejects a different visible winner;
-- all-offline durable sleep/wake still works independently.
+The control-plane recovery described here is implemented and process-tested.
 
-## Known liveness limitation
+The complete player experience is **not yet seamless**.
 
-The current preview deliberately prefers safety over liveness in one second-failure case.
+Current missing integration work includes:
 
-If a candidate obtains durable next-generation reservations and then dies before the Recovery epoch is accepted by a majority, those reservations are not automatically discarded by a timer. Another candidate therefore cannot immediately take the same generation.
+- automatically launching the correct Minecraft runtime immediately when this peer becomes the accepted recovery authority;
+- automatically directing/reconnecting players to that successor runtime;
+- repeated full Minecraft gameplay handoff testing across real networks.
 
-This can stall automatic recovery, but it does not create two authorities.
+Do not translate "authority recovery is implemented" into "Minecraft host migration is already seamless."
 
-A future hardening step should introduce an explicit monotonic recovery round/ballot that can supersede an abandoned reservation while preserving majority intersection. Do not solve this by independently expiring durable reservations from wall-clock time: asymmetric clocks and stale candidates could otherwise reopen split-brain risk.
+---
 
-## Preview threat model
+## Related implementation and acceptance docs
 
-This mechanism is crash/partition safety for an invite-oriented friend-group preview. It is not Byzantine consensus and does not make a malicious canonical majority safe.
-
-All protocol records still require authenticated channels, membership checks, signatures, exact generation checks, state-hash checks, and fencing.
+- [Implementation status](IMPLEMENTATION_STATUS.md)
+- [Recovery acceptance](RECOVERY_ACCEPTANCE.md)
+- [Release gates](RELEASE_GATES.md)
+- [Network validation](NETWORK_VALIDATION.md)
+- [`crates/swarm-cli/src/daemon.rs`](../crates/swarm-cli/src/daemon.rs)
+- [`crates/swarm-consensus/`](../crates/swarm-consensus/)
