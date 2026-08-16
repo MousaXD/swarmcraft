@@ -121,7 +121,7 @@ fn fourth_peer_reconstructs_from_surviving_replicas_and_skips_corrupt_source() {
         } else if index == 2 {
             // Start this blob from B, then resume from C at the negotiated partial offset.
             // A resume is therefore tied to content identity, not to one source peer.
-            let (first_chunk, finished) = peer_b.read_encoded_blob_chunk(world(), descriptor, 0, 4096).unwrap();
+            let (first_chunk, finished) = peer_b.read_encoded_blob_chunk(world(), descriptor, 0, 1).unwrap();
             assert!(!finished, "fixture blob should require more than one transfer chunk");
             let next = peer_d.receive_blob_chunk(world(), descriptor, 0, &first_chunk, false).unwrap();
             assert_eq!(peer_d.partial_blob_offset(world(), descriptor).unwrap(), next);
