@@ -2,17 +2,17 @@
 
 > A decentralized Minecraft world that survives its host.
 
-SwarmCraft is an open-source experiment in building Minecraft multiplayer around a **world**, not a permanent server.
+SwarmCraft is an open-source experiment in building Minecraft multiplayer around a **persistent world swarm**, not a permanent server machine.
 
-Traditional Minecraft multiplayer has a simple topology:
+Traditional Minecraft multiplayer looks like this:
 
 ```text
 Players -> Server -> World
 ```
 
-If the server goes offline, the world goes offline.
+If the server disappears, the world usually disappears with it.
 
-SwarmCraft aims for:
+SwarmCraft is building toward this instead:
 
 ```text
              World
@@ -21,9 +21,51 @@ SwarmCraft aims for:
        Peer   Peer   Peer
 ```
 
-Peers replicate world state, discover one another, elect temporary authority when required, and recover the world from the latest valid replicated state.
+Peers can replicate signed world state, discover and authenticate one another, elect temporary authority, recover from host failure, and preserve the world across complete shutdowns.
 
 The long-term goal is a Minecraft world with **no permanent host** and **no permanent owner of the authoritative machine**.
+
+---
+
+## Project status
+
+**Current application version: 0.2.1 technical preview.**
+
+SwarmCraft is no longer only an architecture prototype. The repository contains an executable Rust core, authenticated peer networking, snapshot replication, authority/recovery logic, a Fabric lifecycle bridge, a Tauri desktop application, and cross-platform packaging workflows.
+
+### Implemented today
+
+- persistent Ed25519 peer identity and deterministic world identity;
+- signed membership, configuration, snapshot, epoch, lease, recovery, sleep and solo-history records;
+- content-addressed BLAKE3 snapshot storage with Zstandard compression and integrity verification;
+- QUIC/libp2p transport with authenticated peer handshakes;
+- mDNS, Kademlia, AutoNAT, DCUtR and relay support;
+- resumable blob replication and replica acknowledgements;
+- quorum-backed authority leases, fencing tokens and crash recovery;
+- durable recovery ballots that allow a later successor when an earlier recovery candidate disappears;
+- explicit solo advancement, solo-history reconciliation and conflict preservation;
+- Fabric server lifecycle IPC, save barriers, restore and final snapshot commit;
+- desktop flows for world creation, joining, invites, play, sleep, seeding, compatibility, conflicts and diagnostics;
+- Linux, Windows and macOS CI/package builds plus RustSec dependency audit.
+
+### Not complete yet
+
+The project has **not** completed the seamless end-to-end host-migration product experience.
+
+Important remaining work includes:
+
+- automatically launching the Minecraft runtime on the peer that wins authority after a crash;
+- reconnecting players to the new authority without manual coordination;
+- exposing manual authority transfer as a complete player-facing workflow;
+- automatically preparing compatible Minecraft/Fabric/mod environments instead of asking users for runtime JAR paths;
+- field-validating NAT traversal and relay fallback across representative home networks, CGNAT, mobile carriers and IPv6 deployments;
+- public/friend world discovery and lobby services that remain non-authoritative;
+- deeper fuzzing, soak, disk-failure and malicious-peer testing;
+- production signing/notarization operations.
+
+Distributed region simulation is research for later and is not part of the current preview.
+
+For the detailed implementation matrix, see [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md).
 
 ---
 
@@ -32,227 +74,103 @@ The long-term goal is a Minecraft world with **no permanent host** and **no perm
 A normal Minecraft server has several weaknesses:
 
 - one machine is the permanent authority;
-- someone has to pay for hosting;
-- the world disappears when that machine disappears;
-- the owner controls backups and availability;
-- scaling usually costs more as more players join.
+- somebody must keep that machine online;
+- backups and availability depend on the host;
+- the original owner can become a single point of failure;
+- moving the world usually requires manual coordination and file copying.
 
 SwarmCraft explores the opposite model:
 
-- players contribute storage, bandwidth, and eventually compute;
-- the world can migrate automatically between players;
-- copies of the world are replicated across peers;
-- the original creator can leave permanently without killing the world;
-- the network can recover after ordinary peer failures;
-- no mandatory central world database is required.
+- players contribute storage and bandwidth;
+- important world state is replicated across peers;
+- authority is temporary and fenced rather than tied to ownership;
+- the original creator can leave without invalidating the world identity;
+- valid replicated state can survive ordinary peer loss;
+- the canonical history is cryptographically verifiable rather than defined by one machine.
 
 This is not "LAN hosting with extra steps."
 
-The intended architecture is closer to:
+The architecture is closer to:
 
-**Minecraft + BitTorrent-style distribution + replicated state machines + automatic host migration.**
-
----
-
-## Project status
-
-**Very early design / research stage.**
-
-The first implementation should deliberately avoid trying to distribute every Minecraft tick across many machines.
-
-The initial target is:
-
-1. peer identity;
-2. peer discovery;
-3. replicated world snapshots;
-4. append-only world history;
-5. automatic authority election;
-6. seamless host migration;
-7. crash recovery;
-8. NAT traversal;
-9. integrity verification.
-
-Distributed region simulation can come later.
+**Minecraft + content-addressed replication + signed distributed state + automatic authority recovery.**
 
 ---
 
 ## Core idea
 
-A SwarmCraft world has a persistent identity.
+A SwarmCraft world has a persistent cryptographic identity.
 
 ```text
 World ID
    |
-Genesis state
+Genesis / signed configuration
    |
 Snapshot 1
    |
-Transaction log
+Canonical epoch + membership history
    |
 Snapshot 2
    |
 ...
 ```
 
-The world is identified by cryptographic metadata rather than by the IP address of one server.
+The source of truth is the **canonical accepted history of the world**, not the IP address or disk of one server.
 
-A player could eventually join a world using something like:
+Each peer can verify the records it accepts: hashes, signatures, protocol versions, membership, authority generation, fencing tokens and snapshot ancestry.
 
-```text
-swarmcraft://world/<world-id>
-```
-
-Their client would:
-
-1. resolve available peers;
-2. connect to the swarm;
-3. download the latest valid state;
-4. verify its history;
-5. join the Minecraft session;
-6. become another replica.
-
----
-
-## What happens when everyone goes offline?
-
-Nothing runs.
-
-The world simply sleeps.
-
-The latest committed world state remains stored across peers.
-
-When a peer returns, it restores the latest valid state it knows about. When more peers return, they compare histories and synchronize.
-
-There is no requirement for a 24/7 Minecraft process.
-
----
-
-## What is the source of truth?
-
-Not a computer.
-
-The source of truth is the **canonical committed history of the world**.
-
-Each accepted state transition references the previous accepted state.
-
-Conceptually:
+A current world ID is represented as:
 
 ```text
-State 900
-hash: A1
-
-    |
-    v
-
-State 901
-previous: A1
-hash: B7
-
-    |
-    v
-
-State 902
-previous: B7
-hash: C4
+scworld:<cryptographic-id>
 ```
 
-Peers can independently verify that a proposed history follows the rules of the protocol.
-
-The exact consensus rules are still part of the research and implementation work.
+Signed invitations carry membership/bootstrap information for joining private worlds.
 
 ---
 
 ## Temporary authority
 
-Minecraft simulation often needs one clear ordering of events.
+Minecraft simulation still needs one clear ordering of events, so SwarmCraft does not attempt to let every peer mutate the same world independently.
 
-SwarmCraft therefore does **not** assume that every peer can modify the same state independently at the same instant.
-
-Instead, the network can elect a temporary authority.
+Instead, one eligible peer temporarily runs the authoritative Minecraft simulation.
 
 ```text
 Alice = authority
-Alice disconnects
-Bob = authority
-Bob disconnects
-Charlie = authority
+Alice disappears
+Bob = elected successor
 ```
 
 The authority is a role, not ownership.
 
-The world identity and replicated history survive the authority.
+The runtime uses epochs, fencing tokens, signed leases and quorum-backed recovery to prevent stale authorities from silently re-entering canonical history.
+
+The control-plane recovery logic is implemented and process-level recovery is tested. Automatically turning a newly elected successor into a running Minecraft server is still an integration milestone.
 
 ---
 
-## Solo play
+## Solo mode and partitions
 
-A decentralized world must remain usable when only one player is online.
+A world may explicitly allow solo advancement when quorum is unavailable.
 
-SwarmCraft should support a solo-authority mode:
+Solo progress is recorded as lower-durability history instead of being mislabeled as quorum-backed canonical safety. When peers reconnect, compatible solo ancestry can be reconciled. Competing solo branches are preserved as a conflict and are **never silently merged**.
 
-```text
-1 peer online
--> peer temporarily advances the world
--> progress is stored durably
--> new state is replicated when another peer appears
-```
-
-Progress created while only one copy exists is inherently less durable.
-
-This cannot be magically eliminated without another storage node.
+For partitioned networks, SwarmCraft prefers consistency over pretending that two independently advanced Minecraft histories are interchangeable.
 
 ---
 
-## Replication
+## Replication and sleep
 
-Important state should exist on multiple devices whenever possible.
+Snapshots are content-addressed, signed and verified before acceptance. Peers negotiate missing blobs and can resume transfers.
 
-Example:
+When all peers are offline, nothing runs. The world simply sleeps. Durable state remains on replicas, and a valid replica can later restore the world.
 
-```text
-Alice   -> snapshot 1250
-Bob     -> snapshot 1250
-Charlie -> snapshot 1250
-```
-
-If Alice disappears permanently, Bob and Charlie still have the world.
-
-The system should distinguish:
-
-- **locally durable** state;
-- **replicated** state;
-- **quorum-confirmed** state;
-- **historical snapshot** state.
-
----
-
-## Network partitions
-
-Network partitions are one of the hardest problems.
-
-Example:
-
-```text
-Alice + Bob + Charlie | Dave + Eve
-```
-
-If the network splits and both sides independently advance the same Minecraft world, inventories, redstone, entities, and blocks can conflict.
-
-SwarmCraft should prefer **consistency over silently forking the canonical world**.
-
-Possible policy:
-
-- the partition retaining the required authority/quorum continues;
-- the other side pauses authoritative simulation or enters an explicitly non-canonical mode;
-- peers reconcile when connectivity returns.
-
-Solo mode requires special treatment and should be recorded clearly in the history.
+The current runtime has durable sleep records and wake logic. Fully invisible wake/host orchestration is still being refined.
 
 ---
 
 ## Architecture
 
-The proposed implementation is split into two major layers.
+SwarmCraft currently has three practical layers:
 
 ```text
 +----------------------------------+
@@ -261,187 +179,130 @@ The proposed implementation is split into two major layers.
 | Java                             |
 +----------------+-----------------+
                  |
-                 | local protocol / IPC
+                 | loopback IPC
                  v
 +----------------------------------+
-| SwarmCraft Core                  |
-| Rust                             |
+| SwarmCraft Rust runtime          |
 |                                  |
-| peer identity                    |
-| networking                       |
-| discovery                        |
-| replication                      |
-| authority election               |
-| snapshots                        |
-| history validation               |
-| encryption                       |
-| persistence                      |
+| identity / protocol              |
+| storage / snapshots              |
+| networking / replication         |
+| membership / authority           |
+| recovery / solo history          |
++----------------+-----------------+
+                 |
+                 | sidecar commands
+                 v
++----------------------------------+
+| Tauri desktop application        |
+| HTML / CSS / JavaScript + Rust   |
 +----------------------------------+
 ```
 
-### Minecraft layer
+The Rust workspace is split into focused crates under `crates/`, including protocol, storage, networking, consensus, IPC, core services and CLI/runtime orchestration.
 
-Recommended:
-
-- Java;
-- Fabric;
-- minimal responsibility;
-- translate Minecraft events/state into protocol operations;
-- apply validated remote state;
-- control server lifecycle.
-
-### Distributed core
-
-Recommended:
-
-- Rust;
-- Tokio;
-- libp2p and/or QUIC;
-- BLAKE3;
-- Ed25519;
-- compact binary serialization;
-- durable local storage;
-- Zstandard compression.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md).
+See [ARCHITECTURE.md](ARCHITECTURE.md) and [PROTOCOL.md](PROTOCOL.md).
 
 ---
 
-## Proposed repository layout
+## Repository layout
 
 ```text
 swarmcraft/
-├── README.md
-├── LICENSE
-├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── PROTOCOL.md
-│   ├── SECURITY.md
-│   └── ROADMAP.md
+├── apps/
+│   └── desktop/              # Tauri desktop application
 ├── crates/
+│   ├── swarm-cli/
+│   ├── swarm-consensus/
 │   ├── swarm-core/
+│   ├── swarm-ipc/
 │   ├── swarm-network/
-│   ├── swarm-storage/
 │   ├── swarm-protocol/
-│   └── swarm-cli/
+│   └── swarm-storage/
 ├── minecraft/
-│   └── fabric/
-├── tests/
-│   ├── integration/
-│   ├── partition/
-│   └── recovery/
-└── tools/
+│   └── fabric/               # Fabric lifecycle bridge
+├── docs/                     # status, release, recovery and validation docs
+├── tests/                    # test guidance / additional fixtures
+├── .github/workflows/        # CI, installers and releases
+├── ARCHITECTURE.md
+├── PROTOCOL.md
+├── ROADMAP.md
+├── SECURITY.md
+└── README.md
 ```
-
-The documentation package currently keeps the docs at repository root for easy review. Move them into `docs/` when creating the actual repository if preferred.
 
 ---
 
 ## Design principles
 
-### 1. The world must outlive its creator
-
-No creator-owned master file should be required after the world is established.
-
-### 2. No permanent server
-
-A peer can temporarily coordinate Minecraft simulation, but no specific machine must remain online.
-
-### 3. Verify, do not blindly trust
-
-Peers should validate hashes, signatures, protocol versions, and history before accepting state.
-
-### 4. Offline-first durability
-
-A peer should be able to persist valid world progress before contacting another peer.
-
-### 5. Replicate aggressively
-
-When peers become available, important state should be replicated quickly.
-
-### 6. Explicit consistency rules
-
-Network partitions must never be handled by vague "last writer wins" behavior.
-
-### 7. Minecraft integration stays replaceable
-
-The distributed core should not depend heavily on Minecraft internals.
-
-### 8. Security is part of the protocol
-
-Identity, permissions, replay protection, malicious peers, and corrupt replicas should be considered from the beginning.
+1. **The world must outlive its creator.** No creator-owned master file should be required after establishment.
+2. **No permanent server.** Authority may move; world identity must not depend on one machine.
+3. **Verify, do not blindly trust.** Hashes, signatures, generations and compatibility matter.
+4. **Offline-first durability.** Valid progress must be durably representable before another peer appears.
+5. **Replicate aggressively.** More independent valid copies mean better durability.
+6. **Make consistency rules explicit.** Never hide forks behind vague last-writer-wins behavior.
+7. **Keep Minecraft integration replaceable.** Distributed state should not depend unnecessarily on Minecraft internals.
+8. **Treat security as protocol design.** Membership, replay protection, stale authority and corrupt replicas are first-class concerns.
 
 ---
 
-## Non-goals for the first version
+## Non-goals for the first production-ready version
 
-The MVP should **not** attempt:
+SwarmCraft is not currently trying to provide:
 
 - fully distributed Minecraft tick simulation;
-- arbitrary conflict-free merging of two independently played worlds;
+- automatic semantic merging of two independently played worlds;
 - anonymous Byzantine consensus at internet scale;
 - blockchain or cryptocurrency;
-- global public-world discovery;
 - perfect protection from a malicious majority;
-- support for every mod loader;
-- support for Bedrock Edition.
+- every Minecraft mod loader;
+- Bedrock Edition support.
 
 ---
 
 ## MVP definition
 
-A successful first milestone could demonstrate:
+The central product milestone remains:
 
 1. Alice creates a SwarmCraft world.
-2. Bob joins.
-3. Both obtain durable copies.
-4. Alice is the active Minecraft authority.
-5. Alice intentionally disconnects.
-6. Bob automatically becomes authority.
-7. Minecraft gameplay resumes using the same world.
-8. Alice reconnects and synchronizes.
-9. Both shut down.
-10. Bob returns later and restores the correct world without Alice.
+2. Bob joins and obtains a durable replica.
+3. Alice runs the authoritative Minecraft session.
+4. Alice's process is killed.
+5. Bob safely wins authority from the latest accepted state.
+6. Bob's Minecraft runtime starts automatically.
+7. Players reconnect and continue the same world.
+8. Alice returns and synchronizes without stale-authority writes.
+9. Everyone shuts down.
+10. Bob later restores the world without Alice being online.
 
-If this works reliably under crashes and packet loss, the project has proven its central idea.
-
----
-
-## Long-term possibilities
-
-Once host migration and replication are solid, the architecture could explore:
-
-- region-based simulation;
-- per-region authority;
-- chunk sharding;
-- distributed mob simulation;
-- background seeding daemons;
-- erasure-coded world storage;
-- public swarm bootstrap nodes;
-- optional community relays;
-- spectator replicas;
-- cross-world federation;
-- decentralized backups;
-- serverless community worlds.
+The repository already proves much of the storage, replication and authority-recovery control plane. Steps 6 and 7 are the main remaining end-to-end integration gap.
 
 ---
 
-## Important warning
+## Current Minecraft target
 
-Distributed systems are unforgiving.
+The 0.2.x preview currently targets:
 
-A bug in ordinary software may crash an app.
+- Minecraft Java `26.1.2`;
+- Fabric Loader `0.19.3`;
+- Fabric API `0.155.2+26.1.2`;
+- Java `25+`.
 
-A bug in a distributed world protocol may create:
+Per-world signed compatibility manifests may impose additional exact mod/datapack requirements.
 
-- duplicated inventories;
-- divergent histories;
-- permanent forks;
-- corrupt snapshots;
-- invalid authority changes;
-- exploits that propagate to every replica.
+---
 
-For that reason, SwarmCraft should prioritize deterministic tests, failure simulation, recovery testing, and conservative protocol evolution.
+## Validation and release discipline
+
+Normal CI covers Rust format/lint/test gates, process-level replication/recovery scenarios, Fabric build, RustSec and native desktop packaging. Real public-network NAT behavior remains a separate manual validation requirement.
+
+See:
+
+- [Implementation status](docs/IMPLEMENTATION_STATUS.md)
+- [Release gates](docs/RELEASE_GATES.md)
+- [Network validation](docs/NETWORK_VALIDATION.md)
+- [Authority recovery](docs/AUTHORITY_RECOVERY.md)
+- [Recovery acceptance](docs/RECOVERY_ACCEPTANCE.md)
 
 ---
 
@@ -449,38 +310,25 @@ For that reason, SwarmCraft should prioritize deterministic tests, failure simul
 
 - [Architecture](ARCHITECTURE.md)
 - [Protocol](PROTOCOL.md)
-- [Security Model](SECURITY.md)
+- [Security model](SECURITY.md)
 - [Roadmap](ROADMAP.md)
+- [Product vision](docs/PRODUCT_VISION.md)
+- [Implementation status](docs/IMPLEMENTATION_STATUS.md)
 - [Contributing](CONTRIBUTING.md)
 
 ---
 
 ## License
 
-A permissive license such as Apache-2.0 or MIT is a natural fit for the project.
-
-Apache-2.0 may be preferable if explicit patent language matters to the project.
-
-Choose intentionally before accepting external contributions.
+SwarmCraft is licensed under Apache-2.0. See [LICENSE](LICENSE).
 
 ---
 
 ## Contributing
 
-The project is currently at the architecture stage.
+SwarmCraft is active preview software. Useful contributions include distributed-systems review, recovery testing, networking/NAT validation, Minecraft lifecycle integration, compatibility tooling, UX work, fuzzing and failure injection.
 
-Useful early contributions include:
-
-- distributed-systems review;
-- Minecraft server lifecycle research;
-- Fabric integration experiments;
-- libp2p prototypes;
-- snapshot formats;
-- deterministic recovery tests;
-- threat modeling;
-- NAT traversal testing.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
 
 ---
 
