@@ -43,6 +43,10 @@ jobs:
         run: cargo test -p swarm-cli --test host_process --locked
       - name: Three-daemon recovery
         run: cargo test -p swarm-cli --test three_daemon_recovery --locked
+      - name: Recovery successor dies before epoch promotion
+        run: cargo test -p swarm-cli --test recovery_successor_dies --locked
+      - name: Solo history acceptance and divergence detection
+        run: cargo test -p swarm-consensus --test solo_history_acceptance --locked
 
   desktop:
     name: Desktop package (${{ matrix.label }})
