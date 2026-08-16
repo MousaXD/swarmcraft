@@ -9,7 +9,7 @@ For the exact current-code assessment, use [docs/IMPLEMENTATION_STATUS.md](docs/
 | Phase | Status | Summary |
 | --- | --- | --- |
 | 0 — Research and protocol skeleton | ✅ Preview-complete | Identity, protocol, signed records, durable storage and deterministic state are established. |
-| 1 — Peer networking | 🟢 Mostly complete | Authenticated libp2p/QUIC, mDNS, Kademlia, AutoNAT, DCUtR and relay code exist. |
+| 1 — Peer networking | ✅ Preview-complete | Authenticated libp2p/QUIC, durable identity/reconnect, bounded requests and resumable transfer are permanently gated, including impaired multi-GiB soak. |
 | 2 — Snapshot swarm | 🟢 Mostly complete | Real resumable snapshot replication exists; multi-source/retention maturity remains. |
 | 3 — Minecraft save integration | ✅ Preview-complete | Fabric IPC, restore, save barriers and final snapshot commit are implemented/tested. |
 | 4 — Manual host migration | 🟠 Partial | Transfer state machinery exists; complete CLI/desktop/runtime handoff does not. |
@@ -56,7 +56,7 @@ Exit criteria:
 
 # Phase 1: Peer networking
 
-**Status: mostly complete.**
+**Status: preview-complete for the Phase 1 transport exit criteria.**
 
 Goal:
 
@@ -81,7 +81,7 @@ Exit criteria:
 - corruption is detected;
 - application peer identity remains stable independently of network address.
 
-Current implementation includes libp2p/QUIC, mDNS, Kademlia, AutoNAT, DCUtR and relay support. Public-network behavior still requires field validation; see [docs/NETWORK_VALIDATION.md](docs/NETWORK_VALIDATION.md).
+Current implementation includes libp2p/QUIC, mDNS, Kademlia, AutoNAT, DCUtR and relay support. Permanent gates cover hard reconnect, a 64 MiB transfer under WAN-like packet impairment, and a default 2 GiB transfer with packet loss, bandwidth shaping, repeated hard sender restarts, deliberately lost acknowledgements, re-authentication and resume-offset negotiation. Representative home NAT, CGNAT, mobile and IPv6 certification remains Phase 9 field work; see [docs/NETWORK_VALIDATION.md](docs/NETWORK_VALIDATION.md).
 
 ---
 
