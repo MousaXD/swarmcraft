@@ -132,8 +132,19 @@ function safetySummary(world) {
   return 'Safety state is unavailable. Refresh or inspect full status before making assumptions about canonical history.';
 }
 
-function playEligibility(world) {
-  const value = String(world?.compatibility?.['Authority eligibility'] || '').trim();
+function hostingEligibility(world) {
+  if (!world) {
+    return { enabled: false, reason: 'Select a world first before starting an authority runtime.' };
+  }
+
+  if (safetyKind(world.status.Safety) === 'danger') {
+    return {
+      enabled: false,
+      reason: 'Play unavailable while divergent history is unresolved. Inspect conflicts and recover or select a safe branch before starting an authority runtime.',
+    };
+  }
+
+  const value = String(world.compatibility?.['Authority eligibility'] || '').trim();
   if (value === 'Compatible') {
     return { enabled: true, reason: 'This node is authority eligible under the synchronized compatibility manifest.' };
   }
@@ -153,7 +164,7 @@ function selectedWorld() {
 }
 
 function updatePlayState(world) {
-  const eligibility = playEligibility(world);
+  const eligibility = hostingEligibility(world);
   $('playWorld').disabled = !eligibility.enabled;
   $('playAvailability').textContent = eligibility.reason;
   $('playAvailability').dataset.tone = eligibility.enabled ? 'safe' : 'warning';
@@ -198,7 +209,7 @@ function updateWorldSpecificControls() {
   for (const control of document.querySelectorAll('.world-required')) {
     control.disabled = !hasWorld;
   }
-  const eligibility = playEligibility(world);
+  const eligibility = hostingEligibility(world);
   for (const control of document.querySelectorAll('.authority-required')) {
     control.disabled = !hasWorld || !eligibility.enabled;
   }
@@ -524,7 +535,7 @@ async function recoverWorld() {
 function runtimeValidationIssue() {
   const world = selectedWorld();
   if (!world) return [null, 'Select a world first before starting an authority runtime.'];
-  const eligibility = playEligibility(world);
+  const eligibility = hostingEligibility(world);
   if (!eligibility.enabled) return [null, eligibility.reason];
   if (!$('serverJar').value.trim()) return ['serverJar', 'Fabric server jar is required before the authority runtime can start.'];
   if (!$('modJar').value.trim()) return ['modJar', 'SwarmCraft Fabric mod jar is required before the authority runtime can start.'];

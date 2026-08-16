@@ -148,6 +148,12 @@ p { line-height: 1.45; }
 .button:hover:not(:disabled) { filter: brightness(1.08); }
 .button:active:not(:disabled) { transform: translateY(1px); }
 .button-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.button-primary:disabled {
+  opacity: 1;
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  color: var(--text-muted);
+}
 .button-secondary { background: var(--surface-3); border-color: var(--border-strong); color: var(--text-primary); }
 .button-subtle { background: transparent; border-color: var(--border-subtle); color: var(--text-secondary); }
 .button-warning { background: var(--warning-bg); border-color: var(--warning-border); color: #ecd18e; }
