@@ -370,33 +370,41 @@ fn maintain_authority_leases(
             fencing_token: generation.fencing_token.saturating_add(1),
         };
         drive_recovery_ballot(
-            storage,
-            identity,
+            RecoveryAttempt {
+                storage,
+                identity,
+                descriptor: &descriptor,
+                previous: &epoch,
+                latest: &latest,
+                visible_peers: &visible_peers,
+                recovery_generation,
+            },
             node,
             outbound,
             runtime,
-            &descriptor,
-            &epoch,
-            &latest,
-            &visible_peers,
-            recovery_generation,
         )?;
     }
     Ok(())
 }
 
+struct RecoveryAttempt<'a> {
+    storage: &'a Storage,
+    identity: &'a PeerIdentity,
+    descriptor: &'a WorldDescriptorV1,
+    previous: &'a EpochRecordV1,
+    latest: &'a SnapshotManifestV1,
+    visible_peers: &'a [PeerId],
+    recovery_generation: AuthorityGeneration,
+}
+
 fn drive_recovery_ballot(
-    storage: &Storage,
-    identity: &PeerIdentity,
+    attempt: RecoveryAttempt<'_>,
     node: &mut SwarmNode,
     outbound: &mut HashMap<String, OutboundContext>,
     runtime: &mut LeaseRuntime,
-    descriptor: &WorldDescriptorV1,
-    previous: &EpochRecordV1,
-    latest: &SnapshotManifestV1,
-    visible_peers: &[PeerId],
-    recovery_generation: AuthorityGeneration,
 ) -> Result<()> {
+    let RecoveryAttempt { storage, identity, descriptor, previous, latest, visible_peers, recovery_generation } =
+        attempt;
     let world = descriptor.world_id;
     let base_snapshot_hash = latest.manifest_hash()?;
     let membership = storage.load_membership_record(world)?;
