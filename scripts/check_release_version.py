@@ -6,7 +6,7 @@ import json
 import re
 import tomllib
 
-EXPECTED_APP = "0.2.0"
+EXPECTED_APP = "0.2.1"
 EXPECTED_PROTOCOL = "1"
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,21 +18,21 @@ def fail(message: str) -> None:
 with (ROOT / "Cargo.toml").open("rb") as handle:
     cargo = tomllib.load(handle)
 if cargo.get("workspace", {}).get("package", {}).get("version") != EXPECTED_APP:
-    fail("workspace.package.version is not 0.2.0")
+    fail("workspace.package.version is not 0.2.1")
 
 with (ROOT / "apps/desktop/src-tauri/Cargo.toml").open("rb") as handle:
     desktop = tomllib.load(handle)
 if desktop.get("package", {}).get("version") != EXPECTED_APP:
-    fail("desktop Cargo.toml package.version is not 0.2.0")
+    fail("desktop Cargo.toml package.version is not 0.2.1")
 
 with (ROOT / "apps/desktop/src-tauri/tauri.conf.json").open(encoding="utf-8") as handle:
     tauri = json.load(handle)
 if tauri.get("version") != EXPECTED_APP:
-    fail("Tauri application version is not 0.2.0")
+    fail("Tauri application version is not 0.2.1")
 
 gradle = (ROOT / "minecraft/fabric/gradle.properties").read_text(encoding="utf-8")
-if not re.search(r"^mod_version=0\.2\.0$", gradle, re.MULTILINE):
-    fail("Fabric mod_version is not 0.2.0")
+if not re.search(r"^mod_version=0\.2\.1$", gradle, re.MULTILINE):
+    fail("Fabric mod_version is not 0.2.1")
 
 fabric_mod = (ROOT / "minecraft/fabric/src/main/resources/fabric.mod.json").read_text(encoding="utf-8")
 if '"version": "${version}"' not in fabric_mod:
