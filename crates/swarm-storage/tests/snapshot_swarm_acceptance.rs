@@ -1,15 +1,13 @@
 use std::{fs, path::PathBuf};
 use swarm_protocol::{BlobDescriptor, BlobEncoding, PeerId, SnapshotManifestV1, WorldId};
-use swarm_storage::{ReplicationError, SnapshotContext, Storage};
+use swarm_storage::{replica::ReplicationError, SnapshotContext, Storage};
 
 fn world() -> WorldId {
     WorldId([0x42; 32])
 }
 
 fn synthetic_bytes(seed: u8, len: usize) -> Vec<u8> {
-    (0..len)
-        .map(|index| seed.wrapping_add((index as u8).wrapping_mul(31)).rotate_left((index % 7) as u32))
-        .collect()
+    (0..len).map(|index| seed.wrapping_add((index as u8).wrapping_mul(31)).rotate_left((index % 7) as u32)).collect()
 }
 
 fn unique_descriptors(manifest: &SnapshotManifestV1) -> Vec<BlobDescriptor> {
@@ -27,12 +25,11 @@ fn blob_path(storage: &Storage, descriptor: &BlobDescriptor) -> PathBuf {
         BlobEncoding::Raw => "raw",
         BlobEncoding::Zstd => "zst",
     };
-    storage
-        .root()
-        .join("worlds")
-        .join(world().to_hex())
-        .join("blobs")
-        .join(format!("{}.{}", descriptor.hash.to_hex(), suffix))
+    storage.root().join("worlds").join(world().to_hex()).join("blobs").join(format!(
+        "{}.{}",
+        descriptor.hash.to_hex(),
+        suffix
+    ))
 }
 
 fn copy_blob(source: &Storage, destination: &Storage, descriptor: &BlobDescriptor) -> Result<(), ReplicationError> {
