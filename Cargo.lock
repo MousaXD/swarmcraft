@@ -3253,7 +3253,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "swarm-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3273,7 +3273,7 @@ dependencies = [
 
 [[package]]
 name = "swarm-consensus"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "swarm-protocol",
  "thiserror 2.0.20",
@@ -3281,7 +3281,7 @@ dependencies = [
 
 [[package]]
 name = "swarm-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "directories",
@@ -3296,7 +3296,7 @@ dependencies = [
 
 [[package]]
 name = "swarm-ipc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "postcard",
@@ -3309,7 +3309,7 @@ dependencies = [
 
 [[package]]
 name = "swarm-network"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek 2.2.0",
@@ -3326,7 +3326,7 @@ dependencies = [
 
 [[package]]
 name = "swarm-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "hex",
@@ -3337,7 +3337,7 @@ dependencies = [
 
 [[package]]
 name = "swarm-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "postcard",
