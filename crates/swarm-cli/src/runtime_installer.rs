@@ -2,11 +2,12 @@ use crate::{
     migration::{load_runtime_config, save_runtime_config, RuntimeLaunchConfig},
     runtime_layout::{
         managed_fabric_api, managed_fabric_server, managed_java_root, managed_minecraft_server,
-        managed_swarmcraft_fabric, managed_world_config_dir, managed_world_mods_dir, managed_world_root,
-        managed_world_server_dir, runtime_install_lock_path, runtime_lock_path, RUNTIME_LOCK_SCHEMA_VERSION,
+        managed_swarmcraft_fabric, managed_world_config_dir, managed_world_mods_dir,
+        managed_world_root, managed_world_server_dir, runtime_install_lock_path, runtime_lock_path,
+        RUNTIME_LOCK_SCHEMA_VERSION,
     },
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -22,10 +23,13 @@ use swarm_core::DataPaths;
 use swarm_protocol::WorldId;
 use swarm_storage::Storage;
 
-const MINECRAFT_MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+const MINECRAFT_MANIFEST: &str =
+    "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const FABRIC_INSTALLERS: &str = "https://meta.fabricmc.net/v2/versions/installer";
-const FABRIC_API_METADATA: &str = "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/maven-metadata.xml";
-const SWARMCRAFT_RELEASE_API: &str = "https://api.github.com/repos/MousaXD/swarmcraft/releases/tags";
+const FABRIC_API_METADATA: &str =
+    "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/maven-metadata.xml";
+const SWARMCRAFT_RELEASE_API: &str =
+    "https://api.github.com/repos/MousaXD/swarmcraft/releases/tags";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -190,9 +194,10 @@ impl<'a> RuntimeInstaller<'a> {
         let metadata = self.storage.load_world(world)?;
         let lock = load_runtime_lock(self.paths, world).ok();
         let manual = load_runtime_config(self.paths, world).ok();
-        let required_java_major = lock
-            .as_ref()
-            .map_or_else(|| heuristic_java_major(&metadata.genesis.minecraft_version), |value| value.required_java_major);
+        let required_java_major = lock.as_ref().map_or_else(
+            || heuristic_java_major(&metadata.genesis.minecraft_version),
+            |value| value.required_java_major,
+        );
         let lock_compatible = lock.as_ref().is_some_and(|value| {
             value.schema_version == RUNTIME_LOCK_SCHEMA_VERSION
                 && value.world_id == world.to_string()
@@ -200,30 +205,36 @@ impl<'a> RuntimeInstaller<'a> {
                 && value.fabric_loader_version == metadata.genesis.fabric_loader_version
         });
 
-        let mut components = Vec::new();
-        components.push(self.java_status(required_java_major, lock.as_ref(), manual.as_ref(), lock_compatible));
-        components.push(self.artifact_status(
-            RuntimeComponentKind::MinecraftServer,
-            "minecraft_server",
-            lock.as_ref(),
-            lock_compatible,
-            Some(managed_world_server_dir(self.paths, world).join("server.jar")),
-        ));
-        components.push(self.artifact_status(
-            RuntimeComponentKind::FabricLoader,
-            "fabric_loader",
-            lock.as_ref(),
-            lock_compatible,
-            None,
-        ));
-        components.push(self.artifact_status(
-            RuntimeComponentKind::FabricApi,
-            "fabric_api",
-            lock.as_ref(),
-            lock_compatible,
-            Some(managed_world_mods_dir(self.paths, world).join("fabric-api.jar")),
-        ));
-        components.push(self.swarmcraft_status(world, lock.as_ref(), lock_compatible));
+        let mut components = vec![
+            self.java_status(
+                required_java_major,
+                lock.as_ref(),
+                manual.as_ref(),
+                lock_compatible,
+            ),
+            self.artifact_status(
+                RuntimeComponentKind::MinecraftServer,
+                "minecraft_server",
+                lock.as_ref(),
+                lock_compatible,
+                Some(managed_world_server_dir(self.paths, world).join("server.jar")),
+            ),
+            self.artifact_status(
+                RuntimeComponentKind::FabricLoader,
+                "fabric_loader",
+                lock.as_ref(),
+                lock_compatible,
+                None,
+            ),
+            self.artifact_status(
+                RuntimeComponentKind::FabricApi,
+                "fabric_api",
+                lock.as_ref(),
+                lock_compatible,
+                Some(managed_world_mods_dir(self.paths, world).join("fabric-api.jar")),
+            ),
+            self.swarmcraft_status(world, lock.as_ref(), lock_compatible),
+        ];
 
         let directories_ready = [
             managed_world_root(self.paths, world),
@@ -235,7 +246,11 @@ impl<'a> RuntimeInstaller<'a> {
         .all(|path| path.is_dir());
         components.push(RuntimeComponentStatus {
             kind: RuntimeComponentKind::ServerDirectories,
-            state: if directories_ready { RuntimeComponentState::Ready } else { RuntimeComponentState::Missing },
+            state: if directories_ready {
+                RuntimeComponentState::Ready
+            } else {
+                RuntimeComponentState::Missing
+            },
             version: None,
             path: Some(managed_world_root(self.paths, world)),
             managed: true,
@@ -245,15 +260,22 @@ impl<'a> RuntimeInstaller<'a> {
         let eula_accepted = manual.as_ref().is_some_and(|config| config.accept_eula);
         components.push(RuntimeComponentStatus {
             kind: RuntimeComponentKind::Eula,
-            state: if eula_accepted { RuntimeComponentState::Ready } else { RuntimeComponentState::Required },
+            state: if eula_accepted {
+                RuntimeComponentState::Ready
+            } else {
+                RuntimeComponentState::Required
+            },
             version: None,
             path: None,
             managed: true,
-            detail: (!eula_accepted).then(|| "explicit Minecraft server EULA acceptance is required before launch".into()),
+            detail: (!eula_accepted)
+                .then(|| "explicit Minecraft server EULA acceptance is required before launch".into()),
         });
         components.push(self.server_mods_status(world));
 
-        let ready = components.iter().all(|component| component.state == RuntimeComponentState::Ready);
+        let ready = components
+            .iter()
+            .all(|component| component.state == RuntimeComponentState::Ready);
         Ok(RuntimeStatus {
             world_id: world.to_string(),
             minecraft_version: metadata.genesis.minecraft_version.clone(),
@@ -274,7 +296,11 @@ impl<'a> RuntimeInstaller<'a> {
     pub fn plan(&self, world: WorldId) -> Result<RuntimePlan> {
         let status = self.inspect(world)?;
         if status.ready {
-            return Ok(RuntimePlan { world_id: world.to_string(), ready: true, actions: Vec::new() });
+            return Ok(RuntimePlan {
+                world_id: world.to_string(),
+                ready: true,
+                actions: Vec::new(),
+            });
         }
 
         let mut actions = Vec::new();
@@ -284,27 +310,45 @@ impl<'a> RuntimeInstaller<'a> {
             }
             let (phase, network, eula) = match component.kind {
                 RuntimeComponentKind::Java => (RuntimePhase::DownloadingJava, true, false),
-                RuntimeComponentKind::MinecraftServer => (RuntimePhase::DownloadingServer, true, false),
-                RuntimeComponentKind::FabricLoader => (RuntimePhase::InstallingFabric, true, false),
-                RuntimeComponentKind::FabricApi => (RuntimePhase::InstallingFabricApi, true, false),
-                RuntimeComponentKind::SwarmcraftFabric => (RuntimePhase::InstallingSwarmcraftMod, true, false),
-                RuntimeComponentKind::ServerDirectories => (RuntimePhase::PreparingDirectories, false, false),
+                RuntimeComponentKind::MinecraftServer => {
+                    (RuntimePhase::DownloadingServer, true, false)
+                }
+                RuntimeComponentKind::FabricLoader => {
+                    (RuntimePhase::InstallingFabric, true, false)
+                }
+                RuntimeComponentKind::FabricApi => {
+                    (RuntimePhase::InstallingFabricApi, true, false)
+                }
+                RuntimeComponentKind::SwarmcraftFabric => {
+                    (RuntimePhase::InstallingSwarmcraftMod, true, false)
+                }
+                RuntimeComponentKind::ServerDirectories => {
+                    (RuntimePhase::PreparingDirectories, false, false)
+                }
                 RuntimeComponentKind::Eula => (RuntimePhase::WaitingForEula, false, true),
                 RuntimeComponentKind::ServerMods => (RuntimePhase::Verifying, false, false),
             };
             actions.push(RuntimePlanAction {
                 phase,
                 component: Some(component.kind),
-                description: component.detail.clone().unwrap_or_else(|| format!("prepare {:?}", component.kind)),
+                description: component
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| format!("prepare {:?}", component.kind)),
                 requires_network: network,
                 requires_eula_acceptance: eula,
             });
         }
 
         if actions.iter().any(|action| action.requires_network) {
-            self.resolve_runtime(world).context("automatic runtime sources could not be resolved")?;
+            self.resolve_runtime(world)
+                .context("automatic runtime sources could not be resolved")?;
         }
-        Ok(RuntimePlan { world_id: world.to_string(), ready: false, actions })
+        Ok(RuntimePlan {
+            world_id: world.to_string(),
+            ready: false,
+            actions,
+        })
     }
 
     pub fn install<F: FnMut(RuntimeProgress)>(
@@ -335,7 +379,12 @@ impl<'a> RuntimeInstaller<'a> {
         self.storage.load_world(world)?;
         let _guard = InstallGuard::acquire(&runtime_install_lock_path(self.paths, world))?;
         let mut completed = Vec::new();
-        emit(&mut progress, &mut completed, RuntimePhase::Checking, "Checking local runtime");
+        emit(
+            &mut progress,
+            &mut completed,
+            RuntimePhase::Checking,
+            "Checking local runtime",
+        );
 
         let initial = self.inspect(world)?;
         if !force && platform_components_ready(&initial) {
@@ -343,12 +392,27 @@ impl<'a> RuntimeInstaller<'a> {
                 let lock = load_runtime_lock(self.paths, world)?;
                 self.save_launch_config(world, &lock, &options)?;
             }
-            emit(&mut progress, &mut completed, RuntimePhase::Verifying, "Verifying prepared runtime");
+            emit(
+                &mut progress,
+                &mut completed,
+                RuntimePhase::Verifying,
+                "Verifying prepared runtime",
+            );
             let status = self.inspect(world)?;
             if status.ready {
-                emit(&mut progress, &mut completed, RuntimePhase::Ready, "Runtime is ready");
+                emit(
+                    &mut progress,
+                    &mut completed,
+                    RuntimePhase::Ready,
+                    "Runtime is ready",
+                );
             } else if !status.eula_accepted {
-                emit(&mut progress, &mut completed, RuntimePhase::WaitingForEula, "Minecraft server EULA acceptance is required");
+                emit(
+                    &mut progress,
+                    &mut completed,
+                    RuntimePhase::WaitingForEula,
+                    "Minecraft server EULA acceptance is required",
+                );
             }
             return Ok(RuntimeInstallReport {
                 launch_config_saved: status.launch_configured,
@@ -359,10 +423,15 @@ impl<'a> RuntimeInstaller<'a> {
 
         let resolved = self.resolve_runtime(world)?;
         prepare_world_directories(self.paths, world)?;
-        emit(&mut progress, &mut completed, RuntimePhase::PreparingDirectories, "Prepared managed server directories");
+        emit(
+            &mut progress,
+            &mut completed,
+            RuntimePhase::PreparingDirectories,
+            "Prepared managed server directories",
+        );
 
         let java_path = if let Ok(major) = probe_java_major(Path::new("java")) {
-            if major == resolved.required_java_major && !force {
+            if major == resolved.required_java_major {
                 PathBuf::from("java")
             } else {
                 self.install_java(&resolved, force, &mut progress, &mut completed)?
@@ -371,24 +440,60 @@ impl<'a> RuntimeInstaller<'a> {
             self.install_java(&resolved, force, &mut progress, &mut completed)?
         };
 
-        emit(&mut progress, &mut completed, RuntimePhase::DownloadingServer, "Preparing Minecraft server");
-        let minecraft_path = managed_minecraft_server(self.paths, &initial.minecraft_version);
-        let minecraft_record = install_artifact(&resolved.minecraft_server, &minecraft_path, force)?;
-        atomic_copy(&minecraft_path, &managed_world_server_dir(self.paths, world).join("server.jar"))?;
+        emit(
+            &mut progress,
+            &mut completed,
+            RuntimePhase::DownloadingServer,
+            "Preparing Minecraft server",
+        );
+        let minecraft_path =
+            managed_minecraft_server(self.paths, &initial.minecraft_version);
+        let minecraft_record =
+            install_artifact(&resolved.minecraft_server, &minecraft_path, force)?;
+        atomic_copy(
+            &minecraft_path,
+            &managed_world_server_dir(self.paths, world).join("server.jar"),
+        )?;
 
-        emit(&mut progress, &mut completed, RuntimePhase::InstallingFabric, "Preparing Fabric Loader server launcher");
-        let fabric_path = managed_fabric_server(self.paths, &initial.minecraft_version, &initial.fabric_loader_version);
+        emit(
+            &mut progress,
+            &mut completed,
+            RuntimePhase::InstallingFabric,
+            "Preparing Fabric Loader server launcher",
+        );
+        let fabric_path = managed_fabric_server(
+            self.paths,
+            &initial.minecraft_version,
+            &initial.fabric_loader_version,
+        );
         let fabric_record = install_artifact(&resolved.fabric_server, &fabric_path, force)?;
 
-        emit(&mut progress, &mut completed, RuntimePhase::InstallingFabricApi, "Installing Fabric API");
+        emit(
+            &mut progress,
+            &mut completed,
+            RuntimePhase::InstallingFabricApi,
+            "Installing Fabric API",
+        );
         let fabric_api_path = managed_fabric_api(self.paths, &resolved.fabric_api_version);
         let fabric_api_record = install_artifact(&resolved.fabric_api, &fabric_api_path, force)?;
-        atomic_copy(&fabric_api_path, &managed_world_mods_dir(self.paths, world).join("fabric-api.jar"))?;
+        atomic_copy(
+            &fabric_api_path,
+            &managed_world_mods_dir(self.paths, world).join("fabric-api.jar"),
+        )?;
 
-        emit(&mut progress, &mut completed, RuntimePhase::InstallingSwarmcraftMod, "Installing SwarmCraft Fabric integration");
+        emit(
+            &mut progress,
+            &mut completed,
+            RuntimePhase::InstallingSwarmcraftMod,
+            "Installing SwarmCraft Fabric integration",
+        );
         let swarmcraft_path = managed_swarmcraft_fabric(self.paths, &resolved.adapter_version);
-        let swarmcraft_record = install_artifact(&resolved.swarmcraft_fabric, &swarmcraft_path, force)?;
-        atomic_copy(&swarmcraft_path, &managed_world_mods_dir(self.paths, world).join("swarmcraft-fabric.jar"))?;
+        let swarmcraft_record =
+            install_artifact(&resolved.swarmcraft_fabric, &swarmcraft_path, force)?;
+        atomic_copy(
+            &swarmcraft_path,
+            &managed_world_mods_dir(self.paths, world).join("swarmcraft-fabric.jar"),
+        )?;
 
         let mut artifacts = BTreeMap::new();
         artifacts.insert("minecraft_server".into(), minecraft_record);
@@ -413,13 +518,28 @@ impl<'a> RuntimeInstaller<'a> {
         if options.accept_eula {
             self.save_launch_config(world, &lock, &options)?;
         } else {
-            emit(&mut progress, &mut completed, RuntimePhase::WaitingForEula, "Minecraft server EULA acceptance is required");
+            emit(
+                &mut progress,
+                &mut completed,
+                RuntimePhase::WaitingForEula,
+                "Minecraft server EULA acceptance is required",
+            );
         }
 
-        emit(&mut progress, &mut completed, RuntimePhase::Verifying, "Verifying installed runtime");
+        emit(
+            &mut progress,
+            &mut completed,
+            RuntimePhase::Verifying,
+            "Verifying installed runtime",
+        );
         let status = self.inspect(world)?;
         if status.ready {
-            emit(&mut progress, &mut completed, RuntimePhase::Ready, "Runtime is ready");
+            emit(
+                &mut progress,
+                &mut completed,
+                RuntimePhase::Ready,
+                "Runtime is ready",
+            );
         }
         Ok(RuntimeInstallReport {
             launch_config_saved: status.launch_configured,
@@ -435,17 +555,32 @@ impl<'a> RuntimeInstaller<'a> {
         progress: &mut F,
         completed: &mut Vec<RuntimePhase>,
     ) -> Result<PathBuf> {
-        emit(progress, completed, RuntimePhase::DownloadingJava, "Preparing managed Java runtime");
-        let artifact = resolved.java.as_ref().context("managed Java source was not resolved")?;
-        let target_root = managed_java_root(self.paths, resolved.required_java_major).join(platform_key());
+        emit(
+            progress,
+            completed,
+            RuntimePhase::DownloadingJava,
+            "Preparing managed Java runtime",
+        );
+        let artifact = resolved
+            .java
+            .as_ref()
+            .context("managed Java source was not resolved")?;
+        let target_root =
+            managed_java_root(self.paths, resolved.required_java_major).join(platform_key());
         let java = java_executable_under(&target_root);
-        if java.exists() && !force && probe_java_major(&java).ok() == Some(resolved.required_java_major) {
+        if java.exists()
+            && !force
+            && probe_java_major(&java).ok() == Some(resolved.required_java_major)
+        {
             return Ok(java);
         }
         if target_root.exists() {
-            fs::remove_dir_all(&target_root).with_context(|| format!("cannot replace {}", target_root.display()))?;
+            fs::remove_dir_all(&target_root)
+                .with_context(|| format!("cannot replace {}", target_root.display()))?;
         }
-        let parent = target_root.parent().context("managed Java directory has no parent")?;
+        let parent = target_root
+            .parent()
+            .context("managed Java directory has no parent")?;
         fs::create_dir_all(parent)?;
         let archive = parent.join(format!("java-{}.archive", unique_suffix()));
         let archive_record = install_artifact(artifact, &archive, true)?;
@@ -468,23 +603,39 @@ impl<'a> RuntimeInstaller<'a> {
             let _ = fs::remove_dir_all(&staging);
             bail!("managed Java archive extraction failed");
         }
-        let staged_java = find_java_executable(&staging).context("managed Java archive did not contain bin/java")?;
+        let staged_java = find_java_executable(&staging)
+            .context("managed Java archive did not contain bin/java")?;
         let relative = staged_java.strip_prefix(&staging)?.to_path_buf();
         if probe_java_major(&staged_java)? != resolved.required_java_major {
             let _ = fs::remove_dir_all(&staging);
             bail!("downloaded Java runtime is incompatible with the selected Minecraft version");
         }
-        fs::rename(&staging, &target_root)
-            .with_context(|| format!("cannot atomically publish managed Java at {}", target_root.display()))?;
+        fs::rename(&staging, &target_root).with_context(|| {
+            format!(
+                "cannot atomically publish managed Java at {}",
+                target_root.display()
+            )
+        })?;
         Ok(target_root.join(relative))
     }
 
-    fn save_launch_config(&self, world: WorldId, lock: &RuntimeLock, options: &RuntimeInstallOptions) -> Result<()> {
+    fn save_launch_config(
+        &self,
+        world: WorldId,
+        lock: &RuntimeLock,
+        options: &RuntimeInstallOptions,
+    ) -> Result<()> {
         if !options.accept_eula {
             bail!("explicit Minecraft server EULA acceptance is required before runtime configuration");
         }
-        let server = lock.artifacts.get("fabric_loader").context("Fabric launcher is missing from runtime lock")?;
-        let bridge = lock.artifacts.get("swarmcraft_fabric").context("SwarmCraft Fabric integration is missing from runtime lock")?;
+        let server = lock
+            .artifacts
+            .get("fabric_loader")
+            .context("Fabric launcher is missing from runtime lock")?;
+        let bridge = lock
+            .artifacts
+            .get("swarmcraft_fabric")
+            .context("SwarmCraft Fabric integration is missing from runtime lock")?;
         let status = self.server_mods_status(world);
         if status.state != RuntimeComponentState::Ready {
             bail!("runtime cannot be made host-ready until required server mods are satisfied");
@@ -518,18 +669,22 @@ impl<'a> RuntimeInstaller<'a> {
             );
         }
 
-        let (required_java_major, minecraft_server) = resolve_minecraft(&metadata.genesis.minecraft_version)?;
+        let (required_java_major, minecraft_server) =
+            resolve_minecraft(&metadata.genesis.minecraft_version)?;
         let fabric_installer_version = resolve_fabric_installer()?;
         let fabric_server = ResolvedArtifact {
             version: metadata.genesis.fabric_loader_version.clone(),
             source: ArtifactSource::Download(format!(
                 "https://meta.fabricmc.net/v2/versions/loader/{}/{}/{}/server/jar",
-                metadata.genesis.minecraft_version, metadata.genesis.fabric_loader_version, fabric_installer_version
+                metadata.genesis.minecraft_version,
+                metadata.genesis.fabric_loader_version,
+                fabric_installer_version
             )),
             sha1: None,
             sha256: None,
         };
-        let (fabric_api_version, fabric_api) = resolve_fabric_api(&metadata.genesis.minecraft_version)?;
+        let (fabric_api_version, fabric_api) =
+            resolve_fabric_api(&metadata.genesis.minecraft_version)?;
         let swarmcraft_fabric = resolve_swarmcraft_fabric(&adapter_version)?;
         let java = if probe_java_major(Path::new("java")).ok() == Some(required_java_major) {
             None
@@ -565,7 +720,9 @@ impl<'a> RuntimeInstaller<'a> {
         };
         let probe = probe_java_major(&path);
         let state = match probe {
-            Ok(major) if major == required && (lock.is_none() || lock_compatible) => RuntimeComponentState::Ready,
+            Ok(major) if major == required && (lock.is_none() || lock_compatible) => {
+                RuntimeComponentState::Ready
+            }
             Ok(_) => RuntimeComponentState::Incompatible,
             Err(_) => RuntimeComponentState::Missing,
         };
@@ -575,7 +732,8 @@ impl<'a> RuntimeInstaller<'a> {
             version: probe.ok().map(|major| major.to_string()),
             path: Some(path),
             managed,
-            detail: (state != RuntimeComponentState::Ready).then(|| format!("Minecraft requires Java {required}")),
+            detail: (state != RuntimeComponentState::Ready)
+                .then(|| format!("Minecraft requires Java {required}")),
         }
     }
 
@@ -604,24 +762,40 @@ impl<'a> RuntimeInstaller<'a> {
                 version: Some(record.version.clone()),
                 path: Some(record.path.clone()),
                 managed: true,
-                detail: Some("installed artifact belongs to a different world runtime profile".into()),
+                detail: Some(
+                    "installed artifact belongs to a different world runtime profile".into(),
+                ),
             };
         }
-        let source_ok = record.path.is_file() && hash_file(&record.path, HashKind::Sha256).is_ok_and(|hash| eq_hash(&hash, &record.sha256));
+        let source_ok = record.path.is_file()
+            && hash_file(&record.path, HashKind::Sha256)
+                .is_ok_and(|hash| eq_hash(&hash, &record.sha256));
         let staged_ok = staged.as_ref().is_none_or(|path| {
-            path.is_file() && hash_file(path, HashKind::Sha256).is_ok_and(|hash| eq_hash(&hash, &record.sha256))
+            path.is_file()
+                && hash_file(path, HashKind::Sha256)
+                    .is_ok_and(|hash| eq_hash(&hash, &record.sha256))
         });
         RuntimeComponentStatus {
             kind,
-            state: if source_ok && staged_ok { RuntimeComponentState::Ready } else { RuntimeComponentState::Corrupt },
+            state: if source_ok && staged_ok {
+                RuntimeComponentState::Ready
+            } else {
+                RuntimeComponentState::Corrupt
+            },
             version: Some(record.version.clone()),
             path: Some(record.path.clone()),
             managed: true,
-            detail: (!(source_ok && staged_ok)).then(|| "artifact is missing or its recorded SHA-256 no longer matches".into()),
+            detail: (!(source_ok && staged_ok))
+                .then(|| "artifact is missing or its recorded SHA-256 no longer matches".into()),
         }
     }
 
-    fn swarmcraft_status(&self, world: WorldId, lock: Option<&RuntimeLock>, lock_compatible: bool) -> RuntimeComponentStatus {
+    fn swarmcraft_status(
+        &self,
+        world: WorldId,
+        lock: Option<&RuntimeLock>,
+        lock_compatible: bool,
+    ) -> RuntimeComponentStatus {
         let expected = self
             .storage
             .load_world_config(world)
@@ -635,7 +809,10 @@ impl<'a> RuntimeInstaller<'a> {
                 version: Some(expected.clone()),
                 path: None,
                 managed: true,
-                detail: Some(format!("world requires adapter {expected}, application provides {}", env!("CARGO_PKG_VERSION"))),
+                detail: Some(format!(
+                    "world requires adapter {expected}, application provides {}",
+                    env!("CARGO_PKG_VERSION")
+                )),
             };
         }
         self.artifact_status(
@@ -657,7 +834,9 @@ impl<'a> RuntimeInstaller<'a> {
                     version: None,
                     path: Some(managed_world_mods_dir(self.paths, world)),
                     managed: false,
-                    detail: Some("canonical runtime compatibility manifest is not synchronized yet".into()),
+                    detail: Some(
+                        "canonical runtime compatibility manifest is not synchronized yet".into(),
+                    ),
                 };
             }
         };
@@ -668,14 +847,22 @@ impl<'a> RuntimeInstaller<'a> {
             .filter(|requirement| {
                 !matches!(
                     requirement.artifact_id.as_str(),
-                    "swarmcraft.legacy-compatibility" | "fabric-api" | "fabric_api" | "swarmcraft" | "swarmcraft-fabric"
+                    "swarmcraft.legacy-compatibility"
+                        | "fabric-api"
+                        | "fabric_api"
+                        | "swarmcraft"
+                        | "swarmcraft-fabric"
                 )
             })
             .map(|requirement| format!("{} {}", requirement.artifact_id, requirement.version))
             .collect();
         RuntimeComponentStatus {
             kind: RuntimeComponentKind::ServerMods,
-            state: if external.is_empty() { RuntimeComponentState::Ready } else { RuntimeComponentState::Unavailable },
+            state: if external.is_empty() {
+                RuntimeComponentState::Ready
+            } else {
+                RuntimeComponentState::Unavailable
+            },
             version: None,
             path: Some(managed_world_mods_dir(self.paths, world)),
             managed: false,
@@ -703,7 +890,10 @@ fn emit<F: FnMut(RuntimeProgress)>(
     message: impl Into<String>,
 ) {
     completed.push(phase);
-    progress(RuntimeProgress { phase, message: message.into() });
+    progress(RuntimeProgress {
+        phase,
+        message: message.into(),
+    });
 }
 
 fn prepare_world_directories(paths: &DataPaths, world: WorldId) -> Result<()> {
@@ -713,30 +903,49 @@ fn prepare_world_directories(paths: &DataPaths, world: WorldId) -> Result<()> {
         managed_world_mods_dir(paths, world),
         managed_world_config_dir(paths, world),
     ] {
-        fs::create_dir_all(&path).with_context(|| format!("cannot create {}", path.display()))?;
+        fs::create_dir_all(&path)
+            .with_context(|| format!("cannot create {}", path.display()))?;
     }
     Ok(())
 }
 
 fn load_runtime_lock(paths: &DataPaths, world: WorldId) -> Result<RuntimeLock> {
     let path = runtime_lock_path(paths, world);
-    let bytes = fs::read(&path).with_context(|| format!("runtime lock is missing at {}", path.display()))?;
+    let bytes = fs::read(&path)
+        .with_context(|| format!("runtime lock is missing at {}", path.display()))?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 
 fn resolve_minecraft(version: &str) -> Result<(u32, ResolvedArtifact)> {
-    let manifest: Value = serde_json::from_str(&curl_text(MINECRAFT_MANIFEST, &["piston-meta.mojang.com"])?)?;
+    let manifest: Value = serde_json::from_str(&curl_text(
+        MINECRAFT_MANIFEST,
+        &["piston-meta.mojang.com"],
+    )?)?;
     let entry = manifest["versions"]
         .as_array()
-        .and_then(|values| values.iter().find(|value| value["id"].as_str() == Some(version)))
-        .with_context(|| format!("Minecraft version {version} is not present in Mojang's official manifest"))?;
-    let metadata_url = entry["url"].as_str().context("Mojang version entry has no metadata URL")?;
-    let metadata: Value = serde_json::from_str(&curl_text(metadata_url, &["piston-meta.mojang.com"])?)?;
+        .and_then(|values| {
+            values
+                .iter()
+                .find(|value| value["id"].as_str() == Some(version))
+        })
+        .with_context(|| {
+            format!("Minecraft version {version} is not present in Mojang's official manifest")
+        })?;
+    let metadata_url = entry["url"]
+        .as_str()
+        .context("Mojang version entry has no metadata URL")?;
+    let metadata: Value = serde_json::from_str(&curl_text(
+        metadata_url,
+        &["piston-meta.mojang.com"],
+    )?)?;
     let major = metadata["javaVersion"]["majorVersion"]
         .as_u64()
-        .context("Mojang metadata does not declare a Java major version")? as u32;
+        .context("Mojang metadata does not declare a Java major version")?
+        as u32;
     let server = &metadata["downloads"]["server"];
-    let url = server["url"].as_str().context("Mojang metadata does not provide a server download")?;
+    let url = server["url"]
+        .as_str()
+        .context("Mojang metadata does not provide a server download")?;
     trusted_https(url, &["piston-data.mojang.com", "launcher.mojang.com"])?;
     let sha1 = server["sha1"].as_str().map(ToOwned::to_owned);
     Ok((
@@ -751,8 +960,13 @@ fn resolve_minecraft(version: &str) -> Result<(u32, ResolvedArtifact)> {
 }
 
 fn resolve_fabric_installer() -> Result<String> {
-    let values: Value = serde_json::from_str(&curl_text(FABRIC_INSTALLERS, &["meta.fabricmc.net"])?)?;
-    let installers = values.as_array().context("Fabric installer metadata is not an array")?;
+    let values: Value = serde_json::from_str(&curl_text(
+        FABRIC_INSTALLERS,
+        &["meta.fabricmc.net"],
+    )?)?;
+    let installers = values
+        .as_array()
+        .context("Fabric installer metadata is not an array")?;
     installers
         .iter()
         .find(|value| value["stable"].as_bool() == Some(true))
@@ -771,8 +985,12 @@ fn resolve_fabric_api(minecraft: &str) -> Result<(String, ResolvedArtifact)> {
         .rev()
         .find(|version| version.ends_with(&suffix))
         .cloned()
-        .with_context(|| format!("Fabric API has no published artifact matching Minecraft {minecraft}"))?;
-    let base = format!("https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/{version}/fabric-api-{version}.jar");
+        .with_context(|| {
+            format!("Fabric API has no published artifact matching Minecraft {minecraft}")
+        })?;
+    let base = format!(
+        "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/{version}/fabric-api-{version}.jar"
+    );
     let sha1 = curl_text(&format!("{base}.sha1"), &["maven.fabricmc.net"])?
         .split_whitespace()
         .next()
@@ -802,7 +1020,9 @@ fn resolve_swarmcraft_fabric(version: &str) -> Result<ResolvedArtifact> {
     }
     let api = format!("{SWARMCRAFT_RELEASE_API}/v{version}");
     let release: Value = serde_json::from_str(&curl_text(&api, &["api.github.com"])?)?;
-    let assets = release["assets"].as_array().context("SwarmCraft release has no assets")?;
+    let assets = release["assets"]
+        .as_array()
+        .context("SwarmCraft release has no assets")?;
     let jar_name = format!("swarmcraft-fabric-{version}.jar");
     let checksum_name = format!("{jar_name}.sha256");
     let jar_url = release_asset_url(assets, &jar_name)?;
@@ -842,9 +1062,13 @@ fn resolve_managed_java(major: u32) -> Result<ResolvedArtifact> {
             continue;
         };
         let package = &asset["binary"]["package"];
-        let link = package["link"].as_str().context("Adoptium package has no download link")?;
+        let link = package["link"]
+            .as_str()
+            .context("Adoptium package has no download link")?;
         trusted_https(link, &["github.com", "api.adoptium.net"])?;
-        let checksum = package["checksum"].as_str().context("Adoptium package has no SHA-256 checksum")?;
+        let checksum = package["checksum"]
+            .as_str()
+            .context("Adoptium package has no SHA-256 checksum")?;
         return Ok(ResolvedArtifact {
             version: major.to_string(),
             source: ArtifactSource::Download(link.to_owned()),
@@ -855,14 +1079,21 @@ fn resolve_managed_java(major: u32) -> Result<ResolvedArtifact> {
     bail!("Adoptium has no compatible Java {major} runtime for this platform")
 }
 
-fn install_artifact(artifact: &ResolvedArtifact, destination: &Path, force: bool) -> Result<ArtifactRecord> {
+fn install_artifact(
+    artifact: &ResolvedArtifact,
+    destination: &Path,
+    force: bool,
+) -> Result<ArtifactRecord> {
     if destination.is_file() && !force {
         let sha256 = hash_file(destination, HashKind::Sha256)?;
-        let sha1_ok = artifact
-            .sha1
+        let sha1_ok = artifact.sha1.as_ref().is_none_or(|expected| {
+            hash_file(destination, HashKind::Sha1)
+                .is_ok_and(|actual| eq_hash(expected, &actual))
+        });
+        let sha256_ok = artifact
+            .sha256
             .as_ref()
-            .is_none_or(|expected| hash_file(destination, HashKind::Sha1).is_ok_and(|actual| eq_hash(expected, &actual)));
-        let sha256_ok = artifact.sha256.as_ref().is_none_or(|expected| eq_hash(expected, &sha256));
+            .is_none_or(|expected| eq_hash(expected, &sha256));
         if sha1_ok && sha256_ok {
             return Ok(ArtifactRecord {
                 version: artifact.version.clone(),
@@ -879,7 +1110,9 @@ fn install_artifact(artifact: &ResolvedArtifact, destination: &Path, force: bool
     let temporary = destination.with_extension(format!("part-{}", unique_suffix()));
     let result = match &artifact.source {
         ArtifactSource::Download(url) => curl_download(url, &temporary),
-        ArtifactSource::Local(path) => fs::copy(path, &temporary).map(|_| ()).map_err(anyhow::Error::from),
+        ArtifactSource::Local(path) => fs::copy(path, &temporary)
+            .map(|_| ())
+            .map_err(anyhow::Error::from),
     };
     if let Err(error) = result {
         let _ = fs::remove_file(&temporary);
@@ -901,10 +1134,15 @@ fn install_artifact(artifact: &ResolvedArtifact, destination: &Path, force: bool
     }
     sync_file(&temporary)?;
     if destination.exists() {
-        fs::remove_file(destination).with_context(|| format!("cannot replace {}", destination.display()))?;
+        fs::remove_file(destination)
+            .with_context(|| format!("cannot replace {}", destination.display()))?;
     }
-    fs::rename(&temporary, destination)
-        .with_context(|| format!("cannot publish downloaded artifact at {}", destination.display()))?;
+    fs::rename(&temporary, destination).with_context(|| {
+        format!(
+            "cannot publish downloaded artifact at {}",
+            destination.display()
+        )
+    })?;
     Ok(ArtifactRecord {
         version: artifact.version.clone(),
         path: destination.to_path_buf(),
@@ -922,7 +1160,9 @@ fn artifact_source_label(source: &ArtifactSource) -> String {
 }
 
 fn atomic_copy(source: &Path, destination: &Path) -> Result<()> {
-    let parent = destination.parent().context("managed artifact destination has no parent")?;
+    let parent = destination
+        .parent()
+        .context("managed artifact destination has no parent")?;
     fs::create_dir_all(parent)?;
     let temporary = destination.with_extension(format!("part-{}", unique_suffix()));
     if let Err(error) = fs::copy(source, &temporary) {
@@ -939,10 +1179,15 @@ fn atomic_copy(source: &Path, destination: &Path) -> Result<()> {
 
 fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
-    let parent = path.parent().context("runtime metadata path has no parent")?;
+    let parent = path
+        .parent()
+        .context("runtime metadata path has no parent")?;
     fs::create_dir_all(parent)?;
     let temporary = path.with_extension(format!("tmp-{}", unique_suffix()));
-    let mut file = OpenOptions::new().create_new(true).write(true).open(&temporary)?;
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
     drop(file);
@@ -964,13 +1209,17 @@ struct InstallGuard {
 
 impl InstallGuard {
     fn acquire(path: &Path) -> Result<Self> {
-        let parent = path.parent().context("runtime install lock has no parent")?;
+        let parent = path
+            .parent()
+            .context("runtime install lock has no parent")?;
         fs::create_dir_all(parent)?;
         match OpenOptions::new().create_new(true).write(true).open(path) {
             Ok(mut file) => {
                 writeln!(file, "pid={}", std::process::id())?;
                 file.sync_all()?;
-                Ok(Self { path: path.to_path_buf() })
+                Ok(Self {
+                    path: path.to_path_buf(),
+                })
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 bail!("another runtime installation is already in progress for this world")
@@ -989,13 +1238,28 @@ impl Drop for InstallGuard {
 fn curl_text(url: &str, hosts: &[&str]) -> Result<String> {
     trusted_https(url, hosts)?;
     let output = Command::new("curl")
-        .args(["-fsSL", "--retry", "2", "--connect-timeout", "15", "--max-time", "120", "-H"])
-        .arg(format!("User-Agent: SwarmCraft/{}", env!("CARGO_PKG_VERSION")))
+        .args([
+            "-fsSL",
+            "--retry",
+            "2",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "120",
+            "-H",
+        ])
+        .arg(format!(
+            "User-Agent: SwarmCraft/{}",
+            env!("CARGO_PKG_VERSION")
+        ))
         .arg(url)
         .output()
         .context("automatic runtime setup requires the platform curl utility")?;
     if !output.status.success() {
-        bail!("official runtime metadata request failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+        bail!(
+            "official runtime metadata request failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
     String::from_utf8(output.stdout).context("official runtime metadata was not UTF-8")
 }
@@ -1013,23 +1277,49 @@ fn curl_download(url: &str, destination: &Path) -> Result<()> {
         ],
     )?;
     let output = Command::new("curl")
-        .args(["-fL", "--retry", "2", "--connect-timeout", "15", "--max-time", "900", "-H"])
-        .arg(format!("User-Agent: SwarmCraft/{}", env!("CARGO_PKG_VERSION")))
+        .args([
+            "-fL",
+            "--retry",
+            "2",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "900",
+            "-H",
+        ])
+        .arg(format!(
+            "User-Agent: SwarmCraft/{}",
+            env!("CARGO_PKG_VERSION")
+        ))
         .arg("-o")
         .arg(destination)
         .arg(url)
         .output()
         .context("automatic runtime setup requires the platform curl utility")?;
     if !output.status.success() {
-        bail!("official artifact download failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+        bail!(
+            "official artifact download failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
     Ok(())
 }
 
 fn trusted_https(url: &str, hosts: &[&str]) -> Result<()> {
-    let rest = url.strip_prefix("https://").context("runtime downloads must use HTTPS")?;
-    let host = rest.split(['/', '?', '#']).next().unwrap_or_default().split(':').next().unwrap_or_default();
-    if hosts.iter().any(|allowed| host.eq_ignore_ascii_case(allowed)) {
+    let rest = url
+        .strip_prefix("https://")
+        .context("runtime downloads must use HTTPS")?;
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default();
+    if hosts
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
+    {
         Ok(())
     } else {
         bail!("runtime download host is not trusted: {host}")
@@ -1037,11 +1327,18 @@ fn trusted_https(url: &str, hosts: &[&str]) -> Result<()> {
 }
 
 fn probe_java_major(path: &Path) -> Result<u32> {
-    let output = Command::new(path).arg("-version").output().with_context(|| format!("cannot run {} -version", path.display()))?;
+    let output = Command::new(path)
+        .arg("-version")
+        .output()
+        .with_context(|| format!("cannot run {} -version", path.display()))?;
     if !output.status.success() {
         bail!("Java version probe failed");
     }
-    let text = format!("{}\n{}", String::from_utf8_lossy(&output.stderr), String::from_utf8_lossy(&output.stdout));
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
     parse_java_major(&text).context("Java version output did not contain a recognizable version")
 }
 
@@ -1054,14 +1351,16 @@ fn parse_java_major(text: &str) -> Option<u32> {
 }
 
 fn heuristic_java_major(minecraft: &str) -> u32 {
-    let parts: Vec<u32> = minecraft.split('.').filter_map(|part| part.parse().ok()).collect();
+    let parts: Vec<u32> = minecraft
+        .split('.')
+        .filter_map(|part| part.parse().ok())
+        .collect();
     if parts.first().copied().unwrap_or_default() >= 26 {
         25
-    } else if parts.first() == Some(&1) && parts.get(1).copied().unwrap_or_default() >= 21 {
-        21
     } else if parts.first() == Some(&1)
-        && parts.get(1) == Some(&20)
-        && parts.get(2).copied().unwrap_or_default() >= 5
+        && (parts.get(1).copied().unwrap_or_default() >= 21
+            || (parts.get(1) == Some(&20)
+                && parts.get(2).copied().unwrap_or_default() >= 5))
     {
         21
     } else if parts.first() == Some(&1) && parts.get(1).copied().unwrap_or_default() >= 18 {
@@ -1074,7 +1373,8 @@ fn heuristic_java_major(minecraft: &str) -> u32 {
 }
 
 fn java_executable_under(root: &Path) -> PathBuf {
-    root.join("bin").join(if cfg!(windows) { "java.exe" } else { "java" })
+    root.join("bin")
+        .join(if cfg!(windows) { "java.exe" } else { "java" })
 }
 
 fn find_java_executable(root: &Path) -> Option<PathBuf> {
@@ -1146,12 +1446,16 @@ fn hash_file(path: &Path, kind: HashKind) -> Result<String> {
             HashKind::Sha1 => "SHA1",
             HashKind::Sha256 => "SHA256",
         };
-        let output = Command::new("certutil").arg("-hashfile").arg(path).arg(algorithm).output()?;
+        let output = Command::new("certutil")
+            .arg("-hashfile")
+            .arg(path)
+            .arg(algorithm)
+            .output()?;
         if !output.status.success() {
             bail!("certutil failed to hash {}", path.display());
         }
         let text = String::from_utf8_lossy(&output.stdout);
-        return parse_hash_output(&text).context("certutil returned no digest");
+        parse_hash_output(&text).context("certutil returned no digest")
     }
     #[cfg(not(windows))]
     {
@@ -1159,7 +1463,11 @@ fn hash_file(path: &Path, kind: HashKind) -> Result<String> {
             HashKind::Sha1 => "1",
             HashKind::Sha256 => "256",
         };
-        let shasum = Command::new("shasum").arg("-a").arg(bits).arg(path).output();
+        let shasum = Command::new("shasum")
+            .arg("-a")
+            .arg(bits)
+            .arg(path)
+            .output();
         if let Ok(output) = shasum {
             if output.status.success() {
                 return String::from_utf8_lossy(&output.stdout)
@@ -1173,7 +1481,15 @@ fn hash_file(path: &Path, kind: HashKind) -> Result<String> {
             HashKind::Sha1 => "sha1sum",
             HashKind::Sha256 => "sha256sum",
         };
-        let output = Command::new(program).arg(path).output().with_context(|| format!("no SHA utility is available to verify {}", path.display()))?;
+        let output = Command::new(program)
+            .arg(path)
+            .output()
+            .with_context(|| {
+                format!(
+                    "no SHA utility is available to verify {}",
+                    path.display()
+                )
+            })?;
         if !output.status.success() {
             bail!("{program} failed to hash {}", path.display());
         }
@@ -1188,7 +1504,11 @@ fn hash_file(path: &Path, kind: HashKind) -> Result<String> {
 #[cfg(windows)]
 fn parse_hash_output(text: &str) -> Option<String> {
     text.lines()
-        .map(|line| line.chars().filter(|character| character.is_ascii_hexdigit()).collect::<String>())
+        .map(|line| {
+            line.chars()
+                .filter(|character| character.is_ascii_hexdigit())
+                .collect::<String>()
+        })
         .find(|line| line.len() == 40 || line.len() == 64)
 }
 
@@ -1197,7 +1517,10 @@ fn eq_hash(left: &str, right: &str) -> bool {
 }
 
 fn unique_suffix() -> String {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     format!("{}-{nanos}", std::process::id())
 }
 
@@ -1207,7 +1530,10 @@ mod tests {
 
     #[test]
     fn parses_java_versions() {
-        assert_eq!(parse_java_major("openjdk version \"25.0.1\" 2026-01-01"), Some(25));
+        assert_eq!(
+            parse_java_major("openjdk version \"25.0.1\" 2026-01-01"),
+            Some(25)
+        );
         assert_eq!(parse_java_major("java version \"1.8.0_412\""), Some(8));
         assert_eq!(parse_java_major("openjdk version \"21-ea\""), Some(21));
     }
@@ -1224,14 +1550,21 @@ mod tests {
     #[test]
     fn extracts_fabric_api_versions_without_xml_dependency() {
         let xml = "<metadata><versioning><versions><version>0.1+1.20.1</version><version>0.2+1.21.1</version></versions></versioning></metadata>";
-        assert_eq!(xml_values(xml, "version"), vec!["0.1+1.20.1", "0.2+1.21.1"]);
+        assert_eq!(
+            xml_values(xml, "version"),
+            vec!["0.1+1.20.1", "0.2+1.21.1"]
+        );
     }
 
     #[test]
     fn rejects_untrusted_or_plain_http_sources() {
         assert!(trusted_https("http://meta.fabricmc.net/file", &["meta.fabricmc.net"]).is_err());
         assert!(trusted_https("https://evil.example/file", &["meta.fabricmc.net"]).is_err());
-        assert!(trusted_https("https://meta.fabricmc.net/file", &["meta.fabricmc.net"]).is_ok());
+        assert!(trusted_https(
+            "https://meta.fabricmc.net/file",
+            &["meta.fabricmc.net"]
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1258,7 +1591,14 @@ mod tests {
         };
         assert!(install_artifact(&artifact, &destination, false).is_err());
         assert!(!destination.exists());
-        assert_eq!(fs::read_dir(temp.path()).unwrap().filter_map(Result::ok).filter(|entry| entry.path().to_string_lossy().contains("part-")).count(), 0);
+        assert_eq!(
+            fs::read_dir(temp.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().to_string_lossy().contains("part-"))
+                .count(),
+            0
+        );
     }
 
     #[test]
