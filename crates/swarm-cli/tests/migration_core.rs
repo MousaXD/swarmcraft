@@ -9,18 +9,19 @@ use std::{
 use swarm_cli::{
     authority_permit::refresh_permit,
     migration::{
-        self, MigrationPhase, RuntimeLaunchConfig, TransferPrepareResult, accept_manual_transfer,
-        activate_manual_transfer, commit_manual_transfer, observe_manual_transfer_epoch, prepare_manual_transfer,
+        self, accept_manual_transfer, activate_manual_transfer, commit_manual_transfer,
+        observe_manual_transfer_epoch, prepare_manual_transfer, MigrationPhase, RuntimeLaunchConfig,
+        TransferPrepareResult,
     },
 };
 use swarm_consensus::AuthorityGeneration;
 use swarm_core::{create_world_genesis, DataPaths, PeerIdentity};
 use swarm_protocol::{
-    EpochMode, EpochRecordV1, MembershipRecordV1, SleepRecordV1, WorldDescriptorV1, WorldMemberV1,
-    WorldId, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    EpochMode, EpochRecordV1, MembershipRecordV1, SleepRecordV1, WorldDescriptorV1, WorldId,
+    WorldMemberV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
-use tokio::time::{sleep, timeout};
+use tokio::{task::JoinHandle, time::{sleep, timeout}};
 
 struct PeerFixture {
     paths: DataPaths,
@@ -100,7 +101,12 @@ fn initialize_two_peer_world(alice: &PeerFixture, bob: &PeerFixture, source: &Pa
     SharedWorld { world, epoch }
 }
 
-fn snapshot(storage: &Storage, authority: &PeerIdentity, world: WorldId, source: &Path) -> swarm_protocol::SnapshotManifestV1 {
+fn snapshot(
+    storage: &Storage,
+    authority: &PeerIdentity,
+    world: WorldId,
+    source: &Path,
+) -> swarm_protocol::SnapshotManifestV1 {
     let mut manifest = storage
         .snapshot_directory(
             source,
@@ -146,8 +152,73 @@ fn save_sleep(peer: &PeerFixture, world: WorldId) {
     peer.storage.save_sleep_record(&record).unwrap();
 }
 
-#[test]
-fn manual_transfer_uses_one_signed_generation_and_fences_alice() {
+fn configure_mock_runtime(temp: &Path, peer: &PeerFixture, world: WorldId, endpoint: &str) {
+    let mock_java = temp.join(format!("mock-java-{}", world.to_hex()));
+    write_mock_java(&mock_java);
+    let server = temp.join(format!("server-{}.jar", world.to_hex()));
+    let fabric = temp.join(format!("swarmcraft-fabric-{}.jar", world.to_hex()));
+    fs::write(&server, b"mock").unwrap();
+    fs::write(&fabric, b"mock").unwrap();
+    migration::save_runtime_config(
+        &peer.paths,
+        world,
+        &RuntimeLaunchConfig {
+            java: mock_java,
+            server_jar: server,
+            mod_jar: fabric,
+            accept_eula: true,
+            game_endpoint: Some(endpoint.into()),
+        },
+    )
+    .unwrap();
+}
+
+fn spawn_heartbeat(
+    paths: DataPaths,
+    world: WorldId,
+    generation: AuthorityGeneration,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        for sequence in 1..100u64 {
+            refresh_permit(&paths, world, generation, sequence).unwrap();
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+}
+
+async fn wait_until_ready(peer: &PeerFixture, world: WorldId, endpoint: &str) {
+    let peer_id = peer.identity.peer_id().to_string();
+    timeout(Duration::from_secs(12), async {
+        loop {
+            if let Ok(status) = migration::load_migration_status(&peer.paths, world) {
+                if status.phase == MigrationPhase::Ready && status.runtime_ready {
+                    assert_eq!(status.authority_peer_id.as_deref(), Some(peer_id.as_str()));
+                    assert_eq!(status.game_endpoint.as_deref(), Some(endpoint));
+                    break;
+                }
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("authority never reached ready state");
+}
+
+async fn wait_until_sleeping(peer: &PeerFixture, world: WorldId) {
+    timeout(Duration::from_secs(12), async {
+        loop {
+            if peer.storage.load_sleep_record(world).is_ok() {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("authority never checkpointed after runtime exit");
+}
+
+#[tokio::test]
+async fn manual_transfer_uses_shared_runner_and_fences_alice() {
     let temp = tempfile::tempdir().unwrap();
     let alice = peer(temp.path().join("alice"));
     let bob = peer(temp.path().join("bob"));
@@ -159,9 +230,18 @@ fn manual_transfer_uses_one_signed_generation_and_fences_alice() {
     let alice_sleep = alice.storage.load_sleep_record(shared.world).unwrap();
     bob.storage.save_sleep_record(&alice_sleep).unwrap();
 
-    let prepared = match prepare_manual_transfer(&alice.paths, &alice.storage, shared.world, bob.identity.peer_id()).unwrap() {
+    let prepared = match prepare_manual_transfer(
+        &alice.paths,
+        &alice.storage,
+        shared.world,
+        bob.identity.peer_id(),
+    )
+    .unwrap()
+    {
         TransferPrepareResult::Prepared(token) => token,
-        TransferPrepareResult::CheckpointRequested => panic!("sleeping world should already be checkpointed"),
+        TransferPrepareResult::CheckpointRequested => {
+            panic!("sleeping world should already be checkpointed")
+        }
     };
     let accepted = accept_manual_transfer(&bob.paths, &bob.storage, shared.world, &prepared).unwrap();
     let committed = commit_manual_transfer(&alice.paths, &alice.storage, shared.world, &accepted).unwrap();
@@ -177,8 +257,37 @@ fn manual_transfer_uses_one_signed_generation_and_fences_alice() {
     assert!(alice.storage.load_sleep_record(shared.world).is_err());
     assert!(bob.storage.load_sleep_record(shared.world).is_err());
 
-    let stale = prepare_manual_transfer(&alice.paths, &alice.storage, shared.world, bob.identity.peer_id());
-    assert!(stale.is_err(), "former authority must not initiate canonical work after observing Bob's generation");
+    let stale = prepare_manual_transfer(
+        &alice.paths,
+        &alice.storage,
+        shared.world,
+        bob.identity.peer_id(),
+    );
+    assert!(
+        stale.is_err(),
+        "former authority must not initiate canonical work after observing Bob's generation"
+    );
+
+    let endpoint = "127.0.0.1:25566";
+    configure_mock_runtime(temp.path(), &bob, shared.world, endpoint);
+    let generation = AuthorityGeneration {
+        epoch: bob_epoch.epoch_number,
+        fencing_token: bob_epoch.fencing_token,
+    };
+    let heartbeat = spawn_heartbeat(bob.paths.clone(), shared.world, generation);
+    let supervisor_paths = bob.paths.clone();
+    let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });
+
+    wait_until_ready(&bob, shared.world, endpoint).await;
+    wait_until_sleeping(&bob, shared.world).await;
+
+    let final_snapshot = bob.storage.latest_snapshot(shared.world).unwrap().unwrap();
+    assert_eq!(final_snapshot.epoch, bob_epoch.epoch_number);
+    assert_eq!(final_snapshot.authority_peer_id, bob.identity.peer_id());
+    bob.storage.verify_snapshot(&final_snapshot).unwrap();
+
+    supervisor.abort();
+    heartbeat.abort();
 }
 
 #[tokio::test]
@@ -208,63 +317,18 @@ async fn recovered_bob_waits_for_exact_permit_then_restores_and_reaches_fabric_r
     recovery.signature = bob.identity.sign(&recovery.signing_bytes().unwrap());
     bob.storage.save_epoch_record(&recovery).unwrap();
 
-    let mock_java = temp.path().join("mock-java");
-    write_mock_java(&mock_java);
-    let server = temp.path().join("server.jar");
-    let fabric = temp.path().join("swarmcraft-fabric.jar");
-    fs::write(&server, b"mock").unwrap();
-    fs::write(&fabric, b"mock").unwrap();
-    migration::save_runtime_config(
-        &bob.paths,
-        shared.world,
-        &RuntimeLaunchConfig {
-            java: mock_java,
-            server_jar: server,
-            mod_jar: fabric,
-            accept_eula: true,
-            game_endpoint: Some("127.0.0.1:25565".into()),
-        },
-    )
-    .unwrap();
-
-    let generation = AuthorityGeneration { epoch: recovery.epoch_number, fencing_token: recovery.fencing_token };
-    let heartbeat_paths = bob.paths.clone();
-    let heartbeat_world = shared.world;
-    let heartbeat = tokio::spawn(async move {
-        for sequence in 1..100u64 {
-            refresh_permit(&heartbeat_paths, heartbeat_world, generation, sequence).unwrap();
-            sleep(Duration::from_millis(100)).await;
-        }
-    });
+    let endpoint = "127.0.0.1:25565";
+    configure_mock_runtime(temp.path(), &bob, shared.world, endpoint);
+    let generation = AuthorityGeneration {
+        epoch: recovery.epoch_number,
+        fencing_token: recovery.fencing_token,
+    };
+    let heartbeat = spawn_heartbeat(bob.paths.clone(), shared.world, generation);
     let supervisor_paths = bob.paths.clone();
     let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });
 
-    let bob_peer_id = bob.identity.peer_id().to_string();
-    timeout(Duration::from_secs(12), async {
-        loop {
-            if let Ok(status) = migration::load_migration_status(&bob.paths, shared.world) {
-                if status.phase == MigrationPhase::Ready && status.runtime_ready {
-                    assert_eq!(status.authority_peer_id.as_deref(), Some(bob_peer_id.as_str()));
-                    assert_eq!(status.game_endpoint.as_deref(), Some("127.0.0.1:25565"));
-                    break;
-                }
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect("recovered authority never reached ready state");
-
-    timeout(Duration::from_secs(12), async {
-        loop {
-            if bob.storage.load_sleep_record(shared.world).is_ok() {
-                break;
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect("recovered authority never checkpointed after runtime exit");
+    wait_until_ready(&bob, shared.world, endpoint).await;
+    wait_until_sleeping(&bob, shared.world).await;
 
     let final_snapshot = bob.storage.latest_snapshot(shared.world).unwrap().unwrap();
     assert_eq!(final_snapshot.epoch, recovery.epoch_number);
