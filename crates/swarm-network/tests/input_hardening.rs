@@ -30,7 +30,7 @@ fn signed_hello() -> PeerHelloV1 {
 }
 
 #[tokio::test]
-async fn oversized_pre_auth_request_is_rejected_without_terminating_event_loop() {
+async fn oversized_request_is_rejected_then_valid_request_still_succeeds() {
     let mut victim = SwarmNode::new(generate_transport_key(), signed_hello()).unwrap();
     let victim_peer = victim.local_transport_peer_id();
     victim.listen("/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()).unwrap();
@@ -54,17 +54,30 @@ async fn oversized_pre_auth_request_is_rejected_without_terminating_event_loop()
         SwarmBuilder::with_new_identity().with_tokio().with_quic().with_behaviour(|_| behaviour).unwrap().build();
     attacker.dial(address).unwrap();
 
-    let mut request_sent = false;
+    let valid_hello = signed_hello();
+    let expected_application_peer = valid_hello.peer_id;
+    let mut oversized_sent = false;
+    let mut oversized_rejected = false;
+    let mut valid_sent = false;
+    let mut valid_response_received = false;
+    let mut victim_authenticated = false;
+
     timeout(Duration::from_secs(15), async {
         loop {
             tokio::select! {
                 victim_event = victim.next_event() => {
-                    if let Err(error) = victim_event {
-                        panic!("malicious request terminated the victim event loop: {error:#}");
+                    match victim_event {
+                        Err(error) => panic!("malicious request terminated the victim event loop: {error:#}"),
+                        Ok(NetworkEvent::Authenticated { application_peer, .. }) => {
+                            assert_eq!(application_peer, expected_application_peer);
+                            assert!(oversized_rejected, "valid request was processed only after oversized rejection");
+                            victim_authenticated = true;
+                        }
+                        Ok(_) => {}
                     }
                 }
                 attacker_event = attacker.select_next_some() => match attacker_event {
-                    SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == victim_peer && !request_sent => {
+                    SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == victim_peer && !oversized_sent => {
                         attacker.behaviour_mut().send_request(
                             &victim_peer,
                             WireRequest::BlobChunk {
@@ -76,24 +89,41 @@ async fn oversized_pre_auth_request_is_rejected_without_terminating_event_loop()
                                 finished: false,
                             },
                         );
-                        request_sent = true;
+                        oversized_sent = true;
                     }
                     SwarmEvent::Behaviour(request_response::Event::Message {
                         message: request_response::Message::Response { response, .. },
                         ..
-                    }) => {
-                        assert!(request_sent);
+                    }) if !oversized_rejected => {
+                        assert!(oversized_sent);
                         assert!(matches!(
                             response,
                             WireResponse::Error { code, .. } if code == "REQUEST_LIMIT_EXCEEDED"
                         ));
-                        break;
+                        oversized_rejected = true;
+                        attacker.behaviour_mut().send_request(&victim_peer, WireRequest::Hello(valid_hello.clone()));
+                        valid_sent = true;
+                    }
+                    SwarmEvent::Behaviour(request_response::Event::Message {
+                        message: request_response::Message::Response { response, .. },
+                        ..
+                    }) if valid_sent => {
+                        assert!(matches!(response, WireResponse::HelloAccepted { protocol_version } if protocol_version == PROTOCOL_VERSION));
+                        valid_response_received = true;
                     }
                     _ => {}
                 }
             }
+
+            if victim_authenticated && valid_response_received {
+                break;
+            }
         }
     })
     .await
-    .expect("attacker should receive a bounded rejection while victim remains alive");
+    .expect("victim should reject oversized input and then accept a valid request on the same connection");
+
+    assert!(oversized_rejected);
+    assert!(victim_authenticated);
+    assert!(valid_response_received);
 }
