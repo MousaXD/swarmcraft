@@ -337,7 +337,17 @@ impl SwarmNode {
                 SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(event)) => match event {
                     request_response::Event::Message { peer, message, .. } => match message {
                         request_response::Message::Request { request, channel, .. } => {
-                            request.validate_limits()?;
+                            if let Err(error) = request.validate_limits() {
+                                warn!(transport_peer = %peer, %error, "inbound request exceeded protocol limits");
+                                self.respond(
+                                    channel,
+                                    WireResponse::Error {
+                                        code: "REQUEST_LIMIT_EXCEEDED".into(),
+                                        message: error.to_string(),
+                                    },
+                                )?;
+                                continue;
+                            }
                             match request {
                                 WireRequest::Hello(hello) => match verify_peer_hello(&hello) {
                                     Ok(()) => {
