@@ -1,0 +1,55 @@
+name: Agent 3 Fix
+
+on:
+  push:
+    branches: [agent/server-mod-management]
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/server-mod-management
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Fix ModIssue constructor
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('crates/swarm-cli/src/server_mods.rs')
+          s = p.read_text()
+          old = '''                issues.push(ModIssue {
+                    kind: ModIssueKind::VersionMismatch,
+                    mod_id: Some(required_value.artifact_id.clone()),
+                    message: format!(
+'''
+          new = '''                issues.push(ModIssue {
+                    kind: ModIssueKind::VersionMismatch,
+                    mod_id: Some(required_value.artifact_id.clone()),
+                    file_name: None,
+                    message: format!(
+'''
+          if s.count(old) != 1:
+              raise SystemExit(f'expected one VersionMismatch constructor, found {s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - name: Format
+        run: cargo fmt --all
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --all-features --locked
+      - name: Commit validated fix
+        run: |
+          rm .github/workflows/agent3-fix.yml
+          git config user.name "swarmcraft-agent3"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: complete server mod readiness diagnostics"
+          git push origin HEAD:agent/server-mod-management
