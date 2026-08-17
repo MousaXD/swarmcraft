@@ -1,9 +1,15 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use tauri::AppHandle;
 use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
     ShellExt,
 };
+
+const CONNECTIVITY_DIAGNOSTICS_JSON_ENV: &str = "SWARMCRAFT_CONNECTIVITY_DIAGNOSTICS_JSON";
 
 struct OwnedChild<T> {
     generation: u64,
@@ -17,10 +23,7 @@ struct SlotState<T> {
 
 impl<T> Default for SlotState<T> {
     fn default() -> Self {
-        Self {
-            next_generation: 0,
-            owned: None,
-        }
+        Self { next_generation: 0, owned: None }
     }
 }
 
@@ -37,11 +40,7 @@ impl<T> SlotState<T> {
     }
 
     fn clear_if_generation(&mut self, generation: u64) -> bool {
-        if self
-            .owned
-            .as_ref()
-            .is_some_and(|owned| owned.generation == generation)
-        {
+        if self.owned.as_ref().is_some_and(|owned| owned.generation == generation) {
             self.owned.take();
             true
         } else {
@@ -59,14 +58,28 @@ struct ProcessSlot {
     state: Arc<Mutex<SlotState<CommandChild>>>,
 }
 
-#[derive(Default)]
 pub struct RuntimeProcesses {
     daemon: ProcessSlot,
     host: ProcessSlot,
+    connectivity_json: PathBuf,
+}
+
+impl Default for RuntimeProcesses {
+    fn default() -> Self {
+        Self {
+            daemon: ProcessSlot::default(),
+            host: ProcessSlot::default(),
+            connectivity_json: std::env::temp_dir().join(format!(
+                "swarmcraft-connectivity-{}.json",
+                std::process::id()
+            )),
+        }
+    }
 }
 
 impl RuntimeProcesses {
     pub fn ensure_daemon_running(&self, app: &AppHandle, listen: String) -> Result<u32, String> {
+        std::env::set_var(CONNECTIVITY_DIAGNOSTICS_JSON_ENV, &self.connectivity_json);
         spawn(
             app,
             "swarmcraft",
@@ -82,6 +95,15 @@ impl RuntimeProcesses {
 
     pub fn stop_daemon(&self) -> Result<(), String> {
         stop(&self.daemon, "Replication daemon")
+    }
+
+    pub fn connectivity_diagnostics_json(&self) -> Result<String, String> {
+        fs::read_to_string(&self.connectivity_json).map_err(|error| {
+            format!(
+                "structured connectivity diagnostics are not available at {}: {error}",
+                self.connectivity_json.display()
+            )
+        })
     }
 
     pub fn start_host(&self, app: &AppHandle, arguments: Vec<String>) -> Result<u32, String> {
@@ -106,10 +128,7 @@ fn spawn(
     slot: &ProcessSlot,
     label: &str,
 ) -> Result<u32, String> {
-    let mut guard = slot
-        .state
-        .lock()
-        .map_err(|_| format!("{label} process state is poisoned"))?;
+    let mut guard = slot.state.lock().map_err(|_| format!("{label} process state is poisoned"))?;
     if let Some(pid) = guard.existing_pid(CommandChild::pid) {
         return Ok(pid);
     }
@@ -162,10 +181,7 @@ mod tests {
 
         assert_eq!(state.existing_pid(|pid| *pid), Some(41));
         assert_eq!(generation, 1);
-        assert_eq!(
-            state.next_generation, 1,
-            "idempotent lookup must not reserve another process generation"
-        );
+        assert_eq!(state.next_generation, 1, "idempotent lookup must not reserve another process generation");
     }
 
     #[test]
@@ -184,10 +200,6 @@ mod tests {
     #[test]
     fn stop_path_has_no_handle_for_external_processes() {
         let mut state = SlotState::<u32>::default();
-        assert_eq!(
-            state.take(),
-            None,
-            "an unrelated daemon must never appear as Desktop-owned"
-        );
+        assert_eq!(state.take(), None, "an unrelated daemon must never appear as Desktop-owned");
     }
 }
