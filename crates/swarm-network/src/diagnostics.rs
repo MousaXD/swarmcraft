@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
+use std::{env, fs, path::PathBuf};
 
 pub const MAX_CONNECTIVITY_FAILURES: usize = 8;
 pub const CONNECTIVITY_DIAGNOSTICS_SNAPSHOT_FILE: &str = "connectivity-diagnostics-v1.postcard";
+pub const CONNECTIVITY_DIAGNOSTICS_JSON_ENV: &str = "SWARMCRAFT_CONNECTIVITY_DIAGNOSTICS_JSON";
 const MAX_FAILURE_DETAIL_CHARS: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -110,16 +112,19 @@ impl ConnectivityDiagnosticsV1 {
             self.local_addresses.sort();
         }
         self.refresh_address_families();
+        self.persist_json_snapshot();
     }
 
     pub fn remove_local_address(&mut self, address: &str) {
         self.local_addresses.retain(|candidate| candidate != address);
         self.refresh_address_families();
+        self.persist_json_snapshot();
     }
 
     pub fn record_observed_address(&mut self, address: impl Into<String>) {
         self.observed_public_address = Some(address.into());
         self.refresh_address_families();
+        self.persist_json_snapshot();
     }
 
     pub fn record_nat_status(&mut self, status: NatStatusV1) {
@@ -229,8 +234,6 @@ impl ConnectivityDiagnosticsV1 {
             ConnectivityStateV1::DirectReachable
         } else if self.relay_connectivity {
             ConnectivityStateV1::RelayConnected
-        } else if self.nat_status == NatStatusV1::Public {
-            ConnectivityStateV1::DirectReachable
         } else if last_path_issue == Some(ConnectivityIssueKindV1::NoViablePath) {
             ConnectivityStateV1::NoViablePath
         } else if self.relay_configured > 0
@@ -246,8 +249,24 @@ impl ConnectivityDiagnosticsV1 {
         } else if self.nat_status == NatStatusV1::Private {
             ConnectivityStateV1::PrivateUnreachable
         } else {
+            // AutoNAT public reachability is a NAT fact, not ownership of a
+            // current application connection. The UI can display nat_status
+            // independently without resurrecting stale DirectReachable state.
             ConnectivityStateV1::NatStatusUnknown
         };
+        self.persist_json_snapshot();
+    }
+
+    fn persist_json_snapshot(&self) {
+        let Some(path) = env::var_os(CONNECTIVITY_DIAGNOSTICS_JSON_ENV).map(PathBuf::from) else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(bytes) = serde_json::to_vec(self) {
+            let _ = fs::write(path, bytes);
+        }
     }
 }
 
@@ -300,13 +319,14 @@ mod tests {
     }
 
     #[test]
-    fn public_autonat_independently_keeps_direct_reachable_after_path_close() {
+    fn public_autonat_does_not_invent_an_active_direct_application_path() {
         let mut diagnostics = ConnectivityDiagnosticsV1::default();
         diagnostics.record_nat_status(NatStatusV1::Public);
         diagnostics.record_active_paths(1, 0, 0);
         diagnostics.record_active_paths(0, 0, 0);
+        assert_eq!(diagnostics.nat_status, NatStatusV1::Public);
         assert!(!diagnostics.direct_connectivity);
-        assert_eq!(diagnostics.state, ConnectivityStateV1::DirectReachable);
+        assert_ne!(diagnostics.state, ConnectivityStateV1::DirectReachable);
     }
 
     #[test]
@@ -416,7 +436,7 @@ mod tests {
 
         let json = diagnostics.to_json().unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["state"], "direct_reachable");
+        assert_eq!(value["state"], "nat_status_unknown");
         assert_eq!(value["nat_status"], "public");
         assert_eq!(value["recent_failures"][0]["kind"], "request_failed");
         assert_eq!(value["ipv4_available"], true);
