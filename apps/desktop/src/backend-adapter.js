@@ -37,60 +37,49 @@ const BACKEND_MIGRATION_PHASE_ALIASES = Object.freeze({
   checkpointing: 'saving-world',
   'awaiting-transfer-acceptance': 'transferring-authority',
   ready: 'ready',
-  blocked: 'failed',
   failed: 'failed',
 });
 
-const CONNECTIVITY_LABELS = Object.freeze({
-  direct: 'Direct',
-  relay: 'Relay',
-  connecting: 'Connecting',
-  offline: 'Offline',
-  limited: 'Limited connectivity',
-  action: 'Action required',
-  unknown: 'Not reported',
-});
-
 const CONNECTIVITY_STATES = Object.freeze({
-  DirectReachable: {
-    kind: 'direct',
-    label: 'Direct',
-    detail: 'Peers can reach this device over a current direct application path.',
-  },
-  HolePunched: {
-    kind: 'direct',
-    label: 'Direct · hole punched',
-    detail: 'A current direct application path was established through DCUtR hole punching.',
-  },
-  RelayConnected: {
-    kind: 'relay',
-    label: 'Relay',
-    detail: 'A current relayed application path is connected.',
-  },
-  RelayRequired: {
-    kind: 'limited',
-    label: 'Relay required',
-    detail: 'Direct connectivity is unavailable and a configured relay is required.',
-  },
-  PrivateUnreachable: {
-    kind: 'action',
-    label: 'Private NAT',
-    detail: 'The device is behind private NAT and no current application path is available.',
-  },
-  BootstrapUnavailable: {
-    kind: 'action',
-    label: 'Bootstrap unavailable',
-    detail: 'Configured bootstrap infrastructure is unavailable.',
-  },
-  NoViablePath: {
-    kind: 'offline',
-    label: 'No viable path',
-    detail: 'Direct and relay attempts have not produced a current usable application path.',
-  },
-  NatStatusUnknown: {
+  nat_status_unknown: {
     kind: 'connecting',
-    label: 'Discovering connectivity',
-    detail: 'No current application path is established yet; NAT and path discovery are still unresolved.',
+    label: 'Checking connectivity',
+    detail: 'SwarmCraft is still determining which network paths are available.',
+  },
+  direct_reachable: {
+    kind: 'direct',
+    label: 'Direct connection',
+    detail: 'Other peers can reach this device directly.',
+  },
+  hole_punched: {
+    kind: 'direct',
+    label: 'Direct connection established',
+    detail: 'SwarmCraft established a direct peer path through NAT traversal.',
+  },
+  relay_connected: {
+    kind: 'relay',
+    label: 'Connected through relay',
+    detail: 'Peer traffic currently has a usable relay path.',
+  },
+  relay_required: {
+    kind: 'limited',
+    label: 'Relay needed',
+    detail: 'A relay path is needed for reliable internet connectivity.',
+  },
+  private_unreachable: {
+    kind: 'action',
+    label: 'Connection needs attention',
+    detail: 'This device does not currently have a usable inbound peer path.',
+  },
+  bootstrap_unavailable: {
+    kind: 'action',
+    label: 'Discovery unavailable',
+    detail: 'SwarmCraft cannot currently reach bootstrap discovery infrastructure.',
+  },
+  no_viable_path: {
+    kind: 'action',
+    label: 'Could not reach other peers',
+    detail: 'No direct, hole-punched, or relayed peer path is currently usable.',
   },
 });
 
@@ -102,6 +91,74 @@ function slug(value) {
     .replace(/[^a-z0-9-]/g, '');
 }
 
+function connectivityKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_')
+    .replace(/[^a-z0-9_]/g, '');
+}
+
+function compactList(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+  if (value === null || value === undefined || value === '') return [];
+  return [String(value).trim()].filter(Boolean);
+}
+
+function connectivityFailures(source) {
+  const failures = source.recent_failures ?? source.recentFailures ?? source.failures ?? source.failure_reasons ?? source.failureReasons ?? source.errors;
+  if (!Array.isArray(failures)) return compactList(failures);
+  return failures.map((failure) => {
+    if (!failure || typeof failure !== 'object') return String(failure || '').trim();
+    const kind = connectivityKey(failure.kind).replaceAll('_', ' ');
+    const detail = String(failure.detail || '').trim();
+    const peer = String(failure.peer || '').trim();
+    const address = String(failure.address || '').trim();
+    return [kind, detail, peer && `peer ${peer}`, address].filter(Boolean).join(': ');
+  }).filter(Boolean);
+}
+
+export function normalizeConnectivityDiagnostics(raw) {
+  const source = raw && typeof raw === 'object' ? raw : { state: raw };
+  const state = connectivityKey(
+    source.state
+      ?? source.connectivity_state
+      ?? source.connectivityState
+      ?? source.path_state
+      ?? source.pathState
+      ?? source.status,
+  );
+  const mapped = CONNECTIVITY_STATES[state] || CONNECTIVITY_STATES.nat_status_unknown;
+  const natState = source.nat_status ?? source.natStatus ?? source.nat_state ?? source.natState ?? null;
+  const localAddresses = compactList(
+    source.local_addresses
+      ?? source.localAddresses
+      ?? source.addresses
+      ?? source.listen_addresses
+      ?? source.listenAddresses,
+  );
+  const observedPublicAddress = String(source.observed_public_address ?? source.observedPublicAddress ?? '').trim();
+  const selectedRelay = String(source.selected_relay ?? source.selectedRelay ?? '').trim();
+  const lastFailure = String(source.last_failure ?? source.lastFailure ?? '').trim();
+  const failures = connectivityFailures(source);
+  const diagnosticParts = [];
+  if (natState) diagnosticParts.push(`NAT: ${natState}`);
+  if (localAddresses.length) diagnosticParts.push(`Local addresses: ${localAddresses.join(', ')}`);
+  if (observedPublicAddress) diagnosticParts.push(`Observed public address: ${observedPublicAddress}`);
+  if (selectedRelay) diagnosticParts.push(`Relay: ${selectedRelay}`);
+  if (lastFailure) diagnosticParts.push(`Last failure: ${lastFailure}`);
+  if (failures.length) diagnosticParts.push(`Recent failures: ${failures.join('; ')}`);
+
+  return {
+    state: CONNECTIVITY_STATES[state] ? state : 'nat_status_unknown',
+    kind: mapped.kind,
+    label: mapped.label,
+    detail: mapped.detail,
+    diagnosticDetail: diagnosticParts.join(' · ') || mapped.detail,
+    raw: source,
+  };
+}
+
 export function normalizeMigrationState(raw) {
   if (!raw) {
     return {
@@ -110,7 +167,9 @@ export function normalizeMigrationState(raw) {
       label: 'Not active',
       detail: 'No host migration is currently reported.',
       progress: 0,
+      blocked: false,
       failed: false,
+      action: null,
       runtimeReady: false,
       gameEndpoint: null,
     };
@@ -134,7 +193,29 @@ export function normalizeMigrationState(raw) {
           ? 'This device is no longer the accepted runtime authority.'
           : 'No host migration is active.'),
       progress: 0,
+      blocked: false,
       failed: false,
+      action: null,
+      runtimeReady,
+      gameEndpoint,
+    };
+  }
+
+  if (backendPhase === 'blocked') {
+    const runtimeConfigMissing = /runtime/i.test(failureReason)
+      && /(config|configuration|setup|launch)/i.test(failureReason)
+      && /(missing|not configured|unavailable|required)/i.test(failureReason);
+    return {
+      available: true,
+      phase: 'blocked',
+      label: 'Action required',
+      detail: runtimeConfigMissing
+        ? 'This device needs Minecraft runtime setup before it can take over hosting.'
+        : failureReason || 'Host migration is blocked until the required local setup is completed.',
+      progress: 0,
+      blocked: true,
+      failed: false,
+      action: runtimeConfigMissing ? 'runtime-setup' : null,
       runtimeReady,
       gameEndpoint,
     };
@@ -150,7 +231,6 @@ export function normalizeMigrationState(raw) {
       : index >= 0
         ? Math.round((index / (MIGRATION_PHASES.length - 2)) * 100)
         : 0;
-  const blocked = backendPhase === 'blocked';
   const detail = String(
     source.detail
       || source.message
@@ -161,55 +241,19 @@ export function normalizeMigrationState(raw) {
   return {
     available: Boolean(knownPhase),
     phase: knownPhase,
-    label: blocked ? 'Action required' : knownPhase ? MIGRATION_LABELS[knownPhase] : 'Migration state unavailable',
+    label: knownPhase ? MIGRATION_LABELS[knownPhase] : 'Migration state unavailable',
     detail,
     progress,
+    blocked: false,
     failed: knownPhase === 'failed',
+    action: null,
     runtimeReady,
     gameEndpoint,
   };
 }
 
-function parseConnectivityDiagnostics(status) {
-  const raw = status?.['Connectivity JSON'] ?? status?.connectivityDiagnostics ?? status?.connectivity_diagnostics;
-  if (!raw) return null;
-  if (typeof raw === 'object') return raw;
-  try {
-    return JSON.parse(String(raw));
-  } catch (_) {
-    return null;
-  }
-}
-
 export function connectivityFromStatus(status = {}) {
-  const diagnostics = parseConnectivityDiagnostics(status);
-  if (!diagnostics || typeof diagnostics.state !== 'string') {
-    return {
-      kind: 'unknown',
-      label: CONNECTIVITY_LABELS.unknown,
-      detail: 'The running daemon has not published structured connectivity diagnostics yet.',
-      raw: null,
-      diagnostics: null,
-    };
-  }
-
-  const model = CONNECTIVITY_STATES[diagnostics.state] || {
-    kind: 'unknown',
-    label: CONNECTIVITY_LABELS.unknown,
-    detail: `Backend reported an unknown typed connectivity state: ${diagnostics.state}.`,
-  };
-  const lastIssue = Array.isArray(diagnostics.recent_failures) ? diagnostics.recent_failures.at(-1) : null;
-  const issueDetail = lastIssue?.kind
-    ? ` Last issue: ${lastIssue.kind}${lastIssue.detail ? ` · ${lastIssue.detail}` : ''}.`
-    : '';
-
-  return {
-    kind: model.kind,
-    label: model.label,
-    detail: `${model.detail}${issueDetail}`,
-    raw: diagnostics.state,
-    diagnostics,
-  };
+  return normalizeConnectivityDiagnostics(status);
 }
 
 export function createBackendAdapter(invoke) {
@@ -230,6 +274,8 @@ export function createBackendAdapter(invoke) {
           const supported = new Set(String(raw || '').split(',').map(slug).filter(Boolean));
           migrationCapabilities.status = supported.has('status');
           migrationCapabilities.wake = supported.has('wake');
+          // Manual transfer is deliberately disabled until migration-core exposes one
+          // Desktop-safe orchestration command for the complete signed transfer flow.
           migrationCapabilities.transfer = false;
           return migrationCapabilities;
         })
@@ -237,6 +283,15 @@ export function createBackendAdapter(invoke) {
     }
     return migrationCapabilityProbe;
   };
+
+  const configureWorldRuntime = (payload) => call('configure_world_runtime', {
+    world: payload.world,
+    java: payload.java,
+    serverJar: payload.serverJar,
+    modJar: payload.modJar,
+    acceptEula: payload.acceptEula,
+    gameEndpoint: payload.gameEndpoint || null,
+  });
 
   return Object.freeze({
     initializeNode: () => call('initialize_node'),
@@ -249,17 +304,7 @@ export function createBackendAdapter(invoke) {
     joinWorld: (invite) => call('join_world', { invite }),
     leaveWorld: (world) => call('leave_world', { world }),
     createInvite: (payload) => call('create_invite', payload),
-    worldStatus: async (world) => {
-      const status = await call('world_status', { world });
-      try {
-        const diagnostics = await call('connectivity_diagnostics');
-        JSON.parse(String(diagnostics));
-        return `${status}\nConnectivity JSON: ${String(diagnostics).trim()}`;
-      } catch (_) {
-        return status;
-      }
-    },
-    connectivityDiagnostics: async () => JSON.parse(String(await call('connectivity_diagnostics'))),
+    worldStatus: (world) => call('world_status', { world }),
     worldCompatibility: (world) => call('world_compatibility', { world }),
     worldConflicts: (world) => call('world_conflicts', { world }),
     setBackgroundSeeding: (world, enabled) => call('set_background_seeding', { world, enabled }),
@@ -267,11 +312,33 @@ export function createBackendAdapter(invoke) {
     verifyWorld: (world) => call('verify_world', { world }),
     exportWorld: (world, destination) => call('export_world', { world, destination }),
     recoverWorld: (world, snapshot, destination) => call('recover_world', { world, snapshot, destination }),
+    ensureDaemonRunning: (listen) => call('ensure_daemon_running', { listen }),
     startDaemon: (listen) => call('start_daemon', { listen }),
     stopDaemon: () => call('stop_daemon'),
-    configureWorldRuntime: (payload) => call('configure_world_runtime', payload),
-    hostWorld: (payload) => call('host_world', payload),
+    configureWorldRuntime,
+    hostWorld: async (payload) => {
+      try {
+        await configureWorldRuntime(payload);
+      } catch (error) {
+        throw new Error(
+          `Minecraft runtime setup could not be saved, so hosting was not started and automatic takeover is not prepared. ${String(error)}`,
+        );
+      }
+      return call('host_world', payload);
+    },
     stopHost: () => call('stop_host'),
+    connectivityDiagnostics: async () => {
+      const raw = await call('connectivity_diagnostics');
+      let parsed = raw;
+      if (typeof raw === 'string') {
+        try {
+          parsed = JSON.parse(raw);
+        } catch (error) {
+          throw new Error(`Connectivity diagnostics were not valid JSON: ${error}`);
+        }
+      }
+      return normalizeConnectivityDiagnostics(parsed);
+    },
 
     migration: Object.freeze({
       capabilities: migrationCapabilities,

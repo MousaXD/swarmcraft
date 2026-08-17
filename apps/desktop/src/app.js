@@ -6,8 +6,12 @@ const backend = createBackendAdapter(invoke);
 const worldCache = new Map();
 let selectedWorldId = '';
 let currentView = 'worlds';
-let migrationRefreshInFlight = false;
+let migrationRequestGeneration = 0;
+let connectivityRefreshInFlight = false;
+let structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });
+let serviceWarning = '';
 const MIGRATION_REFRESH_MS = 5000;
+const CONNECTIVITY_REFRESH_MS = 10000;
 
 const viewMeta = {
   worlds: ['Worlds', 'Choose a world and play'],
@@ -52,6 +56,26 @@ function showInline(id, message, tone = 'neutral') {
   element.dataset.tone = tone;
 }
 
+function serviceWarningElement() {
+  let element = $('serviceWarning');
+  if (element) return element;
+  element = document.createElement('div');
+  element.id = 'serviceWarning';
+  element.className = 'page-notice notice-danger';
+  element.setAttribute('role', 'status');
+  element.setAttribute('aria-live', 'polite');
+  element.hidden = true;
+  document.querySelector('.topbar')?.insertAdjacentElement('afterend', element);
+  return element;
+}
+
+function setServiceWarning(message) {
+  serviceWarning = String(message || '').trim();
+  const element = serviceWarningElement();
+  element.textContent = serviceWarning;
+  element.hidden = !serviceWarning;
+}
+
 function activityLabel(label) {
   return String(label).replace(/…$/, '');
 }
@@ -94,7 +118,10 @@ function showView(name, { focus = true } = {}) {
   const [title, context] = viewMeta[name];
   $('viewTitle').textContent = title;
   $('viewContext').textContent = context;
-  if (name === 'diagnostics') updateDiagnosticsContext();
+  if (name === 'diagnostics') {
+    updateDiagnosticsContext();
+    refreshConnectivityDiagnostics({ logFailure: false }).catch(() => {});
+  }
   if (focus) {
     const panel = document.querySelector(`[data-view-panel="${name}"]`);
     panel?.querySelector('input:not([type="hidden"]):not(:disabled), textarea:not(:disabled), button:not(:disabled), summary, [tabindex]')?.focus({ preventScroll: true });
@@ -166,13 +193,34 @@ function setNodeState(text, kind = 'neutral') {
   $('nodeStateDot').className = `state-dot ${kind}`;
 }
 
-function renderConnectivity(world) {
-  const connectivity = connectivityFromStatus(world?.status || {});
+function renderConnectivity() {
+  const connectivity = structuredConnectivity;
   $('selectedConnectivity').textContent = connectivity.label;
   $('selectedConnectivityDetail').textContent = connectivity.detail;
   $('diagnosticConnectivity').textContent = connectivity.label;
   $('diagnosticConnectivity').className = `status-badge ${connectivity.kind}`;
-  $('diagnosticConnectivityDetail').textContent = connectivity.detail;
+  $('diagnosticConnectivityDetail').textContent = connectivity.diagnosticDetail;
+}
+
+async function refreshConnectivityDiagnostics({ logFailure = false } = {}) {
+  if (connectivityRefreshInFlight) return;
+  connectivityRefreshInFlight = true;
+  try {
+    structuredConnectivity = await backend.connectivityDiagnostics();
+  } catch (error) {
+    structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });
+    structuredConnectivity = {
+      ...structuredConnectivity,
+      diagnosticDetail: `Connectivity diagnostics unavailable: ${String(error)}`,
+    };
+    if (logFailure) setOutput(String(error), 'Connectivity diagnostics failed');
+  } finally {
+    connectivityRefreshInFlight = false;
+  }
+  renderConnectivity();
+  for (const element of document.querySelectorAll('.world-row-connectivity')) {
+    element.textContent = structuredConnectivity.label;
+  }
 }
 
 function updatePlayState(world) {
@@ -210,6 +258,7 @@ function updateWorldSpecificControls() {
 
 function clearSelection() {
   selectedWorldId = '';
+  migrationRequestGeneration += 1;
   $('world').value = '';
   $('selectionContent').hidden = true;
   $('noSelection').hidden = false;
@@ -229,7 +278,7 @@ function updateDiagnosticsContext() {
     $('diagnosticWorldName').textContent = 'No world selected';
     $('diagnosticWorldId').textContent = 'World-specific controls are unavailable.';
     $('diagnosticSafety').hidden = true;
-    renderConnectivity(null);
+    renderConnectivity();
     return;
   }
   $('diagnosticWorldName').textContent = world.name;
@@ -238,7 +287,24 @@ function updateDiagnosticsContext() {
   $('diagnosticSafety').textContent = safety;
   $('diagnosticSafety').className = `status-badge ${safetyKind(safety)}`;
   $('diagnosticSafety').hidden = false;
-  renderConnectivity(world);
+  renderConnectivity();
+}
+
+function runtimeSetupActionButton() {
+  let button = $('migrationRuntimeSetup');
+  if (button) return button;
+  button = document.createElement('button');
+  button.id = 'migrationRuntimeSetup';
+  button.type = 'button';
+  button.className = 'button button-secondary';
+  button.textContent = 'Set up Minecraft runtime';
+  button.hidden = true;
+  button.addEventListener('click', () => showRuntimeValidation([
+    null,
+    'This device needs Minecraft runtime setup before it can take over hosting.',
+  ]));
+  $('migrationCard')?.querySelector('.compact-actions')?.prepend(button);
+  return button;
 }
 
 function renderMigration(state) {
@@ -246,12 +312,13 @@ function renderMigration(state) {
   $('migrationBadge').textContent = migration.label;
   $('migrationBadge').className = `status-badge ${migration.failed ? 'danger' : migration.phase === 'ready' ? 'safe' : migration.available ? 'warning' : 'neutral'}`;
   $('migrationSummary').textContent = migration.detail || (migration.available ? migration.label : 'No host migration is active.');
-  $('migrationProgress').hidden = !migration.available || migration.failed;
+  $('migrationProgress').hidden = !migration.available || migration.failed || migration.blocked;
   $('migrationProgressBar').style.width = `${migration.progress}%`;
+  runtimeSetupActionButton().hidden = migration.action !== 'runtime-setup';
 
   const steps = $('migrationSteps');
   steps.replaceChildren();
-  if (!migration.available || migration.failed) return;
+  if (!migration.available || migration.failed || migration.blocked) return;
   const activeIndex = MIGRATION_PHASES.indexOf(migration.phase);
   MIGRATION_PHASES.filter((phase) => phase !== 'failed').forEach((phase) => {
     const item = document.createElement('li');
@@ -269,18 +336,15 @@ async function refreshMigrationState(world) {
     renderMigration(null);
     return;
   }
-  if (migrationRefreshInFlight) return;
   const requestedWorldId = world.id;
-  migrationRefreshInFlight = true;
+  const requestGeneration = ++migrationRequestGeneration;
   try {
     const state = await backend.migration.readState(requestedWorldId);
-    if (selectedWorldId === requestedWorldId) renderMigration(state);
+    if (selectedWorldId === requestedWorldId && requestGeneration === migrationRequestGeneration) renderMigration(state);
   } catch (error) {
-    if (selectedWorldId === requestedWorldId) {
+    if (selectedWorldId === requestedWorldId && requestGeneration === migrationRequestGeneration) {
       renderMigration({ detail: `Could not read host migration state: ${String(error)}` });
     }
-  } finally {
-    migrationRefreshInFlight = false;
   }
 }
 
@@ -317,8 +381,7 @@ function selectWorld(world, { focusDetail = false } = {}) {
     row.classList.toggle('is-selected', selected);
     row.setAttribute('aria-pressed', selected ? 'true' : 'false');
   }
-
-  renderConnectivity(world);
+  renderConnectivity();
   updatePlayState(world);
   updateDiagnosticsContext();
   refreshMigrationState(world);
@@ -353,7 +416,8 @@ function renderWorld(world) {
   const host = document.createElement('span');
   host.textContent = world.status.Authority ? `Host ${world.status.Authority}` : 'Host not reported';
   const connectivity = document.createElement('span');
-  connectivity.textContent = connectivityFromStatus(world.status).label;
+  connectivity.className = 'world-row-connectivity';
+  connectivity.textContent = structuredConnectivity.label;
   meta.append(minecraft, host, connectivity);
 
   row.append(title, safety, meta);
@@ -410,6 +474,7 @@ async function refreshWorlds() {
     return;
   }
 
+  await refreshConnectivityDiagnostics({ logFailure: currentView === 'diagnostics' });
   const worlds = parseWorldList(raw);
   const previousSelection = selectedWorldId;
   const container = $('worldCards');
@@ -444,11 +509,48 @@ async function refreshWorlds() {
   setStatus('Ready', 'safe');
 }
 
+async function ensureNetworkingService({ quiet = false } = {}) {
+  try {
+    const pid = await backend.ensureDaemonRunning($('daemonListen').value.trim());
+    setServiceWarning('');
+    if (!quiet) setOutput(`Networking daemon is running. PID ${pid}.`, 'Networking');
+    return pid;
+  } catch (error) {
+    const message = `Automatic networking service could not start. Local worlds can still be used, but replication and automatic migration supervision may be unavailable. ${String(error)}`;
+    setServiceWarning(message);
+    if (!quiet) {
+      setOutput(String(error), 'Networking start failed');
+      setStatus('Networking needs attention', 'warning');
+      try { error.swarmcraftActivityLogged = true; } catch (_) {}
+      throw error;
+    }
+    setOutput(String(error), 'Automatic networking start failed');
+    return null;
+  }
+}
+
 async function initialize() {
   const result = await run('Setting up this device…', () => backend.initializeNode());
   $('identity').textContent = String(result);
   setNodeState('Ready', 'safe');
+  await ensureNetworkingService({ quiet: true });
   await refreshWorlds();
+}
+
+async function startup() {
+  setStatus('Starting SwarmCraft…');
+  try {
+    const result = await backend.initializeNode();
+    $('identity').textContent = String(result);
+    setNodeState('Ready', 'safe');
+  } catch (error) {
+    setNodeState('Setup needs attention', 'warning');
+    setOutput(String(error), 'Automatic device setup failed');
+  }
+  await ensureNetworkingService({ quiet: true });
+  await showIdentity({ quiet: true });
+  await refreshWorlds();
+  refreshVisibleMigration();
 }
 
 async function showIdentity({ quiet = false } = {}) {
@@ -646,6 +748,7 @@ async function performLeaveWorld() {
   await run('Requesting membership leave…', () => backend.leaveWorld(worldId()));
   $('leaveDialog').close();
   selectedWorldId = '';
+  migrationRequestGeneration += 1;
   $('world').value = '';
   await refreshWorlds();
 }
@@ -685,7 +788,7 @@ async function hostWorld() {
       acceptEula: $('eula').checked,
     }), { successMessage: (pid) => `Minecraft authority runtime started. PID ${pid}.` });
     showView('worlds');
-    showInline('worldNotice', 'Minecraft runtime started.', 'safe');
+    showInline('worldNotice', 'Minecraft runtime started. Runtime setup is persisted for automatic takeover.', 'safe');
   } catch (error) {
     showInline('runtimeNotice', `Could not start Minecraft: ${String(error)}`, 'danger');
     throw error;
@@ -697,13 +800,16 @@ async function stopHost() {
 }
 
 async function startDaemon() {
-  await run('Starting networking…', () => backend.startDaemon($('daemonListen').value.trim()), {
-    successMessage: (pid) => `Networking daemon started. PID ${pid}.`,
+  await run('Starting networking…', () => backend.ensureDaemonRunning($('daemonListen').value.trim()), {
+    successMessage: (pid) => `Networking daemon is running. PID ${pid}.`,
   });
+  setServiceWarning('');
+  await refreshConnectivityDiagnostics({ logFailure: true });
 }
 
 async function stopDaemon() {
-  await run('Stopping networking…', () => backend.stopDaemon(), { successMessage: 'Networking daemon stopped.' });
+  await run('Stopping networking…', () => backend.stopDaemon(), { successMessage: 'Desktop-owned networking daemon stopped.' });
+  setServiceWarning('Networking is stopped for this Desktop session. Start networking to restore replication and automatic migration supervision.');
 }
 
 async function exportWorld() {
@@ -808,7 +914,12 @@ bindAction('wakeWorld', wakeWorld);
 showView(currentView, { focus: false });
 updateWorldSpecificControls();
 renderMigration(null);
-showIdentity({ quiet: true }).catch(() => {});
-refreshWorlds().catch(() => {});
+startup().catch((error) => {
+  setOutput(String(error), 'Desktop startup failed');
+  setStatus('Startup needs attention', 'warning');
+});
 document.addEventListener('visibilitychange', refreshVisibleMigration);
 setInterval(refreshVisibleMigration, MIGRATION_REFRESH_MS);
+setInterval(() => {
+  if (!document.hidden) refreshConnectivityDiagnostics({ logFailure: false }).catch(() => {});
+}, CONNECTIVITY_REFRESH_MS);

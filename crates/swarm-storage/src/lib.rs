@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::{
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
 };
 use swarm_protocol::{
@@ -34,6 +34,10 @@ pub enum StorageError {
     BlobCorrupt(Hash32),
     #[error("snapshot state root mismatch")]
     StateRootMismatch,
+    #[error("snapshot publication belongs to world {publication_world} but manifest targets {manifest_world}")]
+    SnapshotPublicationWorldMismatch { publication_world: WorldId, manifest_world: WorldId },
+    #[error("snapshot publication does not own a pin for blob {0}")]
+    SnapshotPublicationMissingPin(Hash32),
     #[error("snapshot manifest does not exist: {0}")]
     SnapshotNotFound(u64),
     #[error("world metadata does not exist: {0}")]
@@ -82,6 +86,7 @@ impl Storage {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, StorageError> {
         let this = Self { root: root.into() };
         fs::create_dir_all(this.worlds_dir()).map_err(|e| io_error(this.worlds_dir(), e))?;
+        this.recover_abandoned_snapshot_publications()?;
         Ok(this)
     }
 
@@ -189,12 +194,7 @@ impl Storage {
         let bytes = match descriptor.encoding {
             BlobEncoding::Raw => encoded,
             BlobEncoding::Zstd => {
-                let decoder = zstd::stream::read::Decoder::new(encoded.as_slice())
-                    .map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
-                let mut reader = decoder.take(descriptor.uncompressed_size.saturating_add(1));
-                let mut decoded = Vec::new();
-                reader.read_to_end(&mut decoded).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
-                decoded
+                zstd::stream::decode_all(encoded.as_slice()).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?
             }
         };
         if bytes.len() as u64 != descriptor.uncompressed_size
@@ -209,12 +209,12 @@ impl Storage {
         &self,
         source: &Path,
         context: SnapshotContext,
-    ) -> Result<SnapshotManifestV1, StorageError> {
+    ) -> Result<crate::streaming::SnapshotPublication, StorageError> {
         self.snapshot_directory_streaming(source, context)
     }
 
-    pub fn commit_snapshot(&self, manifest: &SnapshotManifestV1) -> Result<(), StorageError> {
-        self.commit_snapshot_streaming(manifest)
+    pub fn commit_snapshot<T: crate::streaming::SnapshotCommitInput>(&self, snapshot: &T) -> Result<(), StorageError> {
+        self.commit_snapshot_streaming(snapshot)
     }
 
     pub fn load_snapshot(&self, world: WorldId, number: u64) -> Result<SnapshotManifestV1, StorageError> {

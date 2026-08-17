@@ -81,7 +81,7 @@ struct RelayFallbackPlan {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PathKind {
+enum ConnectionPathKind {
     DirectApplication,
     RelayedApplication,
     BootstrapInfrastructure,
@@ -93,7 +93,7 @@ pub struct SwarmNode {
     local_hello: PeerHelloV1,
     authenticated: HashMap<TransportPeerId, PeerId>,
     active_connections: HashMap<TransportPeerId, ConnectionId>,
-    active_paths: HashMap<ConnectionId, PathKind>,
+    connection_paths: HashMap<ConnectionId, ConnectionPathKind>,
     bootstrap_peers: HashSet<TransportPeerId>,
     relay_peers: HashSet<TransportPeerId>,
     relay_fallbacks: HashMap<TransportPeerId, RelayFallbackPlan>,
@@ -152,7 +152,7 @@ impl SwarmNode {
             local_hello,
             authenticated: HashMap::new(),
             active_connections: HashMap::new(),
-            active_paths: HashMap::new(),
+            connection_paths: HashMap::new(),
             bootstrap_peers: HashSet::new(),
             relay_peers: HashSet::new(),
             relay_fallbacks: HashMap::new(),
@@ -388,49 +388,31 @@ impl SwarmNode {
             .map_err(|_| anyhow!("response channel closed"))
     }
 
-    fn respond_best_effort(
-        &mut self,
-        peer: TransportPeerId,
-        channel: request_response::ResponseChannel<WireResponse>,
-        response: WireResponse,
-    ) {
-        if self.respond(channel, response).is_err() {
-            debug!(transport_peer = %peer, "response channel closed before response could be sent");
-        }
-    }
-
     pub async fn next_event(&mut self) -> Result<NetworkEvent> {
         loop {
             match self.swarm.select_next_some().await {
                 SwarmEvent::NewListenAddr { address, .. } => {
-                    // A relay reservation/listener is infrastructure. It does not
-                    // prove a relayed application connection exists.
                     self.diagnostics.record_local_address(address.to_string());
                     info!(%address, "network listening");
                     return Ok(NetworkEvent::Listening { address });
                 }
+                SwarmEvent::ExpiredListenAddr { address, .. } => {
+                    self.diagnostics.remove_local_address(&address.to_string());
+                    debug!(%address, "network listen address expired");
+                }
                 SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, num_established, .. } => {
-                    let path_kind = if self.bootstrap_peers.contains(&peer_id) {
-                        PathKind::BootstrapInfrastructure
-                    } else if self.relay_peers.contains(&peer_id) {
-                        PathKind::RelayInfrastructure
-                    } else if endpoint.is_relayed() {
-                        PathKind::RelayedApplication
-                    } else {
-                        PathKind::DirectApplication
-                    };
-                    self.active_paths.insert(connection_id, path_kind);
-                    match path_kind {
-                        PathKind::DirectApplication => {
-                            self.diagnostics.record_direct_path_up();
-                            self.relay_fallbacks.remove(&peer_id);
-                        }
-                        PathKind::RelayedApplication => {
-                            self.diagnostics.record_relay_path_up();
-                            self.relay_fallbacks.remove(&peer_id);
-                        }
-                        PathKind::BootstrapInfrastructure => self.diagnostics.record_bootstrap_path_up(),
-                        PathKind::RelayInfrastructure => {}
+                    let path_kind = classify_connection_path(
+                        self.bootstrap_peers.contains(&peer_id),
+                        self.relay_peers.contains(&peer_id),
+                        endpoint.is_relayed(),
+                    );
+                    self.connection_paths.insert(connection_id, path_kind);
+                    self.refresh_connectivity_paths();
+                    if matches!(
+                        path_kind,
+                        ConnectionPathKind::DirectApplication | ConnectionPathKind::RelayedApplication
+                    ) {
+                        self.relay_fallbacks.remove(&peer_id);
                     }
                     debug!(transport_peer = %peer_id, %connection_id, %num_established, relayed = endpoint.is_relayed(), ?path_kind, "peer connected");
 
@@ -455,15 +437,8 @@ impl SwarmNode {
                     return Ok(NetworkEvent::Connected { transport_peer: peer_id });
                 }
                 SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
-                    if let Some(path_kind) = self.active_paths.remove(&connection_id) {
-                        match path_kind {
-                            PathKind::DirectApplication => self.diagnostics.record_direct_path_down(),
-                            PathKind::RelayedApplication => self.diagnostics.record_relay_path_down(),
-                            PathKind::BootstrapInfrastructure => self.diagnostics.record_bootstrap_path_down(),
-                            PathKind::RelayInfrastructure => {}
-                        }
-                    }
-
+                    self.connection_paths.remove(&connection_id);
+                    self.refresh_connectivity_paths();
                     // A peer can have multiple libp2p connections at once, especially
                     // during reconnects. Closing an older connection must not erase
                     // authentication established by a newer live connection.
@@ -553,54 +528,71 @@ impl SwarmNode {
                     request_response::Event::Message { peer, message, .. } => match message {
                         request_response::Message::Request { request, channel, .. } => {
                             if let Err(error) = request.validate_limits() {
-                                warn!(transport_peer = %peer, %error, "inbound request exceeded protocol limits");
-                                self.respond_best_effort(
-                                    peer,
-                                    channel,
-                                    WireResponse::Error {
-                                        code: "REQUEST_LIMIT_EXCEEDED".into(),
-                                        message: error.to_string(),
-                                    },
-                                );
+                                let response = WireResponse::Error {
+                                    code: "REQUEST_LIMIT_EXCEEDED".into(),
+                                    message: error.to_string(),
+                                };
+                                if let Err(response_error) = self.respond(channel, response) {
+                                    warn!(
+                                        transport_peer = %peer,
+                                        error = %response_error,
+                                        "failed to send request limit error; continuing network loop"
+                                    );
+                                }
                                 continue;
                             }
                             match request {
                                 WireRequest::Hello(hello) => match verify_peer_hello(&hello) {
                                     Ok(()) => {
                                         self.authenticated.insert(peer, hello.peer_id);
-                                        self.respond_best_effort(
-                                            peer,
+                                        if let Err(response_error) = self.respond(
                                             channel,
                                             WireResponse::HelloAccepted { protocol_version: PROTOCOL_VERSION },
-                                        );
+                                        ) {
+                                            warn!(
+                                                transport_peer = %peer,
+                                                error = %response_error,
+                                                "peer hello response channel closed; continuing network loop"
+                                            );
+                                        }
                                         return Ok(NetworkEvent::Authenticated {
                                             transport_peer: peer,
                                             application_peer: hello.peer_id,
                                         });
                                     }
                                     Err(error) => {
-                                        self.respond_best_effort(
-                                            peer,
+                                        if let Err(response_error) = self.respond(
                                             channel,
                                             WireResponse::Error {
                                                 code: "PEER_AUTHENTICATION_FAILED".into(),
                                                 message: error.to_string(),
                                             },
-                                        );
+                                        ) {
+                                            warn!(
+                                                transport_peer = %peer,
+                                                error = %response_error,
+                                                "peer authentication error response channel closed; continuing network loop"
+                                            );
+                                        }
                                     }
                                 },
                                 request if self.authenticated.contains_key(&peer) => {
                                     return Ok(NetworkEvent::InboundRequest { transport_peer: peer, request, channel });
                                 }
                                 _ => {
-                                    self.respond_best_effort(
-                                        peer,
+                                    if let Err(response_error) = self.respond(
                                         channel,
                                         WireResponse::Error {
                                             code: "HANDSHAKE_REQUIRED".into(),
                                             message: "authenticate with PeerHello before other requests".into(),
                                         },
-                                    );
+                                    ) {
+                                        warn!(
+                                            transport_peer = %peer,
+                                            error = %response_error,
+                                            "handshake-required response channel closed; continuing network loop"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -609,17 +601,9 @@ impl SwarmNode {
                         }
                     },
                     request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
-                        self.record_issue(
-                            ConnectivityIssueKindV1::RequestFailed,
-                            Some(peer),
-                            None,
-                            error.to_string(),
-                        );
-                        return Ok(NetworkEvent::OutboundFailure {
-                            transport_peer: peer,
-                            request_id,
-                            error: error.to_string(),
-                        });
+                        let error = error.to_string();
+                        self.record_issue(ConnectivityIssueKindV1::RequestFailed, Some(peer), None, error.clone());
+                        return Ok(NetworkEvent::OutboundFailure { transport_peer: peer, request_id, error });
                     }
                     request_response::Event::InboundFailure { peer, error, .. } => {
                         warn!(transport_peer = %peer, %error, "inbound request failed");
@@ -627,9 +611,8 @@ impl SwarmNode {
                     request_response::Event::ResponseSent { .. } => {}
                 },
                 SwarmEvent::Behaviour(BehaviourEvent::RelayClient(event)) => {
-                    // Reservation/circuit capability is infrastructure. Actual
-                    // relayed application connectivity is owned by the relayed
-                    // ConnectionEstablished/ConnectionClosed pair above.
+                    // Relay reservation/circuit transport events are infrastructure signals.
+                    // RelayConnected is derived only from an established relayed application connection.
                     debug!(?event, "relay client event");
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Dcutr(event)) => {
@@ -659,6 +642,12 @@ impl SwarmNode {
                 other => debug!(event = ?other, "network event"),
             }
         }
+    }
+
+    fn refresh_connectivity_paths(&mut self) {
+        let (direct_paths, relay_paths, bootstrap_paths) =
+            summarize_connection_paths(self.connection_paths.values().copied());
+        self.diagnostics.record_active_paths(direct_paths, relay_paths, bootstrap_paths);
     }
 
     fn try_relay_fallback(&mut self, peer: TransportPeerId) -> Result<bool> {
@@ -705,6 +694,33 @@ impl SwarmNode {
     }
 }
 
+fn classify_connection_path(bootstrap_peer: bool, relay_peer: bool, relayed_endpoint: bool) -> ConnectionPathKind {
+    if bootstrap_peer {
+        ConnectionPathKind::BootstrapInfrastructure
+    } else if relay_peer {
+        ConnectionPathKind::RelayInfrastructure
+    } else if relayed_endpoint {
+        ConnectionPathKind::RelayedApplication
+    } else {
+        ConnectionPathKind::DirectApplication
+    }
+}
+
+fn summarize_connection_paths(paths: impl IntoIterator<Item = ConnectionPathKind>) -> (usize, usize, usize) {
+    let mut direct_paths = 0;
+    let mut relay_paths = 0;
+    let mut bootstrap_paths = 0;
+    for path in paths {
+        match path {
+            ConnectionPathKind::DirectApplication => direct_paths += 1,
+            ConnectionPathKind::RelayedApplication => relay_paths += 1,
+            ConnectionPathKind::BootstrapInfrastructure => bootstrap_paths += 1,
+            ConnectionPathKind::RelayInfrastructure => {}
+        }
+    }
+    (direct_paths, relay_paths, bootstrap_paths)
+}
+
 fn configured_multiaddrs(name: &str) -> Result<Vec<Multiaddr>> {
     let Some(value) = env::var_os(name) else {
         return Ok(Vec::new());
@@ -734,4 +750,30 @@ fn transport_peer_from_address(address: &Multiaddr) -> Option<TransportPeerId> {
             _ => None,
         })
         .last()
+}
+
+#[cfg(test)]
+mod connectivity_path_tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_and_relay_infrastructure_are_isolated_from_application_paths() {
+        assert_eq!(classify_connection_path(true, false, false), ConnectionPathKind::BootstrapInfrastructure);
+        assert_eq!(classify_connection_path(false, true, false), ConnectionPathKind::RelayInfrastructure);
+        assert_eq!(classify_connection_path(false, false, true), ConnectionPathKind::RelayedApplication);
+        assert_eq!(classify_connection_path(false, false, false), ConnectionPathKind::DirectApplication);
+    }
+
+    #[test]
+    fn path_summary_preserves_multiple_direct_connections() {
+        let paths = [
+            ConnectionPathKind::DirectApplication,
+            ConnectionPathKind::DirectApplication,
+            ConnectionPathKind::BootstrapInfrastructure,
+            ConnectionPathKind::RelayInfrastructure,
+        ];
+        assert_eq!(summarize_connection_paths(paths), (2, 0, 1));
+        assert_eq!(summarize_connection_paths(paths.into_iter().skip(1)), (1, 0, 1));
+        assert_eq!(summarize_connection_paths(paths.into_iter().skip(2)), (0, 0, 1));
+    }
 }

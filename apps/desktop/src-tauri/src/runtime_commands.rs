@@ -10,7 +10,20 @@ fn required(value: String, label: &str) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn start_daemon(app: AppHandle, processes: State<'_, RuntimeProcesses>, listen: String) -> Result<u32, String> {
+pub fn ensure_daemon_running(
+    app: AppHandle,
+    processes: State<'_, RuntimeProcesses>,
+    listen: String,
+) -> Result<u32, String> {
+    processes.ensure_daemon_running(&app, required(listen, "Listen multiaddress")?)
+}
+
+#[tauri::command]
+pub fn start_daemon(
+    app: AppHandle,
+    processes: State<'_, RuntimeProcesses>,
+    listen: String,
+) -> Result<u32, String> {
     processes.start_daemon(&app, required(listen, "Listen multiaddress")?)
 }
 

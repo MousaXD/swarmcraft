@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::{env, fs, path::PathBuf};
 
 pub const MAX_CONNECTIVITY_FAILURES: usize = 8;
-pub const CONNECTIVITY_JSON_ENV: &str = "SWARMCRAFT_CONNECTIVITY_JSON";
+pub const CONNECTIVITY_DIAGNOSTICS_SNAPSHOT_FILE: &str = "connectivity-diagnostics-v1.postcard";
 const MAX_FAILURE_DETAIL_CHARS: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum NatStatusV1 {
     #[default]
     Unknown,
@@ -13,7 +13,18 @@ pub enum NatStatusV1 {
     Private,
 }
 
+impl NatStatusV1 {
+    pub const fn machine_name(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Public => "public",
+            Self::Private => "private",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum HolePunchStateV1 {
     #[default]
     Idle,
@@ -23,6 +34,7 @@ pub enum HolePunchStateV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum ConnectivityStateV1 {
     #[default]
     NatStatusUnknown,
@@ -35,7 +47,23 @@ pub enum ConnectivityStateV1 {
     NoViablePath,
 }
 
+impl ConnectivityStateV1 {
+    pub const fn machine_name(self) -> &'static str {
+        match self {
+            Self::NatStatusUnknown => "nat_status_unknown",
+            Self::DirectReachable => "direct_reachable",
+            Self::HolePunched => "hole_punched",
+            Self::RelayConnected => "relay_connected",
+            Self::RelayRequired => "relay_required",
+            Self::PrivateUnreachable => "private_unreachable",
+            Self::BootstrapUnavailable => "bootstrap_unavailable",
+            Self::NoViablePath => "no_viable_path",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConnectivityIssueKindV1 {
     DirectDialFailed,
     RequestFailed,
@@ -54,11 +82,6 @@ pub struct ConnectivityIssueV1 {
     pub detail: String,
 }
 
-/// Serializable connectivity contract for CLI/Desktop consumers.
-///
-/// `state` describes the currently owned application path, while `nat_status`
-/// independently describes AutoNAT reachability. Infrastructure connections are
-/// tracked separately and never make an application path look direct/relayed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ConnectivityDiagnosticsV1 {
@@ -77,55 +100,31 @@ pub struct ConnectivityDiagnosticsV1 {
     pub bootstrap_connectivity: bool,
     pub relay_configured: usize,
     pub recent_failures: Vec<ConnectivityIssueV1>,
-    #[serde(skip)]
-    active_direct_paths: usize,
-    #[serde(skip)]
-    active_relay_paths: usize,
-    #[serde(skip)]
-    active_bootstrap_paths: usize,
 }
 
 impl ConnectivityDiagnosticsV1 {
     pub fn record_local_address(&mut self, address: impl Into<String>) {
         let address = address.into();
-        self.record_address_family(&address);
         if !self.local_addresses.contains(&address) {
             self.local_addresses.push(address);
             self.local_addresses.sort();
         }
-        self.refresh_state();
+        self.refresh_address_families();
+    }
+
+    pub fn remove_local_address(&mut self, address: &str) {
+        self.local_addresses.retain(|candidate| candidate != address);
+        self.refresh_address_families();
     }
 
     pub fn record_observed_address(&mut self, address: impl Into<String>) {
-        let address = address.into();
-        self.record_address_family(&address);
-        self.observed_public_address = Some(address);
-        self.refresh_state();
+        self.observed_public_address = Some(address.into());
+        self.refresh_address_families();
     }
 
     pub fn record_nat_status(&mut self, status: NatStatusV1) {
         self.nat_status = status;
         self.refresh_state();
-    }
-
-    pub fn record_direct_path_up(&mut self) {
-        self.active_direct_paths = self.active_direct_paths.saturating_add(1);
-        self.direct_connectivity = self.active_direct_paths > 0;
-        self.last_failure = None;
-        self.refresh_state();
-    }
-
-    pub fn record_direct_path_down(&mut self) {
-        self.active_direct_paths = self.active_direct_paths.saturating_sub(1);
-        self.direct_connectivity = self.active_direct_paths > 0;
-        if !self.direct_connectivity && matches!(self.hole_punch, HolePunchStateV1::Succeeded) {
-            self.hole_punch = HolePunchStateV1::Idle;
-        }
-        self.refresh_state();
-    }
-
-    pub fn record_direct_success(&mut self) {
-        self.record_direct_path_up();
     }
 
     pub fn record_direct_failure(&mut self, reason: impl Into<String>) {
@@ -142,47 +141,25 @@ impl ConnectivityDiagnosticsV1 {
         self.refresh_state();
     }
 
-    pub fn record_bootstrap_path_up(&mut self) {
-        self.active_bootstrap_paths = self.active_bootstrap_paths.saturating_add(1);
-        self.bootstrap_connectivity = self.active_bootstrap_paths > 0;
-        self.refresh_state();
-    }
-
-    pub fn record_bootstrap_path_down(&mut self) {
-        self.active_bootstrap_paths = self.active_bootstrap_paths.saturating_sub(1);
-        self.bootstrap_connectivity = self.active_bootstrap_paths > 0;
-        self.refresh_state();
-    }
-
-    pub fn record_bootstrap_connected(&mut self) {
-        self.record_bootstrap_path_up();
-    }
-
     pub fn record_relay_configured(&mut self, relay: impl Into<String>, count: usize) {
         self.selected_relay = Some(relay.into());
         self.relay_configured = count;
         self.refresh_state();
     }
 
-    pub fn record_relay_path_up(&mut self) {
-        self.active_relay_paths = self.active_relay_paths.saturating_add(1);
-        self.relay_connectivity = self.active_relay_paths > 0;
+    /// Replace current path state from exact live connection ownership.
+    ///
+    /// Direct and relay counts are established application paths. Bootstrap
+    /// connectivity is infrastructure only and never implies gameplay reachability.
+    pub fn record_active_paths(&mut self, direct_paths: usize, relay_paths: usize, bootstrap_paths: usize) {
+        let had_direct_path = self.direct_connectivity;
+        self.direct_connectivity = direct_paths > 0;
+        self.relay_connectivity = relay_paths > 0;
+        self.bootstrap_connectivity = bootstrap_paths > 0;
+        if had_direct_path && !self.direct_connectivity && matches!(self.hole_punch, HolePunchStateV1::Succeeded) {
+            self.hole_punch = HolePunchStateV1::Idle;
+        }
         self.refresh_state();
-    }
-
-    pub fn record_relay_path_down(&mut self) {
-        self.active_relay_paths = self.active_relay_paths.saturating_sub(1);
-        self.relay_connectivity = self.active_relay_paths > 0;
-        self.refresh_state();
-    }
-
-    pub fn record_relay_connected(&mut self) {
-        self.record_relay_path_up();
-    }
-
-    pub fn record_relay(&mut self, relay: impl Into<String>) {
-        self.selected_relay = Some(relay.into());
-        self.record_relay_path_up();
     }
 
     pub fn start_hole_punch(&mut self) {
@@ -195,6 +172,7 @@ impl ConnectivityDiagnosticsV1 {
             Ok(()) => {
                 self.hole_punch = HolePunchStateV1::Succeeded;
                 self.last_failure = None;
+                self.refresh_state();
             }
             Err(reason) => {
                 let detail = truncate_detail(reason.into());
@@ -205,10 +183,8 @@ impl ConnectivityDiagnosticsV1 {
                     address: None,
                     detail,
                 });
-                return;
             }
         }
-        self.refresh_state();
     }
 
     pub fn record_issue(&mut self, mut issue: ConnectivityIssueV1) {
@@ -231,50 +207,47 @@ impl ConnectivityDiagnosticsV1 {
         });
     }
 
-    fn record_address_family(&mut self, address: &str) {
-        self.ipv4_available |= address.contains("/ip4/");
-        self.ipv6_available |= address.contains("/ip6/");
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        serde_json::to_string(self)
+    }
+
+    fn refresh_address_families(&mut self) {
+        self.ipv4_available = self.local_addresses.iter().any(|address| address.contains("/ip4/"))
+            || self.observed_public_address.as_deref().is_some_and(|address| address.contains("/ip4/"));
+        self.ipv6_available = self.local_addresses.iter().any(|address| address.contains("/ip6/"))
+            || self.observed_public_address.as_deref().is_some_and(|address| address.contains("/ip6/"));
     }
 
     fn refresh_state(&mut self) {
-        let last_issue = self.recent_failures.last().map(|issue| issue.kind);
+        let last_path_issue = self.recent_failures.iter().rev().find_map(|issue| match issue.kind {
+            ConnectivityIssueKindV1::RequestFailed => None,
+            kind => Some(kind),
+        });
         self.state = if self.direct_connectivity && matches!(self.hole_punch, HolePunchStateV1::Succeeded) {
             ConnectivityStateV1::HolePunched
         } else if self.direct_connectivity {
             ConnectivityStateV1::DirectReachable
         } else if self.relay_connectivity {
             ConnectivityStateV1::RelayConnected
-        } else if last_issue == Some(ConnectivityIssueKindV1::NoViablePath) {
+        } else if self.nat_status == NatStatusV1::Public {
+            ConnectivityStateV1::DirectReachable
+        } else if last_path_issue == Some(ConnectivityIssueKindV1::NoViablePath) {
             ConnectivityStateV1::NoViablePath
         } else if self.relay_configured > 0
             && (self.nat_status == NatStatusV1::Private
                 || matches!(
-                    last_issue,
+                    last_path_issue,
                     Some(ConnectivityIssueKindV1::DirectDialFailed | ConnectivityIssueKindV1::HolePunchFailed)
                 ))
         {
             ConnectivityStateV1::RelayRequired
-        } else if last_issue == Some(ConnectivityIssueKindV1::BootstrapUnavailable) {
+        } else if last_path_issue == Some(ConnectivityIssueKindV1::BootstrapUnavailable) {
             ConnectivityStateV1::BootstrapUnavailable
         } else if self.nat_status == NatStatusV1::Private {
             ConnectivityStateV1::PrivateUnreachable
         } else {
             ConnectivityStateV1::NatStatusUnknown
         };
-        self.persist_structured_snapshot();
-    }
-
-    fn persist_structured_snapshot(&self) {
-        let Some(path) = env::var_os(CONNECTIVITY_JSON_ENV).map(PathBuf::from) else {
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let Ok(bytes) = serde_json::to_vec(self) else {
-            return;
-        };
-        let _ = fs::write(path, bytes);
     }
 }
 
@@ -285,6 +258,7 @@ fn truncate_detail(detail: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
     fn local_addresses_are_deduplicated_stable_and_report_ip_families() {
@@ -296,63 +270,13 @@ mod tests {
         assert!(diagnostics.local_addresses[0] < diagnostics.local_addresses[1]);
         assert!(diagnostics.ipv4_available);
         assert!(diagnostics.ipv6_available);
+
+        diagnostics.remove_local_address("/ip6/::1/udp/4000/quic-v1");
+        assert!(!diagnostics.ipv6_available);
     }
 
     #[test]
-    fn direct_path_state_tracks_current_ownership() {
-        let mut diagnostics = ConnectivityDiagnosticsV1::default();
-        diagnostics.record_direct_path_up();
-        diagnostics.record_direct_path_up();
-        assert_eq!(diagnostics.state, ConnectivityStateV1::DirectReachable);
-        diagnostics.record_direct_path_down();
-        assert_eq!(diagnostics.state, ConnectivityStateV1::DirectReachable);
-        diagnostics.record_direct_path_down();
-        assert!(!diagnostics.direct_connectivity);
-        assert_ne!(diagnostics.state, ConnectivityStateV1::DirectReachable);
-    }
-
-    #[test]
-    fn relay_path_state_tracks_current_ownership() {
-        let mut diagnostics = ConnectivityDiagnosticsV1::default();
-        diagnostics.record_relay_path_up();
-        diagnostics.record_relay_path_up();
-        assert_eq!(diagnostics.state, ConnectivityStateV1::RelayConnected);
-        diagnostics.record_relay_path_down();
-        assert_eq!(diagnostics.state, ConnectivityStateV1::RelayConnected);
-        diagnostics.record_relay_path_down();
-        assert!(!diagnostics.relay_connectivity);
-        assert_ne!(diagnostics.state, ConnectivityStateV1::RelayConnected);
-    }
-
-    #[test]
-    fn infrastructure_paths_do_not_create_application_reachability() {
-        let mut diagnostics = ConnectivityDiagnosticsV1::default();
-        diagnostics.record_bootstrap_configured(1);
-        diagnostics.record_bootstrap_path_up();
-        assert!(diagnostics.bootstrap_connectivity);
-        assert!(!diagnostics.direct_connectivity);
-        assert!(!diagnostics.relay_connectivity);
-        assert_eq!(diagnostics.state, ConnectivityStateV1::NatStatusUnknown);
-        diagnostics.record_bootstrap_path_down();
-        assert!(!diagnostics.bootstrap_connectivity);
-    }
-
-    #[test]
-    fn fallback_diagnostics_preserve_path_failures() {
-        let mut diagnostics = ConnectivityDiagnosticsV1::default();
-        diagnostics.record_direct_failure("direct QUIC timeout");
-        diagnostics.start_hole_punch();
-        diagnostics.finish_hole_punch(Err("remote did not confirm DCUtR"));
-        diagnostics.record_relay("/dns4/relay.example/tcp/443/wss");
-        assert!(diagnostics.relay_connectivity);
-        assert!(matches!(diagnostics.hole_punch, HolePunchStateV1::Failed(_)));
-        assert_eq!(diagnostics.state, ConnectivityStateV1::RelayConnected);
-        assert_eq!(diagnostics.recent_failures.len(), 2);
-        assert_eq!(diagnostics.last_failure.as_deref(), Some("remote did not confirm DCUtR"));
-    }
-
-    #[test]
-    fn private_nat_distinguishes_relay_required_from_unreachable() {
+    fn private_nat_distinguishes_relay_required_from_connected() {
         let mut diagnostics = ConnectivityDiagnosticsV1::default();
         diagnostics.record_nat_status(NatStatusV1::Private);
         assert_eq!(diagnostics.state, ConnectivityStateV1::PrivateUnreachable);
@@ -360,50 +284,107 @@ mod tests {
         diagnostics.record_relay_configured("/dns4/relay.example/tcp/443/p2p/relay", 1);
         assert_eq!(diagnostics.state, ConnectivityStateV1::RelayRequired);
 
-        diagnostics.record_relay_path_up();
+        diagnostics.record_active_paths(0, 1, 0);
         assert_eq!(diagnostics.state, ConnectivityStateV1::RelayConnected);
     }
 
     #[test]
-    fn direct_failure_with_configured_relay_requires_fallback_even_before_nat_classification() {
+    fn direct_path_lifecycle_clears_last_path_without_public_autonat() {
         let mut diagnostics = ConnectivityDiagnosticsV1::default();
-        diagnostics.record_relay_configured("/dns4/relay.example/tcp/443/p2p/relay", 1);
-        diagnostics.record_direct_failure("direct address timed out");
-        assert_eq!(diagnostics.state, ConnectivityStateV1::RelayRequired);
-    }
+        diagnostics.record_active_paths(1, 0, 0);
+        assert_eq!(diagnostics.state, ConnectivityStateV1::DirectReachable);
 
-    #[test]
-    fn public_autonat_result_does_not_invent_an_active_direct_path() {
-        let mut diagnostics = ConnectivityDiagnosticsV1::default();
-        diagnostics.record_nat_status(NatStatusV1::Public);
-        assert_eq!(diagnostics.nat_status, NatStatusV1::Public);
+        diagnostics.record_active_paths(0, 0, 0);
         assert!(!diagnostics.direct_connectivity);
         assert_ne!(diagnostics.state, ConnectivityStateV1::DirectReachable);
     }
 
     #[test]
-    fn hole_punch_success_is_distinct_while_direct_path_is_live() {
+    fn public_autonat_independently_keeps_direct_reachable_after_path_close() {
         let mut diagnostics = ConnectivityDiagnosticsV1::default();
-        diagnostics.record_direct_path_up();
+        diagnostics.record_nat_status(NatStatusV1::Public);
+        diagnostics.record_active_paths(1, 0, 0);
+        diagnostics.record_active_paths(0, 0, 0);
+        assert!(!diagnostics.direct_connectivity);
         assert_eq!(diagnostics.state, ConnectivityStateV1::DirectReachable);
-
-        diagnostics.start_hole_punch();
-        diagnostics.finish_hole_punch(Ok::<(), String>(()));
-        assert_eq!(diagnostics.state, ConnectivityStateV1::HolePunched);
-        diagnostics.record_direct_path_down();
-        assert_ne!(diagnostics.state, ConnectivityStateV1::HolePunched);
     }
 
     #[test]
-    fn request_failures_have_their_own_typed_classification() {
+    fn multiple_direct_paths_survive_single_close() {
         let mut diagnostics = ConnectivityDiagnosticsV1::default();
+        diagnostics.record_active_paths(2, 0, 0);
+        diagnostics.record_active_paths(1, 0, 0);
+        assert!(diagnostics.direct_connectivity);
+        assert_eq!(diagnostics.state, ConnectivityStateV1::DirectReachable);
+
+        diagnostics.record_active_paths(0, 0, 0);
+        assert!(!diagnostics.direct_connectivity);
+        assert_ne!(diagnostics.state, ConnectivityStateV1::DirectReachable);
+    }
+
+    #[test]
+    fn relay_path_lifecycle_clears_last_application_circuit() {
+        let mut diagnostics = ConnectivityDiagnosticsV1::default();
+        diagnostics.record_relay_configured("/dns4/relay.example/tcp/443/p2p/relay", 1);
+        diagnostics.record_active_paths(0, 1, 0);
+        assert_eq!(diagnostics.state, ConnectivityStateV1::RelayConnected);
+
+        diagnostics.record_active_paths(0, 0, 0);
+        assert!(!diagnostics.relay_connectivity);
+        assert_ne!(diagnostics.state, ConnectivityStateV1::RelayConnected);
+    }
+
+    #[test]
+    fn bootstrap_only_connectivity_does_not_imply_direct_reachability() {
+        let mut diagnostics = ConnectivityDiagnosticsV1::default();
+        diagnostics.record_bootstrap_configured(1);
+        diagnostics.record_active_paths(0, 0, 1);
+        assert!(diagnostics.bootstrap_connectivity);
+        assert!(!diagnostics.direct_connectivity);
+        assert_ne!(diagnostics.state, ConnectivityStateV1::DirectReachable);
+    }
+
+    #[test]
+    fn request_failure_is_not_a_dial_failure_or_relay_trigger() {
+        let mut diagnostics = ConnectivityDiagnosticsV1::default();
+        diagnostics.record_relay_configured("/dns4/relay.example/tcp/443/p2p/relay", 1);
         diagnostics.record_issue(ConnectivityIssueV1 {
             kind: ConnectivityIssueKindV1::RequestFailed,
             peer: Some("peer-a".into()),
             address: None,
-            detail: "request timed out".into(),
+            detail: "request timed out on an established route".into(),
         });
-        assert_eq!(diagnostics.recent_failures.last().map(|issue| issue.kind), Some(ConnectivityIssueKindV1::RequestFailed));
+        assert_eq!(diagnostics.recent_failures.last().unwrap().kind, ConnectivityIssueKindV1::RequestFailed);
+        assert_ne!(diagnostics.state, ConnectivityStateV1::RelayRequired);
+    }
+
+    #[test]
+    fn request_failure_does_not_overwrite_real_transport_fallback_state() {
+        let mut diagnostics = ConnectivityDiagnosticsV1::default();
+        diagnostics.record_relay_configured("/dns4/relay.example/tcp/443/p2p/relay", 1);
+        diagnostics.record_direct_failure("transport dial failed");
+        assert_eq!(diagnostics.state, ConnectivityStateV1::RelayRequired);
+        diagnostics.record_issue(ConnectivityIssueV1 {
+            kind: ConnectivityIssueKindV1::RequestFailed,
+            peer: None,
+            address: None,
+            detail: "later request failed".into(),
+        });
+        assert_eq!(diagnostics.state, ConnectivityStateV1::RelayRequired);
+    }
+
+    #[test]
+    fn hole_punch_success_requires_a_current_direct_path() {
+        let mut diagnostics = ConnectivityDiagnosticsV1::default();
+        diagnostics.start_hole_punch();
+        diagnostics.finish_hole_punch(Ok::<(), String>(()));
+        assert_ne!(diagnostics.state, ConnectivityStateV1::HolePunched);
+
+        diagnostics.record_active_paths(1, 0, 0);
+        assert_eq!(diagnostics.state, ConnectivityStateV1::HolePunched);
+
+        diagnostics.record_active_paths(0, 0, 0);
+        assert_ne!(diagnostics.state, ConnectivityStateV1::HolePunched);
     }
 
     #[test]
@@ -417,23 +398,44 @@ mod tests {
                 detail: format!("failure-{index}"),
             });
         }
-
         assert_eq!(diagnostics.recent_failures.len(), MAX_CONNECTIVITY_FAILURES);
         assert_eq!(diagnostics.recent_failures[0].peer.as_deref(), Some("peer-5"));
     }
 
     #[test]
-    fn explicit_terminal_failures_have_actionable_states() {
+    fn json_roundtrip_uses_stable_snake_case_machine_values() {
         let mut diagnostics = ConnectivityDiagnosticsV1::default();
+        diagnostics.record_nat_status(NatStatusV1::Public);
+        diagnostics.record_local_address("/ip4/127.0.0.1/udp/4000/quic-v1");
         diagnostics.record_issue(ConnectivityIssueV1 {
-            kind: ConnectivityIssueKindV1::BootstrapUnavailable,
-            peer: None,
-            address: Some("/dns4/bootstrap.example/udp/4001/quic-v1".into()),
-            detail: "bootstrap dial failed".into(),
+            kind: ConnectivityIssueKindV1::RequestFailed,
+            peer: Some("peer-a".into()),
+            address: None,
+            detail: "request timed out".into(),
         });
-        assert_eq!(diagnostics.state, ConnectivityStateV1::BootstrapUnavailable);
 
-        diagnostics.record_no_viable_path("direct and relay paths both failed");
-        assert_eq!(diagnostics.state, ConnectivityStateV1::NoViablePath);
+        let json = diagnostics.to_json().unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["state"], "direct_reachable");
+        assert_eq!(value["nat_status"], "public");
+        assert_eq!(value["recent_failures"][0]["kind"], "request_failed");
+        assert_eq!(value["ipv4_available"], true);
+        let decoded: ConnectivityDiagnosticsV1 = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, diagnostics);
+
+        let stable_states = [
+            (ConnectivityStateV1::NatStatusUnknown, "nat_status_unknown"),
+            (ConnectivityStateV1::DirectReachable, "direct_reachable"),
+            (ConnectivityStateV1::HolePunched, "hole_punched"),
+            (ConnectivityStateV1::RelayConnected, "relay_connected"),
+            (ConnectivityStateV1::RelayRequired, "relay_required"),
+            (ConnectivityStateV1::PrivateUnreachable, "private_unreachable"),
+            (ConnectivityStateV1::BootstrapUnavailable, "bootstrap_unavailable"),
+            (ConnectivityStateV1::NoViablePath, "no_viable_path"),
+        ];
+        for (state, expected) in stable_states {
+            assert_eq!(state.machine_name(), expected);
+            assert_eq!(serde_json::to_string(&state).unwrap(), format!("\"{expected}\""));
+        }
     }
 }
