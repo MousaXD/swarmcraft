@@ -39,10 +39,7 @@ fn truncated_manifest_is_rejected_instead_of_becoming_canonical() {
     let encoded = fs::read(&path).unwrap();
     fs::write(&path, &encoded[..encoded.len() / 2]).unwrap();
 
-    assert!(matches!(
-        storage.load_snapshot(manifest.world_id, manifest.snapshot_number),
-        Err(StorageError::Decode(_))
-    ));
+    assert!(matches!(storage.load_snapshot(manifest.world_id, manifest.snapshot_number), Err(StorageError::Decode(_))));
 }
 
 #[test]
@@ -78,10 +75,7 @@ fn forged_state_root_is_rejected_before_restore() {
     manifest.state_root = Hash32([0xee; 32]);
     let destination = temp.path().join("restore");
 
-    assert!(matches!(
-        storage.restore_snapshot(&manifest, &destination),
-        Err(StorageError::StateRootMismatch)
-    ));
+    assert!(matches!(storage.restore_snapshot(&manifest, &destination), Err(StorageError::StateRootMismatch)));
     assert!(!destination.join("level.dat").exists());
 }
 
