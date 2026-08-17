@@ -3259,6 +3259,8 @@ dependencies = [
  "clap",
  "hex",
  "postcard",
+ "serde",
+ "serde_json",
  "swarm-consensus",
  "swarm-core",
  "swarm-ipc",

@@ -1,5 +1,6 @@
 use crate::authority_permit::PermitWatch;
 use anyhow::{anyhow, bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
@@ -18,10 +19,7 @@ use swarm_protocol::{
     AuthorityTransferV1, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, PeerId, SleepRecordV1,
     SnapshotManifestV1, TransferPhase, WorldId, PROTOCOL_VERSION,
 };
-use swarm_storage::{
-    serde::{Deserialize, Serialize},
-    serde_json, SnapshotContext, Storage,
-};
+use swarm_storage::{SnapshotContext, Storage};
 use tokio::{
     task::JoinHandle,
     time::{sleep, timeout},
@@ -612,7 +610,6 @@ async fn run_authority_runtime_inner(
         storage,
         &identity,
         &epoch,
-        options.world,
         &mut child,
         &mut session,
         handle_shutdown_signal,
@@ -719,7 +716,6 @@ async fn wait_for_runtime_exit(
     storage: &Storage,
     identity: &PeerIdentity,
     epoch: &EpochRecordV1,
-    world: WorldId,
     child: &mut Child,
     session: &mut swarm_ipc::FabricSession,
     handle_shutdown_signal: bool,
@@ -732,9 +728,9 @@ async fn wait_for_runtime_exit(
             return Ok(RuntimeDisposition::Sleep);
         }
         ensure_authority_generation(storage, identity, epoch)?;
-        match load_transfer_intent(paths, world) {
+        match load_transfer_intent(paths, epoch.world_id) {
             Ok(Some(target)) => {
-                validate_transfer_target(storage, identity, world, target)?;
+                validate_transfer_target(storage, identity, epoch.world_id, target)?;
                 session.prepare_shutdown(2, FABRIC_SHUTDOWN_TIMEOUT).await?;
                 timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
                     .await
@@ -742,7 +738,7 @@ async fn wait_for_runtime_exit(
                 return Ok(RuntimeDisposition::Transfer(target));
             }
             Ok(None) => {}
-            Err(error) => warn!(%world, %error, "ignoring unreadable transfer intent"),
+            Err(error) => warn!(world = %epoch.world_id, %error, "ignoring unreadable transfer intent"),
         }
         if handle_shutdown_signal {
             tokio::select! {
@@ -1083,7 +1079,7 @@ fn encode_transfer(transfer: &AuthorityTransferV1) -> Result<String> {
 
 fn decode_transfer(token: &str) -> Result<AuthorityTransferV1> {
     let bytes = hex::decode(token.trim()).context("transfer token is not valid hex")?;
-    Ok(postcard::from_bytes(&bytes).context("transfer token is malformed")?)
+    postcard::from_bytes(&bytes).context("transfer token is malformed")
 }
 
 fn encode_epoch(epoch: &EpochRecordV1) -> Result<String> {
@@ -1092,7 +1088,7 @@ fn encode_epoch(epoch: &EpochRecordV1) -> Result<String> {
 
 fn decode_epoch(token: &str) -> Result<EpochRecordV1> {
     let bytes = hex::decode(token.trim()).context("epoch token is not valid hex")?;
-    Ok(postcard::from_bytes(&bytes).context("epoch token is malformed")?)
+    postcard::from_bytes(&bytes).context("epoch token is malformed")
 }
 
 fn prepare_authority_epoch(
