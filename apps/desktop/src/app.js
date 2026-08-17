@@ -1,24 +1,36 @@
-const invoke = window.__TAURI__?.core?.invoke;
+import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
+
 const $ = (id) => document.getElementById(id);
+const invoke = window.__TAURI__?.core?.invoke;
+const backend = createBackendAdapter(invoke);
 const worldCache = new Map();
 let selectedWorldId = '';
 let currentView = 'worlds';
+let migrationRefreshInFlight = false;
+const MIGRATION_REFRESH_MS = 5000;
 
 const viewMeta = {
-  worlds: ['Worlds', 'Manage playable replicated worlds'],
-  create: ['Create world', 'Start a new signed world configuration'],
-  join: ['Join world', 'Membership and discovery'],
-  activity: ['Activity', 'Command results and operational detail'],
-  diagnostics: ['Diagnostics', 'Advanced networking, verification, and runtime controls'],
+  worlds: ['Worlds', 'Choose a world and play'],
+  create: ['Create', 'Start a replicated Minecraft world'],
+  join: ['Join', 'Join with a signed invite'],
+  activity: ['Activity', 'Recent actions and detailed errors'],
+  diagnostics: ['Diagnostics', 'Advanced connectivity, runtime, and recovery tools'],
 };
 
-function requireTauri() {
-  if (!invoke) throw new Error('Tauri runtime is unavailable');
-  return invoke;
-}
+const migrationLabels = {
+  'preparing-successor': 'Preparing successor',
+  'saving-world': 'Saving world',
+  'transferring-authority': 'Transferring authority',
+  'restoring-world': 'Restoring world',
+  'starting-minecraft': 'Starting Minecraft',
+  'waiting-for-host': 'Waiting for host',
+  ready: 'Ready',
+  failed: 'Migration failed',
+};
 
-function setStatus(message) {
+function setStatus(message, tone = 'neutral') {
   $('status').textContent = message;
+  $('statusDot').className = `status-dot ${tone}`;
 }
 
 function setOutput(output, label = '') {
@@ -26,7 +38,9 @@ function setOutput(output, label = '') {
   const text = String(output || 'Done.');
   const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const entry = `${stamp}${label ? `  ${label}` : ''}\n${text}`;
-  console.textContent = console.textContent.trim() === 'SwarmCraft is ready.' ? entry : `${console.textContent.trim()}\n\n${entry}`;
+  console.textContent = console.textContent.trim() === 'SwarmCraft is ready.' || console.textContent.trim() === 'Activity cleared.'
+    ? entry
+    : `${console.textContent.trim()}\n\n${entry}`;
   console.scrollTop = console.scrollHeight;
 }
 
@@ -36,6 +50,31 @@ function showInline(id, message, tone = 'neutral') {
   element.textContent = message;
   element.hidden = !message;
   element.dataset.tone = tone;
+}
+
+function activityLabel(label) {
+  return String(label).replace(/…$/, '');
+}
+
+async function run(label, work, { quiet = false, successMessage = null, logResult = true } = {}) {
+  if (!quiet) setStatus(label);
+  try {
+    const result = await work();
+    if (!quiet) {
+      const message = typeof successMessage === 'function' ? successMessage(result) : successMessage;
+      if (message) setOutput(message, activityLabel(label));
+      else if (logResult && result !== undefined && result !== null && String(result).trim()) setOutput(result, activityLabel(label));
+      setStatus('Ready', 'safe');
+    }
+    return result;
+  } catch (error) {
+    if (!quiet) {
+      setOutput(String(error), `${activityLabel(label)} failed`);
+      setStatus('Action failed', 'danger');
+      try { error.swarmcraftActivityLogged = true; } catch (_) {}
+    }
+    throw error;
+  }
 }
 
 function showView(name, { focus = true } = {}) {
@@ -58,33 +97,7 @@ function showView(name, { focus = true } = {}) {
   if (name === 'diagnostics') updateDiagnosticsContext();
   if (focus) {
     const panel = document.querySelector(`[data-view-panel="${name}"]`);
-    const target = panel?.querySelector('input:not([type="hidden"]):not(:disabled), textarea:not(:disabled), button:not(:disabled), summary, [tabindex]');
-    target?.focus({ preventScroll: true });
-  }
-}
-
-function activityLabel(label) {
-  return label.replace(/…$/, '');
-}
-
-async function action(label, command, payload = {}, { quiet = false, successMessage = null } = {}) {
-  if (!quiet) setStatus(label);
-  try {
-    const result = await requireTauri()(command, payload);
-    if (!quiet) {
-      const message = typeof successMessage === 'function' ? successMessage(result) : successMessage;
-      if (message) setOutput(message, activityLabel(label));
-      else if (result !== undefined && result !== null && String(result).trim()) setOutput(result, activityLabel(label));
-      setStatus('Ready.');
-    }
-    return result;
-  } catch (error) {
-    if (!quiet) {
-      setOutput(String(error), `${activityLabel(label)} failed`);
-      setStatus('Action failed.');
-      try { error.swarmcraftActivityLogged = true; } catch (_) {}
-    }
-    throw error;
+    panel?.querySelector('input:not([type="hidden"]):not(:disabled), textarea:not(:disabled), button:not(:disabled), summary, [tabindex]')?.focus({ preventScroll: true });
   }
 }
 
@@ -113,45 +126,39 @@ function safetyKind(safety) {
   const value = String(safety || '').toLowerCase();
   if (value.includes('conflict')) return 'danger';
   if (value.includes('solo') || value.includes('degraded')) return 'warning';
-  if (value.includes('canonical')) return 'safe';
+  if (value.includes('canonical') || value.includes('quorum')) return 'safe';
   return 'neutral';
 }
 
 function safetySummary(world) {
-  const label = world.status.Safety || 'Safety state unknown';
-  const kind = safetyKind(label);
-  if (kind === 'danger') {
-    return 'Preserved divergent solo history exists. Inspect conflicts and preserve both branches rather than treating either as safe to overwrite.';
-  }
-  if (kind === 'warning') {
-    return 'Solo advancement is recorded for this world. Safety guarantees are reduced until canonical history is re-established; this does not by itself indicate data loss.';
-  }
-  if (kind === 'safe') {
-    return 'No solo-history conflict is currently recorded. Canonical metadata is available; live member availability and replication health are separate concerns.';
-  }
-  return 'Safety state is unavailable. Refresh or inspect full status before making assumptions about canonical history.';
+  const kind = safetyKind(world?.status?.Safety);
+  if (kind === 'danger') return 'Divergent history is preserved. Review conflicts before hosting or recovering this world.';
+  if (kind === 'warning') return 'This world has reduced safety guarantees while solo or degraded history is active.';
+  if (kind === 'safe') return 'Canonical world history is available. Connectivity and replica availability are tracked separately.';
+  return 'Safety state is not available yet. Refresh before making recovery or hosting decisions.';
 }
 
 function hostingEligibility(world) {
-  if (!world) {
-    return { enabled: false, reason: 'Select a world first before starting an authority runtime.' };
-  }
-
+  if (!world) return { enabled: false, reason: 'Choose a world first.' };
   if (safetyKind(world.status.Safety) === 'danger') {
-    return {
-      enabled: false,
-      reason: 'Play unavailable while divergent history is unresolved. Inspect conflicts and recover or select a safe branch before starting an authority runtime.',
-    };
+    return { enabled: false, reason: 'Play is unavailable while divergent history needs review.' };
   }
-
   const value = String(world.compatibility?.['Authority eligibility'] || '').trim();
-  if (value === 'Compatible') {
-    return { enabled: true, reason: 'This node is authority eligible under the synchronized compatibility manifest.' };
-  }
+  if (value === 'Compatible') return { enabled: true, reason: 'This device is eligible to host this world.' };
   if (value.toLowerCase().includes('not authority eligible') || value.toLowerCase().startsWith('replica only')) {
-    return { enabled: false, reason: 'Play unavailable on this node. This replica is not authority eligible under the current compatibility manifest.' };
+    return { enabled: false, reason: 'This device can keep a replica, but it is not eligible to host this world.' };
   }
-  return { enabled: false, reason: 'Play unavailable until compatibility and authority eligibility are known.' };
+  return { enabled: false, reason: 'Play is unavailable until compatibility and host eligibility are known.' };
+}
+
+function selectedWorld() {
+  return worldCache.get(selectedWorldId) || null;
+}
+
+function worldId() {
+  const value = $('world').value.trim();
+  if (!value) throw new Error('Choose a world first.');
+  return value;
 }
 
 function setNodeState(text, kind = 'neutral') {
@@ -159,8 +166,13 @@ function setNodeState(text, kind = 'neutral') {
   $('nodeStateDot').className = `state-dot ${kind}`;
 }
 
-function selectedWorld() {
-  return worldCache.get(selectedWorldId) || null;
+function renderConnectivity(world) {
+  const connectivity = connectivityFromStatus(world?.status || {});
+  $('selectedConnectivity').textContent = connectivity.label;
+  $('selectedConnectivityDetail').textContent = connectivity.detail;
+  $('diagnosticConnectivity').textContent = connectivity.label;
+  $('diagnosticConnectivity').className = `status-badge ${connectivity.kind}`;
+  $('diagnosticConnectivityDetail').textContent = connectivity.detail;
 }
 
 function updatePlayState(world) {
@@ -170,6 +182,30 @@ function updatePlayState(world) {
   $('playAvailability').dataset.tone = eligibility.enabled ? 'safe' : 'warning';
   $('runtimeEligibilityHint').textContent = eligibility.reason;
   updateWorldSpecificControls();
+}
+
+function updateWorldSpecificControls() {
+  const world = selectedWorld();
+  const hasWorld = Boolean(world);
+  const eligibility = hostingEligibility(world);
+  for (const control of document.querySelectorAll('.world-required')) control.disabled = !hasWorld;
+  for (const control of document.querySelectorAll('.authority-required')) control.disabled = !hasWorld || !eligibility.enabled;
+  $('playWorld').disabled = !hasWorld || !eligibility.enabled;
+
+  const migration = backend.migration.capabilities;
+  $('transferHost').disabled = !hasWorld || !migration.transfer || !eligibility.enabled;
+  $('wakeWorld').disabled = !hasWorld || !migration.wake;
+  $('transferAvailability').hidden = migration.transfer;
+  $('transferAvailability').textContent = migration.transfer ? '' : 'Manual host transfer is not available in this build.';
+  if (migration.transfer && migration.wake) {
+    $('migrationAvailability').textContent = 'Transfer and wake actions are available only after backend safety checks pass.';
+  } else if (migration.wake) {
+    $('migrationAvailability').textContent = 'Safe wake is available when the backend allows it. Manual host transfer remains unavailable.';
+  } else if (migration.transfer) {
+    $('migrationAvailability').textContent = 'Host transfer is available when backend safety checks pass. Wake is unavailable in this build.';
+  } else {
+    $('migrationAvailability').textContent = 'Transfer and wake are unavailable in this build. Existing Play and graceful stop remain available.';
+  }
 }
 
 function clearSelection() {
@@ -183,16 +219,17 @@ function clearSelection() {
   }
   showInline('worldNotice', '');
   showInline('runtimeNotice', '');
-  updateDiagnosticsContext();
   updateWorldSpecificControls();
+  updateDiagnosticsContext();
 }
 
 function updateDiagnosticsContext() {
   const world = selectedWorld();
   if (!world) {
-    $('diagnosticWorldName').textContent = 'Select a world first';
+    $('diagnosticWorldName').textContent = 'No world selected';
     $('diagnosticWorldId').textContent = 'World-specific controls are unavailable.';
     $('diagnosticSafety').hidden = true;
+    renderConnectivity(null);
     return;
   }
   $('diagnosticWorldName').textContent = world.name;
@@ -201,19 +238,56 @@ function updateDiagnosticsContext() {
   $('diagnosticSafety').textContent = safety;
   $('diagnosticSafety').className = `status-badge ${safetyKind(safety)}`;
   $('diagnosticSafety').hidden = false;
+  renderConnectivity(world);
 }
 
-function updateWorldSpecificControls() {
+function renderMigration(state) {
+  const migration = normalizeMigrationState(state);
+  $('migrationBadge').textContent = migration.label;
+  $('migrationBadge').className = `status-badge ${migration.failed ? 'danger' : migration.phase === 'ready' ? 'safe' : migration.available ? 'warning' : 'neutral'}`;
+  $('migrationSummary').textContent = migration.detail || (migration.available ? migration.label : 'No host migration is active.');
+  $('migrationProgress').hidden = !migration.available || migration.failed;
+  $('migrationProgressBar').style.width = `${migration.progress}%`;
+
+  const steps = $('migrationSteps');
+  steps.replaceChildren();
+  if (!migration.available || migration.failed) return;
+  const activeIndex = MIGRATION_PHASES.indexOf(migration.phase);
+  MIGRATION_PHASES.filter((phase) => phase !== 'failed').forEach((phase) => {
+    const item = document.createElement('li');
+    const index = MIGRATION_PHASES.indexOf(phase);
+    item.textContent = migrationLabels[phase];
+    if (migration.phase === 'failed' && index <= activeIndex) item.classList.add('is-failed');
+    else if (phase === migration.phase) item.classList.add(migration.failed ? 'is-failed' : 'is-current');
+    else if (index < activeIndex && migration.phase !== 'failed') item.classList.add('is-complete');
+    steps.append(item);
+  });
+}
+
+async function refreshMigrationState(world) {
+  if (!world || !backend.migration.capabilities.status) {
+    renderMigration(null);
+    return;
+  }
+  if (migrationRefreshInFlight) return;
+  const requestedWorldId = world.id;
+  migrationRefreshInFlight = true;
+  try {
+    const state = await backend.migration.readState(requestedWorldId);
+    if (selectedWorldId === requestedWorldId) renderMigration(state);
+  } catch (error) {
+    if (selectedWorldId === requestedWorldId) {
+      renderMigration({ detail: `Could not read host migration state: ${String(error)}` });
+    }
+  } finally {
+    migrationRefreshInFlight = false;
+  }
+}
+
+function refreshVisibleMigration() {
+  if (document.hidden || !backend.migration.capabilities.status) return;
   const world = selectedWorld();
-  const hasWorld = Boolean(world);
-  for (const control of document.querySelectorAll('.world-required')) {
-    control.disabled = !hasWorld;
-  }
-  const eligibility = hostingEligibility(world);
-  for (const control of document.querySelectorAll('.authority-required')) {
-    control.disabled = !hasWorld || !eligibility.enabled;
-  }
-  if ($('playWorld')) $('playWorld').disabled = !hasWorld || !eligibility.enabled;
+  if (world) refreshMigrationState(world);
 }
 
 function selectWorld(world, { focusDetail = false } = {}) {
@@ -221,34 +295,33 @@ function selectWorld(world, { focusDetail = false } = {}) {
   $('world').value = world.id;
   $('selectedName').textContent = world.name;
   $('selectedWorldId').textContent = world.id;
+  $('selectedAuthority').textContent = world.status.Authority || 'Not reported';
+  $('selectedMembers').textContent = world.status['Authorized peers'] || 'Unknown';
+  $('selectedMinecraft').textContent = world.status.Minecraft || 'Unknown';
+  $('selectedCheckpoint').textContent = world.status['Latest snapshot'] || (world.snapshots ? `${world.snapshots} stored` : 'None');
+  $('selectedCompatibility').textContent = world.compatibility['Authority eligibility'] || 'Not synchronized';
 
   const safety = world.status.Safety || 'Unknown';
   const kind = safetyKind(safety);
   $('selectedSafety').textContent = safety;
   $('selectedSafety').className = `status-badge ${kind}`;
+  $('safetyPanel').className = `safety-panel ${kind}`;
   $('selectedSummary').textContent = safetySummary(world);
-  $('selectedSummary').className = `safety-summary ${kind}`;
-  $('selectedAuthority').textContent = world.status.Authority || 'No snapshot authority recorded';
-  $('selectedMembers').textContent = world.status['Authorized peers'] || 'Unknown';
-  $('selectedMinecraft').textContent = world.status.Minecraft || 'Unknown';
-  $('selectedCheckpoint').textContent = world.status['Latest snapshot'] || 'None';
-  $('selectedCompatibility').textContent = world.compatibility['Authority eligibility'] || 'Compatibility not synchronized.';
 
-  const secondaryActions = document.querySelector('.secondary-actions');
-  if (secondaryActions) secondaryActions.open = kind === 'danger';
   $('noSelection').hidden = true;
   $('selectionContent').hidden = false;
   showInline('worldNotice', '');
   showInline('runtimeNotice', '');
-
   for (const row of document.querySelectorAll('.world-row')) {
     const selected = row.dataset.worldId === world.id;
     row.classList.toggle('is-selected', selected);
     row.setAttribute('aria-pressed', selected ? 'true' : 'false');
   }
 
+  renderConnectivity(world);
   updatePlayState(world);
   updateDiagnosticsContext();
+  refreshMigrationState(world);
   if (focusDetail) $('selectedName').scrollIntoView({ block: 'nearest' });
 }
 
@@ -277,11 +350,11 @@ function renderWorld(world) {
   meta.className = 'world-row-meta';
   const minecraft = document.createElement('span');
   minecraft.textContent = `Minecraft ${world.status.Minecraft || 'unknown'}`;
-  const members = document.createElement('span');
-  members.textContent = `${world.status['Authorized peers'] || 'Unknown'} members`;
-  const checkpoint = document.createElement('span');
-  checkpoint.textContent = `Checkpoint ${world.status['Latest snapshot'] || 'none'}`;
-  meta.append(minecraft, members, checkpoint);
+  const host = document.createElement('span');
+  host.textContent = world.status.Authority ? `Host ${world.status.Authority}` : 'Host not reported';
+  const connectivity = document.createElement('span');
+  connectivity.textContent = connectivityFromStatus(world.status).label;
+  meta.append(minecraft, host, connectivity);
 
   row.append(title, safety, meta);
   if (world.id === selectedWorldId) row.classList.add('is-selected');
@@ -293,12 +366,16 @@ function renderEmptyWorlds() {
   container.replaceChildren();
   const empty = document.createElement('div');
   empty.className = 'empty-state';
-  const title = document.createElement('h3');
+  const mark = document.createElement('div');
+  mark.className = 'empty-mark';
+  mark.textContent = '▦';
+  mark.setAttribute('aria-hidden', 'true');
+  const title = document.createElement('h2');
   title.textContent = 'No worlds yet';
   const body = document.createElement('p');
-  body.textContent = 'Create a new world or join one with a signed invitation.';
+  body.textContent = 'Create a world for your group or join one with a signed invite.';
   const actions = document.createElement('div');
-  actions.className = 'button-row';
+  actions.className = 'compact-actions';
   const create = document.createElement('button');
   create.type = 'button';
   create.className = 'button button-primary';
@@ -307,45 +384,29 @@ function renderEmptyWorlds() {
   const join = document.createElement('button');
   join.type = 'button';
   join.className = 'button button-secondary';
-  join.textContent = 'Join world';
+  join.textContent = 'Join with invite';
   join.addEventListener('click', () => showView('join'));
   actions.append(create, join);
-  empty.append(title, body, actions);
+  empty.append(mark, title, body, actions);
   container.append(empty);
+  container.setAttribute('aria-busy', 'false');
   $('worldCount').textContent = 'No local worlds';
   clearSelection();
 }
 
-async function initialize() {
-  const result = await action('Initializing local identity…', 'initialize_node');
-  $('identity').textContent = String(result);
-  setNodeState('Initialized', 'safe');
-  await refreshWorlds();
-}
-
-async function showIdentity({ quiet = false } = {}) {
-  try {
-    const result = await action('Reading local identity…', 'node_identity', {}, { quiet });
-    $('identity').textContent = String(result);
-    setNodeState('Initialized', 'safe');
-    return result;
-  } catch (error) {
-    setNodeState('Not initialized', 'neutral');
-    if (!quiet) throw error;
-    return null;
-  }
-}
-
 async function refreshWorlds() {
-  setStatus('Reading local worlds…');
+  $('worldCards').setAttribute('aria-busy', 'true');
+  showInline('worldLoadError', '');
+  setStatus('Reading worlds…');
   let raw;
   try {
-    raw = await action('Reading local worlds…', 'list_worlds', {}, { quiet: true });
+    raw = await run('Reading worlds…', () => backend.listWorlds(), { quiet: true });
   } catch (error) {
     renderEmptyWorlds();
-    $('worldCount').textContent = 'Unable to read local worlds';
-    setStatus('Could not read local worlds.');
+    $('worldCount').textContent = 'Could not read local worlds';
+    showInline('worldLoadError', `Worlds could not be loaded. ${String(error)}`, 'danger');
     setOutput(String(error), 'World refresh failed');
+    setStatus('Worlds unavailable', 'danger');
     return;
   }
 
@@ -354,44 +415,54 @@ async function refreshWorlds() {
   const container = $('worldCards');
   container.replaceChildren();
   worldCache.clear();
-
   if (!worlds.length) {
     renderEmptyWorlds();
-    setStatus('Ready.');
+    setStatus('Ready', 'safe');
     return;
   }
 
-  $('worldCount').textContent = `${worlds.length} local world${worlds.length === 1 ? '' : 's'}`;
+  $('worldCount').textContent = `${worlds.length} world${worlds.length === 1 ? '' : 's'}`;
   for (const world of worlds) {
     let statusText = '';
     let compatibilityText = '';
     try {
       [statusText, compatibilityText] = await Promise.all([
-        action('Reading world status…', 'world_status', { world: world.id }, { quiet: true }),
-        action('Reading compatibility…', 'world_compatibility', { world: world.id }, { quiet: true }),
+        backend.worldStatus(world.id),
+        backend.worldCompatibility(world.id),
       ]);
     } catch (_) {
-      // A partially synchronized local copy still belongs in the world list.
+      // A partial local copy still belongs in the launcher. Its unavailable fields remain explicit.
     }
     const model = { ...world, status: parseLines(statusText), compatibility: parseLines(compatibilityText) };
     worldCache.set(world.id, model);
     container.append(renderWorld(model));
   }
-
-  const nextSelection = worldCache.get(previousSelection) || worldCache.values().next().value;
-  if (nextSelection) selectWorld(nextSelection);
+  container.setAttribute('aria-busy', 'false');
+  const next = worldCache.get(previousSelection) || worldCache.values().next().value;
+  if (next) selectWorld(next);
   else clearSelection();
-  setStatus('Ready.');
+  setStatus('Ready', 'safe');
 }
 
-async function startDaemon() {
-  await action('Starting replication daemon…', 'start_daemon', { listen: $('daemonListen').value.trim() }, {
-    successMessage: (pid) => `Replication daemon started. PID ${pid}.`,
-  });
+async function initialize() {
+  const result = await run('Setting up this device…', () => backend.initializeNode());
+  $('identity').textContent = String(result);
+  setNodeState('Ready', 'safe');
+  await refreshWorlds();
 }
 
-async function stopDaemon() {
-  await action('Stopping replication daemon…', 'stop_daemon', {}, { successMessage: 'Replication daemon stopped.' });
+async function showIdentity({ quiet = false } = {}) {
+  try {
+    const result = await run('Reading device identity…', () => backend.nodeIdentity(), { quiet });
+    $('identity').textContent = String(result);
+    setNodeState('Ready', 'safe');
+    return result;
+  } catch (error) {
+    $('identity').textContent = quiet ? 'Device is not initialized.' : String(error);
+    setNodeState(invoke ? 'Not set up' : 'Desktop bridge unavailable', invoke ? 'warning' : 'danger');
+    if (!quiet) throw error;
+    return null;
+  }
 }
 
 function validateCreate() {
@@ -416,173 +487,261 @@ async function createWorld() {
   if (!validateCreate()) return;
   let result;
   try {
-    result = await action('Creating signed world configuration…', 'create_world', {
+    result = await run('Creating world…', () => backend.createWorld({
       name: $('createName').value.trim(),
       minecraft: $('createMinecraft').value.trim(),
       fabricLoader: $('createLoader').value.trim(),
       compatibility: $('createCompatibility').value.trim(),
       visibility: $('createVisibility').value,
-    });
+    }));
   } catch (error) {
     showInline('createError', `Could not create world: ${String(error)}`, 'danger');
     return;
   }
   const match = String(result).match(/World ID:\s*(scworld:[^\s]+)/);
   if (match) selectedWorldId = match[1];
+  $('createForm').reset();
+  $('createMinecraft').value = '26.1.2';
+  $('createLoader').value = '0.19.3';
+  $('createCompatibility').value = 'vanilla-fabric';
   await refreshWorlds();
-  if (match && worldCache.has(match[1])) selectWorld(worldCache.get(match[1]));
   showView('worlds');
 }
 
 async function joinWorld() {
   const invite = $('joinInvite').value.trim();
   if (!invite) {
-    showInline('joinError', 'Signed invite is required.', 'danger');
+    showInline('joinError', 'Paste a signed invite first.', 'danger');
     $('joinInvite').focus();
     return;
   }
   showInline('joinError', '');
   let result;
   try {
-    result = await action('Staging signed join request…', 'join_world', { invite });
+    result = await run('Joining world…', () => backend.joinWorld(invite));
   } catch (error) {
     showInline('joinError', `Could not join world: ${String(error)}`, 'danger');
     return;
   }
   const match = String(result).match(/World ID:\s*(scworld:[^\s]+)/);
   if (match) selectedWorldId = match[1];
+  $('joinInvite').value = '';
   await refreshWorlds();
-  if (match && worldCache.has(match[1])) selectWorld(worldCache.get(match[1]));
   showView('worlds');
 }
 
-async function joinWorldId() {
+function joinWorldId() {
   const world = $('joinWorldId').value.trim();
   if (!world) {
     showInline('joinWorldIdNotice', 'Enter a World ID first.', 'danger');
     $('joinWorldId').focus();
     return;
   }
-  const message = `World-ID discovery for ${world} cannot bypass membership. Private worlds still require a signed invite; public or unlisted discovery remains non-authoritative until membership is accepted.`;
+  const message = `Discovery can look for ${world}, but it does not grant membership. A private world still needs a signed invite.`;
   showInline('joinWorldIdNotice', message);
-  setOutput(message, 'Discovery');
-  setStatus('Signed membership still required.');
+  setOutput(message, 'World discovery');
 }
 
-function worldId() {
-  const value = $('world').value.trim();
-  if (!value) throw new Error('Choose a world first');
-  return value;
+function openInviteDialog() {
+  const world = selectedWorld();
+  if (!world) throw new Error('Choose a world first.');
+  $('inviteWorldName').textContent = world.name;
+  $('inviteResult').value = '';
+  $('inviteResultWrap').hidden = true;
+  showInline('inviteError', '');
+  $('inviteDialog').showModal();
+  $('inviteMinutes').focus();
+}
+
+async function createInvite() {
+  const bootstrapAddrs = $('bootstrapAddrs').value.split('\n').map((value) => value.trim()).filter(Boolean);
+  let result;
+  try {
+    result = await run('Creating invite…', () => backend.createInvite({
+      world: worldId(),
+      expiresMinutes: Number($('inviteMinutes').value || 60),
+      bootstrapAddrs,
+    }), { logResult: false });
+  } catch (error) {
+    showInline('inviteError', `Could not create invite: ${String(error)}`, 'danger');
+    return;
+  }
+  $('inviteResult').value = String(result || '');
+  $('inviteResultWrap').hidden = false;
+  $('inviteResult').focus();
+  setOutput('Signed invite created.', 'Invite');
+}
+
+async function copyText(text, label) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    const temp = document.createElement('textarea');
+    temp.value = text;
+    temp.setAttribute('readonly', '');
+    temp.style.position = 'fixed';
+    temp.style.opacity = '0';
+    document.body.append(temp);
+    temp.select();
+    document.execCommand('copy');
+    temp.remove();
+  }
+  setStatus(`${label} copied`, 'safe');
 }
 
 async function worldStatus() {
-  await action('Reading canonical world state…', 'world_status', { world: worldId() });
+  await run('Reading world status…', () => backend.worldStatus(worldId()));
+  showView('activity');
 }
+
 async function worldCompatibility() {
-  await action('Checking execution compatibility…', 'world_compatibility', { world: worldId() });
+  await run('Checking compatibility…', () => backend.worldCompatibility(worldId()));
+  showView('activity');
 }
+
 async function worldConflicts() {
-  await action('Reading preserved solo branches…', 'world_conflicts', { world: worldId() });
+  await run('Reading preserved conflicts…', () => backend.worldConflicts(worldId()));
+  showView('activity');
 }
+
 async function worldPeers() {
-  await action('Reading authorized membership…', 'world_peers', { world: worldId() });
+  await run('Reading world members…', () => backend.worldPeers(worldId()));
+  showView('activity');
 }
+
 async function verifyWorld() {
-  await action('Verifying snapshot history and blobs…', 'verify_world', { world: worldId() });
+  await run('Verifying replica…', () => backend.verifyWorld(worldId()), { successMessage: 'Replica verification completed.' });
+  showInline('worldNotice', 'Replica verification completed. Detailed output is available in Activity.', 'safe');
+}
+
+async function setSeeding(enabled) {
+  await run(`${enabled ? 'Enabling' : 'Disabling'} background replica…`, () => backend.setBackgroundSeeding(worldId(), enabled), {
+    successMessage: enabled ? 'This device will keep serving a background replica.' : 'Background replica serving was disabled.',
+  });
+  showInline('worldNotice', enabled ? 'Background replica enabled.' : 'Background replica disabled.', enabled ? 'safe' : 'warning');
+}
+
+function openSleepDialog() {
+  if (!selectedWorld()) throw new Error('Choose a world first.');
+  $('sleepDialog').showModal();
+}
+
+async function sleepWorld() {
+  await run('Stopping local Minecraft runtime…', () => backend.stopHost(), {
+    successMessage: 'World runtime stopped gracefully. Replica storage can continue separately.',
+  });
+  $('sleepDialog').close();
+  showInline('worldNotice', 'World runtime stopped gracefully.', 'safe');
 }
 
 function openLeaveDialog() {
-  const model = selectedWorld();
-  if (!model) throw new Error('Choose a world first');
-  $('leaveDialogText').textContent = `This stages a signed leave request for ${model.name}. Local membership changes after the request is accepted.`;
+  const world = selectedWorld();
+  if (!world) throw new Error('Choose a world first.');
+  $('leaveDialogText').textContent = `This stages a signed leave request for ${world.name}. Local membership changes after the request is accepted.`;
   $('leaveDialog').showModal();
 }
 
 async function performLeaveWorld() {
-  await action('Staging signed leave request…', 'leave_world', { world: worldId() });
+  await run('Requesting membership leave…', () => backend.leaveWorld(worldId()));
   $('leaveDialog').close();
   selectedWorldId = '';
   $('world').value = '';
   await refreshWorlds();
 }
 
-async function setSeeding(enabled) {
-  await action(`${enabled ? 'Enabling' : 'Disabling'} background replica…`, 'set_background_seeding', { world: worldId(), enabled });
-  await refreshWorlds();
-}
-
-async function createInvite() {
-  const bootstrapAddrs = $('bootstrapAddrs').value.split('\n').map((value) => value.trim()).filter(Boolean);
-  await action('Creating signed authority invite…', 'create_invite', {
-    world: worldId(),
-    expiresMinutes: Number($('inviteMinutes').value || 60),
-    bootstrapAddrs,
-  });
-}
-
-async function exportWorld() {
-  await action('Exporting latest verified snapshot…', 'export_world', { world: worldId(), destination: $('destination').value.trim() });
-}
-
-async function recoverWorld() {
-  await action('Recovering selected verified snapshot…', 'recover_world', {
-    world: worldId(),
-    snapshot: Number($('snapshotNumber').value || 1),
-    destination: $('destination').value.trim(),
-  });
-}
-
 function runtimeValidationIssue() {
   const world = selectedWorld();
-  if (!world) return [null, 'Select a world first before starting an authority runtime.'];
+  if (!world) return [null, 'Choose a world first.'];
   const eligibility = hostingEligibility(world);
   if (!eligibility.enabled) return [null, eligibility.reason];
-  if (!$('serverJar').value.trim()) return ['serverJar', 'Fabric server jar is required before the authority runtime can start.'];
-  if (!$('modJar').value.trim()) return ['modJar', 'SwarmCraft Fabric mod jar is required before the authority runtime can start.'];
-  if (!$('eula').checked) return ['eula', 'Minecraft server EULA acceptance is required before the authority runtime can start.'];
+  if (!$('serverJar').value.trim()) return ['serverJar', 'Set the Fabric server jar in Diagnostics before Play can start the current runtime.'];
+  if (!$('modJar').value.trim()) return ['modJar', 'Set the SwarmCraft Fabric mod jar in Diagnostics before Play can start the current runtime.'];
+  if (!$('eula').checked) return ['eula', 'Accept the Minecraft server EULA in Diagnostics before Play can start the current runtime.'];
   return null;
 }
 
-function showRuntimeValidation(issue, { fromPlay = false } = {}) {
+function showRuntimeValidation(issue) {
   const [fieldId, message] = issue;
-  if (fromPlay) showView('diagnostics', { focus: false });
+  showView('diagnostics', { focus: false });
   showInline('runtimeNotice', message, 'warning');
   $('runtimeSection').scrollIntoView({ block: 'start' });
   if (fieldId) $(fieldId).focus();
-  else $('runtimeNotice').focus?.();
 }
 
-async function hostWorld({ fromPlay = false } = {}) {
+async function hostWorld() {
   const issue = runtimeValidationIssue();
   if (issue) {
-    showRuntimeValidation(issue, { fromPlay });
+    showRuntimeValidation(issue);
     return;
   }
   showInline('runtimeNotice', '');
   try {
-    await action('Starting authority runtime…', 'host_world', {
+    await run('Starting Minecraft…', () => backend.hostWorld({
       world: worldId(),
       java: $('java').value.trim(),
       serverJar: $('serverJar').value.trim(),
       modJar: $('modJar').value.trim(),
       acceptEula: $('eula').checked,
-    }, { successMessage: (pid) => `Authority runtime started. PID ${pid}.` });
+    }), { successMessage: (pid) => `Minecraft authority runtime started. PID ${pid}.` });
+    showView('worlds');
+    showInline('worldNotice', 'Minecraft runtime started.', 'safe');
   } catch (error) {
-    showInline('runtimeNotice', `Could not start authority runtime: ${String(error)}`, 'danger');
+    showInline('runtimeNotice', `Could not start Minecraft: ${String(error)}`, 'danger');
     throw error;
   }
 }
 
-async function stopHost(label = 'Stopping authority runtime…') {
-  await action(label, 'stop_host', {}, {
-    successMessage: 'Authority runtime stopped. The replication daemon may continue serving stored snapshots.',
+async function stopHost() {
+  await run('Stopping Minecraft runtime…', () => backend.stopHost(), { successMessage: 'Minecraft runtime stopped.' });
+}
+
+async function startDaemon() {
+  await run('Starting networking…', () => backend.startDaemon($('daemonListen').value.trim()), {
+    successMessage: (pid) => `Networking daemon started. PID ${pid}.`,
   });
+}
+
+async function stopDaemon() {
+  await run('Stopping networking…', () => backend.stopDaemon(), { successMessage: 'Networking daemon stopped.' });
+}
+
+async function exportWorld() {
+  const destination = $('destination').value.trim();
+  if (!destination) {
+    showInline('runtimeNotice', 'Choose an export destination first.', 'warning');
+    $('destination').focus();
+    return;
+  }
+  await run('Exporting verified world…', () => backend.exportWorld(worldId(), destination));
+}
+
+async function recoverWorld() {
+  const destination = $('destination').value.trim();
+  if (!destination) {
+    setStatus('Recovery destination required', 'warning');
+    $('destination').focus();
+    return;
+  }
+  await run('Recovering verified snapshot…', () => backend.recoverWorld(worldId(), Number($('snapshotNumber').value || 1), destination));
+}
+
+async function transferHost() {
+  if (!backend.migration.capabilities.transfer) return;
+  await run('Preparing host transfer…', () => backend.migration.transferAuthority(worldId()));
+  await refreshMigrationState(selectedWorld());
+}
+
+async function wakeWorld() {
+  if (!backend.migration.capabilities.wake) return;
+  await run('Waking world…', () => backend.migration.wakeWorld(worldId()));
+  await refreshMigrationState(selectedWorld());
 }
 
 function bindAction(id, handler, { submit = false } = {}) {
   const element = $(id);
-  const eventName = submit ? 'submit' : 'click';
-  element.addEventListener(eventName, async (event) => {
+  if (!element) return;
+  element.addEventListener(submit ? 'submit' : 'click', async (event) => {
     if (submit) event.preventDefault();
     if (element.dataset.busy === 'true') return;
     const busyControl = submit && event.submitter ? event.submitter : element;
@@ -590,7 +749,7 @@ function bindAction(id, handler, { submit = false } = {}) {
     busyControl.disabled = true;
     busyControl.setAttribute('aria-busy', 'true');
     try {
-      await handler();
+      await handler(event);
     } catch (error) {
       if (!error?.swarmcraftActivityLogged) setOutput(String(error), 'Action failed');
     } finally {
@@ -602,45 +761,54 @@ function bindAction(id, handler, { submit = false } = {}) {
   });
 }
 
-for (const nav of document.querySelectorAll('.nav-item[data-view]')) {
-  nav.addEventListener('click', () => showView(nav.dataset.view));
-}
-
-$('emptyCreate')?.addEventListener('click', () => showView('create'));
-$('emptyJoin')?.addEventListener('click', () => showView('join'));
+for (const nav of document.querySelectorAll('.nav-item[data-view]')) nav.addEventListener('click', () => showView(nav.dataset.view));
+for (const back of document.querySelectorAll('[data-back-worlds]')) back.addEventListener('click', () => showView('worlds'));
+$('quickCreate').addEventListener('click', () => showView('create'));
+$('quickJoin').addEventListener('click', () => showView('join'));
 $('cancelCreate').addEventListener('click', () => showView('worlds'));
 $('cancelJoin').addEventListener('click', () => showView('worlds'));
+$('openWorldDiagnostics').addEventListener('click', () => showView('diagnostics'));
 $('clearActivity').addEventListener('click', () => { $('output').textContent = 'Activity cleared.'; });
-$('leaveWorld').addEventListener('click', () => {
-  try { openLeaveDialog(); } catch (error) { setOutput(String(error), 'Leave world'); }
-});
+$('inviteWorld').addEventListener('click', () => { try { openInviteDialog(); } catch (error) { setOutput(String(error), 'Invite'); } });
+$('sleepWorld').addEventListener('click', () => { try { openSleepDialog(); } catch (error) { setOutput(String(error), 'Stop world'); } });
+$('leaveWorld').addEventListener('click', () => { try { openLeaveDialog(); } catch (error) { setOutput(String(error), 'Leave world'); } });
+$('copyInvite').addEventListener('click', () => copyText($('inviteResult').value, 'Invite'));
+$('copyWorldId').addEventListener('click', () => copyText(selectedWorldId, 'World ID'));
 
 bindAction('sidebarInit', initialize);
 bindAction('init', initialize);
 bindAction('identityButton', () => showIdentity());
 bindAction('refresh', refreshWorlds);
-bindAction('startDaemon', startDaemon);
-bindAction('stopDaemon', stopDaemon);
 bindAction('createForm', createWorld, { submit: true });
 bindAction('joinForm', joinWorld, { submit: true });
 bindAction('joinWorldIdButton', joinWorldId);
+bindAction('createInvite', createInvite);
 bindAction('worldStatus', worldStatus);
 bindAction('worldCompatibility', worldCompatibility);
 bindAction('worldConflicts', worldConflicts);
 bindAction('worldPeers', worldPeers);
 bindAction('verifyWorld', verifyWorld);
-bindAction('confirmLeave', performLeaveWorld);
+bindAction('diagnosticVerify', verifyWorld);
 bindAction('seedOn', () => setSeeding(true));
 bindAction('seedOff', () => setSeeding(false));
-bindAction('createInvite', createInvite);
+bindAction('diagnosticSeedOn', () => setSeeding(true));
+bindAction('diagnosticSeedOff', () => setSeeding(false));
+bindAction('confirmSleep', sleepWorld);
+bindAction('confirmLeave', performLeaveWorld);
+bindAction('playWorld', hostWorld);
+bindAction('host', hostWorld);
+bindAction('stopHost', stopHost);
+bindAction('startDaemon', startDaemon);
+bindAction('stopDaemon', stopDaemon);
 bindAction('exportWorld', exportWorld);
 bindAction('recoverWorld', recoverWorld);
-bindAction('playWorld', () => hostWorld({ fromPlay: true }));
-bindAction('host', () => hostWorld());
-bindAction('gracefulSleep', () => stopHost('Requesting graceful sleep…'));
-bindAction('stopHost', () => stopHost());
+bindAction('transferHost', transferHost);
+bindAction('wakeWorld', wakeWorld);
 
 showView(currentView, { focus: false });
 updateWorldSpecificControls();
+renderMigration(null);
 showIdentity({ quiet: true }).catch(() => {});
 refreshWorlds().catch(() => {});
+document.addEventListener('visibilitychange', refreshVisibleMigration);
+setInterval(refreshVisibleMigration, MIGRATION_REFRESH_MS);

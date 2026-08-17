@@ -1,75 +1,80 @@
 # SwarmCraft Desktop
 
-The SwarmCraft desktop application is the current player-facing technical-preview shell for the Rust runtime.
+SwarmCraft Desktop is the player-facing Tauri 2 launcher for replicated Minecraft worlds.
 
-It is a **Tauri 2** application with a deliberately small frontend stack:
+The frontend intentionally stays small and dependency-free:
 
 ```text
 apps/desktop/
 ├── src/
-│   ├── index.html   # semantic structure
-│   ├── style.css    # visual system
-│   └── app.js       # DOM behavior and Tauri command wiring
+│   ├── index.html          # semantic launcher structure
+│   ├── style.css           # shared visual/component system
+│   ├── backend-adapter.js  # Tauri/backend contract boundary
+│   └── app.js              # state rendering and interactions
+├── tests/
+│   └── frontend-contract.test.mjs
 └── src-tauri/
-    ├── src/         # Rust commands/runtime process management
+    ├── src/
     └── tauri.conf.json
 ```
 
-The desktop bundles SwarmCraft runtime sidecars and invokes the same CLI/runtime functionality used outside the GUI.
+## Player flows
 
-## Current capabilities
+The launcher centers normal use around:
 
-The 0.2.1 desktop preview includes:
+- creating a world;
+- joining with a signed invite;
+- choosing a world and playing;
+- inviting friends;
+- seeing safety, host and connectivity summaries;
+- keeping or verifying a background replica;
+- sleeping/stopping a running world;
+- seeing backend-reported host migration progress;
+- safely waking a sleeping world when the backend exposes that capability;
+- opening advanced diagnostics only when technical setup or recovery is needed.
 
-- local peer initialization and identity display;
-- world listing and safety state;
-- world creation;
-- signed invite creation and invite-based joining;
-- membership leave requests;
-- compatibility/authority-eligibility checks;
-- play/host startup;
-- graceful world sleep/host stop;
-- background replica seeding controls;
-- conflict inspection;
-- peer/membership inspection;
-- snapshot verification;
-- export and recovery tools;
-- replication daemon controls;
-- networking/runtime diagnostics;
-- activity/error history.
+Conflict, solo/degraded, canonical, authority-eligibility, membership and relay semantics remain distinct. A storage replica never implies authority eligibility, and discovery never implies membership.
 
-The UI deliberately distinguishes canonical state, solo/degraded state and preserved conflict state. It must also keep authority eligibility separate from merely holding a storage replica.
+## Backend integration
 
-## Current limitations
+`src/backend-adapter.js` is the frontend boundary for Tauri command contracts. Authority, recovery and quorum decisions stay in Rust.
 
-The desktop is not yet a one-click Minecraft launcher.
+The desktop now capability-probes the bundled `swarmcraft` CLI before enabling migration features. When migration-core is present it can consume:
 
-Hosting may still require the user to provide:
+- `swarmcraft world migration-status <world> --json` for authoritative migration/runtime state;
+- `swarmcraft world wake <world>` for the backend-validated wake request.
 
-- a Java runtime path/configuration;
-- a compatible Fabric server JAR;
-- the SwarmCraft Fabric mod JAR;
-- explicit Minecraft EULA acceptance.
+If those commands are absent, migration status and wake remain disabled instead of being simulated in JavaScript. The finalized migration-core `snake_case` phases are translated into the smaller player-facing progress model used by the launcher.
 
-The app also does not yet automatically start Minecraft on a newly elected recovery successor or automatically reconnect players after host migration.
+Manual authority transfer remains intentionally disabled in the desktop adapter for now. Migration-core implements transfer as a signed, multi-stage prepare/export/accept/commit/activate/observe exchange. The frontend must not collapse that protocol into a fake one-click authority change.
 
-Those are major remaining product milestones rather than hidden completed features.
+Structured connectivity is consumed from world status when the backend reports fields such as `Connectivity`, `Connectivity state`, `Connection`, `Network path`, or `Reachability`. The player-facing states are Direct, Relay, Connecting, Offline, Limited connectivity, and Action required. When no structured state exists, the UI says that it is not reported rather than guessing.
 
-## Development constraints
+## Runtime setup
 
-Read the repository-level [AGENTS.md](../../AGENTS.md) before changing the desktop UI.
+The Play command launches the bundled `swarmcraft-host` runtime. After migration-core integration that binary routes hosting through the shared Rust runtime path; the desktop does not duplicate launch or fencing decisions.
 
-In particular:
+The local runtime can still require advanced setup:
 
-- keep the existing HTML/CSS/JavaScript frontend unless an architectural change is explicitly required;
-- do not add a framework, CSS framework, icon pack, font dependency or frontend build pipeline merely for styling;
-- preserve protocol/safety semantics when simplifying UI;
-- validate the configured default and minimum window sizes;
-- preserve Tauri command names/payloads unless changing the Rust API intentionally.
+- Java executable;
+- compatible Fabric server JAR;
+- SwarmCraft Fabric mod JAR;
+- Minecraft server EULA acceptance.
 
-## Relevant docs
+Those controls live in Diagnostics instead of the primary world flow.
 
-- [Project status](../../docs/IMPLEMENTATION_STATUS.md)
-- [Product vision](../../docs/PRODUCT_VISION.md)
-- [Roadmap](../../ROADMAP.md)
-- [Network validation](../../docs/NETWORK_VALIDATION.md)
+## Validation
+
+Run the frontend contract checks with:
+
+```text
+node --test apps/desktop/tests/frontend-contract.test.mjs
+```
+
+For the Rust/Tauri shell, also run when the required Rust dependencies are available:
+
+```text
+cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
+```
+
+Visual changes should be inspected at the configured default `980x760` window and minimum `720x560` window. The Tauri global bridge must remain enabled with `app.withGlobalTauri: true` because the frontend consumes `window.__TAURI__.core.invoke`.

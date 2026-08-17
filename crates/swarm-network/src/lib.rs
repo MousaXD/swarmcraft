@@ -5,7 +5,10 @@ mod node;
 mod transport;
 pub mod wire;
 
-pub use diagnostics::{ConnectivityDiagnosticsV1, HolePunchStateV1, NatStatusV1};
+pub use diagnostics::{
+    ConnectivityDiagnosticsV1, ConnectivityIssueKindV1, ConnectivityIssueV1, ConnectivityStateV1, HolePunchStateV1,
+    NatStatusV1, MAX_CONNECTIVITY_FAILURES,
+};
 pub use libp2p::request_response::ResponseChannel;
 pub use libp2p::PeerId as TransportPeerId;
 pub use node::{NetworkEvent, SwarmNode, WIRE_PROTOCOL};
@@ -113,5 +116,7 @@ mod tests {
         })
         .await
         .expect("both QUIC peers should authenticate");
+
+        assert_eq!(node_a.connectivity_diagnostics().state, ConnectivityStateV1::DirectReachable);
     }
 }

@@ -11,29 +11,39 @@
     <aside class="sidebar" aria-label="Primary navigation">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">S</span>
-        <div>
+        <div class="brand-copy">
           <strong>SwarmCraft</strong>
-          <span>World replication</span>
+          <span>Minecraft worlds</span>
         </div>
       </div>
 
-      <nav class="nav-stack" aria-label="Workspace">
-        <button id="navWorlds" class="nav-item is-active" type="button" data-view="worlds" aria-current="page">Worlds</button>
-        <button id="openCreate" class="nav-item" type="button" data-view="create">Create world</button>
-        <button id="openJoin" class="nav-item" type="button" data-view="join">Join world</button>
-        <button id="navActivity" class="nav-item" type="button" data-view="activity">Activity</button>
-        <button id="navDiagnostics" class="nav-item" type="button" data-view="diagnostics">Diagnostics</button>
+      <nav class="nav-stack" aria-label="Main">
+        <button id="navWorlds" class="nav-item is-active" type="button" data-view="worlds" aria-current="page">
+          <span class="nav-glyph" aria-hidden="true">▦</span><span>Worlds</span>
+        </button>
+        <button id="openCreate" class="nav-item" type="button" data-view="create">
+          <span class="nav-glyph" aria-hidden="true">＋</span><span>Create</span>
+        </button>
+        <button id="openJoin" class="nav-item" type="button" data-view="join">
+          <span class="nav-glyph" aria-hidden="true">↳</span><span>Join</span>
+        </button>
+        <button id="navActivity" class="nav-item" type="button" data-view="activity">
+          <span class="nav-glyph" aria-hidden="true">≡</span><span>Activity</span>
+        </button>
+        <button id="navDiagnostics" class="nav-item" type="button" data-view="diagnostics">
+          <span class="nav-glyph" aria-hidden="true">⌁</span><span>Diagnostics</span>
+        </button>
       </nav>
 
       <div class="sidebar-node">
         <div class="node-line">
           <span id="nodeStateDot" class="state-dot neutral" aria-hidden="true"></span>
           <div class="node-copy">
-            <span class="sidebar-label">Local node</span>
-            <span id="nodeBadge" class="node-state">Not checked</span>
+            <span class="sidebar-label">This device</span>
+            <span id="nodeBadge" class="node-state">Checking…</span>
           </div>
         </div>
-        <button id="sidebarInit" class="button button-subtle button-small" type="button">Initialize node</button>
+        <button id="sidebarInit" class="button button-subtle button-small" type="button">Set up device</button>
       </div>
     </aside>
 
@@ -41,100 +51,149 @@
       <header class="topbar">
         <div class="topbar-title">
           <h1 id="viewTitle">Worlds</h1>
-          <span id="viewContext">Manage playable replicated worlds</span>
+          <span id="viewContext">Choose a world and play</span>
         </div>
         <div class="topbar-status" role="status" aria-live="polite">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span id="status">Ready.</span>
+          <span id="statusDot" class="status-dot" aria-hidden="true"></span>
+          <span id="status">Ready</span>
         </div>
       </header>
 
       <div class="view-stack">
         <section id="worldsView" class="view is-active" data-view-panel="worlds" aria-labelledby="viewTitle">
+          <div id="worldLoadError" class="page-notice notice-danger" role="alert" hidden></div>
           <div class="worlds-layout">
-            <section class="world-list-pane" aria-label="Worlds">
+            <section class="world-list-pane" aria-label="Your worlds">
               <div class="pane-head">
                 <div>
                   <h2>Your worlds</h2>
-                  <p id="worldCount" class="meta-text">Loading local worlds…</p>
+                  <p id="worldCount" class="meta-text">Loading…</p>
                 </div>
-                <button id="refresh" class="button button-subtle button-small" type="button">Refresh</button>
+                <button id="refresh" class="icon-button" type="button" aria-label="Refresh worlds" title="Refresh worlds">↻</button>
               </div>
-
-              <div id="worldCards" class="world-list" aria-live="polite">
-                <div class="empty-state">
-                  <h3>No worlds loaded</h3>
-                  <p>Create a new world or join one with a signed invitation.</p>
-                  <div class="button-row">
-                    <button id="emptyCreate" class="button button-primary" type="button">Create world</button>
-                    <button id="emptyJoin" class="button button-secondary" type="button">Join world</button>
-                  </div>
+              <div id="worldCards" class="world-list" aria-live="polite" aria-busy="true">
+                <div class="loading-list" aria-hidden="true">
+                  <span></span><span></span><span></span>
                 </div>
+              </div>
+              <div class="list-footer">
+                <button id="quickCreate" class="button button-secondary button-small" type="button">Create world</button>
+                <button id="quickJoin" class="button button-subtle button-small" type="button">Join with invite</button>
               </div>
             </section>
 
             <section id="selectedPanel" class="world-detail" aria-label="Selected world">
               <input id="world" type="hidden" />
               <div id="noSelection" class="selection-empty">
-                <h2>Select a world</h2>
-                <p>Choose a world to inspect safety, snapshot authority, membership, compatibility, and play controls.</p>
+                <div class="empty-mark" aria-hidden="true">▦</div>
+                <h2>Choose a world</h2>
+                <p>Select a world to play, invite friends, keep a replica available, or inspect its safety.</p>
               </div>
 
               <div id="selectionContent" class="selection-content" hidden>
-                <div class="detail-head">
-                  <div class="detail-identity">
+                <header class="world-hero">
+                  <div class="world-heading">
                     <div class="title-line">
-                      <h2 id="selectedName">Choose a world</h2>
+                      <h2 id="selectedName">World</h2>
                       <span id="selectedSafety" class="status-badge neutral">Unknown</span>
                     </div>
-                    <p id="selectedWorldId" class="machine-line"></p>
+                    <button id="copyWorldId" class="machine-button" type="button" title="Copy World ID">
+                      <span id="selectedWorldId" class="machine-line"></span>
+                      <span aria-hidden="true">⧉</span>
+                    </button>
                   </div>
-                  <div class="play-control">
+                  <div class="hero-actions">
                     <button id="playWorld" class="button button-primary play-button" type="button" disabled>Play</button>
-                    <span id="playAvailability" class="play-availability">Compatibility must be known before Play is available.</span>
+                    <button id="inviteWorld" class="button button-secondary" type="button">Invite</button>
+                    <button id="transferHost" class="button button-secondary authority-transfer" type="button" disabled>Transfer host</button>
+                  </div>
+                </header>
+
+                <p id="playAvailability" class="action-reason">Checking whether this device can host the world…</p>
+                <p id="transferAvailability" class="action-reason" hidden></p>
+
+                <div class="world-state-grid" aria-label="World summary">
+                  <div class="state-cell">
+                    <span class="state-label">Host</span>
+                    <strong id="selectedAuthority">Not reported</strong>
+                  </div>
+                  <div class="state-cell">
+                    <span class="state-label">Connectivity</span>
+                    <strong id="selectedConnectivity">Not reported</strong>
+                    <span id="selectedConnectivityDetail" class="state-detail">No structured connectivity state yet.</span>
+                  </div>
+                  <div class="state-cell">
+                    <span class="state-label">Members</span>
+                    <strong id="selectedMembers">Unknown</strong>
+                  </div>
+                  <div class="state-cell">
+                    <span class="state-label">Latest checkpoint</span>
+                    <strong id="selectedCheckpoint">None</strong>
                   </div>
                 </div>
 
-                <p id="selectedSummary" class="safety-summary">Select a world to inspect its safety state.</p>
+                <section id="safetyPanel" class="safety-panel neutral" aria-labelledby="safetyTitle">
+                  <div>
+                    <span id="safetyTitle" class="section-label">World safety</span>
+                    <p id="selectedSummary">Safety state is unavailable.</p>
+                  </div>
+                  <button id="worldConflicts" class="text-button world-required" type="button">Review conflicts</button>
+                </section>
 
-                <dl class="fact-grid">
-                  <div class="fact">
-                    <dt>Latest snapshot authority</dt>
-                    <dd id="selectedAuthority">Unknown</dd>
+                <section class="player-section" aria-labelledby="availabilityTitle">
+                  <div class="section-heading">
+                    <div>
+                      <h3 id="availabilityTitle">Keep the world available</h3>
+                      <p>Store and serve verified world data in the background when this app is running.</p>
+                    </div>
                   </div>
-                  <div class="fact">
-                    <dt>Members</dt>
-                    <dd id="selectedMembers">Unknown</dd>
+                  <div class="compact-actions">
+                    <button id="seedOn" class="button button-secondary world-required" type="button">Keep a replica</button>
+                    <button id="seedOff" class="button button-subtle world-required" type="button">Stop seeding</button>
+                    <button id="verifyWorld" class="button button-subtle world-required" type="button">Verify replica</button>
                   </div>
-                  <div class="fact">
-                    <dt>Minecraft</dt>
-                    <dd id="selectedMinecraft">Unknown</dd>
-                  </div>
-                  <div class="fact">
-                    <dt>Latest checkpoint</dt>
-                    <dd id="selectedCheckpoint">None</dd>
-                  </div>
-                </dl>
+                </section>
 
-                <div class="compatibility-block">
-                  <span class="field-label">Compatibility / authority eligibility</span>
-                  <p id="selectedCompatibility">Compatibility not synchronized.</p>
-                </div>
+                <section id="migrationCard" class="player-section migration-card" aria-labelledby="migrationTitle">
+                  <div class="section-heading migration-heading">
+                    <div>
+                      <h3 id="migrationTitle">Host handoff</h3>
+                      <p id="migrationSummary">No host migration is active.</p>
+                    </div>
+                    <span id="migrationBadge" class="status-badge neutral">Not active</span>
+                  </div>
+                  <div id="migrationProgress" class="migration-progress" hidden>
+                    <div class="progress-track" aria-hidden="true"><span id="migrationProgressBar"></span></div>
+                    <ol id="migrationSteps" class="migration-steps" aria-label="Migration progress"></ol>
+                  </div>
+                  <div class="compact-actions">
+                    <button id="wakeWorld" class="button button-secondary migration-wake" type="button" disabled>Wake world</button>
+                    <button id="sleepWorld" class="button button-subtle world-required" type="button">Stop world…</button>
+                  </div>
+                  <p id="migrationAvailability" class="section-note">Transfer and wake are unavailable in this build. Existing Play and graceful stop remain available.</p>
+                </section>
+
+                <details class="details-panel">
+                  <summary>World details</summary>
+                  <div class="details-grid">
+                    <div class="detail-row"><span>Minecraft</span><strong id="selectedMinecraft">Unknown</strong></div>
+                    <div class="detail-row"><span>Compatibility</span><strong id="selectedCompatibility">Not synchronized</strong></div>
+                  </div>
+                  <div class="compact-actions">
+                    <button id="worldPeers" class="button button-subtle world-required" type="button">Members</button>
+                    <button id="worldCompatibility" class="button button-subtle world-required" type="button">Compatibility</button>
+                    <button id="worldStatus" class="button button-subtle world-required" type="button">Full status</button>
+                    <button id="openWorldDiagnostics" class="button button-subtle" type="button">Diagnostics</button>
+                  </div>
+                </details>
 
                 <div id="worldNotice" class="inline-notice" role="status" aria-live="polite" hidden></div>
 
-                <div class="detail-actions" aria-label="World actions">
-                  <button id="worldPeers" class="button button-secondary" type="button">Authorized members</button>
-                  <button id="worldCompatibility" class="button button-secondary" type="button">Compatibility</button>
-                  <button id="worldStatus" class="button button-subtle" type="button">Full status</button>
-                  <button id="gracefulSleep" class="button button-subtle" type="button">Sleep gracefully</button>
-                </div>
-
-                <details class="secondary-actions">
-                  <summary>More actions</summary>
-                  <div class="secondary-actions-body">
-                    <button id="worldConflicts" class="button button-warning" type="button">Inspect conflicts</button>
-                    <button id="leaveWorld" class="button button-danger" type="button">Leave world…</button>
+                <details class="danger-zone">
+                  <summary>Membership and recovery</summary>
+                  <div class="danger-zone-body">
+                    <p>Leaving removes this device from the world after the signed request is accepted. Recovery tools are in Diagnostics.</p>
+                    <button id="leaveWorld" class="button button-danger world-required" type="button">Leave world…</button>
                   </div>
                 </details>
               </div>
@@ -143,226 +202,270 @@
         </section>
 
         <section id="createPanel" class="view task-view" data-view-panel="create" aria-labelledby="createTitle" hidden>
-          <div class="task-header">
-            <div>
-              <span class="kicker">NEW WORLD</span>
-              <h2 id="createTitle">Create world</h2>
-              <p>Create canonical world metadata before the first authority runtime starts.</p>
+          <div class="task-shell">
+            <div class="task-header">
+              <button class="back-button" type="button" data-back-worlds aria-label="Back to worlds">←</button>
+              <div>
+                <h2 id="createTitle">Create a world</h2>
+                <p>Start a private replicated world. Advanced compatibility settings can stay at their defaults for a normal Fabric setup.</p>
+              </div>
             </div>
-            <span class="status-badge safe">Private by default</span>
-          </div>
 
-          <form id="createForm" class="form-panel" novalidate>
-            <div class="field field-wide">
-              <label for="createName">World name</label>
-              <input id="createName" autocomplete="off" placeholder="Friends SMP" required />
-            </div>
-            <div class="field-grid">
-              <div class="field">
-                <label for="createMinecraft">Minecraft version</label>
-                <input id="createMinecraft" value="26.1.2" required />
+            <form id="createForm" class="form-panel" novalidate>
+              <div class="field field-wide">
+                <label for="createName">World name</label>
+                <input id="createName" autocomplete="off" placeholder="Friends SMP" required />
               </div>
-              <div class="field">
-                <label for="createLoader">Fabric loader</label>
-                <input id="createLoader" value="0.19.3" required />
-              </div>
-            </div>
-            <div class="field-grid">
-              <div class="field">
-                <label for="createVisibility">Visibility</label>
+              <div class="field field-wide">
+                <label for="createVisibility">Who can find it?</label>
                 <select id="createVisibility">
-                  <option value="private">Private</option>
+                  <option value="private">Invite only</option>
                   <option value="unlisted">Unlisted</option>
                   <option value="public">Public</option>
                 </select>
               </div>
-              <div class="field">
-                <label for="createCompatibility">Compatibility profile</label>
-                <input id="createCompatibility" value="vanilla-fabric" required />
+
+              <details class="form-details field-wide">
+                <summary>Compatibility settings</summary>
+                <div class="field-grid details-fields">
+                  <div class="field">
+                    <label for="createMinecraft">Minecraft version</label>
+                    <input id="createMinecraft" value="26.1.2" required />
+                  </div>
+                  <div class="field">
+                    <label for="createLoader">Fabric loader</label>
+                    <input id="createLoader" value="0.19.3" required />
+                  </div>
+                  <div class="field field-wide">
+                    <label for="createCompatibility">Compatibility profile</label>
+                    <input id="createCompatibility" value="vanilla-fabric" required />
+                  </div>
+                </div>
+                <p class="helper">These values become signed world metadata. They determine which devices are eligible to host, not which devices may store replicas.</p>
+              </details>
+
+              <div id="createError" class="form-error field-wide" role="alert" hidden></div>
+              <div class="form-actions field-wide">
+                <button id="cancelCreate" class="button button-secondary" type="button">Cancel</button>
+                <button id="createWorld" class="button button-primary" type="submit">Create world</button>
               </div>
-            </div>
-            <p class="helper field-wide">The signed compatibility manifest remains canonical metadata. Exact mod IDs, versions, and hashes are preserved.</p>
-            <div id="createError" class="form-error" role="alert" hidden></div>
-            <div class="form-actions field-wide">
-              <button id="cancelCreate" class="button button-secondary" type="button">Cancel</button>
-              <button id="createWorld" class="button button-primary" type="submit">Create world</button>
-            </div>
-          </form>
+            </form>
+          </div>
         </section>
 
         <section id="joinPanel" class="view task-view" data-view-panel="join" aria-labelledby="joinTitle" hidden>
-          <div class="task-header">
-            <div>
-              <span class="kicker">MEMBERSHIP</span>
-              <h2 id="joinTitle">Join world</h2>
-              <p>A signed invite establishes membership. World-ID discovery never bypasses canonical authority.</p>
+          <div class="task-shell">
+            <div class="task-header">
+              <button class="back-button" type="button" data-back-worlds aria-label="Back to worlds">←</button>
+              <div>
+                <h2 id="joinTitle">Join with an invite</h2>
+                <p>Paste the complete signed invite from a world member. Discovery alone never grants membership.</p>
+              </div>
             </div>
-          </div>
 
-          <div class="join-grid">
             <form id="joinForm" class="form-panel" novalidate>
               <div class="field field-wide">
-                <label for="joinInvite">Signed invite</label>
-                <textarea id="joinInvite" rows="8" placeholder="scinvite:…" required></textarea>
-                <span class="helper">Paste the complete invitation issued by a world authority.</span>
+                <label for="joinInvite">Invite</label>
+                <textarea id="joinInvite" rows="7" placeholder="scinvite:…" required spellcheck="false"></textarea>
               </div>
-              <div id="joinError" class="form-error" role="alert" hidden></div>
+              <div id="joinError" class="form-error field-wide" role="alert" hidden></div>
               <div class="form-actions field-wide">
                 <button id="cancelJoin" class="button button-secondary" type="button">Cancel</button>
-                <button id="joinWorld" class="button button-primary" type="submit">Join via invite</button>
+                <button id="joinWorld" class="button button-primary" type="submit">Join world</button>
               </div>
             </form>
 
-            <section class="discovery-panel" aria-labelledby="discoveryTitle">
-              <h3 id="discoveryTitle">Discover by World ID</h3>
-              <p>Useful for public or unlisted discovery. It does not grant membership or authority.</p>
-              <div class="field">
+            <details class="task-secondary">
+              <summary>Have only a World ID?</summary>
+              <p>A World ID can check discovery for public or unlisted worlds, but you still need accepted membership before joining a private world.</p>
+              <div class="inline-field">
                 <label for="joinWorldId">World ID</label>
                 <input id="joinWorldId" class="machine-input" placeholder="scworld:…" />
+                <button id="joinWorldIdButton" class="button button-secondary" type="button">Check</button>
               </div>
-              <button id="joinWorldIdButton" class="button button-secondary" type="button">Check discovery path</button>
               <div id="joinWorldIdNotice" class="inline-notice" role="status" hidden></div>
-            </section>
+            </details>
           </div>
         </section>
 
         <section id="activityView" class="view" data-view-panel="activity" aria-labelledby="activityTitle" hidden>
-          <div class="pane-head activity-head">
-            <div>
-              <h2 id="activityTitle">Activity</h2>
-              <p class="meta-text">Command results and operational detail from this session.</p>
+          <div class="content-shell activity-shell">
+            <div class="pane-head standalone-head">
+              <div>
+                <h2 id="activityTitle">Activity</h2>
+                <p class="meta-text">Recent command results and detailed errors from this session.</p>
+              </div>
+              <button id="clearActivity" class="button button-subtle button-small" type="button">Clear</button>
             </div>
-            <button id="clearActivity" class="button button-subtle button-small" type="button">Clear</button>
+            <pre id="output" class="activity-console" tabindex="0" aria-label="Activity log">SwarmCraft is ready.</pre>
           </div>
-          <pre id="output" class="activity-console" tabindex="0">SwarmCraft is ready.</pre>
         </section>
 
         <section id="diagnosticsView" class="view diagnostics-view" data-view-panel="diagnostics" aria-labelledby="diagnosticsTitle" hidden>
-          <div class="task-header diagnostics-header">
-            <div>
-              <span class="kicker">ADVANCED</span>
-              <h2 id="diagnosticsTitle">Diagnostics</h2>
-              <p>Networking, verification, runtime, and recovery controls. Everyday world management stays in Worlds.</p>
+          <div class="content-shell">
+            <div class="task-header diagnostics-header">
+              <button class="back-button" type="button" data-back-worlds aria-label="Back to worlds">←</button>
+              <div>
+                <h2 id="diagnosticsTitle">Diagnostics</h2>
+                <p>Technical controls for connectivity, runtime setup, verification, and recovery.</p>
+              </div>
             </div>
-          </div>
 
-          <section id="diagnosticWorldContext" class="diagnostic-world-context" aria-live="polite">
-            <div class="context-copy">
-              <span class="context-label">Operating on</span>
-              <strong id="diagnosticWorldName">Select a world first</strong>
-              <span id="diagnosticWorldId" class="machine-line">World-specific controls are unavailable.</span>
-            </div>
-            <span id="diagnosticSafety" class="status-badge neutral" hidden>Unknown</span>
-          </section>
-
-          <div class="diagnostic-sections">
-            <section class="diagnostic-section" id="localNodeSection">
-              <div class="section-title-row">
-                <div><h3>Local node</h3><p>Identity and initialization state.</p></div>
+            <section id="diagnosticWorldContext" class="diagnostic-world-context" aria-live="polite">
+              <div class="context-copy">
+                <span class="context-label">Selected world</span>
+                <strong id="diagnosticWorldName">No world selected</strong>
+                <span id="diagnosticWorldId" class="machine-line">World-specific controls are unavailable.</span>
               </div>
-              <pre id="identity" class="diagnostic-output">Not initialized.</pre>
-              <div class="button-row">
-                <button id="init" class="button button-primary" type="button">Initialize</button>
-                <button id="identityButton" class="button button-secondary" type="button">Read identity</button>
-              </div>
+              <span id="diagnosticSafety" class="status-badge neutral" hidden>Unknown</span>
             </section>
 
-            <section class="diagnostic-section" id="replicationSection">
-              <div class="section-title-row">
-                <div><h3>Replication</h3><p>Background snapshot availability for the selected world.</p></div>
-              </div>
-              <p class="helper">Incompatible members may remain storage-only. Storage availability does not imply authority eligibility or current connectivity.</p>
-              <div class="button-row">
-                <button id="seedOn" class="button button-secondary world-required" type="button">Enable seeding</button>
-                <button id="seedOff" class="button button-subtle world-required" type="button">Disable seeding</button>
-                <button id="verifyWorld" class="button button-secondary world-required" type="button">Verify storage</button>
-              </div>
-            </section>
-
-            <section class="diagnostic-section" id="networkingSection">
-              <div class="section-title-row">
-                <div><h3>Networking</h3><p>Replication daemon and bootstrap transport.</p></div>
-              </div>
-              <div class="field">
-                <label for="daemonListen">Listen multiaddress</label>
-                <input id="daemonListen" class="machine-input" value="/ip4/0.0.0.0/udp/0/quic-v1" />
-              </div>
-              <div class="button-row">
-                <button id="startDaemon" class="button button-secondary" type="button">Start daemon</button>
-                <button id="stopDaemon" class="button button-subtle" type="button">Stop daemon</button>
-              </div>
-              <p class="helper">Relays help transport only. Relay connectivity never implies canonical authority.</p>
-            </section>
-
-            <section class="diagnostic-section" id="inviteSection">
-              <div class="section-title-row">
-                <div><h3>Membership invite</h3><p>Create a signed invite for the selected world.</p></div>
-              </div>
-              <div class="field-grid">
+            <div class="diagnostic-grid">
+              <section class="diagnostic-section" id="connectivitySection">
+                <div class="section-title-row">
+                  <div><h3>Connectivity</h3><p>Player-facing path summary plus daemon controls.</p></div>
+                  <span id="diagnosticConnectivity" class="status-badge neutral">Not reported</span>
+                </div>
+                <p id="diagnosticConnectivityDetail" class="helper">The current backend does not expose structured connectivity for this world.</p>
                 <div class="field">
-                  <label for="inviteMinutes">Expiry in minutes</label>
-                  <input id="inviteMinutes" type="number" min="1" value="60" />
+                  <label for="daemonListen">Listen multiaddress</label>
+                  <input id="daemonListen" class="machine-input" value="/ip4/0.0.0.0/udp/0/quic-v1" />
                 </div>
-                <div class="field field-wide-narrow">
-                  <label for="bootstrapAddrs">Bootstrap addresses</label>
-                  <textarea id="bootstrapAddrs" class="machine-input" rows="3" placeholder="/ip4/…/p2p/…"></textarea>
+                <div class="compact-actions">
+                  <button id="startDaemon" class="button button-secondary" type="button">Start networking</button>
+                  <button id="stopDaemon" class="button button-subtle" type="button">Stop networking</button>
                 </div>
-              </div>
-              <button id="createInvite" class="button button-secondary world-required" type="button">Create signed invite</button>
-            </section>
+                <p class="helper">Relay transport can provide connectivity, but it does not make a peer the canonical host.</p>
+              </section>
 
-            <section class="diagnostic-section" id="runtimeSection">
-              <div class="section-title-row">
-                <div><h3>Authority runtime</h3><p>Required executable paths for Play and manual runtime control.</p></div>
-              </div>
-              <div id="runtimeNotice" class="inline-notice" role="status" aria-live="polite" hidden></div>
-              <div class="field">
-                <label for="java">Java executable</label>
-                <input id="java" class="machine-input" value="java" />
-              </div>
-              <div class="field">
-                <label for="serverJar">Fabric server jar</label>
-                <input id="serverJar" class="machine-input" placeholder="/path/to/fabric-server.jar" />
-              </div>
-              <div class="field">
-                <label for="modJar">SwarmCraft Fabric mod jar</label>
-                <input id="modJar" class="machine-input" placeholder="/path/to/swarmcraft-fabric.jar" />
-              </div>
-              <label class="check-row" for="eula"><input id="eula" type="checkbox" /> <span>I accept the Minecraft server EULA.</span></label>
-              <div class="button-row">
-                <button id="host" class="button button-secondary world-required authority-required" type="button">Start runtime</button>
-                <button id="stopHost" class="button button-subtle" type="button">Stop runtime</button>
-              </div>
-              <p id="runtimeEligibilityHint" class="helper">Select an authority-eligible world to start the runtime.</p>
-            </section>
+              <section class="diagnostic-section" id="localNodeSection">
+                <div class="section-title-row">
+                  <div><h3>This device</h3><p>Local peer identity and initialization.</p></div>
+                </div>
+                <pre id="identity" class="diagnostic-output">Checking identity…</pre>
+                <div class="compact-actions">
+                  <button id="init" class="button button-secondary" type="button">Set up device</button>
+                  <button id="identityButton" class="button button-subtle" type="button">Refresh identity</button>
+                </div>
+              </section>
 
-            <section class="diagnostic-section" id="recoverySection">
-              <div class="section-title-row">
-                <div><h3>Recovery / export</h3><p>Copy verified state or recover a specific snapshot.</p></div>
-              </div>
-              <div class="field">
-                <label for="destination">Destination</label>
-                <input id="destination" class="machine-input" placeholder="/path/to/world-export" />
-              </div>
-              <div class="field">
-                <label for="snapshotNumber">Snapshot number</label>
-                <input id="snapshotNumber" type="number" min="1" value="1" />
-              </div>
-              <div class="button-row">
-                <button id="exportWorld" class="button button-secondary world-required" type="button">Export latest</button>
-                <button id="recoverWorld" class="button button-warning world-required" type="button">Recover snapshot</button>
-              </div>
-            </section>
+              <section class="diagnostic-section" id="runtimeSection">
+                <div class="section-title-row">
+                  <div><h3>Minecraft runtime</h3><p>Paths required by the current direct-host Play implementation.</p></div>
+                </div>
+                <div id="runtimeNotice" class="inline-notice" role="status" aria-live="polite" hidden></div>
+                <div class="field">
+                  <label for="java">Java executable</label>
+                  <input id="java" class="machine-input" value="java" />
+                </div>
+                <div class="field">
+                  <label for="serverJar">Fabric server jar</label>
+                  <input id="serverJar" class="machine-input" placeholder="/path/to/fabric-server.jar" />
+                </div>
+                <div class="field">
+                  <label for="modJar">SwarmCraft Fabric mod jar</label>
+                  <input id="modJar" class="machine-input" placeholder="/path/to/swarmcraft-fabric.jar" />
+                </div>
+                <label class="check-row" for="eula"><input id="eula" type="checkbox" /> <span>I accept the Minecraft server EULA.</span></label>
+                <div class="compact-actions">
+                  <button id="host" class="button button-secondary world-required authority-required" type="button">Start runtime</button>
+                  <button id="stopHost" class="button button-subtle" type="button">Stop runtime</button>
+                </div>
+                <p id="runtimeEligibilityHint" class="helper">Select an authority-eligible world to start the runtime.</p>
+              </section>
+
+              <section class="diagnostic-section" id="replicationSection">
+                <div class="section-title-row">
+                  <div><h3>Replica storage</h3><p>Verification and background availability for the selected world.</p></div>
+                </div>
+                <p class="helper">A storage-only replica may remain useful even when this device is not eligible to host.</p>
+                <div class="compact-actions">
+                  <button id="diagnosticSeedOn" class="button button-secondary world-required" type="button">Keep replica</button>
+                  <button id="diagnosticSeedOff" class="button button-subtle world-required" type="button">Stop seeding</button>
+                  <button id="diagnosticVerify" class="button button-subtle world-required" type="button">Verify</button>
+                </div>
+              </section>
+
+              <section class="diagnostic-section diagnostic-wide" id="recoverySection">
+                <div class="section-title-row">
+                  <div><h3>Export and recovery</h3><p>Copy verified state or recover a specific snapshot into a destination.</p></div>
+                </div>
+                <div class="field-grid">
+                  <div class="field field-wide">
+                    <label for="destination">Destination</label>
+                    <input id="destination" class="machine-input" placeholder="/path/to/world-export" />
+                  </div>
+                  <div class="field">
+                    <label for="snapshotNumber">Snapshot number</label>
+                    <input id="snapshotNumber" type="number" min="1" value="1" />
+                  </div>
+                </div>
+                <div class="compact-actions">
+                  <button id="exportWorld" class="button button-secondary world-required" type="button">Export latest</button>
+                  <button id="recoverWorld" class="button button-warning world-required" type="button">Recover snapshot</button>
+                </div>
+              </section>
+            </div>
           </div>
         </section>
       </div>
     </main>
   </div>
 
+  <dialog id="inviteDialog" class="dialog">
+    <form id="inviteForm" class="dialog-card" method="dialog">
+      <div class="dialog-heading">
+        <div>
+          <h2>Invite to <span id="inviteWorldName">world</span></h2>
+          <p>Create a signed invite. The recipient still joins through canonical membership.</p>
+        </div>
+        <button id="closeInvite" class="icon-button" value="cancel" type="submit" aria-label="Close invite dialog">×</button>
+      </div>
+      <div class="field">
+        <label for="inviteMinutes">Invite expires in</label>
+        <select id="inviteMinutes">
+          <option value="30">30 minutes</option>
+          <option value="60" selected>1 hour</option>
+          <option value="360">6 hours</option>
+          <option value="1440">24 hours</option>
+        </select>
+      </div>
+      <details class="form-details">
+        <summary>Advanced bootstrap addresses</summary>
+        <div class="field details-fields">
+          <label for="bootstrapAddrs">Bootstrap addresses</label>
+          <textarea id="bootstrapAddrs" class="machine-input" rows="3" placeholder="/ip4/…/p2p/…"></textarea>
+        </div>
+      </details>
+      <div id="inviteError" class="form-error" role="alert" hidden></div>
+      <div id="inviteResultWrap" class="invite-result" hidden>
+        <label for="inviteResult">Signed invite</label>
+        <textarea id="inviteResult" rows="5" readonly spellcheck="false"></textarea>
+        <button id="copyInvite" class="button button-secondary" type="button">Copy invite</button>
+      </div>
+      <div class="dialog-actions">
+        <button id="cancelInvite" class="button button-secondary" value="cancel" type="submit">Done</button>
+        <button id="createInvite" class="button button-primary world-required" type="button">Create invite</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="sleepDialog" class="dialog">
+    <form class="dialog-card" method="dialog">
+      <div>
+        <h2>Stop this world?</h2>
+        <p>SwarmCraft will stop the local Minecraft runtime. This does not itself create a durable sleeping migration state. Background replica storage can continue separately.</p>
+      </div>
+      <div class="dialog-actions">
+        <button class="button button-secondary" value="cancel" type="submit">Cancel</button>
+        <button id="confirmSleep" class="button button-warning" value="default" type="button">Stop world</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="leaveDialog" class="dialog">
     <form method="dialog" class="dialog-card">
       <div>
-        <span class="kicker danger-text">MEMBERSHIP CHANGE</span>
         <h2>Leave this world?</h2>
         <p id="leaveDialogText">This stages a signed leave request for the selected world.</p>
       </div>

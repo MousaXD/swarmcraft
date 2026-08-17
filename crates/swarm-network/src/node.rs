@@ -1,4 +1,7 @@
-use crate::{verify_peer_hello, wire::WireRequest, wire::WireResponse, ConnectivityDiagnosticsV1, NatStatusV1};
+use crate::{
+    verify_peer_hello, wire::WireRequest, wire::WireResponse, ConnectivityDiagnosticsV1, ConnectivityIssueKindV1,
+    ConnectivityIssueV1, NatStatusV1,
+};
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use libp2p::multiaddr::Protocol;
@@ -11,7 +14,11 @@ use libp2p::{
     swarm::{dial_opts::DialOpts, ConnectionId, NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId as TransportPeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
-use std::{collections::HashMap, env, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    time::Duration,
+};
 use swarm_protocol::{PeerHelloV1, PeerId, PROTOCOL_VERSION};
 use tracing::{debug, info, warn};
 
@@ -67,11 +74,20 @@ pub enum NetworkEvent {
     },
 }
 
+#[derive(Debug, Clone)]
+struct RelayFallbackPlan {
+    relay_address: Multiaddr,
+    attempted: bool,
+}
+
 pub struct SwarmNode {
     swarm: Swarm<Behaviour>,
     local_hello: PeerHelloV1,
     authenticated: HashMap<TransportPeerId, PeerId>,
     active_connections: HashMap<TransportPeerId, ConnectionId>,
+    bootstrap_peers: HashSet<TransportPeerId>,
+    relay_peers: HashSet<TransportPeerId>,
+    relay_fallbacks: HashMap<TransportPeerId, RelayFallbackPlan>,
     diagnostics: ConnectivityDiagnosticsV1,
 }
 
@@ -127,6 +143,9 @@ impl SwarmNode {
             local_hello,
             authenticated: HashMap::new(),
             active_connections: HashMap::new(),
+            bootstrap_peers: HashSet::new(),
+            relay_peers: HashSet::new(),
+            relay_fallbacks: HashMap::new(),
             diagnostics: ConnectivityDiagnosticsV1::default(),
         };
         node.configure_from_environment()?;
@@ -153,38 +172,129 @@ impl SwarmNode {
         if let Some(peer) = transport_peer_from_address(&address) {
             self.swarm.behaviour_mut().kad.add_address(&peer, address.clone());
         }
-        self.swarm.dial(address).context("failed to dial peer")
+        if let Err(error) = self.swarm.dial(address.clone()) {
+            self.record_issue(
+                ConnectivityIssueKindV1::DirectDialFailed,
+                transport_peer_from_address(&address),
+                Some(&address),
+                error.to_string(),
+            );
+            return Err(error).context("failed to dial peer");
+        }
+        Ok(())
     }
 
     pub fn dial_known_peer(&mut self, peer: TransportPeerId, address: Multiaddr) -> Result<()> {
         self.swarm.behaviour_mut().kad.add_address(&peer, address.clone());
-        self.swarm.dial(DialOpts::peer_id(peer).addresses(vec![address]).build()).context("failed to dial known peer")
+        let options = DialOpts::peer_id(peer).addresses(vec![address.clone()]).build();
+        if let Err(error) = self.swarm.dial(options) {
+            self.record_issue(ConnectivityIssueKindV1::DirectDialFailed, Some(peer), Some(&address), error.to_string());
+            return Err(error).context("failed to dial known peer");
+        }
+        Ok(())
+    }
+
+    /// Prefer direct addresses and make at most one relay fallback attempt if the
+    /// direct dial fails. Calling this method again replaces the prior dial plan.
+    pub fn dial_with_relay_fallback(
+        &mut self,
+        remote_peer: TransportPeerId,
+        direct_addresses: Vec<Multiaddr>,
+        relay_peer: TransportPeerId,
+        relay_address: Multiaddr,
+    ) -> Result<()> {
+        let relay_base = ensure_peer_suffix(relay_address, relay_peer);
+        let relay_circuit = relay_base.clone().with(Protocol::P2pCircuit).with(Protocol::P2p(remote_peer));
+        self.relay_peers.insert(relay_peer);
+        self.diagnostics.record_relay_configured(relay_base.to_string(), self.relay_peers.len());
+        self.swarm.behaviour_mut().kad.add_address(&relay_peer, relay_base.clone());
+        self.swarm.behaviour_mut().auto_nat.add_server(relay_peer, Some(relay_base));
+        self.relay_fallbacks.insert(remote_peer, RelayFallbackPlan { relay_address: relay_circuit, attempted: false });
+
+        let direct_addresses: Vec<_> = direct_addresses
+            .into_iter()
+            .filter(|address| !address.iter().any(|protocol| matches!(protocol, Protocol::P2pCircuit)))
+            .collect();
+
+        if direct_addresses.is_empty() {
+            self.record_issue(
+                ConnectivityIssueKindV1::DirectDialFailed,
+                Some(remote_peer),
+                None,
+                "no direct address is available; relay fallback is required",
+            );
+            self.try_relay_fallback(remote_peer)?;
+            return Ok(());
+        }
+
+        for address in &direct_addresses {
+            self.swarm.behaviour_mut().kad.add_address(&remote_peer, address.clone());
+        }
+        let options = DialOpts::peer_id(remote_peer).addresses(direct_addresses).build();
+        if let Err(error) = self.swarm.dial(options) {
+            self.record_issue(ConnectivityIssueKindV1::DirectDialFailed, Some(remote_peer), None, error.to_string());
+            self.try_relay_fallback(remote_peer)?;
+        }
+        Ok(())
     }
 
     pub fn add_bootstrap_peer(&mut self, peer: TransportPeerId, address: Multiaddr) {
+        self.bootstrap_peers.insert(peer);
+        self.diagnostics.record_bootstrap_configured(self.bootstrap_peers.len());
         self.swarm.behaviour_mut().kad.add_address(&peer, address);
     }
 
     pub fn add_bootstrap_address(&mut self, address: Multiaddr) -> Result<TransportPeerId> {
-        let peer = transport_peer_from_address(&address).context("bootstrap address must contain /p2p/<peer-id>")?;
+        let Some(peer) = transport_peer_from_address(&address) else {
+            self.record_issue(
+                ConnectivityIssueKindV1::InvalidAddress,
+                None,
+                Some(&address),
+                "bootstrap address must contain /p2p/<peer-id>",
+            );
+            return Err(anyhow!("bootstrap address must contain /p2p/<peer-id>"));
+        };
         self.add_bootstrap_peer(peer, address.clone());
         if !self.swarm.is_connected(&peer) {
-            self.swarm.dial(address).context("failed to dial bootstrap peer")?;
+            if let Err(error) = self.swarm.dial(address.clone()) {
+                self.record_issue(
+                    ConnectivityIssueKindV1::BootstrapUnavailable,
+                    Some(peer),
+                    Some(&address),
+                    error.to_string(),
+                );
+                return Err(error).context("failed to dial bootstrap peer");
+            }
         }
         Ok(peer)
     }
 
     pub fn bootstrap(&mut self) -> Result<()> {
-        self.swarm.behaviour_mut().kad.bootstrap().map(|_| ()).context("Kademlia bootstrap failed")
+        match self.swarm.behaviour_mut().kad.bootstrap() {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                self.record_issue(ConnectivityIssueKindV1::BootstrapUnavailable, None, None, error.to_string());
+                Err(error).context("Kademlia bootstrap failed")
+            }
+        }
     }
 
     pub fn configure_relay(&mut self, relay_peer: TransportPeerId, relay_address: Multiaddr) -> Result<()> {
         let relay_address = ensure_peer_suffix(relay_address, relay_peer);
-        self.diagnostics.selected_relay = Some(relay_address.to_string());
+        self.relay_peers.insert(relay_peer);
+        self.diagnostics.record_relay_configured(relay_address.to_string(), self.relay_peers.len());
         self.swarm.behaviour_mut().kad.add_address(&relay_peer, relay_address.clone());
         self.swarm.behaviour_mut().auto_nat.add_server(relay_peer, Some(relay_address.clone()));
         if !self.swarm.is_connected(&relay_peer) {
-            self.swarm.dial(relay_address.clone()).context("failed to dial relay")?;
+            if let Err(error) = self.swarm.dial(relay_address.clone()) {
+                self.record_issue(
+                    ConnectivityIssueKindV1::RelayUnavailable,
+                    Some(relay_peer),
+                    Some(&relay_address),
+                    error.to_string(),
+                );
+                return Err(error).context("failed to dial relay");
+            }
         }
         self.swarm
             .listen_on(relay_address.with(Protocol::P2pCircuit))
@@ -193,7 +303,15 @@ impl SwarmNode {
     }
 
     pub fn configure_relay_address(&mut self, address: Multiaddr) -> Result<TransportPeerId> {
-        let peer = transport_peer_from_address(&address).context("relay address must contain /p2p/<peer-id>")?;
+        let Some(peer) = transport_peer_from_address(&address) else {
+            self.record_issue(
+                ConnectivityIssueKindV1::InvalidAddress,
+                None,
+                Some(&address),
+                "relay address must contain /p2p/<peer-id>",
+            );
+            return Err(anyhow!("relay address must contain /p2p/<peer-id>"));
+        };
         self.configure_relay(peer, address)?;
         Ok(peer)
     }
@@ -204,9 +322,20 @@ impl SwarmNode {
         relay_address: Multiaddr,
         remote_peer: TransportPeerId,
     ) -> Result<()> {
-        let address =
-            ensure_peer_suffix(relay_address, relay_peer).with(Protocol::P2pCircuit).with(Protocol::P2p(remote_peer));
-        self.swarm.dial(address).context("failed to dial peer through relay")
+        let relay_base = ensure_peer_suffix(relay_address, relay_peer);
+        self.relay_peers.insert(relay_peer);
+        self.diagnostics.record_relay_configured(relay_base.to_string(), self.relay_peers.len());
+        let address = relay_base.with(Protocol::P2pCircuit).with(Protocol::P2p(remote_peer));
+        if let Err(error) = self.swarm.dial(address.clone()) {
+            self.record_issue(
+                ConnectivityIssueKindV1::RelayUnavailable,
+                Some(remote_peer),
+                Some(&address),
+                error.to_string(),
+            );
+            return Err(error).context("failed to dial peer through relay");
+        }
+        Ok(())
     }
 
     pub fn add_autonat_server(&mut self, peer: TransportPeerId, address: Multiaddr) {
@@ -255,19 +384,25 @@ impl SwarmNode {
                 SwarmEvent::NewListenAddr { address, .. } => {
                     self.diagnostics.record_local_address(address.to_string());
                     if address.iter().any(|protocol| matches!(protocol, Protocol::P2pCircuit)) {
-                        self.diagnostics.relay_connectivity = true;
+                        self.diagnostics.record_relay_connected();
                     }
                     info!(%address, "network listening");
                     return Ok(NetworkEvent::Listening { address });
                 }
                 SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, num_established, .. } => {
-                    let endpoint_debug = format!("{endpoint:?}");
-                    if endpoint_debug.contains("p2p-circuit") || endpoint_debug.contains("P2pCircuit") {
-                        self.diagnostics.relay_connectivity = true;
-                    } else {
+                    let infrastructure_peer =
+                        self.bootstrap_peers.contains(&peer_id) || self.relay_peers.contains(&peer_id);
+                    if endpoint.is_relayed() {
+                        self.diagnostics.record_relay_connected();
+                        self.relay_fallbacks.remove(&peer_id);
+                    } else if !infrastructure_peer {
                         self.diagnostics.record_direct_success();
+                        self.relay_fallbacks.remove(&peer_id);
                     }
-                    debug!(transport_peer = %peer_id, %connection_id, %num_established, "peer connected");
+                    if self.bootstrap_peers.contains(&peer_id) {
+                        self.diagnostics.record_bootstrap_connected();
+                    }
+                    debug!(transport_peer = %peer_id, %connection_id, %num_established, relayed = endpoint.is_relayed(), "peer connected");
 
                     // request-response chooses a connection by peer ID, not by connection
                     // ID. After a hard peer restart libp2p can briefly retain the dead
@@ -309,12 +444,53 @@ impl SwarmNode {
                     }
                     debug!(transport_peer = %peer_id, %connection_id, remaining_connections = num_established, "peer connection closed; keeping authentication for remaining connection");
                 }
+                SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                    let error_text = error.to_string();
+                    if let Some(peer) = peer_id {
+                        if self.relay_fallbacks.get(&peer).is_some_and(|plan| !plan.attempted) {
+                            self.record_issue(ConnectivityIssueKindV1::DirectDialFailed, Some(peer), None, error_text);
+                            if let Err(fallback_error) = self.try_relay_fallback(peer) {
+                                warn!(transport_peer = %peer, error = %fallback_error, "relay fallback could not be started");
+                            }
+                            continue;
+                        }
+                        if self.relay_fallbacks.get(&peer).is_some_and(|plan| plan.attempted) {
+                            self.record_issue(ConnectivityIssueKindV1::RelayUnavailable, Some(peer), None, error_text);
+                            self.diagnostics.record_no_viable_path(format!(
+                                "direct and relay paths failed for transport peer {peer}"
+                            ));
+                            self.relay_fallbacks.remove(&peer);
+                            continue;
+                        }
+                        if self.bootstrap_peers.contains(&peer) {
+                            self.record_issue(
+                                ConnectivityIssueKindV1::BootstrapUnavailable,
+                                Some(peer),
+                                None,
+                                error_text,
+                            );
+                        } else if self.relay_peers.contains(&peer) {
+                            self.record_issue(ConnectivityIssueKindV1::RelayUnavailable, Some(peer), None, error_text);
+                        } else {
+                            self.record_issue(ConnectivityIssueKindV1::DirectDialFailed, Some(peer), None, error_text);
+                        }
+                    } else {
+                        self.record_issue(ConnectivityIssueKindV1::DirectDialFailed, None, None, error_text);
+                    }
+                    warn!(transport_peer = ?peer_id, error = %error, "outgoing connection failed");
+                }
                 SwarmEvent::Behaviour(BehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
                     if let Some((peer, address)) = peers.into_iter().next() {
                         debug!(transport_peer = %peer, %address, "mDNS discovered peer");
                         self.swarm.behaviour_mut().kad.add_address(&peer, address.clone());
                         if !self.swarm.is_connected(&peer) {
                             if let Err(error) = self.swarm.dial(address.clone()) {
+                                self.record_issue(
+                                    ConnectivityIssueKindV1::DirectDialFailed,
+                                    Some(peer),
+                                    Some(&address),
+                                    error.to_string(),
+                                );
                                 warn!(transport_peer = %peer, %address, %error, "mDNS peer dial failed");
                             }
                         }
@@ -380,7 +556,12 @@ impl SwarmNode {
                         }
                     },
                     request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
-                        self.diagnostics.record_direct_failure(error.to_string());
+                        self.record_issue(
+                            ConnectivityIssueKindV1::DirectDialFailed,
+                            Some(peer),
+                            None,
+                            error.to_string(),
+                        );
                         return Ok(NetworkEvent::OutboundFailure {
                             transport_peer: peer,
                             request_id,
@@ -393,29 +574,36 @@ impl SwarmNode {
                     request_response::Event::ResponseSent { .. } => {}
                 },
                 SwarmEvent::Behaviour(BehaviourEvent::RelayClient(event)) => {
-                    let event_debug = format!("{event:?}");
-                    if event_debug.contains("ReservationReqAccepted") || event_debug.contains("Reservation") {
-                        self.diagnostics.relay_connectivity = true;
+                    match &event {
+                        relay::client::Event::ReservationReqAccepted { relay_peer_id, .. }
+                        | relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
+                            self.relay_peers.insert(*relay_peer_id);
+                            self.diagnostics.record_relay_connected();
+                        }
+                        relay::client::Event::InboundCircuitEstablished { .. } => {
+                            self.diagnostics.record_relay_connected();
+                        }
                     }
                     debug!(?event, "relay client event");
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Dcutr(event)) => {
-                    let event_debug = format!("{event:?}");
                     self.diagnostics.start_hole_punch();
-                    if event_debug.contains("Success") {
-                        self.diagnostics.finish_hole_punch(Ok::<(), String>(()));
-                        self.diagnostics.direct_connectivity = true;
-                    } else if event_debug.contains("Error") || event_debug.contains("Failed") {
-                        self.diagnostics.finish_hole_punch(Err(event_debug.clone()));
+                    match &event.result {
+                        Ok(_) => self.diagnostics.finish_hole_punch(Ok::<(), String>(())),
+                        Err(error) => self.diagnostics.finish_hole_punch(Err(error.to_string())),
                     }
-                    info!(?event, "DCUtR hole-punch event");
+                    info!(remote_peer = %event.remote_peer_id, result = ?event.result, "DCUtR hole-punch event");
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::AutoNat(event)) => {
-                    let event_debug = format!("{event:?}");
-                    if event_debug.contains("Public") {
-                        self.diagnostics.nat_status = NatStatusV1::Public;
-                    } else if event_debug.contains("Private") {
-                        self.diagnostics.nat_status = NatStatusV1::Private;
+                    if let autonat::Event::StatusChanged { new, .. } = &event {
+                        match new {
+                            autonat::NatStatus::Public(address) => {
+                                self.diagnostics.record_observed_address(address.to_string());
+                                self.diagnostics.record_nat_status(NatStatusV1::Public);
+                            }
+                            autonat::NatStatus::Private => self.diagnostics.record_nat_status(NatStatusV1::Private),
+                            autonat::NatStatus::Unknown => self.diagnostics.record_nat_status(NatStatusV1::Unknown),
+                        }
                     }
                     debug!(?event, "AutoNAT event");
                 }
@@ -425,6 +613,49 @@ impl SwarmNode {
                 other => debug!(event = ?other, "network event"),
             }
         }
+    }
+
+    fn try_relay_fallback(&mut self, peer: TransportPeerId) -> Result<bool> {
+        let relay_address = {
+            let Some(plan) = self.relay_fallbacks.get_mut(&peer) else {
+                return Ok(false);
+            };
+            if plan.attempted {
+                return Ok(false);
+            }
+            plan.attempted = true;
+            plan.relay_address.clone()
+        };
+
+        if let Err(error) = self.swarm.dial(relay_address.clone()) {
+            self.record_issue(
+                ConnectivityIssueKindV1::RelayUnavailable,
+                Some(peer),
+                Some(&relay_address),
+                error.to_string(),
+            );
+            self.diagnostics.record_no_viable_path(format!(
+                "direct path failed and relay fallback could not be started for transport peer {peer}"
+            ));
+            self.relay_fallbacks.remove(&peer);
+            return Err(error).context("failed to start relay fallback");
+        }
+        Ok(true)
+    }
+
+    fn record_issue(
+        &mut self,
+        kind: ConnectivityIssueKindV1,
+        peer: Option<TransportPeerId>,
+        address: Option<&Multiaddr>,
+        detail: impl Into<String>,
+    ) {
+        self.diagnostics.record_issue(ConnectivityIssueV1 {
+            kind,
+            peer: peer.map(|peer| peer.to_string()),
+            address: address.map(ToString::to_string),
+            detail: detail.into(),
+        });
     }
 }
 

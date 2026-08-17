@@ -170,6 +170,30 @@ async fn recover_world(app: AppHandle, world: String, snapshot: u64, destination
     .await
 }
 
+#[tauri::command]
+async fn migration_capabilities(app: AppHandle) -> String {
+    let mut supported = Vec::new();
+    if run_cli(&app, vec!["world".into(), "migration-status".into(), "--help".into()]).await.is_ok() {
+        supported.push("status");
+    }
+    if run_cli(&app, vec!["world".into(), "wake".into(), "--help".into()]).await.is_ok() {
+        supported.push("wake");
+    }
+    supported.join(",")
+}
+
+#[tauri::command]
+async fn migration_status(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "migration-status".into(), world, "--json".into()]).await
+}
+
+#[tauri::command]
+async fn wake_world(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "wake".into(), world]).await
+}
+
 #[tauri::command(rename_all = "camelCase")]
 fn host_world(
     app: AppHandle,
@@ -222,6 +246,9 @@ fn main() {
             verify_world,
             export_world,
             recover_world,
+            migration_capabilities,
+            migration_status,
+            wake_world,
             start_daemon,
             stop_daemon,
             stop_host,

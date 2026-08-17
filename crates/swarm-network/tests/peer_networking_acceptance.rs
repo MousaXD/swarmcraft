@@ -2,7 +2,8 @@ use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
 use std::time::Duration;
 use swarm_network::{
-    load_or_create_transport_key, NetworkEvent, SwarmNode, TransportPeerId, WireRequest, WireResponse,
+    generate_transport_key, load_or_create_transport_key, ConnectivityIssueKindV1, NetworkEvent, SwarmNode,
+    TransportPeerId, WireRequest, WireResponse,
 };
 use swarm_protocol::{peer_id_from_public_key, PeerHelloV1, PeerId, PROTOCOL_VERSION};
 use tempfile::tempdir;
@@ -121,4 +122,21 @@ async fn hard_reconnect_preserves_transport_identity_and_authenticated_requests(
     wait_for_authentication(&mut node_a, &mut replacement_b, app_a, app_b).await;
     assert_eq!(node_a.application_peer(&transport_b), Some(app_b));
     assert_ping_round_trip(&mut replacement_b, &mut node_a, transport_a).await;
+}
+
+#[tokio::test]
+async fn invalid_bootstrap_address_is_rejected_and_diagnosed() {
+    let app_key = SigningKey::generate(&mut OsRng);
+    let hello = signed_hello(&app_key, 9);
+    let mut node = SwarmNode::new(generate_transport_key(), hello).unwrap();
+    let invalid_bootstrap = "/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap();
+
+    let error = node.add_bootstrap_address(invalid_bootstrap).unwrap_err();
+    assert!(error.to_string().contains("/p2p/<peer-id>"));
+
+    let diagnostics = node.connectivity_diagnostics();
+    assert_eq!(
+        diagnostics.recent_failures.last().map(|issue| issue.kind),
+        Some(ConnectivityIssueKindV1::InvalidAddress)
+    );
 }

@@ -1,17 +1,6 @@
 name: Network Soak
 
 on:
-  pull_request:
-    paths:
-      - 'crates/swarm-network/**'
-      - 'crates/swarm-storage/**'
-      - '.github/workflows/network-soak.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'crates/swarm-network/**'
-      - 'crates/swarm-storage/**'
-      - '.github/workflows/network-soak.yml'
   workflow_dispatch:
     inputs:
       gib:
