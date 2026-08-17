@@ -1,0 +1,62 @@
+name: Desktop stop wording helper
+
+on:
+  push:
+    branches:
+      - agent/desktop-ux
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/desktop-ux
+      - name: Keep direct host stop distinct from durable sleep
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          index = Path('apps/desktop/src/index.html')
+          text = index.read_text()
+          text = text.replace('>Sleep world…</button>', '>Stop world…</button>', 1)
+          text = text.replace('<h2>Sleep this world?</h2>', '<h2>Stop this world?</h2>', 1)
+          text = text.replace(
+              '<p>SwarmCraft will request a graceful runtime stop. Background replica storage can continue separately.</p>',
+              '<p>SwarmCraft will stop the local Minecraft runtime. This does not itself create a durable sleeping migration state. Background replica storage can continue separately.</p>',
+              1,
+          )
+          text = text.replace('>Sleep world</button>', '>Stop world</button>', 1)
+          index.write_text(text)
+
+          app = Path('apps/desktop/src/app.js')
+          text = app.read_text()
+          text = text.replace("setOutput(String(error), 'Sleep world');", "setOutput(String(error), 'Stop world');", 1)
+          text = text.replace("await run('Requesting graceful sleep…', () => backend.stopHost(), {", "await run('Stopping local Minecraft runtime…', () => backend.stopHost(), {", 1)
+          app.write_text(text)
+
+          tests = Path('apps/desktop/tests/frontend-contract.test.mjs')
+          text = tests.read_text()
+          marker = "  assert.match(html, /aria-live=\"polite\"/);\n"
+          insertion = "  assert.doesNotMatch(html, />Sleep world/);\n  assert.match(html, /does not itself create a durable sleeping migration state/);\n"
+          if insertion not in text:
+              if marker not in text:
+                  raise SystemExit('html contract marker missing')
+              text = text.replace(marker, insertion + marker, 1)
+          tests.write_text(text)
+          PY
+      - name: Check JavaScript syntax
+        run: node --check apps/desktop/src/app.js && node --check apps/desktop/src/backend-adapter.js
+      - name: Run desktop contract tests
+        run: node --test apps/desktop/tests/frontend-contract.test.mjs
+      - name: Commit wording fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/desktop/src/index.html apps/desktop/src/app.js apps/desktop/tests/frontend-contract.test.mjs
+          git commit -m "fix(desktop): distinguish runtime stop from sleep"
+          git push origin HEAD:agent/desktop-ux
