@@ -1,0 +1,217 @@
+use anyhow::{anyhow, bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
+use swarm_core::DataPaths;
+use swarm_protocol::{ArtifactRequirementV1, ArtifactSideV1, Hash32, RuntimeCompatibilityManifestV1, WorldId};
+
+const ARTIFACT_HASH_DOMAIN: &[u8] = b"swarmcraft/runtime-artifact/v1\0";
+const MAX_JAR_BYTES: usize = 256 * 1024 * 1024;
+const MAX_METADATA_COMPRESSED_BYTES: usize = 4 * 1024 * 1024;
+const MAX_METADATA_BYTES: usize = 1024 * 1024;
+const FABRIC_METADATA_PATH: &str = "fabric.mod.json";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModEnvironment {
+    Server,
+    Universal,
+    Client,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModComponentKind {
+    ManagedRuntime,
+    UserServerMod,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FabricModMetadata {
+    pub mod_id: String,
+    pub version: String,
+    pub name: Option<String>,
+    pub environment: ModEnvironment,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstalledServerMod {
+    pub file_name: String,
+    pub path: PathBuf,
+    pub mod_id: String,
+    pub version: String,
+    pub artifact_hash: String,
+    pub environment: ModEnvironment,
+    pub component_kind: ModComponentKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequiredServerMod {
+    pub mod_id: String,
+    pub version: String,
+    pub artifact_hash: String,
+    pub side: ArtifactSideV1,
+    pub component_kind: ModComponentKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ModIssueKind {
+    InvalidJar,
+    DuplicateModId,
+    ConflictingVersion,
+    MissingRequired,
+    HashMismatch,
+    VersionMismatch,
+    UnexpectedMod,
+    ClientOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModIssue {
+    pub kind: ModIssueKind,
+    pub mod_id: Option<String>,
+    pub file_name: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerModReadiness {
+    pub world_id: String,
+    pub mods_dir: PathBuf,
+    pub ready: bool,
+    pub required: Vec<RequiredServerMod>,
+    pub installed: Vec<InstalledServerMod>,
+    pub issues: Vec<ModIssue>,
+}
+
+#[derive(Debug, Clone)]
+struct JarInspection {
+    metadata: FabricModMetadata,
+    artifact_hash: Hash32,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct ZipEntry {
+    compression: u16,
+    crc32: u32,
+    compressed_size: usize,
+    uncompressed_size: usize,
+    local_header_offset: usize,
+}
+
+pub fn mods_dir(paths: &DataPaths, world: WorldId) -> PathBuf {
+    paths.worlds_dir().join(world.to_hex()).join("runtime-profile").join("mods")
+}
+
+pub fn inspect_fabric_mod(path: &Path) -> Result<InstalledServerMod> {
+    let inspected = inspect_jar(path)?;
+    Ok(installed_from_inspection(path, &inspected))
+}
+
+pub fn requirements_from_jars(paths: &[PathBuf]) -> Result<Vec<ArtifactRequirementV1>> {
+    let mut requirements = Vec::with_capacity(paths.len());
+    let mut seen = BTreeSet::new();
+    for path in paths {
+        let requirement = requirement_from_jar(path)?;
+        if !seen.insert(requirement.artifact_id.clone()) {
+            bail!(
+                "duplicate Fabric mod id {} in selected server mods",
+                requirement.artifact_id
+            );
+        }
+        requirements.push(requirement);
+    }
+    requirements.sort_by(|a, b| {
+        a.artifact_id
+            .cmp(&b.artifact_id)
+            .then(a.version.cmp(&b.version))
+            .then(a.artifact_hash.0.cmp(&b.artifact_hash.0))
+    });
+    Ok(requirements)
+}
+
+pub fn requirement_from_jar(path: &Path) -> Result<ArtifactRequirementV1> {
+    let inspected = inspect_jar(path)?;
+    if inspected.metadata.environment == ModEnvironment::Client {
+        bail!("Fabric mod {} is client-only and cannot be required as a server mod", inspected.metadata.mod_id);
+    }
+    if is_managed_component(&inspected.metadata.mod_id) {
+        bail!(
+            "{} is a SwarmCraft-managed runtime component, not a user server mod",
+            inspected.metadata.mod_id
+        );
+    }
+    Ok(ArtifactRequirementV1 {
+        artifact_id: inspected.metadata.mod_id,
+        version: inspected.metadata.version,
+        artifact_hash: inspected.artifact_hash,
+        side: match inspected.metadata.environment {
+            ModEnvironment::Universal => ArtifactSideV1::Both,
+            ModEnvironment::Server | ModEnvironment::Unknown => ArtifactSideV1::Server,
+            ModEnvironment::Client => unreachable!(),
+        },
+        provider_hint: None,
+    })
+}
+
+pub fn add_local_mod(
+    paths: &DataPaths,
+    world: WorldId,
+    manifest: &RuntimeCompatibilityManifestV1,
+    source: &Path,
+) -> Result<InstalledServerMod> {
+    let inspected = inspect_jar(source)?;
+    if inspected.metadata.environment == ModEnvironment::Client {
+        bail!("Fabric mod {} is client-only", inspected.metadata.mod_id);
+    }
+    if is_managed_component(&inspected.metadata.mod_id) {
+        bail!(
+            "{} is managed by the runtime installer and cannot be added as a user server mod",
+            inspected.metadata.mod_id
+        );
+    }
+    let expected = canonical_user_requirements(manifest)
+        .into_iter()
+        .find(|required| required.artifact_id == inspected.metadata.mod_id)
+        .ok_or_else(|| {
+            anyhow!(
+                "{} is not part of this world's canonical server-mod profile; protocol v1 profiles cannot be changed in place",
+                inspected.metadata.mod_id
+            )
+        })?;
+    if expected.version != inspected.metadata.version {
+        bail!(
+            "{} version mismatch: world requires {}, selected JAR is {}",
+            expected.artifact_id,
+            expected.version,
+            inspected.metadata.version
+        );
+    }
+    if expected.artifact_hash != inspected.artifact_hash {
+        bail!("{} artifact hash does not match the world's canonical requirement", expected.artifact_id);
+    }
+
+    let dir = mods_dir(paths, world);
+    fs::create_dir_all(&dir).with_context(|| format!("cannot create server mods directory {}", dir.display()))?;
+    let destination = dir.join(canonical_file_name(
+        &inspected.metadata.mod_id,
+        &inspected.metadata.version,
+        inspected.artifact_hash,
+    ));
+    atomic_write(&destination, &inspected.bytes)?;
+    Ok(installed_from_inspection(&destination, &inspected))
+}
+
+pub fn remove_local_mod(paths: &DataPaths, world: WorldId, mod_id: &str) -> Result<Vec<PathBuf>> {
+    let dir = mods_dir(paths, world);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
