@@ -378,21 +378,15 @@ fn open_gc_lock_file(path: &Path) -> Result<File, StorageError> {
         .map_err(|source| io_error(path, source))
 }
 
-fn write_hash_pins(
-    pins_dir: &Path,
-    hashes: impl IntoIterator<Item = Hash32>,
-) -> Result<Vec<PathBuf>, StorageError> {
+fn write_hash_pins(pins_dir: &Path, hashes: impl IntoIterator<Item = Hash32>) -> Result<Vec<PathBuf>, StorageError> {
     fs::create_dir_all(pins_dir).map_err(|source| io_error(pins_dir, source))?;
     let token = PIN_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut paths = Vec::new();
     let mut unique = BTreeSet::new();
     for hash in hashes.into_iter().filter(|hash| unique.insert(*hash)) {
         let path = pins_dir.join(format!("{}-{token}-{}.pin", std::process::id(), hash.to_hex()));
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
-            .map_err(|source| io_error(&path, source))?;
+        let mut file =
+            OpenOptions::new().create_new(true).write(true).open(&path).map_err(|source| io_error(&path, source))?;
         paths.push(path.clone());
         if let Err(source) = file.write_all(hash.to_hex().as_bytes()).and_then(|()| file.sync_all()) {
             remove_pin_paths(&paths, "incomplete GC pin");
@@ -427,12 +421,8 @@ fn read_hash_pins(pins_dir: &Path) -> Result<BTreeSet<Hash32>, RetentionError> {
 
 fn read_pin_hash(path: &Path) -> Result<Hash32, StorageError> {
     let bytes = fs::read(path).map_err(|source| io_error(path, source))?;
-    let value = std::str::from_utf8(&bytes).map_err(|_| {
-        io_error(
-            path,
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "GC pin is not UTF-8"),
-        )
-    })?;
+    let value = std::str::from_utf8(&bytes)
+        .map_err(|_| io_error(path, std::io::Error::new(std::io::ErrorKind::InvalidData, "GC pin is not UTF-8")))?;
     Hash32::from_str(value.trim()).map_err(StorageError::from)
 }
 
@@ -529,13 +519,7 @@ mod platform_lock {
 
 #[cfg(windows)]
 mod platform_lock {
-    use std::{
-        ffi::c_void,
-        fs::File,
-        io,
-        os::windows::io::AsRawHandle,
-        ptr,
-    };
+    use std::{ffi::c_void, fs::File, io, os::windows::io::AsRawHandle, ptr};
 
     const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x0000_0001;
     const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x0000_0002;
@@ -575,27 +559,13 @@ mod platform_lock {
     }
 
     fn lock(file: &File, fail_immediately: bool) -> io::Result<()> {
-        let mut overlapped = Overlapped {
-            internal: 0,
-            internal_high: 0,
-            offset: 0,
-            offset_high: 0,
-            h_event: ptr::null_mut(),
-        };
+        let mut overlapped =
+            Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, h_event: ptr::null_mut() };
         let mut flags = LOCKFILE_EXCLUSIVE_LOCK;
         if fail_immediately {
             flags |= LOCKFILE_FAIL_IMMEDIATELY;
         }
-        let result = unsafe {
-            LockFileEx(
-                file.as_raw_handle().cast(),
-                flags,
-                0,
-                1,
-                0,
-                &mut overlapped,
-            )
-        };
+        let result = unsafe { LockFileEx(file.as_raw_handle().cast(), flags, 0, 1, 0, &mut overlapped) };
         if result == 0 {
             Err(io::Error::last_os_error())
         } else {
