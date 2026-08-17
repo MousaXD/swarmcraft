@@ -230,8 +230,11 @@ mod tests {
         let expanded = vec![0u8; 8 * 1024 * 1024];
         let encoded = zstd::stream::encode_all(expanded.as_slice(), 3).unwrap();
         fs::write(&path, &encoded).unwrap();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(BLOB_HASH_DOMAIN);
+        hasher.update(&[0]);
         let descriptor = BlobDescriptor {
-            hash: BlobDescriptor::hash_uncompressed(&[0]),
+            hash: Hash32(*hasher.finalize().as_bytes()),
             uncompressed_size: 1,
             encoded_size: encoded.len() as u64,
             encoding: BlobEncoding::Zstd,
