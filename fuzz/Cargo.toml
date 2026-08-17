@@ -1,0 +1,23 @@
+[package]
+name = "swarmcraft-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+postcard = { version = "1.0", features = ["alloc"] }
+swarm-protocol = { path = "../crates/swarm-protocol" }
+
+[[bin]]
+name = "canonical_records"
+path = "fuzz_targets/canonical_records.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
