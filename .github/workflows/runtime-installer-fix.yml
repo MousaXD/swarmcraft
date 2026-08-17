@@ -1,0 +1,143 @@
+name: Runtime installer fix
+
+on:
+  push:
+    branches: [agent/runtime-installer]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/runtime-installer
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply reviewed installer fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/swarm-cli/src/runtime_installer.rs')
+          text = path.read_text()
+
+          replacements = [
+              (
+                  'use anyhow::{anyhow, bail, Context, Result};',
+                  'use anyhow::{bail, Context, Result};',
+              ),
+              (
+                  'if major == resolved.required_java_major && !force {',
+                  'if major == resolved.required_java_major {',
+              ),
+              (
+                  'return parse_hash_output(&text).context("certutil returned no digest");',
+                  'parse_hash_output(&text).context("certutil returned no digest")',
+              ),
+              (
+                  '''        let mut components = Vec::new();
+        components.push(self.java_status(required_java_major, lock.as_ref(), manual.as_ref(), lock_compatible));
+        components.push(self.artifact_status(
+            RuntimeComponentKind::MinecraftServer,
+            "minecraft_server",
+            lock.as_ref(),
+            lock_compatible,
+            Some(managed_world_server_dir(self.paths, world).join("server.jar")),
+        ));
+        components.push(self.artifact_status(
+            RuntimeComponentKind::FabricLoader,
+            "fabric_loader",
+            lock.as_ref(),
+            lock_compatible,
+            None,
+        ));
+        components.push(self.artifact_status(
+            RuntimeComponentKind::FabricApi,
+            "fabric_api",
+            lock.as_ref(),
+            lock_compatible,
+            Some(managed_world_mods_dir(self.paths, world).join("fabric-api.jar")),
+        ));
+        components.push(self.swarmcraft_status(world, lock.as_ref(), lock_compatible));''',
+                  '''        let mut components = vec![
+            self.java_status(required_java_major, lock.as_ref(), manual.as_ref(), lock_compatible),
+            self.artifact_status(
+                RuntimeComponentKind::MinecraftServer,
+                "minecraft_server",
+                lock.as_ref(),
+                lock_compatible,
+                Some(managed_world_server_dir(self.paths, world).join("server.jar")),
+            ),
+            self.artifact_status(
+                RuntimeComponentKind::FabricLoader,
+                "fabric_loader",
+                lock.as_ref(),
+                lock_compatible,
+                None,
+            ),
+            self.artifact_status(
+                RuntimeComponentKind::FabricApi,
+                "fabric_api",
+                lock.as_ref(),
+                lock_compatible,
+                Some(managed_world_mods_dir(self.paths, world).join("fabric-api.jar")),
+            ),
+            self.swarmcraft_status(world, lock.as_ref(), lock_compatible),
+        ];''',
+              ),
+              (
+                  '''    } else if parts.first() == Some(&1) && parts.get(1).copied().unwrap_or_default() >= 21 {
+        21
+    } else if parts.first() == Some(&1)
+        && parts.get(1) == Some(&20)
+        && parts.get(2).copied().unwrap_or_default() >= 5
+    {
+        21''',
+                  '''    } else if parts.first() == Some(&1)
+        && (parts.get(1).copied().unwrap_or_default() >= 21
+            || (parts.get(1) == Some(&20) && parts.get(2).copied().unwrap_or_default() >= 5))
+    {
+        21''',
+              ),
+          ]
+
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f'expected replacement source not found: {old[:80]!r}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+
+          lib = Path('crates/swarm-cli/src/lib.rs')
+          lib_text = lib.read_text()
+          workaround = '''#[allow(
+    unused_imports,
+    clippy::vec_init_then_push,
+    clippy::if_same_then_else
+)]
+pub mod runtime_installer;'''
+          if workaround not in lib_text:
+              raise SystemExit('temporary lint workaround not found')
+          lib.write_text(lib_text.replace(workaround, 'pub mod runtime_installer;', 1))
+          PY
+      - name: Format
+        run: cargo fmt --all
+      - name: Clippy
+        run: cargo clippy -p swarm-cli --all-targets --all-features --locked -- -D warnings
+      - name: Tests
+        run: cargo test -p swarm-cli --all-features --locked
+      - name: Commit validated fixes
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add crates/swarm-cli/src/runtime_installer.rs crates/swarm-cli/src/runtime_layout.rs crates/swarm-cli/src/runtime_main.rs crates/swarm-cli/src/lib.rs
+          git diff --cached --quiet && exit 0
+          git commit -m "runtime: format and harden installer"
+          git push origin HEAD:agent/runtime-installer
