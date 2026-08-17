@@ -1,75 +1,81 @@
 # SwarmCraft Desktop
 
-The SwarmCraft desktop application is the current player-facing technical-preview shell for the Rust runtime.
+SwarmCraft Desktop is the player-facing Tauri 2 launcher for replicated Minecraft worlds.
 
-It is a **Tauri 2** application with a deliberately small frontend stack:
+The frontend intentionally stays small and dependency-free:
 
 ```text
 apps/desktop/
 ├── src/
-│   ├── index.html   # semantic structure
-│   ├── style.css    # visual system
-│   └── app.js       # DOM behavior and Tauri command wiring
+│   ├── index.html          # semantic launcher structure
+│   ├── style.css           # shared visual/component system
+│   ├── backend-adapter.js  # Tauri contract and future migration seam
+│   └── app.js              # state rendering and interactions
+├── tests/
+│   └── frontend-contract.test.mjs
 └── src-tauri/
-    ├── src/         # Rust commands/runtime process management
+    ├── src/
     └── tauri.conf.json
 ```
 
-The desktop bundles SwarmCraft runtime sidecars and invokes the same CLI/runtime functionality used outside the GUI.
+## Player flows
 
-## Current capabilities
+The launcher centers normal use around:
 
-The 0.2.1 desktop preview includes:
+- creating a world;
+- joining with a signed invite;
+- choosing a world and playing;
+- inviting friends;
+- seeing safety, host and connectivity summaries;
+- keeping or verifying a background replica;
+- sleeping/stopping a running world;
+- preparing for player-facing host transfer and migration progress;
+- opening advanced diagnostics only when technical setup or recovery is needed.
 
-- local peer initialization and identity display;
-- world listing and safety state;
-- world creation;
-- signed invite creation and invite-based joining;
-- membership leave requests;
-- compatibility/authority-eligibility checks;
-- play/host startup;
-- graceful world sleep/host stop;
-- background replica seeding controls;
-- conflict inspection;
-- peer/membership inspection;
-- snapshot verification;
-- export and recovery tools;
-- replication daemon controls;
-- networking/runtime diagnostics;
-- activity/error history.
+Conflict, solo/degraded, canonical, authority-eligibility, membership and relay semantics remain distinct. A storage replica never implies authority eligibility, and discovery never implies membership.
 
-The UI deliberately distinguishes canonical state, solo/degraded state and preserved conflict state. It must also keep authority eligibility separate from merely holding a storage replica.
+## Backend integration
 
-## Current limitations
+`src/backend-adapter.js` is the only frontend seam for Tauri command contracts. Existing command names and payload shapes remain unchanged.
 
-The desktop is not yet a one-click Minecraft launcher.
+Migration-core is intentionally not simulated in JavaScript. The adapter currently reports migration status/transfer/wake capabilities as unavailable. The UI already knows how to render the agreed migration phases:
 
-Hosting may still require the user to provide:
+- Preparing successor
+- Saving world
+- Transferring authority
+- Restoring world
+- Starting Minecraft
+- Waiting for host
+- Ready
+- Migration failed
 
-- a Java runtime path/configuration;
-- a compatible Fabric server JAR;
-- the SwarmCraft Fabric mod JAR;
-- explicit Minecraft EULA acceptance.
+When migration-core exposes desktop commands, connect them in the adapter and enable the corresponding capabilities rather than implementing authority or recovery decisions in frontend code.
 
-The app also does not yet automatically start Minecraft on a newly elected recovery successor or automatically reconnect players after host migration.
+Structured connectivity is consumed from world status when the backend reports fields such as `Connectivity`, `Connectivity state`, `Connection`, `Network path`, or `Reachability`. The player-facing states are Direct, Relay, Connecting, Offline, Limited connectivity, and Action required. When no structured state exists, the UI says that it is not reported rather than guessing.
 
-Those are major remaining product milestones rather than hidden completed features.
+## Current runtime limitation
 
-## Development constraints
+The current direct-host Play command can still require advanced runtime setup:
 
-Read the repository-level [AGENTS.md](../../AGENTS.md) before changing the desktop UI.
+- Java executable;
+- compatible Fabric server JAR;
+- SwarmCraft Fabric mod JAR;
+- Minecraft server EULA acceptance.
 
-In particular:
+Those controls live in Diagnostics instead of the primary world flow. Automatic migration/wake remains unavailable until migration-core exposes the backend contract.
 
-- keep the existing HTML/CSS/JavaScript frontend unless an architectural change is explicitly required;
-- do not add a framework, CSS framework, icon pack, font dependency or frontend build pipeline merely for styling;
-- preserve protocol/safety semantics when simplifying UI;
-- validate the configured default and minimum window sizes;
-- preserve Tauri command names/payloads unless changing the Rust API intentionally.
+## Validation
 
-## Relevant docs
+Run the frontend contract checks with:
 
-- [Project status](../../docs/IMPLEMENTATION_STATUS.md)
-- [Product vision](../../docs/PRODUCT_VISION.md)
-- [Roadmap](../../ROADMAP.md)
-- [Network validation](../../docs/NETWORK_VALIDATION.md)
+```text
+node --test apps/desktop/tests/frontend-contract.test.mjs
+```
+
+For the Rust/Tauri shell, also run when the required Rust dependencies are available:
+
+```text
+cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
+```
+
+Visual changes should be inspected at the configured default `980x760` window and minimum `720x560` window. The Tauri global bridge must remain enabled with `app.withGlobalTauri: true` because the frontend consumes `window.__TAURI__.core.invoke`.
