@@ -250,9 +250,15 @@ fn restore_blob_streaming(
         if read == 0 {
             break;
         }
+        let next_total = total.checked_add(read as u64).ok_or(StorageError::BlobCorrupt(descriptor.hash))?;
+        if next_total > descriptor.uncompressed_size {
+            drop(temporary_file);
+            remove_if_present(&temporary_path)?;
+            return Err(StorageError::BlobCorrupt(descriptor.hash));
+        }
         hasher.update(&buffer[..read]);
         temporary_file.write_all(&buffer[..read]).map_err(|error| io_error(&temporary_path, error))?;
-        total = total.saturating_add(read as u64);
+        total = next_total;
     }
     if total != descriptor.uncompressed_size || Hash32(*hasher.finalize().as_bytes()) != descriptor.hash {
         remove_if_present(&temporary_path)?;
@@ -285,8 +291,12 @@ fn verify_encoded_blob_streaming(path: &Path, descriptor: &BlobDescriptor) -> Re
         if read == 0 {
             break;
         }
+        let next_total = total.checked_add(read as u64).ok_or(StorageError::BlobCorrupt(descriptor.hash))?;
+        if next_total > descriptor.uncompressed_size {
+            return Err(StorageError::BlobCorrupt(descriptor.hash));
+        }
         hasher.update(&buffer[..read]);
-        total = total.saturating_add(read as u64);
+        total = next_total;
     }
     if total != descriptor.uncompressed_size || Hash32(*hasher.finalize().as_bytes()) != descriptor.hash {
         return Err(StorageError::BlobCorrupt(descriptor.hash));

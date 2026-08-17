@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 use swarm_protocol::{
@@ -189,7 +189,12 @@ impl Storage {
         let bytes = match descriptor.encoding {
             BlobEncoding::Raw => encoded,
             BlobEncoding::Zstd => {
-                zstd::stream::decode_all(encoded.as_slice()).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?
+                let decoder = zstd::stream::read::Decoder::new(encoded.as_slice())
+                    .map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
+                let mut reader = decoder.take(descriptor.uncompressed_size.saturating_add(1));
+                let mut decoded = Vec::new();
+                reader.read_to_end(&mut decoded).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
+                decoded
             }
         };
         if bytes.len() as u64 != descriptor.uncompressed_size

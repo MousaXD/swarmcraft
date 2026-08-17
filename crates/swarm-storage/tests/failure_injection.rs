@@ -1,6 +1,6 @@
 use std::fs;
 
-use swarm_protocol::{snapshot_state_root, Hash32, PeerId, WorldId};
+use swarm_protocol::{snapshot_state_root, BlobDescriptor, BlobEncoding, Hash32, PeerId, WorldId};
 use swarm_storage::{SnapshotContext, Storage, StorageError};
 
 fn context(world: WorldId) -> SnapshotContext {
@@ -117,6 +117,34 @@ fn forged_state_root_is_rejected_before_restore() {
 
     assert!(matches!(storage.restore_snapshot(&manifest, &destination), Err(StorageError::StateRootMismatch)));
     assert!(!destination.join("level.dat").exists());
+}
+
+#[test]
+fn compressed_blob_larger_than_declared_size_is_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::open(temp.path().join("store")).unwrap();
+    let world = WorldId([6; 32]);
+    let hash = Hash32([0x44; 32]);
+    let expanded = vec![0x5a; 8 * 1024 * 1024];
+    let encoded = zstd::stream::encode_all(expanded.as_slice(), 3).unwrap();
+    let descriptor = BlobDescriptor {
+        hash,
+        uncompressed_size: 64,
+        encoded_size: encoded.len() as u64,
+        encoding: BlobEncoding::Zstd,
+    };
+    let blob_dir = storage.world_dir(world).join("blobs");
+    fs::create_dir_all(&blob_dir).unwrap();
+    fs::write(blob_dir.join(format!("{}.zst", hash.to_hex())), encoded).unwrap();
+
+    assert!(matches!(
+        storage.verify_blob_streaming(world, &descriptor),
+        Err(StorageError::BlobCorrupt(actual)) if actual == hash
+    ));
+    assert!(matches!(
+        storage.read_blob(world, &descriptor),
+        Err(StorageError::BlobCorrupt(actual)) if actual == hash
+    ));
 }
 
 #[test]
