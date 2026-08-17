@@ -9,15 +9,39 @@ async function text(name) {
   return readFile(new URL(name, srcRoot), 'utf8');
 }
 
-test('connectivity parser keeps player-facing transport states distinct', () => {
-  assert.equal(connectivityFromStatus({ Connectivity: 'Direct' }).label, 'Direct');
-  assert.equal(connectivityFromStatus({ 'Network path': 'Circuit relay' }).label, 'Relay');
-  assert.equal(connectivityFromStatus({ Connectivity: 'connecting' }).label, 'Connecting');
-  assert.equal(connectivityFromStatus({ Reachability: 'offline' }).label, 'Offline');
-  assert.equal(connectivityFromStatus({ Connectivity: 'limited NAT reachability' }).label, 'Limited connectivity');
-  assert.equal(connectivityFromStatus({ Connectivity: 'Limited connectivity' }).label, 'Limited connectivity');
-  assert.equal(connectivityFromStatus({ Connectivity: 'NAT blocked - action required' }).label, 'Action required');
+function connectivity(state, recent_failures = []) {
+  return { 'Connectivity JSON': JSON.stringify({ state, recent_failures }) };
+}
+
+test('connectivity parser consumes typed daemon JSON and never guesses from prose', () => {
+  assert.equal(connectivityFromStatus(connectivity('DirectReachable')).label, 'Direct');
+  assert.equal(connectivityFromStatus(connectivity('HolePunched')).label, 'Direct · hole punched');
+  assert.equal(connectivityFromStatus(connectivity('RelayConnected')).label, 'Relay');
+  assert.equal(connectivityFromStatus(connectivity('RelayRequired')).label, 'Relay required');
+  assert.equal(connectivityFromStatus(connectivity('NoViablePath')).label, 'No viable path');
+  const requestFailure = connectivityFromStatus(connectivity('NatStatusUnknown', [
+    { kind: 'RequestFailed', detail: 'request timed out' },
+  ]));
+  assert.match(requestFailure.detail, /RequestFailed/);
+  assert.match(requestFailure.detail, /request timed out/);
+  assert.equal(connectivityFromStatus({ Connectivity: 'Direct' }).label, 'Not reported');
+  assert.equal(connectivityFromStatus({ 'Network path': 'Circuit relay' }).label, 'Not reported');
   assert.equal(connectivityFromStatus({}).label, 'Not reported');
+});
+
+test('world status carries the daemon connectivity JSON without text classification', async () => {
+  const calls = [];
+  const backend = createBackendAdapter(async (command, payload) => {
+    calls.push([command, payload]);
+    if (command === 'world_status') return 'World: Test\nSafety: Canonical';
+    if (command === 'connectivity_diagnostics') {
+      return JSON.stringify({ state: 'DirectReachable', recent_failures: [] });
+    }
+    return 'ok';
+  });
+  const status = await backend.worldStatus('scworld:test');
+  assert.match(status, /Connectivity JSON: \{"state":"DirectReachable"/);
+  assert.deepEqual(calls.map(([command]) => command), ['world_status', 'connectivity_diagnostics']);
 });
 
 test('migration state translates migration-core phases into launcher phases', () => {
@@ -71,13 +95,29 @@ test('existing Tauri command names and camelCase payloads stay intact', async ()
   });
   await backend.createWorld({ name: 'Test', minecraft: '26.1.2', fabricLoader: '0.19.3', compatibility: 'vanilla-fabric', visibility: 'private' });
   await backend.createInvite({ world: 'scworld:test', expiresMinutes: 60, bootstrapAddrs: [] });
+  await backend.configureWorldRuntime({ world: 'scworld:test', java: 'java', serverJar: '/server.jar', modJar: '/mod.jar', acceptEula: true });
   await backend.hostWorld({ world: 'scworld:test', java: 'java', serverJar: '/server.jar', modJar: '/mod.jar', acceptEula: true });
   assert.equal(calls[0].command, 'create_world');
   assert.equal(calls[0].payload.fabricLoader, '0.19.3');
   assert.equal(calls[1].command, 'create_invite');
   assert.equal(calls[1].payload.expiresMinutes, 60);
-  assert.equal(calls[2].command, 'host_world');
+  assert.equal(calls[2].command, 'configure_world_runtime');
   assert.equal(calls[2].payload.acceptEula, true);
+  assert.equal(calls[3].command, 'host_world');
+  assert.equal(calls[3].payload.acceptEula, true);
+});
+
+test('Tauri bridge auto-starts networking and persists runtime configuration before host spawn', async () => {
+  const main = await readFile(new URL('../src-tauri/src/main.rs', import.meta.url), 'utf8');
+  const runtime = await readFile(new URL('../src-tauri/src/runtime.rs', import.meta.url), 'utf8');
+  assert.match(main, /\.setup\(\|app\|/);
+  assert.match(main, /\.start_daemon\(app\.handle\(\), DEFAULT_DAEMON_LISTEN\.into\(\)\)/);
+  assert.match(main, /async fn configure_world_runtime/);
+  assert.match(main, /"runtime-configure"\.into\(\)/);
+  assert.match(main, /configure_world_runtime_impl\([\s\S]*?\)\s*\.await\?;[\s\S]*?processes\.start_host/);
+  assert.match(main, /fn connectivity_diagnostics/);
+  assert.match(runtime, /SWARMCRAFT_CONNECTIVITY_JSON/);
+  assert.match(runtime, /connectivity_diagnostics/);
 });
 
 test('launcher markup keeps critical flow and accessibility anchors', async () => {
