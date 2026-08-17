@@ -43,18 +43,41 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Peer networking hard reconnect
         run: cargo test -p swarm-network --test peer_networking_acceptance --locked
+      - name: Hostile network input remains nonfatal
+        run: cargo test -p swarm-network --test input_hardening --locked
+      - name: Network handshake hardening
+        run: cargo test -p swarm-network --test handshake_hardening --locked
       - name: Snapshot swarm reconstruction
         run: cargo test -p swarm-storage --test snapshot_swarm_acceptance --locked
+      - name: Storage failure injection
+        run: cargo test -p swarm-storage --test failure_injection --locked
       - name: Live join replication
         run: cargo test -p swarm-cli --test live_join_replication --locked
       - name: Host process lifecycle
         run: cargo test -p swarm-cli --test host_process --locked
+      - name: Migration orchestration
+        run: cargo test -p swarm-cli --test migration_core --locked
       - name: Three-daemon recovery
         run: cargo test -p swarm-cli --test three_daemon_recovery --locked
       - name: Recovery successor dies before epoch promotion
         run: cargo test -p swarm-cli --test recovery_successor_dies --locked
       - name: Solo history acceptance and divergence detection
         run: cargo test -p swarm-consensus --test solo_history_acceptance --locked
+
+  fuzz-smoke:
+    name: Fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Smoke signed canonical record decoders
+        run: cargo fuzz run --fuzz-dir fuzz canonical_records -- -max_total_time=20
 
   network-impairment:
     name: Network impairment (QUIC resume)
@@ -99,6 +122,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Frontend backend-contract tests
+        if: runner.os == 'Linux'
+        run: node --test apps/desktop/tests/frontend-contract.test.mjs
       - name: Validate Tauri frontend bridge
         if: runner.os == 'Linux'
         shell: bash
