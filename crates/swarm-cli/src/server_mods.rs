@@ -383,6 +383,7 @@ fn evaluate_inventory(
                 issues.push(ModIssue {
                     kind: ModIssueKind::VersionMismatch,
                     mod_id: Some(required_value.artifact_id.clone()),
+                    file_name: None,
                     message: format!(
                         "{} is installed at a different version; world requires {}",
                         required_value.artifact_id, required_value.version
@@ -1065,6 +1066,13 @@ mod tests {
     }
 
     #[test]
+    fn single_wrong_version_is_reported() {
+        let profile = manifest(vec![requirement("lithium", "1", 1)]);
+        let issues = compare_runtime_profile(&profile, &[installed("lithium", "2", 2)]);
+        assert!(issues.iter().any(|issue| issue.kind == ModIssueKind::VersionMismatch));
+    }
+
+    #[test]
     fn hash_mismatch_is_reported() {
         let profile = manifest(vec![requirement("lithium", "1", 1)]);
         let issues = compare_runtime_profile(&profile, &[installed("lithium", "1", 2)]);
@@ -1079,6 +1087,13 @@ mod tests {
         assert!(issues.iter().any(|issue| {
             issue.kind == ModIssueKind::MissingRequired && issue.mod_id.as_deref() == Some("ferritecore")
         }));
+    }
+
+    #[test]
+    fn exact_peer_inventory_is_compatible() {
+        let profile = manifest(vec![requirement("lithium", "1", 1), requirement("ferritecore", "1", 2)]);
+        let bob = vec![installed("lithium", "1", 1), installed("ferritecore", "1", 2)];
+        assert!(compare_runtime_profile(&profile, &bob).is_empty());
     }
 
     #[test]
