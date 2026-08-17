@@ -58,7 +58,6 @@ fn restore_rejects_traversal_before_writing_outside_destination() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "known security gap: restore follows symlinked parents; requires race-resistant extraction"]
 fn restore_rejects_symlinked_parent_before_writing_outside_destination() {
     use std::os::unix::fs::symlink;
 
@@ -77,6 +76,24 @@ fn restore_rejects_symlinked_parent_before_writing_outside_destination() {
         Err(StorageError::SymlinkUnsupported(path)) if path == destination.join("redirect")
     ));
     assert!(!outside.join("escaped.dat").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_rejects_symlinked_destination_root() {
+    use std::os::unix::fs::symlink;
+
+    let (temp, storage, manifest) = snapshot_fixture();
+    let outside = temp.path().join("outside-root");
+    let destination = temp.path().join("restore-root");
+    fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, &destination).unwrap();
+
+    assert!(matches!(
+        storage.restore_snapshot(&manifest, &destination),
+        Err(StorageError::SymlinkUnsupported(path)) if path == destination
+    ));
+    assert!(!outside.join("level.dat").exists());
 }
 
 #[test]

@@ -137,10 +137,10 @@ impl Storage {
         destination: &Path,
     ) -> Result<(), StorageError> {
         validate_manifest_shape(manifest)?;
-        fs::create_dir_all(destination).map_err(|error| io_error(destination, error))?;
+        ensure_restore_root(destination)?;
         for entry in &manifest.entries {
             let output = destination.join(entry.path.replace('/', std::path::MAIN_SEPARATOR_STR));
-            restore_blob_streaming(self, manifest.world_id, &entry.blob, &output)?;
+            restore_blob_streaming(self, manifest.world_id, &entry.blob, destination, &output)?;
         }
         Ok(())
     }
@@ -163,17 +163,76 @@ fn validate_manifest_shape(manifest: &SnapshotManifestV1) -> Result<(), StorageE
     Ok(())
 }
 
+fn restore_directory_exists(path: &Path) -> Result<bool, StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StorageError::SymlinkUnsupported(path.to_path_buf())),
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(io_error(
+            path,
+            std::io::Error::new(std::io::ErrorKind::NotADirectory, "restore path component is not a directory"),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io_error(path, error)),
+    }
+}
+
+fn ensure_restore_root(destination: &Path) -> Result<(), StorageError> {
+    if !restore_directory_exists(destination)? {
+        fs::create_dir_all(destination).map_err(|error| io_error(destination, error))?;
+        if !restore_directory_exists(destination)? {
+            return Err(io_error(
+                destination,
+                std::io::Error::new(std::io::ErrorKind::NotADirectory, "restore destination is not a directory"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_restore_parent(destination: &Path, parent: &Path) -> Result<(), StorageError> {
+    let relative = parent
+        .strip_prefix(destination)
+        .map_err(|_| StorageError::UnsafeRelativePath(parent.to_string_lossy().into_owned()))?;
+    if !restore_directory_exists(destination)? {
+        return Err(io_error(
+            destination,
+            std::io::Error::new(std::io::ErrorKind::NotFound, "restore destination disappeared"),
+        ));
+    }
+
+    let mut current = destination.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(part) = component else {
+            return Err(StorageError::UnsafeRelativePath(parent.to_string_lossy().into_owned()));
+        };
+        current.push(part);
+        if !restore_directory_exists(&current)? {
+            fs::create_dir(&current).map_err(|error| io_error(&current, error))?;
+            if !restore_directory_exists(&current)? {
+                return Err(io_error(
+                    &current,
+                    std::io::Error::new(std::io::ErrorKind::NotADirectory, "restore directory was replaced"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn restore_blob_streaming(
     storage: &Storage,
     world: WorldId,
     descriptor: &BlobDescriptor,
+    destination: &Path,
     output: &Path,
 ) -> Result<(), StorageError> {
     let encoded_path = blob_path(storage, world, descriptor);
     ensure_encoded_size(&encoded_path, descriptor)?;
     let parent =
         output.parent().ok_or_else(|| StorageError::UnsafeRelativePath(output.to_string_lossy().into_owned()))?;
-    fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
+    // Reject pre-existing symlink components before creating temporary files.
+    // A future Unix openat/O_NOFOLLOW extraction path can additionally close the remaining TOCTOU window.
+    ensure_restore_parent(destination, parent)?;
     let (temporary_path, mut temporary_file) = create_unique_temp(parent, "restore", "tmp")?;
     let encoded = File::open(&encoded_path).map_err(|error| io_error(&encoded_path, error))?;
     let mut reader: Box<dyn Read> = match descriptor.encoding {
