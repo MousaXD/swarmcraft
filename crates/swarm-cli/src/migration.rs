@@ -1,4 +1,5 @@
 use crate::authority_permit::PermitWatch;
+use crate::host_readiness;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -110,6 +111,10 @@ pub enum TransferPrepareResult {
 }
 
 pub fn save_runtime_config(paths: &DataPaths, world: WorldId, config: &RuntimeLaunchConfig) -> Result<()> {
+    // Any launch-path change invalidates the prior machine-local runtime proof.
+    // Failing closed here prevents stale verification from making this device
+    // appear takeover-ready after a manual runtime reconfiguration.
+    host_readiness::invalidate_runtime_verification(paths, world)?;
     let path = runtime_config_path(paths, world);
     atomic_json(&path, config)?;
     Ok(())
@@ -586,6 +591,23 @@ async fn run_authority_runtime_inner(
         )?;
         return Err(error);
     }
+    // A runtime becomes host-ready only after the actual Fabric process has
+    // launched and reported the exact world compatibility fingerprint. Persist
+    // that machine-local proof so another peer can distinguish configured paths
+    // from a runtime that has truly passed launch verification.
+    let verified_config = RuntimeLaunchConfig {
+        java: options.java.clone(),
+        server_jar: options.server_jar.clone(),
+        mod_jar: options.mod_jar.clone(),
+        accept_eula: options.accept_eula,
+        game_endpoint: game_endpoint.clone(),
+    };
+    host_readiness::record_runtime_verified(
+        paths,
+        options.world,
+        &verified_config,
+        metadata.genesis.compatibility_fingerprint,
+    )?;
     publish_status(
         paths,
         storage,

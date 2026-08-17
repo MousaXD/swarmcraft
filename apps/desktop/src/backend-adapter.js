@@ -83,6 +83,20 @@ const CONNECTIVITY_STATES = Object.freeze({
   },
 });
 
+const HOST_READINESS_STATES = Object.freeze({
+  safe: { label: 'Safe to shut down', kind: 'safe' },
+  sleeping: { label: 'Safe to shut down', kind: 'safe' },
+  world_will_stop: { label: 'World will go offline', kind: 'warning' },
+  syncing: { label: 'Wait before shutting down', kind: 'syncing' },
+  blocked_by_runtime: { label: 'Another host needs setup', kind: 'action' },
+  blocked_by_mods: { label: 'Another host is missing mods', kind: 'action' },
+  blocked_by_quorum: { label: 'Transfer hosting first', kind: 'action' },
+  degraded_safety: { label: 'Host safety is degraded', kind: 'warning' },
+  conflict: { label: 'World history needs attention', kind: 'danger' },
+  not_current_host: { label: 'Shutdown safety not proven', kind: 'warning' },
+  unknown: { label: 'Checking shutdown safety', kind: 'checking' },
+});
+
 function slug(value) {
   return String(value || '')
     .trim()
@@ -252,6 +266,25 @@ export function normalizeMigrationState(raw) {
   };
 }
 
+export function normalizeHostReadiness(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const state = connectivityKey(source.state || 'unknown');
+  const mapped = HOST_READINESS_STATES[state] || HOST_READINESS_STATES.unknown;
+  return {
+    available: state !== 'unknown',
+    state: HOST_READINESS_STATES[state] ? state : 'unknown',
+    kind: mapped.kind,
+    label: mapped.label,
+    detail: String(source.detail || '').trim() || 'SwarmCraft has not yet proven whether this computer may safely shut down.',
+    safeToShutdown: Boolean(source.safe_to_shutdown ?? source.safeToShutdown),
+    successorPeerId: source.successor_peer_id ?? source.successorPeerId ?? null,
+    handoffCandidatePeerId: source.handoff_candidate_peer_id ?? source.handoffCandidatePeerId ?? null,
+    worldDataReplicated: Boolean(source.world_data_replicated ?? source.worldDataReplicated),
+    peers: Array.isArray(source.peers) ? source.peers : [],
+    raw: source,
+  };
+}
+
 export function connectivityFromStatus(status = {}) {
   return normalizeConnectivityDiagnostics(status);
 }
@@ -305,6 +338,14 @@ export function createBackendAdapter(invoke) {
     leaveWorld: (world) => call('leave_world', { world }),
     createInvite: (payload) => call('create_invite', payload),
     worldStatus: (world) => call('world_status', { world }),
+    hostReadiness: async (world) => {
+      const raw = await call('host_readiness', { world });
+      try {
+        return normalizeHostReadiness(typeof raw === 'string' ? JSON.parse(raw) : raw);
+      } catch (error) {
+        throw new Error(`Host readiness was not valid JSON: ${error}`);
+      }
+    },
     worldCompatibility: (world) => call('world_compatibility', { world }),
     worldConflicts: (world) => call('world_conflicts', { world }),
     setBackgroundSeeding: (world, enabled) => call('set_background_seeding', { world, enabled }),

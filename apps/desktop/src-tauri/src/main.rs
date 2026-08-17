@@ -127,6 +127,12 @@ async fn world_status(app: AppHandle, world: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn host_readiness(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "host-readiness".into(), world, "--json".into()]).await
+}
+
+#[tauri::command]
 async fn world_compatibility(app: AppHandle, world: String) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
     run_cli(&app, vec!["world".into(), "compatibility".into(), world]).await
@@ -314,6 +320,7 @@ fn main() {
             leave_world,
             create_invite,
             world_status,
+            host_readiness,
             world_compatibility,
             world_conflicts,
             set_background_seeding,

@@ -6,6 +6,7 @@ import {
   createBackendAdapter,
   MIGRATION_PHASES,
   normalizeConnectivityDiagnostics,
+  normalizeHostReadiness,
   normalizeMigrationState,
 } from '../src/backend-adapter.js';
 
@@ -239,4 +240,44 @@ test('frontend source and Tauri config preserve the global bridge contract', asy
   assert.match(app, /renderMigration\(\{ detail: `Could not read host migration state:/);
   assert.match(app, /Automatic networking service could not start/);
   assert.equal(tauri.app.withGlobalTauri, true);
+});
+
+
+test('host readiness adapter preserves backend safety distinctions', async () => {
+  const safe = normalizeHostReadiness({
+    state: 'safe',
+    safe_to_shutdown: true,
+    successor_peer_id: 'scpeer:bob',
+    world_data_replicated: true,
+    detail: 'Bob can take over.',
+  });
+  assert.equal(safe.label, 'Safe to shut down');
+  assert.equal(safe.safeToShutdown, true);
+  assert.equal(safe.successorPeerId, 'scpeer:bob');
+
+  const quorum = normalizeHostReadiness({
+    state: 'blocked_by_quorum',
+    safe_to_shutdown: false,
+    handoff_candidate_peer_id: 'scpeer:bob',
+    detail: 'Transfer hosting before shutdown.',
+  });
+  assert.equal(quorum.label, 'Transfer hosting first');
+  assert.equal(quorum.safeToShutdown, false);
+  assert.equal(quorum.handoffCandidatePeerId, 'scpeer:bob');
+
+  const calls = [];
+  const backend = createBackendAdapter(async (command, payload) => {
+    calls.push({ command, payload });
+    return JSON.stringify({ state: 'blocked_by_mods', safe_to_shutdown: false, detail: 'Bob is missing required server mods.' });
+  });
+  const readiness = await backend.hostReadiness('scworld:test');
+  assert.equal(readiness.label, 'Another host is missing mods');
+  assert.deepEqual(calls, [{ command: 'host_readiness', payload: { world: 'scworld:test' } }]);
+});
+
+test('Tauri exposes host readiness as structured CLI JSON without frontend inference', async () => {
+  const tauriMain = await desktopText('src-tauri/src/main.rs');
+  assert.match(tauriMain, /async fn host_readiness/);
+  assert.match(tauriMain, /"host-readiness"\.into\(\).*"--json"\.into\(\)/s);
+  assert.match(tauriMain, /host_readiness,/);
 });

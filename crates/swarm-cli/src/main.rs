@@ -4,7 +4,10 @@ mod invite;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
-use swarm_cli::migration::{self, RuntimeLaunchConfig, TransferPrepareResult};
+use swarm_cli::{
+    host_readiness,
+    migration::{self, RuntimeLaunchConfig, TransferPrepareResult},
+};
 use swarm_core::{
     create_world_genesis_with_fingerprint, random_nonce, sign_world_config, verify_membership_signature,
     verify_snapshot_signature, DataPaths, PeerIdentity,
@@ -107,6 +110,12 @@ enum WorldCommand {
     },
     /// Show machine-readable migration/runtime state for Desktop or operators.
     MigrationStatus {
+        world: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the authoritative backend answer to whether this device may safely shut down.
+    HostReadiness {
         world: String,
         #[arg(long)]
         json: bool,
@@ -441,6 +450,34 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 println!("Game endpoint: {}", status.game_endpoint.as_deref().unwrap_or("unpublished"));
                 if let Some(reason) = status.failure_reason {
                     println!("Failure: {reason}");
+                }
+            }
+        }
+        WorldCommand::HostReadiness { world, json } => {
+            let world = parse_world(&world)?;
+            storage.load_world(world)?;
+            let report = match host_readiness::load_host_readiness_report(paths, world) {
+                Ok(report) => report,
+                Err(error) => {
+                    let identity = PeerIdentity::load_or_create(paths)?;
+                    host_readiness::unknown_report(
+                        world,
+                        identity.peer_id(),
+                        storage.load_epoch_record(world).ok().map(|epoch| epoch.authority_peer_id),
+                        format!("Host-readiness service has not produced a fresh report yet: {error}"),
+                    )
+                }
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Shutdown safety: {:?}", report.state);
+                println!("Safe to shut down: {}", report.safe_to_shutdown);
+                println!("{}", report.detail);
+                if let Some(successor) = report.successor_peer_id {
+                    println!("Automatic successor: {successor}");
+                } else if let Some(candidate) = report.handoff_candidate_peer_id {
+                    println!("Transfer-first candidate: {candidate}");
                 }
             }
         }
