@@ -1,8 +1,6 @@
 //! Crash-safe content-addressed storage and directory snapshots.
 
-pub use serde;
 use serde::{Deserialize, Serialize};
-pub use serde_json;
 #[cfg(unix)]
 use std::fs::File;
 use std::{
