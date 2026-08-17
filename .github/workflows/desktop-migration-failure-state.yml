@@ -1,0 +1,55 @@
+name: Desktop migration error-state helper
+
+on:
+  push:
+    branches:
+      - agent/desktop-ux
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/desktop-ux
+      - name: Keep transport errors distinct from migration failure
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          app = Path('apps/desktop/src/app.js')
+          text = app.read_text()
+          old = '''  $('migrationProgress').hidden = !migration.available;\n  $('migrationProgressBar').style.width = `${migration.progress}%`;\n\n  const steps = $('migrationSteps');\n  steps.replaceChildren();\n  if (!migration.available) return;\n'''
+          new = '''  $('migrationProgress').hidden = !migration.available || migration.failed;\n  $('migrationProgressBar').style.width = `${migration.progress}%`;\n\n  const steps = $('migrationSteps');\n  steps.replaceChildren();\n  if (!migration.available || migration.failed) return;\n'''
+          if old not in text:
+              raise SystemExit('migration progress render block not found')
+          text = text.replace(old, new, 1)
+          old_error = '''      renderMigration({ phase: 'failed', detail: `Could not read host migration state: ${String(error)}` });\n'''
+          new_error = '''      renderMigration({ detail: `Could not read host migration state: ${String(error)}` });\n'''
+          if old_error not in text:
+              raise SystemExit('migration read error block not found')
+          app.write_text(text.replace(old_error, new_error, 1))
+
+          tests = Path('apps/desktop/tests/frontend-contract.test.mjs')
+          text = tests.read_text()
+          old = '''  assert.match(app, /setInterval\\(refreshVisibleMigration, MIGRATION_REFRESH_MS\\)/);\n  assert.equal(tauri.app.withGlobalTauri, true);\n'''
+          new = '''  assert.match(app, /setInterval\\(refreshVisibleMigration, MIGRATION_REFRESH_MS\\)/);\n  assert.match(app, /!migration\\.available \\|\\| migration\\.failed/);\n  assert.match(app, /renderMigration\\(\\{ detail: `Could not read host migration state:/);\n  assert.equal(tauri.app.withGlobalTauri, true);\n'''
+          if old not in text:
+              raise SystemExit('frontend contract source assertions not found')
+          tests.write_text(text.replace(old, new, 1))
+          PY
+      - name: Check JavaScript syntax
+        run: node --check apps/desktop/src/app.js && node --check apps/desktop/src/backend-adapter.js
+      - name: Run desktop contract tests
+        run: node --test apps/desktop/tests/frontend-contract.test.mjs
+      - name: Commit UX fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/desktop/src/app.js apps/desktop/tests/frontend-contract.test.mjs
+          git commit -m "fix(desktop): distinguish migration read failures"
+          git push origin HEAD:agent/desktop-ux
