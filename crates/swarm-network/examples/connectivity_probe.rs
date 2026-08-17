@@ -47,14 +47,14 @@ async fn main() -> Result<()> {
         .clamp(5, 300);
     let deadline = Instant::now() + Duration::from_secs(probe_seconds);
 
-    println!("{}", serde_json::to_string(&node.connectivity_diagnostics())?);
+    println!("{:#?}", node.connectivity_diagnostics());
     loop {
         let event = match timeout_at(deadline, node.next_event()).await {
             Ok(event) => event?,
             Err(_) => break,
         };
         eprintln!("{event:?}");
-        println!("{}", serde_json::to_string(&node.connectivity_diagnostics())?);
+        println!("{:#?}", node.connectivity_diagnostics());
     }
 
     Ok(())
