@@ -14,6 +14,6 @@ pub mod world;
 pub use retention::{ActiveReplicationLease, RetentionError, RetentionPolicy, RetentionReport};
 pub use scheduler::{
     BlobAssignment, BlobSource, BlobSourceSelector, LocalReplicaSource, ReplicaInventory,
-    ReplicationOptions, ReplicationReport, ReplicationScheduler, SchedulerError,
+    ReplicationOptions, ReplicationReport, ReplicationScheduler, SchedulerError, SourceReplicationStats,
 };
 pub use state::{DurableRecoveryPromiseV1, RecoveryPromiseResult};

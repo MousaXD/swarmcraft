@@ -171,6 +171,42 @@ impl BlobSource for DisappearingSource {
     }
 }
 
+struct PoisonThenDisappearSource {
+    inner: LocalReplicaSource,
+    reads: AtomicUsize,
+}
+
+impl BlobSource for PoisonThenDisappearSource {
+    fn peer_id(&self) -> PeerId {
+        self.inner.peer_id()
+    }
+
+    fn has_blob(&self, world: WorldId, descriptor: &BlobDescriptor) -> bool {
+        self.inner.has_blob(world, descriptor)
+    }
+
+    fn read_blob_chunk(
+        &self,
+        world: WorldId,
+        descriptor: &BlobDescriptor,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<(Vec<u8>, bool), ReplicationError> {
+        if self.reads.fetch_add(1, Ordering::AcqRel) != 0 {
+            return Err(StorageError::Io {
+                path: PathBuf::from("simulated-poisoned-disconnected-replica"),
+                source: std::io::Error::new(std::io::ErrorKind::ConnectionReset, "replica disappeared"),
+            }
+            .into());
+        }
+        let (mut data, finished) = self.inner.read_blob_chunk(world, descriptor, offset, max_bytes)?;
+        if let Some(first) = data.first_mut() {
+            *first ^= 0x6D;
+        }
+        Ok((data, finished))
+    }
+}
+
 struct CorruptingSource {
     inner: LocalReplicaSource,
 }
@@ -320,6 +356,36 @@ fn existing_partial_transfer_resumes_from_a_different_replica() {
 
     assert_eq!(report.resumed_blobs, 1);
     assert_eq!(report.completed_blobs, 1);
+    destination.verify_snapshot(&manifest).unwrap();
+    assert_exact_restore(&destination, &manifest, &source_world, &temp.path().join("restored"));
+}
+
+#[test]
+fn corrupt_partial_from_disappearing_source_does_not_blame_the_healthy_fallback() {
+    let temp = tempfile::tempdir().unwrap();
+    let (source_world, _authority, manifest, replica_a, replica_b) = fixture(&temp, 1);
+    let destination = Storage::open(temp.path().join("destination")).unwrap();
+
+    let sources: Vec<Arc<dyn BlobSource>> = vec![
+        Arc::new(PoisonThenDisappearSource {
+            inner: LocalReplicaSource::new(PeerId([1; 32]), replica_a),
+            reads: AtomicUsize::new(0),
+        }),
+        Arc::new(LocalReplicaSource::new(PeerId([2; 32]), replica_b)),
+    ];
+    let report = ReplicationScheduler::new()
+        .reconstruct(
+            &destination,
+            &manifest,
+            sources,
+            ReplicationOptions { max_parallel_blobs: 1, chunk_size: 1024 },
+        )
+        .unwrap();
+
+    assert_eq!(report.resumed_blobs, 1);
+    assert_eq!(report.resume_verification_retries, 1);
+    assert!(report.corrupt_rejections >= 1);
+    assert_eq!(report.per_source[&PeerId([2; 32])].completed_blobs, 1);
     destination.verify_snapshot(&manifest).unwrap();
     assert_exact_restore(&destination, &manifest, &source_world, &temp.path().join("restored"));
 }

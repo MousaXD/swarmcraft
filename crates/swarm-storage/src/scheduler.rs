@@ -191,6 +191,7 @@ pub struct ReplicationReport {
     pub resumed_blobs: usize,
     pub source_failures: usize,
     pub corrupt_rejections: usize,
+    pub resume_verification_retries: usize,
     pub bytes_received: u64,
     pub max_parallel_blobs_observed: usize,
     pub sources_used: BTreeSet<PeerId>,
@@ -394,60 +395,94 @@ fn transfer_assignment(
             report.per_source.entry(*peer).or_default().attempted_blobs += 1;
         }
 
-        let mut offset = match destination.partial_blob_offset(world, descriptor) {
-            Ok(offset) => offset,
-            Err(error) => return Err((descriptor.hash, error.to_string())),
-        };
-        if offset > 0 && !resumed_recorded {
-            report.lock().expect("replication report poisoned").resumed_blobs += 1;
-            resumed_recorded = true;
-        }
-
-        loop {
-            let chunk = source.read_blob_chunk(world, descriptor, offset, chunk_size);
-            let (data, finished) = match chunk {
-                Ok(value) => value,
-                Err(error) => {
-                    record_source_failure(report, *peer, &error);
-                    last_error = error.to_string();
-                    warn!(source = %peer, blob = %descriptor.hash, %last_error, "replica source failed; trying fallback");
-                    break;
-                }
+        let mut clean_retry_used = false;
+        'source_attempt: loop {
+            let mut offset = match destination.partial_blob_offset(world, descriptor) {
+                Ok(offset) => offset,
+                Err(error) => return Err((descriptor.hash, error.to_string())),
             };
-
-            if data.is_empty() && !finished {
-                last_error = "source returned an empty unfinished chunk".into();
-                record_plain_source_failure(report, *peer);
-                warn!(source = %peer, blob = %descriptor.hash, "replica source stalled; trying fallback");
-                break;
+            let attempt_start_offset = offset;
+            if offset > 0 && !resumed_recorded {
+                report.lock().expect("replication report poisoned").resumed_blobs += 1;
+                resumed_recorded = true;
             }
 
-            let received = destination.receive_blob_chunk(world, descriptor, offset, &data, finished);
-            let next_offset = match received {
-                Ok(next_offset) => next_offset,
-                Err(error) => {
-                    record_source_failure(report, *peer, &error);
-                    last_error = error.to_string();
-                    warn!(source = %peer, blob = %descriptor.hash, %last_error, "replica data rejected; trying fallback");
-                    break;
+            loop {
+                let chunk = source.read_blob_chunk(world, descriptor, offset, chunk_size);
+                let (data, finished) = match chunk {
+                    Ok(value) => value,
+                    Err(error) => {
+                        record_source_failure(report, *peer, &error);
+                        last_error = error.to_string();
+                        warn!(
+                            source = %peer,
+                            blob = %descriptor.hash,
+                            %last_error,
+                            "replica source failed; trying fallback"
+                        );
+                        break 'source_attempt;
+                    }
+                };
+
+                if data.is_empty() && !finished {
+                    last_error = "source returned an empty unfinished chunk".into();
+                    record_plain_source_failure(report, *peer);
+                    warn!(source = %peer, blob = %descriptor.hash, "replica source stalled; trying fallback");
+                    break 'source_attempt;
                 }
-            };
 
-            {
-                let mut report = report.lock().expect("replication report poisoned");
-                report.bytes_received = report.bytes_received.saturating_add(data.len() as u64);
-                report.sources_used.insert(*peer);
-                let stats = report.per_source.entry(*peer).or_default();
-                stats.bytes_received = stats.bytes_received.saturating_add(data.len() as u64);
-            }
+                let received = destination.receive_blob_chunk(world, descriptor, offset, &data, finished);
+                let next_offset = match received {
+                    Ok(next_offset) => next_offset,
+                    Err(error) => {
+                        let partial_was_reset = finished
+                            && attempt_start_offset > 0
+                            && !clean_retry_used
+                            && destination.partial_blob_offset(world, descriptor).ok() == Some(0);
+                        if partial_was_reset {
+                            clean_retry_used = true;
+                            {
+                                let mut report = report.lock().expect("replication report poisoned");
+                                report.corrupt_rejections += 1;
+                                report.resume_verification_retries += 1;
+                            }
+                            warn!(
+                                source = %peer,
+                                blob = %descriptor.hash,
+                                error = %error,
+                                "resumed blob failed final verification; retrying current source from offset zero"
+                            );
+                            continue 'source_attempt;
+                        }
 
-            offset = next_offset;
-            if finished {
-                let mut report = report.lock().expect("replication report poisoned");
-                report.completed_blobs += 1;
-                report.sources_used.insert(*peer);
-                report.per_source.entry(*peer).or_default().completed_blobs += 1;
-                return Ok(());
+                        record_source_failure(report, *peer, &error);
+                        last_error = error.to_string();
+                        warn!(
+                            source = %peer,
+                            blob = %descriptor.hash,
+                            %last_error,
+                            "replica data rejected; trying fallback"
+                        );
+                        break 'source_attempt;
+                    }
+                };
+
+                {
+                    let mut report = report.lock().expect("replication report poisoned");
+                    report.bytes_received = report.bytes_received.saturating_add(data.len() as u64);
+                    report.sources_used.insert(*peer);
+                    let stats = report.per_source.entry(*peer).or_default();
+                    stats.bytes_received = stats.bytes_received.saturating_add(data.len() as u64);
+                }
+
+                offset = next_offset;
+                if finished {
+                    let mut report = report.lock().expect("replication report poisoned");
+                    report.completed_blobs += 1;
+                    report.sources_used.insert(*peer);
+                    report.per_source.entry(*peer).or_default().completed_blobs += 1;
+                    return Ok(());
+                }
             }
         }
     }

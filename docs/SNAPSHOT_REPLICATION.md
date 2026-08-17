@@ -30,7 +30,7 @@ manifest
   blob D  <- peer 1
 ```
 
-If a source disappears after writing part of a blob, the next source starts at the destination's durable partial offset. If a source delivers corrupt data, verification rejects the completed partial and the next source starts that blob from offset zero. Failure is scoped to the blob/source attempt rather than poisoning the whole reconstruction when a healthy fallback exists.
+If a source disappears after writing part of a blob, the next source starts at the destination's durable partial offset. If final verification then fails, the scheduler treats the inherited prefix as suspect: after the receiver resets the poisoned partial, the current fallback gets one clean retry from offset zero before it is blamed. If a source delivers a corrupt blob through completion, verification rejects it and the next source starts that blob from offset zero. Failure is scoped to the blob/source attempt rather than poisoning the whole reconstruction when a healthy fallback exists.
 
 `BlobSource` is intentionally transport-agnostic. `LocalReplicaSource` is the in-process implementation used by storage tests and tooling. The live libp2p daemon can populate `ReplicaInventory` from authenticated replica knowledge and reuse `BlobSourceSelector` without redesigning the wire protocol.
 
@@ -43,6 +43,7 @@ Every reconstruction returns a `ReplicationReport` containing:
 - resumed blob count;
 - source failure count;
 - corrupt-source rejection count;
+- resumed-prefix verification retry count;
 - maximum observed parallel blob work;
 - the set of sources used;
 - per-source attempted/completed blobs, bytes, failures, and corruption rejections.
@@ -112,6 +113,7 @@ Permanent storage tests cover:
 - bounded concurrent downloads of different blobs with exact restore;
 - a source disappearing mid-blob and cross-replica resume;
 - corrupt-source rejection followed by healthy fallback;
+- a corrupt partial from a disappearing source being discarded before a clean retry of the healthy fallback;
 - an already-partial transfer resuming from another replica;
 - corrupt local replicas being excluded from inventory;
 - referenced blobs surviving GC;
