@@ -650,6 +650,7 @@ fn transfer_phase_state_survives_restart_without_permanent_wedge() {
     assert_eq!(alice_after_observed.load_epoch_record(shared.world).unwrap(), activated_epoch);
 
     save_sleep(&bob, shared.world);
-    let next = prepare_manual_transfer(&bob.paths, &bob_after_activated, shared.world, alice.identity.peer_id()).unwrap();
+    let next =
+        prepare_manual_transfer(&bob.paths, &bob_after_activated, shared.world, alice.identity.peer_id()).unwrap();
     assert!(matches!(next, TransferPrepareResult::Prepared(_)));
 }
