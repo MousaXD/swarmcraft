@@ -80,6 +80,7 @@ jobs:
           assert text.count(old) == 1
           text = text.replace(old, new, 1)
           text = text.replace("load_transfer_intent(paths, world)", "load_transfer_intent(paths, epoch.world_id)", 1)
+          text = text.replace("validate_transfer_target(storage, identity, world, target)?", "validate_transfer_target(storage, identity, epoch.world_id, target)?", 1)
           text = text.replace("warn!(%world, %error, \"ignoring unreadable transfer intent\")", "warn!(world = %epoch.world_id, %error, \"ignoring unreadable transfer intent\")", 1)
 
           old = "    Ok(postcard::from_bytes(&bytes).context(\"transfer token is malformed\")?)\n"
