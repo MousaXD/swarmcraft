@@ -19,4 +19,5 @@ pub use scheduler::{
     ReplicationReport, ReplicationScheduler, SchedulerError, SourceReplicationStats, DEFAULT_PARALLEL_BLOBS,
     DEFAULT_REPLICATION_CHUNK_SIZE, MAX_PARALLEL_BLOBS, MAX_REPLICATION_CHUNK_SIZE,
 };
+pub use state::{DurableRecoveryPromiseV1, RecoveryPromiseResult};
 pub use streaming::{SnapshotCommitInput, SnapshotPublication};
