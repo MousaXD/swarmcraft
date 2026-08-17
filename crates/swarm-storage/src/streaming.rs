@@ -116,9 +116,6 @@ impl Storage {
         }
         files.sort();
 
-        // Ownership exists before any complete blob can become visible. Every
-        // blob published by this snapshot is pinned inside this transaction's
-        // directory until this exact publication commits.
         let mut lease = self.begin_snapshot_publication(context.world)?;
         let mut entries = Vec::with_capacity(files.len());
         for path in files {
@@ -196,9 +193,6 @@ impl Storage {
         match fs::rename(&temporary_path, &final_path) {
             Ok(()) => {}
             Err(rename_error) if final_path.is_file() => {
-                // Another publisher may have won the identical-hash publish
-                // race after our existence check. A valid complete target is
-                // equivalent to our own bytes and is safe to reuse.
                 let existing_size = fs::metadata(&final_path).map_err(|error| io_error(&final_path, error))?.len();
                 let existing = BlobDescriptor { encoded_size: existing_size, ..descriptor.clone() };
                 if verify_encoded_blob_streaming(&final_path, &existing).is_ok() {
@@ -228,10 +222,6 @@ impl Storage {
         Ok(())
     }
 
-    /// Commits either a local transaction-owned publication or a plain manifest.
-    /// Plain manifests are used by replica finalization and never release local
-    /// publication pins. Only the exact `SnapshotPublication` passed here may
-    /// release the transaction directory it owns.
     pub fn commit_snapshot_streaming<T: SnapshotCommitInput>(&self, target: &T) -> Result<(), StorageError> {
         let manifest = target.snapshot_manifest();
         let publication = (target as &dyn Any).downcast_ref::<SnapshotPublication>();
@@ -268,10 +258,10 @@ impl Storage {
         destination: &Path,
     ) -> Result<(), StorageError> {
         validate_manifest_shape(manifest)?;
-        fs::create_dir_all(destination).map_err(|error| io_error(destination, error))?;
+        ensure_restore_root(destination)?;
         for entry in &manifest.entries {
             let output = destination.join(entry.path.replace('/', std::path::MAIN_SEPARATOR_STR));
-            restore_blob_streaming(self, manifest.world_id, &entry.blob, &output)?;
+            restore_blob_streaming(self, manifest.world_id, &entry.blob, destination, &output)?;
         }
         Ok(())
     }
@@ -294,17 +284,74 @@ fn validate_manifest_shape(manifest: &SnapshotManifestV1) -> Result<(), StorageE
     Ok(())
 }
 
+fn restore_directory_exists(path: &Path) -> Result<bool, StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StorageError::SymlinkUnsupported(path.to_path_buf())),
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(io_error(
+            path,
+            std::io::Error::new(std::io::ErrorKind::NotADirectory, "restore path component is not a directory"),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io_error(path, error)),
+    }
+}
+
+fn ensure_restore_root(destination: &Path) -> Result<(), StorageError> {
+    if !restore_directory_exists(destination)? {
+        fs::create_dir_all(destination).map_err(|error| io_error(destination, error))?;
+        if !restore_directory_exists(destination)? {
+            return Err(io_error(
+                destination,
+                std::io::Error::new(std::io::ErrorKind::NotADirectory, "restore destination is not a directory"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_restore_parent(destination: &Path, parent: &Path) -> Result<(), StorageError> {
+    let relative = parent
+        .strip_prefix(destination)
+        .map_err(|_| StorageError::UnsafeRelativePath(parent.to_string_lossy().into_owned()))?;
+    if !restore_directory_exists(destination)? {
+        return Err(io_error(
+            destination,
+            std::io::Error::new(std::io::ErrorKind::NotFound, "restore destination disappeared"),
+        ));
+    }
+
+    let mut current = destination.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return Err(StorageError::UnsafeRelativePath(parent.to_string_lossy().into_owned()));
+        };
+        current.push(part);
+        if !restore_directory_exists(&current)? {
+            fs::create_dir(&current).map_err(|error| io_error(&current, error))?;
+            if !restore_directory_exists(&current)? {
+                return Err(io_error(
+                    &current,
+                    std::io::Error::new(std::io::ErrorKind::NotADirectory, "restore directory was replaced"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn restore_blob_streaming(
     storage: &Storage,
     world: WorldId,
     descriptor: &BlobDescriptor,
+    destination: &Path,
     output: &Path,
 ) -> Result<(), StorageError> {
     let encoded_path = blob_path(storage, world, descriptor);
     ensure_encoded_size(&encoded_path, descriptor)?;
     let parent =
         output.parent().ok_or_else(|| StorageError::UnsafeRelativePath(output.to_string_lossy().into_owned()))?;
-    fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
+    ensure_restore_parent(destination, parent)?;
     let (temporary_path, mut temporary_file) = create_unique_temp(parent, "restore", "tmp")?;
     let encoded = File::open(&encoded_path).map_err(|error| io_error(&encoded_path, error))?;
     let mut reader: Box<dyn Read> = match descriptor.encoding {
@@ -338,8 +385,17 @@ fn restore_blob_streaming(
     }
     temporary_file.sync_all().map_err(|error| io_error(&temporary_path, error))?;
     drop(temporary_file);
-    if output.exists() {
-        remove_if_present(output)?;
+    match fs::symlink_metadata(output) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            remove_if_present(&temporary_path)?;
+            return Err(StorageError::SymlinkUnsupported(output.to_path_buf()));
+        }
+        Ok(_) => remove_if_present(output)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            remove_if_present(&temporary_path)?;
+            return Err(io_error(output, error));
+        }
     }
     fs::rename(&temporary_path, output).map_err(|error| io_error(output, error))?;
     sync_parent(parent)
@@ -452,10 +508,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
 }
 
 fn remove_if_present(path: &Path) -> Result<(), StorageError> {
-    if path.exists() {
-        fs::remove_file(path).map_err(|error| io_error(path, error))?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(path, error)),
     }
-    Ok(())
 }
 
 fn sync_parent(parent: &Path) -> Result<(), StorageError> {
@@ -568,6 +625,33 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_symlinked_parent_component() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let restore = temp.path().join("restore");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(source.join("region")).unwrap();
+        fs::write(source.join("region/r.0.0.mca"), b"safe-data").unwrap();
+        fs::create_dir_all(&restore).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, restore.join("region")).unwrap();
+
+        let storage = Storage::open(temp.path().join("store")).unwrap();
+        let world = WorldId([0x71; 32]);
+        let mut manifest = storage.snapshot_directory_streaming(&source, context(world)).unwrap();
+        manifest.signature = vec![0; 64];
+        storage.commit_snapshot_streaming(&manifest).unwrap();
+        assert!(matches!(
+            storage.restore_snapshot_streaming(&manifest, &restore),
+            Err(StorageError::SymlinkUnsupported(path)) if path == restore.join("region")
+        ));
+        assert!(!outside.join("r.0.0.mca").exists());
+    }
+
     #[test]
     fn two_concurrent_publishers_same_hash_keep_distinct_publication_ownership() {
         let temp = tempfile::tempdir().unwrap();
@@ -600,9 +684,6 @@ mod tests {
         assert!(storage.snapshot_publication_has_pin(world, &first_id, hash));
         assert!(!storage.snapshot_publication_has_pin(world, &second_id, hash));
 
-        // Remove the second snapshot root to recreate the audit's dangerous
-        // window. The first publisher's independently owned pin must still keep
-        // the shared complete blob alive.
         remove_snapshot_manifest(&storage, world, 2);
         let gc = storage.garbage_collect_blobs(world).unwrap();
         assert_eq!(gc.removed_blobs, 0);
@@ -702,15 +783,11 @@ mod tests {
         let abandoned_id = abandoned.publication_id().to_owned();
         drop(abandoned);
 
-        let mut committed =
-            storage.snapshot_directory_streaming(&source_committed, context_for(world, 3, 3)).unwrap();
+        let mut committed = storage.snapshot_directory_streaming(&source_committed, context_for(world, 3, 3)).unwrap();
         committed.signature = vec![0; 64];
         let committed_blob = committed.entries[0].blob.clone();
         storage.commit_snapshot_streaming(&committed).unwrap();
 
-        // A reopen performs stale-publication recovery. The live publication's
-        // owner lock must be unstealable, while the dropped transaction is
-        // provably stale and may lose its pins.
         let reopened = Storage::open(&store_root).unwrap();
         assert!(reopened.snapshot_publication_has_pin(world, &live_id, live_blob.hash));
         assert!(!reopened.snapshot_publication_has_pin(world, &abandoned_id, abandoned_blob.hash));
@@ -723,7 +800,7 @@ mod tests {
 
         drop(live);
         let reopened_again = Storage::open(&store_root).unwrap();
-        let second_gc = reopened_again.garbage_collect_blobs(world).unwrap();
+        let second_gc = reopened_again.garbage_collect_blobs(world()).unwrap();
         assert_eq!(second_gc.removed_blobs, 1);
         assert!(!blob_path(&reopened_again, world, &live_blob).exists());
         assert!(blob_path(&reopened_again, world, &committed_blob).exists());
