@@ -127,11 +127,8 @@ impl BlobSourceSelector {
             }
             candidates.sort_by_key(|peer| (assigned_bytes.get(peer).copied().unwrap_or(0), *peer));
             let primary = candidates[0];
-            *assigned_bytes.entry(primary).or_default() = assigned_bytes
-                .get(&primary)
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(descriptor.encoded_size);
+            let primary_bytes = assigned_bytes.get(&primary).copied().unwrap_or(0);
+            assigned_bytes.insert(primary, primary_bytes.saturating_add(descriptor.encoded_size));
 
             // Keep the chosen primary first. Re-rank fallbacks by their current
             // assigned load so a failed source does not funnel all work onto one peer.
@@ -462,10 +459,12 @@ fn record_source_failure(report: &Arc<Mutex<ReplicationReport>>, peer: PeerId, e
     let corrupt = matches!(error, ReplicationError::Storage(StorageError::BlobCorrupt(_)));
     let mut report = report.lock().expect("replication report poisoned");
     report.source_failures += 1;
+    if corrupt {
+        report.corrupt_rejections += 1;
+    }
     let stats = report.per_source.entry(peer).or_default();
     stats.failures += 1;
     if corrupt {
-        report.corrupt_rejections += 1;
         stats.corrupt_rejections += 1;
     }
 }
