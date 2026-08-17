@@ -5,8 +5,10 @@ mod runtime_commands;
 
 use runtime::RuntimeProcesses;
 use runtime_commands::{start_daemon, stop_daemon, stop_host};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_shell::ShellExt;
+
+const DEFAULT_DAEMON_LISTEN: &str = "/ip4/0.0.0.0/udp/0/quic-v1";
 
 async fn run_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, String> {
     let output = app
@@ -194,8 +196,61 @@ async fn wake_world(app: AppHandle, world: String) -> Result<String, String> {
     run_cli(&app, vec!["world".into(), "wake".into(), world]).await
 }
 
+#[tauri::command]
+fn connectivity_diagnostics(processes: State<'_, RuntimeProcesses>) -> Result<String, String> {
+    processes.connectivity_diagnostics()
+}
+
+async fn configure_world_runtime_impl(
+    app: &AppHandle,
+    world: String,
+    java: String,
+    server_jar: String,
+    mod_jar: String,
+    accept_eula: bool,
+    game_endpoint: Option<String>,
+) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    let java = require_value(java, "Java executable")?;
+    let server_jar = require_value(server_jar, "Fabric server jar")?;
+    let mod_jar = require_value(mod_jar, "SwarmCraft mod jar")?;
+    if !accept_eula {
+        return Err("Minecraft server EULA acceptance is required before hosting".into());
+    }
+    let mut arguments = vec![
+        "world".into(),
+        "runtime-configure".into(),
+        world,
+        "--java".into(),
+        java,
+        "--server-jar".into(),
+        server_jar,
+        "--mod-jar".into(),
+        mod_jar,
+        "--accept-eula".into(),
+    ];
+    if let Some(endpoint) = game_endpoint.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
+        arguments.push("--game-endpoint".into());
+        arguments.push(endpoint);
+    }
+    run_cli(app, arguments).await
+}
+
 #[tauri::command(rename_all = "camelCase")]
-fn host_world(
+async fn configure_world_runtime(
+    app: AppHandle,
+    world: String,
+    java: String,
+    server_jar: String,
+    mod_jar: String,
+    accept_eula: bool,
+    game_endpoint: Option<String>,
+) -> Result<String, String> {
+    configure_world_runtime_impl(&app, world, java, server_jar, mod_jar, accept_eula, game_endpoint).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn host_world(
     app: AppHandle,
     processes: State<'_, RuntimeProcesses>,
     world: String,
@@ -204,12 +259,16 @@ fn host_world(
     mod_jar: String,
     accept_eula: bool,
 ) -> Result<u32, String> {
-    if world.trim().is_empty() || server_jar.trim().is_empty() || mod_jar.trim().is_empty() {
-        return Err("world ID, Fabric server jar, and SwarmCraft mod jar are required".into());
-    }
-    if !accept_eula {
-        return Err("Minecraft server EULA acceptance is required before hosting".into());
-    }
+    configure_world_runtime_impl(
+        &app,
+        world.clone(),
+        java.clone(),
+        server_jar.clone(),
+        mod_jar.clone(),
+        accept_eula,
+        None,
+    )
+    .await?;
     processes.start_host(
         &app,
         vec![
@@ -230,6 +289,13 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(RuntimeProcesses::default())
+        .setup(|app| {
+            let processes = app.state::<RuntimeProcesses>();
+            processes
+                .start_daemon(app.handle(), DEFAULT_DAEMON_LISTEN.into())
+                .map_err(std::io::Error::other)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             initialize_node,
             node_identity,
@@ -249,6 +315,8 @@ fn main() {
             migration_capabilities,
             migration_status,
             wake_world,
+            connectivity_diagnostics,
+            configure_world_runtime,
             start_daemon,
             stop_daemon,
             stop_host,
