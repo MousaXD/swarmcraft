@@ -1,4 +1,4 @@
-use crate::{SnapshotContext, Storage, StorageError};
+use crate::{retention::SnapshotPublicationTransaction, SnapshotContext, Storage, StorageError};
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
@@ -49,16 +49,17 @@ impl Storage {
         }
         files.sort();
 
+        let publication = self.begin_snapshot_publication(context.world)?;
         let mut entries = Vec::with_capacity(files.len());
         for path in files {
             let relative = path.strip_prefix(source).expect("walkdir entries stay beneath root");
             let relative = portable_relative_path(relative)?;
-            let blob = self.put_file_blob_streaming(context.world, &path)?;
+            let blob = self.put_file_blob_streaming_in_transaction(context.world, &path, &publication)?;
             entries.push(SnapshotEntry { path: relative, blob });
         }
         entries.sort_by(|left, right| left.path.cmp(&right.path));
         let state_root = snapshot_state_root(&entries)?;
-        Ok(SnapshotManifestV1 {
+        let manifest = SnapshotManifestV1 {
             protocol_version: PROTOCOL_VERSION,
             world_id: context.world,
             snapshot_number: context.snapshot_number,
@@ -70,10 +71,31 @@ impl Storage {
             authority_peer_id: context.authority_peer_id,
             authority_public_key: context.authority_public_key,
             signature: Vec::new(),
-        })
+        };
+        self.record_snapshot_publication_manifest(&publication, &manifest)?;
+        publication.persist();
+        Ok(manifest)
     }
 
     pub fn put_file_blob_streaming(&self, world: WorldId, source: &Path) -> Result<BlobDescriptor, StorageError> {
+        self.publish_file_blob_streaming(world, source, None)
+    }
+
+    fn put_file_blob_streaming_in_transaction(
+        &self,
+        world: WorldId,
+        source: &Path,
+        publication: &SnapshotPublicationTransaction,
+    ) -> Result<BlobDescriptor, StorageError> {
+        self.publish_file_blob_streaming(world, source, Some(publication))
+    }
+
+    fn publish_file_blob_streaming(
+        &self,
+        world: WorldId,
+        source: &Path,
+        publication: Option<&SnapshotPublicationTransaction>,
+    ) -> Result<BlobDescriptor, StorageError> {
         let blob_dir = self.world_dir(world).join("blobs");
         fs::create_dir_all(&blob_dir).map_err(|error| io_error(&blob_dir, error))?;
         let (temporary_path, temporary_file) = create_unique_temp(&blob_dir, "blob", "zst")?;
@@ -101,7 +123,12 @@ impl Storage {
         drop(encoded_file);
 
         let hash = Hash32(*hasher.finalize().as_bytes());
-        let publication_pin = self.pin_snapshot_publication_hash(world, hash)?;
+        let standalone_pin = if let Some(transaction) = publication {
+            self.pin_snapshot_publication_transaction_hash(world, transaction, hash)?;
+            None
+        } else {
+            Some(self.pin_snapshot_publication_hash(world, hash)?)
+        };
         let mut descriptor = BlobDescriptor { hash, uncompressed_size, encoded_size, encoding: BlobEncoding::Zstd };
         let final_path = blob_path(self, world, &descriptor);
 
@@ -111,7 +138,9 @@ impl Storage {
             if verify_encoded_blob_streaming(&final_path, &existing).is_ok() {
                 remove_if_present(&temporary_path)?;
                 test_after_complete_blob_published(world);
-                publication_pin.persist();
+                if let Some(pin) = standalone_pin {
+                    pin.persist();
+                }
                 return Ok(existing);
             }
             remove_if_present(&final_path)?;
@@ -121,7 +150,9 @@ impl Storage {
         sync_parent(&blob_dir)?;
         descriptor.encoded_size = fs::metadata(&final_path).map_err(|error| io_error(&final_path, error))?.len();
         test_after_complete_blob_published(world);
-        publication_pin.persist();
+        if let Some(pin) = standalone_pin {
+            pin.persist();
+        }
         Ok(descriptor)
     }
 
@@ -144,9 +175,8 @@ impl Storage {
         let path = snapshots.join(format!("{:020}.postcard", manifest.snapshot_number));
         let bytes = postcard::to_allocvec(manifest)?;
         let _gc_guard = self.lock_blob_gc_for_snapshot_commit(manifest.world_id)?;
-        let created_manifest = !path.exists();
         atomic_write(&path, &bytes)?;
-        if created_manifest {
+        if !self.release_snapshot_publication_transaction(manifest)? {
             self.release_snapshot_publication_pins(
                 manifest.world_id,
                 manifest.entries.iter().map(|entry| entry.blob.hash),
@@ -161,10 +191,10 @@ impl Storage {
         destination: &Path,
     ) -> Result<(), StorageError> {
         validate_manifest_shape(manifest)?;
-        fs::create_dir_all(destination).map_err(|error| io_error(destination, error))?;
+        ensure_restore_root(destination)?;
         for entry in &manifest.entries {
             let output = destination.join(entry.path.replace('/', std::path::MAIN_SEPARATOR_STR));
-            restore_blob_streaming(self, manifest.world_id, &entry.blob, &output)?;
+            restore_blob_streaming(self, manifest.world_id, &entry.blob, destination, &output)?;
         }
         Ok(())
     }
@@ -187,17 +217,74 @@ fn validate_manifest_shape(manifest: &SnapshotManifestV1) -> Result<(), StorageE
     Ok(())
 }
 
+fn restore_directory_exists(path: &Path) -> Result<bool, StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StorageError::SymlinkUnsupported(path.to_path_buf())),
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(io_error(
+            path,
+            std::io::Error::new(std::io::ErrorKind::NotADirectory, "restore path component is not a directory"),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io_error(path, error)),
+    }
+}
+
+fn ensure_restore_root(destination: &Path) -> Result<(), StorageError> {
+    if !restore_directory_exists(destination)? {
+        fs::create_dir_all(destination).map_err(|error| io_error(destination, error))?;
+        if !restore_directory_exists(destination)? {
+            return Err(io_error(
+                destination,
+                std::io::Error::new(std::io::ErrorKind::NotADirectory, "restore destination is not a directory"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_restore_parent(destination: &Path, parent: &Path) -> Result<(), StorageError> {
+    let relative = parent
+        .strip_prefix(destination)
+        .map_err(|_| StorageError::UnsafeRelativePath(parent.to_string_lossy().into_owned()))?;
+    if !restore_directory_exists(destination)? {
+        return Err(io_error(
+            destination,
+            std::io::Error::new(std::io::ErrorKind::NotFound, "restore destination disappeared"),
+        ));
+    }
+
+    let mut current = destination.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return Err(StorageError::UnsafeRelativePath(parent.to_string_lossy().into_owned()));
+        };
+        current.push(part);
+        if !restore_directory_exists(&current)? {
+            fs::create_dir(&current).map_err(|error| io_error(&current, error))?;
+            if !restore_directory_exists(&current)? {
+                return Err(io_error(
+                    &current,
+                    std::io::Error::new(std::io::ErrorKind::NotADirectory, "restore directory was replaced"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn restore_blob_streaming(
     storage: &Storage,
     world: WorldId,
     descriptor: &BlobDescriptor,
+    destination: &Path,
     output: &Path,
 ) -> Result<(), StorageError> {
     let encoded_path = blob_path(storage, world, descriptor);
     ensure_encoded_size(&encoded_path, descriptor)?;
     let parent =
         output.parent().ok_or_else(|| StorageError::UnsafeRelativePath(output.to_string_lossy().into_owned()))?;
-    fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
+    ensure_restore_parent(destination, parent)?;
     let (temporary_path, mut temporary_file) = create_unique_temp(parent, "restore", "tmp")?;
     let encoded = File::open(&encoded_path).map_err(|error| io_error(&encoded_path, error))?;
     let mut reader: Box<dyn Read> = match descriptor.encoding {
@@ -231,8 +318,13 @@ fn restore_blob_streaming(
     }
     temporary_file.sync_all().map_err(|error| io_error(&temporary_path, error))?;
     drop(temporary_file);
-    if output.exists() {
-        remove_if_present(output)?;
+    match fs::symlink_metadata(output) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            remove_if_present(output)?;
+        }
+        Ok(_) => remove_if_present(output)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error(output, error)),
     }
     fs::rename(&temporary_path, output).map_err(|error| io_error(output, error))?;
     sync_parent(parent)
@@ -345,10 +437,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
 }
 
 fn remove_if_present(path: &Path) -> Result<(), StorageError> {
-    if path.exists() {
-        fs::remove_file(path).map_err(|error| io_error(path, error))?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(path, error)),
     }
-    Ok(())
 }
 
 fn sync_parent(parent: &Path) -> Result<(), StorageError> {
@@ -493,6 +586,32 @@ mod tests {
             assert_eq!(after_commit.removed_blobs, 0);
             storage.verify_snapshot_streaming(&manifest).unwrap();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_symlinked_parent_component() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let restore = temp.path().join("restore");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(source.join("region")).unwrap();
+        fs::write(source.join("region/r.0.0.mca"), b"safe-data").unwrap();
+        fs::create_dir_all(&restore).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, restore.join("region")).unwrap();
+
+        let storage = Storage::open(temp.path().join("store")).unwrap();
+        let world = WorldId([0x71; 32]);
+        let manifest = storage.snapshot_directory_streaming(&source, context(world)).unwrap();
+        storage.commit_snapshot_streaming(&manifest).unwrap();
+        assert!(matches!(
+            storage.restore_snapshot_streaming(&manifest, &restore),
+            Err(StorageError::SymlinkUnsupported(path)) if path == restore.join("region")
+        ));
+        assert!(!outside.join("r.0.0.mca").exists());
     }
 
     #[test]
