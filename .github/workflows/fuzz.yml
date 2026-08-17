@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  RUSTUP_TOOLCHAIN: nightly
+
 jobs:
   canonical-records-pr-smoke:
     name: Canonical record fuzz smoke
