@@ -22,10 +22,7 @@ static PIN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetentionPolicy {
-    /// Number of newest snapshots to retain in addition to mandatory recovery roots.
-    /// The latest snapshot is always retained even when this is zero.
     pub keep_latest: usize,
-    /// Operator/application-selected snapshots that must remain available.
     pub protected_snapshots: BTreeSet<u64>,
 }
 
@@ -71,6 +68,27 @@ impl Drop for ActiveReplicationLease {
 }
 
 #[derive(Debug)]
+pub(crate) struct SnapshotPublicationTransaction {
+    pins_dir: PathBuf,
+    owner: String,
+    persisted: bool,
+}
+
+impl SnapshotPublicationTransaction {
+    pub(crate) fn persist(mut self) {
+        self.persisted = true;
+    }
+}
+
+impl Drop for SnapshotPublicationTransaction {
+    fn drop(&mut self) {
+        if !self.persisted {
+            remove_publication_owner_files(&self.pins_dir, &self.owner, "aborted snapshot publication");
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct SnapshotPublicationPin {
     path: Option<PathBuf>,
 }
@@ -95,12 +113,6 @@ pub(crate) struct BlobGcCoordinationGuard {
 }
 
 impl Storage {
-    /// Pins blobs that an active reconstruction may publish into the complete
-    /// blob namespace before its snapshot manifest is committed.
-    ///
-    /// Pin creation and GC use the same kernel-owned lock. If GC already owns
-    /// the lock, replication fails before transfer starts. Once the durable pin
-    /// exists, GC may proceed and will treat the pinned hash as live.
     pub fn pin_replication_hashes(
         &self,
         world: WorldId,
@@ -113,9 +125,50 @@ impl Storage {
         Ok(ActiveReplicationLease { pin_paths })
     }
 
-    /// Creates a durable ownership pin before a local snapshot publisher makes
-    /// a complete blob visible. The returned guard removes the pin on an error;
-    /// callers persist it only after complete-blob publication succeeds.
+    pub(crate) fn begin_snapshot_publication(
+        &self,
+        world: WorldId,
+    ) -> Result<SnapshotPublicationTransaction, StorageError> {
+        let world_dir = self.world_dir(world);
+        let _lock = acquire_gc_lock_blocking(&world_dir)?;
+        let pins_dir = snapshot_publication_pins_dir(&world_dir);
+        fs::create_dir_all(&pins_dir).map_err(|source| io_error(&pins_dir, source))?;
+        let token = PIN_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let owner = format!("{}-{token}", std::process::id());
+        Ok(SnapshotPublicationTransaction { pins_dir, owner, persisted: false })
+    }
+
+    pub(crate) fn pin_snapshot_publication_transaction_hash(
+        &self,
+        world: WorldId,
+        transaction: &SnapshotPublicationTransaction,
+        hash: Hash32,
+    ) -> Result<(), StorageError> {
+        let world_dir = self.world_dir(world);
+        let _lock = acquire_gc_lock_blocking(&world_dir)?;
+        let path = transaction.pins_dir.join(format!("{}-{}.pin", transaction.owner, hash.to_hex()));
+        if path.exists() {
+            return Ok(());
+        }
+        let mut file = OpenOptions::new().create_new(true).write(true).open(&path).map_err(|source| io_error(&path, source))?;
+        file.write_all(hash.to_hex().as_bytes()).and_then(|()| file.sync_all()).map_err(|source| io_error(&path, source))?;
+        sync_dir(&transaction.pins_dir)
+    }
+
+    pub(crate) fn record_snapshot_publication_manifest(
+        &self,
+        transaction: &SnapshotPublicationTransaction,
+        manifest: &SnapshotManifestV1,
+    ) -> Result<(), StorageError> {
+        let world_dir = self.world_dir(manifest.world_id);
+        let _lock = acquire_gc_lock_blocking(&world_dir)?;
+        let path = transaction.pins_dir.join(format!("{}.snapshot", transaction.owner));
+        let bytes = format!("{}\n{}\n", manifest.snapshot_number, manifest.state_root.to_hex());
+        let mut file = OpenOptions::new().create_new(true).write(true).open(&path).map_err(|source| io_error(&path, source))?;
+        file.write_all(bytes.as_bytes()).and_then(|()| file.sync_all()).map_err(|source| io_error(&path, source))?;
+        sync_dir(&transaction.pins_dir)
+    }
+
     pub(crate) fn pin_snapshot_publication_hash(
         &self,
         world: WorldId,
@@ -129,9 +182,6 @@ impl Storage {
         Ok(SnapshotPublicationPin { path: Some(path) })
     }
 
-    /// Serializes snapshot manifest publication and publication-pin cleanup
-    /// against blob GC. This lock blocks rather than requiring a retry because
-    /// local snapshot creation is an ordinary foreground storage operation.
     pub(crate) fn lock_blob_gc_for_snapshot_commit(
         &self,
         world: WorldId,
@@ -139,10 +189,55 @@ impl Storage {
         acquire_gc_lock_blocking(&self.world_dir(world))
     }
 
-    /// Releases at most one local publication pin for each manifest entry.
-    /// Call only while holding the blob-GC coordination lock and only when this
-    /// call created the manifest path for the first time. This preserves pins
-    /// belonging to concurrent publishers of the same content hash.
+    pub(crate) fn release_snapshot_publication_transaction(
+        &self,
+        manifest: &SnapshotManifestV1,
+    ) -> Result<bool, StorageError> {
+        self.release_snapshot_publication_transaction_by_key(
+            manifest.world_id,
+            manifest.snapshot_number,
+            manifest.state_root,
+        )
+    }
+
+    fn release_snapshot_publication_transaction_by_key(
+        &self,
+        world: WorldId,
+        snapshot_number: u64,
+        state_root: Hash32,
+    ) -> Result<bool, StorageError> {
+        let pins_dir = snapshot_publication_pins_dir(&self.world_dir(world));
+        if !pins_dir.exists() {
+            return Ok(false);
+        }
+        let expected = format!("{}\n{}", snapshot_number, state_root.to_hex());
+        let mut markers = Vec::new();
+        for entry in fs::read_dir(&pins_dir).map_err(|source| io_error(&pins_dir, source))? {
+            let entry = entry.map_err(|source| io_error(&pins_dir, source))?;
+            if !entry.file_type().map_err(|source| io_error(entry.path(), source))?.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("snapshot") {
+                markers.push(path);
+            }
+        }
+        markers.sort();
+        for marker in markers {
+            let contents = fs::read_to_string(&marker).map_err(|source| io_error(&marker, source))?;
+            if contents.trim() != expected {
+                continue;
+            }
+            let owner = marker
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| io_error(&marker, std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid publication owner")))?;
+            remove_publication_owner_files_result(&pins_dir, owner)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     pub(crate) fn release_snapshot_publication_pins(
         &self,
         world: WorldId,
@@ -164,6 +259,16 @@ impl Storage {
                 continue;
             }
             let hash = read_pin_hash(&path)?;
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let hash_suffix = format!("-{}.pin", hash.to_hex());
+            let Some(owner) = file_name.strip_suffix(&hash_suffix) else {
+                continue;
+            };
+            if pins_dir.join(format!("{owner}.snapshot")).exists() {
+                continue;
+            }
             available.entry(hash).or_default().push(path);
         }
 
@@ -187,8 +292,6 @@ impl Storage {
         Ok(())
     }
 
-    /// Removes snapshot manifests outside the retention set. No blobs are
-    /// deleted here, so interruption can only retain extra data.
     pub fn prune_snapshots(&self, world: WorldId, policy: &RetentionPolicy) -> Result<RetentionReport, RetentionError> {
         let snapshots = self.list_snapshots(world)?;
         if snapshots.is_empty() {
@@ -218,18 +321,9 @@ impl Storage {
         Ok(report)
     }
 
-    /// Reclaims only complete blob files that are unreferenced by every
-    /// currently committed snapshot and are not pinned by active replication
-    /// or by local snapshot publication.
-    ///
-    /// `.part`, temporary, unknown, and malformed files are ignored.
     pub fn garbage_collect_blobs(&self, world: WorldId) -> Result<RetentionReport, RetentionError> {
         let world_dir = self.world_dir(world);
         let _lock = acquire_gc_lock(&world_dir, world)?;
-
-        // Read roots only after the exclusive OS lock exists. Replication and
-        // local publication create their pins while holding the same lock, so
-        // GC either sees a durable pin or wins before complete publication.
         let snapshots = self.list_snapshots(world)?;
         let mut live = referenced_blob_hashes(&snapshots);
         live.extend(read_hash_pins(&replication_pins_dir(&world_dir))?);
@@ -265,25 +359,15 @@ impl Storage {
             }
         }
         sync_dir(&blobs_dir)?;
-        debug!(
-            world = %world,
-            removed_blobs = report.removed_blobs,
-            reclaimed_bytes = report.reclaimed_bytes,
-            "blob garbage collection complete"
-        );
+        debug!(world = %world, removed_blobs = report.removed_blobs, reclaimed_bytes = report.reclaimed_bytes, "blob garbage collection complete");
         Ok(report)
     }
 
-    /// Conservative two-phase retention: prune manifests first, then re-read
-    /// remaining manifests under the GC lock before sweeping blobs.
     pub fn apply_retention(&self, world: WorldId, policy: &RetentionPolicy) -> Result<RetentionReport, RetentionError> {
         let mut report = self.prune_snapshots(world, policy)?;
         let gc = self.garbage_collect_blobs(world)?;
         report.removed_blobs = gc.removed_blobs;
         report.reclaimed_bytes = gc.reclaimed_bytes;
-
-        // Re-read for an authoritative final retained list. If pruning was
-        // interrupted by an I/O error, apply_retention returned before GC.
         report.retained_snapshots =
             self.list_snapshots(world)?.into_iter().map(|manifest| manifest.snapshot_number).collect();
         Ok(report)
@@ -299,7 +383,6 @@ fn retention_roots(
     let mut retained = policy.protected_snapshots.clone();
     let latest = snapshots.last().expect("non-empty snapshot list");
     retained.insert(latest.snapshot_number);
-
     for manifest in snapshots.iter().rev().take(policy.keep_latest) {
         retained.insert(manifest.snapshot_number);
     }
@@ -341,7 +424,6 @@ fn retention_roots(
             retained.insert(*number);
         }
     }
-
     Ok(retained)
 }
 
@@ -424,6 +506,45 @@ fn read_pin_hash(path: &Path) -> Result<Hash32, StorageError> {
     let value = std::str::from_utf8(&bytes)
         .map_err(|_| io_error(path, std::io::Error::new(std::io::ErrorKind::InvalidData, "GC pin is not UTF-8")))?;
     Hash32::from_str(value.trim()).map_err(StorageError::from)
+}
+
+fn remove_publication_owner_files_result(pins_dir: &Path, owner: &str) -> Result<(), StorageError> {
+    if !pins_dir.exists() {
+        return Ok(());
+    }
+    let pin_prefix = format!("{owner}-");
+    let marker_name = format!("{owner}.snapshot");
+    let mut removed_any = false;
+    for entry in fs::read_dir(pins_dir).map_err(|source| io_error(pins_dir, source))? {
+        let entry = entry.map_err(|source| io_error(pins_dir, source))?;
+        if !entry.file_type().map_err(|source| io_error(entry.path(), source))?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let owned_pin = file_name.starts_with(&pin_prefix)
+            && path.extension().and_then(|value| value.to_str()) == Some("pin");
+        if !owned_pin && file_name != marker_name {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => removed_any = true,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(io_error(&path, source)),
+        }
+    }
+    if removed_any {
+        sync_dir(pins_dir)?;
+    }
+    Ok(())
+}
+
+fn remove_publication_owner_files(pins_dir: &Path, owner: &str, kind: &str) {
+    if let Err(error) = remove_publication_owner_files_result(pins_dir, owner) {
+        warn!(%error, kind, owner, "failed to remove snapshot publication owner pins");
+    }
 }
 
 fn remove_pin_paths(paths: &[PathBuf], kind: &str) {
@@ -598,6 +719,47 @@ mod tests {
         drop(lease);
         reopened.garbage_collect_blobs(world()).unwrap();
         assert!(gc_lock_path(&world_dir).exists());
+    }
+
+    #[test]
+    fn publication_transactions_do_not_remove_other_owner_with_shared_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(temp.path().join("store")).unwrap();
+        let hash = Hash32([9; 32]);
+        let tx_a = storage.begin_snapshot_publication(world()).unwrap();
+        let tx_b = storage.begin_snapshot_publication(world()).unwrap();
+        storage.pin_snapshot_publication_transaction_hash(world(), &tx_a, hash).unwrap();
+        storage.pin_snapshot_publication_transaction_hash(world(), &tx_b, hash).unwrap();
+        let root_a = Hash32([1; 32]);
+        let root_b = Hash32([2; 32]);
+        let marker_a = tx_a.pins_dir.join(format!("{}.snapshot", tx_a.owner));
+        let marker_b = tx_b.pins_dir.join(format!("{}.snapshot", tx_b.owner));
+        fs::write(&marker_a, format!("1\n{}\n", root_a.to_hex())).unwrap();
+        fs::write(&marker_b, format!("2\n{}\n", root_b.to_hex())).unwrap();
+        tx_a.persist();
+        tx_b.persist();
+
+        storage.release_snapshot_publication_transaction_by_key(world(), 1, root_a).unwrap();
+        assert!(read_hash_pins(&snapshot_publication_pins_dir(&storage.world_dir(world()))).unwrap().contains(&hash));
+        storage.release_snapshot_publication_transaction_by_key(world(), 2, root_b).unwrap();
+        assert!(!read_hash_pins(&snapshot_publication_pins_dir(&storage.world_dir(world()))).unwrap().contains(&hash));
+    }
+
+    #[test]
+    fn persisted_publication_owner_survives_reopen_and_protects_gc() {
+        let temp = tempfile::tempdir().unwrap();
+        let store_root = temp.path().join("store");
+        let storage = Storage::open(&store_root).unwrap();
+        let blob = storage.put_blob(world(), b"crash-window").unwrap();
+        let tx = storage.begin_snapshot_publication(world()).unwrap();
+        storage.pin_snapshot_publication_transaction_hash(world(), &tx, blob.hash).unwrap();
+        tx.persist();
+        drop(storage);
+
+        let reopened = Storage::open(&store_root).unwrap();
+        let report = reopened.garbage_collect_blobs(world()).unwrap();
+        assert_eq!(report.removed_blobs, 0);
+        reopened.verify_blob(world(), &blob).unwrap();
     }
 
     #[test]
