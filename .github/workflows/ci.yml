@@ -41,6 +41,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Hostile input continuation
+        run: cargo test -p swarm-network --test input_hardening --locked
       - name: Peer networking hard reconnect
         run: cargo test -p swarm-network --test peer_networking_acceptance --locked
       - name: Snapshot swarm reconstruction
