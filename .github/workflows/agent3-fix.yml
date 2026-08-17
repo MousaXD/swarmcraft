@@ -41,11 +41,7 @@ jobs:
           PY
       - name: Format
         run: cargo fmt --all
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Tests
-        run: cargo test --workspace --all-features --locked
-      - name: Commit validated fix
+      - name: Commit fix
         run: |
           rm .github/workflows/agent3-fix.yml
           git config user.name "swarmcraft-agent3"
@@ -53,3 +49,7 @@ jobs:
           git add -A
           git commit -m "fix: complete server mod readiness diagnostics"
           git push origin HEAD:agent/server-mod-management
+      - name: Clippy committed tree
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Test committed tree
+        run: cargo test --workspace --all-features --locked
