@@ -1,3 +1,5 @@
+import { registerRuntimeWizard } from './runtime-wizard.js';
+
 const unavailable = (feature) => {
   const error = new Error(`${feature} is not available in this build.`);
   error.code = 'SWARMCRAFT_CAPABILITY_UNAVAILABLE';
@@ -13,6 +15,16 @@ export const MIGRATION_PHASES = Object.freeze([
   'waiting-for-host',
   'ready',
   'failed',
+]);
+
+export const RUNTIME_COMPONENTS = Object.freeze([
+  ['java', 'Java'],
+  ['minecraft_server', 'Minecraft server'],
+  ['fabric_loader', 'Fabric Loader'],
+  ['fabric_api', 'Fabric API'],
+  ['swarmcraft_integration', 'SwarmCraft integration'],
+  ['world_directories', 'World directories'],
+  ['server_mods', 'Server mods'],
 ]);
 
 const MIGRATION_LABELS = Object.freeze({
@@ -83,6 +95,16 @@ const CONNECTIVITY_STATES = Object.freeze({
   },
 });
 
+const RUNTIME_COMPONENT_ALIASES = Object.freeze({
+  java: ['java'],
+  minecraft_server: ['minecraft_server', 'minecraftServer', 'server', 'minecraft'],
+  fabric_loader: ['fabric_loader', 'fabricLoader', 'loader'],
+  fabric_api: ['fabric_api', 'fabricApi'],
+  swarmcraft_integration: ['swarmcraft_integration', 'swarmcraftIntegration', 'swarmcraft_mod', 'swarmcraftMod', 'mod'],
+  world_directories: ['world_directories', 'worldDirectories', 'directories'],
+  server_mods: ['server_mods', 'serverMods', 'mods'],
+});
+
 function slug(value) {
   return String(value || '')
     .trim()
@@ -103,6 +125,93 @@ function compactList(value) {
   if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
   if (value === null || value === undefined || value === '') return [];
   return [String(value).trim()].filter(Boolean);
+}
+
+function parseJsonContract(raw, label) {
+  if (raw && typeof raw === 'object') return raw;
+  try {
+    return JSON.parse(String(raw));
+  } catch (error) {
+    throw new Error(`${label} was not valid JSON: ${error}`);
+  }
+}
+
+function optionalBoolean(value) {
+  return typeof value === 'boolean' ? value : null;
+}
+
+function runtimeState(value) {
+  const state = connectivityKey(value);
+  if (['ready', 'installed', 'managed', 'compatible', 'present', 'verified'].includes(state)) return 'ready';
+  if (['checking', 'pending', 'downloading', 'installing', 'preparing', 'verifying', 'working'].includes(state)) return 'working';
+  if (['missing', 'required', 'not_installed', 'absent'].includes(state)) return 'missing';
+  if (['incompatible', 'wrong_version', 'unsupported'].includes(state)) return 'incompatible';
+  if (['corrupt', 'invalid', 'hash_mismatch', 'damaged'].includes(state)) return 'corrupt';
+  if (['failed', 'error'].includes(state)) return 'failed';
+  return 'unknown';
+}
+
+function normalizeRuntimeComponent(id, label, value) {
+  const source = value && typeof value === 'object' ? value : { state: value };
+  return {
+    id,
+    label,
+    state: runtimeState(source.state ?? source.status ?? source.kind ?? value),
+    detail: String(source.detail ?? source.message ?? source.reason ?? '').trim(),
+    version: String(source.version ?? source.resolved_version ?? source.resolvedVersion ?? '').trim(),
+    required: source.required !== false,
+    raw: source,
+  };
+}
+
+export function normalizeRuntimeStatus(raw) {
+  const source = parseJsonContract(raw, 'Runtime status');
+  const componentSource = source.components ?? source.runtime_components ?? source.runtimeComponents ?? {};
+  const components = RUNTIME_COMPONENTS.map(([id, label]) => {
+    const aliases = RUNTIME_COMPONENT_ALIASES[id] || [id];
+    let value;
+    for (const alias of aliases) {
+      if (Object.prototype.hasOwnProperty.call(componentSource, alias)) {
+        value = componentSource[alias];
+        break;
+      }
+      if (Object.prototype.hasOwnProperty.call(source, alias)) {
+        value = source[alias];
+        break;
+      }
+    }
+    return normalizeRuntimeComponent(id, label, value);
+  });
+  const overall = connectivityKey(source.state ?? source.status ?? source.phase);
+  const eulaAccepted = Boolean(source.eula_accepted ?? source.eulaAccepted ?? source.accept_eula ?? source.acceptEula);
+  const eulaRequired = !eulaAccepted && Boolean(
+    source.eula_required
+      ?? source.eulaRequired
+      ?? (overall === 'eula_required'),
+  );
+  const ready = Boolean(source.ready ?? source.runtime_ready ?? source.runtimeReady ?? overall === 'ready');
+  const failure = source.failure ?? source.error ?? source.failure_reason ?? source.failureReason ?? null;
+  const diagnosticDetail = failure && typeof failure === 'object'
+    ? String(failure.detail ?? failure.message ?? JSON.stringify(failure)).trim()
+    : String(failure ?? source.diagnostic_detail ?? source.diagnosticDetail ?? '').trim();
+
+  return {
+    ready,
+    phase: connectivityKey(source.phase ?? source.state ?? source.status) || (ready ? 'ready' : 'checking'),
+    detail: String(source.detail ?? source.message ?? '').trim(),
+    eulaAccepted,
+    eulaRequired,
+    components,
+    worldDataSafe: optionalBoolean(source.world_data_safe ?? source.worldDataSafe),
+    retrySafe: optionalBoolean(source.retry_safe ?? source.retrySafe),
+    diagnosticDetail,
+    raw: source,
+  };
+}
+
+function missingCommand(error) {
+  const message = String(error || '');
+  return /unknown command|command [^\n]*(?:not found|does not exist|not registered)|not a registered command/i.test(message);
 }
 
 function connectivityFailures(source) {
@@ -264,6 +373,15 @@ export function createBackendAdapter(invoke) {
     return invoke(command, payload);
   };
 
+  const callOptional = async (command, payload, feature) => {
+    try {
+      return await call(command, payload);
+    } catch (error) {
+      if (missingCommand(error)) throw unavailable(feature);
+      throw error;
+    }
+  };
+
   const migrationCapabilities = { status: false, transfer: false, wake: false };
   let migrationCapabilityProbe = null;
   const ensureMigrationCapabilities = () => {
@@ -293,7 +411,7 @@ export function createBackendAdapter(invoke) {
     gameEndpoint: payload.gameEndpoint || null,
   });
 
-  return Object.freeze({
+  const adapter = Object.freeze({
     initializeNode: () => call('initialize_node'),
     nodeIdentity: () => call('node_identity'),
     listWorlds: async () => {
@@ -340,6 +458,35 @@ export function createBackendAdapter(invoke) {
       return normalizeConnectivityDiagnostics(parsed);
     },
 
+    runtime: Object.freeze({
+      status: async (world) => normalizeRuntimeStatus(await callOptional(
+        'runtime_status',
+        { world },
+        'Automatic runtime setup',
+      )),
+      plan: async (world) => parseJsonContract(await callOptional(
+        'runtime_plan',
+        { world },
+        'Runtime setup planning',
+      ), 'Runtime plan'),
+      install: async (world, options = {}) => normalizeRuntimeStatus(await callOptional(
+        'runtime_install',
+        { world, acceptEula: options.acceptEula === true },
+        'Automatic runtime installation',
+      )),
+      repair: async (world) => normalizeRuntimeStatus(await callOptional(
+        'runtime_repair',
+        { world },
+        'Automatic runtime repair',
+      )),
+      verify: async (world) => normalizeRuntimeStatus(await callOptional(
+        'runtime_verify',
+        { world },
+        'Runtime verification',
+      )),
+      launch: (world) => callOptional('runtime_launch', { world }, 'Managed runtime launch'),
+    }),
+
     migration: Object.freeze({
       capabilities: migrationCapabilities,
       refreshCapabilities: ensureMigrationCapabilities,
@@ -361,4 +508,7 @@ export function createBackendAdapter(invoke) {
       },
     }),
   });
+
+  registerRuntimeWizard(adapter);
+  return adapter;
 }
