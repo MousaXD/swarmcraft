@@ -1,9 +1,7 @@
 name: Snapshot replication branch validation
 
 on:
-  push:
-    branches:
-      - agent/snapshot-replication
+  pull_request:
 
 permissions:
   contents: read
