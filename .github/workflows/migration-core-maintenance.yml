@@ -1,0 +1,122 @@
+name: Migration Core Branch Maintenance
+
+on:
+  push:
+    branches:
+      - agent/migration-core
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-format:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/migration-core
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply reviewed migration patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("crates/swarm-cli/src/migration.rs")
+          text = path.read_text()
+
+          old = "use serde::{Deserialize, Serialize};\n"
+          assert text.count(old) == 1
+          text = text.replace(old, "", 1)
+
+          old = "use swarm_storage::{SnapshotContext, Storage};\n"
+          new = """use swarm_storage::{
+              serde::{Deserialize, Serialize},
+              serde_json, SnapshotContext, Storage,
+          };
+          """
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          old = """        if let Ok(transfer) = storage.load_transfer_record(world) {
+              if transfer.from_peer_id == identity.peer_id() {
+          """
+          new = """        if let Ok(transfer) = storage.load_transfer_record(world) {
+              let completed = storage.load_epoch_record(world).is_ok_and(|epoch| {
+                  transfer.phase == TransferPhase::Committed
+                      && epoch.epoch_number == transfer.next_epoch
+                      && epoch.fencing_token == transfer.next_fencing_token
+                      && epoch.authority_peer_id == transfer.to_peer_id
+              });
+              if transfer.from_peer_id == identity.peer_id() && !completed {
+          """
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          old = """pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options: HostOptions) -> Result<()> {
+              run_authority_runtime_inner(paths, storage, options, MigrationTrigger::DirectHost, None, true).await
+          }
+          """
+          new = """pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options: HostOptions) -> Result<()> {
+              let identity = PeerIdentity::load_or_create(paths)?;
+              let descriptor = storage.load_world_descriptor(options.world)?;
+              let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
+              if member_count > 1 {
+                  if storage.load_sleep_record(options.world).is_ok() {
+                      bail!("multi-member sleeping worlds must be woken through the migration supervisor");
+                  }
+                  let epoch = storage.load_epoch_record(options.world)?;
+                  if epoch.authority_peer_id != identity.peer_id()
+                      || epoch.authority_public_key != identity.public_key()
+                  {
+                      bail!("local peer does not hold the accepted authority generation");
+                  }
+                  let config = RuntimeLaunchConfig {
+                      java: options.java.clone(),
+                      server_jar: options.server_jar.clone(),
+                      mod_jar: options.mod_jar.clone(),
+                      accept_eula: options.accept_eula,
+                      game_endpoint: None,
+                  };
+                  if !wait_until_launch_safe(
+                      paths,
+                      storage,
+                      &identity,
+                      options.world,
+                      &descriptor,
+                      &epoch,
+                      &config,
+                  )
+                  .await?
+                  {
+                      bail!("authority generation changed while waiting for launch safety");
+                  }
+              }
+              run_authority_runtime_inner(paths, storage, options, MigrationTrigger::DirectHost, None, true).await
+          }
+          """
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+      - name: Format Rust workspace
+        run: cargo fmt --all
+      - name: Verify patch
+        run: |
+          git diff --check
+          git status --short
+      - name: Commit formatted backend changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/swarm-cli/src/migration.rs crates/swarm-cli/src/main.rs crates/swarm-cli/tests/migration_core.rs crates/swarm-storage/src/lib.rs
+          if ! git diff --cached --quiet; then
+            git commit -m "fix(migration): enforce launch safety and format"
+            git push origin HEAD:agent/migration-core
+          fi
