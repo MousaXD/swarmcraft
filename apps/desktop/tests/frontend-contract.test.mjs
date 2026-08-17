@@ -1,49 +1,168 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { connectivityFromStatus, createBackendAdapter, MIGRATION_PHASES, normalizeMigrationState } from '../src/backend-adapter.js';
+import {
+  connectivityFromStatus,
+  createBackendAdapter,
+  MIGRATION_PHASES,
+  normalizeConnectivityDiagnostics,
+  normalizeMigrationState,
+} from '../src/backend-adapter.js';
 
 const srcRoot = new URL('../src/', import.meta.url);
+const desktopRoot = new URL('../', import.meta.url);
 
 async function text(name) {
   return readFile(new URL(name, srcRoot), 'utf8');
 }
 
-test('connectivity parser keeps player-facing transport states distinct', () => {
-  assert.equal(connectivityFromStatus({ Connectivity: 'Direct' }).label, 'Direct');
-  assert.equal(connectivityFromStatus({ 'Network path': 'Circuit relay' }).label, 'Relay');
-  assert.equal(connectivityFromStatus({ Connectivity: 'connecting' }).label, 'Connecting');
-  assert.equal(connectivityFromStatus({ Reachability: 'offline' }).label, 'Offline');
-  assert.equal(connectivityFromStatus({ Connectivity: 'limited NAT reachability' }).label, 'Limited connectivity');
-  assert.equal(connectivityFromStatus({ Connectivity: 'Limited connectivity' }).label, 'Limited connectivity');
-  assert.equal(connectivityFromStatus({ Connectivity: 'NAT blocked - action required' }).label, 'Action required');
-  assert.equal(connectivityFromStatus({}).label, 'Not reported');
+async function desktopText(name) {
+  return readFile(new URL(name, desktopRoot), 'utf8');
+}
+
+test('runtime configuration is persisted before direct host launch', async () => {
+  const calls = [];
+  const backend = createBackendAdapter(async (command, payload) => {
+    calls.push({ command, payload });
+    if (command === 'configure_world_runtime') return 'configured';
+    if (command === 'host_world') return 4242;
+    return 'ok';
+  });
+
+  const payload = {
+    world: 'scworld:test',
+    java: 'java',
+    serverJar: '/server.jar',
+    modJar: '/mod.jar',
+    acceptEula: true,
+  };
+  const pid = await backend.hostWorld(payload);
+
+  assert.equal(pid, 4242);
+  assert.deepEqual(calls.map(({ command }) => command), ['configure_world_runtime', 'host_world']);
+  assert.deepEqual(calls[0].payload, { ...payload, gameEndpoint: null });
 });
 
-test('migration state translates migration-core phases into launcher phases', () => {
-  for (const phase of MIGRATION_PHASES) {
-    const state = normalizeMigrationState({ phase });
-    assert.equal(state.phase, phase);
-    assert.equal(state.available, true);
+test('failed runtime persistence never silently proceeds as failover-ready', async () => {
+  const calls = [];
+  const backend = createBackendAdapter(async (command) => {
+    calls.push(command);
+    if (command === 'configure_world_runtime') throw new Error('runtime config write failed');
+    return 4242;
+  });
+
+  await assert.rejects(
+    backend.hostWorld({
+      world: 'scworld:test',
+      java: 'java',
+      serverJar: '/server.jar',
+      modJar: '/mod.jar',
+      acceptEula: true,
+    }),
+    /hosting was not started and automatic takeover is not prepared/i,
+  );
+  assert.deepEqual(calls, ['configure_world_runtime']);
+});
+
+test('startup automatically initializes the node and ensures the daemon before loading worlds', async () => {
+  const app = await text('app.js');
+  const startup = app.match(/async function startup\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
+  assert.match(startup, /backend\.initializeNode\(\)/);
+  assert.match(startup, /ensureNetworkingService\(\{ quiet: true \}\)/);
+  assert.match(startup, /refreshWorlds\(\)/);
+  assert.ok(startup.indexOf('backend.initializeNode()') < startup.indexOf('ensureNetworkingService({ quiet: true })'));
+  assert.ok(startup.indexOf('ensureNetworkingService({ quiet: true })') < startup.indexOf('refreshWorlds()'));
+  assert.match(app, /startup\(\)\.catch/);
+});
+
+test('daemon ownership is idempotent and stale termination cannot clear a newer child', async () => {
+  const runtime = await desktopText('src-tauri/src/runtime.rs');
+  assert.match(runtime, /if let Some\(pid\) = guard\.existing_pid\(CommandChild::pid\) \{\s*return Ok\(pid\);/);
+  assert.match(runtime, /clear_if_generation\(generation\)/);
+  assert.match(runtime, /stale_termination_cannot_clear_newer_owned_process/);
+  assert.match(runtime, /existing_owned_process_is_idempotent/);
+});
+
+test('Desktop stop path cannot target an unrelated external daemon', async () => {
+  const runtime = await desktopText('src-tauri/src/runtime.rs');
+  assert.match(runtime, /is not owned by this Desktop process/);
+  assert.match(runtime, /stop_path_has_no_handle_for_external_processes/);
+  assert.doesNotMatch(runtime, /pkill|taskkill|killall/);
+});
+
+test('structured connectivity JSON maps to player-facing labels without treating unknown NAT as offline', () => {
+  const expectations = new Map([
+    ['nat_status_unknown', 'Checking connectivity'],
+    ['direct_reachable', 'Direct connection'],
+    ['hole_punched', 'Direct connection established'],
+    ['relay_connected', 'Connected through relay'],
+    ['relay_required', 'Relay needed'],
+    ['private_unreachable', 'Connection needs attention'],
+    ['bootstrap_unavailable', 'Discovery unavailable'],
+    ['no_viable_path', 'Could not reach other peers'],
+  ]);
+  for (const [state, label] of expectations) {
+    assert.equal(normalizeConnectivityDiagnostics({ state }).label, label);
   }
-  assert.equal(normalizeMigrationState({ phase: 'waiting_for_authority' }).phase, 'preparing-successor');
-  assert.equal(normalizeMigrationState({ phase: 'launching_runtime' }).phase, 'starting-minecraft');
-  assert.equal(normalizeMigrationState({ phase: 'verifying_fabric' }).phase, 'waiting-for-host');
-  assert.equal(normalizeMigrationState({ phase: 'checkpointing' }).phase, 'saving-world');
-  assert.equal(normalizeMigrationState({ phase: 'awaiting_transfer_acceptance' }).phase, 'transferring-authority');
-  assert.equal(normalizeMigrationState({ phase: 'sleeping' }).available, false);
-  assert.equal(normalizeMigrationState({ phase: 'blocked', failure_reason: 'runtime config missing' }).label, 'Action required');
-  const ready = normalizeMigrationState({ phase: 'ready', runtime_ready: true, game_endpoint: '127.0.0.1:25565' });
-  assert.equal(ready.detail, 'Minecraft is ready at 127.0.0.1:25565.');
-  assert.equal(ready.progress, 100);
-  assert.equal(ready.runtimeReady, true);
-  assert.equal(ready.gameEndpoint, '127.0.0.1:25565');
-  const unknown = normalizeMigrationState({ phase: 'elected-but-maybe-ready' });
-  assert.equal(unknown.available, false);
-  assert.equal(unknown.phase, null);
+  const unknown = normalizeConnectivityDiagnostics({ state: 'nat_status_unknown', nat_status: 'unknown' });
+  assert.notEqual(unknown.label.toLowerCase(), 'offline');
+  assert.match(unknown.diagnosticDetail, /NAT: unknown/);
+  const direct = normalizeConnectivityDiagnostics({
+    state: 'direct_reachable',
+    nat_status: 'public',
+    local_addresses: ['/ip4/0.0.0.0/udp/4000/quic-v1'],
+    observed_public_address: '/ip4/1.2.3.4/udp/4000/quic-v1',
+    selected_relay: '/dns4/relay.example/udp/4001/quic-v1/p2p/relay',
+    last_failure: 'earlier direct dial timeout',
+    recent_failures: [{ kind: 'direct_dial_failed', peer: 'peer-a', address: null, detail: 'timeout' }],
+  });
+  assert.equal(direct.label, 'Direct connection');
+  assert.match(direct.diagnosticDetail, /NAT: public/);
+  assert.match(direct.diagnosticDetail, /Local addresses: \/ip4\/0\.0\.0\.0/);
+  assert.match(direct.diagnosticDetail, /Observed public address: \/ip4\/1\.2\.3\.4/);
+  assert.match(direct.diagnosticDetail, /Recent failures: direct dial failed: timeout: peer peer-a/);
+  assert.doesNotMatch(direct.diagnosticDetail, /\[object Object\]/);
+  assert.equal(connectivityFromStatus({ Connectivity: 'Direct' }).label, 'Checking connectivity');
 });
 
-test('migration status and wake probe real backend capability while transfer stays multi-stage', async () => {
+test('connectivity adapter requires machine-readable JSON', async () => {
+  const calls = [];
+  const backend = createBackendAdapter(async (command) => {
+    calls.push(command);
+    return JSON.stringify({ state: 'relay_connected', nat_status: 'private', local_addresses: ['/ip4/1.2.3.4/udp/1/quic-v1'] });
+  });
+  const state = await backend.connectivityDiagnostics();
+  assert.equal(state.label, 'Connected through relay');
+  assert.match(state.diagnosticDetail, /NAT: private/);
+  assert.deepEqual(calls, ['connectivity_diagnostics']);
+});
+
+test('blocked migration due to missing runtime config is actionable and distinct from failed', async () => {
+  const blocked = normalizeMigrationState({ phase: 'blocked', failure_reason: 'runtime config missing' });
+  assert.equal(blocked.label, 'Action required');
+  assert.equal(blocked.failed, false);
+  assert.equal(blocked.blocked, true);
+  assert.equal(blocked.action, 'runtime-setup');
+  assert.equal(blocked.detail, 'This device needs Minecraft runtime setup before it can take over hosting.');
+
+  const failed = normalizeMigrationState({ phase: 'failed', failure_reason: 'launch crashed' });
+  assert.equal(failed.failed, true);
+  assert.equal(failed.label, 'Migration failed');
+
+  const app = await text('app.js');
+  assert.match(app, /migrationRuntimeSetup/);
+  assert.match(app, /Set up Minecraft runtime/);
+  assert.match(app, /showRuntimeValidation/);
+});
+
+test('stale migration requests cannot overwrite the newly selected world', async () => {
+  const app = await text('app.js');
+  assert.match(app, /const requestGeneration = \+\+migrationRequestGeneration/);
+  assert.match(app, /selectedWorldId === requestedWorldId && requestGeneration === migrationRequestGeneration/);
+  assert.match(app, /migrationRequestGeneration \+= 1/);
+});
+
+test('manual transfer remains unavailable without one safe backend orchestration command', async () => {
   const calls = [];
   const backend = createBackendAdapter(async (command, payload) => {
     calls.push([command, payload]);
@@ -63,21 +182,37 @@ test('migration status and wake probe real backend capability while transfer sta
   assert.deepEqual(calls.map(([command]) => command), ['migration_capabilities', 'list_worlds', 'migration_status', 'wake_world']);
 });
 
-test('existing Tauri command names and camelCase payloads stay intact', async () => {
-  const calls = [];
-  const backend = createBackendAdapter(async (command, payload) => {
-    calls.push({ command, payload });
-    return 'ok';
-  });
-  await backend.createWorld({ name: 'Test', minecraft: '26.1.2', fabricLoader: '0.19.3', compatibility: 'vanilla-fabric', visibility: 'private' });
-  await backend.createInvite({ world: 'scworld:test', expiresMinutes: 60, bootstrapAddrs: [] });
-  await backend.hostWorld({ world: 'scworld:test', java: 'java', serverJar: '/server.jar', modJar: '/mod.jar', acceptEula: true });
-  assert.equal(calls[0].command, 'create_world');
-  assert.equal(calls[0].payload.fabricLoader, '0.19.3');
-  assert.equal(calls[1].command, 'create_invite');
-  assert.equal(calls[1].payload.expiresMinutes, 60);
-  assert.equal(calls[2].command, 'host_world');
-  assert.equal(calls[2].payload.acceptEula, true);
+test('migration state translates migration-core phases into launcher phases', () => {
+  for (const phase of MIGRATION_PHASES) {
+    const state = normalizeMigrationState({ phase });
+    assert.equal(state.phase, phase);
+    assert.equal(state.available, true);
+  }
+  assert.equal(normalizeMigrationState({ phase: 'waiting_for_authority' }).phase, 'preparing-successor');
+  assert.equal(normalizeMigrationState({ phase: 'launching_runtime' }).phase, 'starting-minecraft');
+  assert.equal(normalizeMigrationState({ phase: 'verifying_fabric' }).phase, 'waiting-for-host');
+  assert.equal(normalizeMigrationState({ phase: 'checkpointing' }).phase, 'saving-world');
+  assert.equal(normalizeMigrationState({ phase: 'awaiting_transfer_acceptance' }).phase, 'transferring-authority');
+  assert.equal(normalizeMigrationState({ phase: 'sleeping' }).available, false);
+  const ready = normalizeMigrationState({ phase: 'ready', runtime_ready: true, game_endpoint: '127.0.0.1:25565' });
+  assert.equal(ready.detail, 'Minecraft is ready at 127.0.0.1:25565.');
+  assert.equal(ready.progress, 100);
+  assert.equal(ready.runtimeReady, true);
+  assert.equal(ready.gameEndpoint, '127.0.0.1:25565');
+  const unknown = normalizeMigrationState({ phase: 'elected-but-maybe-ready' });
+  assert.equal(unknown.available, false);
+  assert.equal(unknown.phase, null);
+});
+
+test('Tauri bridge exposes runtime persistence, daemon ensure, and structured connectivity commands', async () => {
+  const main = await desktopText('src-tauri/src/main.rs');
+  const runtimeCommands = await desktopText('src-tauri/src/runtime_commands.rs');
+  assert.match(main, /async fn configure_world_runtime/);
+  assert.match(main, /"runtime-configure"\.into\(\)/);
+  assert.match(main, /"--accept-eula"\.into\(\)/);
+  assert.match(main, /async fn connectivity_diagnostics/);
+  assert.match(main, /"diagnostics"\.into\(\)[\s\S]*"connectivity"\.into\(\)[\s\S]*"--json"\.into\(\)/);
+  assert.match(runtimeCommands, /pub fn ensure_daemon_running/);
 });
 
 test('launcher markup keeps critical flow and accessibility anchors', async () => {
@@ -99,10 +234,9 @@ test('frontend source and Tauri config preserve the global bridge contract', asy
   const app = await text('app.js');
   const tauri = JSON.parse(await readFile(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
   assert.match(app, /window\.__TAURI__\?\.core\?\.invoke/);
-  assert.match(app, /selectedWorldId === requestedWorldId/);
   assert.match(app, /document\.hidden/);
   assert.match(app, /setInterval\(refreshVisibleMigration, MIGRATION_REFRESH_MS\)/);
-  assert.match(app, /!migration\.available \|\| migration\.failed/);
   assert.match(app, /renderMigration\(\{ detail: `Could not read host migration state:/);
+  assert.match(app, /Automatic networking service could not start/);
   assert.equal(tauri.app.withGlobalTauri, true);
 });

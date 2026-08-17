@@ -37,18 +37,50 @@ const BACKEND_MIGRATION_PHASE_ALIASES = Object.freeze({
   checkpointing: 'saving-world',
   'awaiting-transfer-acceptance': 'transferring-authority',
   ready: 'ready',
-  blocked: 'failed',
   failed: 'failed',
 });
 
-const CONNECTIVITY_LABELS = Object.freeze({
-  direct: 'Direct',
-  relay: 'Relay',
-  connecting: 'Connecting',
-  offline: 'Offline',
-  limited: 'Limited connectivity',
-  action: 'Action required',
-  unknown: 'Not reported',
+const CONNECTIVITY_STATES = Object.freeze({
+  nat_status_unknown: {
+    kind: 'connecting',
+    label: 'Checking connectivity',
+    detail: 'SwarmCraft is still determining which network paths are available.',
+  },
+  direct_reachable: {
+    kind: 'direct',
+    label: 'Direct connection',
+    detail: 'Other peers can reach this device directly.',
+  },
+  hole_punched: {
+    kind: 'direct',
+    label: 'Direct connection established',
+    detail: 'SwarmCraft established a direct peer path through NAT traversal.',
+  },
+  relay_connected: {
+    kind: 'relay',
+    label: 'Connected through relay',
+    detail: 'Peer traffic currently has a usable relay path.',
+  },
+  relay_required: {
+    kind: 'limited',
+    label: 'Relay needed',
+    detail: 'A relay path is needed for reliable internet connectivity.',
+  },
+  private_unreachable: {
+    kind: 'action',
+    label: 'Connection needs attention',
+    detail: 'This device does not currently have a usable inbound peer path.',
+  },
+  bootstrap_unavailable: {
+    kind: 'action',
+    label: 'Discovery unavailable',
+    detail: 'SwarmCraft cannot currently reach bootstrap discovery infrastructure.',
+  },
+  no_viable_path: {
+    kind: 'action',
+    label: 'Could not reach other peers',
+    detail: 'No direct, hole-punched, or relayed peer path is currently usable.',
+  },
 });
 
 function slug(value) {
@@ -59,6 +91,74 @@ function slug(value) {
     .replace(/[^a-z0-9-]/g, '');
 }
 
+function connectivityKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_')
+    .replace(/[^a-z0-9_]/g, '');
+}
+
+function compactList(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+  if (value === null || value === undefined || value === '') return [];
+  return [String(value).trim()].filter(Boolean);
+}
+
+function connectivityFailures(source) {
+  const failures = source.recent_failures ?? source.recentFailures ?? source.failures ?? source.failure_reasons ?? source.failureReasons ?? source.errors;
+  if (!Array.isArray(failures)) return compactList(failures);
+  return failures.map((failure) => {
+    if (!failure || typeof failure !== 'object') return String(failure || '').trim();
+    const kind = connectivityKey(failure.kind).replaceAll('_', ' ');
+    const detail = String(failure.detail || '').trim();
+    const peer = String(failure.peer || '').trim();
+    const address = String(failure.address || '').trim();
+    return [kind, detail, peer && `peer ${peer}`, address].filter(Boolean).join(': ');
+  }).filter(Boolean);
+}
+
+export function normalizeConnectivityDiagnostics(raw) {
+  const source = raw && typeof raw === 'object' ? raw : { state: raw };
+  const state = connectivityKey(
+    source.state
+      ?? source.connectivity_state
+      ?? source.connectivityState
+      ?? source.path_state
+      ?? source.pathState
+      ?? source.status,
+  );
+  const mapped = CONNECTIVITY_STATES[state] || CONNECTIVITY_STATES.nat_status_unknown;
+  const natState = source.nat_status ?? source.natStatus ?? source.nat_state ?? source.natState ?? null;
+  const localAddresses = compactList(
+    source.local_addresses
+      ?? source.localAddresses
+      ?? source.addresses
+      ?? source.listen_addresses
+      ?? source.listenAddresses,
+  );
+  const observedPublicAddress = String(source.observed_public_address ?? source.observedPublicAddress ?? '').trim();
+  const selectedRelay = String(source.selected_relay ?? source.selectedRelay ?? '').trim();
+  const lastFailure = String(source.last_failure ?? source.lastFailure ?? '').trim();
+  const failures = connectivityFailures(source);
+  const diagnosticParts = [];
+  if (natState) diagnosticParts.push(`NAT: ${natState}`);
+  if (localAddresses.length) diagnosticParts.push(`Local addresses: ${localAddresses.join(', ')}`);
+  if (observedPublicAddress) diagnosticParts.push(`Observed public address: ${observedPublicAddress}`);
+  if (selectedRelay) diagnosticParts.push(`Relay: ${selectedRelay}`);
+  if (lastFailure) diagnosticParts.push(`Last failure: ${lastFailure}`);
+  if (failures.length) diagnosticParts.push(`Recent failures: ${failures.join('; ')}`);
+
+  return {
+    state: CONNECTIVITY_STATES[state] ? state : 'nat_status_unknown',
+    kind: mapped.kind,
+    label: mapped.label,
+    detail: mapped.detail,
+    diagnosticDetail: diagnosticParts.join(' · ') || mapped.detail,
+    raw: source,
+  };
+}
+
 export function normalizeMigrationState(raw) {
   if (!raw) {
     return {
@@ -67,7 +167,9 @@ export function normalizeMigrationState(raw) {
       label: 'Not active',
       detail: 'No host migration is currently reported.',
       progress: 0,
+      blocked: false,
       failed: false,
+      action: null,
       runtimeReady: false,
       gameEndpoint: null,
     };
@@ -91,7 +193,29 @@ export function normalizeMigrationState(raw) {
           ? 'This device is no longer the accepted runtime authority.'
           : 'No host migration is active.'),
       progress: 0,
+      blocked: false,
       failed: false,
+      action: null,
+      runtimeReady,
+      gameEndpoint,
+    };
+  }
+
+  if (backendPhase === 'blocked') {
+    const runtimeConfigMissing = /runtime/i.test(failureReason)
+      && /(config|configuration|setup|launch)/i.test(failureReason)
+      && /(missing|not configured|unavailable|required)/i.test(failureReason);
+    return {
+      available: true,
+      phase: 'blocked',
+      label: 'Action required',
+      detail: runtimeConfigMissing
+        ? 'This device needs Minecraft runtime setup before it can take over hosting.'
+        : failureReason || 'Host migration is blocked until the required local setup is completed.',
+      progress: 0,
+      blocked: true,
+      failed: false,
+      action: runtimeConfigMissing ? 'runtime-setup' : null,
       runtimeReady,
       gameEndpoint,
     };
@@ -107,7 +231,6 @@ export function normalizeMigrationState(raw) {
       : index >= 0
         ? Math.round((index / (MIGRATION_PHASES.length - 2)) * 100)
         : 0;
-  const blocked = backendPhase === 'blocked';
   const detail = String(
     source.detail
       || source.message
@@ -118,54 +241,19 @@ export function normalizeMigrationState(raw) {
   return {
     available: Boolean(knownPhase),
     phase: knownPhase,
-    label: blocked ? 'Action required' : knownPhase ? MIGRATION_LABELS[knownPhase] : 'Migration state unavailable',
+    label: knownPhase ? MIGRATION_LABELS[knownPhase] : 'Migration state unavailable',
     detail,
     progress,
+    blocked: false,
     failed: knownPhase === 'failed',
+    action: null,
     runtimeReady,
     gameEndpoint,
   };
 }
 
 export function connectivityFromStatus(status = {}) {
-  const raw = [
-    status.Connectivity,
-    status['Connectivity state'],
-    status.Connection,
-    status['Network path'],
-    status.Reachability,
-  ].find((value) => String(value || '').trim());
-
-  if (!raw) {
-    return {
-      kind: 'unknown',
-      label: CONNECTIVITY_LABELS.unknown,
-      detail: 'The current backend does not expose structured connectivity for this world.',
-      raw: '',
-    };
-  }
-
-  const value = String(raw).toLowerCase();
-  let kind = 'unknown';
-  if (value.includes('direct')) kind = 'direct';
-  else if (value.includes('relay')) kind = 'relay';
-  else if (value.includes('offline') || value.includes('disconnected')) kind = 'offline';
-  else if (value.includes('action') || value.includes('blocked')) kind = 'action';
-  else if (value.includes('limited') || value.includes('degraded')) kind = 'limited';
-  else if (value.includes('connect')) kind = 'connecting';
-  else if (value.includes('nat')) kind = 'action';
-
-  const detailByKind = {
-    direct: 'Peers can reach this world over a direct path.',
-    relay: 'Traffic is using a relay path. Gameplay may still work, but the path is less direct.',
-    connecting: 'SwarmCraft is still establishing a usable path.',
-    offline: 'No usable network path is currently reported.',
-    limited: 'Connectivity is available with restrictions or reduced reachability.',
-    action: 'Networking needs attention before a reliable path is available.',
-    unknown: `Backend reported: ${String(raw).trim()}`,
-  };
-
-  return { kind, label: CONNECTIVITY_LABELS[kind], detail: detailByKind[kind], raw: String(raw).trim() };
+  return normalizeConnectivityDiagnostics(status);
 }
 
 export function createBackendAdapter(invoke) {
@@ -186,8 +274,8 @@ export function createBackendAdapter(invoke) {
           const supported = new Set(String(raw || '').split(',').map(slug).filter(Boolean));
           migrationCapabilities.status = supported.has('status');
           migrationCapabilities.wake = supported.has('wake');
-          // Manual transfer is deliberately still disabled. migration-core exposes a
-          // signed multi-stage exchange that must not be collapsed into a fake one-click action.
+          // Manual transfer is deliberately disabled until migration-core exposes one
+          // Desktop-safe orchestration command for the complete signed transfer flow.
           migrationCapabilities.transfer = false;
           return migrationCapabilities;
         })
@@ -195,6 +283,15 @@ export function createBackendAdapter(invoke) {
     }
     return migrationCapabilityProbe;
   };
+
+  const configureWorldRuntime = (payload) => call('configure_world_runtime', {
+    world: payload.world,
+    java: payload.java,
+    serverJar: payload.serverJar,
+    modJar: payload.modJar,
+    acceptEula: payload.acceptEula,
+    gameEndpoint: payload.gameEndpoint || null,
+  });
 
   return Object.freeze({
     initializeNode: () => call('initialize_node'),
@@ -215,10 +312,33 @@ export function createBackendAdapter(invoke) {
     verifyWorld: (world) => call('verify_world', { world }),
     exportWorld: (world, destination) => call('export_world', { world, destination }),
     recoverWorld: (world, snapshot, destination) => call('recover_world', { world, snapshot, destination }),
+    ensureDaemonRunning: (listen) => call('ensure_daemon_running', { listen }),
     startDaemon: (listen) => call('start_daemon', { listen }),
     stopDaemon: () => call('stop_daemon'),
-    hostWorld: (payload) => call('host_world', payload),
+    configureWorldRuntime,
+    hostWorld: async (payload) => {
+      try {
+        await configureWorldRuntime(payload);
+      } catch (error) {
+        throw new Error(
+          `Minecraft runtime setup could not be saved, so hosting was not started and automatic takeover is not prepared. ${String(error)}`,
+        );
+      }
+      return call('host_world', payload);
+    },
     stopHost: () => call('stop_host'),
+    connectivityDiagnostics: async () => {
+      const raw = await call('connectivity_diagnostics');
+      let parsed = raw;
+      if (typeof raw === 'string') {
+        try {
+          parsed = JSON.parse(raw);
+        } catch (error) {
+          throw new Error(`Connectivity diagnostics were not valid JSON: ${error}`);
+        }
+      }
+      return normalizeConnectivityDiagnostics(parsed);
+    },
 
     migration: Object.freeze({
       capabilities: migrationCapabilities,
