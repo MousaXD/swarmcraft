@@ -195,7 +195,7 @@ impl Storage {
                 Ok(SnapshotPublicationLease {
                     world,
                     publication_id,
-                    publication_dir,
+                    publication_dir: publication_dir.clone(),
                     world_dir: world_dir.clone(),
                     pinned_hashes: BTreeSet::new(),
                     _owner_lock: owner_lock,
