@@ -16,11 +16,12 @@ use swarm_cli::{
         RuntimeLaunchConfig,
     },
 };
-use swarm_core::{create_world_genesis, DataPaths, PeerIdentity};
+use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
 use swarm_network::load_or_create_transport_key;
 use swarm_protocol::{
-    EpochMode, EpochRecordV1, MembershipRecordV1, SnapshotManifestV1, WorldDescriptorV1, WorldId, WorldMemberV1,
-    PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    AuthorityPolicyV1, EpochMode, EpochRecordV1, MembershipPolicyV1, MembershipRecordV1,
+    RuntimeCompatibilityManifestV1, SnapshotManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1,
+    WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 use tempfile::TempDir;
@@ -38,6 +39,7 @@ struct PeerFixture {
 
 struct CanonicalReplicaSeed<'a> {
     metadata: &'a WorldMetadataV1,
+    config: &'a WorldConfigV1,
     descriptor: &'a WorldDescriptorV1,
     membership: &'a MembershipRecordV1,
     epoch: &'a EpochRecordV1,
@@ -118,6 +120,7 @@ fn member(identity: &PeerIdentity) -> WorldMemberV1 {
 
 fn install_canonical_replica(peer: &PeerFixture, seed: &CanonicalReplicaSeed<'_>) {
     peer.storage.create_world(seed.metadata).unwrap();
+    peer.storage.save_world_config(seed.config).unwrap();
     peer.storage.save_world_descriptor(seed.descriptor).unwrap();
     peer.storage.save_membership_record(seed.membership).unwrap();
     peer.storage.save_epoch_record(seed.epoch).unwrap();
@@ -229,8 +232,24 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
         (c_candidate, b_candidate)
     };
 
-    let (world, genesis) =
-        create_world_genesis(&a.identity, "26.1.2".into(), "0.19.3".into(), b"three-daemon-recovery").unwrap();
+    let compatibility = RuntimeCompatibilityManifestV1 {
+        minecraft_version: "26.1.2".into(),
+        loader_id: "fabric".into(),
+        loader_version: "0.19.3".into(),
+        swarmcraft_protocol_version: PROTOCOL_VERSION,
+        fabric_adapter_version: env!("CARGO_PKG_VERSION").into(),
+        required_server_mods: Vec::new(),
+        required_client_mods: Vec::new(),
+        datapacks: Vec::new(),
+    };
+    let fingerprint = compatibility.fingerprint().unwrap();
+    let (world, genesis) = create_world_genesis_with_fingerprint(
+        &a.identity,
+        compatibility.minecraft_version.clone(),
+        compatibility.loader_version.clone(),
+        fingerprint,
+    )
+    .unwrap();
     let metadata = WorldMetadataV1 {
         storage_schema_version: STORAGE_SCHEMA_VERSION,
         display_name: "three-daemon-recovery".into(),
@@ -246,6 +265,28 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
         preferred_replication_factor: 3,
     };
     descriptor.normalize();
+
+    let mut config = WorldConfigV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        sequence: 1,
+        previous_config_hash: None,
+        compatibility,
+        visibility: WorldVisibilityV1::Private,
+        authority_policy: AuthorityPolicyV1 { allow_solo_advancement: true, preferred_replication_factor: 3 },
+        membership_policy: MembershipPolicyV1::InviteOnly,
+        presentation: WorldPresentationV1 {
+            name: "three-daemon-recovery".into(),
+            description: String::new(),
+            tags: Vec::new(),
+            icon_hash: None,
+            approximate_region: None,
+        },
+        authority_peer_id: a.identity.peer_id(),
+        authority_public_key: a.identity.public_key(),
+        signature: Vec::new(),
+    };
+    sign_world_config(&a.identity, &mut config).unwrap();
 
     let mut membership = MembershipRecordV1 {
         protocol_version: PROTOCOL_VERSION,
@@ -298,6 +339,7 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
 
     let seed = CanonicalReplicaSeed {
         metadata: &metadata,
+        config: &config,
         descriptor: &descriptor,
         membership: &membership,
         epoch: &epoch,
@@ -369,8 +411,7 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
         winner.paths.root.join("runtime").join(world.to_hex()).join("world").join("swarmcraft-migration-smoke.txt");
     assert_eq!(
         fs::read_to_string(restored_marker).unwrap(),
-        "started-after-authority-permit
-"
+        "started-after-authority-permit\n"
     );
 
     let winner_latest = winner.storage.latest_snapshot(world).unwrap().unwrap();
