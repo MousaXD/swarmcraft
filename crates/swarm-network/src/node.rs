@@ -188,12 +188,7 @@ impl SwarmNode {
         self.swarm.behaviour_mut().kad.add_address(&peer, address.clone());
         let options = DialOpts::peer_id(peer).addresses(vec![address.clone()]).build();
         if let Err(error) = self.swarm.dial(options) {
-            self.record_issue(
-                ConnectivityIssueKindV1::DirectDialFailed,
-                Some(peer),
-                Some(&address),
-                error.to_string(),
-            );
+            self.record_issue(ConnectivityIssueKindV1::DirectDialFailed, Some(peer), Some(&address), error.to_string());
             return Err(error).context("failed to dial known peer");
         }
         Ok(())
@@ -214,13 +209,7 @@ impl SwarmNode {
         self.diagnostics.record_relay_configured(relay_base.to_string(), self.relay_peers.len());
         self.swarm.behaviour_mut().kad.add_address(&relay_peer, relay_base.clone());
         self.swarm.behaviour_mut().auto_nat.add_server(relay_peer, Some(relay_base));
-        self.relay_fallbacks.insert(
-            remote_peer,
-            RelayFallbackPlan {
-                relay_address: relay_circuit,
-                attempted: false,
-            },
-        );
+        self.relay_fallbacks.insert(remote_peer, RelayFallbackPlan { relay_address: relay_circuit, attempted: false });
 
         let direct_addresses: Vec<_> = direct_addresses
             .into_iter()
@@ -243,12 +232,7 @@ impl SwarmNode {
         }
         let options = DialOpts::peer_id(remote_peer).addresses(direct_addresses).build();
         if let Err(error) = self.swarm.dial(options) {
-            self.record_issue(
-                ConnectivityIssueKindV1::DirectDialFailed,
-                Some(remote_peer),
-                None,
-                error.to_string(),
-            );
+            self.record_issue(ConnectivityIssueKindV1::DirectDialFailed, Some(remote_peer), None, error.to_string());
             self.try_relay_fallback(remote_peer)?;
         }
         Ok(())
@@ -289,12 +273,7 @@ impl SwarmNode {
         match self.swarm.behaviour_mut().kad.bootstrap() {
             Ok(_) => Ok(()),
             Err(error) => {
-                self.record_issue(
-                    ConnectivityIssueKindV1::BootstrapUnavailable,
-                    None,
-                    None,
-                    error.to_string(),
-                );
+                self.record_issue(ConnectivityIssueKindV1::BootstrapUnavailable, None, None, error.to_string());
                 Err(error).context("Kademlia bootstrap failed")
             }
         }
@@ -411,7 +390,8 @@ impl SwarmNode {
                     return Ok(NetworkEvent::Listening { address });
                 }
                 SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, num_established, .. } => {
-                    let infrastructure_peer = self.bootstrap_peers.contains(&peer_id) || self.relay_peers.contains(&peer_id);
+                    let infrastructure_peer =
+                        self.bootstrap_peers.contains(&peer_id) || self.relay_peers.contains(&peer_id);
                     if endpoint.is_relayed() {
                         self.diagnostics.record_relay_connected();
                         self.relay_fallbacks.remove(&peer_id);
@@ -468,24 +448,14 @@ impl SwarmNode {
                     let error_text = error.to_string();
                     if let Some(peer) = peer_id {
                         if self.relay_fallbacks.get(&peer).is_some_and(|plan| !plan.attempted) {
-                            self.record_issue(
-                                ConnectivityIssueKindV1::DirectDialFailed,
-                                Some(peer),
-                                None,
-                                error_text,
-                            );
+                            self.record_issue(ConnectivityIssueKindV1::DirectDialFailed, Some(peer), None, error_text);
                             if let Err(fallback_error) = self.try_relay_fallback(peer) {
                                 warn!(transport_peer = %peer, error = %fallback_error, "relay fallback could not be started");
                             }
                             continue;
                         }
                         if self.relay_fallbacks.get(&peer).is_some_and(|plan| plan.attempted) {
-                            self.record_issue(
-                                ConnectivityIssueKindV1::RelayUnavailable,
-                                Some(peer),
-                                None,
-                                error_text,
-                            );
+                            self.record_issue(ConnectivityIssueKindV1::RelayUnavailable, Some(peer), None, error_text);
                             self.diagnostics.record_no_viable_path(format!(
                                 "direct and relay paths failed for transport peer {peer}"
                             ));
@@ -500,19 +470,9 @@ impl SwarmNode {
                                 error_text,
                             );
                         } else if self.relay_peers.contains(&peer) {
-                            self.record_issue(
-                                ConnectivityIssueKindV1::RelayUnavailable,
-                                Some(peer),
-                                None,
-                                error_text,
-                            );
+                            self.record_issue(ConnectivityIssueKindV1::RelayUnavailable, Some(peer), None, error_text);
                         } else {
-                            self.record_issue(
-                                ConnectivityIssueKindV1::DirectDialFailed,
-                                Some(peer),
-                                None,
-                                error_text,
-                            );
+                            self.record_issue(ConnectivityIssueKindV1::DirectDialFailed, Some(peer), None, error_text);
                         }
                     } else {
                         self.record_issue(ConnectivityIssueKindV1::DirectDialFailed, None, None, error_text);

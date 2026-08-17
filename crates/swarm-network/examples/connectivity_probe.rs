@@ -34,17 +34,12 @@ async fn main() -> Result<()> {
     }
 
     if let Ok(target) = env::var(PROBE_TARGET_ENV) {
-        let address = target
-            .parse()
-            .with_context(|| format!("invalid {PROBE_TARGET_ENV} multiaddress: {target}"))?;
+        let address = target.parse().with_context(|| format!("invalid {PROBE_TARGET_ENV} multiaddress: {target}"))?;
         node.dial(address)?;
     }
 
-    let probe_seconds = env::var(PROBE_SECONDS_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(30)
-        .clamp(5, 300);
+    let probe_seconds =
+        env::var(PROBE_SECONDS_ENV).ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(30).clamp(5, 300);
     let deadline = Instant::now() + Duration::from_secs(probe_seconds);
 
     println!("{:#?}", node.connectivity_diagnostics());
