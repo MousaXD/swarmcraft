@@ -225,3 +225,28 @@ Automated impairment and multi-gigabyte soak gates justify saying that SwarmCraf
 The structured diagnostics and direct-first bounded fallback code justify saying those mechanisms are implemented and testable. They do **not** justify saying SwarmCraft works behind every NAT.
 
 Until representative hardware/carrier records exist, documentation must continue to describe home NAT, symmetric NAT, CGNAT, mobile hotspot, blocked-UDP and independent-ISP IPv6 behavior as requiring field certification.
+
+
+## Structured node connectivity diagnostics contract
+
+Desktop and other local consumers should use the node-scoped backend contract:
+
+```text
+swarmcraft diagnostics connectivity --json
+```
+
+The daemon persists a bounded local connectivity snapshot and the command emits structured JSON with stable snake_case machine values. The contract includes `state`, `nat_status`, `local_addresses`, `observed_public_address`, `ipv4_available`, `ipv6_available`, `bootstrap_configured`, `bootstrap_connectivity`, `relay_configured`, `relay_connectivity`, `selected_relay`, `hole_punch`, and bounded `recent_failures`.
+
+`relay_connectivity` means an established relayed application path. A relay reservation or relay-infrastructure connection by itself is not reported as `relay_connected`. Bootstrap infrastructure connectivity does not imply direct gameplay reachability.
+
+This contract is node-scoped, not per-world. Desktop must not attach a world label to these diagnostics unless a future world-scoped networking contract explicitly provides one.
+
+Stable state strings are `nat_status_unknown`, `direct_reachable`, `hole_punched`, `relay_connected`, `relay_required`, `private_unreachable`, `bootstrap_unavailable`, and `no_viable_path`.
+
+The snapshot does not contain identity private keys, IPC tokens, relay credentials, or secret invite material. Recent failure detail remains bounded by the network diagnostics limit.
+
+### Production Hardening integration requirement
+
+When this branch is integrated with Production Hardening, retain the hardened inbound request behavior in `crates/swarm-network/src/node.rs`: if `request.validate_limits()` fails, send a best-effort protocol error and continue the daemon event loop. A failed response channel must not terminate the daemon. A request/response `OutboundFailure` is `request_failed`, not a direct transport dial failure.
+
+Automated tests and WAN impairment runs are evidence only for the paths they actually exercise. NAT type, CGNAT, mobile-network, relay-provider, and IPv6 field certification remain separate and require recorded field evidence.

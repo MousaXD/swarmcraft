@@ -20,7 +20,7 @@ use swarm_core::{
 };
 use swarm_network::{
     load_or_create_transport_key, BlobResumeV1, NetworkEvent, ReplicaAckV1, ResponseChannel, SwarmNode,
-    TransportPeerId, WireRequest, WireResponse, MAX_BLOB_CHUNK,
+    TransportPeerId, WireRequest, WireResponse, CONNECTIVITY_DIAGNOSTICS_SNAPSHOT_FILE, MAX_BLOB_CHUNK,
 };
 use swarm_protocol::{
     AuthorityLeaseGrantV1, BlobDescriptor, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, PeerId,
@@ -119,6 +119,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
     let mut node = SwarmNode::new(transport_key, hello)?;
     node.listen(listen.parse().context("invalid listen multiaddress")?)?;
     dial_pending_invite_bootstraps(storage, &mut node)?;
+    persist_connectivity_diagnostics(paths, &node)?;
     info!(peer = %identity.peer_id(), %listen, "SwarmCraft daemon starting");
 
     let mut pending_manifests: HashMap<WorldId, SnapshotManifestV1> = HashMap::new();
@@ -139,9 +140,12 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                     &mut leases,
                     Instant::now(),
                 )?;
+                persist_connectivity_diagnostics(paths, &node)?;
             }
             event = node.next_event() => {
-                match event? {
+                let event = event?;
+                persist_connectivity_diagnostics(paths, &node)?;
+                match event {
                     NetworkEvent::Listening { address } => info!(%address, "daemon listening"),
                     NetworkEvent::Authenticated { transport_peer, application_peer } => {
                         leases.authenticated_peers.insert(transport_peer, application_peer);
@@ -254,6 +258,30 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
             }
         }
     }
+}
+
+fn persist_connectivity_diagnostics(paths: &DataPaths, node: &SwarmNode) -> Result<()> {
+    let snapshot_path = paths.root.join(CONNECTIVITY_DIAGNOSTICS_SNAPSHOT_FILE);
+    let encoded = postcard::to_allocvec(&node.connectivity_diagnostics())
+        .context("failed to encode node connectivity diagnostics")?;
+    let staging_path = paths.root.join(format!(".{CONNECTIVITY_DIAGNOSTICS_SNAPSHOT_FILE}.{}.tmp", std::process::id()));
+    std::fs::write(&staging_path, encoded)
+        .with_context(|| format!("failed to stage node connectivity diagnostics at {}", staging_path.display()))?;
+    if let Err(error) = std::fs::rename(&staging_path, &snapshot_path) {
+        if snapshot_path.exists() {
+            std::fs::remove_file(&snapshot_path).with_context(|| {
+                format!("failed to replace node connectivity diagnostics at {}", snapshot_path.display())
+            })?;
+            std::fs::rename(&staging_path, &snapshot_path).with_context(|| {
+                format!("failed to publish node connectivity diagnostics at {}", snapshot_path.display())
+            })?;
+        } else {
+            return Err(error).with_context(|| {
+                format!("failed to publish node connectivity diagnostics at {}", snapshot_path.display())
+            });
+        }
+    }
+    Ok(())
 }
 
 fn maintain_authority_leases(

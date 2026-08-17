@@ -8,6 +8,7 @@ use swarm_core::{
     create_world_genesis_with_fingerprint, random_nonce, sign_world_config, verify_membership_signature,
     verify_snapshot_signature, DataPaths, PeerIdentity,
 };
+use swarm_network::{ConnectivityDiagnosticsV1, CONNECTIVITY_DIAGNOSTICS_SNAPSHOT_FILE};
 use swarm_protocol::{
     ArtifactRequirementV1, ArtifactSideV1, AuthorityPolicyV1, EpochMode, Hash32, InviteV1, JoinRequestV1,
     LeaveRequestV1, MembershipPolicyV1, MembershipRecordV1, RuntimeCompatibilityManifestV1, WorldConfigV1,
@@ -39,6 +40,11 @@ enum Command {
         #[arg(long, default_value = "/ip4/0.0.0.0/udp/0/quic-v1")]
         listen: String,
     },
+    /// Inspect node-scoped backend diagnostics.
+    Diagnostics {
+        #[command(subcommand)]
+        command: DiagnosticsCommand,
+    },
     /// Manage replicated worlds.
     World {
         #[command(subcommand)]
@@ -51,6 +57,16 @@ enum Command {
     },
     /// Display the authorized peers for a world.
     Peers { world: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum DiagnosticsCommand {
+    /// Show the running node's current connectivity diagnostics.
+    Connectivity {
+        /// Emit the stable machine-readable JSON contract used by Desktop.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -150,9 +166,36 @@ fn main() -> Result<()> {
         Command::Daemon { listen } => {
             tokio::runtime::Runtime::new()?.block_on(daemon::run(&paths, &storage, &listen))?;
         }
+        Command::Diagnostics { command } => handle_diagnostics(command, &paths)?,
         Command::World { command } => handle_world(command, &paths, &storage)?,
         Command::Invite { command } => handle_invite(command, &paths, &storage)?,
         Command::Peers { world } => show_peers(parse_world(&world)?, &storage)?,
+    }
+    Ok(())
+}
+
+fn handle_diagnostics(command: DiagnosticsCommand, paths: &DataPaths) -> Result<()> {
+    match command {
+        DiagnosticsCommand::Connectivity { json } => {
+            let snapshot_path = paths.root.join(CONNECTIVITY_DIAGNOSTICS_SNAPSHOT_FILE);
+            let bytes = std::fs::read(&snapshot_path).with_context(|| {
+                format!(
+                    "node connectivity diagnostics are unavailable; start the daemon first ({})",
+                    snapshot_path.display()
+                )
+            })?;
+            let diagnostics: ConnectivityDiagnosticsV1 =
+                postcard::from_bytes(&bytes).context("stored node connectivity diagnostics are corrupt")?;
+            if json {
+                println!("{}", diagnostics.to_json().context("failed to encode connectivity diagnostics as JSON")?);
+            } else {
+                println!("State: {}", diagnostics.state.machine_name());
+                println!("NAT: {}", diagnostics.nat_status.machine_name());
+                println!("Direct application path: {}", diagnostics.direct_connectivity);
+                println!("Relay application path: {}", diagnostics.relay_connectivity);
+                println!("Bootstrap infrastructure: {}", diagnostics.bootstrap_connectivity);
+            }
+        }
     }
     Ok(())
 }

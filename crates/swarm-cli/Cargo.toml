@@ -30,4 +30,5 @@ swarm-protocol = { path = "../swarm-protocol" }
 swarm-storage = { path = "../swarm-storage" }
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
