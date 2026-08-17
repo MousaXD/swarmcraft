@@ -1,0 +1,178 @@
+    let mut matches = Vec::new();
+    for path in jar_paths(&dir)? {
+        let Ok(inspected) = inspect_jar(&path) else {
+            continue;
+        };
+        if inspected.metadata.mod_id == mod_id {
+            matches.push(path);
+        }
+    }
+    if matches.len() > 1 {
+        bail!("multiple JARs claim mod id {mod_id}; remove the conflicting files explicitly from {}", dir.display());
+    }
+    for path in &matches {
+        fs::remove_file(path).with_context(|| format!("cannot remove {}", path.display()))?;
+    }
+    if !matches.is_empty() {
+        sync_parent(&dir)?;
+    }
+    Ok(matches)
+}
+
+pub fn evaluate_world_mods(
+    paths: &DataPaths,
+    world: WorldId,
+    manifest: &RuntimeCompatibilityManifestV1,
+) -> Result<ServerModReadiness> {
+    evaluate_mod_directory(world, mods_dir(paths, world), manifest)
+}
+
+pub fn install_verified_user_mods(
+    paths: &DataPaths,
+    world: WorldId,
+    manifest: &RuntimeCompatibilityManifestV1,
+    destination: &Path,
+) -> Result<ServerModReadiness> {
+    let readiness = evaluate_world_mods(paths, world, manifest)?;
+    if !readiness.ready {
+        let summary = readiness
+            .issues
+            .iter()
+            .map(|issue| issue.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        bail!("server mod runtime profile is not ready: {summary}");
+    }
+    fs::create_dir_all(destination).with_context(|| format!("cannot create runtime mods directory {}", destination.display()))?;
+    let required_ids: BTreeSet<&str> = readiness
+        .required
+        .iter()
+        .filter(|required| required.component_kind == ModComponentKind::UserServerMod)
+        .map(|required| required.mod_id.as_str())
+        .collect();
+    for installed in &readiness.installed {
+        if installed.component_kind != ModComponentKind::UserServerMod || !required_ids.contains(installed.mod_id.as_str()) {
+            continue;
+        }
+        let target = destination.join(&installed.file_name);
+        fs::copy(&installed.path, &target)
+            .with_context(|| format!("cannot stage server mod {} into {}", installed.path.display(), target.display()))?;
+    }
+    Ok(readiness)
+}
+
+pub fn compare_runtime_profile(
+    manifest: &RuntimeCompatibilityManifestV1,
+    installed: &[InstalledServerMod],
+) -> Vec<ModIssue> {
+    evaluate_inventory(manifest, installed).1
+}
+
+fn evaluate_mod_directory(
+    world: WorldId,
+    dir: PathBuf,
+    manifest: &RuntimeCompatibilityManifestV1,
+) -> Result<ServerModReadiness> {
+    let mut installed = Vec::new();
+    let mut issues = Vec::new();
+    if dir.exists() {
+        for path in jar_paths(&dir)? {
+            match inspect_jar(&path) {
+                Ok(inspected) => installed.push(installed_from_inspection(&path, &inspected)),
+                Err(error) => issues.push(ModIssue {
+                    kind: ModIssueKind::InvalidJar,
+                    mod_id: None,
+                    file_name: path.file_name().map(|name| name.to_string_lossy().into_owned()),
+                    message: format!("{} is not a valid Fabric mod JAR: {error:#}", path.display()),
+                }),
+            }
+        }
+    }
+    installed.sort_by(|a, b| a.mod_id.cmp(&b.mod_id).then(a.version.cmp(&b.version)).then(a.file_name.cmp(&b.file_name)));
+    let (required, mut inventory_issues) = evaluate_inventory(manifest, &installed);
+    issues.append(&mut inventory_issues);
+    issues.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.mod_id.cmp(&b.mod_id)).then(a.file_name.cmp(&b.file_name)));
+    Ok(ServerModReadiness {
+        world_id: world.to_string(),
+        mods_dir: dir,
+        ready: issues.is_empty(),
+        required,
+        installed,
+        issues,
+    })
+}
+
+fn evaluate_inventory(
+    manifest: &RuntimeCompatibilityManifestV1,
+    installed: &[InstalledServerMod],
+) -> (Vec<RequiredServerMod>, Vec<ModIssue>) {
+    let required_values = canonical_physical_requirements(manifest);
+    let required = required_values
+        .iter()
+        .map(|value| RequiredServerMod {
+            mod_id: value.artifact_id.clone(),
+            version: value.version.clone(),
+            artifact_hash: value.artifact_hash.to_hex(),
+            side: value.side,
+            component_kind: component_kind(&value.artifact_id),
+        })
+        .collect::<Vec<_>>();
+    let mut issues = Vec::new();
+    let mut by_id: BTreeMap<&str, Vec<&InstalledServerMod>> = BTreeMap::new();
+    for item in installed {
+        by_id.entry(&item.mod_id).or_default().push(item);
+        if item.environment == ModEnvironment::Client {
+            issues.push(ModIssue {
+                kind: ModIssueKind::ClientOnly,
+                mod_id: Some(item.mod_id.clone()),
+                file_name: Some(item.file_name.clone()),
+                message: format!("{} is client-only and cannot be loaded by the server profile", item.mod_id),
+            });
+        }
+    }
+    for (mod_id, values) in &by_id {
+        if values.len() > 1 {
+            issues.push(ModIssue {
+                kind: ModIssueKind::DuplicateModId,
+                mod_id: Some((*mod_id).to_owned()),
+                file_name: None,
+                message: format!("multiple JARs claim Fabric mod id {mod_id}"),
+            });
+            if values.iter().map(|value| value.version.as_str()).collect::<BTreeSet<_>>().len() > 1 {
+                issues.push(ModIssue {
+                    kind: ModIssueKind::ConflictingVersion,
+                    mod_id: Some((*mod_id).to_owned()),
+                    file_name: None,
+                    message: format!("multiple versions of {mod_id} are installed"),
+                });
+            }
+        }
+    }
+
+    let required_user_ids: BTreeSet<&str> = required_values
+        .iter()
+        .filter(|value| component_kind(&value.artifact_id) == ModComponentKind::UserServerMod)
+        .map(|value| value.artifact_id.as_str())
+        .collect();
+    for required_value in required_values
+        .iter()
+        .filter(|value| component_kind(&value.artifact_id) == ModComponentKind::UserServerMod)
+    {
+        let Some(values) = by_id.get(required_value.artifact_id.as_str()) else {
+            issues.push(ModIssue {
+                kind: ModIssueKind::MissingRequired,
+                mod_id: Some(required_value.artifact_id.clone()),
+                file_name: None,
+                message: format!(
+                    "required server mod {} {} is missing",
+                    required_value.artifact_id, required_value.version
+                ),
+            });
+            continue;
+        };
+        let exact = values.iter().find(|value| value.artifact_hash == required_value.artifact_hash.to_hex());
+        if exact.is_none() {
+            if values.iter().any(|value| value.version != required_value.version) {
+                issues.push(ModIssue {
+                    kind: ModIssueKind::VersionMismatch,
+                    mod_id: Some(required_value.artifact_id.clone()),
