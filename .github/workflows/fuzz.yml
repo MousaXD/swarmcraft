@@ -22,4 +22,4 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Fuzz signed canonical record decoders
-        run: cargo fuzz run canonical_records --manifest-path fuzz/Cargo.toml -- -max_total_time=300
+        run: cargo fuzz run --fuzz-dir fuzz canonical_records -- -max_total_time=300
