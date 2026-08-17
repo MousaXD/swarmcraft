@@ -101,8 +101,7 @@ impl SnapshotPublicationLease {
     }
 
     pub(crate) fn owns_durable_hash(&self, hash: Hash32) -> bool {
-        self.pinned_hashes.contains(&hash)
-            && self.publication_dir.join(format!("{}.pin", hash.to_hex())).is_file()
+        self.pinned_hashes.contains(&hash) && self.publication_dir.join(format!("{}.pin", hash.to_hex())).is_file()
     }
 
     pub(crate) fn pin_hash(&mut self, hash: Hash32) -> Result<(), StorageError> {
@@ -115,11 +114,8 @@ impl SnapshotPublicationLease {
         // replaces it as the root.
         let _gc_guard = acquire_gc_lock_blocking(&self.world_dir)?;
         let path = self.publication_dir.join(format!("{}.pin", hash.to_hex()));
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
-            .map_err(|source| io_error(&path, source))?;
+        let mut file =
+            OpenOptions::new().create_new(true).write(true).open(&path).map_err(|source| io_error(&path, source))?;
         if let Err(source) = file.write_all(hash.to_hex().as_bytes()).and_then(|()| file.sync_all()) {
             let _ = fs::remove_file(&path);
             return Err(io_error(&path, source));
@@ -159,10 +155,7 @@ impl Storage {
     /// The publication directory is created while holding the GC lock, and its
     /// owner lock remains held until the returned lease is dropped. Recovery may
     /// remove the directory only after it can acquire that owner lock itself.
-    pub fn begin_snapshot_publication(
-        &self,
-        world: WorldId,
-    ) -> Result<SnapshotPublicationLease, StorageError> {
+    pub fn begin_snapshot_publication(&self, world: WorldId) -> Result<SnapshotPublicationLease, StorageError> {
         let world_dir = self.world_dir(world);
         let _gc_guard = acquire_gc_lock_blocking(&world_dir)?;
         let publications_dir = snapshot_publication_pins_dir(&world_dir);
@@ -402,12 +395,7 @@ impl Storage {
     }
 
     #[cfg(test)]
-    pub(crate) fn snapshot_publication_has_pin(
-        &self,
-        world: WorldId,
-        publication_id: &str,
-        hash: Hash32,
-    ) -> bool {
+    pub(crate) fn snapshot_publication_has_pin(&self, world: WorldId, publication_id: &str, hash: Hash32) -> bool {
         snapshot_publication_pins_dir(&self.world_dir(world))
             .join(publication_id)
             .join(format!("{}.pin", hash.to_hex()))
