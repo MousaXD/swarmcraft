@@ -70,7 +70,7 @@ fn fixture(temp: &tempfile::TempDir, file_count: usize) -> (PathBuf, Storage, Sn
     }
 
     let authority = Storage::open(temp.path().join("authority")).unwrap();
-    let mut manifest = authority
+    let mut publication = authority
         .snapshot_directory(
             &source_world,
             SnapshotContext {
@@ -84,8 +84,9 @@ fn fixture(temp: &tempfile::TempDir, file_count: usize) -> (PathBuf, Storage, Sn
             },
         )
         .unwrap();
-    manifest.signature = vec![0; 64];
-    authority.commit_snapshot(&manifest).unwrap();
+    publication.signature = vec![0; 64];
+    authority.commit_snapshot(&publication).unwrap();
+    let manifest = publication.manifest().clone();
 
     let replica_a = Storage::open(temp.path().join("replica-a")).unwrap();
     let replica_b = Storage::open(temp.path().join("replica-b")).unwrap();

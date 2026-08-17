@@ -13,12 +13,14 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use swarm_protocol::{Hash32, SnapshotManifestV1, WorldId};
 use thiserror::Error;
 use tracing::{debug, warn};
 
 static PIN_COUNTER: AtomicU64 = AtomicU64::new(0);
+static PUBLICATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetentionPolicy {
@@ -70,22 +72,61 @@ impl Drop for ActiveReplicationLease {
     }
 }
 
+/// Durable ownership for one local snapshot publication transaction.
+///
+/// The owner lock is kernel-held for the lifetime of this value. Pins live only
+/// inside this publication's directory, so another commit can never release them
+/// by matching a content hash.
 #[derive(Debug)]
-pub(crate) struct SnapshotPublicationPin {
-    path: Option<PathBuf>,
+pub struct SnapshotPublicationLease {
+    world: WorldId,
+    publication_id: String,
+    publication_dir: PathBuf,
+    world_dir: PathBuf,
+    pinned_hashes: BTreeSet<Hash32>,
+    _owner_lock: File,
 }
 
-impl SnapshotPublicationPin {
-    pub(crate) fn persist(mut self) {
-        self.path = None;
+impl SnapshotPublicationLease {
+    pub(crate) fn world(&self) -> WorldId {
+        self.world
     }
-}
 
-impl Drop for SnapshotPublicationPin {
-    fn drop(&mut self) {
-        if let Some(path) = self.path.take() {
-            remove_pin_paths(&[path], "snapshot publication GC pin");
+    pub fn publication_id(&self) -> &str {
+        &self.publication_id
+    }
+
+    pub fn pinned_blobs(&self) -> usize {
+        self.pinned_hashes.len()
+    }
+
+    pub(crate) fn owns_durable_hash(&self, hash: Hash32) -> bool {
+        self.pinned_hashes.contains(&hash)
+            && self.publication_dir.join(format!("{}.pin", hash.to_hex())).is_file()
+    }
+
+    pub(crate) fn pin_hash(&mut self, hash: Hash32) -> Result<(), StorageError> {
+        if self.pinned_hashes.contains(&hash) {
+            return Ok(());
         }
+
+        // Serialize durable pin creation with GC. After this lock is released,
+        // GC must either observe this pin or observe the manifest that later
+        // replaces it as the root.
+        let _gc_guard = acquire_gc_lock_blocking(&self.world_dir)?;
+        let path = self.publication_dir.join(format!("{}.pin", hash.to_hex()));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .map_err(|source| io_error(&path, source))?;
+        if let Err(source) = file.write_all(hash.to_hex().as_bytes()).and_then(|()| file.sync_all()) {
+            let _ = fs::remove_file(&path);
+            return Err(io_error(&path, source));
+        }
+        sync_dir(&self.publication_dir)?;
+        self.pinned_hashes.insert(hash);
+        Ok(())
     }
 }
 
@@ -113,20 +154,68 @@ impl Storage {
         Ok(ActiveReplicationLease { pin_paths })
     }
 
-    /// Creates a durable ownership pin before a local snapshot publisher makes
-    /// a complete blob visible. The returned guard removes the pin on an error;
-    /// callers persist it only after complete-blob publication succeeds.
-    pub(crate) fn pin_snapshot_publication_hash(
+    /// Begins one local snapshot publication transaction.
+    ///
+    /// The publication directory is created while holding the GC lock, and its
+    /// owner lock remains held until the returned lease is dropped. Recovery may
+    /// remove the directory only after it can acquire that owner lock itself.
+    pub fn begin_snapshot_publication(
         &self,
         world: WorldId,
-        hash: Hash32,
-    ) -> Result<SnapshotPublicationPin, StorageError> {
+    ) -> Result<SnapshotPublicationLease, StorageError> {
         let world_dir = self.world_dir(world);
-        let _lock = acquire_gc_lock_blocking(&world_dir)?;
-        let pins_dir = snapshot_publication_pins_dir(&world_dir);
-        let mut paths = write_hash_pins(&pins_dir, std::iter::once(hash))?;
-        let path = paths.pop().expect("one snapshot publication pin was requested");
-        Ok(SnapshotPublicationPin { path: Some(path) })
+        let _gc_guard = acquire_gc_lock_blocking(&world_dir)?;
+        let publications_dir = snapshot_publication_pins_dir(&world_dir);
+        fs::create_dir_all(&publications_dir).map_err(|source| io_error(&publications_dir, source))?;
+
+        for _ in 0..128 {
+            let publication_id = next_publication_id();
+            let publication_dir = publications_dir.join(&publication_id);
+            match fs::create_dir(&publication_dir) {
+                Ok(()) => {}
+                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(source) => return Err(io_error(&publication_dir, source)),
+            }
+
+            let owner_path = publication_owner_lock_path(&publication_dir);
+            let result = (|| {
+                let mut owner_lock = OpenOptions::new()
+                    .create_new(true)
+                    .read(true)
+                    .write(true)
+                    .open(&owner_path)
+                    .map_err(|source| io_error(&owner_path, source))?;
+                platform_lock::lock_exclusive(&owner_lock).map_err(|source| io_error(&owner_path, source))?;
+                owner_lock
+                    .write_all(publication_id.as_bytes())
+                    .and_then(|()| owner_lock.sync_all())
+                    .map_err(|source| io_error(&owner_path, source))?;
+                sync_dir(&publication_dir)?;
+                sync_dir(&publications_dir)?;
+                Ok(SnapshotPublicationLease {
+                    world,
+                    publication_id,
+                    publication_dir,
+                    world_dir: world_dir.clone(),
+                    pinned_hashes: BTreeSet::new(),
+                    _owner_lock: owner_lock,
+                })
+            })();
+
+            match result {
+                Ok(lease) => return Ok(lease),
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&publication_dir);
+                    let _ = sync_dir(&publications_dir);
+                    return Err(error);
+                }
+            }
+        }
+
+        Err(io_error(
+            &publications_dir,
+            std::io::Error::new(std::io::ErrorKind::AlreadyExists, "unable to allocate snapshot publication id"),
+        ))
     }
 
     /// Serializes snapshot manifest publication and publication-pin cleanup
@@ -139,42 +228,31 @@ impl Storage {
         acquire_gc_lock_blocking(&self.world_dir(world))
     }
 
-    /// Releases at most one local publication pin for each manifest entry.
-    /// Call only while holding the blob-GC coordination lock and only when this
-    /// call created the manifest path for the first time. This preserves pins
-    /// belonging to concurrent publishers of the same content hash.
+    /// Releases only the pins owned by one local publication transaction.
+    ///
+    /// The owner lock file and directory are intentionally left in place while
+    /// the live publication object exists. They become safe to remove after the
+    /// kernel owner lock is released and abandoned-publication recovery proves
+    /// the transaction is stale.
     pub(crate) fn release_snapshot_publication_pins(
         &self,
         world: WorldId,
-        hashes: impl IntoIterator<Item = Hash32>,
+        publication_id: &str,
     ) -> Result<(), StorageError> {
-        let pins_dir = snapshot_publication_pins_dir(&self.world_dir(world));
-        if !pins_dir.exists() {
+        let publication_dir = snapshot_publication_pins_dir(&self.world_dir(world)).join(publication_id);
+        if !publication_dir.exists() {
             return Ok(());
         }
 
-        let mut available = BTreeMap::<Hash32, Vec<PathBuf>>::new();
-        for entry in fs::read_dir(&pins_dir).map_err(|source| io_error(&pins_dir, source))? {
-            let entry = entry.map_err(|source| io_error(&pins_dir, source))?;
-            if !entry.file_type().map_err(|source| io_error(entry.path(), source))?.is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("pin") {
-                continue;
-            }
-            let hash = read_pin_hash(&path)?;
-            available.entry(hash).or_default().push(path);
-        }
-
         let mut removed_any = false;
-        for hash in hashes {
-            let Some(paths) = available.get_mut(&hash) else {
+        for entry in fs::read_dir(&publication_dir).map_err(|source| io_error(&publication_dir, source))? {
+            let entry = entry.map_err(|source| io_error(&publication_dir, source))?;
+            let path = entry.path();
+            if !entry.file_type().map_err(|source| io_error(&path, source))?.is_file()
+                || path.extension().and_then(|value| value.to_str()) != Some("pin")
+            {
                 continue;
-            };
-            let Some(path) = paths.pop() else {
-                continue;
-            };
+            }
             match fs::remove_file(&path) {
                 Ok(()) => removed_any = true,
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
@@ -182,7 +260,34 @@ impl Storage {
             }
         }
         if removed_any {
-            sync_dir(&pins_dir)?;
+            sync_dir(&publication_dir)?;
+        }
+        Ok(())
+    }
+
+    /// Cleans abandoned transaction-owned publication directories during open.
+    /// A directory is removed only if its kernel owner lock can be acquired,
+    /// proving that no live publisher currently owns it.
+    pub(crate) fn recover_abandoned_snapshot_publications(&self) -> Result<(), StorageError> {
+        let worlds_dir = self.worlds_dir();
+        if !worlds_dir.exists() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(&worlds_dir).map_err(|source| io_error(&worlds_dir, source))? {
+            let entry = entry.map_err(|source| io_error(&worlds_dir, source))?;
+            if !entry.file_type().map_err(|source| io_error(entry.path(), source))?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if WorldId::from_str(name).is_err() {
+                continue;
+            }
+            let world_dir = entry.path();
+            let _gc_guard = acquire_gc_lock_blocking(&world_dir)?;
+            let _ = read_live_snapshot_publication_hashes(&world_dir)?;
         }
         Ok(())
     }
@@ -233,7 +338,14 @@ impl Storage {
         let snapshots = self.list_snapshots(world)?;
         let mut live = referenced_blob_hashes(&snapshots);
         live.extend(read_hash_pins(&replication_pins_dir(&world_dir))?);
-        live.extend(read_hash_pins(&snapshot_publication_pins_dir(&world_dir))?);
+
+        // Legacy flat publication pins have no provable transaction ownership.
+        // Keep honoring them forever rather than risk false deletion after an
+        // upgrade. New transaction-owned pins live in subdirectories below the
+        // same root and are recovered using their owner locks.
+        let publication_root = snapshot_publication_pins_dir(&world_dir);
+        live.extend(read_hash_pins(&publication_root)?);
+        live.extend(read_live_snapshot_publication_hashes(&world_dir)?);
 
         let blobs_dir = world_dir.join("blobs");
         if !blobs_dir.exists() {
@@ -287,6 +399,19 @@ impl Storage {
         report.retained_snapshots =
             self.list_snapshots(world)?.into_iter().map(|manifest| manifest.snapshot_number).collect();
         Ok(report)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_publication_has_pin(
+        &self,
+        world: WorldId,
+        publication_id: &str,
+        hash: Hash32,
+    ) -> bool {
+        snapshot_publication_pins_dir(&self.world_dir(world))
+            .join(publication_id)
+            .join(format!("{}.pin", hash.to_hex()))
+            .is_file()
     }
 }
 
@@ -378,6 +503,10 @@ fn open_gc_lock_file(path: &Path) -> Result<File, StorageError> {
         .map_err(|source| io_error(path, source))
 }
 
+fn open_existing_lock_file(path: &Path) -> Result<File, StorageError> {
+    OpenOptions::new().read(true).write(true).open(path).map_err(|source| io_error(path, source))
+}
+
 fn write_hash_pins(pins_dir: &Path, hashes: impl IntoIterator<Item = Hash32>) -> Result<Vec<PathBuf>, StorageError> {
     fs::create_dir_all(pins_dir).map_err(|source| io_error(pins_dir, source))?;
     let token = PIN_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -419,6 +548,67 @@ fn read_hash_pins(pins_dir: &Path) -> Result<BTreeSet<Hash32>, RetentionError> {
     Ok(hashes)
 }
 
+/// Returns hashes protected by live transaction-owned publications and removes
+/// only publication directories whose kernel owner locks are provably stale.
+/// Caller must hold the world GC lock.
+fn read_live_snapshot_publication_hashes(world_dir: &Path) -> Result<BTreeSet<Hash32>, StorageError> {
+    let root = snapshot_publication_pins_dir(world_dir);
+    if !root.exists() {
+        return Ok(BTreeSet::new());
+    }
+
+    let mut live = BTreeSet::new();
+    let mut removed_any = false;
+    for entry in fs::read_dir(&root).map_err(|source| io_error(&root, source))? {
+        let entry = entry.map_err(|source| io_error(&root, source))?;
+        let publication_dir = entry.path();
+        if !entry.file_type().map_err(|source| io_error(&publication_dir, source))?.is_dir() {
+            continue;
+        }
+
+        let owner_path = publication_owner_lock_path(&publication_dir);
+        if !owner_path.is_file() {
+            // No ownership proof means no cleanup. Retain any readable pins in
+            // this malformed directory rather than risk deleting live data.
+            live.extend(read_pin_files_in_publication(&publication_dir)?);
+            continue;
+        }
+
+        let owner = open_existing_lock_file(&owner_path)?;
+        match platform_lock::try_lock_exclusive(&owner) {
+            Ok(false) => live.extend(read_pin_files_in_publication(&publication_dir)?),
+            Ok(true) => {
+                // The GC lock prevents a new publisher from adopting this stale
+                // directory after the proof. Drop the owner handle before
+                // removal so Windows can delete the lock file.
+                drop(owner);
+                fs::remove_dir_all(&publication_dir).map_err(|source| io_error(&publication_dir, source))?;
+                removed_any = true;
+            }
+            Err(source) => return Err(io_error(&owner_path, source)),
+        }
+    }
+    if removed_any {
+        sync_dir(&root)?;
+    }
+    Ok(live)
+}
+
+fn read_pin_files_in_publication(publication_dir: &Path) -> Result<BTreeSet<Hash32>, StorageError> {
+    let mut hashes = BTreeSet::new();
+    for entry in fs::read_dir(publication_dir).map_err(|source| io_error(publication_dir, source))? {
+        let entry = entry.map_err(|source| io_error(publication_dir, source))?;
+        let path = entry.path();
+        if !entry.file_type().map_err(|source| io_error(&path, source))?.is_file()
+            || path.extension().and_then(|value| value.to_str()) != Some("pin")
+        {
+            continue;
+        }
+        hashes.insert(read_pin_hash(&path)?);
+    }
+    Ok(hashes)
+}
+
 fn read_pin_hash(path: &Path) -> Result<Hash32, StorageError> {
     let bytes = fs::read(path).map_err(|source| io_error(path, source))?;
     let value = std::str::from_utf8(&bytes)
@@ -451,6 +641,12 @@ fn complete_blob_hash(path: &Path) -> Option<Hash32> {
     Hash32::from_str(stem).ok()
 }
 
+fn next_publication_id() -> String {
+    let counter = PUBLICATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
+    format!("{}-{nanos:032x}-{counter:016x}", std::process::id())
+}
+
 fn gc_lock_path(world_dir: &Path) -> PathBuf {
     world_dir.join(".blob-gc.lock")
 }
@@ -461,6 +657,10 @@ fn replication_pins_dir(world_dir: &Path) -> PathBuf {
 
 fn snapshot_publication_pins_dir(world_dir: &Path) -> PathBuf {
     world_dir.join(".snapshot-publication-pins")
+}
+
+fn publication_owner_lock_path(publication_dir: &Path) -> PathBuf {
+    publication_dir.join("owner.lock")
 }
 
 fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
@@ -607,15 +807,15 @@ mod tests {
         let replication = storage.put_blob(world(), b"replication-in-flight").unwrap();
         let local = storage.put_blob(world(), b"local-snapshot-in-flight").unwrap();
         let replication_lease = storage.pin_replication_hashes(world(), &[replication.hash]).unwrap();
-        let local_pin = storage.pin_snapshot_publication_hash(world(), local.hash).unwrap();
-        local_pin.persist();
+        let mut local_lease = storage.begin_snapshot_publication(world()).unwrap();
+        local_lease.pin_hash(local.hash).unwrap();
 
         let report = storage.garbage_collect_blobs(world()).unwrap();
         assert_eq!(report.removed_blobs, 0);
 
         drop(replication_lease);
         let commit_guard = storage.lock_blob_gc_for_snapshot_commit(world()).unwrap();
-        storage.release_snapshot_publication_pins(world(), [local.hash]).unwrap();
+        storage.release_snapshot_publication_pins(world(), local_lease.publication_id()).unwrap();
         drop(commit_guard);
         let report = storage.garbage_collect_blobs(world()).unwrap();
         assert_eq!(report.removed_blobs, 2);

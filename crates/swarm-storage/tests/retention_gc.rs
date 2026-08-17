@@ -23,7 +23,7 @@ fn snapshot(
     number: u64,
     previous_snapshot_hash: Option<Hash32>,
 ) -> SnapshotManifestV1 {
-    let mut manifest = storage
+    let mut publication = storage
         .snapshot_directory(
             source,
             SnapshotContext {
@@ -37,9 +37,9 @@ fn snapshot(
             },
         )
         .unwrap();
-    manifest.signature = vec![0; 64];
-    storage.commit_snapshot(&manifest).unwrap();
-    manifest
+    publication.signature = vec![0; 64];
+    storage.commit_snapshot(&publication).unwrap();
+    publication.manifest().clone()
 }
 
 #[test]
