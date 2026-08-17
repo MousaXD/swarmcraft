@@ -3,11 +3,19 @@
 use std::{
     fs,
     net::UdpSocket,
+    os::unix::fs::PermissionsExt,
+    path::Path,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
-use swarm_cli::authority_permit::permit_path;
+use swarm_cli::{
+    authority_permit::permit_path,
+    migration::{
+        load_migration_status, prepare_manual_transfer, save_runtime_config, MigrationPhase, MigrationTrigger,
+        RuntimeLaunchConfig,
+    },
+};
 use swarm_core::{create_world_genesis, DataPaths, PeerIdentity};
 use swarm_network::load_or_create_transport_key;
 use swarm_protocol::{
@@ -142,11 +150,84 @@ fn permit_generation(peer: &PeerFixture, world: WorldId) -> Option<(u64, u64, u6
     Some((epoch, fencing, heartbeat))
 }
 
+fn configure_mock_runtime(peer: &PeerFixture, world: WorldId, endpoint: &str) {
+    let fixture_dir = peer.paths.root.join("migration-runtime-fixture");
+    fs::create_dir_all(&fixture_dir).unwrap();
+    let java = fixture_dir.join("mock-java");
+    let server = fixture_dir.join("server.jar");
+    let fabric = fixture_dir.join("swarmcraft-fabric.jar");
+    write_mock_java(&java);
+    fs::write(&server, b"mock").unwrap();
+    fs::write(&fabric, b"mock").unwrap();
+    save_runtime_config(
+        &peer.paths,
+        world,
+        &RuntimeLaunchConfig {
+            java,
+            server_jar: server,
+            mod_jar: fabric,
+            accept_eula: true,
+            game_endpoint: Some(endpoint.into()),
+        },
+    )
+    .unwrap();
+}
+
+fn runtime_ready(peer: &PeerFixture, world: WorldId, endpoint: &str, trigger: MigrationTrigger) -> bool {
+    let peer_id = peer.identity.peer_id().to_string();
+    load_migration_status(&peer.paths, world).is_ok_and(|status| {
+        status.phase == MigrationPhase::Ready
+            && status.runtime_ready
+            && status.trigger == Some(trigger)
+            && status.game_endpoint.as_deref() == Some(endpoint)
+            && status.authority_peer_id.as_deref() == Some(peer_id.as_str())
+    })
+}
+
+fn write_mock_java(path: &Path) {
+    fs::write(
+        path,
+        r#"#!/usr/bin/env python3
+import os
+import pathlib
+import socket
+
+host = os.environ["SWARMCRAFT_IPC_HOST"]
+port = int(os.environ["SWARMCRAFT_IPC_PORT"])
+token = os.environ["SWARMCRAFT_IPC_TOKEN"]
+world = os.environ["SWARMCRAFT_WORLD_DIR"]
+fingerprint = os.environ["SWARMCRAFT_COMPAT_FINGERPRINT"]
+pathlib.Path(world, "swarmcraft-migration-smoke.txt").write_text("started-after-authority-permit\n", encoding="utf-8")
+
+def encoded(value):
+    return value.encode("utf-8").hex()
+
+with socket.create_connection((host, port), timeout=5) as connection:
+    writer = connection.makefile("w", encoding="utf-8", newline="\n")
+    writer.write("AUTH\t" + token + "\n")
+    writer.write("WORLD_INFO\t" + encoded("26.1.2") + "\t" + encoded("0.19.3") + "\t" + encoded(world) + "\t" + fingerprint + "\n")
+    writer.flush()
+    reader = connection.makefile("r", encoding="utf-8")
+    while reader.readline():
+        pass
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).unwrap();
+}
+
 #[test]
 fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     let a = peer_fixture();
-    let b = peer_fixture();
-    let c = peer_fixture();
+    let b_candidate = peer_fixture();
+    let c_candidate = peer_fixture();
+    let (b, c) = if b_candidate.identity.peer_id() < c_candidate.identity.peer_id() {
+        (b_candidate, c_candidate)
+    } else {
+        (c_candidate, b_candidate)
+    };
 
     let (world, genesis) =
         create_world_genesis(&a.identity, "26.1.2".into(), "0.19.3".into(), b"three-daemon-recovery").unwrap();
@@ -228,6 +309,10 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
         install_canonical_replica(peer, &seed);
     }
 
+    configure_mock_runtime(&a, world, "alice.test:25565");
+    configure_mock_runtime(&b, world, "bob.test:25565");
+    configure_mock_runtime(&c, world, "carol.test:25565");
+
     let a_addr = transport_address(&a);
     let b_addr = transport_address(&b);
     let c_addr = transport_address(&c);
@@ -241,6 +326,9 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     wait_until("initial authority quorum permit", Duration::from_secs(20), || {
         permit_generation(&a, world)
             .is_some_and(|(epoch, fencing, heartbeat)| epoch == 1 && fencing == 1 && heartbeat >= 2)
+    });
+    wait_until("Alice authority runtime ready", Duration::from_secs(20), || {
+        runtime_ready(&a, world, "alice.test:25565", MigrationTrigger::DirectHost)
     });
 
     daemon_a.stop();
@@ -259,12 +347,31 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
         })
     });
 
-    let (winner, loser) = if b.identity.peer_id() == expected_successor { (&b, &c) } else { (&c, &b) };
+    let (winner, loser, winner_endpoint) = if b.identity.peer_id() == expected_successor {
+        (&b, &c, "bob.test:25565")
+    } else {
+        (&c, &b, "carol.test:25565")
+    };
+    assert_eq!(
+        winner.identity.peer_id(),
+        b.identity.peer_id(),
+        "Bob should be the deterministic successor in this fixture"
+    );
     wait_until("successor live authority permit", Duration::from_secs(20), || {
         permit_generation(winner, world)
             .is_some_and(|(epoch, fencing, heartbeat)| epoch == 2 && fencing == 2 && heartbeat >= 2)
     });
     assert!(permit_generation(loser, world).is_none());
+    wait_until("recovered authority runtime ready", Duration::from_secs(30), || {
+        runtime_ready(winner, world, winner_endpoint, MigrationTrigger::AutomaticRecovery)
+    });
+    let restored_marker =
+        winner.paths.root.join("runtime").join(world.to_hex()).join("world").join("swarmcraft-migration-smoke.txt");
+    assert_eq!(
+        fs::read_to_string(restored_marker).unwrap(),
+        "started-after-authority-permit
+"
+    );
 
     let winner_latest = winner.storage.latest_snapshot(world).unwrap().unwrap();
     assert_eq!(winner_latest.snapshot_number, 2);
@@ -280,6 +387,15 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
             && a_latest.manifest_hash().ok() == winner_latest.manifest_hash().ok()
     });
     assert!(permit_generation(&a, world).is_none());
+    let expected_successor_text = expected_successor.to_string();
+    wait_until("stale Alice runtime fenced", Duration::from_secs(10), || {
+        load_migration_status(&a.paths, world).is_ok_and(|status| {
+            status.phase == MigrationPhase::WaitingForAuthority
+                && !status.runtime_ready
+                && status.authority_peer_id.as_deref() == Some(expected_successor_text.as_str())
+        })
+    });
+    assert!(prepare_manual_transfer(&a.paths, &a.storage, world, winner.identity.peer_id()).is_err());
     restarted_a.stop();
 
     let hashes = [

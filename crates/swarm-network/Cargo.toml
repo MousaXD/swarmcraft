@@ -12,6 +12,7 @@ ed25519-dalek.workspace = true
 futures.workspace = true
 libp2p.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

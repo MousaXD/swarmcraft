@@ -26,10 +26,10 @@ fn blob_path(storage: &Storage, world: WorldId, manifest: &swarm_protocol::Snaps
 fn create_snapshot(storage: &Storage, source: &Path, world: WorldId) -> swarm_protocol::SnapshotManifestV1 {
     fs::create_dir_all(source).unwrap();
     fs::write(source.join("level.dat"), b"canonical-world-state").unwrap();
-    let mut manifest = storage.snapshot_directory(source, context(world)).unwrap();
-    manifest.signature = vec![0; 64];
-    storage.commit_snapshot(&manifest).unwrap();
-    manifest
+    let mut publication = storage.snapshot_directory(source, context(world)).unwrap();
+    publication.signature = vec![0; 64];
+    storage.commit_snapshot(&publication).unwrap();
+    publication.manifest().clone()
 }
 
 #[test]

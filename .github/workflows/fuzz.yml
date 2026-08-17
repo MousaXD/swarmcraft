@@ -1,0 +1,27 @@
+name: Protocol fuzz
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '41 4 * * 3'
+
+permissions:
+  contents: read
+
+jobs:
+  canonical-records:
+    name: Canonical record parsers
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz signed canonical record decoders
+        run: cargo fuzz run --fuzz-dir fuzz canonical_records -- -max_total_time=300

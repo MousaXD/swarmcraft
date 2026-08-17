@@ -1,8 +1,10 @@
-use crate::{SnapshotContext, Storage, StorageError};
+use crate::{retention::SnapshotPublicationLease, SnapshotContext, Storage, StorageError};
 use std::{
+    any::Any,
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
+    ops::{Deref, DerefMut},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -15,12 +17,87 @@ use walkdir::WalkDir;
 pub const STREAM_BUFFER_SIZE: usize = 1024 * 1024;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// A local snapshot manifest together with the durable publication ownership
+/// that protects its complete blobs until the manifest becomes durable.
+#[derive(Debug)]
+pub struct SnapshotPublication {
+    manifest: SnapshotManifestV1,
+    lease: SnapshotPublicationLease,
+}
+
+impl SnapshotPublication {
+    pub fn manifest(&self) -> &SnapshotManifestV1 {
+        &self.manifest
+    }
+
+    pub fn manifest_mut(&mut self) -> &mut SnapshotManifestV1 {
+        &mut self.manifest
+    }
+
+    pub fn publication_id(&self) -> &str {
+        self.lease.publication_id()
+    }
+
+    pub fn pinned_blobs(&self) -> usize {
+        self.lease.pinned_blobs()
+    }
+}
+
+impl AsRef<SnapshotManifestV1> for SnapshotPublication {
+    fn as_ref(&self) -> &SnapshotManifestV1 {
+        &self.manifest
+    }
+}
+
+impl Deref for SnapshotPublication {
+    type Target = SnapshotManifestV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.manifest
+    }
+}
+
+impl DerefMut for SnapshotPublication {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.manifest
+    }
+}
+
+/// A snapshot object accepted by the commit path. Only the concrete
+/// `SnapshotPublication` type carries local publication ownership; any other
+/// implementation is committed without releasing publication pins.
+pub trait SnapshotCommitInput: Any {
+    fn snapshot_manifest(&self) -> &SnapshotManifestV1;
+}
+
+impl SnapshotCommitInput for SnapshotManifestV1 {
+    fn snapshot_manifest(&self) -> &SnapshotManifestV1 {
+        self
+    }
+}
+
+impl SnapshotCommitInput for SnapshotPublication {
+    fn snapshot_manifest(&self) -> &SnapshotManifestV1 {
+        &self.manifest
+    }
+}
+
+#[cfg(test)]
+struct PublicationHook {
+    world: WorldId,
+    published: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+static TEST_PUBLICATION_HOOK: std::sync::Mutex<Option<PublicationHook>> = std::sync::Mutex::new(None);
+
 impl Storage {
     pub fn snapshot_directory_streaming(
         &self,
         source: &Path,
         context: SnapshotContext,
-    ) -> Result<SnapshotManifestV1, StorageError> {
+    ) -> Result<SnapshotPublication, StorageError> {
         if !source.is_dir() {
             return Err(StorageError::SourceNotDirectory(source.to_path_buf()));
         }
@@ -39,16 +116,17 @@ impl Storage {
         }
         files.sort();
 
+        let mut lease = self.begin_snapshot_publication(context.world)?;
         let mut entries = Vec::with_capacity(files.len());
         for path in files {
             let relative = path.strip_prefix(source).expect("walkdir entries stay beneath root");
             let relative = portable_relative_path(relative)?;
-            let blob = self.put_file_blob_streaming(context.world, &path)?;
+            let blob = self.put_file_blob_streaming(&mut lease, &path)?;
             entries.push(SnapshotEntry { path: relative, blob });
         }
         entries.sort_by(|left, right| left.path.cmp(&right.path));
         let state_root = snapshot_state_root(&entries)?;
-        Ok(SnapshotManifestV1 {
+        let manifest = SnapshotManifestV1 {
             protocol_version: PROTOCOL_VERSION,
             world_id: context.world,
             snapshot_number: context.snapshot_number,
@@ -60,10 +138,16 @@ impl Storage {
             authority_peer_id: context.authority_peer_id,
             authority_public_key: context.authority_public_key,
             signature: Vec::new(),
-        })
+        };
+        Ok(SnapshotPublication { manifest, lease })
     }
 
-    pub fn put_file_blob_streaming(&self, world: WorldId, source: &Path) -> Result<BlobDescriptor, StorageError> {
+    pub fn put_file_blob_streaming(
+        &self,
+        lease: &mut SnapshotPublicationLease,
+        source: &Path,
+    ) -> Result<BlobDescriptor, StorageError> {
+        let world = lease.world();
         let blob_dir = self.world_dir(world).join("blobs");
         fs::create_dir_all(&blob_dir).map_err(|error| io_error(&blob_dir, error))?;
         let (temporary_path, temporary_file) = create_unique_temp(&blob_dir, "blob", "zst")?;
@@ -91,6 +175,7 @@ impl Storage {
         drop(encoded_file);
 
         let hash = Hash32(*hasher.finalize().as_bytes());
+        lease.pin_hash(hash)?;
         let mut descriptor = BlobDescriptor { hash, uncompressed_size, encoded_size, encoding: BlobEncoding::Zstd };
         let final_path = blob_path(self, world, &descriptor);
 
@@ -99,14 +184,29 @@ impl Storage {
             let existing = BlobDescriptor { encoded_size: existing_size, ..descriptor.clone() };
             if verify_encoded_blob_streaming(&final_path, &existing).is_ok() {
                 remove_if_present(&temporary_path)?;
+                test_after_complete_blob_published(world);
                 return Ok(existing);
             }
             remove_if_present(&final_path)?;
         }
 
-        fs::rename(&temporary_path, &final_path).map_err(|error| io_error(&final_path, error))?;
+        match fs::rename(&temporary_path, &final_path) {
+            Ok(()) => {}
+            Err(rename_error) if final_path.is_file() => {
+                let existing_size = fs::metadata(&final_path).map_err(|error| io_error(&final_path, error))?.len();
+                let existing = BlobDescriptor { encoded_size: existing_size, ..descriptor.clone() };
+                if verify_encoded_blob_streaming(&final_path, &existing).is_ok() {
+                    remove_if_present(&temporary_path)?;
+                    test_after_complete_blob_published(world);
+                    return Ok(existing);
+                }
+                return Err(io_error(&final_path, rename_error));
+            }
+            Err(error) => return Err(io_error(&final_path, error)),
+        }
         sync_parent(&blob_dir)?;
         descriptor.encoded_size = fs::metadata(&final_path).map_err(|error| io_error(&final_path, error))?.len();
+        test_after_complete_blob_published(world);
         Ok(descriptor)
     }
 
@@ -122,13 +222,34 @@ impl Storage {
         Ok(())
     }
 
-    pub fn commit_snapshot_streaming(&self, manifest: &SnapshotManifestV1) -> Result<(), StorageError> {
+    pub fn commit_snapshot_streaming<T: SnapshotCommitInput>(&self, target: &T) -> Result<(), StorageError> {
+        let manifest = target.snapshot_manifest();
+        let publication = (target as &dyn Any).downcast_ref::<SnapshotPublication>();
+        if let Some(publication) = publication {
+            if publication.lease.world() != manifest.world_id {
+                return Err(StorageError::SnapshotPublicationWorldMismatch {
+                    publication_world: publication.lease.world(),
+                    manifest_world: manifest.world_id,
+                });
+            }
+            for hash in manifest.entries.iter().map(|entry| entry.blob.hash) {
+                if !publication.lease.owns_durable_hash(hash) {
+                    return Err(StorageError::SnapshotPublicationMissingPin(hash));
+                }
+            }
+        }
+
         self.verify_snapshot_streaming(manifest)?;
         let snapshots = self.world_dir(manifest.world_id).join("snapshots");
         fs::create_dir_all(&snapshots).map_err(|error| io_error(&snapshots, error))?;
         let path = snapshots.join(format!("{:020}.postcard", manifest.snapshot_number));
         let bytes = postcard::to_allocvec(manifest)?;
-        atomic_write(&path, &bytes)
+        let _gc_guard = self.lock_blob_gc_for_snapshot_commit(manifest.world_id)?;
+        atomic_write(&path, &bytes)?;
+        if let Some(publication) = publication {
+            self.release_snapshot_publication_pins(manifest.world_id, publication.publication_id())?;
+        }
+        Ok(())
     }
 
     pub fn restore_snapshot_streaming(
@@ -137,10 +258,10 @@ impl Storage {
         destination: &Path,
     ) -> Result<(), StorageError> {
         validate_manifest_shape(manifest)?;
-        fs::create_dir_all(destination).map_err(|error| io_error(destination, error))?;
+        ensure_restore_root(destination)?;
         for entry in &manifest.entries {
             let output = destination.join(entry.path.replace('/', std::path::MAIN_SEPARATOR_STR));
-            restore_blob_streaming(self, manifest.world_id, &entry.blob, &output)?;
+            restore_blob_streaming(self, manifest.world_id, &entry.blob, destination, &output)?;
         }
         Ok(())
     }
@@ -163,17 +284,74 @@ fn validate_manifest_shape(manifest: &SnapshotManifestV1) -> Result<(), StorageE
     Ok(())
 }
 
+fn restore_directory_exists(path: &Path) -> Result<bool, StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StorageError::SymlinkUnsupported(path.to_path_buf())),
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(io_error(
+            path,
+            std::io::Error::new(std::io::ErrorKind::NotADirectory, "restore path component is not a directory"),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io_error(path, error)),
+    }
+}
+
+fn ensure_restore_root(destination: &Path) -> Result<(), StorageError> {
+    if !restore_directory_exists(destination)? {
+        fs::create_dir_all(destination).map_err(|error| io_error(destination, error))?;
+        if !restore_directory_exists(destination)? {
+            return Err(io_error(
+                destination,
+                std::io::Error::new(std::io::ErrorKind::NotADirectory, "restore destination is not a directory"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_restore_parent(destination: &Path, parent: &Path) -> Result<(), StorageError> {
+    let relative = parent
+        .strip_prefix(destination)
+        .map_err(|_| StorageError::UnsafeRelativePath(parent.to_string_lossy().into_owned()))?;
+    if !restore_directory_exists(destination)? {
+        return Err(io_error(
+            destination,
+            std::io::Error::new(std::io::ErrorKind::NotFound, "restore destination disappeared"),
+        ));
+    }
+
+    let mut current = destination.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return Err(StorageError::UnsafeRelativePath(parent.to_string_lossy().into_owned()));
+        };
+        current.push(part);
+        if !restore_directory_exists(&current)? {
+            fs::create_dir(&current).map_err(|error| io_error(&current, error))?;
+            if !restore_directory_exists(&current)? {
+                return Err(io_error(
+                    &current,
+                    std::io::Error::new(std::io::ErrorKind::NotADirectory, "restore directory was replaced"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn restore_blob_streaming(
     storage: &Storage,
     world: WorldId,
     descriptor: &BlobDescriptor,
+    destination: &Path,
     output: &Path,
 ) -> Result<(), StorageError> {
     let encoded_path = blob_path(storage, world, descriptor);
     ensure_encoded_size(&encoded_path, descriptor)?;
     let parent =
         output.parent().ok_or_else(|| StorageError::UnsafeRelativePath(output.to_string_lossy().into_owned()))?;
-    fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
+    ensure_restore_parent(destination, parent)?;
     let (temporary_path, mut temporary_file) = create_unique_temp(parent, "restore", "tmp")?;
     let encoded = File::open(&encoded_path).map_err(|error| io_error(&encoded_path, error))?;
     let mut reader: Box<dyn Read> = match descriptor.encoding {
@@ -187,13 +365,19 @@ fn restore_blob_streaming(
     let mut total = 0u64;
     let mut buffer = vec![0u8; STREAM_BUFFER_SIZE];
     loop {
-        let read = reader.read(&mut buffer).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
+        let remaining = descriptor.uncompressed_size.saturating_sub(total);
+        let read_limit = remaining.saturating_add(1).min(buffer.len() as u64) as usize;
+        let read = reader.read(&mut buffer[..read_limit]).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
         if read == 0 {
             break;
         }
+        if read as u64 > remaining {
+            remove_if_present(&temporary_path)?;
+            return Err(StorageError::BlobCorrupt(descriptor.hash));
+        }
         hasher.update(&buffer[..read]);
         temporary_file.write_all(&buffer[..read]).map_err(|error| io_error(&temporary_path, error))?;
-        total = total.saturating_add(read as u64);
+        total += read as u64;
     }
     if total != descriptor.uncompressed_size || Hash32(*hasher.finalize().as_bytes()) != descriptor.hash {
         remove_if_present(&temporary_path)?;
@@ -201,8 +385,17 @@ fn restore_blob_streaming(
     }
     temporary_file.sync_all().map_err(|error| io_error(&temporary_path, error))?;
     drop(temporary_file);
-    if output.exists() {
-        remove_if_present(output)?;
+    match fs::symlink_metadata(output) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            remove_if_present(&temporary_path)?;
+            return Err(StorageError::SymlinkUnsupported(output.to_path_buf()));
+        }
+        Ok(_) => remove_if_present(output)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            remove_if_present(&temporary_path)?;
+            return Err(io_error(output, error));
+        }
     }
     fs::rename(&temporary_path, output).map_err(|error| io_error(output, error))?;
     sync_parent(parent)
@@ -222,12 +415,17 @@ fn verify_encoded_blob_streaming(path: &Path, descriptor: &BlobDescriptor) -> Re
     let mut total = 0u64;
     let mut buffer = vec![0u8; STREAM_BUFFER_SIZE];
     loop {
-        let read = reader.read(&mut buffer).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
+        let remaining = descriptor.uncompressed_size.saturating_sub(total);
+        let read_limit = remaining.saturating_add(1).min(buffer.len() as u64) as usize;
+        let read = reader.read(&mut buffer[..read_limit]).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
         if read == 0 {
             break;
         }
+        if read as u64 > remaining {
+            return Err(StorageError::BlobCorrupt(descriptor.hash));
+        }
         hasher.update(&buffer[..read]);
-        total = total.saturating_add(read as u64);
+        total += read as u64;
     }
     if total != descriptor.uncompressed_size || Hash32(*hasher.finalize().as_bytes()) != descriptor.hash {
         return Err(StorageError::BlobCorrupt(descriptor.hash));
@@ -310,10 +508,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
 }
 
 fn remove_if_present(path: &Path) -> Result<(), StorageError> {
-    if path.exists() {
-        fs::remove_file(path).map_err(|error| io_error(path, error))?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(path, error)),
     }
-    Ok(())
 }
 
 fn sync_parent(parent: &Path) -> Result<(), StorageError> {
@@ -333,17 +532,44 @@ fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
 }
 
 #[cfg(test)]
+fn test_after_complete_blob_published(world: WorldId) {
+    let hook = {
+        let mut slot = TEST_PUBLICATION_HOOK.lock().expect("publication test hook lock poisoned");
+        if slot.as_ref().is_some_and(|hook| hook.world == world) {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    if let Some(hook) = hook {
+        hook.published.send(()).expect("publication test receiver dropped");
+        hook.resume.recv().expect("publication test resume sender dropped");
+    }
+}
+
+#[cfg(not(test))]
+fn test_after_complete_blob_published(_world: WorldId) {}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Seek, SeekFrom};
+    use std::{
+        io::{Seek, SeekFrom},
+        sync::mpsc,
+        thread,
+    };
     use swarm_protocol::PeerId;
 
     fn context(world: WorldId) -> SnapshotContext {
+        context_for(world, 1, 1)
+    }
+
+    fn context_for(world: WorldId, snapshot_number: u64, sequence: u64) -> SnapshotContext {
         SnapshotContext {
             world,
-            snapshot_number: 1,
+            snapshot_number,
             epoch: 1,
-            sequence: 1,
+            sequence,
             previous_snapshot_hash: None,
             authority_peer_id: PeerId([3; 32]),
             authority_public_key: [4; 32],
@@ -363,6 +589,11 @@ mod tests {
             remaining -= write as u64;
         }
         file.sync_all().unwrap();
+    }
+
+    fn remove_snapshot_manifest(storage: &Storage, world: WorldId, snapshot_number: u64) {
+        let path = storage.world_dir(world).join("snapshots").join(format!("{snapshot_number:020}.postcard"));
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -392,6 +623,231 @@ mod tests {
             storage.verify_blob_streaming(world, descriptor),
             Err(StorageError::BlobCorrupt(hash)) if hash == descriptor.hash
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_symlinked_parent_component() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let restore = temp.path().join("restore");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(source.join("region")).unwrap();
+        fs::write(source.join("region/r.0.0.mca"), b"safe-data").unwrap();
+        fs::create_dir_all(&restore).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, restore.join("region")).unwrap();
+
+        let storage = Storage::open(temp.path().join("store")).unwrap();
+        let world = WorldId([0x71; 32]);
+        let mut manifest = storage.snapshot_directory_streaming(&source, context(world)).unwrap();
+        manifest.signature = vec![0; 64];
+        storage.commit_snapshot_streaming(&manifest).unwrap();
+        assert!(matches!(
+            storage.restore_snapshot_streaming(&manifest, &restore),
+            Err(StorageError::SymlinkUnsupported(path)) if path == restore.join("region")
+        ));
+        assert!(!outside.join("r.0.0.mca").exists());
+    }
+
+    #[test]
+    fn two_concurrent_publishers_same_hash_keep_distinct_publication_ownership() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("level.dat"), b"same-content-for-both-publishers").unwrap();
+        fs::write(source.join("session.lock"), b"same-content-for-both-publishers").unwrap();
+        let storage = Storage::open(temp.path().join("store")).unwrap();
+        let world = WorldId([0xa1; 32]);
+
+        let mut first = storage.snapshot_directory_streaming(&source, context_for(world, 1, 1)).unwrap();
+        first.signature = vec![0; 64];
+        let hash = first.entries[0].blob.hash;
+        assert_eq!(first.entries.len(), 2);
+        assert!(first.entries.iter().all(|entry| entry.blob.hash == hash));
+        assert_eq!(first.pinned_blobs(), 1);
+        let first_id = first.publication_id().to_owned();
+
+        let mut second = storage.snapshot_directory_streaming(&source, context_for(world, 2, 2)).unwrap();
+        second.signature = vec![0; 64];
+        let second_id = second.publication_id().to_owned();
+        assert!(second.entries.iter().all(|entry| entry.blob.hash == hash));
+        assert_eq!(second.pinned_blobs(), 1);
+        assert_ne!(first_id, second_id);
+        assert!(storage.snapshot_publication_has_pin(world, &first_id, hash));
+        assert!(storage.snapshot_publication_has_pin(world, &second_id, hash));
+
+        let second_manifest = second.manifest().clone();
+        storage.commit_snapshot_streaming(&second).unwrap();
+        assert!(storage.snapshot_publication_has_pin(world, &first_id, hash));
+        assert!(!storage.snapshot_publication_has_pin(world, &second_id, hash));
+
+        remove_snapshot_manifest(&storage, world, 2);
+        let gc = storage.garbage_collect_blobs(world).unwrap();
+        assert_eq!(gc.removed_blobs, 0);
+        assert!(blob_path(&storage, world, &first.entries[0].blob).exists());
+        assert!(storage.snapshot_publication_has_pin(world, &first_id, hash));
+
+        storage.commit_snapshot_streaming(&first).unwrap();
+        storage.finalize_replica(&second_manifest).unwrap();
+        storage.verify_snapshot_streaming(&first).unwrap();
+        storage.verify_snapshot_streaming(&second_manifest).unwrap();
+        assert_eq!(storage.list_snapshots(world).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn replica_commit_never_releases_local_publication_pins() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("level.dat"), b"shared-local-and-replica-content").unwrap();
+        let storage = Storage::open(temp.path().join("store")).unwrap();
+        let world = WorldId([0xa2; 32]);
+
+        let mut local = storage.snapshot_directory_streaming(&source, context_for(world, 1, 1)).unwrap();
+        local.signature = vec![0; 64];
+        let hash = local.entries[0].blob.hash;
+        let publication_id = local.publication_id().to_owned();
+
+        let mut replica = local.manifest().clone();
+        replica.snapshot_number = 2;
+        replica.sequence = 2;
+        storage.finalize_replica(&replica).unwrap();
+        assert!(storage.snapshot_publication_has_pin(world, &publication_id, hash));
+
+        remove_snapshot_manifest(&storage, world, 2);
+        let gc = storage.garbage_collect_blobs(world).unwrap();
+        assert_eq!(gc.removed_blobs, 0);
+        assert!(storage.snapshot_publication_has_pin(world, &publication_id, hash));
+        storage.commit_snapshot_streaming(&local).unwrap();
+        storage.verify_snapshot_streaming(&local).unwrap();
+    }
+
+    #[test]
+    fn different_hash_publishers_release_only_their_own_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_a = temp.path().join("source-a");
+        let source_b = temp.path().join("source-b");
+        fs::create_dir_all(&source_a).unwrap();
+        fs::create_dir_all(&source_b).unwrap();
+        fs::write(source_a.join("level.dat"), b"publisher-a").unwrap();
+        fs::write(source_b.join("level.dat"), b"publisher-b").unwrap();
+        let storage = Storage::open(temp.path().join("store")).unwrap();
+        let world = WorldId([0xa3; 32]);
+
+        let first = storage.snapshot_directory_streaming(&source_a, context_for(world, 1, 1)).unwrap();
+        let first_blob = first.entries[0].blob.clone();
+        let mut second = storage.snapshot_directory_streaming(&source_b, context_for(world, 2, 2)).unwrap();
+        second.signature = vec![0; 64];
+        let second_blob = second.entries[0].blob.clone();
+        assert_ne!(first_blob.hash, second_blob.hash);
+
+        storage.commit_snapshot_streaming(&second).unwrap();
+        let while_first_live = storage.garbage_collect_blobs(world).unwrap();
+        assert_eq!(while_first_live.removed_blobs, 0);
+        assert!(blob_path(&storage, world, &first_blob).exists());
+        assert!(blob_path(&storage, world, &second_blob).exists());
+
+        drop(first);
+        let after_first_abandoned = storage.garbage_collect_blobs(world).unwrap();
+        assert_eq!(after_first_abandoned.removed_blobs, 1);
+        assert!(!blob_path(&storage, world, &first_blob).exists());
+        assert!(blob_path(&storage, world, &second_blob).exists());
+        storage.verify_snapshot_streaming(&second).unwrap();
+    }
+
+    #[test]
+    fn crashed_publication_recovery_never_steals_a_live_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let store_root = temp.path().join("store");
+        let source_live = temp.path().join("source-live");
+        let source_abandoned = temp.path().join("source-abandoned");
+        let source_committed = temp.path().join("source-committed");
+        for source in [&source_live, &source_abandoned, &source_committed] {
+            fs::create_dir_all(source).unwrap();
+        }
+        fs::write(source_live.join("level.dat"), b"live-publication").unwrap();
+        fs::write(source_abandoned.join("level.dat"), b"abandoned-publication").unwrap();
+        fs::write(source_committed.join("level.dat"), b"committed-publication").unwrap();
+
+        let storage = Storage::open(&store_root).unwrap();
+        let world = WorldId([0xa4; 32]);
+        let live = storage.snapshot_directory_streaming(&source_live, context_for(world, 1, 1)).unwrap();
+        let live_blob = live.entries[0].blob.clone();
+        let live_id = live.publication_id().to_owned();
+
+        let abandoned = storage.snapshot_directory_streaming(&source_abandoned, context_for(world, 2, 2)).unwrap();
+        let abandoned_blob = abandoned.entries[0].blob.clone();
+        let abandoned_id = abandoned.publication_id().to_owned();
+        drop(abandoned);
+
+        let mut committed = storage.snapshot_directory_streaming(&source_committed, context_for(world, 3, 3)).unwrap();
+        committed.signature = vec![0; 64];
+        let committed_blob = committed.entries[0].blob.clone();
+        storage.commit_snapshot_streaming(&committed).unwrap();
+
+        let reopened = Storage::open(&store_root).unwrap();
+        assert!(reopened.snapshot_publication_has_pin(world, &live_id, live_blob.hash));
+        assert!(!reopened.snapshot_publication_has_pin(world, &abandoned_id, abandoned_blob.hash));
+        let first_gc = reopened.garbage_collect_blobs(world).unwrap();
+        assert_eq!(first_gc.removed_blobs, 1);
+        assert!(blob_path(&reopened, world, &live_blob).exists());
+        assert!(!blob_path(&reopened, world, &abandoned_blob).exists());
+        assert!(blob_path(&reopened, world, &committed_blob).exists());
+        reopened.verify_snapshot_streaming(&committed).unwrap();
+
+        drop(live);
+        let reopened_again = Storage::open(&store_root).unwrap();
+        let second_gc = reopened_again.garbage_collect_blobs(world).unwrap();
+        assert_eq!(second_gc.removed_blobs, 1);
+        assert!(!blob_path(&reopened_again, world, &live_blob).exists());
+        assert!(blob_path(&reopened_again, world, &committed_blob).exists());
+        reopened_again.verify_snapshot_streaming(&committed).unwrap();
+    }
+
+    #[test]
+    fn gc_cannot_reclaim_local_blob_before_manifest_commit() {
+        for iteration in 0..8u8 {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("source");
+            let restore = temp.path().join("restore");
+            fs::create_dir_all(&source).unwrap();
+            fs::write(source.join("level.dat"), vec![iteration; 64 * 1024]).unwrap();
+
+            let storage = Storage::open(temp.path().join("store")).unwrap();
+            let world = WorldId([0x90 + iteration; 32]);
+            let (published_tx, published_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            *TEST_PUBLICATION_HOOK.lock().unwrap() =
+                Some(PublicationHook { world, published: published_tx, resume: resume_rx });
+
+            let worker_storage = storage.clone();
+            let worker_source = source.clone();
+            let worker = thread::spawn(move || {
+                let mut manifest = worker_storage.snapshot_directory_streaming(&worker_source, context(world)).unwrap();
+                manifest.signature = vec![0; 64];
+                worker_storage.commit_snapshot_streaming(&manifest).unwrap();
+                manifest
+            });
+
+            published_rx.recv().unwrap();
+            let report = storage.garbage_collect_blobs(world).unwrap();
+            assert_eq!(report.removed_blobs, 0);
+            resume_tx.send(()).unwrap();
+
+            let manifest = worker.join().unwrap();
+            storage.verify_snapshot_streaming(&manifest).unwrap();
+            for entry in &manifest.entries {
+                assert!(blob_path(&storage, world, &entry.blob).exists());
+            }
+            storage.restore_snapshot_streaming(&manifest, &restore).unwrap();
+            assert_eq!(fs::read(restore.join("level.dat")).unwrap(), vec![iteration; 64 * 1024]);
+            let after_commit = storage.garbage_collect_blobs(world).unwrap();
+            assert_eq!(after_commit.removed_blobs, 0);
+            storage.verify_snapshot_streaming(&manifest).unwrap();
+        }
     }
 
     #[test]

@@ -4,13 +4,14 @@ mod invite;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
+use swarm_cli::migration::{self, RuntimeLaunchConfig, TransferPrepareResult};
 use swarm_core::{
     create_world_genesis_with_fingerprint, random_nonce, sign_world_config, verify_membership_signature,
     verify_snapshot_signature, DataPaths, PeerIdentity,
 };
 use swarm_protocol::{
     ArtifactRequirementV1, ArtifactSideV1, AuthorityPolicyV1, EpochMode, Hash32, InviteV1, JoinRequestV1,
-    LeaveRequestV1, MembershipPolicyV1, MembershipRecordV1, RuntimeCompatibilityManifestV1, WorldConfigV1,
+    LeaveRequestV1, MembershipPolicyV1, MembershipRecordV1, PeerId, RuntimeCompatibilityManifestV1, WorldConfigV1,
     WorldDescriptorV1, WorldId, WorldMemberV1, WorldPresentationV1, WorldSafetyLevelV1, WorldVisibilityV1,
     PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
@@ -34,7 +35,7 @@ enum Command {
     Init,
     /// Display this device's persistent cryptographic peer identity.
     Identity,
-    /// Run the authenticated replication coordinator.
+    /// Run the authenticated replication coordinator and migration supervisor.
     Daemon {
         #[arg(long, default_value = "/ip4/0.0.0.0/udp/0/quic-v1")]
         listen: String,
@@ -90,6 +91,40 @@ enum WorldCommand {
     List,
     /// Show local world and snapshot status.
     Status { world: String },
+    /// Configure the local Minecraft/Fabric runtime used by recovery, transfer, and wake orchestration.
+    RuntimeConfigure {
+        world: String,
+        #[arg(long, default_value = "java")]
+        java: PathBuf,
+        #[arg(long)]
+        server_jar: PathBuf,
+        #[arg(long)]
+        mod_jar: PathBuf,
+        #[arg(long)]
+        accept_eula: bool,
+        #[arg(long)]
+        game_endpoint: Option<String>,
+    },
+    /// Show machine-readable migration/runtime state for Desktop or operators.
+    MigrationStatus {
+        world: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Request a safe wake of a sleeping world. Multi-member worlds remain blocked until a quorum transition exists.
+    Wake { world: String },
+    /// Request a final checkpoint and prepare a manual authority transfer.
+    TransferPrepare { world: String, to: String },
+    /// Export the locally durable signed transfer token.
+    TransferExport { world: String },
+    /// Accept a prepared transfer as its target and print the accepted token.
+    TransferAccept { world: String, token: String },
+    /// Commit an accepted transfer as the current authority and print the committed token.
+    TransferCommit { world: String, token: String },
+    /// Activate a committed transfer as the target and print the signed successor epoch token.
+    TransferActivate { world: String, token: String },
+    /// Observe the signed successor epoch on another quorum peer.
+    TransferObserve { world: String, token: String },
     /// Inspect the canonical execution compatibility manifest and authority eligibility.
     Compatibility { world: String },
     /// Enable or disable background replica seeding while Minecraft is off.
@@ -148,7 +183,13 @@ fn main() -> Result<()> {
             println!("Public key: {}", hex_string(&identity.public_key()));
         }
         Command::Daemon { listen } => {
-            tokio::runtime::Runtime::new()?.block_on(daemon::run(&paths, &storage, &listen))?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(async {
+                let supervisor = tokio::spawn(migration::supervise(paths.clone()));
+                let result = daemon::run(&paths, &storage, &listen).await;
+                supervisor.abort();
+                result
+            })?;
         }
         Command::World { command } => handle_world(command, &paths, &storage)?,
         Command::Invite { command } => handle_invite(command, &paths, &storage)?,
@@ -347,6 +388,16 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             };
             println!("Safety: {:?}", safety);
             println!("Background seeding: {}", storage.background_seeding_enabled(world)?);
+            if let Ok(status) = migration::load_migration_status(paths, world) {
+                println!("Migration: {:?}", status.phase);
+                println!("Runtime ready: {}", status.runtime_ready);
+                if let Some(endpoint) = status.game_endpoint {
+                    println!("Game endpoint: {endpoint}");
+                }
+                if let Some(reason) = status.failure_reason {
+                    println!("Migration failure: {reason}");
+                }
+            }
             match latest {
                 Some(snapshot) => {
                     println!("Latest snapshot: {}", snapshot.snapshot_number);
@@ -357,6 +408,80 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 }
                 None => println!("Latest snapshot: none"),
             }
+        }
+        WorldCommand::RuntimeConfigure { world, java, server_jar, mod_jar, accept_eula, game_endpoint } => {
+            let world = parse_world(&world)?;
+            storage.load_world(world)?;
+            if !accept_eula {
+                bail!("runtime configuration requires explicit --accept-eula after reviewing Mojang's EULA");
+            }
+            migration::save_runtime_config(
+                paths,
+                world,
+                &RuntimeLaunchConfig { java, server_jar, mod_jar, accept_eula, game_endpoint },
+            )?;
+            println!("Runtime orchestration configured for {world}.");
+            println!("Recovery and committed transfer launches will now be supervised by `swarmcraft daemon`.");
+        }
+        WorldCommand::MigrationStatus { world, json } => {
+            let world = parse_world(&world)?;
+            let status = migration::load_migration_status(paths, world)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            } else {
+                println!("World: {}", status.world_id);
+                println!("Authority: {}", status.authority_peer_id.as_deref().unwrap_or("unknown"));
+                println!("Epoch: {}", status.epoch.map_or_else(|| "unknown".into(), |value| value.to_string()));
+                println!(
+                    "Fencing token: {}",
+                    status.fencing_token.map_or_else(|| "unknown".into(), |value| value.to_string())
+                );
+                println!("Phase: {:?}", status.phase);
+                println!("Runtime ready: {}", status.runtime_ready);
+                println!("Game endpoint: {}", status.game_endpoint.as_deref().unwrap_or("unpublished"));
+                if let Some(reason) = status.failure_reason {
+                    println!("Failure: {reason}");
+                }
+            }
+        }
+        WorldCommand::Wake { world } => {
+            let world = parse_world(&world)?;
+            migration::request_world_wake(paths, storage, world)?;
+            println!("Wake requested for {world}.");
+            println!(
+                "The migration supervisor will launch only after a safe accepted authority generation is available."
+            );
+        }
+        WorldCommand::TransferPrepare { world, to } => {
+            let world = parse_world(&world)?;
+            let target = PeerId::from_str(&to).with_context(|| format!("invalid peer ID: {to}"))?;
+            match migration::prepare_manual_transfer(paths, storage, world, target)? {
+                TransferPrepareResult::CheckpointRequested => {
+                    println!("Transfer checkpoint requested.");
+                    println!("After the runtime stops, run `swarmcraft world transfer-export {world}` to obtain the prepared token.");
+                }
+                TransferPrepareResult::Prepared(token) => println!("{token}"),
+            }
+        }
+        WorldCommand::TransferExport { world } => {
+            println!("{}", migration::export_transfer(storage, parse_world(&world)?)?);
+        }
+        WorldCommand::TransferAccept { world, token } => {
+            println!("{}", migration::accept_manual_transfer(paths, storage, parse_world(&world)?, &token)?);
+        }
+        WorldCommand::TransferCommit { world, token } => {
+            println!("{}", migration::commit_manual_transfer(paths, storage, parse_world(&world)?, &token)?);
+        }
+        WorldCommand::TransferActivate { world, token } => {
+            let world = parse_world(&world)?;
+            let epoch = migration::activate_manual_transfer(paths, storage, world, &token)?;
+            println!("{epoch}");
+            println!("Distribute this signed epoch token to a quorum of peers with `swarmcraft world transfer-observe {world} <token>`.");
+        }
+        WorldCommand::TransferObserve { world, token } => {
+            let world = parse_world(&world)?;
+            migration::observe_manual_transfer_epoch(paths, storage, world, &token)?;
+            println!("Accepted manual authority epoch for {world}.");
         }
         WorldCommand::Compatibility { world } => {
             let world = parse_world(&world)?;
