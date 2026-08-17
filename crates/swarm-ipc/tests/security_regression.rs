@@ -24,7 +24,10 @@ async fn oversized_unauthenticated_control_line_is_rejected() {
         stream.flush().await.unwrap();
     });
 
-    let error = listener.accept(Duration::from_secs(5)).await.unwrap_err();
+    let error = match listener.accept(Duration::from_secs(5)).await {
+        Ok(_) => panic!("oversized unauthenticated control line was accepted"),
+        Err(error) => error,
+    };
     assert!(matches!(error, IpcTransportError::LineTooLong));
     client.await.unwrap();
 }
