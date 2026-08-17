@@ -36,6 +36,7 @@ pub enum ConnectivityStateV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectivityIssueKindV1 {
     DirectDialFailed,
+    RequestFailed,
     HolePunchFailed,
     RelayUnavailable,
     BootstrapUnavailable,
@@ -125,7 +126,6 @@ impl ConnectivityDiagnosticsV1 {
 
     pub fn record_relay_connected(&mut self) {
         self.relay_connectivity = true;
-        self.last_failure = None;
         self.refresh_state();
     }
 
@@ -187,28 +187,29 @@ impl ConnectivityDiagnosticsV1 {
     }
 
     fn refresh_state(&mut self) {
+        let last_issue = self.recent_failures.last().map(|issue| issue.kind);
         self.state = if matches!(self.hole_punch, HolePunchStateV1::Succeeded) {
             ConnectivityStateV1::HolePunched
         } else if self.direct_connectivity {
             ConnectivityStateV1::DirectReachable
         } else if self.relay_connectivity {
             ConnectivityStateV1::RelayConnected
-        } else if self
-            .recent_failures
-            .last()
-            .is_some_and(|issue| issue.kind == ConnectivityIssueKindV1::NoViablePath)
-        {
+        } else if last_issue == Some(ConnectivityIssueKindV1::NoViablePath) {
             ConnectivityStateV1::NoViablePath
-        } else if self.nat_status == NatStatusV1::Private && self.relay_configured > 0 {
-            ConnectivityStateV1::RelayRequired
-        } else if self
-            .recent_failures
-            .last()
-            .is_some_and(|issue| issue.kind == ConnectivityIssueKindV1::BootstrapUnavailable)
+        } else if self.relay_configured > 0
+            && (self.nat_status == NatStatusV1::Private
+                || matches!(
+                    last_issue,
+                    Some(ConnectivityIssueKindV1::DirectDialFailed | ConnectivityIssueKindV1::HolePunchFailed)
+                ))
         {
+            ConnectivityStateV1::RelayRequired
+        } else if last_issue == Some(ConnectivityIssueKindV1::BootstrapUnavailable) {
             ConnectivityStateV1::BootstrapUnavailable
         } else if self.nat_status == NatStatusV1::Private {
             ConnectivityStateV1::PrivateUnreachable
+        } else if self.nat_status == NatStatusV1::Public {
+            ConnectivityStateV1::DirectReachable
         } else {
             ConnectivityStateV1::NatStatusUnknown
         };
@@ -236,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_diagnostics_preserve_failure_reason() {
+    fn fallback_diagnostics_preserve_path_failures() {
         let mut diagnostics = ConnectivityDiagnosticsV1::default();
         diagnostics.record_direct_failure("direct QUIC timeout");
         diagnostics.start_hole_punch();
@@ -245,7 +246,8 @@ mod tests {
         assert!(diagnostics.relay_connectivity);
         assert!(matches!(diagnostics.hole_punch, HolePunchStateV1::Failed(_)));
         assert_eq!(diagnostics.state, ConnectivityStateV1::RelayConnected);
-        assert_eq!(diagnostics.last_failure, None);
+        assert_eq!(diagnostics.recent_failures.len(), 2);
+        assert_eq!(diagnostics.last_failure.as_deref(), Some("remote did not confirm DCUtR"));
     }
 
     #[test]
@@ -259,6 +261,21 @@ mod tests {
 
         diagnostics.record_relay_connected();
         assert_eq!(diagnostics.state, ConnectivityStateV1::RelayConnected);
+    }
+
+    #[test]
+    fn direct_failure_with_configured_relay_requires_fallback_even_before_nat_classification() {
+        let mut diagnostics = ConnectivityDiagnosticsV1::default();
+        diagnostics.record_relay_configured("/dns4/relay.example/tcp/443/p2p/relay", 1);
+        diagnostics.record_direct_failure("direct address timed out");
+        assert_eq!(diagnostics.state, ConnectivityStateV1::RelayRequired);
+    }
+
+    #[test]
+    fn public_autonat_result_is_directly_reachable() {
+        let mut diagnostics = ConnectivityDiagnosticsV1::default();
+        diagnostics.record_nat_status(NatStatusV1::Public);
+        assert_eq!(diagnostics.state, ConnectivityStateV1::DirectReachable);
     }
 
     #[test]
