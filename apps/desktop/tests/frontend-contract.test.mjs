@@ -33,6 +33,11 @@ test('migration state translates migration-core phases into launcher phases', ()
   assert.equal(normalizeMigrationState({ phase: 'awaiting_transfer_acceptance' }).phase, 'transferring-authority');
   assert.equal(normalizeMigrationState({ phase: 'sleeping' }).available, false);
   assert.equal(normalizeMigrationState({ phase: 'blocked', failure_reason: 'runtime config missing' }).label, 'Action required');
+  const ready = normalizeMigrationState({ phase: 'ready', runtime_ready: true, game_endpoint: '127.0.0.1:25565' });
+  assert.equal(ready.detail, 'Minecraft is ready at 127.0.0.1:25565.');
+  assert.equal(ready.progress, 100);
+  assert.equal(ready.runtimeReady, true);
+  assert.equal(ready.gameEndpoint, '127.0.0.1:25565');
   const unknown = normalizeMigrationState({ phase: 'elected-but-maybe-ready' });
   assert.equal(unknown.available, false);
   assert.equal(unknown.phase, null);
