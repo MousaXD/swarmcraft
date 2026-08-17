@@ -51,6 +51,49 @@ const CONNECTIVITY_LABELS = Object.freeze({
   unknown: 'Not reported',
 });
 
+const CONNECTIVITY_STATES = Object.freeze({
+  DirectReachable: {
+    kind: 'direct',
+    label: 'Direct',
+    detail: 'Peers can reach this device over a current direct application path.',
+  },
+  HolePunched: {
+    kind: 'direct',
+    label: 'Direct · hole punched',
+    detail: 'A current direct application path was established through DCUtR hole punching.',
+  },
+  RelayConnected: {
+    kind: 'relay',
+    label: 'Relay',
+    detail: 'A current relayed application path is connected.',
+  },
+  RelayRequired: {
+    kind: 'limited',
+    label: 'Relay required',
+    detail: 'Direct connectivity is unavailable and a configured relay is required.',
+  },
+  PrivateUnreachable: {
+    kind: 'action',
+    label: 'Private NAT',
+    detail: 'The device is behind private NAT and no current application path is available.',
+  },
+  BootstrapUnavailable: {
+    kind: 'action',
+    label: 'Bootstrap unavailable',
+    detail: 'Configured bootstrap infrastructure is unavailable.',
+  },
+  NoViablePath: {
+    kind: 'offline',
+    label: 'No viable path',
+    detail: 'Direct and relay attempts have not produced a current usable application path.',
+  },
+  NatStatusUnknown: {
+    kind: 'connecting',
+    label: 'Discovering connectivity',
+    detail: 'No current application path is established yet; NAT and path discovery are still unresolved.',
+  },
+});
+
 function slug(value) {
   return String(value || '')
     .trim()
@@ -127,45 +170,46 @@ export function normalizeMigrationState(raw) {
   };
 }
 
-export function connectivityFromStatus(status = {}) {
-  const raw = [
-    status.Connectivity,
-    status['Connectivity state'],
-    status.Connection,
-    status['Network path'],
-    status.Reachability,
-  ].find((value) => String(value || '').trim());
+function parseConnectivityDiagnostics(status) {
+  const raw = status?.['Connectivity JSON'] ?? status?.connectivityDiagnostics ?? status?.connectivity_diagnostics;
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try {
+    return JSON.parse(String(raw));
+  } catch (_) {
+    return null;
+  }
+}
 
-  if (!raw) {
+export function connectivityFromStatus(status = {}) {
+  const diagnostics = parseConnectivityDiagnostics(status);
+  if (!diagnostics || typeof diagnostics.state !== 'string') {
     return {
       kind: 'unknown',
       label: CONNECTIVITY_LABELS.unknown,
-      detail: 'The current backend does not expose structured connectivity for this world.',
-      raw: '',
+      detail: 'The running daemon has not published structured connectivity diagnostics yet.',
+      raw: null,
+      diagnostics: null,
     };
   }
 
-  const value = String(raw).toLowerCase();
-  let kind = 'unknown';
-  if (value.includes('direct')) kind = 'direct';
-  else if (value.includes('relay')) kind = 'relay';
-  else if (value.includes('offline') || value.includes('disconnected')) kind = 'offline';
-  else if (value.includes('action') || value.includes('blocked')) kind = 'action';
-  else if (value.includes('limited') || value.includes('degraded')) kind = 'limited';
-  else if (value.includes('connect')) kind = 'connecting';
-  else if (value.includes('nat')) kind = 'action';
-
-  const detailByKind = {
-    direct: 'Peers can reach this world over a direct path.',
-    relay: 'Traffic is using a relay path. Gameplay may still work, but the path is less direct.',
-    connecting: 'SwarmCraft is still establishing a usable path.',
-    offline: 'No usable network path is currently reported.',
-    limited: 'Connectivity is available with restrictions or reduced reachability.',
-    action: 'Networking needs attention before a reliable path is available.',
-    unknown: `Backend reported: ${String(raw).trim()}`,
+  const model = CONNECTIVITY_STATES[diagnostics.state] || {
+    kind: 'unknown',
+    label: CONNECTIVITY_LABELS.unknown,
+    detail: `Backend reported an unknown typed connectivity state: ${diagnostics.state}.`,
   };
+  const lastIssue = Array.isArray(diagnostics.recent_failures) ? diagnostics.recent_failures.at(-1) : null;
+  const issueDetail = lastIssue?.kind
+    ? ` Last issue: ${lastIssue.kind}${lastIssue.detail ? ` · ${lastIssue.detail}` : ''}.`
+    : '';
 
-  return { kind, label: CONNECTIVITY_LABELS[kind], detail: detailByKind[kind], raw: String(raw).trim() };
+  return {
+    kind: model.kind,
+    label: model.label,
+    detail: `${model.detail}${issueDetail}`,
+    raw: diagnostics.state,
+    diagnostics,
+  };
 }
 
 export function createBackendAdapter(invoke) {
@@ -186,8 +230,6 @@ export function createBackendAdapter(invoke) {
           const supported = new Set(String(raw || '').split(',').map(slug).filter(Boolean));
           migrationCapabilities.status = supported.has('status');
           migrationCapabilities.wake = supported.has('wake');
-          // Manual transfer is deliberately still disabled. migration-core exposes a
-          // signed multi-stage exchange that must not be collapsed into a fake one-click action.
           migrationCapabilities.transfer = false;
           return migrationCapabilities;
         })
@@ -207,7 +249,17 @@ export function createBackendAdapter(invoke) {
     joinWorld: (invite) => call('join_world', { invite }),
     leaveWorld: (world) => call('leave_world', { world }),
     createInvite: (payload) => call('create_invite', payload),
-    worldStatus: (world) => call('world_status', { world }),
+    worldStatus: async (world) => {
+      const status = await call('world_status', { world });
+      try {
+        const diagnostics = await call('connectivity_diagnostics');
+        JSON.parse(String(diagnostics));
+        return `${status}\nConnectivity JSON: ${String(diagnostics).trim()}`;
+      } catch (_) {
+        return status;
+      }
+    },
+    connectivityDiagnostics: async () => JSON.parse(String(await call('connectivity_diagnostics'))),
     worldCompatibility: (world) => call('world_compatibility', { world }),
     worldConflicts: (world) => call('world_conflicts', { world }),
     setBackgroundSeeding: (world, enabled) => call('set_background_seeding', { world, enabled }),
@@ -217,6 +269,7 @@ export function createBackendAdapter(invoke) {
     recoverWorld: (world, snapshot, destination) => call('recover_world', { world, snapshot, destination }),
     startDaemon: (listen) => call('start_daemon', { listen }),
     stopDaemon: () => call('stop_daemon'),
+    configureWorldRuntime: (payload) => call('configure_world_runtime', payload),
     hostWorld: (payload) => call('host_world', payload),
     stopHost: () => call('stop_host'),
 
