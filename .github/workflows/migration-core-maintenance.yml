@@ -43,19 +43,6 @@ jobs:
           assert text.count(old) == 1
           text = text.replace(old, new, 1)
 
-          old = "            if transfer.from_peer_id == identity.peer_id() {"
-          new = (
-              "            let completed = storage.load_epoch_record(world).is_ok_and(|epoch| {\n"
-              "                transfer.phase == TransferPhase::Committed\n"
-              "                    && epoch.epoch_number == transfer.next_epoch\n"
-              "                    && epoch.fencing_token == transfer.next_fencing_token\n"
-              "                    && epoch.authority_peer_id == transfer.to_peer_id\n"
-              "            });\n"
-              "            if transfer.from_peer_id == identity.peer_id() && !completed {"
-          )
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
-
           old = (
               "pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options: HostOptions) -> Result<()> {\n"
               "    run_authority_runtime_inner(paths, storage, options, MigrationTrigger::DirectHost, None, true).await\n"
