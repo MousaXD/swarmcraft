@@ -40,7 +40,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - name: Storage package suite
         run: cargo test -p swarm-storage --locked
       - name: Network package suite
