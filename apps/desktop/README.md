@@ -9,7 +9,7 @@ apps/desktop/
 ├── src/
 │   ├── index.html          # semantic launcher structure
 │   ├── style.css           # shared visual/component system
-│   ├── backend-adapter.js  # Tauri contract and future migration seam
+│   ├── backend-adapter.js  # Tauri/backend contract boundary
 │   └── app.js              # state rendering and interactions
 ├── tests/
 │   └── frontend-contract.test.mjs
@@ -29,40 +29,39 @@ The launcher centers normal use around:
 - seeing safety, host and connectivity summaries;
 - keeping or verifying a background replica;
 - sleeping/stopping a running world;
-- preparing for player-facing host transfer and migration progress;
+- seeing backend-reported host migration progress;
+- safely waking a sleeping world when the backend exposes that capability;
 - opening advanced diagnostics only when technical setup or recovery is needed.
 
 Conflict, solo/degraded, canonical, authority-eligibility, membership and relay semantics remain distinct. A storage replica never implies authority eligibility, and discovery never implies membership.
 
 ## Backend integration
 
-`src/backend-adapter.js` is the only frontend seam for Tauri command contracts. Existing command names and payload shapes remain unchanged.
+`src/backend-adapter.js` is the frontend boundary for Tauri command contracts. Authority, recovery and quorum decisions stay in Rust.
 
-Migration-core is intentionally not simulated in JavaScript. The adapter currently reports migration status/transfer/wake capabilities as unavailable. The UI already knows how to render the agreed migration phases:
+The desktop now capability-probes the bundled `swarmcraft` CLI before enabling migration features. When migration-core is present it can consume:
 
-- Preparing successor
-- Saving world
-- Transferring authority
-- Restoring world
-- Starting Minecraft
-- Waiting for host
-- Ready
-- Migration failed
+- `swarmcraft world migration-status <world> --json` for authoritative migration/runtime state;
+- `swarmcraft world wake <world>` for the backend-validated wake request.
 
-When migration-core exposes desktop commands, connect them in the adapter and enable the corresponding capabilities rather than implementing authority or recovery decisions in frontend code.
+If those commands are absent, migration status and wake remain disabled instead of being simulated in JavaScript. The finalized migration-core `snake_case` phases are translated into the smaller player-facing progress model used by the launcher.
+
+Manual authority transfer remains intentionally disabled in the desktop adapter for now. Migration-core implements transfer as a signed, multi-stage prepare/export/accept/commit/activate/observe exchange. The frontend must not collapse that protocol into a fake one-click authority change.
 
 Structured connectivity is consumed from world status when the backend reports fields such as `Connectivity`, `Connectivity state`, `Connection`, `Network path`, or `Reachability`. The player-facing states are Direct, Relay, Connecting, Offline, Limited connectivity, and Action required. When no structured state exists, the UI says that it is not reported rather than guessing.
 
-## Current runtime limitation
+## Runtime setup
 
-The current direct-host Play command can still require advanced runtime setup:
+The Play command launches the bundled `swarmcraft-host` runtime. After migration-core integration that binary routes hosting through the shared Rust runtime path; the desktop does not duplicate launch or fencing decisions.
+
+The local runtime can still require advanced setup:
 
 - Java executable;
 - compatible Fabric server JAR;
 - SwarmCraft Fabric mod JAR;
 - Minecraft server EULA acceptance.
 
-Those controls live in Diagnostics instead of the primary world flow. Automatic migration/wake remains unavailable until migration-core exposes the backend contract.
+Those controls live in Diagnostics instead of the primary world flow.
 
 ## Validation
 
