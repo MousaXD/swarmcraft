@@ -153,14 +153,29 @@ fn verify_encoded_blob(path: &Path, descriptor: &BlobDescriptor) -> Result<(), R
             Box::new(zstd::stream::read::Decoder::new(file).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?)
         }
     };
+    verify_decoded_blob(&mut reader, path, descriptor)
+}
+
+fn verify_decoded_blob(
+    reader: &mut dyn Read,
+    path: &Path,
+    descriptor: &BlobDescriptor,
+) -> Result<(), ReplicationError> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(BLOB_HASH_DOMAIN);
     let mut total = 0u64;
     let mut buffer = [0u8; 1024 * 1024];
     loop {
-        let read = reader.read(&mut buffer).map_err(|source| StorageError::Io { path: path.to_path_buf(), source })?;
+        let remaining = descriptor.uncompressed_size.saturating_sub(total);
+        let read_limit = remaining.saturating_add(1).min(buffer.len() as u64) as usize;
+        let read = reader
+            .read(&mut buffer[..read_limit])
+            .map_err(|source| StorageError::Io { path: path.to_path_buf(), source })?;
         if read == 0 {
             break;
+        }
+        if read as u64 > remaining {
+            return Err(StorageError::BlobCorrupt(descriptor.hash).into());
         }
         total += read as u64;
         hasher.update(&buffer[..read]);
@@ -169,4 +184,62 @@ fn verify_encoded_blob(path: &Path, descriptor: &BlobDescriptor) -> Result<(), R
         return Err(StorageError::BlobCorrupt(descriptor.hash).into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ExpansionProbe {
+        reads: usize,
+        largest_request: usize,
+    }
+
+    impl Read for ExpansionProbe {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            self.largest_request = self.largest_request.max(buffer.len());
+            buffer.fill(0);
+            Ok(buffer.len())
+        }
+    }
+
+    #[test]
+    fn decoded_verifier_reads_only_one_byte_beyond_declared_size_before_rejection() {
+        let descriptor = BlobDescriptor {
+            hash: Hash32([0; 32]),
+            uncompressed_size: 1,
+            encoded_size: 0,
+            encoding: BlobEncoding::Zstd,
+        };
+        let mut probe = ExpansionProbe { reads: 0, largest_request: 0 };
+        let error = verify_decoded_blob(&mut probe, Path::new("amplification.zst"), &descriptor).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ReplicationError::Storage(StorageError::BlobCorrupt(hash)) if hash == descriptor.hash
+        ));
+        assert_eq!(probe.reads, 1);
+        assert_eq!(probe.largest_request, 2);
+    }
+
+    #[test]
+    fn zstd_replica_verifier_rejects_expansion_past_declared_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("amplification.zst");
+        let expanded = vec![0u8; 8 * 1024 * 1024];
+        let encoded = zstd::stream::encode_all(expanded.as_slice(), 3).unwrap();
+        fs::write(&path, &encoded).unwrap();
+        let descriptor = BlobDescriptor {
+            hash: BlobDescriptor::hash_uncompressed(&[0]),
+            uncompressed_size: 1,
+            encoded_size: encoded.len() as u64,
+            encoding: BlobEncoding::Zstd,
+        };
+
+        assert!(matches!(
+            verify_encoded_blob(&path, &descriptor),
+            Err(ReplicationError::Storage(StorageError::BlobCorrupt(hash))) if hash == descriptor.hash
+        ));
+    }
 }
