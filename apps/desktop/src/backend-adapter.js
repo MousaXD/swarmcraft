@@ -108,7 +108,12 @@ export function normalizeMigrationState(raw) {
         ? Math.round((index / (MIGRATION_PHASES.length - 2)) * 100)
         : 0;
   const blocked = backendPhase === 'blocked';
-  const detail = String(source.detail || source.message || failureReason || '').trim();
+  const detail = String(
+    source.detail
+      || source.message
+      || failureReason
+      || (runtimeReady && gameEndpoint ? `Minecraft is ready at ${gameEndpoint}.` : ''),
+  ).trim();
 
   return {
     available: Boolean(knownPhase),
