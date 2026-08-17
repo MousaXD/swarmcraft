@@ -1,0 +1,69 @@
+name: Desktop migration refresh helper
+
+on:
+  push:
+    branches:
+      - agent/desktop-ux
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/desktop-ux
+      - name: Keep migration progress fresh and selection-safe
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          app = Path('apps/desktop/src/app.js')
+          text = app.read_text()
+          text = text.replace(
+              "let currentView = 'worlds';\n",
+              "let currentView = 'worlds';\nlet migrationRefreshInFlight = false;\nconst MIGRATION_REFRESH_MS = 5000;\n",
+              1,
+          )
+
+          old = '''  $('transferAvailability').hidden = migration.transfer;\n  $('transferAvailability').textContent = migration.transfer ? '' : 'Transfer host is not available in this build.';\n  $('migrationAvailability').textContent = migration.transfer || migration.wake\n    ? 'Host handoff actions are enabled when the backend reports they are safe.'\n    : 'Transfer and wake are unavailable in this build. Existing Play and graceful stop remain available.';\n'''
+          new = '''  $('transferAvailability').hidden = migration.transfer;\n  $('transferAvailability').textContent = migration.transfer ? '' : 'Manual host transfer is not available in this build.';\n  if (migration.transfer && migration.wake) {\n    $('migrationAvailability').textContent = 'Transfer and wake actions are available only after backend safety checks pass.';\n  } else if (migration.wake) {\n    $('migrationAvailability').textContent = 'Safe wake is available when the backend allows it. Manual host transfer remains unavailable.';\n  } else if (migration.transfer) {\n    $('migrationAvailability').textContent = 'Host transfer is available when backend safety checks pass. Wake is unavailable in this build.';\n  } else {\n    $('migrationAvailability').textContent = 'Transfer and wake are unavailable in this build. Existing Play and graceful stop remain available.';\n  }\n'''
+          if old not in text:
+              raise SystemExit('migration availability block not found')
+          text = text.replace(old, new, 1)
+
+          old_refresh = '''async function refreshMigrationState(world) {\n  if (!world || !backend.migration.capabilities.status) {\n    renderMigration(null);\n    return;\n  }\n  try {\n    const state = await backend.migration.readState(world.id);\n    renderMigration(state);\n  } catch (error) {\n    renderMigration({ phase: 'failed', detail: `Could not read host migration state: ${String(error)}` });\n  }\n}\n'''
+          new_refresh = '''async function refreshMigrationState(world) {\n  if (!world || !backend.migration.capabilities.status) {\n    renderMigration(null);\n    return;\n  }\n  if (migrationRefreshInFlight) return;\n  const requestedWorldId = world.id;\n  migrationRefreshInFlight = true;\n  try {\n    const state = await backend.migration.readState(requestedWorldId);\n    if (selectedWorldId === requestedWorldId) renderMigration(state);\n  } catch (error) {\n    if (selectedWorldId === requestedWorldId) {\n      renderMigration({ phase: 'failed', detail: `Could not read host migration state: ${String(error)}` });\n    }\n  } finally {\n    migrationRefreshInFlight = false;\n  }\n}\n\nfunction refreshVisibleMigration() {\n  if (document.hidden || !backend.migration.capabilities.status) return;\n  const world = selectedWorld();\n  if (world) refreshMigrationState(world);\n}\n'''
+          if old_refresh not in text:
+              raise SystemExit('migration refresh function not found')
+          text = text.replace(old_refresh, new_refresh, 1)
+
+          old_tail = '''renderMigration(null);\nshowIdentity({ quiet: true }).catch(() => {});\nrefreshWorlds().catch(() => {});\n'''
+          new_tail = '''renderMigration(null);\nshowIdentity({ quiet: true }).catch(() => {});\nrefreshWorlds().catch(() => {});\ndocument.addEventListener('visibilitychange', refreshVisibleMigration);\nsetInterval(refreshVisibleMigration, MIGRATION_REFRESH_MS);\n'''
+          if old_tail not in text:
+              raise SystemExit('startup tail not found')
+          app.write_text(text.replace(old_tail, new_tail, 1))
+
+          tests = Path('apps/desktop/tests/frontend-contract.test.mjs')
+          text = tests.read_text()
+          old = '''  assert.match(app, /window\\.__TAURI__\\?\\.core\\?\\.invoke/);\n  assert.equal(tauri.app.withGlobalTauri, true);\n});\n'''
+          new = '''  assert.match(app, /window\\.__TAURI__\\?\\.core\\?\\.invoke/);\n  assert.match(app, /selectedWorldId === requestedWorldId/);\n  assert.match(app, /document\\.hidden/);\n  assert.match(app, /setInterval\\(refreshVisibleMigration, MIGRATION_REFRESH_MS\\)/);\n  assert.equal(tauri.app.withGlobalTauri, true);\n});\n'''
+          if old not in text:
+              raise SystemExit('frontend source test tail not found')
+          tests.write_text(text.replace(old, new, 1))
+          PY
+      - name: Check JavaScript syntax
+        run: node --check apps/desktop/src/app.js && node --check apps/desktop/src/backend-adapter.js
+      - name: Run desktop contract tests
+        run: node --test apps/desktop/tests/frontend-contract.test.mjs
+      - name: Commit UX refresh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/desktop/src/app.js apps/desktop/tests/frontend-contract.test.mjs
+          git commit -m "fix(desktop): keep migration progress selection-safe"
+          git push origin HEAD:agent/desktop-ux
