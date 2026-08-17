@@ -58,6 +58,8 @@ jobs:
         run: cargo test -p swarm-cli --test host_process --locked
       - name: Migration orchestration
         run: cargo test -p swarm-cli --test migration_core --locked
+      - name: Runtime setup failure hardening
+        run: cargo test -p swarm-cli --test runtime_setup_hardening --locked
       - name: Three-daemon recovery
         run: cargo test -p swarm-cli --test three_daemon_recovery --locked
       - name: Recovery successor dies before epoch promotion
