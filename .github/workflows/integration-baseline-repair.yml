@@ -1,0 +1,44 @@
+name: Integration baseline repair
+
+on:
+  push:
+    branches:
+      - agent/integration-audit
+    paths:
+      - .github/workflows/integration-baseline-repair.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/integration-audit
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format integrated workspace
+        run: cargo fmt --all
+      - name: Regenerate integrated lockfile
+        run: cargo generate-lockfile
+      - name: Verify formatting
+        run: cargo fmt --all -- --check
+      - name: Commit generated baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add Cargo.lock crates
+          if git diff --cached --quiet; then
+            echo "No generated baseline changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(integration): refresh lockfile and formatting"
+          git push origin HEAD:agent/integration-audit
+      - name: Check integrated workspace
+        run: cargo check --workspace --all-features --locked
