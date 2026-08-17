@@ -371,6 +371,7 @@ fn acquire_gc_lock_blocking(world_dir: &Path) -> Result<BlobGcCoordinationGuard,
 fn open_gc_lock_file(path: &Path) -> Result<File, StorageError> {
     OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(path)
