@@ -628,7 +628,7 @@ function openSleepDialog() {
 }
 
 async function sleepWorld() {
-  await run('Requesting graceful sleep…', () => backend.stopHost(), {
+  await run('Stopping local Minecraft runtime…', () => backend.stopHost(), {
     successMessage: 'World runtime stopped gracefully. Replica storage can continue separately.',
   });
   $('sleepDialog').close();
@@ -770,7 +770,7 @@ $('cancelJoin').addEventListener('click', () => showView('worlds'));
 $('openWorldDiagnostics').addEventListener('click', () => showView('diagnostics'));
 $('clearActivity').addEventListener('click', () => { $('output').textContent = 'Activity cleared.'; });
 $('inviteWorld').addEventListener('click', () => { try { openInviteDialog(); } catch (error) { setOutput(String(error), 'Invite'); } });
-$('sleepWorld').addEventListener('click', () => { try { openSleepDialog(); } catch (error) { setOutput(String(error), 'Sleep world'); } });
+$('sleepWorld').addEventListener('click', () => { try { openSleepDialog(); } catch (error) { setOutput(String(error), 'Stop world'); } });
 $('leaveWorld').addEventListener('click', () => { try { openLeaveDialog(); } catch (error) { setOutput(String(error), 'Leave world'); } });
 $('copyInvite').addEventListener('click', () => copyText($('inviteResult').value, 'Invite'));
 $('copyWorldId').addEventListener('click', () => copyText(selectedWorldId, 'World ID'));

@@ -88,6 +88,8 @@ test('launcher markup keeps critical flow and accessibility anchors', async () =
   ]) {
     assert.match(html, new RegExp(`id=["']${id}["']`), `missing #${id}`);
   }
+  assert.doesNotMatch(html, />Sleep world/);
+  assert.match(html, /does not itself create a durable sleeping migration state/);
   assert.match(html, /aria-live="polite"/);
   assert.match(html, /<label for="createName">/);
   assert.match(html, /<label for="joinInvite">/);

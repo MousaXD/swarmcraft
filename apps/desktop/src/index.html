@@ -168,7 +168,7 @@
                   </div>
                   <div class="compact-actions">
                     <button id="wakeWorld" class="button button-secondary migration-wake" type="button" disabled>Wake world</button>
-                    <button id="sleepWorld" class="button button-subtle world-required" type="button">Sleep world…</button>
+                    <button id="sleepWorld" class="button button-subtle world-required" type="button">Stop world…</button>
                   </div>
                   <p id="migrationAvailability" class="section-note">Transfer and wake are unavailable in this build. Existing Play and graceful stop remain available.</p>
                 </section>
@@ -453,12 +453,12 @@
   <dialog id="sleepDialog" class="dialog">
     <form class="dialog-card" method="dialog">
       <div>
-        <h2>Sleep this world?</h2>
-        <p>SwarmCraft will request a graceful runtime stop. Background replica storage can continue separately.</p>
+        <h2>Stop this world?</h2>
+        <p>SwarmCraft will stop the local Minecraft runtime. This does not itself create a durable sleeping migration state. Background replica storage can continue separately.</p>
       </div>
       <div class="dialog-actions">
         <button class="button button-secondary" value="cancel" type="submit">Cancel</button>
-        <button id="confirmSleep" class="button button-warning" value="default" type="button">Sleep world</button>
+        <button id="confirmSleep" class="button button-warning" value="default" type="button">Stop world</button>
       </div>
     </form>
   </dialog>
