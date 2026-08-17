@@ -213,9 +213,7 @@ fn restore_blob_streaming(
     loop {
         let remaining = descriptor.uncompressed_size.saturating_sub(total);
         let read_limit = remaining.saturating_add(1).min(buffer.len() as u64) as usize;
-        let read = reader
-            .read(&mut buffer[..read_limit])
-            .map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
+        let read = reader.read(&mut buffer[..read_limit]).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
         if read == 0 {
             break;
         }
@@ -256,9 +254,7 @@ fn verify_encoded_blob_streaming(path: &Path, descriptor: &BlobDescriptor) -> Re
     loop {
         let remaining = descriptor.uncompressed_size.saturating_sub(total);
         let read_limit = remaining.saturating_add(1).min(buffer.len() as u64) as usize;
-        let read = reader
-            .read(&mut buffer[..read_limit])
-            .map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
+        let read = reader.read(&mut buffer[..read_limit]).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
         if read == 0 {
             break;
         }
@@ -469,18 +465,13 @@ mod tests {
             let world = WorldId([0x90 + iteration; 32]);
             let (published_tx, published_rx) = mpsc::channel();
             let (resume_tx, resume_rx) = mpsc::channel();
-            *TEST_PUBLICATION_HOOK.lock().unwrap() = Some(PublicationHook {
-                world,
-                published: published_tx,
-                resume: resume_rx,
-            });
+            *TEST_PUBLICATION_HOOK.lock().unwrap() =
+                Some(PublicationHook { world, published: published_tx, resume: resume_rx });
 
             let worker_storage = storage.clone();
             let worker_source = source.clone();
             let worker = thread::spawn(move || {
-                let mut manifest = worker_storage
-                    .snapshot_directory_streaming(&worker_source, context(world))
-                    .unwrap();
+                let mut manifest = worker_storage.snapshot_directory_streaming(&worker_source, context(world)).unwrap();
                 manifest.signature = vec![0; 64];
                 worker_storage.commit_snapshot_streaming(&manifest).unwrap();
                 manifest
