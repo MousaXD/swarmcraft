@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use swarm_cli::migration::{
-    self, load_migration_status, load_runtime_config, run_authority_runtime, save_runtime_config, HostOptions,
+    load_migration_status, load_runtime_config, run_authority_runtime, save_runtime_config, HostOptions,
     MigrationPhase, RuntimeLaunchConfig,
 };
 use swarm_core::{create_world_genesis, DataPaths, PeerIdentity};
@@ -18,7 +18,6 @@ use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 struct RuntimeFixture {
     paths: DataPaths,
     storage: Storage,
-    identity: PeerIdentity,
     world: WorldId,
     baseline_hash: swarm_protocol::Hash32,
     baseline_snapshot_number: u64,
@@ -93,7 +92,6 @@ fn fixture(root: PathBuf) -> RuntimeFixture {
     RuntimeFixture {
         paths,
         storage,
-        identity,
         world,
         baseline_hash: snapshot.manifest_hash().unwrap(),
         baseline_snapshot_number: snapshot.snapshot_number,
@@ -125,18 +123,18 @@ def encoded(value):
     return value.encode("utf-8").hex()
 
 with socket.create_connection((host, port), timeout=5) as connection:
-    writer = connection.makefile("w", encoding="utf-8", newline="\\n")
-    writer.write("AUTH\\t" + token + "\\n")
+    writer = connection.makefile("w", encoding="utf-8", newline="\n")
+    writer.write("AUTH\t" + token + "\n")
     writer.write(
-        "WORLD_INFO\\t"
+        "WORLD_INFO\t"
         + encoded({minecraft:?})
-        + "\\t"
+        + "\t"
         + encoded({loader:?})
-        + "\\t"
+        + "\t"
         + encoded(world)
-        + "\\t"
+        + "\t"
         + fingerprint
-        + "\\n"
+        + "\n"
     )
     writer.flush()
     time.sleep(0.35)
@@ -250,7 +248,10 @@ async fn failed_partial_setup_retries_cleanly_and_manual_advanced_runtime_still_
     let latest = fixture.storage.latest_snapshot(fixture.world).unwrap().unwrap();
     fixture.storage.verify_snapshot(&latest).unwrap();
     assert_eq!(latest.snapshot_number, fixture.baseline_snapshot_number + 1);
-    assert_eq!(fs::read_to_string(runtime_dir(&fixture).join("world/level.dat")).unwrap(), "canonical-runtime-hardening\n");
+    assert_eq!(
+        fs::read_to_string(runtime_dir(&fixture).join("world/level.dat")).unwrap(),
+        "canonical-runtime-hardening\n"
+    );
     assert_eq!(fs::read_to_string(runtime_dir(&fixture).join("eula.txt")).unwrap(), "eula=true\n");
 }
 
@@ -263,13 +264,7 @@ async fn incompatible_fabric_handshake_is_rejected_before_ready_and_world_stays_
     let error = run_authority_runtime(
         &fixture.paths,
         &fixture.storage,
-        HostOptions {
-            world: fixture.world,
-            java,
-            server_jar: server,
-            mod_jar: bridge,
-            accept_eula: true,
-        },
+        HostOptions { world: fixture.world, java, server_jar: server, mod_jar: bridge, accept_eula: true },
     )
     .await
     .unwrap_err();
