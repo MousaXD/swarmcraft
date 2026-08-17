@@ -76,7 +76,7 @@ fn simultaneous_local_publishers_survive_replica_commit_gc_and_retention() {
         spawn_publisher(storage.clone(), &shared_source, world, 2, start.clone(), commit.clone(), published_tx);
 
     start.wait();
-    let mut locals = vec![published_rx.recv().unwrap(), published_rx.recv().unwrap()];
+    let mut locals = [published_rx.recv().unwrap(), published_rx.recv().unwrap()];
     locals.sort_by_key(|(manifest, _)| manifest.snapshot_number);
     let shared_hash = locals[0].0.entries[0].blob.hash;
     assert_eq!(shared_hash, locals[1].0.entries[0].blob.hash);
