@@ -1,0 +1,41 @@
+name: Snapshot replication branch validation
+
+on:
+  push:
+    branches:
+      - agent/snapshot-replication
+
+permissions:
+  contents: read
+
+jobs:
+  storage-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Workspace all targets
+        run: cargo test --workspace --all-targets --locked
+      - name: Retention tests direct
+        run: cargo test -p swarm-storage --test retention_gc --locked
+      - name: Snapshot swarm acceptance direct
+        run: cargo test -p swarm-storage --test snapshot_swarm_acceptance --locked
+      - name: GC publication race direct
+        run: cargo test -p swarm-storage streaming::tests::gc_cannot_reclaim_local_blob_before_manifest_commit --locked
+      - name: Stale and live GC lock tests direct
+        run: |
+          cargo test -p swarm-storage retention::tests::stale_lock_file_is_recoverable_after_reopen --locked
+          cargo test -p swarm-storage retention::tests::live_lock_cannot_be_stolen_and_releases_on_handle_close --locked
+          cargo test -p swarm-storage retention::tests::replication_and_snapshot_publication_pins_coexist_during_gc --locked
+      - name: Bounded zstd verifier tests direct
+        run: |
+          cargo test -p swarm-storage replica::tests::decoded_verifier_reads_only_one_byte_beyond_declared_size_before_rejection --locked
+          cargo test -p swarm-storage replica::tests::zstd_replica_verifier_rejects_expansion_past_declared_size --locked
