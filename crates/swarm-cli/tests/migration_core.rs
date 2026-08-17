@@ -125,7 +125,7 @@ fn snapshot(
         .unwrap();
     authority.sign_snapshot(&mut manifest).unwrap();
     storage.commit_snapshot(&manifest).unwrap();
-    manifest
+    manifest.manifest().clone()
 }
 
 fn member(identity: &PeerIdentity) -> WorldMemberV1 {
@@ -446,7 +446,7 @@ fn promote_snapshot_for_epoch(
         .unwrap();
     authority.sign_snapshot(&mut manifest).unwrap();
     peer.storage.commit_snapshot(&manifest).unwrap();
-    manifest
+    manifest.manifest().clone()
 }
 
 #[test]
