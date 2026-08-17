@@ -1,5 +1,8 @@
 use std::{collections::BTreeSet, fs, path::PathBuf};
-use swarm_protocol::{BlobDescriptor, BlobEncoding, Hash32, PeerId, SnapshotManifestV1, WorldId};
+use swarm_protocol::{
+    AuthorityTransferV1, BlobDescriptor, BlobEncoding, Hash32, PeerId, SnapshotManifestV1, TransferPhase, WorldId,
+    PROTOCOL_VERSION,
+};
 use swarm_storage::{retention::RetentionPolicy, SnapshotContext, Storage};
 
 fn world() -> WorldId {
@@ -155,6 +158,53 @@ fn active_replication_pins_prevent_gc_from_reclaiming_in_flight_complete_blobs()
     let second_gc = storage.garbage_collect_blobs(world()).unwrap();
     assert_eq!(second_gc.removed_blobs, 1);
     assert!(!path.exists());
+}
+
+#[test]
+fn authority_transfer_base_is_a_mandatory_retention_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("world");
+    fs::create_dir_all(&source).unwrap();
+    let storage = Storage::open(temp.path().join("store")).unwrap();
+
+    fs::write(source.join("level.dat"), b"transfer-base").unwrap();
+    let first = snapshot(&storage, &source, 1, None);
+    let first_blob = first.entries[0].blob.clone();
+
+    fs::write(source.join("level.dat"), b"newer-canonical-state").unwrap();
+    let second = snapshot(&storage, &source, 2, Some(first.manifest_hash().unwrap()));
+
+    storage
+        .save_transfer_record(&AuthorityTransferV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world(),
+            from_peer_id: PeerId([1; 32]),
+            to_peer_id: PeerId([2; 32]),
+            base_snapshot_hash: first.manifest_hash().unwrap(),
+            next_epoch: 2,
+            next_fencing_token: 2,
+            phase: TransferPhase::Prepared,
+            signer_peer_id: PeerId([1; 32]),
+            signer_public_key: [3; 32],
+            signature: vec![0; 64],
+        })
+        .unwrap();
+
+    let report = storage
+        .apply_retention(
+            world(),
+            &RetentionPolicy {
+                keep_latest: 1,
+                protected_snapshots: BTreeSet::new(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(report.retained_snapshots, vec![1, 2]);
+    assert!(report.removed_snapshots.is_empty());
+    assert!(blob_path(&storage, &first_blob).exists());
+    storage.verify_snapshot(&first).unwrap();
+    storage.verify_snapshot(&second).unwrap();
 }
 
 #[test]

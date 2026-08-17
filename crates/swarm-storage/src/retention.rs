@@ -118,7 +118,7 @@ impl Storage {
         fs::create_dir_all(&pins_dir).map_err(|source| io_error(&pins_dir, source))?;
         let token = PIN_COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut unique = BTreeSet::new();
-        let mut pin_paths = Vec::new();
+        let mut lease = ActiveReplicationLease { pin_paths: Vec::new() };
 
         for hash in hashes.iter().copied().filter(|hash| unique.insert(*hash)) {
             let path = pins_dir.join(format!(
@@ -131,24 +131,21 @@ impl Storage {
                 .write(true)
                 .open(&path)
                 .map_err(|source| io_error(&path, source))?;
+            // Track immediately so any later write/sync error is cleaned up by Drop.
+            lease.pin_paths.push(path.clone());
             file.write_all(hash.to_hex().as_bytes()).map_err(|source| io_error(&path, source))?;
             file.sync_all().map_err(|source| io_error(&path, source))?;
-            pin_paths.push(path);
         }
         sync_dir(&pins_dir)?;
 
         // Close the check/create race with GC. GC creates its lock with
         // create_new before reading pins. If it appeared after our first check,
-        // do not perform replication under that lock.
+        // returning the error drops the lease and removes every pin.
         if lock_path.exists() {
-            for path in &pin_paths {
-                let _ = fs::remove_file(path);
-            }
-            let _ = sync_dir(&pins_dir);
             return Err(RetentionError::GarbageCollectionActive(world));
         }
 
-        Ok(ActiveReplicationLease { pin_paths })
+        Ok(lease)
     }
 
     /// Removes snapshot manifests outside the retention set. No blobs are
