@@ -1,4 +1,4 @@
-use crate::authority_permit::PermitWatch;
+use crate::{authority_permit::PermitWatch, server_mods};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -487,6 +487,13 @@ async fn run_authority_runtime_inner(
     storage.verify_snapshot(&latest)?;
     verify_snapshot_signature(&latest)?;
     ensure_authority_generation(storage, &identity, &epoch)?;
+    let world_config =
+        storage.load_world_config(options.world).context("canonical runtime profile is not synchronized")?;
+    let mod_readiness = server_mods::evaluate_world_mods(paths, options.world, &world_config.compatibility)?;
+    if !mod_readiness.ready {
+        let details = mod_readiness.issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>().join("; ");
+        bail!("local device is not server-mod ready for authority runtime: {details}");
+    }
 
     let runtime = paths.root.join("runtime").join(options.world.to_hex());
     let world_dir = runtime.join("world");
@@ -505,6 +512,7 @@ async fn run_authority_runtime_inner(
     fs::create_dir_all(runtime.join("mods"))?;
     fs::copy(&options.mod_jar, runtime.join("mods/swarmcraft-fabric.jar"))
         .with_context(|| format!("cannot install Fabric bridge from {}", options.mod_jar.display()))?;
+    server_mods::install_verified_user_mods(paths, options.world, &world_config.compatibility, &runtime.join("mods"))?;
     fs::write(runtime.join("eula.txt"), "eula=true\n")?;
 
     publish_status(
