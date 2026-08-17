@@ -14,6 +14,10 @@ path = "src/main.rs"
 name = "swarmcraft-host"
 path = "src/host_main.rs"
 
+[[bin]]
+name = "swarmcraft-runtime"
+path = "src/runtime_main.rs"
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
