@@ -100,5 +100,7 @@ test('frontend source and Tauri config preserve the global bridge contract', asy
   assert.match(app, /selectedWorldId === requestedWorldId/);
   assert.match(app, /document\.hidden/);
   assert.match(app, /setInterval\(refreshVisibleMigration, MIGRATION_REFRESH_MS\)/);
+  assert.match(app, /!migration\.available \|\| migration\.failed/);
+  assert.match(app, /renderMigration\(\{ detail: `Could not read host migration state:/);
   assert.equal(tauri.app.withGlobalTauri, true);
 });

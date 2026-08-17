@@ -246,12 +246,12 @@ function renderMigration(state) {
   $('migrationBadge').textContent = migration.label;
   $('migrationBadge').className = `status-badge ${migration.failed ? 'danger' : migration.phase === 'ready' ? 'safe' : migration.available ? 'warning' : 'neutral'}`;
   $('migrationSummary').textContent = migration.detail || (migration.available ? migration.label : 'No host migration is active.');
-  $('migrationProgress').hidden = !migration.available;
+  $('migrationProgress').hidden = !migration.available || migration.failed;
   $('migrationProgressBar').style.width = `${migration.progress}%`;
 
   const steps = $('migrationSteps');
   steps.replaceChildren();
-  if (!migration.available) return;
+  if (!migration.available || migration.failed) return;
   const activeIndex = MIGRATION_PHASES.indexOf(migration.phase);
   MIGRATION_PHASES.filter((phase) => phase !== 'failed').forEach((phase) => {
     const item = document.createElement('li');
@@ -277,7 +277,7 @@ async function refreshMigrationState(world) {
     if (selectedWorldId === requestedWorldId) renderMigration(state);
   } catch (error) {
     if (selectedWorldId === requestedWorldId) {
-      renderMigration({ phase: 'failed', detail: `Could not read host migration state: ${String(error)}` });
+      renderMigration({ detail: `Could not read host migration state: ${String(error)}` });
     }
   } finally {
     migrationRefreshInFlight = false;
