@@ -43,8 +43,12 @@ jobs:
           guard = Path('scripts/check_release_version.py')
           text = guard.read_text(encoding='utf-8')
           if text.count('0.2.1') != 5:
-              raise SystemExit(f'version guard: expected 5 references to 0.2.1, found {text.count("0.2.1")}')
-          guard.write_text(text.replace('0.2.1', '0.3.0'), encoding='utf-8')
+              raise SystemExit(f'version guard: expected 5 plain references to 0.2.1, found {text.count("0.2.1")}')
+          text = text.replace('0.2.1', '0.3.0')
+          if text.count(r'0\.2\.1') != 1:
+              raise SystemExit(f'version guard: expected one escaped 0.2.1 regex, found {text.count(r"0\.2\.1")}')
+          text = text.replace(r'0\.2\.1', r'0\.3\.0', 1)
+          guard.write_text(text, encoding='utf-8')
           PY
 
       - name: Update and audit Cargo.lock
