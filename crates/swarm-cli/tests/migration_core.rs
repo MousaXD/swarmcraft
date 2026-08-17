@@ -9,19 +9,21 @@ use std::{
 use swarm_cli::{
     authority_permit::refresh_permit,
     migration::{
-        self, accept_manual_transfer, activate_manual_transfer, commit_manual_transfer,
-        observe_manual_transfer_epoch, prepare_manual_transfer, MigrationPhase, RuntimeLaunchConfig,
-        TransferPrepareResult,
+        self, accept_manual_transfer, activate_manual_transfer, commit_manual_transfer, observe_manual_transfer_epoch,
+        prepare_manual_transfer, MigrationPhase, RuntimeLaunchConfig, TransferPrepareResult,
     },
 };
 use swarm_consensus::AuthorityGeneration;
 use swarm_core::{create_world_genesis, DataPaths, PeerIdentity};
 use swarm_protocol::{
-    EpochMode, EpochRecordV1, MembershipRecordV1, SleepRecordV1, WorldDescriptorV1, WorldId,
-    WorldMemberV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    EpochMode, EpochRecordV1, MembershipRecordV1, SleepRecordV1, WorldDescriptorV1, WorldId, WorldMemberV1,
+    PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
-use tokio::{task::JoinHandle, time::{sleep, timeout}};
+use tokio::{
+    task::JoinHandle,
+    time::{sleep, timeout},
+};
 
 struct PeerFixture {
     paths: DataPaths,
@@ -173,11 +175,7 @@ fn configure_mock_runtime(temp: &Path, peer: &PeerFixture, world: WorldId, endpo
     .unwrap();
 }
 
-fn spawn_heartbeat(
-    paths: DataPaths,
-    world: WorldId,
-    generation: AuthorityGeneration,
-) -> JoinHandle<()> {
+fn spawn_heartbeat(paths: DataPaths, world: WorldId, generation: AuthorityGeneration) -> JoinHandle<()> {
     tokio::spawn(async move {
         for sequence in 1..100u64 {
             refresh_permit(&paths, world, generation, sequence).unwrap();
@@ -230,19 +228,13 @@ async fn manual_transfer_uses_shared_runner_and_fences_alice() {
     let alice_sleep = alice.storage.load_sleep_record(shared.world).unwrap();
     bob.storage.save_sleep_record(&alice_sleep).unwrap();
 
-    let prepared = match prepare_manual_transfer(
-        &alice.paths,
-        &alice.storage,
-        shared.world,
-        bob.identity.peer_id(),
-    )
-    .unwrap()
-    {
-        TransferPrepareResult::Prepared(token) => token,
-        TransferPrepareResult::CheckpointRequested => {
-            panic!("sleeping world should already be checkpointed")
-        }
-    };
+    let prepared =
+        match prepare_manual_transfer(&alice.paths, &alice.storage, shared.world, bob.identity.peer_id()).unwrap() {
+            TransferPrepareResult::Prepared(token) => token,
+            TransferPrepareResult::CheckpointRequested => {
+                panic!("sleeping world should already be checkpointed")
+            }
+        };
     let accepted = accept_manual_transfer(&bob.paths, &bob.storage, shared.world, &prepared).unwrap();
     let committed = commit_manual_transfer(&alice.paths, &alice.storage, shared.world, &accepted).unwrap();
     let epoch_token = activate_manual_transfer(&bob.paths, &bob.storage, shared.world, &committed).unwrap();
@@ -257,23 +249,12 @@ async fn manual_transfer_uses_shared_runner_and_fences_alice() {
     assert!(alice.storage.load_sleep_record(shared.world).is_err());
     assert!(bob.storage.load_sleep_record(shared.world).is_err());
 
-    let stale = prepare_manual_transfer(
-        &alice.paths,
-        &alice.storage,
-        shared.world,
-        bob.identity.peer_id(),
-    );
-    assert!(
-        stale.is_err(),
-        "former authority must not initiate canonical work after observing Bob's generation"
-    );
+    let stale = prepare_manual_transfer(&alice.paths, &alice.storage, shared.world, bob.identity.peer_id());
+    assert!(stale.is_err(), "former authority must not initiate canonical work after observing Bob's generation");
 
     let endpoint = "127.0.0.1:25566";
     configure_mock_runtime(temp.path(), &bob, shared.world, endpoint);
-    let generation = AuthorityGeneration {
-        epoch: bob_epoch.epoch_number,
-        fencing_token: bob_epoch.fencing_token,
-    };
+    let generation = AuthorityGeneration { epoch: bob_epoch.epoch_number, fencing_token: bob_epoch.fencing_token };
     let heartbeat = spawn_heartbeat(bob.paths.clone(), shared.world, generation);
     let supervisor_paths = bob.paths.clone();
     let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });
@@ -319,10 +300,7 @@ async fn recovered_bob_waits_for_exact_permit_then_restores_and_reaches_fabric_r
 
     let endpoint = "127.0.0.1:25565";
     configure_mock_runtime(temp.path(), &bob, shared.world, endpoint);
-    let generation = AuthorityGeneration {
-        epoch: recovery.epoch_number,
-        fencing_token: recovery.fencing_token,
-    };
+    let generation = AuthorityGeneration { epoch: recovery.epoch_number, fencing_token: recovery.fencing_token };
     let heartbeat = spawn_heartbeat(bob.paths.clone(), shared.world, generation);
     let supervisor_paths = bob.paths.clone();
     let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });

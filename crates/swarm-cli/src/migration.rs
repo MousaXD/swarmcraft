@@ -1,6 +1,5 @@
 use crate::authority_permit::PermitWatch;
 use anyhow::{anyhow, bail, Context, Result};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
@@ -19,8 +18,14 @@ use swarm_protocol::{
     AuthorityTransferV1, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, PeerId, SleepRecordV1,
     SnapshotManifestV1, TransferPhase, WorldId, PROTOCOL_VERSION,
 };
-use swarm_storage::{SnapshotContext, Storage};
-use tokio::{task::JoinHandle, time::{sleep, timeout}};
+use swarm_storage::{
+    serde::{Deserialize, Serialize},
+    serde_json, SnapshotContext, Storage,
+};
+use tokio::{
+    task::JoinHandle,
+    time::{sleep, timeout},
+};
 use tracing::{info, warn};
 
 const FABRIC_START_TIMEOUT: Duration = Duration::from_secs(60);
@@ -114,7 +119,8 @@ pub fn save_runtime_config(paths: &DataPaths, world: WorldId, config: &RuntimeLa
 
 pub fn load_runtime_config(paths: &DataPaths, world: WorldId) -> Result<RuntimeLaunchConfig> {
     let path = runtime_config_path(paths, world);
-    let bytes = fs::read(&path).with_context(|| format!("runtime launch configuration is missing at {}", path.display()))?;
+    let bytes =
+        fs::read(&path).with_context(|| format!("runtime launch configuration is missing at {}", path.display()))?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 
@@ -431,6 +437,28 @@ fn infer_trigger(storage: &Storage, epoch: &EpochRecordV1, local_peer: PeerId) -
 }
 
 pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options: HostOptions) -> Result<()> {
+    let identity = PeerIdentity::load_or_create(paths)?;
+    let descriptor = storage.load_world_descriptor(options.world)?;
+    let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
+    if member_count > 1 {
+        if storage.load_sleep_record(options.world).is_ok() {
+            bail!("multi-member sleeping worlds must be woken through the migration supervisor");
+        }
+        let epoch = storage.load_epoch_record(options.world)?;
+        if epoch.authority_peer_id != identity.peer_id() || epoch.authority_public_key != identity.public_key() {
+            bail!("local peer does not hold the accepted authority generation");
+        }
+        let config = RuntimeLaunchConfig {
+            java: options.java.clone(),
+            server_jar: options.server_jar.clone(),
+            mod_jar: options.mod_jar.clone(),
+            accept_eula: options.accept_eula,
+            game_endpoint: None,
+        };
+        if !wait_until_launch_safe(paths, storage, &identity, options.world, &descriptor, &epoch, &config).await? {
+            bail!("authority generation changed while waiting for launch safety");
+        }
+    }
     run_authority_runtime_inner(paths, storage, options, MigrationTrigger::DirectHost, None, true).await
 }
 
@@ -602,7 +630,10 @@ async fn run_authority_runtime_inner(
         paths,
         storage,
         options.world,
-        Some(match disposition { RuntimeDisposition::Transfer(_) => MigrationTrigger::ManualTransfer, _ => trigger }),
+        Some(match disposition {
+            RuntimeDisposition::Transfer(_) => MigrationTrigger::ManualTransfer,
+            _ => trigger,
+        }),
         MigrationPhase::Checkpointing,
         false,
         game_endpoint.clone(),
@@ -630,7 +661,8 @@ async fn run_authority_runtime_inner(
 
     match disposition {
         RuntimeDisposition::Transfer(target) => {
-            let transfer = create_prepared_transfer(storage, &identity, options.world, target, &epoch, &final_manifest)?;
+            let transfer =
+                create_prepared_transfer(storage, &identity, options.world, target, &epoch, &final_manifest)?;
             storage.save_transfer_record(&transfer)?;
             clear_transfer_intent(paths, options.world)?;
             publish_status(
@@ -912,12 +944,7 @@ pub fn activate_manual_transfer(paths: &DataPaths, storage: &Storage, world: Wor
     encode_epoch(&next)
 }
 
-pub fn observe_manual_transfer_epoch(
-    paths: &DataPaths,
-    storage: &Storage,
-    world: WorldId,
-    token: &str,
-) -> Result<()> {
+pub fn observe_manual_transfer_epoch(paths: &DataPaths, storage: &Storage, world: WorldId, token: &str) -> Result<()> {
     let identity = PeerIdentity::load_or_create(paths)?;
     let next = decode_epoch(token)?;
     if next.world_id != world || next.mode == EpochMode::Recovery {

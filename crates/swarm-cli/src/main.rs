@@ -435,7 +435,10 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 println!("World: {}", status.world_id);
                 println!("Authority: {}", status.authority_peer_id.as_deref().unwrap_or("unknown"));
                 println!("Epoch: {}", status.epoch.map_or_else(|| "unknown".into(), |value| value.to_string()));
-                println!("Fencing token: {}", status.fencing_token.map_or_else(|| "unknown".into(), |value| value.to_string()));
+                println!(
+                    "Fencing token: {}",
+                    status.fencing_token.map_or_else(|| "unknown".into(), |value| value.to_string())
+                );
                 println!("Phase: {:?}", status.phase);
                 println!("Runtime ready: {}", status.runtime_ready);
                 println!("Game endpoint: {}", status.game_endpoint.as_deref().unwrap_or("unpublished"));
@@ -448,7 +451,9 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             let world = parse_world(&world)?;
             migration::request_world_wake(paths, storage, world)?;
             println!("Wake requested for {world}.");
-            println!("The migration supervisor will launch only after a safe accepted authority generation is available.");
+            println!(
+                "The migration supervisor will launch only after a safe accepted authority generation is available."
+            );
         }
         WorldCommand::TransferPrepare { world, to } => {
             let world = parse_world(&world)?;
