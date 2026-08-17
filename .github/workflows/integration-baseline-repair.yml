@@ -21,24 +21,48 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - name: Align migration test helpers with publication ownership
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/swarm-cli/tests/migration_core.rs')
+          text = path.read_text()
+          replacements = [
+              (
+                  '    storage.commit_snapshot(&manifest).unwrap();\n    manifest\n}\n',
+                  '    storage.commit_snapshot(&manifest).unwrap();\n    manifest.manifest().clone()\n}\n',
+              ),
+              (
+                  '    peer.storage.commit_snapshot(&manifest).unwrap();\n    manifest\n}\n',
+                  '    peer.storage.commit_snapshot(&manifest).unwrap();\n    manifest.manifest().clone()\n}\n',
+              ),
+          ]
+          for old, new in replacements:
+              count = text.count(old)
+              assert count == 1, f'expected exactly one match for migration helper, found {count}'
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
       - name: Format integrated workspace
         run: cargo fmt --all
       - name: Regenerate integrated lockfile
         run: cargo generate-lockfile
       - name: Verify formatting
         run: cargo fmt --all -- --check
-      - name: Commit generated baseline
+      - name: Commit integration test fix
         shell: bash
         run: |
           set -euo pipefail
           git add Cargo.lock crates
           if git diff --cached --quiet; then
-            echo "No generated baseline changes"
+            echo "No integration changes"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore(integration): refresh lockfile and formatting"
+          git commit -m "fix(integration): align migration tests with publication ownership"
           git push origin HEAD:agent/integration-audit
       - name: Check integrated workspace
         run: cargo check --workspace --all-features --locked
