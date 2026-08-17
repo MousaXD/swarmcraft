@@ -702,8 +702,7 @@ mod tests {
         let abandoned_id = abandoned.publication_id().to_owned();
         drop(abandoned);
 
-        let mut committed =
-            storage.snapshot_directory_streaming(&source_committed, context_for(world, 3, 3)).unwrap();
+        let mut committed = storage.snapshot_directory_streaming(&source_committed, context_for(world, 3, 3)).unwrap();
         committed.signature = vec![0; 64];
         let committed_blob = committed.entries[0].blob.clone();
         storage.commit_snapshot_streaming(&committed).unwrap();
