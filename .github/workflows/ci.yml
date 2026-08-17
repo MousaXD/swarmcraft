@@ -95,6 +95,23 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Validate Tauri frontend bridge
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          config = json.loads(Path('apps/desktop/src-tauri/tauri.conf.json').read_text())
+          frontend = Path('apps/desktop/src/app.js').read_text()
+
+          assert 'window.__TAURI__' in frontend, 'desktop frontend no longer uses the expected Tauri global API'
+          assert config.get('app', {}).get('withGlobalTauri') is True, (
+              'apps/desktop/src/app.js uses window.__TAURI__, so tauri.conf.json must set '
+              'app.withGlobalTauri=true'
+          )
+          PY
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
