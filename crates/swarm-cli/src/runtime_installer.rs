@@ -190,9 +190,10 @@ impl<'a> RuntimeInstaller<'a> {
         let metadata = self.storage.load_world(world)?;
         let lock = load_runtime_lock(self.paths, world).ok();
         let manual = load_runtime_config(self.paths, world).ok();
-        let required_java_major = lock
-            .as_ref()
-            .map_or_else(|| heuristic_java_major(&metadata.genesis.minecraft_version), |value| value.required_java_major);
+        let required_java_major = lock.as_ref().map_or_else(
+            || heuristic_java_major(&metadata.genesis.minecraft_version),
+            |value| value.required_java_major,
+        );
         let lock_compatible = lock.as_ref().is_some_and(|value| {
             value.schema_version == RUNTIME_LOCK_SCHEMA_VERSION
                 && value.world_id == world.to_string()
@@ -250,7 +251,8 @@ impl<'a> RuntimeInstaller<'a> {
             version: None,
             path: None,
             managed: true,
-            detail: (!eula_accepted).then(|| "explicit Minecraft server EULA acceptance is required before launch".into()),
+            detail: (!eula_accepted)
+                .then(|| "explicit Minecraft server EULA acceptance is required before launch".into()),
         });
         components.push(self.server_mods_status(world));
 
@@ -349,7 +351,12 @@ impl<'a> RuntimeInstaller<'a> {
             if status.ready {
                 emit(&mut progress, &mut completed, RuntimePhase::Ready, "Runtime is ready");
             } else if !status.eula_accepted {
-                emit(&mut progress, &mut completed, RuntimePhase::WaitingForEula, "Minecraft server EULA acceptance is required");
+                emit(
+                    &mut progress,
+                    &mut completed,
+                    RuntimePhase::WaitingForEula,
+                    "Minecraft server EULA acceptance is required",
+                );
             }
             return Ok(RuntimeInstallReport {
                 launch_config_saved: status.launch_configured,
@@ -419,7 +426,12 @@ impl<'a> RuntimeInstaller<'a> {
         if options.accept_eula {
             self.save_launch_config(world, &lock, &options)?;
         } else {
-            emit(&mut progress, &mut completed, RuntimePhase::WaitingForEula, "Minecraft server EULA acceptance is required");
+            emit(
+                &mut progress,
+                &mut completed,
+                RuntimePhase::WaitingForEula,
+                "Minecraft server EULA acceptance is required",
+            );
         }
 
         emit(&mut progress, &mut completed, RuntimePhase::Verifying, "Verifying installed runtime");
@@ -623,11 +635,17 @@ impl<'a> RuntimeInstaller<'a> {
             version: Some(record.version.clone()),
             path: Some(record.path.clone()),
             managed: true,
-            detail: (!(source_ok && staged_ok)).then(|| "artifact is missing or its recorded SHA-256 no longer matches".into()),
+            detail: (!(source_ok && staged_ok))
+                .then(|| "artifact is missing or its recorded SHA-256 no longer matches".into()),
         }
     }
 
-    fn swarmcraft_status(&self, world: WorldId, lock: Option<&RuntimeLock>, lock_compatible: bool) -> RuntimeComponentStatus {
+    fn swarmcraft_status(
+        &self,
+        world: WorldId,
+        lock: Option<&RuntimeLock>,
+        lock_compatible: bool,
+    ) -> RuntimeComponentStatus {
         let expected = self
             .storage
             .load_world_config(world)
@@ -641,7 +659,10 @@ impl<'a> RuntimeInstaller<'a> {
                 version: Some(expected.clone()),
                 path: None,
                 managed: true,
-                detail: Some(format!("world requires adapter {expected}, application provides {}", env!("CARGO_PKG_VERSION"))),
+                detail: Some(format!(
+                    "world requires adapter {expected}, application provides {}",
+                    env!("CARGO_PKG_VERSION")
+                )),
             };
         }
         self.artifact_status(
@@ -674,7 +695,11 @@ impl<'a> RuntimeInstaller<'a> {
             .filter(|requirement| {
                 !matches!(
                     requirement.artifact_id.as_str(),
-                    "swarmcraft.legacy-compatibility" | "fabric-api" | "fabric_api" | "swarmcraft" | "swarmcraft-fabric"
+                    "swarmcraft.legacy-compatibility"
+                        | "fabric-api"
+                        | "fabric_api"
+                        | "swarmcraft"
+                        | "swarmcraft-fabric"
                 )
             })
             .map(|requirement| format!("{} {}", requirement.artifact_id, requirement.version))
@@ -859,10 +884,9 @@ fn resolve_managed_java(major: u32) -> Result<ResolvedArtifact> {
 fn install_artifact(artifact: &ResolvedArtifact, destination: &Path, force: bool) -> Result<ArtifactRecord> {
     if destination.is_file() && !force {
         let sha256 = hash_file(destination, HashKind::Sha256)?;
-        let sha1_ok = artifact
-            .sha1
-            .as_ref()
-            .is_none_or(|expected| hash_file(destination, HashKind::Sha1).is_ok_and(|actual| eq_hash(expected, &actual)));
+        let sha1_ok = artifact.sha1.as_ref().is_none_or(|expected| {
+            hash_file(destination, HashKind::Sha1).is_ok_and(|actual| eq_hash(expected, &actual))
+        });
         let sha256_ok = artifact.sha256.as_ref().is_none_or(|expected| eq_hash(expected, &sha256));
         if sha1_ok && sha256_ok {
             return Ok(ArtifactRecord {
@@ -1038,7 +1062,10 @@ fn trusted_https(url: &str, hosts: &[&str]) -> Result<()> {
 }
 
 fn probe_java_major(path: &Path) -> Result<u32> {
-    let output = Command::new(path).arg("-version").output().with_context(|| format!("cannot run {} -version", path.display()))?;
+    let output = Command::new(path)
+        .arg("-version")
+        .output()
+        .with_context(|| format!("cannot run {} -version", path.display()))?;
     if !output.status.success() {
         bail!("Java version probe failed");
     }
@@ -1260,7 +1287,14 @@ mod tests {
         };
         assert!(install_artifact(&artifact, &destination, false).is_err());
         assert!(!destination.exists());
-        assert_eq!(fs::read_dir(temp.path()).unwrap().filter_map(Result::ok).filter(|entry| entry.path().to_string_lossy().contains("part-")).count(), 0);
+        assert_eq!(
+            fs::read_dir(temp.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().to_string_lossy().contains("part-"))
+                .count(),
+            0
+        );
     }
 
     #[test]
