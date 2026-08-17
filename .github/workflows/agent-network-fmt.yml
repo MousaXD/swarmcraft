@@ -1,0 +1,36 @@
+name: Agent network rustfmt
+
+on:
+  pull_request:
+    paths:
+      - 'crates/swarm-network/**'
+      - '.github/workflows/agent-network-fmt.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  rustfmt:
+    if: github.head_ref == 'agent/nat-internet'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format owned Rust package
+        run: cargo fmt -p swarm-network
+      - name: Commit formatting when needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- crates/swarm-network; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/swarm-network
+          git commit -m 'style(network): cargo fmt'
+          git push origin HEAD:${{ github.head_ref }}
