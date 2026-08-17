@@ -20,26 +20,42 @@ test('connectivity parser keeps player-facing transport states distinct', () => 
   assert.equal(connectivityFromStatus({}).label, 'Not reported');
 });
 
-test('migration state only accepts the prepared structured phases', () => {
+test('migration state translates migration-core phases into launcher phases', () => {
   for (const phase of MIGRATION_PHASES) {
     const state = normalizeMigrationState({ phase });
     assert.equal(state.phase, phase);
     assert.equal(state.available, true);
   }
+  assert.equal(normalizeMigrationState({ phase: 'waiting_for_authority' }).phase, 'preparing-successor');
+  assert.equal(normalizeMigrationState({ phase: 'launching_runtime' }).phase, 'starting-minecraft');
+  assert.equal(normalizeMigrationState({ phase: 'verifying_fabric' }).phase, 'waiting-for-host');
+  assert.equal(normalizeMigrationState({ phase: 'checkpointing' }).phase, 'saving-world');
+  assert.equal(normalizeMigrationState({ phase: 'awaiting_transfer_acceptance' }).phase, 'transferring-authority');
+  assert.equal(normalizeMigrationState({ phase: 'sleeping' }).available, false);
+  assert.equal(normalizeMigrationState({ phase: 'blocked', failure_reason: 'runtime config missing' }).label, 'Action required');
   const unknown = normalizeMigrationState({ phase: 'elected-but-maybe-ready' });
   assert.equal(unknown.available, false);
   assert.equal(unknown.phase, null);
 });
 
-test('migration operations remain capability-gated until migration-core is connected', async () => {
+test('migration status and wake probe real backend capability while transfer stays multi-stage', async () => {
   const calls = [];
   const backend = createBackendAdapter(async (command, payload) => {
     calls.push([command, payload]);
+    if (command === 'migration_capabilities') return 'status,wake';
+    if (command === 'migration_status') {
+      return JSON.stringify({ phase: 'waiting_for_authority', runtime_ready: false, game_endpoint: null });
+    }
     return 'ok';
   });
   assert.deepEqual(backend.migration.capabilities, { status: false, transfer: false, wake: false });
+  await backend.listWorlds();
+  assert.deepEqual(backend.migration.capabilities, { status: true, transfer: false, wake: true });
+  const state = await backend.migration.readState('scworld:test');
+  assert.equal(state.phase, 'waiting_for_authority');
+  await backend.migration.wakeWorld('scworld:test');
   await assert.rejects(backend.migration.transferAuthority('scworld:test'), /not available in this build/i);
-  assert.equal(calls.length, 0);
+  assert.deepEqual(calls.map(([command]) => command), ['migration_capabilities', 'list_worlds', 'migration_status', 'wake_world']);
 });
 
 test('existing Tauri command names and camelCase payloads stay intact', async () => {

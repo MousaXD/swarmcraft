@@ -26,6 +26,21 @@ const MIGRATION_LABELS = Object.freeze({
   failed: 'Migration failed',
 });
 
+const BACKEND_MIGRATION_PHASE_ALIASES = Object.freeze({
+  'waiting-for-authority': 'preparing-successor',
+  'waiting-for-quorum': 'preparing-successor',
+  'selecting-snapshot': 'preparing-successor',
+  'preparing-runtime': 'preparing-successor',
+  'restoring-world': 'restoring-world',
+  'launching-runtime': 'starting-minecraft',
+  'verifying-fabric': 'waiting-for-host',
+  checkpointing: 'saving-world',
+  'awaiting-transfer-acceptance': 'transferring-authority',
+  ready: 'ready',
+  blocked: 'failed',
+  failed: 'failed',
+});
+
 const CONNECTIVITY_LABELS = Object.freeze({
   direct: 'Direct',
   relay: 'Relay',
@@ -53,11 +68,36 @@ export function normalizeMigrationState(raw) {
       detail: 'No host migration is currently reported.',
       progress: 0,
       failed: false,
+      runtimeReady: false,
+      gameEndpoint: null,
     };
   }
 
   const source = typeof raw === 'string' ? { phase: raw } : raw;
-  const phase = slug(source.phase || source.state || source.status);
+  const backendPhase = slug(source.phase || source.state || source.status);
+  const runtimeReady = Boolean(source.runtime_ready ?? source.runtimeReady);
+  const gameEndpoint = source.game_endpoint ?? source.gameEndpoint ?? null;
+  const failureReason = String(source.failure_reason ?? source.failureReason ?? '').trim();
+
+  if (backendPhase === 'dormant' || backendPhase === 'sleeping' || backendPhase === 'superseded') {
+    const labels = { dormant: 'Not active', sleeping: 'Sleeping', superseded: 'Host changed' };
+    return {
+      available: false,
+      phase: null,
+      label: labels[backendPhase],
+      detail: failureReason || (backendPhase === 'sleeping'
+        ? 'The world is durably sleeping and can be woken only through the backend safety checks.'
+        : backendPhase === 'superseded'
+          ? 'This device is no longer the accepted runtime authority.'
+          : 'No host migration is active.'),
+      progress: 0,
+      failed: false,
+      runtimeReady,
+      gameEndpoint,
+    };
+  }
+
+  const phase = BACKEND_MIGRATION_PHASE_ALIASES[backendPhase] || backendPhase;
   const knownPhase = MIGRATION_PHASES.includes(phase) ? phase : null;
   const index = knownPhase ? MIGRATION_PHASES.indexOf(knownPhase) : -1;
   const progress = knownPhase === 'failed'
@@ -67,14 +107,18 @@ export function normalizeMigrationState(raw) {
       : index >= 0
         ? Math.round((index / (MIGRATION_PHASES.length - 2)) * 100)
         : 0;
+  const blocked = backendPhase === 'blocked';
+  const detail = String(source.detail || source.message || failureReason || '').trim();
 
   return {
     available: Boolean(knownPhase),
     phase: knownPhase,
-    label: knownPhase ? MIGRATION_LABELS[knownPhase] : 'Migration state unavailable',
-    detail: String(source.detail || source.message || '').trim(),
+    label: blocked ? 'Action required' : knownPhase ? MIGRATION_LABELS[knownPhase] : 'Migration state unavailable',
+    detail,
     progress,
     failed: knownPhase === 'failed',
+    runtimeReady,
+    gameEndpoint,
   };
 }
 
@@ -127,10 +171,33 @@ export function createBackendAdapter(invoke) {
     return invoke(command, payload);
   };
 
+  const migrationCapabilities = { status: false, transfer: false, wake: false };
+  let migrationCapabilityProbe = null;
+  const ensureMigrationCapabilities = () => {
+    if (!migrationCapabilityProbe) {
+      migrationCapabilityProbe = Promise.resolve()
+        .then(() => call('migration_capabilities'))
+        .then((raw) => {
+          const supported = new Set(String(raw || '').split(',').map(slug).filter(Boolean));
+          migrationCapabilities.status = supported.has('status');
+          migrationCapabilities.wake = supported.has('wake');
+          // Manual transfer is deliberately still disabled. migration-core exposes a
+          // signed multi-stage exchange that must not be collapsed into a fake one-click action.
+          migrationCapabilities.transfer = false;
+          return migrationCapabilities;
+        })
+        .catch(() => migrationCapabilities);
+    }
+    return migrationCapabilityProbe;
+  };
+
   return Object.freeze({
     initializeNode: () => call('initialize_node'),
     nodeIdentity: () => call('node_identity'),
-    listWorlds: () => call('list_worlds'),
+    listWorlds: async () => {
+      await ensureMigrationCapabilities();
+      return call('list_worlds');
+    },
     createWorld: (payload) => call('create_world', payload),
     joinWorld: (invite) => call('join_world', { invite }),
     leaveWorld: (world) => call('leave_world', { world }),
@@ -148,13 +215,25 @@ export function createBackendAdapter(invoke) {
     hostWorld: (payload) => call('host_world', payload),
     stopHost: () => call('stop_host'),
 
-    // migration-core owns the authoritative implementation. Keeping these entry points
-    // capability-gated prevents the desktop from inventing consensus or recovery behavior.
     migration: Object.freeze({
-      capabilities: Object.freeze({ status: false, transfer: false, wake: false }),
-      readState: async () => normalizeMigrationState(null),
+      capabilities: migrationCapabilities,
+      refreshCapabilities: ensureMigrationCapabilities,
+      readState: async (world) => {
+        await ensureMigrationCapabilities();
+        if (!migrationCapabilities.status) throw unavailable('Host migration status');
+        const raw = await call('migration_status', { world });
+        try {
+          return JSON.parse(String(raw));
+        } catch (error) {
+          throw new Error(`Migration status was not valid JSON: ${error}`);
+        }
+      },
       transferAuthority: async () => { throw unavailable('Transfer host'); },
-      wakeWorld: async () => { throw unavailable('Wake world'); },
+      wakeWorld: async (world) => {
+        await ensureMigrationCapabilities();
+        if (!migrationCapabilities.wake) throw unavailable('Wake world');
+        return call('wake_world', { world });
+      },
     }),
   });
 }
