@@ -17,7 +17,7 @@ fn signed_probe_hello() -> PeerHelloV1 {
         public_key,
         protocol_versions: vec![PROTOCOL_VERSION],
         capabilities: vec!["connectivity-probe-v1".into()],
-        nonce: rand::random(),
+        nonce: [0xC7; 32],
         signature: Vec::new(),
     };
     hello.signature = key.sign(&hello.signing_bytes().expect("probe hello should encode")).to_bytes().to_vec();
