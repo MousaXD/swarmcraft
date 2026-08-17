@@ -5,7 +5,7 @@ use std::{
     sync::{mpsc, Arc, Barrier},
     thread,
 };
-use swarm_protocol::{PeerId, SnapshotManifestV1, WorldId};
+use swarm_protocol::{Hash32, PeerId, SnapshotManifestV1, WorldId};
 use swarm_storage::{RetentionPolicy, SnapshotContext, Storage};
 
 fn context(world: WorldId, snapshot_number: u64) -> SnapshotContext {
@@ -18,6 +18,15 @@ fn context(world: WorldId, snapshot_number: u64) -> SnapshotContext {
         authority_peer_id: PeerId([0x31; 32]),
         authority_public_key: [0x42; 32],
     }
+}
+
+fn publication_has_pin(storage: &Storage, world: WorldId, publication_id: &str, hash: Hash32) -> bool {
+    storage
+        .world_dir(world)
+        .join(".snapshot-publication-pins")
+        .join(publication_id)
+        .join(format!("{}.pin", hash.to_hex()))
+        .is_file()
 }
 
 fn spawn_publisher(
@@ -88,16 +97,16 @@ fn simultaneous_local_publishers_survive_replica_commit_gc_and_retention() {
     let shared_hash = locals[0].0.entries[0].blob.hash;
     assert_eq!(shared_hash, locals[1].0.entries[0].blob.hash);
     assert_ne!(locals[0].1, locals[1].1);
-    assert!(storage.snapshot_publication_has_pin(world, &locals[0].1, shared_hash));
-    assert!(storage.snapshot_publication_has_pin(world, &locals[1].1, shared_hash));
+    assert!(publication_has_pin(&storage, world, &locals[0].1, shared_hash));
+    assert!(publication_has_pin(&storage, world, &locals[1].1, shared_hash));
 
     let mut replica = locals[0].0.clone();
     replica.snapshot_number = 3;
     replica.sequence = 3;
     replica.signature = vec![0x63; 64];
     storage.finalize_replica(&replica).expect("replica manifest should commit over the shared complete blob");
-    assert!(storage.snapshot_publication_has_pin(world, &locals[0].1, shared_hash));
-    assert!(storage.snapshot_publication_has_pin(world, &locals[1].1, shared_hash));
+    assert!(publication_has_pin(&storage, world, &locals[0].1, shared_hash));
+    assert!(publication_has_pin(&storage, world, &locals[1].1, shared_hash));
 
     let mut latest = storage
         .snapshot_directory_streaming(&latest_source, context(world, 4))
@@ -113,14 +122,14 @@ fn simultaneous_local_publishers_survive_replica_commit_gc_and_retention() {
         .expect("GC and retention should coexist with in-flight publication owners");
     assert_eq!(during.removed_blobs, 0, "shared blob must remain live only because both local publication owners pin it");
     assert!(!storage.list_snapshots(world).unwrap().iter().any(|manifest| manifest.snapshot_number == 3));
-    assert!(storage.snapshot_publication_has_pin(world, &locals[0].1, shared_hash));
-    assert!(storage.snapshot_publication_has_pin(world, &locals[1].1, shared_hash));
+    assert!(publication_has_pin(&storage, world, &locals[0].1, shared_hash));
+    assert!(publication_has_pin(&storage, world, &locals[1].1, shared_hash));
 
     commit.wait();
     first.join().expect("first publisher thread should complete");
     second.join().expect("second publisher thread should complete");
-    assert!(!storage.snapshot_publication_has_pin(world, &locals[0].1, shared_hash));
-    assert!(!storage.snapshot_publication_has_pin(world, &locals[1].1, shared_hash));
+    assert!(!publication_has_pin(&storage, world, &locals[0].1, shared_hash));
+    assert!(!publication_has_pin(&storage, world, &locals[1].1, shared_hash));
 
     let after = storage
         .apply_retention(
