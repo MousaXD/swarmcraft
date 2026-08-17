@@ -56,6 +56,28 @@ fn restore_rejects_traversal_before_writing_outside_destination() {
     assert!(!escaped.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn restore_rejects_symlinked_parent_before_writing_outside_destination() {
+    use std::os::unix::fs::symlink;
+
+    let (temp, storage, mut manifest) = snapshot_fixture();
+    manifest.entries[0].path = "redirect/escaped.dat".into();
+    manifest.state_root = snapshot_state_root(&manifest.entries).unwrap();
+
+    let destination = temp.path().join("restore");
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(&destination).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, destination.join("redirect")).unwrap();
+
+    assert!(matches!(
+        storage.restore_snapshot(&manifest, &destination),
+        Err(StorageError::SymlinkUnsupported(path)) if path == destination.join("redirect")
+    ));
+    assert!(!outside.join("escaped.dat").exists());
+}
+
 #[test]
 fn duplicate_manifest_paths_are_rejected_even_with_a_matching_state_root() {
     let (_temp, storage, mut manifest) = snapshot_fixture();
