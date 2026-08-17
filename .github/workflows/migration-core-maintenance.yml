@@ -43,12 +43,8 @@ jobs:
           assert text.count(old) == 1
           text = text.replace(old, new, 1)
 
-          old = (
-              "if let Ok(transfer) = storage.load_transfer_record(world) {\n"
-              "            if transfer.from_peer_id == identity.peer_id() {"
-          )
+          old = "            if transfer.from_peer_id == identity.peer_id() {"
           new = (
-              "if let Ok(transfer) = storage.load_transfer_record(world) {\n"
               "            let completed = storage.load_epoch_record(world).is_ok_and(|epoch| {\n"
               "                transfer.phase == TransferPhase::Committed\n"
               "                    && epoch.epoch_number == transfer.next_epoch\n"
