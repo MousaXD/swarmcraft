@@ -20,7 +20,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Restore direct serde dependencies
+      - name: Apply migration validation patch
         shell: bash
         run: |
           python3 - <<'PY'
@@ -53,6 +53,44 @@ jobs:
           )
           assert text.count(old) == 1
           text = text.replace(old, "use serde::{Deserialize, Serialize};\nuse swarm_storage::{SnapshotContext, Storage};\n", 1)
+
+          old = (
+              "        options.world,\n"
+              "        &mut child,\n"
+              "        &mut session,\n"
+              "        handle_shutdown_signal,\n"
+          )
+          new = (
+              "        &mut child,\n"
+              "        &mut session,\n"
+              "        handle_shutdown_signal,\n"
+          )
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          old = (
+              "    epoch: &EpochRecordV1,\n"
+              "    world: WorldId,\n"
+              "    child: &mut Child,\n"
+          )
+          new = (
+              "    epoch: &EpochRecordV1,\n"
+              "    child: &mut Child,\n"
+          )
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+          text = text.replace("load_transfer_intent(paths, world)", "load_transfer_intent(paths, epoch.world_id)", 1)
+          text = text.replace("warn!(%world, %error, \"ignoring unreadable transfer intent\")", "warn!(world = %epoch.world_id, %error, \"ignoring unreadable transfer intent\")", 1)
+
+          old = "    Ok(postcard::from_bytes(&bytes).context(\"transfer token is malformed\")?)\n"
+          new = "    postcard::from_bytes(&bytes).context(\"transfer token is malformed\")\n"
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          old = "    Ok(postcard::from_bytes(&bytes).context(\"epoch token is malformed\")?)\n"
+          new = "    postcard::from_bytes(&bytes).context(\"epoch token is malformed\")\n"
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
           migration.write_text(text)
 
           main = Path("crates/swarm-cli/src/main.rs")
@@ -77,11 +115,11 @@ jobs:
         run: cargo test --workspace --all-features --locked
       - name: Verify diff
         run: git diff --check
-      - name: Commit validated dependency fix
+      - name: Commit validated migration fixes
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Cargo.lock crates/swarm-cli/Cargo.toml crates/swarm-cli/src/lib.rs crates/swarm-cli/src/main.rs crates/swarm-cli/src/migration.rs crates/swarm-storage/src/lib.rs
-          git commit -m "fix(migration): use direct serde dependencies"
+          git commit -m "fix(migration): satisfy locked clippy validation"
           git push origin HEAD:agent/migration-core
