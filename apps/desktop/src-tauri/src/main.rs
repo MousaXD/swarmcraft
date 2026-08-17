@@ -19,11 +19,7 @@ async fn run_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, Stri
         .map_err(|error| error.to_string())?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(if error.is_empty() {
-            "SwarmCraft CLI command failed".into()
-        } else {
-            error
-        });
+        return Err(if error.is_empty() { "SwarmCraft CLI command failed".into() } else { error });
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -143,17 +139,9 @@ async fn world_conflicts(app: AppHandle, world: String) -> Result<String, String
 }
 
 #[tauri::command]
-async fn set_background_seeding(
-    app: AppHandle,
-    world: String,
-    enabled: bool,
-) -> Result<String, String> {
+async fn set_background_seeding(app: AppHandle, world: String, enabled: bool) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
-    run_cli(
-        &app,
-        vec!["world".into(), "seed".into(), world, enabled.to_string()],
-    )
-    .await
+    run_cli(&app, vec!["world".into(), "seed".into(), world, enabled.to_string()]).await
 }
 
 #[tauri::command]
@@ -169,18 +157,10 @@ async fn verify_world(app: AppHandle, world: String) -> Result<String, String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn export_world(
-    app: AppHandle,
-    world: String,
-    destination: String,
-) -> Result<String, String> {
+async fn export_world(app: AppHandle, world: String, destination: String) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
     let destination = require_value(destination, "Export destination")?;
-    run_cli(
-        &app,
-        vec!["world".into(), "export".into(), world, destination],
-    )
-    .await
+    run_cli(&app, vec!["world".into(), "export".into(), world, destination]).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -194,13 +174,7 @@ async fn recover_world(
     let destination = require_value(destination, "Recovery destination")?;
     run_cli(
         &app,
-        vec![
-            "world".into(),
-            "recover".into(),
-            world,
-            snapshot.to_string(),
-            destination,
-        ],
+        vec!["world".into(), "recover".into(), world, snapshot.to_string(), destination],
     )
     .await
 }
@@ -208,25 +182,15 @@ async fn recover_world(
 #[tauri::command]
 async fn migration_capabilities(app: AppHandle) -> String {
     let mut supported = Vec::new();
-    if run_cli(
-        &app,
-        vec![
-            "world".into(),
-            "migration-status".into(),
-            "--help".into(),
-        ],
-    )
-    .await
-    .is_ok()
+    if run_cli(&app, vec!["world".into(), "migration-status".into(), "--help".into()])
+        .await
+        .is_ok()
     {
         supported.push("status");
     }
-    if run_cli(
-        &app,
-        vec!["world".into(), "wake".into(), "--help".into()],
-    )
-    .await
-    .is_ok()
+    if run_cli(&app, vec!["world".into(), "wake".into(), "--help".into()])
+        .await
+        .is_ok()
     {
         supported.push("wake");
     }
@@ -238,12 +202,7 @@ async fn migration_status(app: AppHandle, world: String) -> Result<String, Strin
     let world = require_value(world, "World ID")?;
     run_cli(
         &app,
-        vec![
-            "world".into(),
-            "migration-status".into(),
-            world,
-            "--json".into(),
-        ],
+        vec!["world".into(), "migration-status".into(), world, "--json".into()],
     )
     .await
 }
@@ -295,16 +254,19 @@ async fn configure_world_runtime(
 }
 
 #[tauri::command]
-async fn connectivity_diagnostics(app: AppHandle) -> Result<String, String> {
-    run_cli(
+async fn connectivity_diagnostics(
+    app: AppHandle,
+    processes: State<'_, RuntimeProcesses>,
+) -> Result<String, String> {
+    match run_cli(
         &app,
-        vec![
-            "diagnostics".into(),
-            "connectivity".into(),
-            "--json".into(),
-        ],
+        vec!["diagnostics".into(), "connectivity".into(), "--json".into()],
     )
     .await
+    {
+        Ok(json) => Ok(json),
+        Err(_) => processes.connectivity_diagnostics_json(),
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
