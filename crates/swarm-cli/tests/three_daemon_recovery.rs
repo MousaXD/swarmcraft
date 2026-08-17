@@ -409,10 +409,7 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     });
     let restored_marker =
         winner.paths.root.join("runtime").join(world.to_hex()).join("world").join("swarmcraft-migration-smoke.txt");
-    assert_eq!(
-        fs::read_to_string(restored_marker).unwrap(),
-        "started-after-authority-permit\n"
-    );
+    assert_eq!(fs::read_to_string(restored_marker).unwrap(), "started-after-authority-permit\n");
 
     let winner_latest = winner.storage.latest_snapshot(world).unwrap().unwrap();
     assert_eq!(winner_latest.snapshot_number, 2);
