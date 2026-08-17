@@ -1,0 +1,87 @@
+name: Migration Core Branch Maintenance
+
+on:
+  push:
+    branches:
+      - agent/migration-core
+
+permissions:
+  contents: write
+
+jobs:
+  patch-validate-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/migration-core
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Restore direct serde dependencies
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          cargo = Path("crates/swarm-cli/Cargo.toml")
+          text = cargo.read_text()
+          needle = "postcard.workspace = true\n"
+          assert text.count(needle) == 1
+          text = text.replace(needle, needle + "serde.workspace = true\nserde_json.workspace = true\n", 1)
+          cargo.write_text(text)
+
+          storage = Path("crates/swarm-storage/src/lib.rs")
+          text = storage.read_text()
+          text = text.replace("pub use serde;\npub use serde_json;\n", "", 1)
+          storage.write_text(text)
+
+          lib = Path("crates/swarm-cli/src/lib.rs")
+          text = lib.read_text()
+          text = text.replace("pub use swarm_storage::{serde, serde_json};\n\n", "", 1)
+          lib.write_text(text)
+
+          migration = Path("crates/swarm-cli/src/migration.rs")
+          text = migration.read_text()
+          old = (
+              "use swarm_storage::{\n"
+              "    serde::{Deserialize, Serialize},\n"
+              "    serde_json, SnapshotContext, Storage,\n"
+              "};\n"
+          )
+          assert text.count(old) == 1
+          text = text.replace(old, "use serde::{Deserialize, Serialize};\nuse swarm_storage::{SnapshotContext, Storage};\n", 1)
+          migration.write_text(text)
+
+          main = Path("crates/swarm-cli/src/main.rs")
+          text = main.read_text()
+          old = (
+              "use swarm_cli::{\n"
+              "    migration::{self, RuntimeLaunchConfig, TransferPrepareResult},\n"
+              "    serde_json,\n"
+              "};\n"
+          )
+          assert text.count(old) == 1
+          text = text.replace(old, "use swarm_cli::migration::{self, RuntimeLaunchConfig, TransferPrepareResult};\n", 1)
+          main.write_text(text)
+          PY
+      - name: Update lockfile
+        run: cargo check --workspace --all-targets --all-features
+      - name: Format
+        run: cargo fmt --all
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Test workspace
+        run: cargo test --workspace --all-features --locked
+      - name: Verify diff
+        run: git diff --check
+      - name: Commit validated dependency fix
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock crates/swarm-cli/Cargo.toml crates/swarm-cli/src/lib.rs crates/swarm-cli/src/main.rs crates/swarm-cli/src/migration.rs crates/swarm-storage/src/lib.rs
+          git commit -m "fix(migration): use direct serde dependencies"
+          git push origin HEAD:agent/migration-core
