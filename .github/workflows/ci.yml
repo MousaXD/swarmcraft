@@ -95,6 +95,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Desktop frontend contract tests
+        if: runner.os == 'Linux'
+        run: node --test apps/desktop/tests/frontend-contract.test.mjs
       - name: Validate Tauri frontend bridge
         if: runner.os == 'Linux'
         shell: bash
