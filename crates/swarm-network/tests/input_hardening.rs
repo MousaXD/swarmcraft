@@ -50,12 +50,8 @@ async fn oversized_pre_auth_request_is_rejected_without_terminating_event_loop()
         [(StreamProtocol::new(WIRE_PROTOCOL), ProtocolSupport::Full)],
         request_response::Config::default().with_request_timeout(Duration::from_secs(5)),
     );
-    let mut attacker = SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_quic()
-        .with_behaviour(|_| behaviour)
-        .unwrap()
-        .build();
+    let mut attacker =
+        SwarmBuilder::with_new_identity().with_tokio().with_quic().with_behaviour(|_| behaviour).unwrap().build();
     attacker.dial(address).unwrap();
 
     let mut request_sent = false;
