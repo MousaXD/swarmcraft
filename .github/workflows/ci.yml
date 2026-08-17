@@ -40,7 +40,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - name: Peer networking hard reconnect
         run: cargo test -p swarm-network --test peer_networking_acceptance --locked
       - name: Hostile network input remains nonfatal
@@ -49,6 +48,8 @@ jobs:
         run: cargo test -p swarm-network --test handshake_hardening --locked
       - name: Snapshot swarm reconstruction
         run: cargo test -p swarm-storage --test snapshot_swarm_acceptance --locked
+      - name: Publication ownership + replica + GC + retention race
+        run: cargo test -p swarm-storage --test publication_ownership_race --locked
       - name: Storage failure injection
         run: cargo test -p swarm-storage --test failure_injection --locked
       - name: Live join replication
