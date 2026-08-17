@@ -579,7 +579,7 @@ async fn run_authority_runtime_inner(
     )?;
     info!(world = %options.world, pid = child.id(), ?trigger, "Minecraft authority runtime is ready");
 
-    let disposition = wait_for_runtime_exit(
+    let disposition = match wait_for_runtime_exit(
         paths,
         storage,
         &identity,
@@ -589,7 +589,14 @@ async fn run_authority_runtime_inner(
         &mut session,
         handle_shutdown_signal,
     )
-    .await?;
+    .await
+    {
+        Ok(disposition) => disposition,
+        Err(error) => {
+            terminate_child(&mut child);
+            return Err(error);
+        }
+    };
 
     publish_status(
         paths,
