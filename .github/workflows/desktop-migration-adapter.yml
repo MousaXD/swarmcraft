@@ -1,0 +1,81 @@
+name: Desktop migration adapter helper
+
+on:
+  push:
+    branches:
+      - agent/desktop-ux
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/desktop-ux
+      - name: Connect finalized migration CLI contract
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          main = Path('apps/desktop/src-tauri/src/main.rs')
+          text = main.read_text()
+          marker = '#[tauri::command(rename_all = "camelCase")]\nfn host_world('
+          insertion = '''#[tauri::command]\nasync fn migration_capabilities(app: AppHandle) -> String {\n    let mut supported = Vec::new();\n    if run_cli(&app, vec!["world".into(), "migration-status".into(), "--help".into()]).await.is_ok() {\n        supported.push("status");\n    }\n    if run_cli(&app, vec!["world".into(), "wake".into(), "--help".into()]).await.is_ok() {\n        supported.push("wake");\n    }\n    supported.join(",")\n}\n\n#[tauri::command]\nasync fn migration_status(app: AppHandle, world: String) -> Result<String, String> {\n    let world = require_value(world, "World ID")?;\n    run_cli(&app, vec!["world".into(), "migration-status".into(), world, "--json".into()]).await\n}\n\n#[tauri::command]\nasync fn wake_world(app: AppHandle, world: String) -> Result<String, String> {\n    let world = require_value(world, "World ID")?;\n    run_cli(&app, vec!["world".into(), "wake".into(), world]).await\n}\n\n'''
+          if insertion not in text:
+              if marker not in text:
+                  raise SystemExit('host_world marker not found')
+              text = text.replace(marker, insertion + marker, 1)
+          handler = '            recover_world,\n            start_daemon,'
+          replacement = '            recover_world,\n            migration_capabilities,\n            migration_status,\n            wake_world,\n            start_daemon,'
+          if replacement not in text:
+              if handler not in text:
+                  raise SystemExit('invoke handler marker not found')
+              text = text.replace(handler, replacement, 1)
+          main.write_text(text)
+
+          adapter = Path('apps/desktop/src/backend-adapter.js')
+          text = adapter.read_text()
+          labels_marker = '''const CONNECTIVITY_LABELS = Object.freeze({'''
+          aliases = '''const BACKEND_MIGRATION_PHASE_ALIASES = Object.freeze({\n  'waiting-for-authority': 'preparing-successor',\n  'waiting-for-quorum': 'preparing-successor',\n  'selecting-snapshot': 'preparing-successor',\n  'preparing-runtime': 'preparing-successor',\n  'restoring-world': 'restoring-world',\n  'launching-runtime': 'starting-minecraft',\n  'verifying-fabric': 'waiting-for-host',\n  checkpointing: 'saving-world',\n  'awaiting-transfer-acceptance': 'transferring-authority',\n  ready: 'ready',\n  blocked: 'failed',\n  failed: 'failed',\n});\n\n'''
+          if aliases not in text:
+              if labels_marker not in text:
+                  raise SystemExit('connectivity labels marker not found')
+              text = text.replace(labels_marker, aliases + labels_marker, 1)
+
+          start = text.index('export function normalizeMigrationState(raw) {')
+          end = text.index('export function connectivityFromStatus', start)
+          normalize = '''export function normalizeMigrationState(raw) {\n  if (!raw) {\n    return {\n      available: false,\n      phase: null,\n      label: 'Not active',\n      detail: 'No host migration is currently reported.',\n      progress: 0,\n      failed: false,\n      runtimeReady: false,\n      gameEndpoint: null,\n    };\n  }\n\n  const source = typeof raw === 'string' ? { phase: raw } : raw;\n  const backendPhase = slug(source.phase || source.state || source.status);\n  const runtimeReady = Boolean(source.runtime_ready ?? source.runtimeReady);\n  const gameEndpoint = source.game_endpoint ?? source.gameEndpoint ?? null;\n  const failureReason = String(source.failure_reason ?? source.failureReason ?? '').trim();\n\n  if (backendPhase === 'dormant' || backendPhase === 'sleeping' || backendPhase === 'superseded') {\n    const labels = { dormant: 'Not active', sleeping: 'Sleeping', superseded: 'Host changed' };\n    return {\n      available: false,\n      phase: null,\n      label: labels[backendPhase],\n      detail: failureReason || (backendPhase === 'sleeping'\n        ? 'The world is durably sleeping and can be woken only through the backend safety checks.'\n        : backendPhase === 'superseded'\n          ? 'This device is no longer the accepted runtime authority.'\n          : 'No host migration is active.'),\n      progress: 0,\n      failed: false,\n      runtimeReady,\n      gameEndpoint,\n    };\n  }\n\n  const phase = BACKEND_MIGRATION_PHASE_ALIASES[backendPhase] || backendPhase;\n  const knownPhase = MIGRATION_PHASES.includes(phase) ? phase : null;\n  const index = knownPhase ? MIGRATION_PHASES.indexOf(knownPhase) : -1;\n  const progress = knownPhase === 'failed'\n    ? Math.max(0, Math.min(100, Number(source.progress || 0)))\n    : knownPhase === 'ready'\n      ? 100\n      : index >= 0\n        ? Math.round((index / (MIGRATION_PHASES.length - 2)) * 100)\n        : 0;\n  const blocked = backendPhase === 'blocked';\n  const detail = String(source.detail || source.message || failureReason || '').trim();\n\n  return {\n    available: Boolean(knownPhase),\n    phase: knownPhase,\n    label: blocked ? 'Action required' : knownPhase ? MIGRATION_LABELS[knownPhase] : 'Migration state unavailable',\n    detail,\n    progress,\n    failed: knownPhase === 'failed',\n    runtimeReady,\n    gameEndpoint,\n  };\n}\n\n'''
+          text = text[:start] + normalize + text[end:]
+
+          start = text.index('export function createBackendAdapter(invoke) {')
+          create_adapter = '''export function createBackendAdapter(invoke) {\n  const call = (command, payload = {}) => {\n    if (typeof invoke !== 'function') {\n      throw new Error('Tauri runtime is unavailable. Open this interface from the SwarmCraft desktop application.');\n    }\n    return invoke(command, payload);\n  };\n\n  const migrationCapabilities = { status: false, transfer: false, wake: false };\n  let migrationCapabilityProbe = null;\n  const ensureMigrationCapabilities = () => {\n    if (!migrationCapabilityProbe) {\n      migrationCapabilityProbe = Promise.resolve()\n        .then(() => call('migration_capabilities'))\n        .then((raw) => {\n          const supported = new Set(String(raw || '').split(',').map(slug).filter(Boolean));\n          migrationCapabilities.status = supported.has('status');\n          migrationCapabilities.wake = supported.has('wake');\n          // Manual transfer is deliberately still disabled. migration-core exposes a\n          // signed multi-stage exchange that must not be collapsed into a fake one-click action.\n          migrationCapabilities.transfer = false;\n          return migrationCapabilities;\n        })\n        .catch(() => migrationCapabilities);\n    }\n    return migrationCapabilityProbe;\n  };\n\n  return Object.freeze({\n    initializeNode: () => call('initialize_node'),\n    nodeIdentity: () => call('node_identity'),\n    listWorlds: async () => {\n      await ensureMigrationCapabilities();\n      return call('list_worlds');\n    },\n    createWorld: (payload) => call('create_world', payload),\n    joinWorld: (invite) => call('join_world', { invite }),\n    leaveWorld: (world) => call('leave_world', { world }),\n    createInvite: (payload) => call('create_invite', payload),\n    worldStatus: (world) => call('world_status', { world }),\n    worldCompatibility: (world) => call('world_compatibility', { world }),\n    worldConflicts: (world) => call('world_conflicts', { world }),\n    setBackgroundSeeding: (world, enabled) => call('set_background_seeding', { world, enabled }),\n    worldPeers: (world) => call('world_peers', { world }),\n    verifyWorld: (world) => call('verify_world', { world }),\n    exportWorld: (world, destination) => call('export_world', { world, destination }),\n    recoverWorld: (world, snapshot, destination) => call('recover_world', { world, snapshot, destination }),\n    startDaemon: (listen) => call('start_daemon', { listen }),\n    stopDaemon: () => call('stop_daemon'),\n    hostWorld: (payload) => call('host_world', payload),\n    stopHost: () => call('stop_host'),\n\n    migration: Object.freeze({\n      capabilities: migrationCapabilities,\n      refreshCapabilities: ensureMigrationCapabilities,\n      readState: async (world) => {\n        await ensureMigrationCapabilities();\n        if (!migrationCapabilities.status) throw unavailable('Host migration status');\n        const raw = await call('migration_status', { world });\n        try {\n          return JSON.parse(String(raw));\n        } catch (error) {\n          throw new Error(`Migration status was not valid JSON: ${error}`);\n        }\n      },\n      transferAuthority: async () => { throw unavailable('Transfer host'); },\n      wakeWorld: async (world) => {\n        await ensureMigrationCapabilities();\n        if (!migrationCapabilities.wake) throw unavailable('Wake world');\n        return call('wake_world', { world });\n      },\n    }),\n  });\n}\n'''
+          text = text[:start] + create_adapter
+          adapter.write_text(text)
+
+          tests = Path('apps/desktop/tests/frontend-contract.test.mjs')
+          text = tests.read_text()
+          old = '''test('migration state only accepts the prepared structured phases', () => {\n  for (const phase of MIGRATION_PHASES) {\n    const state = normalizeMigrationState({ phase });\n    assert.equal(state.phase, phase);\n    assert.equal(state.available, true);\n  }\n  const unknown = normalizeMigrationState({ phase: 'elected-but-maybe-ready' });\n  assert.equal(unknown.available, false);\n  assert.equal(unknown.phase, null);\n});\n\ntest('migration operations remain capability-gated until migration-core is connected', async () => {\n  const calls = [];\n  const backend = createBackendAdapter(async (command, payload) => {\n    calls.push([command, payload]);\n    return 'ok';\n  });\n  assert.deepEqual(backend.migration.capabilities, { status: false, transfer: false, wake: false });\n  await assert.rejects(backend.migration.transferAuthority('scworld:test'), /not available in this build/i);\n  assert.equal(calls.length, 0);\n});\n'''
+          new = '''test('migration state translates migration-core phases into launcher phases', () => {\n  for (const phase of MIGRATION_PHASES) {\n    const state = normalizeMigrationState({ phase });\n    assert.equal(state.phase, phase);\n    assert.equal(state.available, true);\n  }\n  assert.equal(normalizeMigrationState({ phase: 'waiting_for_authority' }).phase, 'preparing-successor');\n  assert.equal(normalizeMigrationState({ phase: 'launching_runtime' }).phase, 'starting-minecraft');\n  assert.equal(normalizeMigrationState({ phase: 'verifying_fabric' }).phase, 'waiting-for-host');\n  assert.equal(normalizeMigrationState({ phase: 'checkpointing' }).phase, 'saving-world');\n  assert.equal(normalizeMigrationState({ phase: 'awaiting_transfer_acceptance' }).phase, 'transferring-authority');\n  assert.equal(normalizeMigrationState({ phase: 'sleeping' }).available, false);\n  assert.equal(normalizeMigrationState({ phase: 'blocked', failure_reason: 'runtime config missing' }).label, 'Action required');\n  const unknown = normalizeMigrationState({ phase: 'elected-but-maybe-ready' });\n  assert.equal(unknown.available, false);\n  assert.equal(unknown.phase, null);\n});\n\ntest('migration status and wake probe real backend capability while transfer stays multi-stage', async () => {\n  const calls = [];\n  const backend = createBackendAdapter(async (command, payload) => {\n    calls.push([command, payload]);\n    if (command === 'migration_capabilities') return 'status,wake';\n    if (command === 'migration_status') {\n      return JSON.stringify({ phase: 'waiting_for_authority', runtime_ready: false, game_endpoint: null });\n    }\n    return 'ok';\n  });\n  assert.deepEqual(backend.migration.capabilities, { status: false, transfer: false, wake: false });\n  await backend.listWorlds();\n  assert.deepEqual(backend.migration.capabilities, { status: true, transfer: false, wake: true });\n  const state = await backend.migration.readState('scworld:test');\n  assert.equal(state.phase, 'waiting_for_authority');\n  await backend.migration.wakeWorld('scworld:test');\n  await assert.rejects(backend.migration.transferAuthority('scworld:test'), /not available in this build/i);\n  assert.deepEqual(calls.map(([command]) => command), ['migration_capabilities', 'list_worlds', 'migration_status', 'wake_world']);\n});\n'''
+          if old not in text:
+              raise SystemExit('migration test block not found')
+          tests.write_text(text.replace(old, new, 1))
+          PY
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format Tauri Rust
+        run: cargo fmt --all
+      - name: Run desktop contract tests
+        run: node --test apps/desktop/tests/frontend-contract.test.mjs
+      - name: Commit integration
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/desktop/src-tauri/src/main.rs apps/desktop/src/backend-adapter.js apps/desktop/tests/frontend-contract.test.mjs
+          git commit -m "feat(desktop): connect migration status and safe wake"
+          git push origin HEAD:agent/desktop-ux
