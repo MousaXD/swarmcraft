@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::{env, fs, path::PathBuf};
 
 pub const MAX_CONNECTIVITY_FAILURES: usize = 8;
+pub const CONNECTIVITY_JSON_ENV: &str = "SWARMCRAFT_CONNECTIVITY_JSON";
 const MAX_FAILURE_DETAIL_CHARS: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -91,12 +93,14 @@ impl ConnectivityDiagnosticsV1 {
             self.local_addresses.push(address);
             self.local_addresses.sort();
         }
+        self.refresh_state();
     }
 
     pub fn record_observed_address(&mut self, address: impl Into<String>) {
         let address = address.into();
         self.record_address_family(&address);
         self.observed_public_address = Some(address);
+        self.refresh_state();
     }
 
     pub fn record_nat_status(&mut self, status: NatStatusV1) {
@@ -255,10 +259,22 @@ impl ConnectivityDiagnosticsV1 {
         } else if self.nat_status == NatStatusV1::Private {
             ConnectivityStateV1::PrivateUnreachable
         } else {
-            // AutoNAT Public is intentionally represented in `nat_status`, not as
-            // an active DirectReachable application connection.
             ConnectivityStateV1::NatStatusUnknown
         };
+        self.persist_structured_snapshot();
+    }
+
+    fn persist_structured_snapshot(&self) {
+        let Some(path) = env::var_os(CONNECTIVITY_JSON_ENV).map(PathBuf::from) else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let Ok(bytes) = serde_json::to_vec(self) else {
+            return;
+        };
+        let _ = fs::write(path, bytes);
     }
 }
 
