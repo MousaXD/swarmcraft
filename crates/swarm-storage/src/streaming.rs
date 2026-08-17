@@ -15,6 +15,16 @@ use walkdir::WalkDir;
 pub const STREAM_BUFFER_SIZE: usize = 1024 * 1024;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+struct PublicationHook {
+    world: WorldId,
+    published: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+static TEST_PUBLICATION_HOOK: std::sync::Mutex<Option<PublicationHook>> = std::sync::Mutex::new(None);
+
 impl Storage {
     pub fn snapshot_directory_streaming(
         &self,
@@ -91,6 +101,7 @@ impl Storage {
         drop(encoded_file);
 
         let hash = Hash32(*hasher.finalize().as_bytes());
+        let publication_pin = self.pin_snapshot_publication_hash(world, hash)?;
         let mut descriptor = BlobDescriptor { hash, uncompressed_size, encoded_size, encoding: BlobEncoding::Zstd };
         let final_path = blob_path(self, world, &descriptor);
 
@@ -99,6 +110,8 @@ impl Storage {
             let existing = BlobDescriptor { encoded_size: existing_size, ..descriptor.clone() };
             if verify_encoded_blob_streaming(&final_path, &existing).is_ok() {
                 remove_if_present(&temporary_path)?;
+                test_after_complete_blob_published(world);
+                publication_pin.persist();
                 return Ok(existing);
             }
             remove_if_present(&final_path)?;
@@ -107,6 +120,8 @@ impl Storage {
         fs::rename(&temporary_path, &final_path).map_err(|error| io_error(&final_path, error))?;
         sync_parent(&blob_dir)?;
         descriptor.encoded_size = fs::metadata(&final_path).map_err(|error| io_error(&final_path, error))?.len();
+        test_after_complete_blob_published(world);
+        publication_pin.persist();
         Ok(descriptor)
     }
 
@@ -128,7 +143,16 @@ impl Storage {
         fs::create_dir_all(&snapshots).map_err(|error| io_error(&snapshots, error))?;
         let path = snapshots.join(format!("{:020}.postcard", manifest.snapshot_number));
         let bytes = postcard::to_allocvec(manifest)?;
-        atomic_write(&path, &bytes)
+        let _gc_guard = self.lock_blob_gc_for_snapshot_commit(manifest.world_id)?;
+        let created_manifest = !path.exists();
+        atomic_write(&path, &bytes)?;
+        if created_manifest {
+            self.release_snapshot_publication_pins(
+                manifest.world_id,
+                manifest.entries.iter().map(|entry| entry.blob.hash),
+            )?;
+        }
+        Ok(())
     }
 
     pub fn restore_snapshot_streaming(
@@ -187,13 +211,21 @@ fn restore_blob_streaming(
     let mut total = 0u64;
     let mut buffer = vec![0u8; STREAM_BUFFER_SIZE];
     loop {
-        let read = reader.read(&mut buffer).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
+        let remaining = descriptor.uncompressed_size.saturating_sub(total);
+        let read_limit = remaining.saturating_add(1).min(buffer.len() as u64) as usize;
+        let read = reader
+            .read(&mut buffer[..read_limit])
+            .map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
         if read == 0 {
             break;
         }
+        if read as u64 > remaining {
+            remove_if_present(&temporary_path)?;
+            return Err(StorageError::BlobCorrupt(descriptor.hash));
+        }
         hasher.update(&buffer[..read]);
         temporary_file.write_all(&buffer[..read]).map_err(|error| io_error(&temporary_path, error))?;
-        total = total.saturating_add(read as u64);
+        total += read as u64;
     }
     if total != descriptor.uncompressed_size || Hash32(*hasher.finalize().as_bytes()) != descriptor.hash {
         remove_if_present(&temporary_path)?;
@@ -222,12 +254,19 @@ fn verify_encoded_blob_streaming(path: &Path, descriptor: &BlobDescriptor) -> Re
     let mut total = 0u64;
     let mut buffer = vec![0u8; STREAM_BUFFER_SIZE];
     loop {
-        let read = reader.read(&mut buffer).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
+        let remaining = descriptor.uncompressed_size.saturating_sub(total);
+        let read_limit = remaining.saturating_add(1).min(buffer.len() as u64) as usize;
+        let read = reader
+            .read(&mut buffer[..read_limit])
+            .map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
         if read == 0 {
             break;
         }
+        if read as u64 > remaining {
+            return Err(StorageError::BlobCorrupt(descriptor.hash));
+        }
         hasher.update(&buffer[..read]);
-        total = total.saturating_add(read as u64);
+        total += read as u64;
     }
     if total != descriptor.uncompressed_size || Hash32(*hasher.finalize().as_bytes()) != descriptor.hash {
         return Err(StorageError::BlobCorrupt(descriptor.hash));
@@ -333,9 +372,32 @@ fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
 }
 
 #[cfg(test)]
+fn test_after_complete_blob_published(world: WorldId) {
+    let hook = {
+        let mut slot = TEST_PUBLICATION_HOOK.lock().expect("publication test hook lock poisoned");
+        if slot.as_ref().is_some_and(|hook| hook.world == world) {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    if let Some(hook) = hook {
+        hook.published.send(()).expect("publication test receiver dropped");
+        hook.resume.recv().expect("publication test resume sender dropped");
+    }
+}
+
+#[cfg(not(test))]
+fn test_after_complete_blob_published(_world: WorldId) {}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Seek, SeekFrom};
+    use std::{
+        io::{Seek, SeekFrom},
+        sync::mpsc,
+        thread,
+    };
     use swarm_protocol::PeerId;
 
     fn context(world: WorldId) -> SnapshotContext {
@@ -392,6 +454,54 @@ mod tests {
             storage.verify_blob_streaming(world, descriptor),
             Err(StorageError::BlobCorrupt(hash)) if hash == descriptor.hash
         ));
+    }
+
+    #[test]
+    fn gc_cannot_reclaim_local_blob_before_manifest_commit() {
+        for iteration in 0..8u8 {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("source");
+            let restore = temp.path().join("restore");
+            fs::create_dir_all(&source).unwrap();
+            fs::write(source.join("level.dat"), vec![iteration; 64 * 1024]).unwrap();
+
+            let storage = Storage::open(temp.path().join("store")).unwrap();
+            let world = WorldId([0x90 + iteration; 32]);
+            let (published_tx, published_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            *TEST_PUBLICATION_HOOK.lock().unwrap() = Some(PublicationHook {
+                world,
+                published: published_tx,
+                resume: resume_rx,
+            });
+
+            let worker_storage = storage.clone();
+            let worker_source = source.clone();
+            let worker = thread::spawn(move || {
+                let mut manifest = worker_storage
+                    .snapshot_directory_streaming(&worker_source, context(world))
+                    .unwrap();
+                manifest.signature = vec![0; 64];
+                worker_storage.commit_snapshot_streaming(&manifest).unwrap();
+                manifest
+            });
+
+            published_rx.recv().unwrap();
+            let report = storage.garbage_collect_blobs(world).unwrap();
+            assert_eq!(report.removed_blobs, 0);
+            resume_tx.send(()).unwrap();
+
+            let manifest = worker.join().unwrap();
+            storage.verify_snapshot_streaming(&manifest).unwrap();
+            for entry in &manifest.entries {
+                assert!(blob_path(&storage, world, &entry.blob).exists());
+            }
+            storage.restore_snapshot_streaming(&manifest, &restore).unwrap();
+            assert_eq!(fs::read(restore.join("level.dat")).unwrap(), vec![iteration; 64 * 1024]);
+            let after_commit = storage.garbage_collect_blobs(world).unwrap();
+            assert_eq!(after_commit.removed_blobs, 0);
+            storage.verify_snapshot_streaming(&manifest).unwrap();
+        }
     }
 
     #[test]
