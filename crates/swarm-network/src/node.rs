@@ -80,11 +80,20 @@ struct RelayFallbackPlan {
     attempted: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathKind {
+    DirectApplication,
+    RelayedApplication,
+    BootstrapInfrastructure,
+    RelayInfrastructure,
+}
+
 pub struct SwarmNode {
     swarm: Swarm<Behaviour>,
     local_hello: PeerHelloV1,
     authenticated: HashMap<TransportPeerId, PeerId>,
     active_connections: HashMap<TransportPeerId, ConnectionId>,
+    active_paths: HashMap<ConnectionId, PathKind>,
     bootstrap_peers: HashSet<TransportPeerId>,
     relay_peers: HashSet<TransportPeerId>,
     relay_fallbacks: HashMap<TransportPeerId, RelayFallbackPlan>,
@@ -143,6 +152,7 @@ impl SwarmNode {
             local_hello,
             authenticated: HashMap::new(),
             active_connections: HashMap::new(),
+            active_paths: HashMap::new(),
             bootstrap_peers: HashSet::new(),
             relay_peers: HashSet::new(),
             relay_fallbacks: HashMap::new(),
@@ -378,31 +388,51 @@ impl SwarmNode {
             .map_err(|_| anyhow!("response channel closed"))
     }
 
+    fn respond_best_effort(
+        &mut self,
+        peer: TransportPeerId,
+        channel: request_response::ResponseChannel<WireResponse>,
+        response: WireResponse,
+    ) {
+        if self.respond(channel, response).is_err() {
+            debug!(transport_peer = %peer, "response channel closed before response could be sent");
+        }
+    }
+
     pub async fn next_event(&mut self) -> Result<NetworkEvent> {
         loop {
             match self.swarm.select_next_some().await {
                 SwarmEvent::NewListenAddr { address, .. } => {
+                    // A relay reservation/listener is infrastructure. It does not
+                    // prove a relayed application connection exists.
                     self.diagnostics.record_local_address(address.to_string());
-                    if address.iter().any(|protocol| matches!(protocol, Protocol::P2pCircuit)) {
-                        self.diagnostics.record_relay_connected();
-                    }
                     info!(%address, "network listening");
                     return Ok(NetworkEvent::Listening { address });
                 }
                 SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, num_established, .. } => {
-                    let infrastructure_peer =
-                        self.bootstrap_peers.contains(&peer_id) || self.relay_peers.contains(&peer_id);
-                    if endpoint.is_relayed() {
-                        self.diagnostics.record_relay_connected();
-                        self.relay_fallbacks.remove(&peer_id);
-                    } else if !infrastructure_peer {
-                        self.diagnostics.record_direct_success();
-                        self.relay_fallbacks.remove(&peer_id);
+                    let path_kind = if self.bootstrap_peers.contains(&peer_id) {
+                        PathKind::BootstrapInfrastructure
+                    } else if self.relay_peers.contains(&peer_id) {
+                        PathKind::RelayInfrastructure
+                    } else if endpoint.is_relayed() {
+                        PathKind::RelayedApplication
+                    } else {
+                        PathKind::DirectApplication
+                    };
+                    self.active_paths.insert(connection_id, path_kind);
+                    match path_kind {
+                        PathKind::DirectApplication => {
+                            self.diagnostics.record_direct_path_up();
+                            self.relay_fallbacks.remove(&peer_id);
+                        }
+                        PathKind::RelayedApplication => {
+                            self.diagnostics.record_relay_path_up();
+                            self.relay_fallbacks.remove(&peer_id);
+                        }
+                        PathKind::BootstrapInfrastructure => self.diagnostics.record_bootstrap_path_up(),
+                        PathKind::RelayInfrastructure => {}
                     }
-                    if self.bootstrap_peers.contains(&peer_id) {
-                        self.diagnostics.record_bootstrap_connected();
-                    }
-                    debug!(transport_peer = %peer_id, %connection_id, %num_established, relayed = endpoint.is_relayed(), "peer connected");
+                    debug!(transport_peer = %peer_id, %connection_id, %num_established, relayed = endpoint.is_relayed(), ?path_kind, "peer connected");
 
                     // request-response chooses a connection by peer ID, not by connection
                     // ID. After a hard peer restart libp2p can briefly retain the dead
@@ -425,6 +455,15 @@ impl SwarmNode {
                     return Ok(NetworkEvent::Connected { transport_peer: peer_id });
                 }
                 SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
+                    if let Some(path_kind) = self.active_paths.remove(&connection_id) {
+                        match path_kind {
+                            PathKind::DirectApplication => self.diagnostics.record_direct_path_down(),
+                            PathKind::RelayedApplication => self.diagnostics.record_relay_path_down(),
+                            PathKind::BootstrapInfrastructure => self.diagnostics.record_bootstrap_path_down(),
+                            PathKind::RelayInfrastructure => {}
+                        }
+                    }
+
                     // A peer can have multiple libp2p connections at once, especially
                     // during reconnects. Closing an older connection must not erase
                     // authentication established by a newer live connection.
@@ -513,41 +552,55 @@ impl SwarmNode {
                 SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(event)) => match event {
                     request_response::Event::Message { peer, message, .. } => match message {
                         request_response::Message::Request { request, channel, .. } => {
-                            request.validate_limits()?;
+                            if let Err(error) = request.validate_limits() {
+                                warn!(transport_peer = %peer, %error, "inbound request exceeded protocol limits");
+                                self.respond_best_effort(
+                                    peer,
+                                    channel,
+                                    WireResponse::Error {
+                                        code: "REQUEST_LIMIT_EXCEEDED".into(),
+                                        message: error.to_string(),
+                                    },
+                                );
+                                continue;
+                            }
                             match request {
                                 WireRequest::Hello(hello) => match verify_peer_hello(&hello) {
                                     Ok(()) => {
                                         self.authenticated.insert(peer, hello.peer_id);
-                                        self.respond(
+                                        self.respond_best_effort(
+                                            peer,
                                             channel,
                                             WireResponse::HelloAccepted { protocol_version: PROTOCOL_VERSION },
-                                        )?;
+                                        );
                                         return Ok(NetworkEvent::Authenticated {
                                             transport_peer: peer,
                                             application_peer: hello.peer_id,
                                         });
                                     }
                                     Err(error) => {
-                                        self.respond(
+                                        self.respond_best_effort(
+                                            peer,
                                             channel,
                                             WireResponse::Error {
                                                 code: "PEER_AUTHENTICATION_FAILED".into(),
                                                 message: error.to_string(),
                                             },
-                                        )?;
+                                        );
                                     }
                                 },
                                 request if self.authenticated.contains_key(&peer) => {
                                     return Ok(NetworkEvent::InboundRequest { transport_peer: peer, request, channel });
                                 }
                                 _ => {
-                                    self.respond(
+                                    self.respond_best_effort(
+                                        peer,
                                         channel,
                                         WireResponse::Error {
                                             code: "HANDSHAKE_REQUIRED".into(),
                                             message: "authenticate with PeerHello before other requests".into(),
                                         },
-                                    )?;
+                                    );
                                 }
                             }
                         }
@@ -557,7 +610,7 @@ impl SwarmNode {
                     },
                     request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
                         self.record_issue(
-                            ConnectivityIssueKindV1::DirectDialFailed,
+                            ConnectivityIssueKindV1::RequestFailed,
                             Some(peer),
                             None,
                             error.to_string(),
@@ -574,16 +627,9 @@ impl SwarmNode {
                     request_response::Event::ResponseSent { .. } => {}
                 },
                 SwarmEvent::Behaviour(BehaviourEvent::RelayClient(event)) => {
-                    match &event {
-                        relay::client::Event::ReservationReqAccepted { relay_peer_id, .. }
-                        | relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
-                            self.relay_peers.insert(*relay_peer_id);
-                            self.diagnostics.record_relay_connected();
-                        }
-                        relay::client::Event::InboundCircuitEstablished { .. } => {
-                            self.diagnostics.record_relay_connected();
-                        }
-                    }
+                    // Reservation/circuit capability is infrastructure. Actual
+                    // relayed application connectivity is owned by the relayed
+                    // ConnectionEstablished/ConnectionClosed pair above.
                     debug!(?event, "relay client event");
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Dcutr(event)) => {
