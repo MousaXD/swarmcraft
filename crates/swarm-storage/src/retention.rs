@@ -67,6 +67,12 @@ impl Drop for ActiveReplicationLease {
     }
 }
 
+/// Owns every publication pin created by one local snapshot transaction.
+///
+/// The `.owner` reservation exists before the first blob pin. That lets legacy
+/// standalone-pin cleanup distinguish an in-flight transaction even before its
+/// manifest identity is known, preventing hash-equal publishers from stealing
+/// each other's GC protection.
 #[derive(Debug)]
 pub(crate) struct SnapshotPublicationTransaction {
     pins_dir: PathBuf,
@@ -133,9 +139,31 @@ impl Storage {
         let _lock = acquire_gc_lock_blocking(&world_dir)?;
         let pins_dir = snapshot_publication_pins_dir(&world_dir);
         fs::create_dir_all(&pins_dir).map_err(|source| io_error(&pins_dir, source))?;
-        let token = PIN_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let owner = format!("{}-{token}", std::process::id());
-        Ok(SnapshotPublicationTransaction { pins_dir, owner, persisted: false })
+
+        for _ in 0..128 {
+            let token = PIN_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let owner = format!("{}-{token}", std::process::id());
+            let reservation = pins_dir.join(format!("{owner}.owner"));
+            match OpenOptions::new().create_new(true).write(true).open(&reservation) {
+                Ok(mut file) => {
+                    file.write_all(b"snapshot-publication-v1\n")
+                        .and_then(|()| file.sync_all())
+                        .map_err(|source| io_error(&reservation, source))?;
+                    sync_dir(&pins_dir)?;
+                    return Ok(SnapshotPublicationTransaction { pins_dir, owner, persisted: false });
+                }
+                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(source) => return Err(io_error(&reservation, source)),
+            }
+        }
+
+        Err(io_error(
+            &pins_dir,
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "unable to allocate unique snapshot publication owner",
+            ),
+        ))
     }
 
     pub(crate) fn pin_snapshot_publication_transaction_hash(
@@ -146,12 +174,21 @@ impl Storage {
     ) -> Result<(), StorageError> {
         let world_dir = self.world_dir(world);
         let _lock = acquire_gc_lock_blocking(&world_dir)?;
+        let reservation = transaction.pins_dir.join(format!("{}.owner", transaction.owner));
+        if !reservation.exists() {
+            return Err(io_error(
+                &reservation,
+                std::io::Error::new(std::io::ErrorKind::NotFound, "snapshot publication owner reservation is missing"),
+            ));
+        }
         let path = transaction.pins_dir.join(format!("{}-{}.pin", transaction.owner, hash.to_hex()));
         if path.exists() {
             return Ok(());
         }
         let mut file = OpenOptions::new().create_new(true).write(true).open(&path).map_err(|source| io_error(&path, source))?;
-        file.write_all(hash.to_hex().as_bytes()).and_then(|()| file.sync_all()).map_err(|source| io_error(&path, source))?;
+        file.write_all(hash.to_hex().as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|source| io_error(&path, source))?;
         sync_dir(&transaction.pins_dir)
     }
 
@@ -162,10 +199,19 @@ impl Storage {
     ) -> Result<(), StorageError> {
         let world_dir = self.world_dir(manifest.world_id);
         let _lock = acquire_gc_lock_blocking(&world_dir)?;
+        let reservation = transaction.pins_dir.join(format!("{}.owner", transaction.owner));
+        if !reservation.exists() {
+            return Err(io_error(
+                &reservation,
+                std::io::Error::new(std::io::ErrorKind::NotFound, "snapshot publication owner reservation is missing"),
+            ));
+        }
         let path = transaction.pins_dir.join(format!("{}.snapshot", transaction.owner));
         let bytes = format!("{}\n{}\n", manifest.snapshot_number, manifest.state_root.to_hex());
         let mut file = OpenOptions::new().create_new(true).write(true).open(&path).map_err(|source| io_error(&path, source))?;
-        file.write_all(bytes.as_bytes()).and_then(|()| file.sync_all()).map_err(|source| io_error(&path, source))?;
+        file.write_all(bytes.as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|source| io_error(&path, source))?;
         sync_dir(&transaction.pins_dir)
     }
 
@@ -231,13 +277,20 @@ impl Storage {
             let owner = marker
                 .file_stem()
                 .and_then(|value| value.to_str())
-                .ok_or_else(|| io_error(&marker, std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid publication owner")))?;
+                .ok_or_else(|| {
+                    io_error(
+                        &marker,
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid publication owner"),
+                    )
+                })?;
             remove_publication_owner_files_result(&pins_dir, owner)?;
             return Ok(true);
         }
         Ok(false)
     }
 
+    /// Compatibility cleanup for the standalone `put_file_blob_streaming`
+    /// publication path. Owner-reserved transaction pins are never eligible.
     pub(crate) fn release_snapshot_publication_pins(
         &self,
         world: WorldId,
@@ -266,7 +319,9 @@ impl Storage {
             let Some(owner) = file_name.strip_suffix(&hash_suffix) else {
                 continue;
             };
-            if pins_dir.join(format!("{owner}.snapshot")).exists() {
+            if pins_dir.join(format!("{owner}.owner")).exists()
+                || pins_dir.join(format!("{owner}.snapshot")).exists()
+            {
                 continue;
             }
             available.entry(hash).or_default().push(path);
@@ -359,7 +414,12 @@ impl Storage {
             }
         }
         sync_dir(&blobs_dir)?;
-        debug!(world = %world, removed_blobs = report.removed_blobs, reclaimed_bytes = report.reclaimed_bytes, "blob garbage collection complete");
+        debug!(
+            world = %world,
+            removed_blobs = report.removed_blobs,
+            reclaimed_bytes = report.reclaimed_bytes,
+            "blob garbage collection complete"
+        );
         Ok(report)
     }
 
@@ -513,6 +573,7 @@ fn remove_publication_owner_files_result(pins_dir: &Path, owner: &str) -> Result
         return Ok(());
     }
     let pin_prefix = format!("{owner}-");
+    let owner_name = format!("{owner}.owner");
     let marker_name = format!("{owner}.snapshot");
     let mut removed_any = false;
     for entry in fs::read_dir(pins_dir).map_err(|source| io_error(pins_dir, source))? {
@@ -526,7 +587,7 @@ fn remove_publication_owner_files_result(pins_dir: &Path, owner: &str) -> Result
         };
         let owned_pin = file_name.starts_with(&pin_prefix)
             && path.extension().and_then(|value| value.to_str()) == Some("pin");
-        if !owned_pin && file_name != marker_name {
+        if !owned_pin && file_name != owner_name && file_name != marker_name {
             continue;
         }
         match fs::remove_file(&path) {
@@ -719,6 +780,23 @@ mod tests {
         drop(lease);
         reopened.garbage_collect_blobs(world()).unwrap();
         assert!(gc_lock_path(&world_dir).exists());
+    }
+
+    #[test]
+    fn standalone_cleanup_cannot_consume_unmarked_transaction_pin() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(temp.path().join("store")).unwrap();
+        let hash = Hash32([0x44; 32]);
+        let tx = storage.begin_snapshot_publication(world()).unwrap();
+        storage.pin_snapshot_publication_transaction_hash(world(), &tx, hash).unwrap();
+        let tx_pin = tx.pins_dir.join(format!("{}-{}.pin", tx.owner, hash.to_hex()));
+        assert!(tx_pin.exists());
+
+        let standalone = storage.pin_snapshot_publication_hash(world(), hash).unwrap();
+        standalone.persist();
+        storage.release_snapshot_publication_pins(world(), [hash]).unwrap();
+
+        assert!(tx_pin.exists(), "standalone cleanup stole an in-flight transaction pin");
     }
 
     #[test]
