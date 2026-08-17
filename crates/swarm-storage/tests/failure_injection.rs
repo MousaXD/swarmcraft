@@ -1,7 +1,7 @@
 use std::fs;
 
 use swarm_protocol::{snapshot_state_root, BlobDescriptor, BlobEncoding, Hash32, PeerId, WorldId};
-use swarm_storage::{SnapshotContext, Storage, StorageError};
+use swarm_storage::{SnapshotContext, SnapshotPublication, Storage, StorageError};
 
 fn context(world: WorldId) -> SnapshotContext {
     SnapshotContext {
@@ -15,7 +15,7 @@ fn context(world: WorldId) -> SnapshotContext {
     }
 }
 
-fn snapshot_fixture() -> (tempfile::TempDir, Storage, swarm_protocol::SnapshotManifestV1) {
+fn snapshot_fixture() -> (tempfile::TempDir, Storage, SnapshotPublication) {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
     fs::create_dir_all(source.join("region")).unwrap();
