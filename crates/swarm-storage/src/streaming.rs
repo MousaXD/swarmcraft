@@ -800,7 +800,7 @@ mod tests {
 
         drop(live);
         let reopened_again = Storage::open(&store_root).unwrap();
-        let second_gc = reopened_again.garbage_collect_blobs(world()).unwrap();
+        let second_gc = reopened_again.garbage_collect_blobs(world).unwrap();
         assert_eq!(second_gc.removed_blobs, 1);
         assert!(!blob_path(&reopened_again, world, &live_blob).exists());
         assert!(blob_path(&reopened_again, world, &committed_blob).exists());
