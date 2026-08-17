@@ -52,6 +52,11 @@ pub struct ConnectivityIssueV1 {
     pub detail: String,
 }
 
+/// Serializable connectivity contract for CLI/Desktop consumers.
+///
+/// `state` describes the currently owned application path, while `nat_status`
+/// independently describes AutoNAT reachability. Infrastructure connections are
+/// tracked separately and never make an application path look direct/relayed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ConnectivityDiagnosticsV1 {
@@ -70,6 +75,12 @@ pub struct ConnectivityDiagnosticsV1 {
     pub bootstrap_connectivity: bool,
     pub relay_configured: usize,
     pub recent_failures: Vec<ConnectivityIssueV1>,
+    #[serde(skip)]
+    active_direct_paths: usize,
+    #[serde(skip)]
+    active_relay_paths: usize,
+    #[serde(skip)]
+    active_bootstrap_paths: usize,
 }
 
 impl ConnectivityDiagnosticsV1 {
@@ -93,10 +104,24 @@ impl ConnectivityDiagnosticsV1 {
         self.refresh_state();
     }
 
-    pub fn record_direct_success(&mut self) {
-        self.direct_connectivity = true;
+    pub fn record_direct_path_up(&mut self) {
+        self.active_direct_paths = self.active_direct_paths.saturating_add(1);
+        self.direct_connectivity = self.active_direct_paths > 0;
         self.last_failure = None;
         self.refresh_state();
+    }
+
+    pub fn record_direct_path_down(&mut self) {
+        self.active_direct_paths = self.active_direct_paths.saturating_sub(1);
+        self.direct_connectivity = self.active_direct_paths > 0;
+        if !self.direct_connectivity && matches!(self.hole_punch, HolePunchStateV1::Succeeded) {
+            self.hole_punch = HolePunchStateV1::Idle;
+        }
+        self.refresh_state();
+    }
+
+    pub fn record_direct_success(&mut self) {
+        self.record_direct_path_up();
     }
 
     pub fn record_direct_failure(&mut self, reason: impl Into<String>) {
@@ -113,9 +138,20 @@ impl ConnectivityDiagnosticsV1 {
         self.refresh_state();
     }
 
-    pub fn record_bootstrap_connected(&mut self) {
-        self.bootstrap_connectivity = true;
+    pub fn record_bootstrap_path_up(&mut self) {
+        self.active_bootstrap_paths = self.active_bootstrap_paths.saturating_add(1);
+        self.bootstrap_connectivity = self.active_bootstrap_paths > 0;
         self.refresh_state();
+    }
+
+    pub fn record_bootstrap_path_down(&mut self) {
+        self.active_bootstrap_paths = self.active_bootstrap_paths.saturating_sub(1);
+        self.bootstrap_connectivity = self.active_bootstrap_paths > 0;
+        self.refresh_state();
+    }
+
+    pub fn record_bootstrap_connected(&mut self) {
+        self.record_bootstrap_path_up();
     }
 
     pub fn record_relay_configured(&mut self, relay: impl Into<String>, count: usize) {
@@ -124,14 +160,25 @@ impl ConnectivityDiagnosticsV1 {
         self.refresh_state();
     }
 
-    pub fn record_relay_connected(&mut self) {
-        self.relay_connectivity = true;
+    pub fn record_relay_path_up(&mut self) {
+        self.active_relay_paths = self.active_relay_paths.saturating_add(1);
+        self.relay_connectivity = self.active_relay_paths > 0;
         self.refresh_state();
+    }
+
+    pub fn record_relay_path_down(&mut self) {
+        self.active_relay_paths = self.active_relay_paths.saturating_sub(1);
+        self.relay_connectivity = self.active_relay_paths > 0;
+        self.refresh_state();
+    }
+
+    pub fn record_relay_connected(&mut self) {
+        self.record_relay_path_up();
     }
 
     pub fn record_relay(&mut self, relay: impl Into<String>) {
         self.selected_relay = Some(relay.into());
-        self.record_relay_connected();
+        self.record_relay_path_up();
     }
 
     pub fn start_hole_punch(&mut self) {
@@ -143,7 +190,6 @@ impl ConnectivityDiagnosticsV1 {
         match result {
             Ok(()) => {
                 self.hole_punch = HolePunchStateV1::Succeeded;
-                self.direct_connectivity = true;
                 self.last_failure = None;
             }
             Err(reason) => {
@@ -188,7 +234,7 @@ impl ConnectivityDiagnosticsV1 {
 
     fn refresh_state(&mut self) {
         let last_issue = self.recent_failures.last().map(|issue| issue.kind);
-        self.state = if matches!(self.hole_punch, HolePunchStateV1::Succeeded) {
+        self.state = if self.direct_connectivity && matches!(self.hole_punch, HolePunchStateV1::Succeeded) {
             ConnectivityStateV1::HolePunched
         } else if self.direct_connectivity {
             ConnectivityStateV1::DirectReachable
@@ -208,9 +254,9 @@ impl ConnectivityDiagnosticsV1 {
             ConnectivityStateV1::BootstrapUnavailable
         } else if self.nat_status == NatStatusV1::Private {
             ConnectivityStateV1::PrivateUnreachable
-        } else if self.nat_status == NatStatusV1::Public {
-            ConnectivityStateV1::DirectReachable
         } else {
+            // AutoNAT Public is intentionally represented in `nat_status`, not as
+            // an active DirectReachable application connection.
             ConnectivityStateV1::NatStatusUnknown
         };
     }
@@ -237,6 +283,45 @@ mod tests {
     }
 
     #[test]
+    fn direct_path_state_tracks_current_ownership() {
+        let mut diagnostics = ConnectivityDiagnosticsV1::default();
+        diagnostics.record_direct_path_up();
+        diagnostics.record_direct_path_up();
+        assert_eq!(diagnostics.state, ConnectivityStateV1::DirectReachable);
+        diagnostics.record_direct_path_down();
+        assert_eq!(diagnostics.state, ConnectivityStateV1::DirectReachable);
+        diagnostics.record_direct_path_down();
+        assert!(!diagnostics.direct_connectivity);
+        assert_ne!(diagnostics.state, ConnectivityStateV1::DirectReachable);
+    }
+
+    #[test]
+    fn relay_path_state_tracks_current_ownership() {
+        let mut diagnostics = ConnectivityDiagnosticsV1::default();
+        diagnostics.record_relay_path_up();
+        diagnostics.record_relay_path_up();
+        assert_eq!(diagnostics.state, ConnectivityStateV1::RelayConnected);
+        diagnostics.record_relay_path_down();
+        assert_eq!(diagnostics.state, ConnectivityStateV1::RelayConnected);
+        diagnostics.record_relay_path_down();
+        assert!(!diagnostics.relay_connectivity);
+        assert_ne!(diagnostics.state, ConnectivityStateV1::RelayConnected);
+    }
+
+    #[test]
+    fn infrastructure_paths_do_not_create_application_reachability() {
+        let mut diagnostics = ConnectivityDiagnosticsV1::default();
+        diagnostics.record_bootstrap_configured(1);
+        diagnostics.record_bootstrap_path_up();
+        assert!(diagnostics.bootstrap_connectivity);
+        assert!(!diagnostics.direct_connectivity);
+        assert!(!diagnostics.relay_connectivity);
+        assert_eq!(diagnostics.state, ConnectivityStateV1::NatStatusUnknown);
+        diagnostics.record_bootstrap_path_down();
+        assert!(!diagnostics.bootstrap_connectivity);
+    }
+
+    #[test]
     fn fallback_diagnostics_preserve_path_failures() {
         let mut diagnostics = ConnectivityDiagnosticsV1::default();
         diagnostics.record_direct_failure("direct QUIC timeout");
@@ -259,7 +344,7 @@ mod tests {
         diagnostics.record_relay_configured("/dns4/relay.example/tcp/443/p2p/relay", 1);
         assert_eq!(diagnostics.state, ConnectivityStateV1::RelayRequired);
 
-        diagnostics.record_relay_connected();
+        diagnostics.record_relay_path_up();
         assert_eq!(diagnostics.state, ConnectivityStateV1::RelayConnected);
     }
 
@@ -272,21 +357,37 @@ mod tests {
     }
 
     #[test]
-    fn public_autonat_result_is_directly_reachable() {
+    fn public_autonat_result_does_not_invent_an_active_direct_path() {
         let mut diagnostics = ConnectivityDiagnosticsV1::default();
         diagnostics.record_nat_status(NatStatusV1::Public);
-        assert_eq!(diagnostics.state, ConnectivityStateV1::DirectReachable);
+        assert_eq!(diagnostics.nat_status, NatStatusV1::Public);
+        assert!(!diagnostics.direct_connectivity);
+        assert_ne!(diagnostics.state, ConnectivityStateV1::DirectReachable);
     }
 
     #[test]
-    fn hole_punch_success_is_distinct_from_plain_direct_connectivity() {
+    fn hole_punch_success_is_distinct_while_direct_path_is_live() {
         let mut diagnostics = ConnectivityDiagnosticsV1::default();
-        diagnostics.record_direct_success();
+        diagnostics.record_direct_path_up();
         assert_eq!(diagnostics.state, ConnectivityStateV1::DirectReachable);
 
         diagnostics.start_hole_punch();
         diagnostics.finish_hole_punch(Ok::<(), String>(()));
         assert_eq!(diagnostics.state, ConnectivityStateV1::HolePunched);
+        diagnostics.record_direct_path_down();
+        assert_ne!(diagnostics.state, ConnectivityStateV1::HolePunched);
+    }
+
+    #[test]
+    fn request_failures_have_their_own_typed_classification() {
+        let mut diagnostics = ConnectivityDiagnosticsV1::default();
+        diagnostics.record_issue(ConnectivityIssueV1 {
+            kind: ConnectivityIssueKindV1::RequestFailed,
+            peer: Some("peer-a".into()),
+            address: None,
+            detail: "request timed out".into(),
+        });
+        assert_eq!(diagnostics.recent_failures.last().map(|issue| issue.kind), Some(ConnectivityIssueKindV1::RequestFailed));
     }
 
     #[test]
