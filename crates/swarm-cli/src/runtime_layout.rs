@@ -17,18 +17,11 @@ pub fn managed_minecraft_server(paths: &DataPaths, minecraft: &str) -> PathBuf {
 }
 
 pub fn managed_fabric_server(paths: &DataPaths, minecraft: &str, loader: &str) -> PathBuf {
-    managed_runtimes_root(paths)
-        .join("fabric")
-        .join(minecraft)
-        .join(loader)
-        .join("fabric-server-launch.jar")
+    managed_runtimes_root(paths).join("fabric").join(minecraft).join(loader).join("fabric-server-launch.jar")
 }
 
 pub fn managed_fabric_api(paths: &DataPaths, version: &str) -> PathBuf {
-    managed_runtimes_root(paths)
-        .join("fabric-api")
-        .join(version)
-        .join(format!("fabric-api-{version}.jar"))
+    managed_runtimes_root(paths).join("fabric-api").join(version).join(format!("fabric-api-{version}.jar"))
 }
 
 pub fn managed_swarmcraft_fabric(paths: &DataPaths, version: &str) -> PathBuf {
