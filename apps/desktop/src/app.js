@@ -6,6 +6,8 @@ const backend = createBackendAdapter(invoke);
 const worldCache = new Map();
 let selectedWorldId = '';
 let currentView = 'worlds';
+let migrationRefreshInFlight = false;
+const MIGRATION_REFRESH_MS = 5000;
 
 const viewMeta = {
   worlds: ['Worlds', 'Choose a world and play'],
@@ -194,10 +196,16 @@ function updateWorldSpecificControls() {
   $('transferHost').disabled = !hasWorld || !migration.transfer || !eligibility.enabled;
   $('wakeWorld').disabled = !hasWorld || !migration.wake;
   $('transferAvailability').hidden = migration.transfer;
-  $('transferAvailability').textContent = migration.transfer ? '' : 'Transfer host is not available in this build.';
-  $('migrationAvailability').textContent = migration.transfer || migration.wake
-    ? 'Host handoff actions are enabled when the backend reports they are safe.'
-    : 'Transfer and wake are unavailable in this build. Existing Play and graceful stop remain available.';
+  $('transferAvailability').textContent = migration.transfer ? '' : 'Manual host transfer is not available in this build.';
+  if (migration.transfer && migration.wake) {
+    $('migrationAvailability').textContent = 'Transfer and wake actions are available only after backend safety checks pass.';
+  } else if (migration.wake) {
+    $('migrationAvailability').textContent = 'Safe wake is available when the backend allows it. Manual host transfer remains unavailable.';
+  } else if (migration.transfer) {
+    $('migrationAvailability').textContent = 'Host transfer is available when backend safety checks pass. Wake is unavailable in this build.';
+  } else {
+    $('migrationAvailability').textContent = 'Transfer and wake are unavailable in this build. Existing Play and graceful stop remain available.';
+  }
 }
 
 function clearSelection() {
@@ -261,12 +269,25 @@ async function refreshMigrationState(world) {
     renderMigration(null);
     return;
   }
+  if (migrationRefreshInFlight) return;
+  const requestedWorldId = world.id;
+  migrationRefreshInFlight = true;
   try {
-    const state = await backend.migration.readState(world.id);
-    renderMigration(state);
+    const state = await backend.migration.readState(requestedWorldId);
+    if (selectedWorldId === requestedWorldId) renderMigration(state);
   } catch (error) {
-    renderMigration({ phase: 'failed', detail: `Could not read host migration state: ${String(error)}` });
+    if (selectedWorldId === requestedWorldId) {
+      renderMigration({ phase: 'failed', detail: `Could not read host migration state: ${String(error)}` });
+    }
+  } finally {
+    migrationRefreshInFlight = false;
   }
+}
+
+function refreshVisibleMigration() {
+  if (document.hidden || !backend.migration.capabilities.status) return;
+  const world = selectedWorld();
+  if (world) refreshMigrationState(world);
 }
 
 function selectWorld(world, { focusDetail = false } = {}) {
@@ -789,3 +810,5 @@ updateWorldSpecificControls();
 renderMigration(null);
 showIdentity({ quiet: true }).catch(() => {});
 refreshWorlds().catch(() => {});
+document.addEventListener('visibilitychange', refreshVisibleMigration);
+setInterval(refreshVisibleMigration, MIGRATION_REFRESH_MS);

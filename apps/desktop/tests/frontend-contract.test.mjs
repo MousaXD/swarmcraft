@@ -97,5 +97,8 @@ test('frontend source and Tauri config preserve the global bridge contract', asy
   const app = await text('app.js');
   const tauri = JSON.parse(await readFile(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
   assert.match(app, /window\.__TAURI__\?\.core\?\.invoke/);
+  assert.match(app, /selectedWorldId === requestedWorldId/);
+  assert.match(app, /document\.hidden/);
+  assert.match(app, /setInterval\(refreshVisibleMigration, MIGRATION_REFRESH_MS\)/);
   assert.equal(tauri.app.withGlobalTauri, true);
 });
