@@ -216,22 +216,20 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
             }
         };
 
-        if let Ok(transfer) = storage.load_transfer_record(world) {
-            if transfer.from_peer_id == identity.peer_id() {
-                publish_status(
-                    &paths,
-                    &storage,
-                    world,
-                    Some(MigrationTrigger::ManualTransfer),
-                    MigrationPhase::AwaitingTransferAcceptance,
-                    false,
-                    config.game_endpoint.clone(),
-                    Some(transfer.base_snapshot_hash),
-                    None,
-                )?;
-                sleep(SUPERVISOR_POLL).await;
-                continue;
-            }
+        if let Some(transfer) = active_outbound_transfer(&storage, world, identity.peer_id())? {
+            publish_status(
+                &paths,
+                &storage,
+                world,
+                Some(MigrationTrigger::ManualTransfer),
+                MigrationPhase::AwaitingTransferAcceptance,
+                false,
+                config.game_endpoint.clone(),
+                Some(transfer.base_snapshot_hash),
+                None,
+            )?;
+            sleep(SUPERVISOR_POLL).await;
+            continue;
         }
 
         if storage.load_sleep_record(world).is_ok() {
@@ -407,10 +405,8 @@ async fn wait_until_launch_safe(
         {
             return Ok(false);
         }
-        if let Ok(transfer) = storage.load_transfer_record(world) {
-            if transfer.from_peer_id == identity.peer_id() {
-                return Ok(false);
-            }
+        if active_outbound_transfer(storage, world, identity.peer_id())?.is_some() {
+            return Ok(false);
         }
         if watch.observe(paths, world, Instant::now()).unwrap_or(false) {
             return Ok(true);
@@ -423,12 +419,10 @@ fn infer_trigger(storage: &Storage, epoch: &EpochRecordV1, local_peer: PeerId) -
     if epoch.mode == EpochMode::Recovery {
         return MigrationTrigger::AutomaticRecovery;
     }
-    if storage.load_transfer_record(epoch.world_id).is_ok_and(|transfer| {
-        transfer.phase == TransferPhase::Committed
-            && transfer.to_peer_id == local_peer
-            && transfer.next_epoch == epoch.epoch_number
-            && transfer.next_fencing_token == epoch.fencing_token
-    }) {
+    if storage
+        .load_transfer_record(epoch.world_id)
+        .is_ok_and(|transfer| transfer_is_successor_generation(&transfer, epoch, local_peer))
+    {
         return MigrationTrigger::ManualTransfer;
     }
     MigrationTrigger::DirectHost
@@ -772,11 +766,14 @@ pub fn prepare_manual_transfer(
     storage.verify_snapshot(&latest)?;
     verify_snapshot_signature(&latest)?;
 
-    if let Ok(existing) = storage.load_transfer_record(world) {
-        if existing.from_peer_id == identity.peer_id() && existing.to_peer_id == target {
+    if let Some(existing) = active_transfer_for_current_generation(storage, world)? {
+        if existing.from_peer_id == identity.peer_id()
+            && existing.to_peer_id == target
+            && existing.phase == TransferPhase::Prepared
+        {
             return Ok(TransferPrepareResult::Prepared(encode_transfer(&existing)?));
         }
-        bail!("another authority transfer is already durable for this world");
+        bail!("another authority transfer is already active for this authority generation");
     }
 
     if let Ok(sleep_record) = storage.load_sleep_record(world) {
@@ -832,6 +829,14 @@ pub fn accept_manual_transfer(paths: &DataPaths, storage: &Storage, world: World
     if prepared.to_peer_id != identity.peer_id() {
         bail!("only the prepared target may accept this transfer");
     }
+    if let Some(existing) = active_transfer_for_current_generation(storage, world)? {
+        ensure_same_transfer(&existing, &prepared)?;
+        match existing.phase {
+            TransferPhase::Prepared => {}
+            TransferPhase::Accepted => return encode_transfer(&existing),
+            TransferPhase::Committed => bail!("transfer is already committed and cannot be accepted again"),
+        }
+    }
     storage.save_transfer_record(&prepared)?;
     let mut accepted = prepared.clone();
     accepted.phase = TransferPhase::Accepted;
@@ -861,10 +866,11 @@ pub fn commit_manual_transfer(paths: &DataPaths, storage: &Storage, world: World
     if accepted.from_peer_id != identity.peer_id() {
         bail!("only the current authority may commit this transfer");
     }
-    if let Ok(previous) = storage.load_transfer_record(world) {
+    if let Some(previous) = active_transfer_for_current_generation(storage, world)? {
         ensure_same_transfer(&previous, &accepted)?;
-        if previous.phase != TransferPhase::Prepared && previous.phase != TransferPhase::Accepted {
-            bail!("local transfer state cannot advance to committed");
+        match previous.phase {
+            TransferPhase::Prepared | TransferPhase::Accepted => {}
+            TransferPhase::Committed => return encode_transfer(&previous),
         }
     }
     storage.save_transfer_record(&accepted)?;
@@ -896,7 +902,12 @@ pub fn activate_manual_transfer(paths: &DataPaths, storage: &Storage, world: Wor
     if committed.to_peer_id != identity.peer_id() {
         bail!("only the committed target may activate this transfer");
     }
-    storage.save_transfer_record(&committed)?;
+    if let Some(existing) = active_transfer_for_current_generation(storage, world)? {
+        ensure_same_transfer(&existing, &committed)?;
+        if existing.phase == TransferPhase::Prepared {
+            bail!("target has not durably accepted this transfer");
+        }
+    }
     let current = storage.load_epoch_record(world)?;
     if current.authority_peer_id != committed.from_peer_id
         || current.epoch_number.saturating_add(1) != committed.next_epoch
@@ -910,6 +921,7 @@ pub fn activate_manual_transfer(paths: &DataPaths, storage: &Storage, world: Wor
     if latest.manifest_hash()? != committed.base_snapshot_hash {
         bail!("transfer target lacks the exact canonical checkpoint");
     }
+    storage.save_transfer_record(&committed)?;
     let mut next = EpochRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
@@ -949,6 +961,7 @@ pub fn observe_manual_transfer_epoch(paths: &DataPaths, storage: &Storage, world
     verify_signature(next.authority_peer_id, next.authority_public_key, &next.signing_bytes()?, &next.signature)?;
     let current = storage.load_epoch_record(world)?;
     let transfer = storage.load_transfer_record(world).context("manual epoch is missing its committed transfer")?;
+    validate_transfer_record_against_epoch(storage, &transfer, &current)?;
     if transfer.phase != TransferPhase::Committed
         || transfer.from_peer_id != current.authority_peer_id
         || transfer.to_peer_id != next.authority_peer_id
@@ -987,6 +1000,56 @@ pub fn observe_manual_transfer_epoch(paths: &DataPaths, storage: &Storage, world
     Ok(())
 }
 
+fn active_transfer_for_current_generation(storage: &Storage, world: WorldId) -> Result<Option<AuthorityTransferV1>> {
+    let current = match storage.load_epoch_record(world) {
+        Ok(current) => current,
+        Err(_) => return Ok(None),
+    };
+    let transfer = match storage.load_transfer_record(world) {
+        Ok(transfer) => transfer,
+        Err(_) => return Ok(None),
+    };
+    if !transfer_is_source_generation(&transfer, &current) {
+        return Ok(None);
+    }
+    validate_transfer_record_against_epoch(storage, &transfer, &current)?;
+    Ok(Some(transfer))
+}
+
+fn active_outbound_transfer(
+    storage: &Storage,
+    world: WorldId,
+    local_peer: PeerId,
+) -> Result<Option<AuthorityTransferV1>> {
+    Ok(active_transfer_for_current_generation(storage, world)?.filter(|transfer| transfer.from_peer_id == local_peer))
+}
+
+fn transfer_is_source_generation(transfer: &AuthorityTransferV1, current: &EpochRecordV1) -> bool {
+    let Some(source_epoch) = transfer.next_epoch.checked_sub(1) else {
+        return false;
+    };
+    let Some(source_fencing_token) = transfer.next_fencing_token.checked_sub(1) else {
+        return false;
+    };
+    transfer.world_id == current.world_id
+        && transfer.from_peer_id == current.authority_peer_id
+        && source_epoch == current.epoch_number
+        && source_fencing_token == current.fencing_token
+}
+
+fn transfer_is_successor_generation(
+    transfer: &AuthorityTransferV1,
+    current: &EpochRecordV1,
+    local_peer: PeerId,
+) -> bool {
+    transfer.world_id == current.world_id
+        && transfer.phase == TransferPhase::Committed
+        && transfer.to_peer_id == local_peer
+        && transfer.to_peer_id == current.authority_peer_id
+        && transfer.next_epoch == current.epoch_number
+        && transfer.next_fencing_token == current.fencing_token
+}
+
 fn create_prepared_transfer(
     storage: &Storage,
     identity: &PeerIdentity,
@@ -996,14 +1059,16 @@ fn create_prepared_transfer(
     latest: &SnapshotManifestV1,
 ) -> Result<AuthorityTransferV1> {
     validate_transfer_target(storage, identity, world, target)?;
+    let next_epoch = epoch.epoch_number.checked_add(1).context("authority epoch is exhausted")?;
+    let next_fencing_token = epoch.fencing_token.checked_add(1).context("authority fencing token is exhausted")?;
     let mut transfer = AuthorityTransferV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
         from_peer_id: identity.peer_id(),
         to_peer_id: target,
         base_snapshot_hash: latest.manifest_hash()?,
-        next_epoch: epoch.epoch_number.saturating_add(1),
-        next_fencing_token: epoch.fencing_token.saturating_add(1),
+        next_epoch,
+        next_fencing_token,
         phase: TransferPhase::Prepared,
         signer_peer_id: identity.peer_id(),
         signer_public_key: identity.public_key(),
@@ -1026,12 +1091,27 @@ fn validate_transfer_target(storage: &Storage, identity: &PeerIdentity, world: W
 }
 
 fn validate_transfer_record(storage: &Storage, transfer: &AuthorityTransferV1) -> Result<()> {
+    let current = storage.load_epoch_record(transfer.world_id)?;
+    validate_transfer_record_against_epoch(storage, transfer, &current)
+}
+
+fn validate_transfer_record_against_epoch(
+    storage: &Storage,
+    transfer: &AuthorityTransferV1,
+    current: &EpochRecordV1,
+) -> Result<()> {
     verify_transfer_signature(transfer)?;
+    if transfer.world_id != current.world_id {
+        bail!("transfer world does not match the accepted authority generation");
+    }
     let descriptor = storage.load_world_descriptor(transfer.world_id)?;
     let from = descriptor.member(transfer.from_peer_id).context("transfer source is not a world member")?;
     let to = descriptor.member(transfer.to_peer_id).context("transfer target is not a world member")?;
     if from.banned || to.banned || !to.authority_eligible {
         bail!("transfer participants are banned or target is not authority eligible");
+    }
+    if from.public_key != current.authority_public_key {
+        bail!("transfer source key does not match the accepted authority generation");
     }
     let expected_signer = match transfer.phase {
         TransferPhase::Prepared | TransferPhase::Committed => transfer.from_peer_id,
@@ -1044,10 +1124,15 @@ fn validate_transfer_record(storage: &Storage, transfer: &AuthorityTransferV1) -
     if signer.public_key != transfer.signer_public_key {
         bail!("transfer signer key does not match membership");
     }
-    let current = storage.load_epoch_record(transfer.world_id)?;
-    if transfer.next_epoch != current.epoch_number.saturating_add(1)
-        || transfer.next_fencing_token != current.fencing_token.saturating_add(1)
-        || transfer.from_peer_id != current.authority_peer_id
+    let source_epoch =
+        transfer.next_epoch.checked_sub(1).context("transfer successor epoch has no source generation")?;
+    let source_fencing_token = transfer
+        .next_fencing_token
+        .checked_sub(1)
+        .context("transfer successor fencing token has no source generation")?;
+    if source_epoch != current.epoch_number
+        || source_fencing_token != current.fencing_token
+        || !transfer_is_source_generation(transfer, current)
     {
         bail!("transfer generation does not extend the accepted authority exactly once");
     }

@@ -35,3 +35,5 @@ Automatic recovery launches only after the recovered generation is accepted and 
 Single-member durable sleep can wake locally through the shared path. Multi-member wake remains intentionally blocked until a quorum-backed wake authority transition is available; the backend does not invent a solo authority transition for a replicated world.
 
 The manual transfer records and epoch tokens are currently exposed as a signed backend/CLI exchange. Automatic peer-to-peer advancement of all manual-transfer phases over the existing network message is a follow-up integration item.
+
+Manual transfer records are generation-scoped operational state. Prepared, Accepted, and Committed records remain durable across restart while their source authority generation is still accepted. Once the accepted epoch/fencing generation advances to the committed successor or any later generation, that record is terminal historical evidence: supervisor launch gating and future transfer preparation ignore it. Replayed phase tokens are still signature-checked and rejected unless they exactly extend the currently accepted source generation and canonical base snapshot.
