@@ -7,7 +7,8 @@ pub mod wire;
 
 pub use diagnostics::{
     ConnectivityDiagnosticsV1, ConnectivityIssueKindV1, ConnectivityIssueV1, ConnectivityStateV1, HolePunchStateV1,
-    NatStatusV1, CONNECTIVITY_DIAGNOSTICS_SNAPSHOT_FILE, MAX_CONNECTIVITY_FAILURES,
+    NatStatusV1, CONNECTIVITY_DIAGNOSTICS_JSON_ENV, CONNECTIVITY_DIAGNOSTICS_SNAPSHOT_FILE,
+    MAX_CONNECTIVITY_FAILURES,
 };
 pub use libp2p::request_response::ResponseChannel;
 pub use libp2p::PeerId as TransportPeerId;
@@ -118,5 +119,6 @@ mod tests {
         .expect("both QUIC peers should authenticate");
 
         assert_eq!(node_a.connectivity_diagnostics().state, ConnectivityStateV1::DirectReachable);
+        assert_eq!(node_b.connectivity_diagnostics().state, ConnectivityStateV1::DirectReachable);
     }
 }
