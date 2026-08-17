@@ -14,10 +14,11 @@ use swarm_cli::{
     },
 };
 use swarm_consensus::AuthorityGeneration;
-use swarm_core::{create_world_genesis, DataPaths, PeerIdentity};
+use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
 use swarm_protocol::{
-    EpochMode, EpochRecordV1, MembershipRecordV1, SleepRecordV1, WorldDescriptorV1, WorldId, WorldMemberV1,
-    PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    AuthorityPolicyV1, EpochMode, EpochRecordV1, MembershipPolicyV1, MembershipRecordV1,
+    RuntimeCompatibilityManifestV1, SleepRecordV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1,
+    WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 use tokio::{
@@ -44,8 +45,24 @@ fn peer(root: PathBuf) -> PeerFixture {
 }
 
 fn initialize_two_peer_world(alice: &PeerFixture, bob: &PeerFixture, source: &Path) -> SharedWorld {
-    let (world, genesis) =
-        create_world_genesis(&alice.identity, "26.1.2".into(), "0.19.3".into(), b"migration-core").unwrap();
+    let compatibility = RuntimeCompatibilityManifestV1 {
+        minecraft_version: "26.1.2".into(),
+        loader_id: "fabric".into(),
+        loader_version: "0.19.3".into(),
+        swarmcraft_protocol_version: PROTOCOL_VERSION,
+        fabric_adapter_version: env!("CARGO_PKG_VERSION").into(),
+        required_server_mods: Vec::new(),
+        required_client_mods: Vec::new(),
+        datapacks: Vec::new(),
+    };
+    let fingerprint = compatibility.fingerprint().unwrap();
+    let (world, genesis) = create_world_genesis_with_fingerprint(
+        &alice.identity,
+        compatibility.minecraft_version.clone(),
+        compatibility.loader_version.clone(),
+        fingerprint,
+    )
+    .unwrap();
     let metadata = WorldMetadataV1 {
         storage_schema_version: STORAGE_SCHEMA_VERSION,
         display_name: "migration-core".into(),
@@ -79,6 +96,30 @@ fn initialize_two_peer_world(alice: &PeerFixture, bob: &PeerFixture, source: &Pa
     alice.identity.sign_membership(&mut membership).unwrap();
     alice.storage.save_membership_record(&membership).unwrap();
     bob.storage.save_membership_record(&membership).unwrap();
+
+    let mut config = WorldConfigV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        sequence: 1,
+        previous_config_hash: None,
+        compatibility,
+        visibility: WorldVisibilityV1::Private,
+        authority_policy: AuthorityPolicyV1 { allow_solo_advancement: true, preferred_replication_factor: 2 },
+        membership_policy: MembershipPolicyV1::InviteOnly,
+        presentation: WorldPresentationV1 {
+            name: "migration-core".into(),
+            description: String::new(),
+            tags: Vec::new(),
+            icon_hash: None,
+            approximate_region: None,
+        },
+        authority_peer_id: alice.identity.peer_id(),
+        authority_public_key: alice.identity.public_key(),
+        signature: Vec::new(),
+    };
+    sign_world_config(&alice.identity, &mut config).unwrap();
+    alice.storage.save_world_config(&config).unwrap();
+    bob.storage.save_world_config(&config).unwrap();
 
     let alice_snapshot = snapshot(&alice.storage, &alice.identity, world, source);
     let bob_snapshot = snapshot(&bob.storage, &alice.identity, world, source);
@@ -364,6 +405,8 @@ with socket.create_connection((host, port), timeout=5) as connection:
 fn add_third_peer(alice: &PeerFixture, bob: &PeerFixture, carol: &PeerFixture, shared: &SharedWorld, source: &Path) {
     let metadata = alice.storage.load_world(shared.world).unwrap();
     carol.storage.create_world(&metadata).unwrap();
+    let config = alice.storage.load_world_config(shared.world).unwrap();
+    carol.storage.save_world_config(&config).unwrap();
 
     let mut descriptor = alice.storage.load_world_descriptor(shared.world).unwrap();
     descriptor.members.push(member(&carol.identity));
@@ -607,7 +650,6 @@ fn transfer_phase_state_survives_restart_without_permanent_wedge() {
     assert_eq!(alice_after_observed.load_epoch_record(shared.world).unwrap(), activated_epoch);
 
     save_sleep(&bob, shared.world);
-    let next =
-        prepare_manual_transfer(&bob.paths, &bob_after_activated, shared.world, alice.identity.peer_id()).unwrap();
+    let next = prepare_manual_transfer(&bob.paths, &bob_after_activated, shared.world, alice.identity.peer_id()).unwrap();
     assert!(matches!(next, TransferPrepareResult::Prepared(_)));
 }
