@@ -121,11 +121,7 @@ impl Storage {
         let mut lease = ActiveReplicationLease { pin_paths: Vec::new() };
 
         for hash in hashes.iter().copied().filter(|hash| unique.insert(*hash)) {
-            let path = pins_dir.join(format!(
-                "{}-{token}-{}.pin",
-                std::process::id(),
-                hash.to_hex()
-            ));
+            let path = pins_dir.join(format!("{}-{token}-{}.pin", std::process::id(), hash.to_hex()));
             let mut file = OpenOptions::new()
                 .create_new(true)
                 .write(true)
@@ -150,11 +146,7 @@ impl Storage {
 
     /// Removes snapshot manifests outside the retention set. No blobs are
     /// deleted here, so interruption can only retain extra data.
-    pub fn prune_snapshots(
-        &self,
-        world: WorldId,
-        policy: &RetentionPolicy,
-    ) -> Result<RetentionReport, RetentionError> {
+    pub fn prune_snapshots(&self, world: WorldId, policy: &RetentionPolicy) -> Result<RetentionReport, RetentionError> {
         let snapshots = self.list_snapshots(world)?;
         if snapshots.is_empty() {
             return Ok(RetentionReport::default());
@@ -162,10 +154,8 @@ impl Storage {
 
         let retained = retention_roots(self, world, &snapshots, policy)?;
         let snapshots_dir = self.world_dir(world).join("snapshots");
-        let mut report = RetentionReport {
-            retained_snapshots: retained.iter().copied().collect(),
-            ..Default::default()
-        };
+        let mut report =
+            RetentionReport { retained_snapshots: retained.iter().copied().collect(), ..Default::default() };
 
         for manifest in snapshots {
             if retained.contains(&manifest.snapshot_number) {
@@ -241,11 +231,7 @@ impl Storage {
 
     /// Conservative two-phase retention: prune manifests first, then re-read
     /// remaining manifests under the GC lock before sweeping blobs.
-    pub fn apply_retention(
-        &self,
-        world: WorldId,
-        policy: &RetentionPolicy,
-    ) -> Result<RetentionReport, RetentionError> {
+    pub fn apply_retention(&self, world: WorldId, policy: &RetentionPolicy) -> Result<RetentionReport, RetentionError> {
         let mut report = self.prune_snapshots(world, policy)?;
         let gc = self.garbage_collect_blobs(world)?;
         report.removed_blobs = gc.removed_blobs;
@@ -315,10 +301,7 @@ fn retention_roots(
 }
 
 fn referenced_blob_hashes(snapshots: &[SnapshotManifestV1]) -> BTreeSet<Hash32> {
-    snapshots
-        .iter()
-        .flat_map(|manifest| manifest.entries.iter().map(|entry| entry.blob.hash))
-        .collect()
+    snapshots.iter().flat_map(|manifest| manifest.entries.iter().map(|entry| entry.blob.hash)).collect()
 }
 
 fn acquire_gc_lock(world_dir: &Path, world: WorldId) -> Result<GcLock, RetentionError> {

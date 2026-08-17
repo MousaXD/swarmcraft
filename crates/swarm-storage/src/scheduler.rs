@@ -5,11 +5,7 @@
 //! callers can use [`ReplicationScheduler`] directly with [`BlobSource`]
 //! implementations.
 
-use crate::{
-    replica::ReplicationError,
-    retention::RetentionError,
-    Storage, StorageError,
-};
+use crate::{replica::ReplicationError, retention::RetentionError, Storage, StorageError};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
@@ -152,10 +148,7 @@ pub struct ReplicationOptions {
 
 impl Default for ReplicationOptions {
     fn default() -> Self {
-        Self {
-            max_parallel_blobs: DEFAULT_PARALLEL_BLOBS,
-            chunk_size: DEFAULT_REPLICATION_CHUNK_SIZE,
-        }
+        Self { max_parallel_blobs: DEFAULT_PARALLEL_BLOBS, chunk_size: DEFAULT_REPLICATION_CHUNK_SIZE }
     }
 }
 
@@ -281,10 +274,7 @@ impl ReplicationScheduler {
 
         let inventory = self.inventory(destination, manifest, &sources)?;
         let assignments = self.selector.assign(&missing, &inventory)?;
-        let source_map = sources
-            .into_iter()
-            .map(|source| (source.peer_id(), source))
-            .collect::<BTreeMap<_, _>>();
+        let source_map = sources.into_iter().map(|source| (source.peer_id(), source)).collect::<BTreeMap<_, _>>();
 
         let hashes = missing.iter().map(|descriptor| descriptor.hash).collect::<Vec<_>>();
         let _lease = destination.pin_replication_hashes(manifest.world_id, &hashes)?;
@@ -412,7 +402,7 @@ fn transfer_assignment(
                 let (data, finished) = match chunk {
                     Ok(value) => value,
                     Err(error) => {
-                        record_source_failure(report, *peer, &error);
+                        record_source_failure(report, *peer, &error, false);
                         last_error = error.to_string();
                         warn!(
                             source = %peer,
@@ -455,7 +445,7 @@ fn transfer_assignment(
                             continue 'source_attempt;
                         }
 
-                        record_source_failure(report, *peer, &error);
+                        record_source_failure(report, *peer, &error, finished);
                         last_error = error.to_string();
                         warn!(
                             source = %peer,
@@ -490,8 +480,13 @@ fn transfer_assignment(
     Err((descriptor.hash, last_error))
 }
 
-fn record_source_failure(report: &Arc<Mutex<ReplicationReport>>, peer: PeerId, error: &ReplicationError) {
-    let corrupt = matches!(error, ReplicationError::Storage(StorageError::BlobCorrupt(_)));
+fn record_source_failure(
+    report: &Arc<Mutex<ReplicationReport>>,
+    peer: PeerId,
+    error: &ReplicationError,
+    integrity_rejection: bool,
+) {
+    let corrupt = integrity_rejection || matches!(error, ReplicationError::Storage(StorageError::BlobCorrupt(_)));
     let mut report = report.lock().expect("replication report poisoned");
     report.source_failures += 1;
     if corrupt {

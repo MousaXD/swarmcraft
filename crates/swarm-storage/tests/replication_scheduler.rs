@@ -35,10 +35,7 @@ fn blob_path(storage: &Storage, descriptor: &BlobDescriptor) -> PathBuf {
         BlobEncoding::Raw => "raw",
         BlobEncoding::Zstd => "zst",
     };
-    storage
-        .world_dir(world())
-        .join("blobs")
-        .join(format!("{}.{}", descriptor.hash.to_hex(), suffix))
+    storage.world_dir(world()).join("blobs").join(format!("{}.{}", descriptor.hash.to_hex(), suffix))
 }
 
 fn copy_blob(source: &Storage, destination: &Storage, descriptor: &BlobDescriptor) {
@@ -63,11 +60,8 @@ fn fixture(temp: &tempfile::TempDir, file_count: usize) -> (PathBuf, Storage, Sn
     let source_world = temp.path().join("source-world");
     fs::create_dir_all(source_world.join("region")).unwrap();
     for index in 0..file_count {
-        let relative = if index == 0 {
-            PathBuf::from("level.dat")
-        } else {
-            PathBuf::from(format!("region/r.{index}.mca"))
-        };
+        let relative =
+            if index == 0 { PathBuf::from("level.dat") } else { PathBuf::from(format!("region/r.{index}.mca")) };
         fs::write(
             source_world.join(relative),
             pseudo_random_bytes(0xCAFE_BABE + index as u64, 96 * 1024 + index * 4096),
@@ -253,12 +247,7 @@ fn new_peer_reconstructs_one_snapshot_from_multiple_replicas_concurrently() {
         }),
     ];
     let report = scheduler
-        .reconstruct(
-            &destination,
-            &manifest,
-            sources,
-            ReplicationOptions { max_parallel_blobs: 4, chunk_size: 2048 },
-        )
+        .reconstruct(&destination, &manifest, sources, ReplicationOptions { max_parallel_blobs: 4, chunk_size: 2048 })
         .unwrap();
 
     assert_eq!(report.completed_blobs, manifest.entries.len());
@@ -287,12 +276,7 @@ fn source_disappearance_mid_blob_resumes_from_another_replica() {
         Arc::new(LocalReplicaSource::new(PeerId([2; 32]), replica_b)),
     ];
     let report = scheduler
-        .reconstruct(
-            &destination,
-            &manifest,
-            sources,
-            ReplicationOptions { max_parallel_blobs: 1, chunk_size: 1024 },
-        )
+        .reconstruct(&destination, &manifest, sources, ReplicationOptions { max_parallel_blobs: 1, chunk_size: 1024 })
         .unwrap();
 
     assert!(report.source_failures >= 1);
@@ -310,18 +294,11 @@ fn corrupt_source_is_rejected_without_poisoning_snapshot_reconstruction() {
     let scheduler = ReplicationScheduler::new();
 
     let sources: Vec<Arc<dyn BlobSource>> = vec![
-        Arc::new(CorruptingSource {
-            inner: LocalReplicaSource::new(PeerId([1; 32]), replica_a),
-        }),
+        Arc::new(CorruptingSource { inner: LocalReplicaSource::new(PeerId([1; 32]), replica_a) }),
         Arc::new(LocalReplicaSource::new(PeerId([2; 32]), replica_b)),
     ];
     let report = scheduler
-        .reconstruct(
-            &destination,
-            &manifest,
-            sources,
-            ReplicationOptions { max_parallel_blobs: 1, chunk_size: 4096 },
-        )
+        .reconstruct(&destination, &manifest, sources, ReplicationOptions { max_parallel_blobs: 1, chunk_size: 4096 })
         .unwrap();
 
     assert!(report.corrupt_rejections >= 1);
@@ -343,15 +320,9 @@ fn existing_partial_transfer_resumes_from_a_different_replica() {
     let offset = destination.receive_blob_chunk(world(), &descriptor, 0, &first, false).unwrap();
     assert_eq!(destination.partial_blob_offset(world(), &descriptor).unwrap(), offset);
 
-    let sources: Vec<Arc<dyn BlobSource>> =
-        vec![Arc::new(LocalReplicaSource::new(PeerId([2; 32]), replica_b))];
+    let sources: Vec<Arc<dyn BlobSource>> = vec![Arc::new(LocalReplicaSource::new(PeerId([2; 32]), replica_b))];
     let report = ReplicationScheduler::new()
-        .reconstruct(
-            &destination,
-            &manifest,
-            sources,
-            ReplicationOptions { max_parallel_blobs: 1, chunk_size: 2048 },
-        )
+        .reconstruct(&destination, &manifest, sources, ReplicationOptions { max_parallel_blobs: 1, chunk_size: 2048 })
         .unwrap();
 
     assert_eq!(report.resumed_blobs, 1);
@@ -374,12 +345,7 @@ fn corrupt_partial_from_disappearing_source_does_not_blame_the_healthy_fallback(
         Arc::new(LocalReplicaSource::new(PeerId([2; 32]), replica_b)),
     ];
     let report = ReplicationScheduler::new()
-        .reconstruct(
-            &destination,
-            &manifest,
-            sources,
-            ReplicationOptions { max_parallel_blobs: 1, chunk_size: 1024 },
-        )
+        .reconstruct(&destination, &manifest, sources, ReplicationOptions { max_parallel_blobs: 1, chunk_size: 1024 })
         .unwrap();
 
     assert_eq!(report.resumed_blobs, 1);

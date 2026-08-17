@@ -14,10 +14,7 @@ fn blob_path(storage: &Storage, descriptor: &BlobDescriptor) -> PathBuf {
         BlobEncoding::Raw => "raw",
         BlobEncoding::Zstd => "zst",
     };
-    storage
-        .world_dir(world())
-        .join("blobs")
-        .join(format!("{}.{}", descriptor.hash.to_hex(), suffix))
+    storage.world_dir(world()).join("blobs").join(format!("{}.{}", descriptor.hash.to_hex(), suffix))
 }
 
 fn snapshot(
@@ -81,13 +78,7 @@ fn orphaned_blobs_are_reclaimed_after_snapshot_retention_prunes_their_last_refer
     let second_blob = second.entries[0].blob.clone();
 
     let report = storage
-        .apply_retention(
-            world(),
-            &RetentionPolicy {
-                keep_latest: 1,
-                protected_snapshots: BTreeSet::new(),
-            },
-        )
+        .apply_retention(world(), &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() })
         .unwrap();
 
     assert_eq!(report.removed_snapshots, vec![1]);
@@ -112,13 +103,7 @@ fn interrupted_cleanup_between_prune_and_gc_preserves_recoverability() {
     let latest = snapshot(&storage, &source, 2, Some(first.manifest_hash().unwrap()));
 
     let prune = storage
-        .prune_snapshots(
-            world(),
-            &RetentionPolicy {
-                keep_latest: 1,
-                protected_snapshots: BTreeSet::new(),
-            },
-        )
+        .prune_snapshots(world(), &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() })
         .unwrap();
     assert_eq!(prune.removed_snapshots, vec![1]);
 
@@ -191,13 +176,7 @@ fn authority_transfer_base_is_a_mandatory_retention_root() {
         .unwrap();
 
     let report = storage
-        .apply_retention(
-            world(),
-            &RetentionPolicy {
-                keep_latest: 1,
-                protected_snapshots: BTreeSet::new(),
-            },
-        )
+        .apply_retention(world(), &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() })
         .unwrap();
 
     assert_eq!(report.retained_snapshots, vec![1, 2]);
@@ -217,13 +196,7 @@ fn latest_snapshot_is_retained_even_when_keep_latest_is_zero() {
     let manifest = snapshot(&storage, &source, 1, None);
 
     let report = storage
-        .apply_retention(
-            world(),
-            &RetentionPolicy {
-                keep_latest: 0,
-                protected_snapshots: BTreeSet::new(),
-            },
-        )
+        .apply_retention(world(), &RetentionPolicy { keep_latest: 0, protected_snapshots: BTreeSet::new() })
         .unwrap();
 
     assert_eq!(report.retained_snapshots, vec![1]);
