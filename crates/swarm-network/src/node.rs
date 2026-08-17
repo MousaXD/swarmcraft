@@ -249,6 +249,17 @@ impl SwarmNode {
             .map_err(|_| anyhow!("response channel closed"))
     }
 
+    fn respond_best_effort(
+        &mut self,
+        peer: TransportPeerId,
+        channel: request_response::ResponseChannel<WireResponse>,
+        response: WireResponse,
+    ) {
+        if self.respond(channel, response).is_err() {
+            debug!(transport_peer = %peer, "response channel closed before response could be sent");
+        }
+    }
+
     pub async fn next_event(&mut self) -> Result<NetworkEvent> {
         loop {
             match self.swarm.select_next_some().await {
@@ -339,49 +350,53 @@ impl SwarmNode {
                         request_response::Message::Request { request, channel, .. } => {
                             if let Err(error) = request.validate_limits() {
                                 warn!(transport_peer = %peer, %error, "inbound request exceeded protocol limits");
-                                self.respond(
+                                self.respond_best_effort(
+                                    peer,
                                     channel,
                                     WireResponse::Error {
                                         code: "REQUEST_LIMIT_EXCEEDED".into(),
                                         message: error.to_string(),
                                     },
-                                )?;
+                                );
                                 continue;
                             }
                             match request {
                                 WireRequest::Hello(hello) => match verify_peer_hello(&hello) {
                                     Ok(()) => {
                                         self.authenticated.insert(peer, hello.peer_id);
-                                        self.respond(
+                                        self.respond_best_effort(
+                                            peer,
                                             channel,
                                             WireResponse::HelloAccepted { protocol_version: PROTOCOL_VERSION },
-                                        )?;
+                                        );
                                         return Ok(NetworkEvent::Authenticated {
                                             transport_peer: peer,
                                             application_peer: hello.peer_id,
                                         });
                                     }
                                     Err(error) => {
-                                        self.respond(
+                                        self.respond_best_effort(
+                                            peer,
                                             channel,
                                             WireResponse::Error {
                                                 code: "PEER_AUTHENTICATION_FAILED".into(),
                                                 message: error.to_string(),
                                             },
-                                        )?;
+                                        );
                                     }
                                 },
                                 request if self.authenticated.contains_key(&peer) => {
                                     return Ok(NetworkEvent::InboundRequest { transport_peer: peer, request, channel });
                                 }
                                 _ => {
-                                    self.respond(
+                                    self.respond_best_effort(
+                                        peer,
                                         channel,
                                         WireResponse::Error {
                                             code: "HANDSHAKE_REQUIRED".into(),
                                             message: "authenticate with PeerHello before other requests".into(),
                                         },
-                                    )?;
+                                    );
                                 }
                             }
                         }
