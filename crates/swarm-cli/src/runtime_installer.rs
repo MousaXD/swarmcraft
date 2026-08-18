@@ -1180,9 +1180,7 @@ fn hash_file(path: &Path, kind: HashKind) -> Result<String> {
             HashKind::Sha1 => "SHA1",
             HashKind::Sha256 => "SHA256",
         };
-        let script = format!(
-            "(Get-FileHash -LiteralPath $env:SWARMCRAFT_HASH_PATH -Algorithm {algorithm}).Hash"
-        );
+        let script = format!("(Get-FileHash -LiteralPath $env:SWARMCRAFT_HASH_PATH -Algorithm {algorithm}).Hash");
         let output = Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command"])
             .arg(script)
@@ -1190,11 +1188,7 @@ fn hash_file(path: &Path, kind: HashKind) -> Result<String> {
             .output()
             .context("PowerShell Get-FileHash is unavailable")?;
         if !output.status.success() {
-            bail!(
-                "PowerShell failed to hash {}: {}",
-                path.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+            bail!("PowerShell failed to hash {}: {}", path.display(), String::from_utf8_lossy(&output.stderr).trim());
         }
         let text = String::from_utf8_lossy(&output.stdout);
         parse_hash_output(&text).context("PowerShell returned no digest")
