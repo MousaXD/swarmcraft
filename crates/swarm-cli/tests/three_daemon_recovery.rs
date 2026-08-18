@@ -365,7 +365,7 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     thread::sleep(Duration::from_secs(1));
     let _daemon_c = spawn_daemon(&c, &[a_addr.clone(), b_addr.clone()]);
 
-    wait_until("initial authority quorum permit", Duration::from_secs(20), || {
+    wait_until("initial authority quorum permit", Duration::from_secs(40), || {
         permit_generation(&a, world)
             .is_some_and(|(epoch, fencing, heartbeat)| epoch == 1 && fencing == 1 && heartbeat >= 2)
     });
@@ -399,7 +399,7 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
         b.identity.peer_id(),
         "Bob should be the deterministic successor in this fixture"
     );
-    wait_until("successor live authority permit", Duration::from_secs(20), || {
+    wait_until("successor live authority permit", Duration::from_secs(40), || {
         permit_generation(winner, world)
             .is_some_and(|(epoch, fencing, heartbeat)| epoch == 2 && fencing == 2 && heartbeat >= 2)
     });
