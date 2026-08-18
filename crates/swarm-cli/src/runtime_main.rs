@@ -99,11 +99,7 @@ fn main() -> Result<()> {
             let mods = server_mods::evaluate_world_mods(&paths, world, &world_config.compatibility)?;
             let mod_state = if mods.ready {
                 ServerModsReadinessV1::Ready
-            } else if mods
-                .issues
-                .iter()
-                .any(|issue| matches!(issue.kind, server_mods::ModIssueKind::MissingRequired))
-            {
+            } else if mods.issues.iter().any(|issue| matches!(issue.kind, server_mods::ModIssueKind::MissingRequired)) {
                 ServerModsReadinessV1::Missing
             } else {
                 ServerModsReadinessV1::Incompatible
@@ -146,11 +142,14 @@ fn main() -> Result<()> {
                 anyhow::bail!("managed runtime launch was requested before runtime verification reported Ready");
             }
             let config = migration::load_runtime_config(&paths, world)?;
-            tokio::runtime::Runtime::new()?.block_on(migration::run_authority_runtime(
-                &paths,
-                &storage,
-                config.host_options(world),
-            ))?;
+            let options = migration::HostOptions {
+                world,
+                java: config.java,
+                server_jar: config.server_jar,
+                mod_jar: config.mod_jar,
+                accept_eula: config.accept_eula,
+            };
+            tokio::runtime::Runtime::new()?.block_on(migration::run_authority_runtime(&paths, &storage, options))?;
         }
     }
     Ok(())
