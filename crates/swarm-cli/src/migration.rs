@@ -144,11 +144,7 @@ pub fn request_world_stop(paths: &DataPaths, storage: &Storage, world: WorldId) 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(
-        &path, b"stop
-",
-    )
-    .with_context(|| format!("cannot write safe-stop intent {}", path.display()))?;
+    fs::write(&path, b"stop\n").with_context(|| format!("cannot write safe-stop intent {}", path.display()))?;
     Ok(())
 }
 
@@ -316,9 +312,7 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
                     false,
                     config.game_endpoint.clone(),
                     storage.latest_snapshot(world)?.and_then(|snapshot| snapshot.manifest_hash().ok()),
-                    Some(format!(
-                        "sleep state is unreadable or corrupt; authority launch is blocked: {error}"
-                    )),
+                    Some(format!("sleep state is unreadable or corrupt; authority launch is blocked: {error}")),
                 )?;
                 sleep(Duration::from_secs(1)).await;
                 continue;
@@ -532,11 +526,17 @@ async fn run_authority_runtime_inner(
     storage.verify_snapshot(&latest)?;
     verify_snapshot_signature(&latest)?;
     ensure_authority_generation(storage, &identity, &epoch)?;
-    let world_config =
-        storage.load_world_config(options.world).context("canonical runtime profile is not synchronized")?;
+    let world_config = storage
+        .load_world_config(options.world)
+        .context("canonical runtime profile is not synchronized")?;
     let mod_readiness = server_mods::evaluate_world_mods(paths, options.world, &world_config.compatibility)?;
     if !mod_readiness.ready {
-        let details = mod_readiness.issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>().join("; ");
+        let details = mod_readiness
+            .issues
+            .iter()
+            .map(|issue| issue.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
         bail!("local device is not server-mod ready for authority runtime: {details}");
     }
 
@@ -722,8 +722,7 @@ async fn run_authority_runtime_inner(
 
     match disposition {
         RuntimeDisposition::Transfer(target) => {
-            let transfer =
-                create_prepared_transfer(storage, &identity, options.world, target, &epoch, &final_manifest)?;
+            let transfer = create_prepared_transfer(storage, &identity, options.world, target, &epoch, &final_manifest)?;
             storage.save_transfer_record(&transfer)?;
             clear_transfer_intent(paths, options.world)?;
             publish_status(
@@ -1047,7 +1046,9 @@ pub fn observe_manual_transfer_epoch(paths: &DataPaths, storage: &Storage, world
     }
     verify_signature(next.authority_peer_id, next.authority_public_key, &next.signing_bytes()?, &next.signature)?;
     let current = storage.load_epoch_record(world)?;
-    let transfer = storage.load_transfer_record(world).context("manual epoch is missing its committed transfer")?;
+    let transfer = storage
+        .load_transfer_record(world)
+        .context("manual epoch is missing its committed transfer")?;
     validate_transfer_record_against_epoch(storage, &transfer, &current)?;
     if transfer.phase != TransferPhase::Committed
         || transfer.from_peer_id != current.authority_peer_id
@@ -1211,8 +1212,10 @@ fn validate_transfer_record_against_epoch(
     if signer.public_key != transfer.signer_public_key {
         bail!("transfer signer key does not match membership");
     }
-    let source_epoch =
-        transfer.next_epoch.checked_sub(1).context("transfer successor epoch has no source generation")?;
+    let source_epoch = transfer
+        .next_epoch
+        .checked_sub(1)
+        .context("transfer successor epoch has no source generation")?;
     let source_fencing_token = transfer
         .next_fencing_token
         .checked_sub(1)
