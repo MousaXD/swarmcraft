@@ -5,15 +5,19 @@ use crate::{
         managed_swarmcraft_fabric, managed_world_config_dir, managed_world_mods_dir, managed_world_root,
         managed_world_server_dir, runtime_install_lock_path, runtime_lock_path, RUNTIME_LOCK_SCHEMA_VERSION,
     },
+    server_mods,
 };
 use anyhow::{bail, Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha1::Sha1;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     env,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
@@ -456,9 +460,6 @@ impl<'a> RuntimeInstaller<'a> {
         if java.exists() && !force && probe_java_major(&java).ok() == Some(resolved.required_java_major) {
             return Ok(java);
         }
-        if target_root.exists() {
-            fs::remove_dir_all(&target_root).with_context(|| format!("cannot replace {}", target_root.display()))?;
-        }
         let parent = target_root.parent().context("managed Java directory has no parent")?;
         fs::create_dir_all(parent)?;
         let archive = parent.join(format!("java-{}.archive", unique_suffix()));
@@ -488,8 +489,23 @@ impl<'a> RuntimeInstaller<'a> {
             let _ = fs::remove_dir_all(&staging);
             bail!("downloaded Java runtime is incompatible with the selected Minecraft version");
         }
-        fs::rename(&staging, &target_root)
-            .with_context(|| format!("cannot atomically publish managed Java at {}", target_root.display()))?;
+        let backup = parent.join(format!("java-backup-{}", unique_suffix()));
+        let had_previous = target_root.exists();
+        if had_previous {
+            fs::rename(&target_root, &backup)
+                .with_context(|| format!("cannot preserve existing managed Java at {}", target_root.display()))?;
+        }
+        if let Err(error) = fs::rename(&staging, &target_root) {
+            if had_previous {
+                let _ = fs::rename(&backup, &target_root);
+            }
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error)
+                .with_context(|| format!("cannot atomically publish managed Java at {}", target_root.display()));
+        }
+        if had_previous {
+            let _ = fs::remove_dir_all(&backup);
+        }
         Ok(target_root.join(relative))
     }
 
@@ -682,40 +698,31 @@ impl<'a> RuntimeInstaller<'a> {
                     kind: RuntimeComponentKind::ServerMods,
                     state: RuntimeComponentState::Unavailable,
                     version: None,
-                    path: Some(managed_world_mods_dir(self.paths, world)),
+                    path: Some(server_mods::mods_dir(self.paths, world)),
                     managed: false,
                     detail: Some("canonical runtime compatibility manifest is not synchronized yet".into()),
                 };
             }
         };
-        let external: Vec<_> = config
-            .compatibility
-            .required_server_mods
-            .iter()
-            .filter(|requirement| {
-                !matches!(
-                    requirement.artifact_id.as_str(),
-                    "swarmcraft.legacy-compatibility"
-                        | "fabric-api"
-                        | "fabric_api"
-                        | "swarmcraft"
-                        | "swarmcraft-fabric"
-                )
-            })
-            .map(|requirement| format!("{} {}", requirement.artifact_id, requirement.version))
-            .collect();
-        RuntimeComponentStatus {
-            kind: RuntimeComponentKind::ServerMods,
-            state: if external.is_empty() { RuntimeComponentState::Ready } else { RuntimeComponentState::Unavailable },
-            version: None,
-            path: Some(managed_world_mods_dir(self.paths, world)),
-            managed: false,
-            detail: (!external.is_empty()).then(|| {
-                format!(
-                    "required user server mods need the server-mod manager and are not auto-downloaded: {}",
-                    external.join(", ")
-                )
-            }),
+        match server_mods::evaluate_world_mods(self.paths, world, &config.compatibility) {
+            Ok(readiness) => RuntimeComponentStatus {
+                kind: RuntimeComponentKind::ServerMods,
+                state: if readiness.ready { RuntimeComponentState::Ready } else { RuntimeComponentState::Incompatible },
+                version: None,
+                path: Some(readiness.mods_dir),
+                managed: false,
+                detail: (!readiness.ready).then(|| {
+                    readiness.issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>().join("; ")
+                }),
+            },
+            Err(error) => RuntimeComponentStatus {
+                kind: RuntimeComponentKind::ServerMods,
+                state: RuntimeComponentState::Incompatible,
+                version: None,
+                path: Some(server_mods::mods_dir(self.paths, world)),
+                managed: false,
+                detail: Some(error.to_string()),
+            },
         }
     }
 }
@@ -933,10 +940,7 @@ fn install_artifact(artifact: &ResolvedArtifact, destination: &Path, force: bool
             return Err(error);
         }
     };
-    if destination.exists() {
-        fs::remove_file(destination).with_context(|| format!("cannot replace {}", destination.display()))?;
-    }
-    fs::rename(&temporary, destination)
+    publish_replace(&temporary, destination)
         .with_context(|| format!("cannot publish downloaded artifact at {}", destination.display()))?;
     Ok(ArtifactRecord {
         version: artifact.version.clone(),
@@ -963,10 +967,7 @@ fn atomic_copy(source: &Path, destination: &Path) -> Result<()> {
         return Err(error.into());
     }
     sync_file(&temporary)?;
-    if destination.exists() {
-        fs::remove_file(destination)?;
-    }
-    fs::rename(&temporary, destination)?;
+    publish_replace(&temporary, destination)?;
     Ok(())
 }
 
@@ -979,11 +980,36 @@ fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     file.write_all(&bytes)?;
     file.sync_all()?;
     drop(file);
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    fs::rename(&temporary, path)?;
+    publish_replace(&temporary, path)?;
     Ok(())
+}
+
+fn publish_replace(temporary: &Path, destination: &Path) -> Result<()> {
+    if !destination.exists() {
+        fs::rename(temporary, destination)?;
+        return Ok(());
+    }
+    let backup = destination.with_extension(format!("backup-{}", unique_suffix()));
+    fs::rename(destination, &backup)
+        .with_context(|| format!("cannot preserve {} before replacement", destination.display()))?;
+    match fs::rename(temporary, destination) {
+        Ok(()) => {
+            let _ = fs::remove_file(&backup);
+            Ok(())
+        }
+        Err(error) => {
+            let restore = fs::rename(&backup, destination);
+            let _ = fs::remove_file(temporary);
+            if let Err(restore_error) = restore {
+                bail!(
+                    "replacement of {} failed ({error}) and rollback also failed ({restore_error}); preserved backup is {}",
+                    destination.display(),
+                    backup.display()
+                );
+            }
+            Err(error.into())
+        }
+    }
 }
 
 fn sync_file(path: &Path) -> Result<()> {
@@ -993,28 +1019,26 @@ fn sync_file(path: &Path) -> Result<()> {
 
 struct InstallGuard {
     path: PathBuf,
+    file: fs::File,
 }
 
 impl InstallGuard {
     fn acquire(path: &Path) -> Result<Self> {
         let parent = path.parent().context("runtime install lock has no parent")?;
         fs::create_dir_all(parent)?;
-        match OpenOptions::new().create_new(true).write(true).open(path) {
-            Ok(mut file) => {
-                writeln!(file, "pid={}", std::process::id())?;
-                file.sync_all()?;
-                Ok(Self { path: path.to_path_buf() })
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                bail!("another runtime installation is already in progress for this world")
-            }
-            Err(error) => Err(error.into()),
-        }
+        let mut file = OpenOptions::new().create(true).read(true).write(true).open(path)?;
+        file.try_lock_exclusive()
+            .map_err(|_| anyhow::anyhow!("another runtime installation is already in progress for this world"))?;
+        file.set_len(0)?;
+        writeln!(file, "pid={}", std::process::id())?;
+        file.sync_all()?;
+        Ok(Self { path: path.to_path_buf(), file })
     }
 }
 
 impl Drop for InstallGuard {
     fn drop(&mut self) {
+        let _ = self.file.unlock();
         let _ = fs::remove_file(&self.path);
     }
 }
@@ -1174,65 +1198,32 @@ enum HashKind {
 }
 
 fn hash_file(path: &Path, kind: HashKind) -> Result<String> {
-    #[cfg(windows)]
-    {
-        let algorithm = match kind {
-            HashKind::Sha1 => "SHA1",
-            HashKind::Sha256 => "SHA256",
-        };
-        let script = format!("(Get-FileHash -LiteralPath $env:SWARMCRAFT_HASH_PATH -Algorithm {algorithm}).Hash");
-        let output = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command"])
-            .arg(script)
-            .env("SWARMCRAFT_HASH_PATH", path)
-            .output()
-            .context("PowerShell Get-FileHash is unavailable")?;
-        if !output.status.success() {
-            bail!("PowerShell failed to hash {}: {}", path.display(), String::from_utf8_lossy(&output.stderr).trim());
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        parse_hash_output(&text).context("PowerShell returned no digest")
-    }
-    #[cfg(not(windows))]
-    {
-        let bits = match kind {
-            HashKind::Sha1 => "1",
-            HashKind::Sha256 => "256",
-        };
-        let shasum = Command::new("shasum").arg("-a").arg(bits).arg(path).output();
-        if let Ok(output) = shasum {
-            if output.status.success() {
-                return String::from_utf8_lossy(&output.stdout)
-                    .split_whitespace()
-                    .next()
-                    .map(ToOwned::to_owned)
-                    .context("shasum returned no digest");
+    let mut file = fs::File::open(path).with_context(|| format!("cannot open {} for hashing", path.display()))?;
+    let mut buffer = [0_u8; 64 * 1024];
+    match kind {
+        HashKind::Sha1 => {
+            let mut hasher = Sha1::new();
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
             }
+            Ok(format!("{:x}", hasher.finalize()))
         }
-        let program = match kind {
-            HashKind::Sha1 => "sha1sum",
-            HashKind::Sha256 => "sha256sum",
-        };
-        let output = Command::new(program)
-            .arg(path)
-            .output()
-            .with_context(|| format!("no SHA utility is available to verify {}", path.display()))?;
-        if !output.status.success() {
-            bail!("{program} failed to hash {}", path.display());
+        HashKind::Sha256 => {
+            let mut hasher = Sha256::new();
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Ok(format!("{:x}", hasher.finalize()))
         }
-        String::from_utf8_lossy(&output.stdout)
-            .split_whitespace()
-            .next()
-            .map(ToOwned::to_owned)
-            .context("hash utility returned no digest")
     }
-}
-
-#[cfg(windows)]
-fn parse_hash_output(text: &str) -> Option<String> {
-    text.lines()
-        .map(|line| line.chars().filter(|character| character.is_ascii_hexdigit()).collect::<String>())
-        .find(|line| line.len() == 40 || line.len() == 64)
 }
 
 fn eq_hash(left: &str, right: &str) -> bool {

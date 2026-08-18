@@ -95,13 +95,27 @@ const CONNECTIVITY_STATES = Object.freeze({
   },
 });
 
+const HOST_READINESS_STATES = Object.freeze({
+  safe: { label: 'Safe to shut down', kind: 'safe' },
+  sleeping: { label: 'Safe to shut down', kind: 'safe' },
+  world_will_stop: { label: 'World will go offline', kind: 'warning' },
+  syncing: { label: 'Wait before shutting down', kind: 'syncing' },
+  blocked_by_runtime: { label: 'Keep this PC on', kind: 'action' },
+  blocked_by_mods: { label: 'Keep this PC on', kind: 'action' },
+  blocked_by_quorum: { label: 'World will go offline', kind: 'action' },
+  degraded_safety: { label: 'Keep this PC on', kind: 'warning' },
+  conflict: { label: 'Host handoff unavailable', kind: 'danger' },
+  not_current_host: { label: 'Shutdown safety not proven', kind: 'warning' },
+  unknown: { label: 'Checking shutdown safety', kind: 'checking' },
+});
+
 const RUNTIME_COMPONENT_ALIASES = Object.freeze({
   java: ['java'],
   minecraft_server: ['minecraft_server', 'minecraftServer', 'server', 'minecraft'],
   fabric_loader: ['fabric_loader', 'fabricLoader', 'loader'],
   fabric_api: ['fabric_api', 'fabricApi'],
-  swarmcraft_integration: ['swarmcraft_integration', 'swarmcraftIntegration', 'swarmcraft_mod', 'swarmcraftMod', 'mod'],
-  world_directories: ['world_directories', 'worldDirectories', 'directories'],
+  swarmcraft_integration: ['swarmcraft_integration', 'swarmcraftIntegration', 'swarmcraft_mod', 'swarmcraftMod', 'swarmcraft_fabric', 'mod'],
+  world_directories: ['world_directories', 'worldDirectories', 'server_directories', 'directories'],
   server_mods: ['server_mods', 'serverMods', 'mods'],
 });
 
@@ -165,8 +179,12 @@ function normalizeRuntimeComponent(id, label, value) {
 }
 
 export function normalizeRuntimeStatus(raw) {
-  const source = parseJsonContract(raw, 'Runtime status');
-  const componentSource = source.components ?? source.runtime_components ?? source.runtimeComponents ?? {};
+  const envelope = parseJsonContract(raw, 'Runtime status');
+  const source = envelope.status && typeof envelope.status === 'object' ? envelope.status : envelope;
+  const rawComponents = source.components ?? source.runtime_components ?? source.runtimeComponents ?? {};
+  const componentSource = Array.isArray(rawComponents)
+    ? Object.fromEntries(rawComponents.map((component) => [component.kind ?? component.id, component]))
+    : rawComponents;
   const components = RUNTIME_COMPONENTS.map(([id, label]) => {
     const aliases = RUNTIME_COMPONENT_ALIASES[id] || [id];
     let value;
@@ -182,13 +200,19 @@ export function normalizeRuntimeStatus(raw) {
     }
     return normalizeRuntimeComponent(id, label, value);
   });
-  const overall = connectivityKey(source.state ?? source.status ?? source.phase);
+  const completedPhases = envelope.completed_phases ?? envelope.completedPhases ?? [];
+  const inferredPhase = Array.isArray(completedPhases) && completedPhases.length ? completedPhases.at(-1) : null;
+  const overall = connectivityKey(source.state ?? source.status ?? source.phase ?? inferredPhase);
   const eulaAccepted = Boolean(source.eula_accepted ?? source.eulaAccepted ?? source.accept_eula ?? source.acceptEula);
+  const eulaComponent = Array.isArray(rawComponents)
+    ? rawComponents.find((component) => connectivityKey(component.kind ?? component.id) === 'eula')
+    : componentSource.eula;
   const eulaRequired = !eulaAccepted && Boolean(
     source.eula_required
       ?? source.eulaRequired
-      ?? (overall === 'eula_required'),
-  );
+      ?? (overall === 'eula_required')
+      ?? false
+  ) || (!eulaAccepted && connectivityKey(eulaComponent?.state ?? eulaComponent?.status) === 'required');
   const ready = Boolean(source.ready ?? source.runtime_ready ?? source.runtimeReady ?? overall === 'ready');
   const failure = source.failure ?? source.error ?? source.failure_reason ?? source.failureReason ?? null;
   const diagnosticDetail = failure && typeof failure === 'object'
@@ -361,6 +385,25 @@ export function normalizeMigrationState(raw) {
   };
 }
 
+export function normalizeHostReadiness(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const state = connectivityKey(source.state || 'unknown');
+  const mapped = HOST_READINESS_STATES[state] || HOST_READINESS_STATES.unknown;
+  return {
+    available: state !== 'unknown',
+    state: HOST_READINESS_STATES[state] ? state : 'unknown',
+    kind: mapped.kind,
+    label: mapped.label,
+    detail: String(source.detail || '').trim() || 'SwarmCraft has not yet proven whether this computer may safely shut down.',
+    safeToShutdown: Boolean(source.safe_to_shutdown ?? source.safeToShutdown),
+    successorPeerId: source.successor_peer_id ?? source.successorPeerId ?? null,
+    handoffCandidatePeerId: source.handoff_candidate_peer_id ?? source.handoffCandidatePeerId ?? null,
+    worldDataReplicated: Boolean(source.world_data_replicated ?? source.worldDataReplicated),
+    peers: Array.isArray(source.peers) ? source.peers : [],
+    raw: source,
+  };
+}
+
 export function connectivityFromStatus(status = {}) {
   return normalizeConnectivityDiagnostics(status);
 }
@@ -423,6 +466,14 @@ export function createBackendAdapter(invoke) {
     leaveWorld: (world) => call('leave_world', { world }),
     createInvite: (payload) => call('create_invite', payload),
     worldStatus: (world) => call('world_status', { world }),
+    hostReadiness: async (world) => {
+      const raw = await call('host_readiness', { world });
+      try {
+        return normalizeHostReadiness(typeof raw === 'string' ? JSON.parse(raw) : raw);
+      } catch (error) {
+        throw new Error(`Host readiness was not valid JSON: ${error}`);
+      }
+    },
     worldCompatibility: (world) => call('world_compatibility', { world }),
     worldConflicts: (world) => call('world_conflicts', { world }),
     setBackgroundSeeding: (world, enabled) => call('set_background_seeding', { world, enabled }),
@@ -444,7 +495,7 @@ export function createBackendAdapter(invoke) {
       }
       return call('host_world', payload);
     },
-    stopHost: () => call('stop_host'),
+    stopHost: (world) => call('stop_host', { world }),
     connectivityDiagnostics: async () => {
       const raw = await call('connectivity_diagnostics');
       let parsed = raw;

@@ -1,8 +1,13 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
-use swarm_cli::runtime_installer::{RuntimeInstallOptions, RuntimeInstaller, RuntimeProgress};
+use swarm_cli::{
+    host_readiness, migration,
+    runtime_installer::{RuntimeInstallOptions, RuntimeInstaller, RuntimeProgress},
+    server_mods,
+};
 use swarm_core::DataPaths;
+use swarm_network::ServerModsReadinessV1;
 use swarm_protocol::WorldId;
 use swarm_storage::Storage;
 
@@ -78,7 +83,33 @@ fn main() -> Result<()> {
             print_json(&report)?;
         }
         RuntimeCommand::Verify { world } => {
-            print_json(&installer.verify(parse_world(&world)?)?)?;
+            let world = parse_world(&world)?;
+            let status = installer.verify(world)?;
+            if status.ready {
+                let config = migration::load_runtime_config(&paths, world)?;
+                let descriptor = storage.load_world_descriptor(world)?;
+                host_readiness::record_runtime_verified(&paths, world, &config, descriptor.compatibility_fingerprint)?;
+                let world_config = storage.load_world_config(world)?;
+                let mods = server_mods::evaluate_world_mods(&paths, world, &world_config.compatibility)?;
+                let state = if mods.ready {
+                    ServerModsReadinessV1::Ready
+                } else if mods
+                    .issues
+                    .iter()
+                    .any(|issue| matches!(issue.kind, server_mods::ModIssueKind::MissingRequired))
+                {
+                    ServerModsReadinessV1::Missing
+                } else {
+                    ServerModsReadinessV1::Incompatible
+                };
+                host_readiness::record_server_mod_readiness(
+                    &paths,
+                    world,
+                    descriptor.compatibility_fingerprint,
+                    state,
+                )?;
+            }
+            print_json(&status)?;
         }
     }
     Ok(())

@@ -65,10 +65,10 @@ def reconcile_cli_main() -> None:
     if "Stop { world: String }," not in text:
         text = replace_once(
             text,
-            "    /// Request a safe wake of a sleeping world.\n",
+            "    /// Request a safe wake of a sleeping world. Multi-member worlds remain blocked until a quorum transition exists.\n",
             "    /// Request a safe stop. Success is reported only after the Fabric save barrier, final checkpoint and durable sleep record complete.\n"
             "    Stop { world: String },\n"
-            "    /// Request a safe wake of a sleeping world.\n",
+            "    /// Request a safe wake of a sleeping world. Multi-member worlds remain blocked until a quorum transition exists.\n",
             "safe stop command",
         )
 
@@ -84,18 +84,18 @@ def reconcile_cli_main() -> None:
     # A newly created world needs a canonical empty base snapshot so the shared
     # migration/runtime path can let Minecraft generate the first playable world.
     if "initial empty canonical snapshot" not in text:
-        create_anchor = "            storage.save_world_config(&world_config)?;"
+        create_anchor = "            storage.save_world_config(&config)?;"
         if create_anchor in text:
             block = """
             // Seed an initial empty canonical snapshot. The shared authority runtime restores this
             // empty directory and Minecraft creates the actual world on first launch; from then on
             // all state is checkpointed through the normal canonical snapshot path.
-            let initial_source = paths.root.join("initial-world").join(world.to_hex());
+            let initial_source = paths.root.join("initial-world").join(world_id.to_hex());
             std::fs::create_dir_all(&initial_source)?;
             let mut initial_snapshot = storage.snapshot_directory(
                 &initial_source,
                 swarm_storage::SnapshotContext {
-                    world,
+                    world: world_id,
                     snapshot_number: 1,
                     epoch: 0,
                     sequence: 1,
@@ -800,7 +800,6 @@ def main() -> None:
     reconcile_runtime_main()
     reconcile_desktop_bridge()
     reconcile_frontend()
-    reconcile_ci_packaging()
 
 
 if __name__ == "__main__":

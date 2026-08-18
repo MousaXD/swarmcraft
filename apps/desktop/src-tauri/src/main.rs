@@ -24,6 +24,22 @@ async fn run_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, Stri
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+async fn run_runtime_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, String> {
+    let output = app
+        .shell()
+        .sidecar("swarmcraft-runtime")
+        .map_err(|error| error.to_string())?
+        .args(arguments)
+        .output()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if error.is_empty() { "SwarmCraft runtime command failed".into() } else { error });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 fn require_value(value: String, label: &str) -> Result<String, String> {
     let value = value.trim().to_owned();
     if value.is_empty() {
@@ -124,6 +140,12 @@ async fn create_invite(
 async fn world_status(app: AppHandle, world: String) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
     run_cli(&app, vec!["world".into(), "status".into(), world]).await
+}
+
+#[tauri::command]
+async fn host_readiness(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "host-readiness".into(), world, "--json".into()]).await
 }
 
 #[tauri::command]
@@ -254,6 +276,69 @@ async fn configure_world_runtime(
 }
 
 #[tauri::command]
+async fn runtime_status(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_runtime_cli(&app, vec!["status".into(), world]).await
+}
+
+#[tauri::command]
+async fn runtime_plan(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_runtime_cli(&app, vec!["plan".into(), world]).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn runtime_install(app: AppHandle, world: String, accept_eula: bool) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    let mut arguments = vec!["install".into(), world];
+    if accept_eula { arguments.push("--accept-eula".into()); }
+    run_runtime_cli(&app, arguments).await
+}
+
+#[tauri::command]
+async fn runtime_repair(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_runtime_cli(&app, vec!["repair".into(), world]).await
+}
+
+#[tauri::command]
+async fn runtime_verify(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_runtime_cli(&app, vec!["verify".into(), world]).await
+}
+
+#[tauri::command]
+async fn runtime_launch(
+    app: AppHandle,
+    processes: State<'_, RuntimeProcesses>,
+    world: String,
+) -> Result<Option<u32>, String> {
+    let world = require_value(world, "World ID")?;
+    // Starting/ensuring the daemon is the launch trigger. The daemon's migration
+    // supervisor consumes the persisted RuntimeLaunchConfig and owns the shared
+    // authority -> restore -> Fabric launch orchestration path.
+    processes.ensure_daemon_running(&app, "/ip4/0.0.0.0/udp/0/quic-v1".into())?;
+    for _ in 0..160 {
+        match run_cli(&app, vec!["world".into(), "migration-status".into(), world.clone(), "--json".into()]).await {
+            Ok(raw) => {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let phase = value.get("phase").and_then(|v| v.as_str()).unwrap_or_default();
+                    let ready = value.get("runtime_ready").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if phase == "ready" && ready { return Ok(None); }
+                    if matches!(phase, "failed" | "blocked") {
+                        let detail = value.get("failure_reason").and_then(|v| v.as_str()).unwrap_or("shared runtime launch was blocked");
+                        return Err(detail.to_owned());
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    Err("Minecraft did not reach the shared runtime ready state before the launch timeout".into())
+}
+
+#[tauri::command]
 async fn connectivity_diagnostics(
     app: AppHandle,
     processes: State<'_, RuntimeProcesses>,
@@ -314,6 +399,7 @@ fn main() {
             leave_world,
             create_invite,
             world_status,
+            host_readiness,
             world_compatibility,
             world_conflicts,
             set_background_seeding,
@@ -325,6 +411,12 @@ fn main() {
             migration_status,
             wake_world,
             configure_world_runtime,
+            runtime_status,
+            runtime_plan,
+            runtime_install,
+            runtime_repair,
+            runtime_verify,
+            runtime_launch,
             connectivity_diagnostics,
             ensure_daemon_running,
             start_daemon,

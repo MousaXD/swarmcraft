@@ -40,13 +40,9 @@ fn fixture(root: PathBuf) -> RuntimeFixture {
         datapacks: Vec::new(),
     };
     let compatibility_fingerprint = compatibility.fingerprint().unwrap();
-    let (world, genesis) = create_world_genesis_with_fingerprint(
-        &identity,
-        "26.1.2".into(),
-        "0.19.3".into(),
-        compatibility_fingerprint,
-    )
-    .unwrap();
+    let (world, genesis) =
+        create_world_genesis_with_fingerprint(&identity, "26.1.2".into(), "0.19.3".into(), compatibility_fingerprint)
+            .unwrap();
 
     storage
         .create_world(&WorldMetadataV1 {

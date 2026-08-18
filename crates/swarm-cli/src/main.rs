@@ -4,6 +4,7 @@ mod invite;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
+use swarm_cli::host_readiness;
 use swarm_cli::migration::{self, RuntimeLaunchConfig, TransferPrepareResult};
 use swarm_cli::server_mods;
 use swarm_core::{
@@ -115,6 +116,14 @@ enum WorldCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Show the authoritative backend answer to whether this device may safely shut down.
+    HostReadiness {
+        world: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Request a safe stop. Success is reported only after the Fabric save barrier, final checkpoint and durable sleep record complete.
+    Stop { world: String },
     /// Request a safe wake of a sleeping world. Multi-member worlds remain blocked until a quorum transition exists.
     Wake { world: String },
     /// Request a final checkpoint and prepare a manual authority transfer.
@@ -294,6 +303,29 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             };
             sign_world_config(&identity, &mut config)?;
             storage.save_world_config(&config)?;
+
+            // Seed an initial empty canonical snapshot. The shared authority runtime restores this
+            // empty directory and Minecraft creates the actual world on first launch; from then on
+            // all state is checkpointed through the normal canonical snapshot path.
+            let initial_source = paths.root.join("initial-world").join(world_id.to_hex());
+            std::fs::create_dir_all(&initial_source)?;
+            let mut initial_snapshot = storage.snapshot_directory(
+                &initial_source,
+                swarm_storage::SnapshotContext {
+                    world: world_id,
+                    snapshot_number: 1,
+                    epoch: 0,
+                    sequence: 1,
+                    previous_snapshot_hash: None,
+                    authority_peer_id: identity.peer_id(),
+                    authority_public_key: identity.public_key(),
+                },
+            )?;
+            identity.sign_snapshot(&mut initial_snapshot)?;
+            storage.commit_snapshot(&initial_snapshot)?;
+            let _ = std::fs::remove_dir_all(&initial_source);
+            // initial empty canonical snapshot
+
             for source in &server_mod {
                 server_mods::add_local_mod(paths, world_id, &config.compatibility, source)?;
             }
@@ -464,6 +496,39 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                     println!("Failure: {reason}");
                 }
             }
+        }
+        WorldCommand::HostReadiness { world, json } => {
+            let world = parse_world(&world)?;
+            storage.load_world(world)?;
+            let report = match host_readiness::load_host_readiness_report(paths, world) {
+                Ok(report) => report,
+                Err(error) => {
+                    let identity = PeerIdentity::load_or_create(paths)?;
+                    host_readiness::unknown_report(
+                        world,
+                        identity.peer_id(),
+                        storage.load_epoch_record(world).ok().map(|epoch| epoch.authority_peer_id),
+                        format!("Host-readiness service has not produced a fresh report yet: {error}"),
+                    )
+                }
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Shutdown safety: {:?}", report.state);
+                println!("Safe to shut down: {}", report.safe_to_shutdown);
+                println!("{}", report.detail);
+                if let Some(successor) = report.successor_peer_id {
+                    println!("Automatic successor: {successor}");
+                } else if let Some(candidate) = report.handoff_candidate_peer_id {
+                    println!("Transfer-first candidate: {candidate}");
+                }
+            }
+        }
+        WorldCommand::Stop { world } => {
+            let world = parse_world(&world)?;
+            migration::request_world_stop(&paths, &storage, world)?;
+            println!("Safe stop requested for {world}; wait for migration status to become sleeping before treating shutdown as complete.");
         }
         WorldCommand::Wake { world } => {
             let world = parse_world(&world)?;

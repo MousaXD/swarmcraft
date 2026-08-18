@@ -1,4 +1,4 @@
-use crate::{authority_permit::PermitWatch, server_mods};
+use crate::{authority_permit::PermitWatch, host_readiness, server_mods};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -110,6 +110,8 @@ pub enum TransferPrepareResult {
 }
 
 pub fn save_runtime_config(paths: &DataPaths, world: WorldId, config: &RuntimeLaunchConfig) -> Result<()> {
+    // Any launch-path change invalidates the prior machine-local runtime proof.
+    host_readiness::invalidate_runtime_verification(paths, world)?;
     let path = runtime_config_path(paths, world);
     atomic_json(&path, config)?;
     Ok(())
@@ -126,6 +128,28 @@ pub fn load_migration_status(paths: &DataPaths, world: WorldId) -> Result<Migrat
     let path = migration_status_path(paths, world);
     let bytes = fs::read(&path).with_context(|| format!("migration status is unavailable at {}", path.display()))?;
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+pub fn request_world_stop(paths: &DataPaths, storage: &Storage, world: WorldId) -> Result<()> {
+    storage.load_world(world)?;
+    if storage.load_sleep_record(world).is_ok() {
+        return Ok(());
+    }
+    let identity = PeerIdentity::load_or_create(paths)?;
+    let epoch = storage.load_epoch_record(world)?;
+    if epoch.authority_peer_id != identity.peer_id() || epoch.authority_public_key != identity.public_key() {
+        bail!("only the current authority may request a safe world stop");
+    }
+    let path = stop_intent_path(paths, world);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &path, b"stop
+",
+    )
+    .with_context(|| format!("cannot write safe-stop intent {}", path.display()))?;
+    Ok(())
 }
 
 pub fn request_world_wake(paths: &DataPaths, storage: &Storage, world: WorldId) -> Result<()> {
@@ -594,6 +618,23 @@ async fn run_authority_runtime_inner(
         )?;
         return Err(error);
     }
+    // A runtime becomes host-ready only after the actual Fabric process has
+    // launched and reported the exact world compatibility fingerprint. Persist
+    // that machine-local proof so another peer can distinguish configured paths
+    // from a runtime that has truly passed launch verification.
+    let verified_config = RuntimeLaunchConfig {
+        java: options.java.clone(),
+        server_jar: options.server_jar.clone(),
+        mod_jar: options.mod_jar.clone(),
+        accept_eula: options.accept_eula,
+        game_endpoint: game_endpoint.clone(),
+    };
+    host_readiness::record_runtime_verified(
+        paths,
+        options.world,
+        &verified_config,
+        metadata.genesis.compatibility_fingerprint,
+    )?;
     publish_status(
         paths,
         storage,
@@ -730,6 +771,24 @@ async fn wait_for_runtime_exit(
             return Ok(RuntimeDisposition::Sleep);
         }
         ensure_authority_generation(storage, identity, epoch)?;
+        if stop_intent_path(paths, epoch.world_id).exists() {
+            let stop_result = async {
+                session.prepare_shutdown(1, FABRIC_SHUTDOWN_TIMEOUT).await?;
+                timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
+                    .await
+                    .map_err(|_| anyhow!("Minecraft did not stop after the shutdown save barrier"))??;
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+            clear_stop_intent(paths, epoch.world_id)?;
+            match stop_result {
+                Ok(()) => return Ok(RuntimeDisposition::Sleep),
+                Err(error) => {
+                    warn!(world = %epoch.world_id, %error, "safe stop save barrier failed; keeping Minecraft running");
+                    continue;
+                }
+            }
+        }
         match load_transfer_intent(paths, epoch.world_id) {
             Ok(Some(target)) => {
                 validate_transfer_target(storage, identity, epoch.world_id, target)?;
@@ -1443,6 +1502,18 @@ fn runtime_config_path(paths: &DataPaths, world: WorldId) -> PathBuf {
 
 fn migration_status_path(paths: &DataPaths, world: WorldId) -> PathBuf {
     control_dir(paths, world).join("migration-status.json")
+}
+
+fn stop_intent_path(paths: &DataPaths, world: WorldId) -> PathBuf {
+    paths.root.join("runtime-control").join(world.to_hex()).join("stop.intent")
+}
+
+fn clear_stop_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
+    let path = stop_intent_path(paths, world);
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| format!("cannot clear safe-stop intent {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn wake_intent_path(paths: &DataPaths, world: WorldId) -> PathBuf {

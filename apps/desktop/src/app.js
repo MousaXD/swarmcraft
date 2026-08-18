@@ -730,7 +730,7 @@ function openSleepDialog() {
 }
 
 async function sleepWorld() {
-  await run('Stopping local Minecraft runtime…', () => backend.stopHost(), {
+  await run('Stopping local Minecraft runtime…', () => backend.stopHost(worldId()), {
     successMessage: 'World runtime stopped gracefully. Replica storage can continue separately.',
   });
   $('sleepDialog').close();
@@ -796,7 +796,7 @@ async function hostWorld() {
 }
 
 async function stopHost() {
-  await run('Stopping Minecraft runtime…', () => backend.stopHost(), { successMessage: 'Minecraft runtime stopped.' });
+  await run('Stopping Minecraft runtime…', () => backend.stopHost(), { successMessage: 'World stopped safely. Latest world state is checkpointed and sleeping.' });
 }
 
 async function startDaemon() {
