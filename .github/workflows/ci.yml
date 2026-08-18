@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, agent/final-player-journey-gates]
   pull_request:
 
 permissions:
@@ -54,6 +54,8 @@ jobs:
         run: cargo test -p swarm-storage --test failure_injection --locked
       - name: Existing-world import journey
         run: cargo test -p swarm-cli world_import --lib --locked
+      - name: Host Readiness negative matrix and two-member quorum fail-closed
+        run: cargo test -p swarm-cli host_readiness::tests --lib --locked
       - name: Live join replication
         run: cargo test -p swarm-cli --test live_join_replication --locked
       - name: Host process lifecycle
