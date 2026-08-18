@@ -21,28 +21,50 @@ text = text.replace(
 )
 text = text.replace('paths.root.join("initial-world").join(world.to_hex())', 'paths.root.join("initial-world").join(world_id.to_hex())')
 text = text.replace('                    world,\n                    snapshot_number: 1,', '                    world: world_id,\n                    snapshot_number: 1,')
-# Make the crash-safe lock explicit for clippy while keeping the project's Rust 1.88 MSRV.
 text = text.replace(
     'OpenOptions::new().create(true).read(true).write(true).open(path)?;',
     'OpenOptions::new().create(true).read(true).write(true).truncate(false).open(path)?;',
 )
 text = text.replace('let _ = self.file.unlock();', 'let _ = FileExt::unlock(&self.file);')
-# The GitHub Actions token used as the temporary integration workbench cannot
-# push workflow-file changes. Apply packaging workflow edits separately through
-# the repository connector, after the tested code commit lands.
 text = text.replace('    reconcile_ci_packaging()\n', '')
 path.write_text(text)
 
-# The player-facing Host Readiness/Mods finish pass is already in the branch.
-# Only the still-live issue #28 manual-runtime reconciliation remains here.
 runpy.run_path('.github/scripts/finalize_manual_runtime.py', run_name='__main__')
 
-# finalize_manual_runtime inserts manual_file_status inside RuntimeInstaller's
-# impl block, so generated calls must use the associated-function form.
 installer_path = Path('crates/swarm-cli/src/runtime_installer.rs')
 installer = installer_path.read_text()
 installer = installer.replace('|config| manual_file_status(', '|config| Self::manual_file_status(')
 installer = installer.replace('\n        manual_file_status(\n', '\n        Self::manual_file_status(\n')
+if '    fn manual_file_status(\n' not in installer:
+    anchor = '    fn server_mods_status(&self, world: WorldId) -> RuntimeComponentStatus {'
+    if anchor not in installer:
+        raise RuntimeError('RuntimeInstaller server_mods_status anchor moved')
+    helper = '''    fn manual_file_status(
+        kind: RuntimeComponentKind,
+        path: &Path,
+        ready_detail: &str,
+    ) -> RuntimeComponentStatus {
+        let ready = path.is_file();
+        RuntimeComponentStatus {
+            kind,
+            state: if ready {
+                RuntimeComponentState::Ready
+            } else {
+                RuntimeComponentState::Missing
+            },
+            version: None,
+            path: Some(path.to_path_buf()),
+            managed: false,
+            detail: Some(if ready {
+                ready_detail.to_owned()
+            } else {
+                format!("manual runtime file is missing: {}", path.display())
+            }),
+        }
+    }
+
+'''
+    installer = installer.replace(anchor, helper + anchor, 1)
 installer_path.write_text(installer)
 
 runpy.run_path('.github/scripts/add_safe_stop_acceptance.py', run_name='__main__')
