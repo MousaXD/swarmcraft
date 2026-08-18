@@ -19,6 +19,7 @@ name = "swarmcraft-runtime"
 path = "src/runtime_main.rs"
 
 [dependencies]
+blake3.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 hex.workspace = true

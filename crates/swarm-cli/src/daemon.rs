@@ -4,7 +4,10 @@ use std::{
     fmt::Debug,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use swarm_cli::authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL};
+use swarm_cli::{
+    authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
+    host_readiness::{self, PeerReadinessObservation},
+};
 use swarm_consensus::{
     elect_authority, has_quorum, reconcile_solo_history, validate_recovery_certificate_shape, AuthorityCandidate,
     AuthorityGeneration, SoloReconciliation,
@@ -19,8 +22,8 @@ use swarm_core::{
     verify_snapshot_signature, verify_transfer_signature, DataPaths, PeerIdentity,
 };
 use swarm_network::{
-    load_or_create_transport_key, BlobResumeV1, NetworkEvent, ReplicaAckV1, ResponseChannel, SwarmNode,
-    TransportPeerId, WireRequest, WireResponse, MAX_BLOB_CHUNK,
+    load_or_create_transport_key, BlobResumeV1, HostCapabilityV1, NetworkEvent, ReplicaAckV1, ResponseChannel,
+    SwarmNode, TransportPeerId, WireRequest, WireResponse, MAX_BLOB_CHUNK,
 };
 use swarm_protocol::{
     AuthorityLeaseGrantV1, BlobDescriptor, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, PeerId,
@@ -42,6 +45,7 @@ enum OutboundContext {
     RecoveryBallot { world: WorldId, peer: PeerId, ballot_hash: Hash32 },
     Epoch { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
     Status { world: WorldId, peer: PeerId },
+    HostCapability { world: WorldId, peer: PeerId },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,6 +66,12 @@ struct ObservedStatus {
     observed_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct ObservedCapability {
+    capability: HostCapabilityV1,
+    observed_at: Instant,
+}
+
 #[derive(Debug, Default)]
 struct LeaseRuntime {
     authenticated_peers: HashMap<TransportPeerId, PeerId>,
@@ -73,11 +83,13 @@ struct LeaseRuntime {
     permit_heartbeats: HashMap<WorldId, u64>,
     inbound_leases: HashMap<WorldId, InboundLease>,
     peer_status: HashMap<(WorldId, PeerId), ObservedStatus>,
+    peer_capability: HashMap<(WorldId, PeerId), ObservedCapability>,
     recovery_not_before: HashMap<WorldId, Instant>,
     recovery_replication_sent: HashSet<(WorldId, PeerId)>,
 }
 
 struct HandlerContext<'a> {
+    paths: &'a DataPaths,
     identity: &'a PeerIdentity,
     storage: &'a Storage,
 }
@@ -115,6 +127,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
         "world-config-v1".into(),
         "solo-history-v1".into(),
         "background-replica-v1".into(),
+        "host-readiness-v1".into(),
     ])?;
     let mut node = SwarmNode::new(transport_key, hello)?;
     node.listen(listen.parse().context("invalid listen multiaddress")?)?;
@@ -160,7 +173,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                         let application_peer = node
                             .application_peer(&transport_peer)
                             .context("authenticated request lost application peer mapping")?;
-                        let context = HandlerContext { identity: &identity, storage };
+                        let context = HandlerContext { paths, identity: &identity, storage };
                         let mut state = RequestState {
                             pending_manifests: &mut pending_manifests,
                         outbound: &mut outbound,
@@ -230,6 +243,9 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                                 OutboundContext::Status { world, peer } => {
                                     leases.peer_status.remove(&(world, peer));
                                 }
+                                OutboundContext::HostCapability { world, peer } => {
+                                    leases.peer_capability.remove(&(world, peer));
+                                }
                                 OutboundContext::Manifest { .. } => {}
                             }
                         }
@@ -241,6 +257,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                             leases.recovery_votes.retain(|(_, peer), _| *peer != application_peer);
                             leases.epoch_acks.retain(|(_, peer), _| *peer != application_peer);
                             leases.peer_status.retain(|(_, peer), _| *peer != application_peer);
+                            leases.peer_capability.retain(|(_, peer), _| *peer != application_peer);
                         }
                         info!(transport = %transport_peer, "peer disconnected");
                     }
@@ -268,6 +285,9 @@ fn maintain_authority_leases(
     let recovery_initial_delay = Duration::from_millis(AUTHORITY_LEASE_DURATION_MS) + RECOVERY_SETTLE_DELAY;
     for metadata in storage.list_worlds()? {
         let world = metadata.world_id;
+        if let Err(error) = publish_host_readiness_snapshot(paths, storage, identity, runtime, world, now) {
+            warn!(%world, %error, "host-readiness snapshot could not be published");
+        }
         if storage.load_sleep_record(world).is_ok() {
             clear_permit(paths, world)?;
             clear_runtime_world(runtime, world);
@@ -303,6 +323,8 @@ fn maintain_authority_leases(
                 clear_permit(paths, world)?;
                 continue;
             }
+            request_world_statuses(storage, node, outbound, runtime, &descriptor, identity.peer_id())?;
+            request_host_capabilities(node, outbound, runtime, &descriptor, identity.peer_id())?;
             let context = LocalAuthorityContext {
                 paths,
                 storage,
@@ -323,6 +345,7 @@ fn maintain_authority_leases(
         }
 
         request_world_statuses(storage, node, outbound, runtime, &descriptor, identity.peer_id())?;
+        request_host_capabilities(node, outbound, runtime, &descriptor, identity.peer_id())?;
         if runtime.authenticated_peers.values().any(|peer| *peer == epoch.authority_peer_id) {
             continue;
         }
@@ -870,6 +893,97 @@ fn request_world_statuses(
     Ok(())
 }
 
+fn request_host_capabilities(
+    node: &mut SwarmNode,
+    outbound: &mut HashMap<String, OutboundContext>,
+    runtime: &LeaseRuntime,
+    descriptor: &WorldDescriptorV1,
+    local_peer: PeerId,
+) -> Result<()> {
+    for (transport_peer, application_peer) in &runtime.authenticated_peers {
+        if *application_peer == local_peer {
+            continue;
+        }
+        let Some(member) = descriptor.member(*application_peer) else {
+            continue;
+        };
+        if member.banned || capability_request_pending(outbound, descriptor.world_id, *application_peer) {
+            continue;
+        }
+        let request_id =
+            node.send_request(transport_peer, WireRequest::HostCapability { world_id: descriptor.world_id })?;
+        outbound.insert(
+            request_key(&request_id),
+            OutboundContext::HostCapability { world: descriptor.world_id, peer: *application_peer },
+        );
+    }
+    Ok(())
+}
+
+fn peer_readiness_observations(
+    descriptor: &WorldDescriptorV1,
+    local_peer: PeerId,
+    runtime: &LeaseRuntime,
+    now: Instant,
+) -> Vec<PeerReadinessObservation> {
+    descriptor
+        .members
+        .iter()
+        .filter(|member| member.peer_id != local_peer && !member.banned)
+        .map(|member| {
+            let peer = member.peer_id;
+            let reachable = runtime.authenticated_peers.values().any(|value| *value == peer);
+            let status = runtime
+                .peer_status
+                .get(&(descriptor.world_id, peer))
+                .filter(|observed| now.saturating_duration_since(observed.observed_at) <= STATUS_FRESHNESS)
+                .map(|observed| observed.status.clone());
+            let capability = runtime
+                .peer_capability
+                .get(&(descriptor.world_id, peer))
+                .filter(|observed| now.saturating_duration_since(observed.observed_at) <= STATUS_FRESHNESS)
+                .map(|observed| observed.capability.clone());
+            PeerReadinessObservation { peer_id: peer, reachable, status, capability }
+        })
+        .collect()
+}
+
+fn local_recovery_quorum_without_authority(
+    storage: &Storage,
+    world: WorldId,
+    local_peer: PeerId,
+    runtime: &LeaseRuntime,
+    now: Instant,
+) -> Result<bool> {
+    let Ok(descriptor) = storage.load_world_descriptor(world) else {
+        return Ok(false);
+    };
+    let Ok(epoch) = storage.load_epoch_record(world) else {
+        return Ok(false);
+    };
+    let Some(latest) = storage.latest_snapshot(world)? else {
+        return Ok(false);
+    };
+    let observations = peer_readiness_observations(&descriptor, local_peer, runtime, now);
+    host_readiness::surviving_recovery_quorum(&descriptor, &epoch, &latest, local_peer, &observations)
+}
+
+fn publish_host_readiness_snapshot(
+    paths: &DataPaths,
+    storage: &Storage,
+    identity: &PeerIdentity,
+    runtime: &LeaseRuntime,
+    world: WorldId,
+    now: Instant,
+) -> Result<()> {
+    let observations = storage
+        .load_world_descriptor(world)
+        .map(|descriptor| peer_readiness_observations(&descriptor, identity.peer_id(), runtime, now))
+        .unwrap_or_default();
+    let report = host_readiness::evaluate_from_storage(storage, identity.peer_id(), world, &observations)?;
+    host_readiness::publish_report(paths, world, &report)
+}
+
 fn recovery_window_open(runtime: &LeaseRuntime, world: WorldId, generation: AuthorityGeneration, now: Instant) -> bool {
     if let Some(lease) = runtime.inbound_leases.get(&world) {
         if lease.generation > generation {
@@ -967,6 +1081,7 @@ fn clear_runtime_world(runtime: &mut LeaseRuntime, world: WorldId) {
     runtime.recovery_round_floor.remove(&world);
     runtime.epoch_acks.retain(|(ack_world, _), _| *ack_world != world);
     runtime.peer_status.retain(|(status_world, _), _| *status_world != world);
+    runtime.peer_capability.retain(|(status_world, _), _| *status_world != world);
     runtime.permit_heartbeats.remove(&world);
     runtime.inbound_leases.remove(&world);
     runtime.recovery_not_before.remove(&world);
@@ -1030,6 +1145,12 @@ fn epoch_request_pending(
 fn status_request_pending(outbound: &HashMap<String, OutboundContext>, world: WorldId, peer: PeerId) -> bool {
     outbound.values().any(|context| {
         matches!(context, OutboundContext::Status { world: request_world, peer: request_peer } if *request_world == world && *request_peer == peer)
+    })
+}
+
+fn capability_request_pending(outbound: &HashMap<String, OutboundContext>, world: WorldId, peer: PeerId) -> bool {
+    outbound.values().any(|context| {
+        matches!(context, OutboundContext::HostCapability { world: request_world, peer: request_peer } if *request_world == world && *request_peer == peer)
     })
 }
 
@@ -1146,6 +1267,17 @@ fn handle_request(
         WireRequest::WorldStatus { world_id } => {
             let status = world_status(storage, world_id, identity.peer_id())?;
             node.respond(channel, WireResponse::WorldStatus(status))?;
+        }
+        WireRequest::HostCapability { world_id } => {
+            let recovery_quorum = local_recovery_quorum_without_authority(
+                storage,
+                world_id,
+                identity.peer_id(),
+                state.leases,
+                state.now,
+            )?;
+            let capability = host_readiness::local_host_capability(context.paths, storage, world_id, recovery_quorum)?;
+            node.respond(channel, WireResponse::HostCapability(capability))?;
         }
         WireRequest::WorldDescriptor { world_id } => {
             let descriptor = storage.load_world_descriptor(world_id).ok();
@@ -1747,6 +1879,15 @@ fn handle_response(
         }
         (Some(OutboundContext::Status { world, peer }), WireResponse::WorldStatus(None)) => {
             runtime.peer_status.remove(&(world, peer));
+        }
+        (Some(OutboundContext::HostCapability { world, peer }), WireResponse::HostCapability(Some(capability))) => {
+            if capability.world_id != world {
+                return Err(anyhow!("host-capability response references the wrong world"));
+            }
+            runtime.peer_capability.insert((world, peer), ObservedCapability { capability, observed_at: now });
+        }
+        (Some(OutboundContext::HostCapability { world, peer }), WireResponse::HostCapability(None)) => {
+            runtime.peer_capability.remove(&(world, peer));
         }
         (_, WireResponse::Error { code, message }) => warn!(%code, %message, "peer rejected request"),
         _ => {}

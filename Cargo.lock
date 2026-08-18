@@ -3256,6 +3256,7 @@ name = "swarm-cli"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "clap",
  "hex",
  "postcard",

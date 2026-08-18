@@ -22,6 +22,40 @@ pub struct ReplicaAckV1 {
     pub complete: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostRuntimeReadinessV1 {
+    Ready,
+    MissingConfiguration,
+    EulaRequired,
+    MissingJava,
+    MissingServerJar,
+    MissingSwarmCraftMod,
+    Unverified,
+    Incompatible,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerModsReadinessV1 {
+    Ready,
+    Missing,
+    Incompatible,
+    Unverified,
+}
+
+/// Ephemeral, authenticated machine-local host capability. This is deliberately
+/// not part of signed world state: it describes what this device can do now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostCapabilityV1 {
+    pub world_id: WorldId,
+    pub compatibility_fingerprint: Hash32,
+    pub runtime: HostRuntimeReadinessV1,
+    pub server_mods: ServerModsReadinessV1,
+    pub conflict_free: bool,
+    pub recovery_quorum_without_authority: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlobResumeV1 {
     pub hash: Hash32,
@@ -50,6 +84,8 @@ pub enum WireRequest {
     RecoveryEpoch { record: EpochRecordV1, certificate: Box<RecoveryCertificateV1> },
     WorldConfig(Box<WorldConfigV1>),
     SoloBranch(Box<SoloBranchV1>),
+    // Host readiness is appended so all earlier postcard discriminants stay stable.
+    HostCapability { world_id: WorldId },
 }
 
 impl WireRequest {
@@ -106,6 +142,8 @@ pub enum WireResponse {
     RecoveryRejected { highest_round: u64, reason: String },
     WorldConfigAccepted { sequence: u64 },
     SoloBranchAccepted,
+    // Host readiness is appended so all earlier postcard discriminants stay stable.
+    HostCapability(Option<HostCapabilityV1>),
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
