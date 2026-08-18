@@ -1,4 +1,4 @@
-use crate::{authority_permit::PermitWatch, host_readiness, server_mods};
+use crate::{authority_permit::PermitWatch, host_readiness, launch_guard, server_mods};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -132,7 +132,7 @@ pub fn load_migration_status(paths: &DataPaths, world: WorldId) -> Result<Migrat
 
 pub fn request_world_stop(paths: &DataPaths, storage: &Storage, world: WorldId) -> Result<()> {
     storage.load_world(world)?;
-    if storage.load_sleep_record(world).is_ok() {
+    if launch_guard::load_sleep_record_fail_closed(storage, world)?.is_some() {
         return Ok(());
     }
     let identity = PeerIdentity::load_or_create(paths)?;
@@ -256,53 +256,73 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
             continue;
         }
 
-        if storage.load_sleep_record(world).is_ok() {
-            if !wake_intent_path(&paths, world).exists() {
-                publish_status(
+        match launch_guard::load_sleep_record_fail_closed(&storage, world) {
+            Ok(Some(_)) => {
+                if !wake_intent_path(&paths, world).exists() {
+                    publish_status(
+                        &paths,
+                        &storage,
+                        world,
+                        None,
+                        MigrationPhase::Sleeping,
+                        false,
+                        config.game_endpoint.clone(),
+                        storage.latest_snapshot(world)?.and_then(|snapshot| snapshot.manifest_hash().ok()),
+                        None,
+                    )?;
+                    sleep(SUPERVISOR_POLL).await;
+                    continue;
+                }
+                let descriptor = storage.load_world_descriptor(world)?;
+                let members = descriptor.members.iter().filter(|member| !member.banned).count();
+                if members > 1 {
+                    publish_status(
+                        &paths,
+                        &storage,
+                        world,
+                        Some(MigrationTrigger::WorldWake),
+                        MigrationPhase::Blocked,
+                        false,
+                        config.game_endpoint.clone(),
+                        storage.latest_snapshot(world)?.and_then(|snapshot| snapshot.manifest_hash().ok()),
+                        Some("multi-member wake requires a quorum-backed authority transition; unsafe solo wake is not automatic".into()),
+                    )?;
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                let result = run_authority_runtime_inner(
                     &paths,
                     &storage,
-                    world,
-                    None,
-                    MigrationPhase::Sleeping,
-                    false,
+                    config.host_options(world),
+                    MigrationTrigger::WorldWake,
                     config.game_endpoint.clone(),
-                    storage.latest_snapshot(world)?.and_then(|snapshot| snapshot.manifest_hash().ok()),
-                    None,
-                )?;
-                sleep(SUPERVISOR_POLL).await;
+                    false,
+                )
+                .await;
+                if let Err(error) = result {
+                    publish_failure(&paths, &storage, world, MigrationTrigger::WorldWake, &config, &error)?;
+                    sleep(Duration::from_secs(1)).await;
+                }
                 continue;
             }
-            let descriptor = storage.load_world_descriptor(world)?;
-            let members = descriptor.members.iter().filter(|member| !member.banned).count();
-            if members > 1 {
+            Ok(None) => {}
+            Err(error) => {
                 publish_status(
                     &paths,
                     &storage,
                     world,
-                    Some(MigrationTrigger::WorldWake),
+                    None,
                     MigrationPhase::Blocked,
                     false,
                     config.game_endpoint.clone(),
                     storage.latest_snapshot(world)?.and_then(|snapshot| snapshot.manifest_hash().ok()),
-                    Some("multi-member wake requires a quorum-backed authority transition; unsafe solo wake is not automatic".into()),
+                    Some(format!(
+                        "sleep state is unreadable or corrupt; authority launch is blocked: {error}"
+                    )),
                 )?;
                 sleep(Duration::from_secs(1)).await;
                 continue;
             }
-            let result = run_authority_runtime_inner(
-                &paths,
-                &storage,
-                config.host_options(world),
-                MigrationTrigger::WorldWake,
-                config.game_endpoint.clone(),
-                false,
-            )
-            .await;
-            if let Err(error) = result {
-                publish_failure(&paths, &storage, world, MigrationTrigger::WorldWake, &config, &error)?;
-                sleep(Duration::from_secs(1)).await;
-            }
-            continue;
         }
 
         let descriptor = storage.load_world_descriptor(world)?;
@@ -456,8 +476,9 @@ pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options
     let identity = PeerIdentity::load_or_create(paths)?;
     let descriptor = storage.load_world_descriptor(options.world)?;
     let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
+    let sleep_record = launch_guard::load_sleep_record_fail_closed(storage, options.world)?;
     if member_count > 1 {
-        if storage.load_sleep_record(options.world).is_ok() {
+        if sleep_record.is_some() {
             bail!("multi-member sleeping worlds must be woken through the migration supervisor");
         }
         let epoch = storage.load_epoch_record(options.world)?;
@@ -843,8 +864,7 @@ pub fn prepare_manual_transfer(
         bail!("another authority transfer is already active for this authority generation");
     }
 
-    if let Ok(sleep_record) = storage.load_sleep_record(world) {
-        verify_sleep_record_signature(&sleep_record)?;
+    if let Some(sleep_record) = launch_guard::load_sleep_record_fail_closed(storage, world)? {
         if sleep_record.latest_snapshot_hash != latest.manifest_hash()?
             || sleep_record.epoch != epoch.epoch_number
             || sleep_record.fencing_token != epoch.fencing_token
@@ -1255,8 +1275,7 @@ fn prepare_authority_epoch(
         bail!("local peer is not eligible to host this world");
     }
 
-    if let Ok(sleep_record) = storage.load_sleep_record(world) {
-        verify_sleep_record_signature(&sleep_record)?;
+    if let Some(sleep_record) = launch_guard::load_sleep_record_fail_closed(storage, world)? {
         if sleep_record.latest_snapshot_hash != latest.manifest_hash()? {
             bail!("local replica is stale and cannot wake the sleeping world");
         }
