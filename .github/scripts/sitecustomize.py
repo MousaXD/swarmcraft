@@ -33,5 +33,6 @@ text = text.replace('let _ = self.file.unlock();', 'let _ = FileExt::unlock(&sel
 text = text.replace('    reconcile_ci_packaging()\n', '')
 path.write_text(text)
 
-runpy.run_path('.github/scripts/finish_runtime_player_journey.py', run_name='__main__')
+# The player-facing Host Readiness/Mods finish pass is already in the branch.
+# Only the still-live issue #28 manual-runtime reconciliation remains here.
 runpy.run_path('.github/scripts/finalize_manual_runtime.py', run_name='__main__')
