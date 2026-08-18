@@ -902,8 +902,7 @@ fn resolve_swarmcraft_fabric(version: &str) -> Result<ResolvedArtifact> {
             });
         }
     }
-    let api = format!("{SWARMCRAFT_RELEASE_API}/v{version}");
-    let release: Value = serde_json::from_str(&curl_text(&api, &["api.github.com"])?)?;
+    let release = load_swarmcraft_release(version)?;
     let assets = release["assets"].as_array().context("SwarmCraft release has no assets")?;
     let jar_name = format!("swarmcraft-fabric-{version}.jar");
     let checksum_name = format!("{jar_name}.sha256");
@@ -920,6 +919,36 @@ fn resolve_swarmcraft_fabric(version: &str) -> Result<ResolvedArtifact> {
         sha1: None,
         sha256: Some(sha256),
     })
+}
+
+fn swarmcraft_release_candidates(version: &str) -> [String; 2] {
+    [format!("{SWARMCRAFT_RELEASE_API}/v{version}"), format!("{SWARMCRAFT_RELEASE_API}/main-latest")]
+}
+
+fn load_swarmcraft_release(version: &str) -> Result<Value> {
+    let jar_name = format!("swarmcraft-fabric-{version}.jar");
+    let checksum_name = format!("{jar_name}.sha256");
+    let mut failures = Vec::new();
+    for api in swarmcraft_release_candidates(version) {
+        match curl_text(&api, &["api.github.com"]) {
+            Ok(body) => match serde_json::from_str::<Value>(&body) {
+                Ok(release) => {
+                    let Some(assets) = release["assets"].as_array() else {
+                        failures.push(format!("{api}: release has no assets"));
+                        continue;
+                    };
+                    if release_asset_url(assets, &jar_name).is_ok() && release_asset_url(assets, &checksum_name).is_ok()
+                    {
+                        return Ok(release);
+                    }
+                    failures.push(format!("{api}: exact {jar_name} and checksum were not both published"));
+                }
+                Err(error) => failures.push(format!("{api}: invalid release metadata: {error}")),
+            },
+            Err(error) => failures.push(format!("{api}: {error}")),
+        }
+    }
+    bail!("no published SwarmCraft Fabric artifacts for version {version}: {}", failures.join("; "))
 }
 
 fn release_asset_url(assets: &[Value], name: &str) -> Result<String> {
@@ -1322,6 +1351,14 @@ mod tests {
         assert_eq!(heuristic_java_major("1.20.6"), 21);
         assert_eq!(heuristic_java_major("1.20.4"), 17);
         assert_eq!(heuristic_java_major("1.17.1"), 16);
+    }
+
+    #[test]
+    fn release_candidates_prefer_immutable_tag_then_main_snapshot() {
+        assert_eq!(
+            swarmcraft_release_candidates("0.4.0"),
+            [format!("{SWARMCRAFT_RELEASE_API}/v0.4.0"), format!("{SWARMCRAFT_RELEASE_API}/main-latest"),]
+        );
     }
 
     #[test]

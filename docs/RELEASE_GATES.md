@@ -1,241 +1,74 @@
-# SwarmCraft 0.2.x Release Gates
+# SwarmCraft 0.4.0 Release Gates
 
-This file records the minimum executable evidence expected before SwarmCraft preview changes are treated as healthy.
+SwarmCraft changes distributed authority and world durability, so a release candidate must earn more than a successful compile.
 
-It is intentionally stricter than "the code compiles." SwarmCraft changes distributed state, world durability and authority, so process-level failure behavior is part of correctness.
+## Required candidate evidence
 
-## Latest verified main CI baseline
+Before merging the integration candidate to `main`:
 
-For the 0.2.1 frontend/status baseline:
+- current-head CI must pass;
+- Release version guard must pass;
+- Player journey live acceptance must pass on the final candidate content;
+- no unresolved safety review threads may remain;
+- quorum/fencing rules must not be weakened to turn intentional fail-closed cases green.
 
-- GitHub Actions workflow: `CI`
-- Run: `31960938193`
-- Commit: `e70cbab011470909d0427ecda1e51bc320cda87a`
-- Result: **PASS**
+## Normal CI gates
 
-That run passed Rust gates on Linux, Windows and macOS, the Fabric build, RustSec, process-level acceptance scenarios and native desktop package jobs.
+Required coverage includes:
 
-A later commit must earn its own green CI result; this record is evidence, not a waiver.
+- Rust format, strict Clippy and locked tests on Linux, Windows and macOS;
+- RustSec dependency audit and committed lockfile validation;
+- hostile network input and handshake hardening;
+- snapshot reconstruction, publication ownership/GC/retention race coverage and storage failure injection;
+- existing-world import acceptance;
+- direct, standby and migration corrupt-sleep fail-closed regressions;
+- Host Readiness negative matrix including two-member quorum behavior;
+- live join, host lifecycle, migration orchestration, runtime hardening, three-daemon recovery, successor-loss recovery and solo-history conflict handling;
+- fuzz smoke and WAN-like QUIC resume impairment;
+- Fabric build with embedded Fabric API verification;
+- Desktop frontend tests and native packages on Linux, Windows, macOS ARM64 and macOS x86_64.
 
----
+## Desktop package contract
 
-## Permanent Rust gates
+Every Desktop package must contain all four sidecars declared by Tauri:
 
-Required:
+- `swarmcraft`
+- `swarmcraft-host`
+- `swarmcraft-runtime`
+- `swarmcraft-import`
 
-- committed `Cargo.lock` remains current;
-- Ubuntu format check;
-- strict Clippy;
-- Rust tests with locked dependencies;
-- Windows strict Clippy and tests;
-- macOS strict Clippy and tests;
-- RustSec dependency audit.
+Producing a Tauri shell while omitting one of these is a release failure.
 
-Protocol/storage changes must not bypass these gates merely because a failing test appears unrelated to the edited crate.
+## Main snapshot contract
 
----
+A push to `main` builds the rolling `main-latest` technical-preview release. It must include:
 
-## Process-level acceptance gates
+- Linux `.deb`;
+- Windows NSIS `.exe`;
+- macOS ARM64 `.dmg`;
+- macOS x86_64 `.dmg`;
+- the exact versioned `swarmcraft-fabric-X.Y.Z.jar`;
+- SHA-256 checksum files.
 
-The normal CI workflow includes real process/network scenarios rather than relying only on unit tests.
+Development signing status must be described accurately.
 
-Required scenarios include:
+## Tagged release contract
 
-### Peer networking hard reconnect
+A `vX.Y.Z` tag builds the same four-sidecar Desktop bundles and the exact versioned Fabric bridge JAR/checksum. Runtime Installer prefers this immutable version tag.
 
-- two independent QUIC/libp2p peers authenticate using signed application identities;
-- the restarting peer reloads the same persisted transport identity;
-- a replacement connection is allowed to race the dead connection from the previous process;
-- the live replacement connection becomes canonical without the stale connection erasing application authentication;
-- signed application authentication is re-established after restart;
-- authenticated request/response traffic succeeds after the reconnect.
+For a just-merged technical-preview main snapshot before its immutable tag is published, Runtime Installer may fall back to `main-latest` only when that release contains the exact requested `swarmcraft-fabric-X.Y.Z.jar` and matching checksum asset. A newer rolling release cannot satisfy an older version request merely because it is `main-latest`.
 
-This gate protects the distinction between durable peer identity and transient network connections.
+Application version and wire protocol version remain independent.
 
-### Network impairment and resume
+## Live Minecraft gate
 
-Normal CI also runs an impaired-link QUIC transfer gate:
+The live workflow uses official Minecraft/Fabric/Adoptium resolution, a fresh SwarmCraft data directory, explicit EULA acceptance and managed Java. It launches real Minecraft, proves authenticated Fabric readiness, stops through the durability barrier, restarts, restores known world state, and advances canonical snapshots without divergence.
 
-- 64 MiB is transferred through the real libp2p request/response path;
-- loopback traffic is shaped with latency variation, packet loss and a bandwidth limit;
-- the sender is hard-restarted every 16 MiB;
-- the receiver deliberately commits the final chunk before each restart while the sender loses the acknowledgement;
-- the restarted sender reloads the same transport identity and re-authenticates the same application identity;
-- `MissingBlobs` resume negotiation returns the receiver's committed offset;
-- transfer continues without replaying already committed data;
-- every received chunk is checked against the deterministic source payload.
+## Intentional YELLOW gates
 
-This gate catches reconnect/resume regressions on ordinary pull requests without forcing the full multi-gigabyte profile into every CI job.
+- **Two-voter crash failover:** Bob alone cannot form majority quorum after Alice disappears. Keep `BlockedByQuorum`.
+- **Multi-member wake:** no sleep-bound quorum wake election exists. Keep fail-closed behavior.
+- **Public-network certification:** representative NAT/CGNAT/mobile/IPv6/blocked-UDP field evidence remains separate from automated synthetic impairment.
+- **Seamless player reconnection:** successor runtime orchestration is implemented, but universal automatic client redirect/reconnect is not yet claimed.
 
-### Snapshot swarm reconstruction
-
-- an original peer creates a verified snapshot and replicates it to two peers;
-- the original peer disappears completely;
-- one surviving replica is missing a blob;
-- another surviving replica contains a same-size but corrupt encoded blob;
-- the corrupt source is rejected by content verification;
-- a failed final blob verification discards the poisoned partial file so another source can retry from offset zero;
-- a partial blob begun from one surviving replica can resume from another replica holding the same content-addressed blob;
-- a fourth peer reconstructs, finalizes, verifies and restores the exact original world from the surviving replicas.
-
-This is the permanent executable form of the roadmap's three-peer to fourth-peer reconstruction criterion.
-
-### Live join and replication
-
-- start independent peer daemons;
-- stage a signed join;
-- authority accepts canonical membership;
-- joined peer receives the current signed snapshot without requiring a reconnect;
-- replicated snapshot verifies.
-
-### Host process lifecycle
-
-- restore a verified snapshot into a runtime directory;
-- start the Minecraft/Fabric host process;
-- complete local IPC handshake;
-- exercise save/shutdown barrier behavior;
-- commit a final signed snapshot;
-- persist sleep state.
-
-### Three-daemon hard-kill recovery
-
-- multiple authenticated members share canonical state;
-- current authority disappears;
-- surviving peers reach safe recovery authority using current quorum/fencing rules;
-- stale returning state cannot overwrite the accepted generation;
-- replication resumes from canonical history.
-
-### Recovery successor disappears
-
-- a recovery candidate begins a durable recovery round;
-- that candidate disappears before completing epoch promotion;
-- a later strictly higher recovery round on the same canonical base can restore liveness;
-- old recovery votes/rounds do not gain authority after the successor changes.
-
-This scenario closes the known v0.1 preview liveness limitation. It is now a permanent regression gate.
-
-### Solo history
-
-- signed solo policy permits solo advancement;
-- compatible returning history is accepted safely;
-- independently advanced solo histories are detected as divergent;
-- conflicting branches are preserved and never silently merged.
-
----
-
-## Multi-gigabyte network soak
-
-The separate `Network Soak` workflow is a permanent Phase 1 transport gate for networking/storage changes and also runs weekly.
-
-Default profile:
-
-- 2 GiB transferred through real QUIC/libp2p request/response messages;
-- maximum protocol blob chunk size of 256 KiB;
-- 0.2% synthetic packet loss;
-- 250 Mbit/s bandwidth shaping;
-- light latency/jitter shaping so the job remains volume-focused rather than becoming thousands of artificial sequential RTTs;
-- a hard sender restart every 256 MiB;
-- deliberately lost acknowledgement at every restart boundary;
-- durable transport identity reload and signed application re-authentication;
-- exact committed-offset resume negotiation after every restart;
-- deterministic byte-for-byte chunk verification;
-- uploaded workflow artifacts containing the tested commit/profile, qdisc configuration and test output.
-
-The first passing default-profile evidence added with this gate is:
-
-- workflow: `Network Soak`;
-- run: `31966815821`;
-- tested commit: `50a072f0d3e32d6c67d836a9725b5d88078d102c`;
-- result: **PASS**.
-
-Manual dispatch can run 1 GiB, 2 GiB or 5 GiB profiles with configurable restart intervals. Green soak evidence proves sustained synthetic transport/reconnect behavior; it does not certify arbitrary residential NAT or carrier networks.
-
----
-
-## Fabric gate
-
-The supported Fabric bridge must build against the repository's declared Minecraft/Fabric target.
-
-The bridge is not optional test decoration. Host lifecycle, save barriers and authority-permit behavior depend on it.
-
----
-
-## Desktop/package gates
-
-CI/native packaging covers the Tauri desktop shell and bundled SwarmCraft runtime sidecars.
-
-Expected package coverage:
-
-- Linux native package build, including `.deb` and configured AppImage/release targets;
-- Windows NSIS `.exe` installer;
-- macOS Apple Silicon package;
-- macOS Intel package when the configured runner is available;
-- runtime sidecars staged for the matching platform/architecture.
-
-A package job is only healthy when the installer contains the expected SwarmCraft runtime sidecars, not merely when Tauri produces an empty shell.
-
----
-
-## Rolling main snapshot
-
-The `Main Desktop Installers` workflow publishes development installers to the rolling `main-latest` prerelease after its required platform build policy is satisfied.
-
-`main-latest` is a **development snapshot**, not a production-stability promise.
-
-Application version metadata must remain coherent across:
-
-- Rust workspace packages;
-- desktop Tauri package/config;
-- Fabric mod metadata;
-- lockfile package versions;
-- produced installer names where applicable.
-
-Wire protocol version is independent and must not be bumped just to match application version numbers.
-
----
-
-## Release signing
-
-Release workflows can use configured platform signing credentials, but documentation and release notes must distinguish:
-
-- cryptographically signed/notarized production artifacts;
-- unsigned or ad-hoc development artifacts.
-
-Never claim Authenticode signing, Apple Developer ID signing or notarization unless the workflow actually performed it successfully for those artifacts.
-
----
-
-## Storage large-world evidence
-
-The repository has historical large-world streaming evidence:
-
-- GitHub Actions run: `31757348001`
-- Tested commit: `886120e4a7b67f8b448541551b8b04fb03366654`
-- Command: `cargo test -p swarm-storage release_large_world_streaming_profiles -- --ignored --nocapture`
-- Profiles: 1 GiB, 5 GiB and 10 GiB synthetic world files
-- Path: streaming snapshot creation, Zstd encoding, content hashing, snapshot commit and streaming verification
-- Buffering: bounded storage buffers rather than whole-world materialization
-
-Repeat or expand this evidence when storage algorithms materially change.
-
-The permanent snapshot-swarm reconstruction gate proves source failover, corruption rejection and cross-replica resume semantics. The network soak separately proves that the QUIC transfer/reconnect path survives sustained multi-gigabyte volume and repeated interruptions.
-
----
-
-## Gates not yet equivalent to production certification
-
-Green CI does **not** prove all real-world deployment conditions.
-
-Still requiring broader/manual evidence:
-
-- longer-duration and wider-profile network soak campaigns beyond the permanent default profile;
-- production-quality parallel multi-source scheduling and retention/GC policy;
-- repeated long-duration Minecraft crash/host-migration campaigns;
-- disk-full and hardware corruption scenarios;
-- hostile/malicious peer campaigns;
-- broader fuzz/property testing;
-- representative home NAT/CGNAT/mobile/IPv6 validation;
-- production signing/notarization operations;
-- automatic successor Minecraft launch and player reconnection.
-
-See [NETWORK_VALIDATION.md](NETWORK_VALIDATION.md) and [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+These are documented limitations, not permission to weaken safety.

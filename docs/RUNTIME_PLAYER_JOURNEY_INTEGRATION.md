@@ -1,51 +1,52 @@
 # Runtime Player Journey Integration
 
-This document records the integration contract implemented on `integration/runtime-player-journey` for independent release audit. It does not replace exact-head CI results.
+This document records the integrated 0.4.0 player-journey contract that is being prepared for `main`.
 
-## Integrated sources
+## Normal player path
 
-- `agent/runtime-installer`
-- `agent/server-mod-management`
-- `agent/host-readiness`
-- `agent/runtime-wizard-ui`
-- `agent/runtime-setup-hardening`
+**Play** uses backend Runtime Installer status and the Runtime Wizard. Runtime setup is owned by Rust, including compatible Java, official Minecraft/Fabric resolution, Fabric API, the SwarmCraft Fabric bridge, managed directories, explicit EULA state and durable launch configuration.
 
-## Player journey contract
+Runtime verification and required server-mod verification are separate fail-closed Host Readiness boundaries. Desktop does not infer readiness from paths or historical success.
 
-Normal **Play** uses backend runtime preflight and the Runtime Wizard. Runtime setup is owned by `swarmcraft-runtime`; Desktop does not download or assemble Java launch commands in JavaScript. Minecraft EULA acceptance remains explicit and is persisted only after the player accepts it.
+## Shared launch, migration and stop
 
-Runtime verification is the readiness boundary. Managed runtime verification records machine-local runtime proof only after authoritative verification. Manual Advanced configuration remains usable, but static file existence is not a host-readiness proof: the exact configured runtime must pass the authenticated Fabric compatibility handshake before it is considered verified.
+Managed launch, automatic authority recovery, manual transfer and supported wake paths share Rust runtime/migration orchestration rather than maintaining independent JavaScript launch logic.
 
-Canonical server-mod requirements are verified by ID, version, side/environment, and artifact hash. Desktop may supply or remove a local copy of an already-canonical required artifact; it does not mutate the signed world modpack.
+**Stop World** reports success only after the Fabric save/shutdown barrier, Minecraft process exit, final signed canonical snapshot, durable signed sleep record and sleeping migration state.
 
-## Shared launch and stop paths
+Corrupt or unreadable sleep state is never interpreted as awake. Direct launch, standby and migration block fail-closed.
 
-Desktop managed launch delegates to the shared daemon/migration runtime orchestration path that consumes persisted `RuntimeLaunchConfig`.
+## Existing-world import
 
-Desktop **Stop world** requests the shared safe-stop path. Success is reported only after the Fabric shutdown/save barrier, Minecraft process exit, final signed canonical snapshot, durable signed sleep record, and `sleeping` migration status. A save/barrier failure must not be presented as a graceful stop.
+`swarmcraft-import` and the Desktop `import_world` path safely stage, verify and atomically publish imported canonical world state. Import leaves the source world unchanged and does not import EULA or machine-local runtime configuration.
 
 ## Host Readiness
 
-The selected-world screen includes the player-facing question **Can I turn off this PC?**. Wording is mapped from structured backend Host Readiness state; JavaScript does not recompute takeover safety.
+The Desktop question **Can I turn off this PC?** renders structured backend Host Readiness. A safe successor must have current reachable membership, exact canonical state, authority eligibility, verified runtime, verified required mods, no conflict and a recovery quorum that survives without the current authority.
+
+A two-member Alice/Bob world therefore remains `BlockedByQuorum` for crash failover. That is an intentional safety result, not a missing frontend shortcut.
 
 ## Packaging
 
-Desktop packaging stages all three Rust sidecars on supported platforms:
+All supported Desktop targets bundle four Rust sidecars:
 
 - `swarmcraft`
 - `swarmcraft-host`
 - `swarmcraft-runtime`
+- `swarmcraft-import`
 
-The Fabric CI artifact check verifies that the released SwarmCraft Fabric JAR embeds Fabric API under `META-INF/jars`, so the normal path does not require a separately hunted Fabric API JAR.
+The Fabric artifact embeds Fabric API for the normal path. Main snapshots and tagged releases publish the versioned SwarmCraft Fabric bridge plus SHA-256 checksum so managed runtime setup can resolve the exact adapter version.
 
-## Installer hardening
+## CI and live acceptance
 
-Core artifact hashing is implemented in Rust. Installer locking uses an OS-backed file lock so a crashed process does not permanently wedge setup while concurrent live installers remain excluded. Replacement preserves a known-good artifact until the new verified artifact is ready to publish and attempts rollback if publication fails.
+Normal CI covers Rust fmt/clippy/tests, storage/network/process acceptance, import, corrupt-sleep regressions, Host Readiness, migration/recovery, all Desktop tests and packages, Fabric verification, dependency audit, fuzz smoke and impaired QUIC resume.
 
-## CI contract
+`player-journey-live.yml` also runs for main-bound pull requests and exercises a fresh data directory against official services with managed Java, explicit EULA, real Minecraft/Fabric launch, safe stop, restart/restore and canonical snapshot advancement.
 
-The integration branch CI runs the repository Rust matrix and process-level acceptance tests, all Desktop JavaScript tests via `node --test apps/desktop/tests/*.test.mjs`, native Desktop packaging, Fabric build and embedded-Fabric-API verification, dependency audit, fuzz smoke, and impaired QUIC resume.
+## Intentional YELLOW gates
 
-## Audit boundary
+- Two-voter crash failover remains `BlockedByQuorum`.
+- Multi-member wake remains fail-closed until a sleep-bound quorum wake protocol exists.
+- Seamless client reconnection and representative real-world NAT certification remain future validation/product work.
 
-This branch must not be merged to `main` until an exact-head CI run and the independent player-journey audit have completed. Known out-of-scope or intentionally unavailable product gaps, including existing-world import and unsafe multi-member wake shortcuts, remain documented as limitations rather than being simulated in Desktop.
+None of these limitations justify weakening quorum, fencing, signed history or runtime verification.
