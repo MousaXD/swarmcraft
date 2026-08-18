@@ -54,6 +54,12 @@ jobs:
         run: cargo test -p swarm-storage --test failure_injection --locked
       - name: Existing-world import journey
         run: cargo test -p swarm-cli world_import --lib --locked
+      - name: Sleep/wake direct launch guard regressions
+        run: cargo test -p swarm-cli launch_guard::tests --lib --locked
+      - name: Standby corrupt-sleep regression
+        run: cargo test -p swarm-cli --bin swarmcraft-host standby_wait_until_ready_rejects_corrupt_sleep_record_before_host_launch --locked
+      - name: Migration corrupt-sleep regression
+        run: cargo test -p swarm-cli --test sleep_state_fail_closed --locked
       - name: Host Readiness negative matrix and two-member quorum fail-closed
         run: cargo test -p swarm-cli host_readiness::tests --lib --locked
       - name: Live join replication
