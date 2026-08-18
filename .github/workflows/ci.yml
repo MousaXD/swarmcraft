@@ -205,8 +205,10 @@ jobs:
           mkdir -p apps/desktop/src-tauri/binaries
           cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
           cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+          cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
           "apps/desktop/src-tauri/binaries/swarmcraft-$target" --version
           "apps/desktop/src-tauri/binaries/swarmcraft-host-$target" --version
+          "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target" --version
       - name: Stage Windows sidecars
         if: runner.os == 'Windows'
         shell: pwsh
@@ -215,8 +217,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path apps/desktop/src-tauri/binaries | Out-Null
           Copy-Item target/release/swarmcraft.exe "apps/desktop/src-tauri/binaries/swarmcraft-$target.exe"
           Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"
+          Copy-Item target/release/swarmcraft-runtime.exe "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target.exe"
           & "apps/desktop/src-tauri/binaries/swarmcraft-$target.exe" --version
           & "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe" --version
+          & "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target.exe" --version
       - name: Build native desktop package
         working-directory: apps/desktop
         run: cargo tauri build --bundles ${{ matrix.bundle }} --ci
@@ -244,6 +248,22 @@ jobs:
           gradle-version: '9.5.1'
       - name: Build Fabric mod
         run: gradle build --stacktrace
+      - name: Verify released Fabric artifact embeds Fabric API
+        run: |
+          python3 - <<'PY'
+          import glob
+          import zipfile
+
+          jars = [path for path in glob.glob('build/libs/*.jar') if '-sources' not in path]
+          assert jars, 'Fabric build produced no release JAR'
+          with zipfile.ZipFile(jars[0]) as archive:
+              nested = [
+                  name for name in archive.namelist()
+                  if name.startswith('META-INF/jars/') and 'fabric-api' in name.lower() and name.endswith('.jar')
+              ]
+          assert nested, 'released SwarmCraft Fabric JAR does not embed Fabric API under META-INF/jars'
+          print('Embedded Fabric API:', ', '.join(nested))
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: swarmcraft-fabric
