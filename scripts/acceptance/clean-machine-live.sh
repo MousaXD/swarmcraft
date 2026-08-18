@@ -25,19 +25,18 @@ trap cleanup EXIT
 json_field() {
   local json="$1"
   local field="$2"
-  python3 - "$field" <<<"$json" <<'PY'
+  python3 -c '
 import json, sys
-field = sys.argv[1]
 value = json.load(sys.stdin)
-for part in field.split('.'):
+for part in sys.argv[1].split("."):
     value = value[part]
 if isinstance(value, bool):
-    print('true' if value else 'false')
+    print("true" if value else "false")
 elif value is None:
-    print('null')
+    print("null")
 else:
     print(value)
-PY
+' "$field" <<<"$json"
 }
 
 runtime_status() {
@@ -154,15 +153,12 @@ VERIFIED_STATUS="$("$RUNTIME" --data-dir "$DATA" verify "$WORLD")"
 # The release workflow deliberately runs this script with JAVA_HOME removed and
 # a base PATH. Assert that the test really exercised managed Java rather than
 # silently succeeding on a pre-installed compatible JVM.
-MANAGED_JAVA="$(python3 - <<'PY' <<<"$VERIFIED_STATUS"
+MANAGED_JAVA="$(python3 -c '
 import json, sys
-s=json.load(sys.stdin)
-for c in s['components']:
-    if c['kind'] == 'java':
-        print('true' if c.get('managed') else 'false')
-        break
-PY
-)"
+status = json.load(sys.stdin)
+java = next(component for component in status["components"] if component["kind"] == "java")
+print("true" if java.get("managed") else "false")
+' <<<"$VERIFIED_STATUS")"
 [[ "$MANAGED_JAVA" == "true" ]] || {
   printf 'Clean-machine live gate did not exercise managed Java installation\n' >&2
   exit 1
