@@ -42,6 +42,10 @@ The Fabric CI artifact check verifies that the released SwarmCraft Fabric JAR em
 
 Core artifact hashing is implemented in Rust. Installer locking uses an OS-backed file lock so a crashed process does not permanently wedge setup while concurrent live installers remain excluded. Replacement preserves a known-good artifact until the new verified artifact is ready to publish and attempts rollback if publication fails.
 
+## CI contract
+
+The integration branch CI runs the repository Rust matrix and process-level acceptance tests, all Desktop JavaScript tests via `node --test apps/desktop/tests/*.test.mjs`, native Desktop packaging, Fabric build and embedded-Fabric-API verification, dependency audit, fuzz smoke, and impaired QUIC resume.
+
 ## Audit boundary
 
 This branch must not be merged to `main` until an exact-head CI run and the independent player-journey audit have completed. Known out-of-scope or intentionally unavailable product gaps, including existing-world import and unsafe multi-member wake shortcuts, remain documented as limitations rather than being simulated in Desktop.
