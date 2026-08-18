@@ -987,7 +987,7 @@ fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 }
 
 fn sync_file(path: &Path) -> Result<()> {
-    OpenOptions::new().read(true).open(path)?.sync_all()?;
+    OpenOptions::new().write(true).open(path)?.sync_all()?;
     Ok(())
 }
 
