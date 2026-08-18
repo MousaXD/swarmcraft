@@ -1,0 +1,166 @@
+name: Runtime player journey integration driver
+
+on:
+  push:
+    branches:
+      - integration/runtime-player-journey
+
+permissions:
+  contents: write
+
+jobs:
+  integrate-host-readiness:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: integration/runtime-player-journey
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "swarmcraft-integration-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git fetch origin agent/host-readiness
+
+      - name: Merge host readiness with semantic reconciliation
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor origin/agent/host-readiness HEAD; then
+            echo "host-readiness is already integrated"
+            exit 0
+          fi
+
+          if git merge --no-ff --no-commit origin/agent/host-readiness; then
+            echo "host-readiness merged cleanly"
+          else
+            echo "Resolving expected integration conflicts"
+            git status --short
+
+            for path in Cargo.lock crates/swarm-cli/Cargo.toml crates/swarm-cli/src/lib.rs crates/swarm-cli/src/main.rs crates/swarm-cli/src/migration.rs; do
+              if git ls-files -u -- "$path" | grep -q .; then
+                git checkout --ours -- "$path"
+              fi
+            done
+
+            # Cargo.lock was unchanged by runtime-installer/server-mod work; take the
+            # host-readiness lockfile so the swarm-cli blake3 dependency is recorded.
+            if git ls-tree -r origin/agent/host-readiness -- Cargo.lock | grep -q .; then
+              git checkout origin/agent/host-readiness -- Cargo.lock
+            fi
+
+            python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          def theirs(path: str) -> str:
+              return subprocess.check_output(
+                  ["git", "show", f"origin/agent/host-readiness:{path}"], text=True
+              )
+
+          # Preserve the managed runtime binary while adding the readiness hashing dependency.
+          cargo_path = Path("crates/swarm-cli/Cargo.toml")
+          cargo = cargo_path.read_text()
+          if "blake3.workspace = true" not in cargo:
+              cargo = cargo.replace("[dependencies]\n", "[dependencies]\nblake3.workspace = true\n", 1)
+          cargo_path.write_text(cargo)
+
+          # Export every integrated module. Do not discard runtime-installer or server-mod modules.
+          lib_path = Path("crates/swarm-cli/src/lib.rs")
+          lib = lib_path.read_text()
+          if "pub mod host_readiness;" not in lib:
+              lib = lib.replace("pub mod authority_permit;\n", "pub mod authority_permit;\npub mod host_readiness;\n", 1)
+          lib_path.write_text(lib)
+
+          # Layer the host-readiness CLI command onto the server-mod-aware CLI.
+          main_path = Path("crates/swarm-cli/src/main.rs")
+          main = main_path.read_text()
+          host_main = theirs(str(main_path))
+          if "use swarm_cli::host_readiness;" not in main:
+              anchor = "use swarm_cli::server_mods;\n"
+              if anchor not in main:
+                  raise SystemExit("main.rs import anchor changed")
+              main = main.replace(anchor, "use swarm_cli::host_readiness;\n" + anchor, 1)
+          if "HostReadiness {" not in main:
+              start = host_main.index("    /// Show the authoritative backend answer to whether this device may safely shut down.")
+              end = host_main.index("    /// Request a safe wake of a sleeping world.", start)
+              block = host_main[start:end]
+              anchor = "    /// Request a safe wake of a sleeping world."
+              if anchor not in main:
+                  raise SystemExit("main.rs enum anchor changed")
+              main = main.replace(anchor, block + anchor, 1)
+          if "WorldCommand::HostReadiness { world, json } =>" not in main:
+              start_marker = "        WorldCommand::HostReadiness { world, json } => {"
+              end_marker = "        WorldCommand::Wake { world } => {"
+              start = host_main.index(start_marker)
+              end = host_main.index(end_marker, start)
+              block = host_main[start:end]
+              if end_marker not in main:
+                  raise SystemExit("main.rs match anchor changed")
+              main = main.replace(end_marker, block + end_marker, 1)
+          main_path.write_text(main)
+
+          # Keep server-mod launch gating and add runtime proof invalidation/recording.
+          migration_path = Path("crates/swarm-cli/src/migration.rs")
+          migration = migration_path.read_text()
+          host_migration = theirs(str(migration_path))
+          if "use crate::host_readiness;" not in migration:
+              first_newline = migration.index("\n") + 1
+              migration = migration[:first_newline] + "use crate::host_readiness;\n" + migration[first_newline:]
+          if "host_readiness::invalidate_runtime_verification(paths, world)?;" not in migration:
+              anchor = "    let path = runtime_config_path(paths, world);"
+              insertion = (
+                  "    // Any launch-path change invalidates the prior machine-local runtime proof.\n"
+                  "    // Failing closed here prevents stale verification from making this device\n"
+                  "    // appear takeover-ready after a manual runtime reconfiguration.\n"
+                  "    host_readiness::invalidate_runtime_verification(paths, world)?;\n"
+              )
+              if anchor not in migration:
+                  raise SystemExit("migration.rs runtime config anchor changed")
+              migration = migration.replace(anchor, insertion + anchor, 1)
+          if "host_readiness::record_runtime_verified(" not in migration:
+              comment = "    // A runtime becomes host-ready only after the actual Fabric process has"
+              start = host_migration.index(comment)
+              end = host_migration.index("    publish_status(", start)
+              block = host_migration[start:end]
+              anchor = "        return Err(error);\n    }\n    publish_status("
+              if anchor not in migration:
+                  raise SystemExit("migration.rs verified-runtime anchor changed")
+              migration = migration.replace(
+                  anchor,
+                  "        return Err(error);\n    }\n" + block + "    publish_status(",
+                  1,
+              )
+          migration_path.write_text(migration)
+          PY
+
+            # There must be no unresolved paths outside the five expected reconciliation points.
+            if git ls-files -u | grep -q .; then
+              echo "Unexpected unresolved conflicts remain:"
+              git ls-files -u
+              exit 1
+            fi
+          fi
+
+          git add -A
+          git diff --cached --check
+          cargo fmt --all
+          git add -A
+          git diff --cached --check
+
+          if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+            git commit -m "Merge host readiness into runtime player journey"
+          elif ! git diff --cached --quiet; then
+            git commit -m "Integrate host readiness into runtime player journey"
+          fi
+
+      - name: Validate host readiness integration
+        run: |
+          cargo check -p swarm-cli --all-features --locked
+          cargo test -p swarm-cli host_readiness --lib --locked
+          node --test apps/desktop/tests/frontend-contract.test.mjs
+
+      - name: Push integration branch
+        run: git push origin HEAD:integration/runtime-player-journey
