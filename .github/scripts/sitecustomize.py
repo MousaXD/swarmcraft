@@ -1,7 +1,8 @@
 from pathlib import Path
+import runpy
 
 # Temporary integration-only bootstrap. The workflow runs this explicitly
-# before the reconciliation driver and both files are removed before handoff.
+# before the reconciliation driver and all workbench files are removed before handoff.
 path = Path('.github/scripts/reconcile_runtime_player_journey.py')
 text = path.read_text()
 text = text.replace(
@@ -25,3 +26,5 @@ text = text.replace('                    world,\n                    snapshot_nu
 # the repository connector, after the tested code commit lands.
 text = text.replace('    reconcile_ci_packaging()\n', '')
 path.write_text(text)
+
+runpy.run_path('.github/scripts/finish_runtime_player_journey.py', run_name='__main__')
