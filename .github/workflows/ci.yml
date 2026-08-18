@@ -13,40 +13,6 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  reconcile-runtime-player-journey:
-    name: Reconcile runtime player journey
-    if: github.event_name == 'pull_request' && github.head_ref == 'integration/runtime-player-journey' && github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: integration/runtime-player-journey
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - name: Reconcile feature contracts and safety paths
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "swarmcraft-integration-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git fetch origin agent/host-readiness agent/runtime-installer agent/server-mod-management agent/runtime-wizard-ui agent/runtime-setup-hardening
-          python3 .github/scripts/sitecustomize.py
-          python3 .github/scripts/reconcile_runtime_player_journey.py
-          cargo fmt --all
-          cargo check -p swarm-cli --all-features
-          cargo test -p swarm-cli --test runtime_setup_hardening
-          node --test apps/desktop/tests/*.test.mjs
-          git add -A
-          git diff --cached --check
-          if ! git diff --cached --quiet; then
-            git commit -m "Integrate runtime player journey contracts and safety paths"
-            git push origin HEAD:integration/runtime-player-journey
-          fi
-
   rust:
     name: Rust (${{ matrix.os }})
     strategy:
