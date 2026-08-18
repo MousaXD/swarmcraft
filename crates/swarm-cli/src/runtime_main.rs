@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
 use swarm_cli::{
-    host_readiness, migration,
+    host_readiness, launch_guard, migration,
     runtime_installer::{
         RuntimeComponentKind, RuntimeComponentState, RuntimeInstallOptions, RuntimeInstaller, RuntimeProgress,
         RuntimeStatus,
@@ -141,6 +141,7 @@ fn main() -> Result<()> {
             if !status.ready {
                 anyhow::bail!("managed runtime launch was requested before runtime verification reported Ready");
             }
+            launch_guard::ensure_direct_launch_safe(&storage, world)?;
             let config = migration::load_runtime_config(&paths, world)?;
             let options = migration::HostOptions {
                 world,
