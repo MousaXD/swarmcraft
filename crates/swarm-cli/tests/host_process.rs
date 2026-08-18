@@ -4,8 +4,11 @@
 mod host;
 
 use std::{fs, os::unix::fs::PermissionsExt};
-use swarm_core::{create_world_genesis, DataPaths, PeerIdentity};
-use swarm_protocol::{WorldDescriptorV1, WorldMemberV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION};
+use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
+use swarm_protocol::{
+    AuthorityPolicyV1, MembershipPolicyV1, RuntimeCompatibilityManifestV1, WorldConfigV1, WorldDescriptorV1,
+    WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+};
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 
 #[tokio::test]
@@ -14,8 +17,24 @@ async fn real_host_process_restores_launches_and_commits_mutated_world() {
     let paths = DataPaths::from_root(temp.path().join("data"));
     let storage = Storage::open(paths.root.clone()).unwrap();
     let identity = PeerIdentity::load_or_create(&paths).unwrap();
-    let (world, genesis) =
-        create_world_genesis(&identity, "26.1.2".into(), "0.19.3".into(), b"runtime-process-smoke").unwrap();
+    let compatibility = RuntimeCompatibilityManifestV1 {
+        minecraft_version: "26.1.2".into(),
+        loader_id: "fabric".into(),
+        loader_version: "0.19.3".into(),
+        swarmcraft_protocol_version: PROTOCOL_VERSION,
+        fabric_adapter_version: env!("CARGO_PKG_VERSION").into(),
+        required_server_mods: Vec::new(),
+        required_client_mods: Vec::new(),
+        datapacks: Vec::new(),
+    };
+    let fingerprint = compatibility.fingerprint().unwrap();
+    let (world, genesis) = create_world_genesis_with_fingerprint(
+        &identity,
+        compatibility.minecraft_version.clone(),
+        compatibility.loader_version.clone(),
+        fingerprint,
+    )
+    .unwrap();
 
     storage
         .create_world(&WorldMetadataV1 {
@@ -39,6 +58,28 @@ async fn real_host_process_restores_launches_and_commits_mutated_world() {
             preferred_replication_factor: 1,
         })
         .unwrap();
+    let mut config = WorldConfigV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        sequence: 1,
+        previous_config_hash: None,
+        compatibility,
+        visibility: WorldVisibilityV1::Private,
+        authority_policy: AuthorityPolicyV1 { allow_solo_advancement: true, preferred_replication_factor: 1 },
+        membership_policy: MembershipPolicyV1::InviteOnly,
+        presentation: WorldPresentationV1 {
+            name: "runtime-process-smoke".into(),
+            description: String::new(),
+            tags: Vec::new(),
+            icon_hash: None,
+            approximate_region: None,
+        },
+        authority_peer_id: identity.peer_id(),
+        authority_public_key: identity.public_key(),
+        signature: Vec::new(),
+    };
+    sign_world_config(&identity, &mut config).unwrap();
+    storage.save_world_config(&config).unwrap();
 
     let source = temp.path().join("source");
     fs::create_dir_all(&source).unwrap();
