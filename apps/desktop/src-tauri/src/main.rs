@@ -386,7 +386,9 @@ async fn runtime_plan(app: AppHandle, world: String) -> Result<String, String> {
 async fn runtime_install(app: AppHandle, world: String, accept_eula: bool) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
     let mut arguments = vec!["install".into(), world];
-    if accept_eula { arguments.push("--accept-eula".into()); }
+    if accept_eula {
+        arguments.push("--accept-eula".into());
+    }
     run_runtime_cli(&app, arguments).await
 }
 
@@ -409,19 +411,26 @@ async fn runtime_launch(
     world: String,
 ) -> Result<Option<u32>, String> {
     let world = require_value(world, "World ID")?;
-    // Starting/ensuring the daemon is the launch trigger. The daemon's migration
-    // supervisor consumes the persisted RuntimeLaunchConfig and owns the shared
-    // authority -> restore -> Fabric launch orchestration path.
+    // Networking/recovery supervision and the foreground managed authority
+    // runtime are separate owned processes. The managed host enters the same
+    // Rust migration::run_authority_runtime path as Advanced hosting, which can
+    // safely establish the first solo authority generation for a new world.
     processes.ensure_daemon_running(&app, "/ip4/0.0.0.0/udp/0/quic-v1".into())?;
+    let pid = processes.start_managed_host(&app, world.clone())?;
     for _ in 0..160 {
         match run_cli(&app, vec!["world".into(), "migration-status".into(), world.clone(), "--json".into()]).await {
             Ok(raw) => {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
                     let phase = value.get("phase").and_then(|v| v.as_str()).unwrap_or_default();
                     let ready = value.get("runtime_ready").and_then(|v| v.as_bool()).unwrap_or(false);
-                    if phase == "ready" && ready { return Ok(None); }
+                    if phase == "ready" && ready {
+                        return Ok(Some(pid));
+                    }
                     if matches!(phase, "failed" | "blocked") {
-                        let detail = value.get("failure_reason").and_then(|v| v.as_str()).unwrap_or("shared runtime launch was blocked");
+                        let detail = value
+                            .get("failure_reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("shared runtime launch was blocked");
                         return Err(detail.to_owned());
                     }
                 }
