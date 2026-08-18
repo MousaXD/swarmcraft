@@ -20,4 +20,8 @@ text = text.replace(
 )
 text = text.replace('paths.root.join("initial-world").join(world.to_hex())', 'paths.root.join("initial-world").join(world_id.to_hex())')
 text = text.replace('                    world,\n                    snapshot_number: 1,', '                    world: world_id,\n                    snapshot_number: 1,')
+# The GitHub Actions token used as the temporary integration workbench cannot
+# push workflow-file changes. Apply packaging workflow edits separately through
+# the repository connector, after the tested code commit lands.
+text = text.replace('    reconcile_ci_packaging()\n', '')
 path.write_text(text)
