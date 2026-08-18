@@ -37,40 +37,12 @@ path.write_text(text)
 # Only the still-live issue #28 manual-runtime reconciliation remains here.
 runpy.run_path('.github/scripts/finalize_manual_runtime.py', run_name='__main__')
 
-# Keep the manual status helper a free function. The first manual pass exposed
-# that relying on the script's conditional insertion was brittle, so assert the
-# final generated source contains the helper before the compiler sees it.
+# finalize_manual_runtime inserts manual_file_status inside RuntimeInstaller's
+# impl block, so generated calls must use the associated-function form.
 installer_path = Path('crates/swarm-cli/src/runtime_installer.rs')
 installer = installer_path.read_text()
-if '\nfn manual_file_status(\n' not in installer:
-    anchor = '\nfn platform_components_ready(status: &RuntimeStatus) -> bool {'
-    if anchor not in installer:
-        raise RuntimeError('manual runtime helper anchor moved')
-    helper = '''\nfn manual_file_status(
-    kind: RuntimeComponentKind,
-    path: &Path,
-    ready_detail: &str,
-) -> RuntimeComponentStatus {
-    let ready = path.is_file();
-    RuntimeComponentStatus {
-        kind,
-        state: if ready {
-            RuntimeComponentState::Ready
-        } else {
-            RuntimeComponentState::Missing
-        },
-        version: None,
-        path: Some(path.to_path_buf()),
-        managed: false,
-        detail: Some(if ready {
-            ready_detail.to_owned()
-        } else {
-            format!("manual runtime file is missing: {}", path.display())
-        }),
-    }
-}
-'''
-    installer = installer.replace(anchor, helper + anchor, 1)
+installer = installer.replace('|config| manual_file_status(', '|config| Self::manual_file_status(')
+installer = installer.replace('\n        manual_file_status(\n', '\n        Self::manual_file_status(\n')
 installer_path.write_text(installer)
 
 runpy.run_path('.github/scripts/add_safe_stop_acceptance.py', run_name='__main__')
