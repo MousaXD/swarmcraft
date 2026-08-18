@@ -1,4 +1,5 @@
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
+import { createImportRequest, parseImportResult } from './import-flow.js';
 
 const $ = (id) => document.getElementById(id);
 const invoke = window.__TAURI__?.core?.invoke;
@@ -18,6 +19,7 @@ const CONNECTIVITY_REFRESH_MS = 10000;
 const viewMeta = {
   worlds: ['Worlds', 'Choose a world and play'],
   create: ['Create', 'Start a replicated Minecraft world'],
+  import: ['Import', 'Bring an existing Minecraft world into SwarmCraft'],
   join: ['Join', 'Join with a signed invite'],
   activity: ['Activity', 'Recent actions and detailed errors'],
   diagnostics: ['Diagnostics', 'Advanced connectivity, runtime, and recovery tools'],
@@ -608,7 +610,7 @@ function renderEmptyWorlds() {
   const title = document.createElement('h2');
   title.textContent = 'No worlds yet';
   const body = document.createElement('p');
-  body.textContent = 'Create a world for your group or join one with a signed invite.';
+  body.textContent = 'Create a world, import an existing Minecraft save, or join with a signed invite.';
   const actions = document.createElement('div');
   actions.className = 'compact-actions';
   const create = document.createElement('button');
@@ -616,12 +618,17 @@ function renderEmptyWorlds() {
   create.className = 'button button-primary';
   create.textContent = 'Create world';
   create.addEventListener('click', () => showView('create'));
+  const importExisting = document.createElement('button');
+  importExisting.type = 'button';
+  importExisting.className = 'button button-secondary';
+  importExisting.textContent = 'Import existing world';
+  importExisting.addEventListener('click', () => showView('import'));
   const join = document.createElement('button');
   join.type = 'button';
   join.className = 'button button-secondary';
   join.textContent = 'Join with invite';
   join.addEventListener('click', () => showView('join'));
-  actions.append(create, join);
+  actions.append(create, importExisting, join);
   empty.append(mark, title, body, actions);
   container.append(empty);
   container.setAttribute('aria-busy', 'false');
@@ -780,6 +787,60 @@ async function createWorld() {
   $('createCompatibility').value = 'vanilla-fabric';
   await refreshWorlds();
   showView('worlds');
+}
+
+function importRequestFromForm() {
+  return createImportRequest({
+    source: $('importSource').value,
+    name: $('importName').value,
+    minecraft: $('importMinecraft').value,
+    fabricLoader: $('importLoader').value,
+    visibility: $('importVisibility').value,
+    serverMods: $('importServerMods').value,
+    noServerMods: $('importNoServerMods').checked,
+  });
+}
+
+async function importWorld() {
+  let request;
+  try {
+    request = importRequestFromForm();
+    showInline('importError', '');
+  } catch (error) {
+    showInline('importError', String(error.message || error), 'danger');
+    if (error.field) $(error.field)?.focus();
+    return;
+  }
+
+  let result;
+  try {
+    result = await run('Importing existing world…', () => backend.importWorld(request), {
+      logResult: false,
+      successMessage: 'Existing world imported into canonical SwarmCraft storage.',
+    });
+  } catch (error) {
+    showInline('importError', `Could not import world: ${String(error)}`, 'danger');
+    return;
+  }
+
+  let importedWorldId;
+  try {
+    importedWorldId = parseImportResult(result).worldId;
+  } catch (error) {
+    showInline('importError', `Import completed but its result could not be read: ${String(error)}`, 'danger');
+    return;
+  }
+  selectedWorldId = importedWorldId;
+  $('importForm').reset();
+  $('importMinecraft').value = '26.1.2';
+  $('importLoader').value = '0.19.3';
+  await refreshWorlds();
+  showView('worlds');
+  showInline(
+    'worldNotice',
+    'Existing world imported. Minecraft EULA acceptance and this device’s runtime setup were not changed.',
+    'safe',
+  );
 }
 
 async function joinWorld() {
@@ -1042,8 +1103,10 @@ function bindAction(id, handler, { submit = false } = {}) {
 for (const nav of document.querySelectorAll('.nav-item[data-view]')) nav.addEventListener('click', () => showView(nav.dataset.view));
 for (const back of document.querySelectorAll('[data-back-worlds]')) back.addEventListener('click', () => showView('worlds'));
 $('quickCreate').addEventListener('click', () => showView('create'));
+$('quickImport').addEventListener('click', () => showView('import'));
 $('quickJoin').addEventListener('click', () => showView('join'));
 $('cancelCreate').addEventListener('click', () => showView('worlds'));
+$('cancelImport').addEventListener('click', () => showView('worlds'));
 $('cancelJoin').addEventListener('click', () => showView('worlds'));
 $('openWorldDiagnostics').addEventListener('click', () => showView('diagnostics'));
 $('clearActivity').addEventListener('click', () => { $('output').textContent = 'Activity cleared.'; });
@@ -1058,6 +1121,7 @@ bindAction('init', initialize);
 bindAction('identityButton', () => showIdentity());
 bindAction('refresh', refreshWorlds);
 bindAction('createForm', createWorld, { submit: true });
+bindAction('importForm', importWorld, { submit: true });
 bindAction('joinForm', joinWorld, { submit: true });
 bindAction('joinWorldIdButton', joinWorldId);
 bindAction('createInvite', createInvite);
