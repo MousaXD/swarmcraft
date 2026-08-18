@@ -34,3 +34,4 @@ text = text.replace('    reconcile_ci_packaging()\n', '')
 path.write_text(text)
 
 runpy.run_path('.github/scripts/finish_runtime_player_journey.py', run_name='__main__')
+runpy.run_path('.github/scripts/finalize_manual_runtime.py', run_name='__main__')
