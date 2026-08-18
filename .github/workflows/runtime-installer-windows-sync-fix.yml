@@ -1,0 +1,45 @@
+name: Runtime installer Windows fsync fix
+
+on:
+  push:
+    branches:
+      - agent/runtime-installer
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/runtime-installer
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Fix Windows fsync handle access
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/swarm-cli/src/runtime_installer.rs')
+          text = path.read_text()
+          old = 'OpenOptions::new().read(true).open(path)?.sync_all()?;'
+          new = 'OpenOptions::new().write(true).open(path)?.sync_all()?;'
+          if old not in text:
+              raise SystemExit('sync_file read-only handle pattern not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          cargo fmt --all
+      - name: Remove one-shot workflow
+        run: rm .github/workflows/runtime-installer-windows-sync-fix.yml
+      - name: Commit fix
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add crates/swarm-cli/src/runtime_installer.rs .github/workflows/runtime-installer-windows-sync-fix.yml
+          git commit -m "runtime: fsync artifacts with writable handle"
+          git push origin HEAD:agent/runtime-installer
