@@ -3,7 +3,10 @@ use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
 use swarm_cli::{
     host_readiness, migration,
-    runtime_installer::{RuntimeInstallOptions, RuntimeInstaller, RuntimeProgress},
+    runtime_installer::{
+        RuntimeComponentKind, RuntimeComponentState, RuntimeInstallOptions, RuntimeInstaller, RuntimeProgress,
+        RuntimeStatus,
+    },
     server_mods,
 };
 use swarm_core::DataPaths;
@@ -85,9 +88,36 @@ fn main() -> Result<()> {
         RuntimeCommand::Verify { world } => {
             let world = parse_world(&world)?;
             let status = installer.verify(world)?;
-            if status.ready {
+            let descriptor = storage.load_world_descriptor(world)?;
+            let world_config = storage.load_world_config(world)?;
+
+            // Server-mod verification is an independent proof boundary. Record
+            // the exact current result even when the platform runtime itself is
+            // healthy but a required user mod is missing or incompatible.
+            let mods = server_mods::evaluate_world_mods(&paths, world, &world_config.compatibility)?;
+            let mod_state = if mods.ready {
+                ServerModsReadinessV1::Ready
+            } else if mods
+                .issues
+                .iter()
+                .any(|issue| matches!(issue.kind, server_mods::ModIssueKind::MissingRequired))
+            {
+                ServerModsReadinessV1::Missing
+            } else {
+                ServerModsReadinessV1::Incompatible
+            };
+            host_readiness::record_server_mod_readiness(
+                &paths,
+                world,
+                descriptor.compatibility_fingerprint,
+                mod_state,
+            )?;
+
+            // Runtime proof excludes third-party server-mod readiness. This is
+            // what lets Host Readiness distinguish "runtime verified, mod
+            // missing" from a genuinely unverified runtime.
+            if runtime_platform_ready(&status) {
                 let config = migration::load_runtime_config(&paths, world)?;
-                let descriptor = storage.load_world_descriptor(world)?;
                 if status.manual_configuration {
                     let live =
                         host_readiness::local_runtime_readiness(&paths, world, descriptor.compatibility_fingerprint)?;
@@ -104,30 +134,17 @@ fn main() -> Result<()> {
                         descriptor.compatibility_fingerprint,
                     )?;
                 }
-                let world_config = storage.load_world_config(world)?;
-                let mods = server_mods::evaluate_world_mods(&paths, world, &world_config.compatibility)?;
-                let state = if mods.ready {
-                    ServerModsReadinessV1::Ready
-                } else if mods
-                    .issues
-                    .iter()
-                    .any(|issue| matches!(issue.kind, server_mods::ModIssueKind::MissingRequired))
-                {
-                    ServerModsReadinessV1::Missing
-                } else {
-                    ServerModsReadinessV1::Incompatible
-                };
-                host_readiness::record_server_mod_readiness(
-                    &paths,
-                    world,
-                    descriptor.compatibility_fingerprint,
-                    state,
-                )?;
             }
             print_json(&status)?;
         }
     }
     Ok(())
+}
+
+fn runtime_platform_ready(status: &RuntimeStatus) -> bool {
+    status.components.iter().all(|component| {
+        component.kind == RuntimeComponentKind::ServerMods || component.state == RuntimeComponentState::Ready
+    })
 }
 
 fn parse_world(value: &str) -> Result<WorldId> {
@@ -143,4 +160,52 @@ fn print_progress(progress: RuntimeProgress) {
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use swarm_cli::runtime_installer::RuntimeComponentStatus;
+
+    #[test]
+    fn server_mod_failure_does_not_erase_runtime_verification_boundary() {
+        let status = RuntimeStatus {
+            world_id: "scworld:test".into(),
+            minecraft_version: "1.21.1".into(),
+            fabric_loader_version: "0.16.0".into(),
+            required_java_major: 21,
+            ready: false,
+            eula_accepted: true,
+            launch_configured: true,
+            manual_configuration: false,
+            components: vec![
+                RuntimeComponentStatus {
+                    kind: RuntimeComponentKind::Java,
+                    state: RuntimeComponentState::Ready,
+                    version: Some("21".into()),
+                    path: None,
+                    managed: false,
+                    detail: None,
+                },
+                RuntimeComponentStatus {
+                    kind: RuntimeComponentKind::Eula,
+                    state: RuntimeComponentState::Ready,
+                    version: None,
+                    path: None,
+                    managed: true,
+                    detail: None,
+                },
+                RuntimeComponentStatus {
+                    kind: RuntimeComponentKind::ServerMods,
+                    state: RuntimeComponentState::Incompatible,
+                    version: None,
+                    path: None,
+                    managed: false,
+                    detail: Some("required mod missing".into()),
+                },
+            ],
+        };
+        assert!(runtime_platform_ready(&status));
+        assert!(!status.ready);
+    }
 }
