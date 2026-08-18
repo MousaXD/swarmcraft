@@ -1172,12 +1172,18 @@ fn hash_file(path: &Path, kind: HashKind) -> Result<String> {
             HashKind::Sha1 => "SHA1",
             HashKind::Sha256 => "SHA256",
         };
-        let output = Command::new("certutil").arg("-hashfile").arg(path).arg(algorithm).output()?;
+        let script = format!("(Get-FileHash -LiteralPath $args[0] -Algorithm {algorithm}).Hash");
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(script)
+            .arg(path)
+            .output()
+            .context("PowerShell Get-FileHash is unavailable")?;
         if !output.status.success() {
-            bail!("certutil failed to hash {}", path.display());
+            bail!("PowerShell failed to hash {}", path.display());
         }
         let text = String::from_utf8_lossy(&output.stdout);
-        parse_hash_output(&text).context("certutil returned no digest")
+        parse_hash_output(&text).context("PowerShell returned no digest")
     }
     #[cfg(not(windows))]
     {
