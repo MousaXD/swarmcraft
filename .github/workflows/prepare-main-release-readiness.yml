@@ -1,0 +1,547 @@
+name: Prepare main release readiness
+
+on:
+  push:
+    branches:
+      - agent/main-release-readiness
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/main-release-readiness
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply release-readiness fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f"expected text not found in {path}: {old!r}")
+              p.write_text(text.replace(old, new))
+
+          # CI/live workflows should follow main/release candidates, not the retired agent branch.
+          replace(
+              '.github/workflows/ci.yml',
+              'branches: [main, agent/final-player-journey-gates]',
+              'branches: [main]',
+          )
+          replace(
+              '.github/workflows/player-journey-live.yml',
+              '  push:\n    branches:\n      - agent/final-player-journey-gates\n  pull_request:\n    branches:\n      - integration/runtime-player-journey\n',
+              '  push:\n    branches:\n      - main\n  pull_request:\n    branches:\n      - integration/runtime-player-journey\n      - main\n',
+          )
+
+          # Main snapshot packaging must stage all four Tauri sidecars.
+          replace(
+              '.github/workflows/main-installers.yml',
+              '          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"\n',
+              '          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"\n'
+              '          cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"\n'
+              '          cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"\n',
+          )
+          replace(
+              '.github/workflows/main-installers.yml',
+              '          Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"\n',
+              '          Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"\n'
+              '          Copy-Item target/release/swarmcraft-runtime.exe "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target.exe"\n'
+              '          Copy-Item target/release/swarmcraft-import.exe "apps/desktop/src-tauri/binaries/swarmcraft-import-$target.exe"\n',
+          )
+
+          main_installers = Path('.github/workflows/main-installers.yml')
+          text = main_installers.read_text()
+          marker = '  publish:\n    name: Publish rolling main release\n'
+          if marker not in text:
+              raise SystemExit('main installer publish marker missing')
+          fabric_job = '''  fabric:\n    name: Fabric bridge jar\n    runs-on: ubuntu-latest\n    defaults:\n      run:\n        working-directory: minecraft/fabric\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-java@v4\n        with:\n          distribution: temurin\n          java-version: '25'\n      - uses: gradle/actions/setup-gradle@v4\n        with:\n          gradle-version: '9.5.1'\n      - name: Build Fabric bridge\n        run: gradle build --stacktrace\n      - name: Stage Fabric jar and checksum\n        shell: bash\n        run: |\n          set -euo pipefail\n          mkdir -p ../../dist\n          jar="$(find build/libs -maxdepth 1 -type f -name 'swarmcraft-fabric-*.jar' ! -name '*-sources.jar' -print -quit)"\n          test -n "$jar"\n          cp "$jar" ../../dist/\n          (cd ../../dist && sha256sum "$(basename "$jar")" > "$(basename "$jar").sha256")\n      - uses: actions/upload-artifact@v4\n        with:\n          name: swarmcraft-fabric-${{ github.sha }}\n          path: |\n            minecraft/fabric/dist/*.jar\n            minecraft/fabric/dist/*.sha256\n          if-no-files-found: error\n          retention-days: 14\n\n'''
+          text = text.replace(marker, fabric_job + marker)
+          text = text.replace('    needs: [linux, windows, macos]\n', '    needs: [linux, windows, macos, fabric]\n')
+          text = text.replace(
+              '          - macOS Intel disk image (`.dmg`)\n          - SHA-256 checksum files\n',
+              '          - macOS Intel disk image (`.dmg`)\n          - versioned SwarmCraft Fabric bridge JAR\n          - SHA-256 checksum files\n',
+          )
+          main_installers.write_text(text)
+
+          # Tagged release packaging must stage all four sidecars too.
+          replace(
+              '.github/workflows/release.yml',
+              '          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"\n',
+              '          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"\n'
+              '          cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"\n'
+              '          cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"\n',
+          )
+          replace(
+              '.github/workflows/release.yml',
+              '          Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"\n',
+              '          Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"\n'
+              '          Copy-Item target/release/swarmcraft-runtime.exe "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target.exe"\n'
+              '          Copy-Item target/release/swarmcraft-import.exe "apps/desktop/src-tauri/binaries/swarmcraft-import-$target.exe"\n',
+          )
+
+          # Runtime Installer prefers immutable vX.Y.Z assets, then permits the rolling
+          # main snapshot only when it contains the exact requested versioned JAR + checksum.
+          runtime = Path('crates/swarm-cli/src/runtime_installer.rs')
+          text = runtime.read_text()
+          old = '''    let api = format!("{SWARMCRAFT_RELEASE_API}/v{version}");\n    let release: Value = serde_json::from_str(&curl_text(&api, &["api.github.com"])?)?;\n    let assets = release["assets"].as_array().context("SwarmCraft release has no assets")?;\n    let jar_name = format!("swarmcraft-fabric-{version}.jar");\n    let checksum_name = format!("{jar_name}.sha256");\n    let jar_url = release_asset_url(assets, &jar_name)?;\n    let checksum_url = release_asset_url(assets, &checksum_name)?;\n'''
+          new = '''    let release = load_swarmcraft_release(version)?;\n    let assets = release["assets"].as_array().context("SwarmCraft release has no assets")?;\n    let jar_name = format!("swarmcraft-fabric-{version}.jar");\n    let checksum_name = format!("{jar_name}.sha256");\n    let jar_url = release_asset_url(assets, &jar_name)?;\n    let checksum_url = release_asset_url(assets, &checksum_name)?;\n'''
+          if old not in text:
+              raise SystemExit('runtime installer release resolution block changed unexpectedly')
+          text = text.replace(old, new)
+          helper_marker = '\nfn release_asset_url(assets: &[Value], name: &str) -> Result<String> {\n'
+          helper = r'''
+fn swarmcraft_release_candidates(version: &str) -> [String; 2] {
+    [
+        format!("{SWARMCRAFT_RELEASE_API}/v{version}"),
+        format!("{SWARMCRAFT_RELEASE_API}/main-latest"),
+    ]
+}
+
+fn load_swarmcraft_release(version: &str) -> Result<Value> {
+    let jar_name = format!("swarmcraft-fabric-{version}.jar");
+    let checksum_name = format!("{jar_name}.sha256");
+    let mut failures = Vec::new();
+    for api in swarmcraft_release_candidates(version) {
+        match curl_text(&api, &["api.github.com"]) {
+            Ok(body) => match serde_json::from_str::<Value>(&body) {
+                Ok(release) => {
+                    let Some(assets) = release["assets"].as_array() else {
+                        failures.push(format!("{api}: release has no assets"));
+                        continue;
+                    };
+                    if release_asset_url(assets, &jar_name).is_ok()
+                        && release_asset_url(assets, &checksum_name).is_ok()
+                    {
+                        return Ok(release);
+                    }
+                    failures.push(format!(
+                        "{api}: exact {jar_name} and checksum were not both published"
+                    ));
+                }
+                Err(error) => failures.push(format!("{api}: invalid release metadata: {error}")),
+            },
+            Err(error) => failures.push(format!("{api}: {error}")),
+        }
+    }
+    bail!(
+        "no published SwarmCraft Fabric artifacts for version {version}: {}",
+        failures.join("; ")
+    )
+}
+'''
+          if helper_marker not in text:
+              raise SystemExit('runtime installer helper marker missing')
+          text = text.replace(helper_marker, '\n' + helper + helper_marker, 1)
+          test_marker = '''    #[test]\n    fn extracts_fabric_api_versions_without_xml_dependency() {\n'''
+          test = '''    #[test]\n    fn release_candidates_prefer_immutable_tag_then_main_snapshot() {\n        assert_eq!(\n            swarmcraft_release_candidates("0.4.0"),\n            [\n                format!("{SWARMCRAFT_RELEASE_API}/v0.4.0"),\n                format!("{SWARMCRAFT_RELEASE_API}/main-latest"),\n            ]\n        );\n    }\n\n'''
+          if test_marker not in text:
+              raise SystemExit('runtime installer test marker missing')
+          text = text.replace(test_marker, test + test_marker, 1)
+          runtime.write_text(text)
+
+          Path('README.md').write_text(r'''# SwarmCraft
+
+> A decentralized Minecraft world that survives its host.
+
+**Current application version: 0.4.0 technical preview.** Wire protocol version remains `1`.
+
+SwarmCraft combines signed world history, content-addressed replication, temporary fenced authority, a Fabric lifecycle bridge, and a Tauri desktop launcher. The normal player journey now includes backend-managed Java/Minecraft/Fabric preparation, explicit Minecraft EULA acceptance, verified runtime/mod readiness, safe stop/sleep, existing-world import, and automatic successor runtime orchestration after a quorum-backed authority transition.
+
+## What 0.4.0 implements
+
+- persistent Ed25519 peer identity and deterministic world identity;
+- signed membership, configuration, snapshot, epoch, lease, recovery, sleep and solo-history records;
+- content-addressed BLAKE3/Zstandard snapshot storage with corruption verification;
+- authenticated libp2p/QUIC networking with mDNS, Kademlia, AutoNAT, DCUtR and relay support;
+- resumable snapshot replication, source fallback and fourth-peer reconstruction;
+- quorum-backed authority recovery, monotonic epochs and fencing tokens;
+- shared migration/runtime orchestration for automatic recovery, manual transfer and supported wake paths;
+- Fabric save/shutdown barriers, restore, final canonical snapshot and durable sleep records;
+- fail-closed corrupt/unreadable sleep-state handling across direct launch, standby and migration;
+- backend Host Readiness for the player-facing “Can I turn off this PC?” decision;
+- managed Runtime Installer for compatible Java, Minecraft, Fabric Loader, Fabric API and the SwarmCraft Fabric bridge;
+- explicit Minecraft EULA handling, never automatic acceptance;
+- deterministic third-party server-mod requirements and local hash verification;
+- safe existing-world import through the Rust backend and normal Desktop flow;
+- Tauri desktop packages for Linux, Windows, macOS Apple Silicon and macOS Intel;
+- four bundled sidecars on every Desktop target: `swarmcraft`, `swarmcraft-host`, `swarmcraft-runtime`, and `swarmcraft-import`.
+
+## Deliberate limitations
+
+SwarmCraft 0.4.0 is still a technical preview, not a claim of universal production readiness.
+
+- **Two-voter crash failover stays fail-closed.** In an Alice/Bob world, Bob alone cannot form the majority quorum after Alice disappears. Use explicit authority transfer while both peers are present, or a three-member topology for automatic crash recovery.
+- **Multi-member wake stays fail-closed.** A sleep-bound quorum wake election is not implemented yet. SwarmCraft does not use first-click-wins wake semantics.
+- **Player reconnection after migration is not yet seamless.** The successor runtime can be orchestrated automatically, but clients are not universally redirected/reconnected without coordination.
+- **Real internet connectivity still needs field certification.** Automated QUIC impairment and relay/DCUtR coverage are strong, but they are not proof for every home NAT, CGNAT, carrier, firewall or IPv6 environment.
+- **Third-party server-mod bytes are not redistributed automatically.** Canonical requirements are synchronized; players provide required JARs locally and SwarmCraft verifies exact metadata/hash compatibility.
+- Production Authenticode and Apple notarization depend on repository release credentials. Development snapshots clearly identify unsigned/ad-hoc signing status.
+
+## Player journey
+
+A normal fresh-world path is:
+
+1. Create or join a world.
+2. Press **Play**.
+3. Runtime Wizard inspects backend state.
+4. Accept the Minecraft EULA explicitly when required.
+5. SwarmCraft prepares and verifies the managed runtime.
+6. Required third-party server mods are verified.
+7. Minecraft launches through the shared Rust authority/runtime path.
+8. **Stop World** waits for the Fabric save/shutdown barrier, final signed canonical snapshot, and durable sleep record before reporting success.
+
+Existing saves can enter through **Import existing world**. Import copies world data into canonical SwarmCraft state but deliberately does not import EULA acceptance or machine-local runtime configuration.
+
+## Current Minecraft target
+
+- Minecraft Java `26.1.2`
+- Fabric Loader `0.19.3`
+- Fabric API `0.155.2+26.1.2`
+- Java `25+`
+
+Per-world signed compatibility metadata may impose additional exact mod requirements.
+
+## Validation
+
+Normal CI covers Rust formatting/lint/tests, process-level storage/network/authority/migration acceptance, corrupt-sleep regressions, existing-world import, Desktop frontend tests, native package builds on all supported targets, Fabric build + embedded Fabric API verification, dependency audit, fuzz smoke, and impaired QUIC resume.
+
+A separate live acceptance workflow exercises a fresh data directory against official Minecraft/Fabric/Adoptium services, requires managed Java resolution, launches real Minecraft twice, persists runtime configuration, restores known world data, and stops through the safe snapshot/sleep barrier.
+
+See:
+
+- [Final player-journey acceptance](docs/FINAL_PLAYER_JOURNEY_ACCEPTANCE.md)
+- [Implementation status](docs/IMPLEMENTATION_STATUS.md)
+- [Release gates](docs/RELEASE_GATES.md)
+- [Network validation](docs/NETWORK_VALIDATION.md)
+- [Architecture](ARCHITECTURE.md)
+- [Protocol](PROTOCOL.md)
+- [Security model](SECURITY.md)
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
+''')
+
+          Path('docs/IMPLEMENTATION_STATUS.md').write_text(r'''# SwarmCraft 0.4.0 Implementation Status
+
+This document is the repository source of truth for implemented behavior versus known technical-preview limitations. Application version `0.4.0` continues to use wire protocol version `1`.
+
+## Executive summary
+
+SwarmCraft 0.4.0 is an advanced technical preview with the core player journey integrated end to end. Runtime setup, explicit EULA handling, server-mod verification, Host Readiness, existing-world import, safe stop/sleep, and automatic successor Minecraft runtime orchestration are implemented in the shared Rust/Desktop product path.
+
+The remaining gaps are narrower than earlier previews: seamless client reconnection, safe quorum-based multi-member wake, representative public-network certification, and production release/signing operations.
+
+## Implemented
+
+### Identity, storage and replication
+
+- Durable peer/world identity and signed canonical records.
+- Content-addressed compressed snapshots with streaming verification and corruption rejection.
+- Publication ownership protection, retention/GC coordination, failure injection, and multi-source/source-fallback reconstruction.
+- Resumable transfers across reconnects and surviving replicas.
+
+### Networking
+
+- Authenticated libp2p QUIC/TCP paths, Kademlia, mDNS, AutoNAT, DCUtR and relay support.
+- Current-path connectivity diagnostics rather than sticky historical-success booleans.
+- Bounded hostile-input handling, fuzz smoke and impaired QUIC resume acceptance.
+
+### Authority and migration
+
+- Majority quorum, signed leases, epochs and fencing tokens.
+- Quorum-backed crash recovery and stale-authority rejection.
+- Shared migration/runtime orchestration used by automatic recovery, manual transfer and supported wake paths.
+- Successor Minecraft runtime startup after safe authority transition.
+- Three-daemon recovery and recovery-successor failure acceptance.
+
+### Minecraft runtime and lifecycle
+
+- Backend-managed Java/Minecraft/Fabric/Fabric API/SwarmCraft bridge installation.
+- Explicit Minecraft EULA acceptance and durable machine-local launch configuration.
+- Authenticated Fabric compatibility/readiness handshake.
+- Required third-party server-mod metadata/hash verification.
+- Fabric save/checkpoint/shutdown barrier before successful Stop World.
+- Final signed canonical snapshot and durable sleep record.
+- Corrupt/unreadable sleep state fails closed in direct, standby and migration paths.
+
+### Desktop
+
+- Launcher-style Runtime Wizard backed by the Rust sidecar contract.
+- Create, join, invite, leave, play, stop/sleep, diagnostics and Host Readiness flows.
+- Existing-world import with explicit compatibility metadata and safe backend publication.
+- Runtime/mod remediation without reproducing authority logic in JavaScript.
+
+### Packaging
+
+Every native Desktop bundle requires four sidecars:
+
+- `swarmcraft`
+- `swarmcraft-host`
+- `swarmcraft-runtime`
+- `swarmcraft-import`
+
+CI builds Linux `.deb` + AppImage, Windows NSIS, macOS ARM64 `.dmg`, and macOS x86_64 `.dmg`. Main snapshots and tagged releases must stage the same four sidecars. Tagged releases also publish the versioned Fabric bridge JAR and checksum.
+
+## Intentional fail-closed limitations
+
+### Two-voter crash recovery
+
+For two voting members, majority quorum is two. If Alice crashes, Bob alone cannot safely elect himself. `BlockedByQuorum` is correct. A positive automatic crash-recovery topology requires three voting members, or Alice must explicitly transfer authority before leaving.
+
+### Multi-member wake
+
+A dedicated sleep-bound quorum wake election is not implemented. Multi-member sleeping worlds remain blocked rather than using first-click-wins or weakening fencing/quorum.
+
+## Still incomplete
+
+- Seamless automatic Minecraft client reconnection/redirect after authority migration.
+- Representative home-router, CGNAT, mobile-carrier, blocked-UDP and independent-ISP IPv6 field certification.
+- Automatic redistribution of arbitrary third-party mod JARs.
+- Production signing/notarization credentials in every release environment.
+- Longer hostile-peer/fuzz/soak campaigns beyond permanent CI profiles.
+- Public/friends lobby services and later research features such as distributed simulation.
+
+## Release claim discipline
+
+Safe 0.4.0 claims include managed runtime setup, explicit EULA, existing-world import, verified server-mod readiness, safe stop/sleep, quorum-backed recovery, automatic successor runtime orchestration, signed snapshot replication, and cross-platform technical-preview installers.
+
+Do not claim universal NAT traversal, Byzantine fault tolerance, seamless client reconnection after every crash, safe two-voter crash failover, or multi-member wake until those are genuinely implemented and proven.
+''')
+
+          Path('apps/desktop/RUNTIME_WIZARD_CONTRACT.md').write_text(r'''# Desktop Runtime Wizard Contract
+
+The Runtime Wizard is a player-facing consumer of the backend-owned runtime contract. It does not implement Java, Minecraft, Fabric, EULA, server-mod, authority or migration rules in JavaScript.
+
+## Backend ownership
+
+The packaged `swarmcraft-runtime` sidecar exposes structured commands for:
+
+```text
+status
+plan
+install
+repair
+verify
+launch
+```
+
+Desktop invokes these through thin Tauri commands in `apps/desktop/src-tauri`. Status/plan/verify are machine-readable JSON. Install/repair expose backend progress and return the final structured install report.
+
+## Normal Play flow
+
+1. Desktop requests `runtime_status` for the selected world.
+2. If required components are incomplete, Runtime Wizard renders backend component state.
+3. If EULA acceptance is required, the UI requires an explicit player checkbox before sending `acceptEula: true`.
+4. Desktop requests backend install/repair as needed. It does not download artifacts itself.
+5. Desktop requests backend verification.
+6. Required server-mod readiness remains a separate fail-closed proof boundary.
+7. Managed launch delegates to the shared Rust runtime/migration orchestration path and persisted `RuntimeLaunchConfig`.
+
+The wizard never treats file existence alone as Host Readiness. Runtime proof becomes authoritative only after the configured runtime launches and completes the authenticated Fabric compatibility/readiness handshake.
+
+## Core Tauri commands
+
+- `runtime_status`
+- `runtime_plan`
+- `runtime_install`
+- `runtime_repair`
+- `runtime_verify`
+- `runtime_launch`
+
+Each command is a thin bridge to the Rust backend/sidecar. Desktop normalizes presentation fields but does not recalculate backend safety decisions.
+
+## EULA
+
+Minecraft server EULA acceptance is explicit. A player action is required before `acceptEula: true` is sent. Importing an existing world does not import EULA state.
+
+## Existing-world import
+
+Import is a separate typed backend path exposed by `swarmcraft-import` and the Tauri `import_world` command. It imports canonical world data and compatibility requirements, then returns to the normal Runtime Wizard + Play path. Runtime binaries, Java selection, launch configuration and EULA state remain machine-local.
+
+## Failure behavior
+
+Backend errors remain errors. The UI may offer retry/repair/Advanced diagnostics, but it must not fake `ready`, suppress corrupt runtime state, auto-accept the EULA, or bypass server-mod/authority checks.
+''')
+
+          Path('docs/RUNTIME_PLAYER_JOURNEY_INTEGRATION.md').write_text(r'''# Runtime Player Journey Integration
+
+This document records the integrated 0.4.0 player-journey contract that is being prepared for `main`.
+
+## Normal player path
+
+**Play** uses backend Runtime Installer status and the Runtime Wizard. Runtime setup is owned by Rust, including compatible Java, official Minecraft/Fabric resolution, Fabric API, the SwarmCraft Fabric bridge, managed directories, explicit EULA state and durable launch configuration.
+
+Runtime verification and required server-mod verification are separate fail-closed Host Readiness boundaries. Desktop does not infer readiness from paths or historical success.
+
+## Shared launch, migration and stop
+
+Managed launch, automatic authority recovery, manual transfer and supported wake paths share Rust runtime/migration orchestration rather than maintaining independent JavaScript launch logic.
+
+**Stop World** reports success only after the Fabric save/shutdown barrier, Minecraft process exit, final signed canonical snapshot, durable signed sleep record and sleeping migration state.
+
+Corrupt or unreadable sleep state is never interpreted as awake. Direct launch, standby and migration block fail-closed.
+
+## Existing-world import
+
+`swarmcraft-import` and the Desktop `import_world` path safely stage, verify and atomically publish imported canonical world state. Import leaves the source world unchanged and does not import EULA or machine-local runtime configuration.
+
+## Host Readiness
+
+The Desktop question **Can I turn off this PC?** renders structured backend Host Readiness. A safe successor must have current reachable membership, exact canonical state, authority eligibility, verified runtime, verified required mods, no conflict and a recovery quorum that survives without the current authority.
+
+A two-member Alice/Bob world therefore remains `BlockedByQuorum` for crash failover. That is an intentional safety result, not a missing frontend shortcut.
+
+## Packaging
+
+All supported Desktop targets bundle four Rust sidecars:
+
+- `swarmcraft`
+- `swarmcraft-host`
+- `swarmcraft-runtime`
+- `swarmcraft-import`
+
+The Fabric artifact embeds Fabric API for the normal path. Main snapshots and tagged releases publish the versioned SwarmCraft Fabric bridge plus SHA-256 checksum so managed runtime setup can resolve the exact adapter version.
+
+## CI and live acceptance
+
+Normal CI covers Rust fmt/clippy/tests, storage/network/process acceptance, import, corrupt-sleep regressions, Host Readiness, migration/recovery, all Desktop tests and packages, Fabric verification, dependency audit, fuzz smoke and impaired QUIC resume.
+
+`player-journey-live.yml` also runs for main-bound pull requests and exercises a fresh data directory against official services with managed Java, explicit EULA, real Minecraft/Fabric launch, safe stop, restart/restore and canonical snapshot advancement.
+
+## Intentional YELLOW gates
+
+- Two-voter crash failover remains `BlockedByQuorum`.
+- Multi-member wake remains fail-closed until a sleep-bound quorum wake protocol exists.
+- Seamless client reconnection and representative real-world NAT certification remain future validation/product work.
+
+None of these limitations justify weakening quorum, fencing, signed history or runtime verification.
+''')
+
+          Path('docs/RELEASE_GATES.md').write_text(r'''# SwarmCraft 0.4.0 Release Gates
+
+SwarmCraft changes distributed authority and world durability, so a release candidate must earn more than a successful compile.
+
+## Required candidate evidence
+
+Before merging the integration candidate to `main`:
+
+- current-head CI must pass;
+- Release version guard must pass;
+- Player journey live acceptance must pass on the final candidate content;
+- no unresolved safety review threads may remain;
+- quorum/fencing rules must not be weakened to turn intentional fail-closed cases green.
+
+## Normal CI gates
+
+Required coverage includes:
+
+- Rust format, strict Clippy and locked tests on Linux, Windows and macOS;
+- RustSec dependency audit and committed lockfile validation;
+- hostile network input and handshake hardening;
+- snapshot reconstruction, publication ownership/GC/retention race coverage and storage failure injection;
+- existing-world import acceptance;
+- direct, standby and migration corrupt-sleep fail-closed regressions;
+- Host Readiness negative matrix including two-member quorum behavior;
+- live join, host lifecycle, migration orchestration, runtime hardening, three-daemon recovery, successor-loss recovery and solo-history conflict handling;
+- fuzz smoke and WAN-like QUIC resume impairment;
+- Fabric build with embedded Fabric API verification;
+- Desktop frontend tests and native packages on Linux, Windows, macOS ARM64 and macOS x86_64.
+
+## Desktop package contract
+
+Every Desktop package must contain all four sidecars declared by Tauri:
+
+- `swarmcraft`
+- `swarmcraft-host`
+- `swarmcraft-runtime`
+- `swarmcraft-import`
+
+Producing a Tauri shell while omitting one of these is a release failure.
+
+## Main snapshot contract
+
+A push to `main` builds the rolling `main-latest` technical-preview release. It must include:
+
+- Linux `.deb`;
+- Windows NSIS `.exe`;
+- macOS ARM64 `.dmg`;
+- macOS x86_64 `.dmg`;
+- the exact versioned `swarmcraft-fabric-X.Y.Z.jar`;
+- SHA-256 checksum files.
+
+Development signing status must be described accurately.
+
+## Tagged release contract
+
+A `vX.Y.Z` tag builds the same four-sidecar Desktop bundles and the exact versioned Fabric bridge JAR/checksum. Runtime Installer prefers this immutable version tag.
+
+For a just-merged technical-preview main snapshot before its immutable tag is published, Runtime Installer may fall back to `main-latest` only when that release contains the exact requested `swarmcraft-fabric-X.Y.Z.jar` and matching checksum asset. A newer rolling release cannot satisfy an older version request merely because it is `main-latest`.
+
+Application version and wire protocol version remain independent.
+
+## Live Minecraft gate
+
+The live workflow uses official Minecraft/Fabric/Adoptium resolution, a fresh SwarmCraft data directory, explicit EULA acceptance and managed Java. It launches real Minecraft, proves authenticated Fabric readiness, stops through the durability barrier, restarts, restores known world state, and advances canonical snapshots without divergence.
+
+## Intentional YELLOW gates
+
+- **Two-voter crash failover:** Bob alone cannot form majority quorum after Alice disappears. Keep `BlockedByQuorum`.
+- **Multi-member wake:** no sleep-bound quorum wake election exists. Keep fail-closed behavior.
+- **Public-network certification:** representative NAT/CGNAT/mobile/IPv6/blocked-UDP field evidence remains separate from automated synthetic impairment.
+- **Seamless player reconnection:** successor runtime orchestration is implemented, but universal automatic client redirect/reconnect is not yet claimed.
+
+These are documented limitations, not permission to weaken safety.
+''')
+
+          # Retired one-off evidence workflow must not ship to main.
+          Path('.github/workflows/exact-head-evidence.yml').unlink(missing_ok=True)
+          Path('.github/workflows/prepare-main-release-readiness.yml').unlink()
+          PY
+
+      - name: Validate focused release changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test -p swarm-cli runtime_installer::tests --locked
+          python3 scripts/check_release_version.py
+          python3 - <<'PY'
+          from pathlib import Path
+          for workflow in ['.github/workflows/main-installers.yml', '.github/workflows/release.yml']:
+              text = Path(workflow).read_text()
+              for sidecar in ['swarmcraft', 'swarmcraft-host', 'swarmcraft-runtime', 'swarmcraft-import']:
+                  if sidecar not in text:
+                      raise SystemExit(f'{workflow} does not stage {sidecar}')
+          ci = Path('.github/workflows/ci.yml').read_text()
+          live = Path('.github/workflows/player-journey-live.yml').read_text()
+          assert 'agent/final-player-journey-gates' not in ci
+          assert 'agent/final-player-journey-gates' not in live
+          assert '- main' in live
+          PY
+
+      - name: Commit prepared release candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'chore: prepare 0.4.0 main release candidate'
+          git push origin HEAD:agent/main-release-readiness
