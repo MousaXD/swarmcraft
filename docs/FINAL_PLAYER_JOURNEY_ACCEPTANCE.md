@@ -12,7 +12,7 @@ Acceptance branch: `agent/final-player-journey-gates`.
 
 Pull request: #37 into `integration/runtime-player-journey`. `main` is not a target of this branch or PR.
 
-The authoritative final branch SHA is reported in the PR handoff after the final exact-head checks finish. A Git commit cannot embed its own final SHA in a file that participates in that same commit without changing the SHA again, so this document deliberately does not use a self-invalidating SHA placeholder.
+The authoritative final branch SHA is reported in the PR/final handoff after the exact-head checks finish. A Git commit cannot embed its own final SHA in a tracked file that participates in that same commit without changing the SHA again, so this document deliberately does not use a self-invalidating SHA placeholder.
 
 Gate colors are evidence-based:
 
@@ -26,10 +26,10 @@ No gate is promoted by weakening authority fencing, quorum, runtime verification
 
 | Gate | Candidate status | Reason |
 | --- | --- | --- |
-| Clean-machine E2E | YELLOW until the live workflow passes the accepted exact head | A real-artifact workflow now exists and exercises managed Java, explicit EULA, real Minecraft/Fabric launch, safe stop, restart and persisted runtime configuration. The deterministic runtime-hardening suite remains always-on. |
+| Clean-machine E2E | YELLOW until the final exact-head live workflow passes | A real-artifact workflow exercises managed Java, explicit EULA, real Minecraft/Fabric launch, safe stop, restart and persisted runtime configuration. A pre-final run completed the real server journey twice and exposed only a brittle exact snapshot-number assertion, which was replaced by the actual invariant: each safe stop must monotonically advance a verified canonical snapshot. |
 | Alice/Bob two-device E2E | YELLOW | A literal two-voter world cannot lose Alice and still form a majority recovery quorum. Bob-alone failover would require weakening the existing quorum rule. Real join/sync and three-member recovery are covered separately. |
-| Existing-world import | GREEN once exact-head CI passes | A backend-first, atomic import path now stages and verifies canonical metadata/snapshot state before publication, leaves the source untouched, and imports no EULA or runtime binaries. |
-| Multi-member wake | YELLOW | Current sleeping worlds are intentionally excluded from ordinary recovery. Safe wake needs a sleep-bound quorum proposal/selection protocol that does not yet exist. Existing behavior remains fail-closed. |
+| Existing-world import | GREEN once exact-head CI passes | A backend-first, atomic import path stages and verifies canonical metadata/snapshot state before publication, leaves the source untouched, and imports no EULA or runtime binaries. |
+| Multi-member wake | YELLOW | Safe wake needs a sleep-bound quorum proposal/selection protocol that does not yet exist. The backend remains fail-closed, and this pass additionally removed the direct-host solo-wake escape hatch and guards managed/direct launches against bypassing the sleep barrier. |
 
 ## Clean-machine E2E
 
@@ -63,13 +63,19 @@ The live journey proves, in order:
 14. real Minecraft world startup demonstrated by generated `level.dat` plus backend `runtime_ready=true`;
 15. a known world-data marker is written through the live runtime directory;
 16. safe Stop World requests the Fabric shutdown/save barrier rather than killing Minecraft;
-17. a new canonical snapshot is verified and a durable sleep record is present;
+17. a new canonical snapshot is verified, its sequence advances, and a durable sleep record is present;
 18. backend processes are restarted;
 19. EULA acceptance and RuntimeLaunchConfig remain persisted from the earlier explicit acceptance;
 20. a second real Minecraft launch restores the marker from canonical state without manual Java/server/mod paths;
-21. a second safe stop produces the next canonical snapshot with no divergence.
+21. a second safe stop verifies another monotonically newer canonical snapshot with no divergence.
 
 The live workflow uses official Mojang/Fabric/Adoptium resolution paths. `SWARMCRAFT_FABRIC_MOD_JAR` points at the candidate branch's freshly built Fabric artifact because an unpublished candidate SHA cannot yet have a matching GitHub release asset.
+
+### Pre-final live evidence and harness correction
+
+Live run `32117811369` on candidate `878b25c1e8fbd7623c2327f989141bb2dc60e597` downloaded managed Eclipse Adoptium Java 25, installed the official Minecraft/Fabric runtime, launched Minecraft `26.1.2` with Fabric Loader `0.19.3` twice, reached the authenticated SwarmCraft lifecycle connection twice, stopped through the Fabric save/shutdown path twice, restored a known marker on the second launch, and ended with a signed sleeping state and verified canonical snapshots.
+
+That run's harness still expected hard-coded snapshot numbers `2` and `3`. The actual safe lifecycle legitimately produced a newer sequence by the end of the second wake/stop. The acceptance script now records the initial sequence and requires each safe stop to produce a strictly newer verified canonical snapshot instead of depending on an internal exact counter. The final gate color still depends on the corrected workflow passing the final exact branch head.
 
 ### First-host integration defect fixed by this pass
 
@@ -181,7 +187,9 @@ A sleeping world has a signed sleep record bound to the final canonical snapshot
 
 For more than one non-banned member, supervision refuses to launch and publishes a blocked state explaining that a quorum-backed authority transition is required. Sleeping worlds are also intentionally excluded from ordinary daemon lease/recovery processing.
 
-That combination is deliberate: it prevents the first peer to click Play from becoming authority merely because the old runtime is asleep.
+This pass also closes direct-launch bypasses. `swarmcraft-host` no longer exposes the former `--allow-solo-wake` override. Both Advanced direct hosting and managed `swarmcraft-runtime launch` call a shared launch guard: no sleep record allows ordinary launch; a valid sleeping single-member world may use the existing solo wake semantics; a valid sleeping multi-member world is rejected; and a corrupt/unreadable sleep record fails closed rather than being interpreted as an awake world.
+
+That combination prevents the first peer to click Play, or an Advanced launch, from becoming authority merely because the old runtime is asleep.
 
 ### Missing protocol needed for GREEN
 
@@ -212,7 +220,7 @@ The exact-head CI matrix builds and tests:
 | Linux | required | `.deb` + AppImage | required |
 | Windows | required | NSIS `.exe` | required |
 | macOS ARM64 | required | `.dmg` | required |
-| macOS x86_64 | required through the macOS matrix/package runner | `.dmg` | required |
+| macOS x86_64 | package runner plus shared macOS Rust tests | `.dmg` | required |
 
 The Fabric artifact build/embedded Fabric API verification, dependency audit, fuzz smoke and impaired QUIC resume gates remain enabled.
 
@@ -220,16 +228,18 @@ The Fabric artifact build/embedded Fabric API verification, dependency audit, fu
 
 Baseline integration CI: `32112002373` at `3731183ef97e51172ec8e8ff13981503ca55c2ba`.
 
+Pre-final live external-artifact run: `32117811369` at `878b25c1e8fbd7623c2327f989141bb2dc60e597`. Its uploaded evidence demonstrates the two real Minecraft/Fabric lifecycles described above; the workflow result exposed the now-corrected exact snapshot-number assertion.
+
 Acceptance exact-head workflows are configured to run on pushes to `agent/final-player-journey-gates` so the release record can distinguish the literal candidate SHA from GitHub's synthetic pull-request merge SHA.
 
-Final exact-head CI and live player-journey run IDs are recorded in the PR/final handoff after the final documentation commit has itself passed those workflows.
+Final exact-head CI and corrected live player-journey run IDs are recorded in the PR/final handoff after this documentation commit itself has passed those workflows.
 
 ## Remaining limitations
 
 1. **YELLOW, Alice/Bob literal crash failover:** two voting members cannot survive one disappearance with majority quorum. A third witness/member or separately designed safe quorum-changing protocol is required for the requested positive crash-failover journey.
-2. **YELLOW, multi-member wake:** no sleep-bound quorum wake protocol exists yet; backend remains explicitly fail-closed.
-3. **YELLOW, Desktop import presentation:** safe import backend, packaged sidecar and Tauri bridge exist, but this branch does not add a normal-player folder-picker/form.
-4. Clean-machine is GREEN only after the real live workflow passes the accepted exact head. External service failure remains distinguishable from the deterministic offline fixture suite.
+2. **YELLOW, multi-member wake:** no sleep-bound quorum wake protocol exists yet; backend remains explicitly fail-closed and direct-launch bypasses are now guarded.
+3. **YELLOW, Desktop import presentation:** safe import backend, packaged sidecar and Tauri bridge exist, but this branch does not add a normal-player native folder-picker/form.
+4. Clean-machine is GREEN only after the corrected real live workflow passes the final exact head. External service evidence remains distinguishable from the deterministic offline fixture suite.
 
 ## Release recommendation rule
 
