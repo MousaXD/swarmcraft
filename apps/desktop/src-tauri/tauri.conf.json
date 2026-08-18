@@ -34,7 +34,8 @@
     "externalBin": [
       "binaries/swarmcraft",
       "binaries/swarmcraft-host",
-      "binaries/swarmcraft-runtime"
+      "binaries/swarmcraft-runtime",
+      "binaries/swarmcraft-import"
     ]
   }
 }
