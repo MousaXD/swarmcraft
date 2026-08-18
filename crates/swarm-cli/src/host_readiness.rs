@@ -248,11 +248,7 @@ pub fn local_server_mod_readiness(
     // invalidates a previous green result immediately.
     let current = server_mods::evaluate_world_mods(paths, world, &config.compatibility)?;
     if !current.ready {
-        if current
-            .issues
-            .iter()
-            .any(|issue| matches!(issue.kind, server_mods::ModIssueKind::MissingRequired))
-        {
+        if current.issues.iter().any(|issue| matches!(issue.kind, server_mods::ModIssueKind::MissingRequired)) {
             return Ok(ServerModsReadinessV1::Missing);
         }
         return Ok(ServerModsReadinessV1::Incompatible);
