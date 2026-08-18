@@ -12,10 +12,9 @@ use swarm_core::{
     verify_snapshot_signature, DataPaths, PeerIdentity,
 };
 use swarm_protocol::{
-    ArtifactRequirementV1, ArtifactSideV1, AuthorityPolicyV1, EpochMode, Hash32, InviteV1, JoinRequestV1,
-    LeaveRequestV1, MembershipPolicyV1, MembershipRecordV1, PeerId, RuntimeCompatibilityManifestV1, WorldConfigV1,
-    WorldDescriptorV1, WorldId, WorldMemberV1, WorldPresentationV1, WorldSafetyLevelV1, WorldVisibilityV1,
-    PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    AuthorityPolicyV1, EpochMode, InviteV1, JoinRequestV1, LeaveRequestV1, MembershipPolicyV1, MembershipRecordV1,
+    PeerId, RuntimeCompatibilityManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1,
+    WorldPresentationV1, WorldSafetyLevelV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 use tracing::info;
@@ -228,16 +227,11 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
         WorldCommand::Create { name, minecraft, fabric_loader, compatibility, server_mod, visibility } => {
             let identity = PeerIdentity::load_or_create(paths)?;
             let visibility = parse_visibility(&visibility)?;
-            let legacy_hash =
-                Hash32::from_domain_bytes(b"swarmcraft/legacy-compatibility/v1\0", compatibility.as_bytes());
-            let mut required_server_mods = vec![ArtifactRequirementV1 {
-                artifact_id: "swarmcraft.legacy-compatibility".into(),
-                version: "1".into(),
-                artifact_hash: legacy_hash,
-                side: ArtifactSideV1::Server,
-                provider_hint: None,
-            }];
-            required_server_mods.extend(server_mods::requirements_from_jars(&server_mod)?);
+            // The legacy compatibility text is retained only as a CLI compatibility input.
+            // It is not a physical server-mod requirement and must never make a clean world
+            // appear to be missing a fictional JAR.
+            let _legacy_compatibility = compatibility;
+            let required_server_mods = server_mods::requirements_from_jars(&server_mod)?;
             let manifest = RuntimeCompatibilityManifestV1 {
                 minecraft_version: minecraft.clone(),
                 loader_id: "fabric".into(),

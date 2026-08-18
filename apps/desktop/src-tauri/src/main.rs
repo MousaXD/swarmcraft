@@ -149,6 +149,43 @@ async fn host_readiness(app: AppHandle, world: String) -> Result<String, String>
 }
 
 #[tauri::command]
+async fn world_mods_status(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "mods-status".into(), world, "--json".into()]).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn world_mods_add(app: AppHandle, world: String, jar_path: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    let jar_path = require_value(jar_path, "Required mod JAR path")?;
+    run_cli(&app, vec!["world".into(), "mods-add".into(), world, jar_path]).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn world_mods_remove(app: AppHandle, world: String, mod_id: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    let mod_id = require_value(mod_id, "Mod ID")?;
+    run_cli(&app, vec!["world".into(), "mods-remove".into(), world, mod_id]).await
+}
+
+#[tauri::command]
+async fn open_world_mods_folder(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    let raw = run_cli(&app, vec!["world".into(), "mods-path".into(), world]).await?;
+    let path = require_value(raw, "Server mods folder")?;
+
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "linux")]
+    let mut command = std::process::Command::new("xdg-open");
+
+    command.arg(&path).spawn().map_err(|error| format!("Could not open server mods folder: {error}"))?;
+    Ok(path)
+}
+
+#[tauri::command]
 async fn world_compatibility(app: AppHandle, world: String) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
     run_cli(&app, vec!["world".into(), "compatibility".into(), world]).await
@@ -400,6 +437,10 @@ fn main() {
             create_invite,
             world_status,
             host_readiness,
+            world_mods_status,
+            world_mods_add,
+            world_mods_remove,
+            open_world_mods_folder,
             world_compatibility,
             world_conflicts,
             set_background_seeding,

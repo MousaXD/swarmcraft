@@ -509,6 +509,16 @@ export function createBackendAdapter(invoke) {
       return normalizeConnectivityDiagnostics(parsed);
     },
 
+    mods: Object.freeze({
+      status: async (world) => parseJsonContract(
+        await call('world_mods_status', { world }),
+        'Server mod status',
+      ),
+      supplyRequiredJar: (world, jarPath) => call('world_mods_add', { world, jarPath }),
+      removeLocal: (world, modId) => call('world_mods_remove', { world, modId }),
+      openFolder: (world) => call('open_world_mods_folder', { world }),
+    }),
+
     runtime: Object.freeze({
       status: async (world) => normalizeRuntimeStatus(await callOptional(
         'runtime_status',
