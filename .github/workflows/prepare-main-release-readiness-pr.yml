@@ -1,0 +1,78 @@
+name: Prepare main release readiness from PR
+
+on:
+  pull_request:
+    branches:
+      - integration/runtime-player-journey
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/main-release-readiness
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Execute prepared transformation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          raw = Path('.github/workflows/prepare-main-release-readiness.yml').read_text()
+          start_marker = "          python3 - <<'PY'\n"
+          end_marker = "\n          PY\n\n      - name: Validate focused release changes"
+          start = raw.index(start_marker) + len(start_marker)
+          end = raw.index(end_marker, start)
+          lines = raw[start:end].splitlines()
+          script = "\n".join(line[10:] if line.startswith("          ") else line for line in lines)
+          exec(compile(script, 'prepare-main-release-readiness', 'exec'))
+
+          # The Fabric staging command writes to repository-root dist/.
+          p = Path('.github/workflows/main-installers.yml')
+          text = p.read_text().replace('minecraft/fabric/dist/*.jar', 'dist/*.jar').replace(
+              'minecraft/fabric/dist/*.sha256', 'dist/*.sha256'
+          )
+          p.write_text(text)
+          Path('.github/workflows/prepare-main-release-readiness-pr.yml').unlink()
+          PY
+      - name: Validate focused release changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test -p swarm-cli runtime_installer::tests --locked
+          python3 scripts/check_release_version.py
+          python3 - <<'PY'
+          from pathlib import Path
+          for workflow in ['.github/workflows/main-installers.yml', '.github/workflows/release.yml']:
+              text = Path(workflow).read_text()
+              for sidecar in ['swarmcraft', 'swarmcraft-host', 'swarmcraft-runtime', 'swarmcraft-import']:
+                  assert sidecar in text, f'{workflow} does not stage {sidecar}'
+          main = Path('.github/workflows/main-installers.yml').read_text()
+          assert 'name: Fabric bridge jar' in main
+          assert 'dist/*.jar' in main and 'dist/*.sha256' in main
+          assert 'minecraft/fabric/dist/' not in main
+          assert not Path('.github/workflows/exact-head-evidence.yml').exists()
+          assert 'agent/final-player-journey-gates' not in Path('.github/workflows/ci.yml').read_text()
+          live = Path('.github/workflows/player-journey-live.yml').read_text()
+          assert 'agent/final-player-journey-gates' not in live
+          assert '- main' in live
+          PY
+      - name: Commit prepared release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'chore: prepare 0.4.0 main release candidate'
+          git push origin HEAD:agent/main-release-readiness
