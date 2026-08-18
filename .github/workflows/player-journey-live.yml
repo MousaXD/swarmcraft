@@ -2,6 +2,9 @@ name: Player journey live acceptance
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - agent/final-player-journey-gates
   pull_request:
     branches:
       - integration/runtime-player-journey
