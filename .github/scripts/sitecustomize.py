@@ -21,6 +21,12 @@ text = text.replace(
 )
 text = text.replace('paths.root.join("initial-world").join(world.to_hex())', 'paths.root.join("initial-world").join(world_id.to_hex())')
 text = text.replace('                    world,\n                    snapshot_number: 1,', '                    world: world_id,\n                    snapshot_number: 1,')
+# Make the crash-safe lock explicit for clippy while keeping the project's Rust 1.88 MSRV.
+text = text.replace(
+    'OpenOptions::new().create(true).read(true).write(true).open(path)?;',
+    'OpenOptions::new().create(true).read(true).write(true).truncate(false).open(path)?;',
+)
+text = text.replace('let _ = self.file.unlock();', 'let _ = FileExt::unlock(&self.file);')
 # The GitHub Actions token used as the temporary integration workbench cannot
 # push workflow-file changes. Apply packaging workflow edits separately through
 # the repository connector, after the tested code commit lands.
