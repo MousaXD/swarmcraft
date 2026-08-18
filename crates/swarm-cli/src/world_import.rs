@@ -213,7 +213,24 @@ fn stage_and_publish(
         bail!("injected existing-world import interruption before publication");
     }
 
+    let result = ImportWorldResult {
+        world_id: world.to_string(),
+        display_name,
+        snapshot_number: snapshot.snapshot_number,
+        snapshot_hash: snapshot.manifest_hash()?.to_string(),
+        state_root: snapshot.state_root.to_string(),
+        files: snapshot.entries.len(),
+        compatibility_fingerprint: genesis.compatibility_fingerprint.to_string(),
+    };
     let staged_world_dir = staged.world_dir(world);
+
+    // SnapshotPublication owns a kernel-held publication lock until it is
+    // dropped. The manifest is durable and its pins were released by
+    // commit_snapshot above, so release that transaction lease before moving
+    // the complete staged directory. Unix permits renaming beneath an open
+    // handle, while Windows correctly rejects it with AccessDenied.
+    drop(snapshot);
+
     fs::create_dir_all(paths.worlds_dir())
         .with_context(|| format!("cannot create SwarmCraft worlds directory {}", paths.worlds_dir().display()))?;
     if final_world_dir.exists() {
@@ -233,15 +250,7 @@ fn stage_and_publish(
         return Err(error).context("import publication directory could not be durably synchronized");
     }
 
-    Ok(ImportWorldResult {
-        world_id: world.to_string(),
-        display_name,
-        snapshot_number: snapshot.snapshot_number,
-        snapshot_hash: snapshot.manifest_hash()?.to_string(),
-        state_root: snapshot.state_root.to_string(),
-        files: snapshot.entries.len(),
-        compatibility_fingerprint: genesis.compatibility_fingerprint.to_string(),
-    })
+    Ok(result)
 }
 
 fn validate_request(request: &ImportWorldRequest) -> Result<()> {
