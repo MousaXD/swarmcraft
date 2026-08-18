@@ -1,0 +1,63 @@
+name: Prepare 0.4.0 version bump
+
+on:
+  pull_request:
+    branches:
+      - integration/runtime-player-journey
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    if: github.head_ref == 'agent/version-0.4.0'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Bump and validate application metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          exact = {
+              "Cargo.toml": ("version = \"0.3.0\"", "version = \"0.4.0\""),
+              "apps/desktop/src-tauri/Cargo.toml": ("version = \"0.3.0\"", "version = \"0.4.0\""),
+              "apps/desktop/src-tauri/tauri.conf.json": ("\"version\": \"0.3.0\"", "\"version\": \"0.4.0\""),
+              "minecraft/fabric/gradle.properties": ("mod_version=0.3.0", "mod_version=0.4.0"),
+          }
+          for name, (old, new) in exact.items():
+              path = Path(name)
+              text = path.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected exactly one {old!r} in {name}, found {count}")
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          guard = Path("scripts/check_release_version.py")
+          text = guard.read_text(encoding="utf-8")
+          count = text.count("0.3.0")
+          if count < 1:
+              raise SystemExit("release guard does not contain 0.3.0")
+          guard.write_text(text.replace("0.3.0", "0.4.0"), encoding="utf-8")
+          PY
+
+          cargo metadata --format-version 1 --no-deps > /dev/null
+          python3 scripts/check_release_version.py
+          cargo metadata --locked --format-version 1 --no-deps > /dev/null
+          git diff --check
+
+      - name: Commit validated version bump to PR branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/bump-0.4.0-pr.yml
+          git add Cargo.toml Cargo.lock apps/desktop/src-tauri/Cargo.toml apps/desktop/src-tauri/tauri.conf.json minecraft/fabric/gradle.properties scripts/check_release_version.py
+          git commit -m "chore: bump SwarmCraft to 0.4.0"
+          git push origin HEAD:${{ github.head_ref }}
