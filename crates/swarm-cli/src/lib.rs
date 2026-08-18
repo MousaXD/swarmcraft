@@ -4,3 +4,4 @@ pub mod migration;
 pub mod runtime_installer;
 pub mod runtime_layout;
 pub mod server_mods;
+pub mod world_import;
