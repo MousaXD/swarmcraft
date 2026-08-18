@@ -521,7 +521,7 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
         }
         WorldCommand::Stop { world } => {
             let world = parse_world(&world)?;
-            migration::request_world_stop(&paths, &storage, world)?;
+            migration::request_world_stop(paths, storage, world)?;
             println!("Safe stop requested for {world}; wait for migration status to become sleeping before treating shutdown as complete.");
         }
         WorldCommand::Wake { world } => {
