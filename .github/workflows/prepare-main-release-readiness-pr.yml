@@ -47,6 +47,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo fmt --all
           cargo fmt --all -- --check
           cargo test -p swarm-cli runtime_installer::tests --locked
           python3 scripts/check_release_version.py
