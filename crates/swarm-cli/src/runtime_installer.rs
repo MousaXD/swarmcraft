@@ -910,21 +910,29 @@ fn install_artifact(artifact: &ResolvedArtifact, destination: &Path, force: bool
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
-    if let Some(expected) = &artifact.sha1 {
-        let actual = hash_file(&temporary, HashKind::Sha1)?;
-        if !eq_hash(expected, &actual) {
-            let _ = fs::remove_file(&temporary);
-            bail!("downloaded artifact SHA-1 mismatch");
+    let verification = (|| -> Result<String> {
+        if let Some(expected) = &artifact.sha1 {
+            let actual = hash_file(&temporary, HashKind::Sha1)?;
+            if !eq_hash(expected, &actual) {
+                bail!("downloaded artifact SHA-1 mismatch");
+            }
         }
-    }
-    let sha256 = hash_file(&temporary, HashKind::Sha256)?;
-    if let Some(expected) = &artifact.sha256 {
-        if !eq_hash(expected, &sha256) {
-            let _ = fs::remove_file(&temporary);
-            bail!("downloaded artifact SHA-256 mismatch");
+        let sha256 = hash_file(&temporary, HashKind::Sha256)?;
+        if let Some(expected) = &artifact.sha256 {
+            if !eq_hash(expected, &sha256) {
+                bail!("downloaded artifact SHA-256 mismatch");
+            }
         }
-    }
-    sync_file(&temporary)?;
+        sync_file(&temporary)?;
+        Ok(sha256)
+    })();
+    let sha256 = match verification {
+        Ok(sha256) => sha256,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+    };
     if destination.exists() {
         fs::remove_file(destination).with_context(|| format!("cannot replace {}", destination.display()))?;
     }
@@ -1172,15 +1180,21 @@ fn hash_file(path: &Path, kind: HashKind) -> Result<String> {
             HashKind::Sha1 => "SHA1",
             HashKind::Sha256 => "SHA256",
         };
-        let script = format!("(Get-FileHash -LiteralPath $args[0] -Algorithm {algorithm}).Hash");
+        let script = format!(
+            "(Get-FileHash -LiteralPath $env:SWARMCRAFT_HASH_PATH -Algorithm {algorithm}).Hash"
+        );
         let output = Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command"])
             .arg(script)
-            .arg(path)
+            .env("SWARMCRAFT_HASH_PATH", path)
             .output()
             .context("PowerShell Get-FileHash is unavailable")?;
         if !output.status.success() {
-            bail!("PowerShell failed to hash {}", path.display());
+            bail!(
+                "PowerShell failed to hash {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
         }
         let text = String::from_utf8_lossy(&output.stdout);
         parse_hash_output(&text).context("PowerShell returned no digest")
