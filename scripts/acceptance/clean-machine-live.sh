@@ -47,6 +47,24 @@ migration_status() {
   "$CLI" --data-dir "$DATA" world migration-status "$WORLD" --json 2>/dev/null || true
 }
 
+latest_snapshot_number() {
+  "$CLI" --data-dir "$DATA" world status "$WORLD" | sed -n 's/^Latest snapshot: //p' | tail -n1
+}
+
+assert_snapshot_advanced() {
+  local previous="$1"
+  local current="$2"
+  local label="$3"
+  [[ "$previous" =~ ^[0-9]+$ && "$current" =~ ^[0-9]+$ ]] || {
+    printf '%s snapshot sequence is not numeric: previous=%s current=%s\n' "$label" "$previous" "$current" >&2
+    return 1
+  }
+  (( current > previous )) || {
+    printf '%s did not advance the canonical snapshot sequence: previous=%s current=%s\n' "$label" "$previous" "$current" >&2
+    return 1
+  }
+}
+
 wait_phase() {
   local wanted="$1"
   local timeout_seconds="${2:-180}"
@@ -122,6 +140,11 @@ CREATE_OUTPUT="$("$CLI" --data-dir "$DATA" world create \
 printf '%s\n' "$CREATE_OUTPUT"
 WORLD="$(sed -n 's/^World ID: //p' <<<"$CREATE_OUTPUT" | tail -n1)"
 [[ "$WORLD" == scworld:* ]] || { printf 'Could not parse created world ID\n' >&2; exit 1; }
+INITIAL_SNAPSHOT="$(latest_snapshot_number)"
+[[ "$INITIAL_SNAPSHOT" =~ ^[0-9]+$ ]] || {
+  printf 'Initial canonical snapshot sequence is not numeric: %s\n' "$INITIAL_SNAPSHOT" >&2
+  exit 1
+}
 
 INITIAL_STATUS="$(runtime_status)"
 [[ "$(json_field "$INITIAL_STATUS" eula_accepted)" == "false" ]]
@@ -175,7 +198,8 @@ printf 'persisted through canonical checkpoint\n' >"$WORLD_DIR/swarmcraft-clean-
 stop_runtime_safely
 "$CLI" --data-dir "$DATA" world verify "$WORLD"
 FIRST_STOP_STATUS="$("$CLI" --data-dir "$DATA" world status "$WORLD")"
-grep -q '^Latest snapshot: 2$' <<<"$FIRST_STOP_STATUS"
+FIRST_STOP_SNAPSHOT="$(latest_snapshot_number)"
+assert_snapshot_advanced "$INITIAL_SNAPSHOT" "$FIRST_STOP_SNAPSHOT" "First safe stop"
 grep -q '^Migration: Sleeping$' <<<"$FIRST_STOP_STATUS"
 
 printf '== backend/process restart with persisted runtime configuration ==\n'
@@ -190,6 +214,8 @@ grep -q '^persisted through canonical checkpoint$' "$WORLD_DIR/swarmcraft-clean-
 stop_runtime_safely
 "$CLI" --data-dir "$DATA" world verify "$WORLD"
 SECOND_STOP_STATUS="$("$CLI" --data-dir "$DATA" world status "$WORLD")"
-grep -q '^Latest snapshot: 3$' <<<"$SECOND_STOP_STATUS"
+SECOND_STOP_SNAPSHOT="$(latest_snapshot_number)"
+assert_snapshot_advanced "$FIRST_STOP_SNAPSHOT" "$SECOND_STOP_SNAPSHOT" "Second safe stop"
+grep -q '^Migration: Sleeping$' <<<"$SECOND_STOP_STATUS"
 
-echo "CLEAN_MACHINE_LIVE_PASS world=$WORLD"
+echo "CLEAN_MACHINE_LIVE_PASS world=$WORLD snapshots=$INITIAL_SNAPSHOT,$FIRST_STOP_SNAPSHOT,$SECOND_STOP_SNAPSHOT"
