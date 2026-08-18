@@ -1,0 +1,35 @@
+name: Apply rustfmt once
+
+on:
+  push:
+    branches: [agent/final-player-journey-gates]
+
+permissions:
+  contents: write
+
+jobs:
+  rustfmt:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/final-player-journey-gates
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply canonical Rust formatting
+        run: cargo fmt --all
+      - name: Commit formatter output if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "No formatter changes needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- '*.rs'
+          git commit -m "style: apply canonical rustfmt"
+          git push origin HEAD:agent/final-player-journey-gates
