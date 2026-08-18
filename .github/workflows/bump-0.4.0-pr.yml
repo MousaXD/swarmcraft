@@ -23,6 +23,7 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           exact = {
               "Cargo.toml": ("version = \"0.3.0\"", "version = \"0.4.0\""),
@@ -46,9 +47,37 @@ jobs:
           text = text.replace('0.3.0', '0.4.0')
           text = text.replace(r'0\.3\.0', r'0\.4\.0')
           guard.write_text(text, encoding="utf-8")
+
+          owned = {
+              "swarm-cli",
+              "swarm-consensus",
+              "swarm-core",
+              "swarm-ipc",
+              "swarm-network",
+              "swarm-protocol",
+              "swarm-storage",
+          }
+          lock = Path("Cargo.lock")
+          raw = lock.read_text(encoding="utf-8")
+          prefix, *blocks = raw.split("[[package]]")
+          seen = set()
+          out = [prefix]
+          for block in blocks:
+              name = re.search(r'\nname = "([^"]+)"', block)
+              if name and name.group(1) in owned:
+                  package = name.group(1)
+                  seen.add(package)
+                  old = 'version = "0.3.0"'
+                  if block.count(old) != 1:
+                      raise SystemExit(f"Cargo.lock {package} does not have exactly one 0.3.0 version line")
+                  block = block.replace(old, 'version = "0.4.0"', 1)
+              out.append("[[package]]" + block)
+          missing = owned - seen
+          if missing:
+              raise SystemExit(f"Cargo.lock missing owned packages: {sorted(missing)}")
+          lock.write_text("".join(out), encoding="utf-8")
           PY
 
-          cargo metadata --format-version 1 --no-deps > /dev/null
           python3 scripts/check_release_version.py
           cargo metadata --locked --format-version 1 --no-deps > /dev/null
           git diff --check
