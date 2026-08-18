@@ -6,11 +6,7 @@ use swarm_core::DataPaths;
 use swarm_protocol::WorldVisibilityV1;
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "swarmcraft-import",
-    version,
-    about = "Safely import an existing Minecraft save into SwarmCraft"
-)]
+#[command(name = "swarmcraft-import", version, about = "Safely import an existing Minecraft save into SwarmCraft")]
 struct Args {
     /// Override the standard OS-local SwarmCraft data directory.
     #[arg(long, env = "SWARMCRAFT_DATA_DIR")]
