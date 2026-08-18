@@ -16,6 +16,7 @@ use swarm_protocol::{
 use swarm_storage::Storage;
 
 use crate::migration::{load_runtime_config, RuntimeLaunchConfig};
+use crate::server_mods;
 
 pub const HOST_READINESS_MAX_AGE_MS: u64 = 6_000;
 const RUNTIME_VERIFICATION_SCHEMA: u16 = 1;
@@ -241,6 +242,22 @@ pub fn local_server_mod_readiness(
     if !has_user_server_mods {
         return Ok(ServerModsReadinessV1::Ready);
     }
+
+    // A persisted proof is not enough on its own: re-evaluate the exact local
+    // inventory so a deleted, replaced, wrong-version, or wrong-hash JAR
+    // invalidates a previous green result immediately.
+    let current = server_mods::evaluate_world_mods(paths, world, &config.compatibility)?;
+    if !current.ready {
+        if current
+            .issues
+            .iter()
+            .any(|issue| matches!(issue.kind, server_mods::ModIssueKind::MissingRequired))
+        {
+            return Ok(ServerModsReadinessV1::Missing);
+        }
+        return Ok(ServerModsReadinessV1::Incompatible);
+    }
+
     let record: ServerModsVerificationRecord = match read_json(&server_mod_verification_path(paths, world)) {
         Ok(record) => record,
         Err(_) => return Ok(ServerModsReadinessV1::Unverified),
@@ -251,7 +268,13 @@ pub fn local_server_mod_readiness(
     {
         return Ok(ServerModsReadinessV1::Incompatible);
     }
-    Ok(record.state)
+    if record.state == ServerModsReadinessV1::Ready {
+        Ok(ServerModsReadinessV1::Ready)
+    } else {
+        // Inventory is now valid but the last recorded verification was not
+        // green. Require a fresh verify instead of reusing a stale negative.
+        Ok(ServerModsReadinessV1::Unverified)
+    }
 }
 
 pub fn surviving_recovery_quorum(
