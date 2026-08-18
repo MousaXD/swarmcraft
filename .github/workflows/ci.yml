@@ -34,6 +34,7 @@ jobs:
           git config user.name "swarmcraft-integration-bot"
           git config user.email "actions@users.noreply.github.com"
           git fetch origin agent/host-readiness agent/runtime-installer agent/server-mod-management agent/runtime-wizard-ui agent/runtime-setup-hardening
+          python3 .github/scripts/sitecustomize.py
           python3 .github/scripts/reconcile_runtime_player_journey.py
           cargo fmt --all
           cargo check -p swarm-cli --all-features
