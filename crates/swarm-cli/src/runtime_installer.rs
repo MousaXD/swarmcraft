@@ -205,40 +205,66 @@ impl<'a> RuntimeInstaller<'a> {
                 && value.fabric_loader_version == metadata.genesis.fabric_loader_version
         });
 
+        let manual_only = manual.as_ref().filter(|_| lock.is_none());
         let mut components = vec![
             self.java_status(required_java_major, lock.as_ref(), manual.as_ref(), lock_compatible),
-            self.artifact_status(
-                RuntimeComponentKind::MinecraftServer,
-                "minecraft_server",
-                lock.as_ref(),
-                lock_compatible,
-                Some(managed_world_server_dir(self.paths, world).join("server.jar")),
+            manual_only.map_or_else(
+                || self.artifact_status(
+                    RuntimeComponentKind::MinecraftServer,
+                    "minecraft_server",
+                    lock.as_ref(),
+                    lock_compatible,
+                    Some(managed_world_server_dir(self.paths, world).join("server.jar")),
+                ),
+                |config| Self::manual_file_status(
+                    RuntimeComponentKind::MinecraftServer,
+                    &config.server_jar,
+                    "manual Fabric server launcher is configured; live Fabric verification proves the exact Minecraft runtime before host readiness",
+                ),
             ),
-            self.artifact_status(
-                RuntimeComponentKind::FabricLoader,
-                "fabric_loader",
-                lock.as_ref(),
-                lock_compatible,
-                None,
+            manual_only.map_or_else(
+                || self.artifact_status(
+                    RuntimeComponentKind::FabricLoader,
+                    "fabric_loader",
+                    lock.as_ref(),
+                    lock_compatible,
+                    None,
+                ),
+                |config| Self::manual_file_status(
+                    RuntimeComponentKind::FabricLoader,
+                    &config.server_jar,
+                    "manual Fabric launcher is configured; loader compatibility is proven by the live Fabric handshake",
+                ),
             ),
-            self.artifact_status(
-                RuntimeComponentKind::FabricApi,
-                "fabric_api",
-                lock.as_ref(),
-                lock_compatible,
-                Some(managed_world_mods_dir(self.paths, world).join("fabric-api.jar")),
+            manual_only.map_or_else(
+                || self.artifact_status(
+                    RuntimeComponentKind::FabricApi,
+                    "fabric_api",
+                    lock.as_ref(),
+                    lock_compatible,
+                    Some(managed_world_mods_dir(self.paths, world).join("fabric-api.jar")),
+                ),
+                |config| Self::manual_file_status(
+                    RuntimeComponentKind::FabricApi,
+                    &config.mod_jar,
+                    "manual SwarmCraft Fabric integration is configured; release packaging embeds Fabric API and live verification remains required",
+                ),
             ),
-            self.swarmcraft_status(world, lock.as_ref(), lock_compatible),
+            manual_only.map_or_else(
+                || self.swarmcraft_status(world, lock.as_ref(), lock_compatible),
+                |config| self.manual_swarmcraft_status(world, config),
+            ),
         ];
 
-        let directories_ready = [
-            managed_world_root(self.paths, world),
-            managed_world_server_dir(self.paths, world),
-            managed_world_mods_dir(self.paths, world),
-            managed_world_config_dir(self.paths, world),
-        ]
-        .iter()
-        .all(|path| path.is_dir());
+        let directories_ready = manual_only.is_some()
+            || [
+                managed_world_root(self.paths, world),
+                managed_world_server_dir(self.paths, world),
+                managed_world_mods_dir(self.paths, world),
+                managed_world_config_dir(self.paths, world),
+            ]
+            .iter()
+            .all(|path| path.is_dir());
         components.push(RuntimeComponentStatus {
             kind: RuntimeComponentKind::ServerDirectories,
             state: if directories_ready { RuntimeComponentState::Ready } else { RuntimeComponentState::Missing },
@@ -690,6 +716,49 @@ impl<'a> RuntimeInstaller<'a> {
         )
     }
 
+    fn manual_swarmcraft_status(&self, world: WorldId, config: &RuntimeLaunchConfig) -> RuntimeComponentStatus {
+        let expected = self
+            .storage
+            .load_world_config(world)
+            .ok()
+            .map(|world_config| world_config.compatibility.fabric_adapter_version)
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
+        if expected != env!("CARGO_PKG_VERSION") {
+            return RuntimeComponentStatus {
+                kind: RuntimeComponentKind::SwarmcraftFabric,
+                state: RuntimeComponentState::Incompatible,
+                version: Some(expected.clone()),
+                path: Some(config.mod_jar.clone()),
+                managed: false,
+                detail: Some(format!(
+                    "world requires SwarmCraft Fabric adapter {expected}, but this application build provides {}",
+                    env!("CARGO_PKG_VERSION")
+                )),
+            };
+        }
+        Self::manual_file_status(
+            RuntimeComponentKind::SwarmcraftFabric,
+            &config.mod_jar,
+            "manual SwarmCraft Fabric integration is configured; host readiness still requires the live authenticated Fabric handshake",
+        )
+    }
+
+    fn manual_file_status(kind: RuntimeComponentKind, path: &Path, ready_detail: &str) -> RuntimeComponentStatus {
+        let ready = path.is_file();
+        RuntimeComponentStatus {
+            kind,
+            state: if ready { RuntimeComponentState::Ready } else { RuntimeComponentState::Missing },
+            version: None,
+            path: Some(path.to_path_buf()),
+            managed: false,
+            detail: Some(if ready {
+                ready_detail.to_owned()
+            } else {
+                format!("manual runtime file is missing: {}", path.display())
+            }),
+        }
+    }
+
     fn server_mods_status(&self, world: WorldId) -> RuntimeComponentStatus {
         let config = match self.storage.load_world_config(world) {
             Ok(config) => config,
@@ -1026,7 +1095,7 @@ impl InstallGuard {
     fn acquire(path: &Path) -> Result<Self> {
         let parent = path.parent().context("runtime install lock has no parent")?;
         fs::create_dir_all(parent)?;
-        let mut file = OpenOptions::new().create(true).read(true).write(true).open(path)?;
+        let mut file = OpenOptions::new().create(true).read(true).write(true).truncate(false).open(path)?;
         file.try_lock_exclusive()
             .map_err(|_| anyhow::anyhow!("another runtime installation is already in progress for this world"))?;
         file.set_len(0)?;
@@ -1038,7 +1107,7 @@ impl InstallGuard {
 
 impl Drop for InstallGuard {
     fn drop(&mut self) {
-        let _ = self.file.unlock();
+        let _ = FileExt::unlock(&self.file);
         let _ = fs::remove_file(&self.path);
     }
 }

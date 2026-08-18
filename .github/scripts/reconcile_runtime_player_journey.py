@@ -336,7 +336,7 @@ impl InstallGuard {
     fn acquire(path: &Path) -> Result<Self> {
         let parent = path.parent().context("runtime install lock has no parent")?;
         fs::create_dir_all(parent)?;
-        let mut file = OpenOptions::new().create(true).read(true).write(true).open(path)?;
+        let mut file = OpenOptions::new().create(true).read(true).write(true).truncate(false).open(path)?;
         file.try_lock_exclusive()
             .map_err(|_| anyhow::anyhow!("another runtime installation is already in progress for this world"))?;
         file.set_len(0)?;
@@ -348,7 +348,7 @@ impl InstallGuard {
 
 impl Drop for InstallGuard {
     fn drop(&mut self) {
-        let _ = self.file.unlock();
+        let _ = FileExt::unlock(&self.file);
         let _ = fs::remove_file(&self.path);
     }
 }

@@ -7,7 +7,7 @@ use swarm_cli::{
     server_mods,
 };
 use swarm_core::DataPaths;
-use swarm_network::ServerModsReadinessV1;
+use swarm_network::{HostRuntimeReadinessV1, ServerModsReadinessV1};
 use swarm_protocol::WorldId;
 use swarm_storage::Storage;
 
@@ -88,7 +88,22 @@ fn main() -> Result<()> {
             if status.ready {
                 let config = migration::load_runtime_config(&paths, world)?;
                 let descriptor = storage.load_world_descriptor(world)?;
-                host_readiness::record_runtime_verified(&paths, world, &config, descriptor.compatibility_fingerprint)?;
+                if status.manual_configuration {
+                    let live =
+                        host_readiness::local_runtime_readiness(&paths, world, descriptor.compatibility_fingerprint)?;
+                    if live != HostRuntimeReadinessV1::Ready {
+                        anyhow::bail!(
+                            "manual Advanced runtime is configured but not authoritatively verified; launch it through the shared SwarmCraft runtime once so the authenticated Fabric compatibility handshake can prove this exact configuration"
+                        );
+                    }
+                } else {
+                    host_readiness::record_runtime_verified(
+                        &paths,
+                        world,
+                        &config,
+                        descriptor.compatibility_fingerprint,
+                    )?;
+                }
                 let world_config = storage.load_world_config(world)?;
                 let mods = server_mods::evaluate_world_mods(&paths, world, &world_config.compatibility)?;
                 let state = if mods.ready {

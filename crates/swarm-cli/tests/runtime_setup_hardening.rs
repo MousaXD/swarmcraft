@@ -9,6 +9,7 @@ use swarm_cli::migration::{
     load_migration_status, load_runtime_config, run_authority_runtime, save_runtime_config, HostOptions,
     MigrationPhase, RuntimeLaunchConfig,
 };
+use swarm_cli::runtime_installer::RuntimeInstaller;
 use swarm_core::{create_world_genesis_with_fingerprint, DataPaths, PeerIdentity};
 use swarm_protocol::{
     AuthorityPolicyV1, EpochMode, EpochRecordV1, MembershipPolicyV1, RuntimeCompatibilityManifestV1, WorldConfigV1,
@@ -147,7 +148,12 @@ fn write_mock_java(path: &Path, minecraft_version: &str, loader_version: &str) {
         r#"#!/usr/bin/env python3
 import os
 import socket
+import sys
 import time
+
+if "-version" in sys.argv:
+    print('openjdk version "25.0.1"', file=sys.stderr)
+    raise SystemExit(0)
 
 host = os.environ["SWARMCRAFT_IPC_HOST"]
 port = int(os.environ["SWARMCRAFT_IPC_PORT"])
@@ -338,4 +344,48 @@ fn corrupt_runtime_metadata_can_be_repaired_without_touching_world_state() {
     save_runtime_config(&fixture.paths, fixture.world, &config).unwrap();
     assert_eq!(load_runtime_config(&fixture.paths, fixture.world).unwrap(), config);
     assert_eq!(canonical_hash(&fixture), fixture.baseline_hash);
+}
+
+#[test]
+fn manual_advanced_config_is_launchable_without_being_reclassified_as_missing_managed_runtime() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fixture(temp.path().join("peer-manual-inspect"));
+    let (java, server, bridge) = manual_runtime_files(temp.path(), "26.1.2", "0.19.3");
+    let config = RuntimeLaunchConfig {
+        java,
+        server_jar: server,
+        mod_jar: bridge,
+        accept_eula: true,
+        game_endpoint: Some("127.0.0.1:25565".into()),
+    };
+    save_runtime_config(&fixture.paths, fixture.world, &config).unwrap();
+
+    let installer = RuntimeInstaller::new(&fixture.paths, &fixture.storage);
+    let status = installer.inspect(fixture.world).unwrap();
+    assert!(status.manual_configuration);
+    assert!(
+        status.ready,
+        "valid manual runtime should be launchable without automatic managed re-resolution: {status:?}"
+    );
+    assert!(status
+        .components
+        .iter()
+        .filter(|component| {
+            matches!(
+                component.kind,
+                swarm_cli::runtime_installer::RuntimeComponentKind::MinecraftServer
+                    | swarm_cli::runtime_installer::RuntimeComponentKind::FabricLoader
+                    | swarm_cli::runtime_installer::RuntimeComponentKind::FabricApi
+                    | swarm_cli::runtime_installer::RuntimeComponentKind::SwarmcraftFabric
+            )
+        })
+        .all(|component| !component.managed));
+
+    let readiness = swarm_cli::host_readiness::local_runtime_readiness(
+        &fixture.paths,
+        fixture.world,
+        fixture.storage.load_world_descriptor(fixture.world).unwrap().compatibility_fingerprint,
+    )
+    .unwrap();
+    assert_eq!(readiness, swarm_network::HostRuntimeReadinessV1::Unverified);
 }
