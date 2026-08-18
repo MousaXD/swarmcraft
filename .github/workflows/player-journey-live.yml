@@ -4,10 +4,11 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - agent/final-player-journey-gates
+      - main
   pull_request:
     branches:
       - integration/runtime-player-journey
+      - main
 
 permissions:
   contents: read
