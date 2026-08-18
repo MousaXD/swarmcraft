@@ -40,6 +40,22 @@ async fn run_runtime_cli(app: &AppHandle, arguments: Vec<String>) -> Result<Stri
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+async fn run_import_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, String> {
+    let output = app
+        .shell()
+        .sidecar("swarmcraft-import")
+        .map_err(|error| error.to_string())?
+        .args(arguments)
+        .output()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if error.is_empty() { "SwarmCraft world import failed".into() } else { error });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 fn require_value(value: String, label: &str) -> Result<String, String> {
     let value = value.trim().to_owned();
     if value.is_empty() {
@@ -96,6 +112,48 @@ async fn create_world(
         ],
     )
     .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn import_world(
+    app: AppHandle,
+    source: String,
+    name: String,
+    minecraft: String,
+    fabric_loader: String,
+    visibility: String,
+    server_mods: Vec<String>,
+    no_server_mods: bool,
+) -> Result<String, String> {
+    let source = require_value(source, "Minecraft world folder")?;
+    let name = require_value(name, "World name")?;
+    let minecraft = require_value(minecraft, "Minecraft version")?;
+    let fabric_loader = require_value(fabric_loader, "Fabric loader version")?;
+    let visibility = require_value(visibility, "Visibility")?;
+    let mut arguments = vec![
+        "--source".into(),
+        source,
+        "--name".into(),
+        name,
+        "--minecraft".into(),
+        minecraft,
+        "--fabric-loader".into(),
+        fabric_loader,
+        "--visibility".into(),
+        visibility,
+    ];
+    for jar in server_mods
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        arguments.push("--server-mod".into());
+        arguments.push(jar);
+    }
+    if no_server_mods {
+        arguments.push("--no-server-mods".into());
+    }
+    run_import_cli(&app, arguments).await
 }
 
 #[tauri::command]
@@ -432,6 +490,7 @@ fn main() {
             node_identity,
             list_worlds,
             create_world,
+            import_world,
             join_world,
             leave_world,
             create_invite,
