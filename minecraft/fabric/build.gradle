@@ -16,6 +16,10 @@ dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     implementation "net.fabricmc:fabric-loader:${project.loader_version}"
     implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    // Migration intentionally installs one first-party bridge JAR. Nest the exact
+    // Fabric API artifact in that bridge so Fabric Loader discovers it without
+    // teaching the authority/migration layer package-management semantics.
+    include "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 }
 
 processResources {
