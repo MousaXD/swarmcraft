@@ -273,7 +273,7 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
         previous_config_hash: None,
         compatibility,
         visibility: WorldVisibilityV1::Private,
-        authority_policy: AuthorityPolicyV1 { allow_solo_advancement: true, preferred_replication_factor: 3 },
+        authority_policy: AuthorityPolicyV1 { allow_solo_advancement: false, preferred_replication_factor: 3 },
         membership_policy: MembershipPolicyV1::InviteOnly,
         presentation: WorldPresentationV1 {
             name: "three-daemon-recovery".into(),
@@ -365,7 +365,7 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     thread::sleep(Duration::from_secs(1));
     let _daemon_c = spawn_daemon(&c, &[a_addr.clone(), b_addr.clone()]);
 
-    wait_until("initial authority quorum permit", Duration::from_secs(40), || {
+    wait_until("initial authority quorum permit", Duration::from_secs(20), || {
         permit_generation(&a, world)
             .is_some_and(|(epoch, fencing, heartbeat)| epoch == 1 && fencing == 1 && heartbeat >= 2)
     });
@@ -399,7 +399,7 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
         b.identity.peer_id(),
         "Bob should be the deterministic successor in this fixture"
     );
-    wait_until("successor live authority permit", Duration::from_secs(40), || {
+    wait_until("successor live authority permit", Duration::from_secs(20), || {
         permit_generation(winner, world)
             .is_some_and(|(epoch, fencing, heartbeat)| epoch == 2 && fencing == 2 && heartbeat >= 2)
     });
