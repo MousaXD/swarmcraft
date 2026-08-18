@@ -1,4 +1,4 @@
-use crate::{migration, runtime_installer::RuntimeInstaller, server_mods};
+use crate::server_mods;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -38,11 +38,10 @@ pub struct ImportWorldResult {
     pub compatibility_fingerprint: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImportFailpoint {
-    None,
-    AfterSnapshotCommit,
-    BeforePublication,
+#[derive(Debug, Clone, Copy, Default)]
+struct ImportFaults {
+    after_snapshot_commit: bool,
+    before_publication: bool,
 }
 
 /// Import Minecraft world DATA into SwarmCraft without importing machine-local
@@ -52,13 +51,13 @@ enum ImportFailpoint {
 /// root on the same filesystem and becomes visible only through one directory
 /// rename after every signed metadata object and canonical snapshot is durable.
 pub fn import_world(paths: &DataPaths, request: &ImportWorldRequest) -> Result<ImportWorldResult> {
-    import_world_inner(paths, request, ImportFailpoint::None)
+    import_world_inner(paths, request, ImportFaults::default())
 }
 
 fn import_world_inner(
     paths: &DataPaths,
     request: &ImportWorldRequest,
-    failpoint: ImportFailpoint,
+    faults: ImportFaults,
 ) -> Result<ImportWorldResult> {
     validate_request(request)?;
     let identity = PeerIdentity::load_or_create(paths)?;
@@ -100,7 +99,7 @@ fn import_world_inner(
         genesis,
         compatibility,
         request,
-        failpoint,
+        faults,
     );
     if staging_root.exists() {
         let _ = fs::remove_dir_all(&staging_root);
@@ -118,7 +117,7 @@ fn stage_and_publish(
     genesis: swarm_protocol::WorldGenesisV1,
     compatibility: RuntimeCompatibilityManifestV1,
     request: &ImportWorldRequest,
-    failpoint: ImportFailpoint,
+    faults: ImportFaults,
 ) -> Result<ImportWorldResult> {
     let staged_paths = DataPaths::from_root(staging_root.to_path_buf());
     let staged = Storage::open(staged_paths.root.clone())?;
@@ -199,7 +198,7 @@ fn stage_and_publish(
     staged.verify_snapshot(&snapshot)?;
     swarm_core::verify_snapshot_signature(&snapshot)?;
 
-    if failpoint == ImportFailpoint::AfterSnapshotCommit {
+    if faults.after_snapshot_commit {
         bail!("injected existing-world import interruption after snapshot commit");
     }
 
@@ -210,7 +209,7 @@ fn stage_and_publish(
         server_mods::add_local_mod(&staged_paths, world, &world_config.compatibility, source)?;
     }
 
-    if failpoint == ImportFailpoint::BeforePublication {
+    if faults.before_publication {
         bail!("injected existing-world import interruption before publication");
     }
 
@@ -234,7 +233,7 @@ fn stage_and_publish(
         return Err(error).context("import publication directory could not be durably synchronized");
     }
 
-    let result = ImportWorldResult {
+    Ok(ImportWorldResult {
         world_id: world.to_string(),
         display_name,
         snapshot_number: snapshot.snapshot_number,
@@ -242,8 +241,7 @@ fn stage_and_publish(
         state_root: snapshot.state_root.to_string(),
         files: snapshot.entries.len(),
         compatibility_fingerprint: genesis.compatibility_fingerprint.to_string(),
-    };
-    Ok(result)
+    })
 }
 
 fn validate_request(request: &ImportWorldRequest) -> Result<()> {
@@ -306,6 +304,7 @@ fn sync_directory(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{migration, runtime_installer::RuntimeInstaller};
     use std::str::FromStr;
 
     fn source_world(root: &Path) -> PathBuf {
@@ -395,8 +394,9 @@ mod tests {
         let paths = DataPaths::from_root(temp.path().join("data"));
         let source = source_world(temp.path());
         let req = request(source.clone());
+        let faults = ImportFaults { after_snapshot_commit: true, ..ImportFaults::default() };
 
-        assert!(import_world_inner(&paths, &req, ImportFailpoint::AfterSnapshotCommit).is_err());
+        assert!(import_world_inner(&paths, &req, faults).is_err());
         assert!(Storage::open(paths.root.clone()).unwrap().list_worlds().unwrap().is_empty());
         assert_eq!(fs::read(source.join("level.dat")).unwrap(), b"existing-level-data\n");
 
@@ -411,7 +411,8 @@ mod tests {
         let paths = DataPaths::from_root(temp.path().join("data"));
         let source = source_world(temp.path());
         let req = request(source);
-        assert!(import_world_inner(&paths, &req, ImportFailpoint::BeforePublication).is_err());
+        let faults = ImportFaults { before_publication: true, ..ImportFaults::default() };
+        assert!(import_world_inner(&paths, &req, faults).is_err());
         assert!(Storage::open(paths.root.clone()).unwrap().list_worlds().unwrap().is_empty());
     }
 
