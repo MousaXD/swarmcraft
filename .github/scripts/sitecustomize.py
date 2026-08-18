@@ -72,3 +72,5 @@ if '\nfn manual_file_status(\n' not in installer:
 '''
     installer = installer.replace(anchor, helper + anchor, 1)
 installer_path.write_text(installer)
+
+runpy.run_path('.github/scripts/add_safe_stop_acceptance.py', run_name='__main__')
