@@ -9,9 +9,11 @@ use swarm_cli::migration::{
     load_migration_status, load_runtime_config, run_authority_runtime, save_runtime_config, HostOptions,
     MigrationPhase, RuntimeLaunchConfig,
 };
-use swarm_core::{create_world_genesis, DataPaths, PeerIdentity};
+use swarm_core::{create_world_genesis_with_fingerprint, DataPaths, PeerIdentity};
 use swarm_protocol::{
-    EpochMode, EpochRecordV1, WorldDescriptorV1, WorldId, WorldMemberV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    AuthorityPolicyV1, EpochMode, EpochRecordV1, MembershipPolicyV1, RuntimeCompatibilityManifestV1, WorldConfigV1,
+    WorldDescriptorV1, WorldId, WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION,
+    STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 
@@ -27,8 +29,24 @@ fn fixture(root: PathBuf) -> RuntimeFixture {
     let paths = DataPaths::from_root(root);
     let storage = Storage::open(paths.root.clone()).unwrap();
     let identity = PeerIdentity::load_or_create(&paths).unwrap();
-    let (world, genesis) =
-        create_world_genesis(&identity, "26.1.2".into(), "0.19.3".into(), b"runtime-hardening").unwrap();
+    let compatibility = RuntimeCompatibilityManifestV1 {
+        minecraft_version: "26.1.2".into(),
+        loader_id: "fabric".into(),
+        loader_version: "0.19.3".into(),
+        swarmcraft_protocol_version: PROTOCOL_VERSION,
+        fabric_adapter_version: env!("CARGO_PKG_VERSION").into(),
+        required_server_mods: Vec::new(),
+        required_client_mods: Vec::new(),
+        datapacks: Vec::new(),
+    };
+    let compatibility_fingerprint = compatibility.fingerprint().unwrap();
+    let (world, genesis) = create_world_genesis_with_fingerprint(
+        &identity,
+        "26.1.2".into(),
+        "0.19.3".into(),
+        compatibility_fingerprint,
+    )
+    .unwrap();
 
     storage
         .create_world(&WorldMetadataV1 {
@@ -52,6 +70,28 @@ fn fixture(root: PathBuf) -> RuntimeFixture {
             preferred_replication_factor: 1,
         })
         .unwrap();
+    let mut world_config = WorldConfigV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        sequence: 1,
+        previous_config_hash: None,
+        compatibility,
+        visibility: WorldVisibilityV1::Private,
+        authority_policy: AuthorityPolicyV1 { allow_solo_advancement: true, preferred_replication_factor: 1 },
+        membership_policy: MembershipPolicyV1::InviteOnly,
+        presentation: WorldPresentationV1 {
+            name: "runtime-hardening".into(),
+            description: String::new(),
+            tags: Vec::new(),
+            icon_hash: None,
+            approximate_region: None,
+        },
+        authority_peer_id: identity.peer_id(),
+        authority_public_key: identity.public_key(),
+        signature: Vec::new(),
+    };
+    world_config.signature = identity.sign(&world_config.signing_bytes().unwrap());
+    storage.save_world_config(&world_config).unwrap();
 
     let source = paths.root.join("fixture-world");
     fs::create_dir_all(&source).unwrap();
