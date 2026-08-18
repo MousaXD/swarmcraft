@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
     time::{Duration, Instant},
 };
-use swarm_cli::authority_permit::PermitWatch;
+use swarm_cli::{authority_permit::PermitWatch, launch_guard};
 use swarm_consensus::AuthorityGeneration;
 use swarm_core::{DataPaths, PeerIdentity};
 use swarm_protocol::WorldId;
@@ -34,9 +34,6 @@ struct Args {
     /// Stay dormant until this peer is the accepted authority and has a changing majority-backed permit.
     #[arg(long)]
     standby: bool,
-    /// Allow a multi-member sleeping world to wake without quorum. Concurrent isolated wakes can fork history.
-    #[arg(long)]
-    allow_solo_wake: bool,
 }
 
 fn main() -> Result<()> {
@@ -56,24 +53,8 @@ fn main() -> Result<()> {
         return tokio::runtime::Runtime::new()?.block_on(run_standby(&paths, &storage, &args, world));
     }
 
-    enforce_wake_policy(&storage, world, args.allow_solo_wake)?;
-    if args.allow_solo_wake {
-        std::env::set_var("SWARMCRAFT_ALLOW_SOLO_WAKE", "1");
-    }
+    launch_guard::ensure_direct_launch_safe(&storage, world)?;
     tokio::runtime::Runtime::new()?.block_on(host_once(&paths, &storage, &args, world))
-}
-
-fn enforce_wake_policy(storage: &Storage, world: WorldId, allow_solo_wake: bool) -> Result<()> {
-    if storage.load_sleep_record(world).is_err() {
-        return Ok(());
-    }
-    let descriptor = storage.load_world_descriptor(world)?;
-    if descriptor.members.len() > 1 && !allow_solo_wake {
-        bail!(
-            "multi-member sleeping worlds require quorum-safe wake; use --allow-solo-wake only when you explicitly accept concurrent-wake fork risk"
-        );
-    }
-    Ok(())
 }
 
 async fn run_standby(paths: &DataPaths, storage: &Storage, args: &Args, world: WorldId) -> Result<()> {
@@ -111,7 +92,7 @@ async fn wait_until_ready(paths: &DataPaths, storage: &Storage, identity: &PeerI
     let mut watched_generation = None;
     let mut permit_watch = None;
     loop {
-        if storage.load_sleep_record(world).is_ok() {
+        if launch_guard::load_sleep_record_fail_closed(storage, world)?.is_some() {
             watched_generation = None;
             permit_watch = None;
             sleep(Duration::from_millis(500)).await;
@@ -148,5 +129,26 @@ async fn wait_until_ready(paths: &DataPaths, storage: &Storage, identity: &PeerI
             }
         }
         sleep(Duration::from_millis(250)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[tokio::test]
+    async fn standby_wait_until_ready_rejects_corrupt_sleep_record_before_host_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let storage = Storage::open(paths.root.clone()).unwrap();
+        let identity = PeerIdentity::load_or_create(&paths).unwrap();
+        let world = WorldId([8; 32]);
+        let metadata = storage.world_dir(world).join("metadata");
+        fs::create_dir_all(&metadata).unwrap();
+        fs::write(metadata.join("sleep.postcard"), b"corrupt-sleep-state").unwrap();
+
+        let error = wait_until_ready(&paths, &storage, &identity, world).await.unwrap_err();
+        assert!(!error.to_string().is_empty());
     }
 }

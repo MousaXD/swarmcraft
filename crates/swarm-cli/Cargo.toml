@@ -18,6 +18,10 @@ path = "src/host_main.rs"
 name = "swarmcraft-runtime"
 path = "src/runtime_main.rs"
 
+[[bin]]
+name = "swarmcraft-import"
+path = "src/import_main.rs"
+
 [dependencies]
 blake3.workspace = true
 anyhow.workspace = true

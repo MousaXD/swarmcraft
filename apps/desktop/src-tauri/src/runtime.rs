@@ -110,6 +110,16 @@ impl RuntimeProcesses {
         spawn(app, "swarmcraft-host", arguments, &self.host, "Authority host")
     }
 
+    pub fn start_managed_host(&self, app: &AppHandle, world: String) -> Result<u32, String> {
+        spawn(
+            app,
+            "swarmcraft-runtime",
+            vec!["launch".into(), world],
+            &self.host,
+            "Managed authority host",
+        )
+    }
+
     pub fn stop_host(&self) -> Result<(), String> {
         stop(&self.host, "Authority host")
     }

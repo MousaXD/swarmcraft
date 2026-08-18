@@ -1,0 +1,74 @@
+name: Player journey live acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - agent/final-player-journey-gates
+  pull_request:
+    branches:
+      - integration/runtime-player-journey
+
+permissions:
+  contents: read
+
+concurrency:
+  group: player-journey-live-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clean-machine-live:
+    name: Clean machine live artifacts + Minecraft
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+      - name: Build candidate SwarmCraft Fabric artifact
+        working-directory: minecraft/fabric
+        run: gradle build --stacktrace
+      - name: Build candidate Rust binaries
+        run: cargo build -p swarm-cli --bins --locked
+      - name: Resolve candidate Fabric JAR
+        shell: bash
+        run: |
+          set -euo pipefail
+          jar="$(find minecraft/fabric/build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' -print -quit)"
+          test -n "$jar"
+          echo "SWARMCRAFT_FABRIC_MOD_JAR=$GITHUB_WORKSPACE/$jar" >> "$GITHUB_ENV"
+      - name: Execute clean-machine player journey against official services
+        shell: bash
+        env:
+          SWARMCRAFT_ACCEPTANCE_KEEP_DATA: '1'
+          SWARMCRAFT_ACCEPTANCE_DATA_DIR: ${{ runner.temp }}/swarmcraft-clean-machine-data
+          SWARMCRAFT_ACCEPTANCE_LOG_DIR: ${{ runner.temp }}/swarmcraft-clean-machine-logs
+        run: |
+          set -euo pipefail
+          # setup-java is needed to build the candidate Fabric artifact, but the
+          # player journey must not inherit that compatible JVM. A base OS PATH
+          # forces Runtime Installer to exercise managed-Java resolution.
+          env -u JAVA_HOME \
+            PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            SWARMCRAFT_FABRIC_MOD_JAR="$SWARMCRAFT_FABRIC_MOD_JAR" \
+            SWARMCRAFT_ACCEPTANCE_KEEP_DATA="$SWARMCRAFT_ACCEPTANCE_KEEP_DATA" \
+            SWARMCRAFT_ACCEPTANCE_DATA_DIR="$SWARMCRAFT_ACCEPTANCE_DATA_DIR" \
+            SWARMCRAFT_ACCEPTANCE_LOG_DIR="$SWARMCRAFT_ACCEPTANCE_LOG_DIR" \
+            bash scripts/acceptance/clean-machine-live.sh
+      - name: Upload clean-machine evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clean-machine-live-evidence
+          path: |
+            ${{ runner.temp }}/swarmcraft-clean-machine-logs/**
+            ${{ runner.temp }}/swarmcraft-clean-machine-data/**
+          if-no-files-found: warn
+          retention-days: 7

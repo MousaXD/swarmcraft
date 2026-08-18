@@ -1,0 +1,107 @@
+name: Exact-head evidence recorder
+
+on:
+  push:
+    branches:
+      - agent/final-player-journey-gates
+
+permissions:
+  contents: read
+  actions: read
+  statuses: write
+
+jobs:
+  record:
+    name: Record literal-head workflow evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Wait for branch-head CI and live acceptance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          FINAL_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.parse
+          import urllib.request
+
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["REPOSITORY"]
+          sha = os.environ["FINAL_SHA"]
+          api_root = f"https://api.github.com/repos/{repo}"
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "swarmcraft-exact-head-evidence",
+          }
+
+          def request(url, *, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(url, data=data, headers=headers)
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  body = response.read().decode()
+                  return json.loads(body) if body else {}
+
+          query = urllib.parse.urlencode({
+              "head_sha": sha,
+              "event": "push",
+              "per_page": 100,
+          })
+          runs_url = f"{api_root}/actions/runs?{query}"
+          wanted = {
+              "CI": "exact-head/ci",
+              "Player journey live acceptance": "exact-head/live",
+          }
+
+          for attempt in range(120):
+              document = request(runs_url)
+              by_name = {}
+              for run in document.get("workflow_runs", []):
+                  if (
+                      run.get("name") in wanted
+                      and run.get("head_sha") == sha
+                      and run.get("head_branch") == "agent/final-player-journey-gates"
+                      and run.get("event") == "push"
+                  ):
+                      current = by_name.get(run["name"])
+                      if current is None or run.get("id", 0) > current.get("id", 0):
+                          by_name[run["name"]] = run
+
+              if all(name in by_name for name in wanted):
+                  if all(by_name[name].get("status") == "completed" for name in wanted):
+                      failures = {
+                          name: by_name[name].get("conclusion")
+                          for name in wanted
+                          if by_name[name].get("conclusion") != "success"
+                      }
+                      if failures:
+                          raise SystemExit(f"literal-head workflow failure: {failures}")
+
+                      for name, context in wanted.items():
+                          run = by_name[name]
+                          request(
+                              f"{api_root}/statuses/{sha}",
+                              payload={
+                                  "state": "success",
+                                  "context": context,
+                                  "description": f"run {run['id']} event push",
+                                  "target_url": run["html_url"],
+                              },
+                          )
+                          print(
+                              f"{name}: run={run['id']} event={run['event']} "
+                              f"head_branch={run['head_branch']} head_sha={run['head_sha']} "
+                              f"conclusion={run['conclusion']}"
+                          )
+                      break
+
+              print(f"Waiting for literal-head CI/live runs at {sha} (attempt {attempt + 1}/120)")
+              time.sleep(15)
+          else:
+              raise SystemExit(f"timed out waiting for literal-head CI/live runs at {sha}")
+          PY

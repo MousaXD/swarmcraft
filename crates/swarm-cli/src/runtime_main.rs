@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
 use swarm_cli::{
-    host_readiness, migration,
+    host_readiness, launch_guard, migration,
     runtime_installer::{
         RuntimeComponentKind, RuntimeComponentState, RuntimeInstallOptions, RuntimeInstaller, RuntimeProgress,
         RuntimeStatus,
@@ -51,6 +51,8 @@ enum RuntimeCommand {
     },
     /// Re-hash and re-check the installed runtime without downloading anything.
     Verify { world: String },
+    /// Launch the persisted managed runtime through the shared Rust authority/migration path.
+    Launch { world: String },
 }
 
 fn main() -> Result<()> {
@@ -132,6 +134,23 @@ fn main() -> Result<()> {
                 }
             }
             print_json(&status)?;
+        }
+        RuntimeCommand::Launch { world } => {
+            let world = parse_world(&world)?;
+            let status = installer.verify(world)?;
+            if !status.ready {
+                anyhow::bail!("managed runtime launch was requested before runtime verification reported Ready");
+            }
+            launch_guard::ensure_direct_launch_safe(&storage, world)?;
+            let config = migration::load_runtime_config(&paths, world)?;
+            let options = migration::HostOptions {
+                world,
+                java: config.java,
+                server_jar: config.server_jar,
+                mod_jar: config.mod_jar,
+                accept_eula: config.accept_eula,
+            };
+            tokio::runtime::Runtime::new()?.block_on(migration::run_authority_runtime(&paths, &storage, options))?;
         }
     }
     Ok(())

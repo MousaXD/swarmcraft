@@ -462,6 +462,15 @@ export function createBackendAdapter(invoke) {
       return call('list_worlds');
     },
     createWorld: (payload) => call('create_world', payload),
+    importWorld: (payload) => call('import_world', {
+      source: payload.source,
+      name: payload.name,
+      minecraft: payload.minecraft,
+      fabricLoader: payload.fabricLoader,
+      visibility: payload.visibility,
+      serverMods: payload.serverMods,
+      noServerMods: payload.noServerMods === true,
+    }),
     joinWorld: (invite) => call('join_world', { invite }),
     leaveWorld: (world) => call('leave_world', { world }),
     createInvite: (payload) => call('create_invite', payload),
