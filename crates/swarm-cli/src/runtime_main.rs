@@ -97,11 +97,7 @@ fn main() -> Result<()> {
             let mods = server_mods::evaluate_world_mods(&paths, world, &world_config.compatibility)?;
             let mod_state = if mods.ready {
                 ServerModsReadinessV1::Ready
-            } else if mods
-                .issues
-                .iter()
-                .any(|issue| matches!(issue.kind, server_mods::ModIssueKind::MissingRequired))
-            {
+            } else if mods.issues.iter().any(|issue| matches!(issue.kind, server_mods::ModIssueKind::MissingRequired)) {
                 ServerModsReadinessV1::Missing
             } else {
                 ServerModsReadinessV1::Incompatible
