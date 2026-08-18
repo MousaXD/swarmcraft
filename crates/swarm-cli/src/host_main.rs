@@ -92,7 +92,7 @@ async fn wait_until_ready(paths: &DataPaths, storage: &Storage, identity: &PeerI
     let mut watched_generation = None;
     let mut permit_watch = None;
     loop {
-        if storage.load_sleep_record(world).is_ok() {
+        if launch_guard::load_sleep_record_fail_closed(storage, world)?.is_some() {
             watched_generation = None;
             permit_watch = None;
             sleep(Duration::from_millis(500)).await;
@@ -129,5 +129,26 @@ async fn wait_until_ready(paths: &DataPaths, storage: &Storage, identity: &PeerI
             }
         }
         sleep(Duration::from_millis(250)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[tokio::test]
+    async fn standby_wait_until_ready_rejects_corrupt_sleep_record_before_host_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let storage = Storage::open(paths.root.clone()).unwrap();
+        let identity = PeerIdentity::load_or_create(&paths).unwrap();
+        let world = WorldId([8; 32]);
+        let metadata = storage.world_dir(world).join("metadata");
+        fs::create_dir_all(&metadata).unwrap();
+        fs::write(metadata.join("sleep.postcard"), b"corrupt-sleep-state").unwrap();
+
+        let error = wait_until_ready(&paths, &storage, &identity, world).await.unwrap_err();
+        assert!(!error.to_string().is_empty());
     }
 }
