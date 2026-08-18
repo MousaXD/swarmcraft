@@ -51,6 +51,8 @@ enum RuntimeCommand {
     },
     /// Re-hash and re-check the installed runtime without downloading anything.
     Verify { world: String },
+    /// Launch the persisted managed runtime through the shared Rust authority/migration path.
+    Launch { world: String },
 }
 
 fn main() -> Result<()> {
@@ -97,7 +99,11 @@ fn main() -> Result<()> {
             let mods = server_mods::evaluate_world_mods(&paths, world, &world_config.compatibility)?;
             let mod_state = if mods.ready {
                 ServerModsReadinessV1::Ready
-            } else if mods.issues.iter().any(|issue| matches!(issue.kind, server_mods::ModIssueKind::MissingRequired)) {
+            } else if mods
+                .issues
+                .iter()
+                .any(|issue| matches!(issue.kind, server_mods::ModIssueKind::MissingRequired))
+            {
                 ServerModsReadinessV1::Missing
             } else {
                 ServerModsReadinessV1::Incompatible
@@ -132,6 +138,19 @@ fn main() -> Result<()> {
                 }
             }
             print_json(&status)?;
+        }
+        RuntimeCommand::Launch { world } => {
+            let world = parse_world(&world)?;
+            let status = installer.verify(world)?;
+            if !status.ready {
+                anyhow::bail!("managed runtime launch was requested before runtime verification reported Ready");
+            }
+            let config = migration::load_runtime_config(&paths, world)?;
+            tokio::runtime::Runtime::new()?.block_on(migration::run_authority_runtime(
+                &paths,
+                &storage,
+                config.host_options(world),
+            ))?;
         }
     }
     Ok(())
