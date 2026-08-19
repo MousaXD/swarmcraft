@@ -39,7 +39,6 @@ The launcher centers normal use around:
 - verifying/remediating required server mods;
 - sleeping/stopping a running world through the safe durability barrier;
 - seeing backend-reported host migration progress;
-- transferring authority when the backend exposes the transfer capability and safety checks permit it;
 - safely waking a sleeping world only when the backend exposes a valid wake path;
 - opening advanced diagnostics for technical setup, manual overrides or recovery.
 
@@ -52,7 +51,6 @@ Conflict, solo/degraded, canonical, authority-eligibility, membership and relay 
 The Desktop consumes structured backend capabilities and state including:
 
 - `swarmcraft world migration-status <world> --json` for migration/runtime state;
-- the migration transfer backend for the player-facing host-transfer action;
 - `swarmcraft world wake <world>` for backend-validated wake intent;
 - `swarmcraft world host-readiness <world> --json` for shutdown safety;
 - `swarmcraft-runtime` status/plan/install/repair/verify/launch for managed runtime setup;
@@ -61,7 +59,7 @@ The Desktop consumes structured backend capabilities and state including:
 
 If a backend capability is absent, the matching Desktop action stays unavailable instead of being simulated in JavaScript. The finalized migration-core `snake_case` phases are translated into the smaller player-facing progress model used by the launcher.
 
-Manual authority transfer is no longer a fake frontend shortcut. `transferHost()` calls the migration adapter, and the backend remains responsible for the signed transition and authority checks. Desktop merely exposes the action when capability and host eligibility allow it.
+Manual authority transfer is **not yet a complete Desktop flow**. Migration Core has a signed staged transfer protocol and shared runtime orchestration, but the current Tauri capability probe exposes migration status and wake only, and the Desktop adapter keeps `transferAuthority` unavailable. The frontend must not collapse the backend transfer protocol into a fake one-click authority change.
 
 Structured connectivity uses backend path state rather than guessing from peer counts. Player-facing presentation distinguishes direct, relayed, connecting, offline/limited and actionable failure states while preserving the underlying backend diagnostics for Advanced views.
 
@@ -102,7 +100,7 @@ EULA acceptance, Java/runtime binaries and `RuntimeLaunchConfig` are intentional
 
 The player-facing shutdown question renders the backend `HostReadinessReport`; JavaScript does not recompute whether another device can safely take over.
 
-For exactly two voting members, one survivor after a crash is not a quorum. Desktop therefore preserves `BlockedByQuorum` instead of showing a false **Safe to shut down** result. An explicit authority transfer while both peers are present is a different operation.
+For exactly two voting members, one survivor after a crash is not a quorum. Desktop therefore preserves `BlockedByQuorum` instead of showing a false **Safe to shut down** result. Backend explicit authority transfer while both peers are present is a different operation, but its complete Desktop workflow remains future integration work.
 
 Multi-member wake also remains fail-closed until the backend implements a sleep-bound quorum wake transition. Desktop must not implement first-click-wins wake behavior.
 
