@@ -36,15 +36,17 @@ swarmcraft world mods-path <world>
 
 ## Managed runtime components
 
-Fabric Loader, Fabric API, and the SwarmCraft Fabric integration are runtime/platform components rather than user server mods. Agent 3 does not download or own those artifacts. `fabric-api` and `swarmcraft` requirements are classified as `managed_runtime` so the user-mod readiness check does not claim they are missing from the third-party mod store. The runtime installer remains responsible for proving those components ready.
+Fabric Loader, Fabric API, and the SwarmCraft Fabric integration are runtime/platform components rather than user server mods. `fabric-api` and `swarmcraft` requirements are classified as `managed_runtime` so the user-mod readiness check does not claim they are missing from the third-party mod store. Runtime Installer remains responsible for preparing and proving those components ready.
 
-## Host readiness and migration
+## Host Readiness and migration
 
 Before the Minecraft authority runtime is prepared, SwarmCraft evaluates local third-party server mods against the canonical compatibility manifest. Missing required mods, wrong versions, hash mismatches, duplicate/conflicting IDs, invalid JARs, client-only JARs, or unexpected user mods make the local server-mod profile not ready and block launch.
 
 This closes the local safety hole where authority migration could reset the ephemeral runtime and launch without the world's required third-party mods.
 
-The network authority-election status still exposes only the canonical compatibility fingerprint, not a peer's live machine-local mod readiness. A peer can therefore be selected by the existing recovery layer and then be blocked by runtime preparation if its local third-party mod set is incomplete. The host-readiness subsystem should consume the structured `ServerModReadiness` contract and propagate/aggregate live readiness rather than infer it from the canonical fingerprint.
+Host Readiness consumes the structured current `ServerModReadiness` proof and reports `BlockedByMods` when an otherwise viable successor is missing, incompatible with, or has mutated its required local mod set. Deleting or replacing a previously verified artifact therefore invalidates the green readiness state instead of inheriting historical success.
+
+Authority election itself remains a canonical world-state decision rather than trusting a peer's machine-local filesystem. A peer can still safely win a valid recovery generation and then have migration/runtime preparation stop in a blocked state if its local third-party mod set is no longer complete. Runtime preparation re-verifies the local profile before launch, so election never bypasses the mod gate.
 
 ## What is synchronized
 
@@ -53,7 +55,7 @@ Automatically synchronized:
 - signed canonical runtime/mod requirements through the existing world configuration replication;
 - requirement IDs, versions, sides, and exact artifact hashes.
 
-Not automatically synchronized or downloaded in phase one:
+Not automatically synchronized or downloaded:
 
 - arbitrary third-party mod JAR bytes;
 - third-party marketplace metadata;
