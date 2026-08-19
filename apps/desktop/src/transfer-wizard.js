@@ -1,3 +1,5 @@
+import './player-experience.js';
+
 export function parsePeerId(identityText) {
   const match = String(identityText || '').match(/^Peer ID:\s*(\S+)$/m);
   return match?.[1] || '';
