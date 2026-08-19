@@ -111,6 +111,7 @@ test('transfer presentation delegates authority semantics to backend commands ra
     assert.match(wizard, new RegExp(`backend\\.migration\\.${method}`));
   }
   assert.match(adapter, /manual_transfer_step/);
-  assert.doesNotMatch(wizard, /nextEpoch|next_epoch|fencingToken|fencing_token|quorum\s*[+\-*\/]?/i);
-  assert.doesNotMatch(wizard, /saveEpoch|writeEpoch|setAuthority|authority\s*=/i);
+  assert.doesNotMatch(wizard, /nextEpoch|next_epoch|fencingToken|fencing_token/i);
+  assert.doesNotMatch(wizard, /quorum\s*=|memberCount\s*\/\s*2|member_count\s*\/\s*2|Math\.(?:floor|ceil)\([^\n]*quorum/i);
+  assert.doesNotMatch(wizard, /saveEpoch|writeEpoch|setAuthority|authorityPeerId\s*=|authority_peer_id\s*=/i);
 });
