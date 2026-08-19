@@ -50,9 +50,9 @@ export function deriveJourneyState({
     };
   }
   return {
-    kind: ACTION_WORDS.test(readinessText) ? 'neutral' : 'neutral',
+    kind: 'neutral',
     label: 'World status',
-    detail: playText || 'SwarmCraft is waiting for an authoritative world status.',
+    detail: playText || readinessText || 'SwarmCraft is waiting for an authoritative world status.',
   };
 }
 
@@ -66,6 +66,10 @@ function textOf(id, fallback = '') {
 
 function setText(element, value) {
   if (element && element.textContent !== value) element.textContent = value;
+}
+
+function setClassName(element, value) {
+  if (element && element.className !== value) element.className = value;
 }
 
 function ensureStylesheet() {
@@ -203,6 +207,11 @@ function installPrimaryWorldLayout() {
   return true;
 }
 
+function updateNavigationState() {
+  const tools = byId('advancedNavigation');
+  if (tools?.querySelector('.nav-item.is-active')) tools.open = true;
+}
+
 function updateWorldExperience() {
   const play = byId('playWorld');
   const state = deriveJourneyState({
@@ -217,7 +226,7 @@ function updateWorldExperience() {
   setText(byId('playerJourneyDetail'), state.detail);
   const chip = byId('playerJourneyChip');
   if (chip) {
-    chip.className = `journey-chip ${state.kind}`;
+    setClassName(chip, `journey-chip ${state.kind}`);
     setText(chip, state.label);
   }
   setText(byId('playerConnectionSummary'), textOf('selectedConnectivity', 'Checking…'));
@@ -238,6 +247,7 @@ function updateWorldExperience() {
 
   const details = byId('advancedWorldTools');
   if (details) details.classList.toggle('has-attention', technicalWarnings > 0);
+  updateNavigationState();
 }
 
 function relabelPlayerLanguage() {
