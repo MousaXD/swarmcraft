@@ -15,7 +15,7 @@ const TRANSFER_COMMANDS: [&str; 6] = [
 fn transfer_token(raw: &str) -> Option<String> {
     raw.lines()
         .map(str::trim)
-        .find(|line| line.len() >= 64 && line.len() % 2 == 0 && line.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .find(|line| line.len() >= 64 && (line.len() & 1) == 0 && line.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .map(ToOwned::to_owned)
 }
 
@@ -68,18 +68,15 @@ pub async fn manual_transfer_step(
             // prepared token to Desktop until the backend has durably reached that
             // state and transfer-export succeeds.
             for _ in 0..TRANSFER_WAIT_ATTEMPTS {
-                match run_cli(
+                if let Ok(raw) = run_cli(
                     &app,
                     vec!["world".into(), "transfer-export".into(), world.clone()],
                 )
                 .await
                 {
-                    Ok(raw) => {
-                        if let Some(token) = transfer_token(&raw) {
-                            return Ok(token);
-                        }
+                    if let Some(token) = transfer_token(&raw) {
+                        return Ok(token);
                     }
-                    Err(_) => {}
                 }
                 tokio::time::sleep(TRANSFER_WAIT_INTERVAL).await;
             }
