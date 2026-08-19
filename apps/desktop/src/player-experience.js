@@ -1,5 +1,5 @@
-const READY_WORDS = /ready|safe to shut down|direct connection|connected through relay/i;
-const ACTION_WORDS = /blocked|missing|failed|unavailable|attention|conflict|keep this pc on|could not/i;
+const READY_WORDS = /ready|direct connection|connected through relay/i;
+const ACTION_WORDS = /blocked|missing|failed|unavailable|attention|conflict|could not|no viable path/i;
 const WORKING_WORDS = /checking|preparing|saving|transferring|restoring|starting|waiting|syncing|installing|downloading|verifying/i;
 
 export function deriveJourneyState({
@@ -13,7 +13,6 @@ export function deriveJourneyState({
   const readinessText = String(hostReadiness || '').trim();
   const playText = String(playDetail || '').trim();
   const connectivityText = String(connectivity || '').trim();
-  const combined = `${playText} ${readinessText} ${migrationText} ${connectivityText}`;
 
   if (migrationText && !/not active|sleeping/i.test(migrationText) && WORKING_WORDS.test(migrationText)) {
     return {
@@ -22,11 +21,11 @@ export function deriveJourneyState({
       detail: 'SwarmCraft is moving hosting safely. You can keep this window open while the handoff completes.',
     };
   }
-  if (ACTION_WORDS.test(combined)) {
+  if (ACTION_WORDS.test(playText) || ACTION_WORDS.test(connectivityText)) {
     return {
       kind: 'action',
       label: 'Needs attention',
-      detail: playText || readinessText || 'Something needs to be resolved before this world is fully ready.',
+      detail: playText || connectivityText || 'Something needs to be resolved before this world is fully ready.',
     };
   }
   if (playDisabled || WORKING_WORDS.test(playText)) {
@@ -43,7 +42,7 @@ export function deriveJourneyState({
       detail: 'The latest world state is saved. Play will use the normal safe wake path when needed.',
     };
   }
-  if (READY_WORDS.test(combined) || !playDisabled) {
+  if (!playDisabled || READY_WORDS.test(`${playText} ${connectivityText}`)) {
     return {
       kind: 'ready',
       label: 'Ready to play',
@@ -51,7 +50,7 @@ export function deriveJourneyState({
     };
   }
   return {
-    kind: 'neutral',
+    kind: ACTION_WORDS.test(readinessText) ? 'neutral' : 'neutral',
     label: 'World status',
     detail: playText || 'SwarmCraft is waiting for an authoritative world status.',
   };
