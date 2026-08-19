@@ -1,141 +1,53 @@
 # Desktop Runtime Wizard Contract
 
-This document defines the Desktop-side contract for the automatic Minecraft runtime setup flow.
+The Runtime Wizard is a player-facing consumer of the backend-owned runtime contract. It does not implement Java, Minecraft, Fabric, EULA, server-mod, authority or migration rules in JavaScript.
 
-At the time this branch was created, `agent/runtime-installer` was not available, so Desktop does not claim automatic installation works yet. The UI treats missing runtime commands as an explicit unavailable capability and routes power users to the existing Advanced/Diagnostics path.
+## Backend ownership
 
-## Player flow
+The packaged `swarmcraft-runtime` sidecar exposes structured commands for:
 
-`Play` is intercepted before the legacy manual-path launcher flow.
-
-1. Desktop asks the backend for structured runtime status.
-2. If the backend reports `ready: true`, Desktop asks the backend to launch the managed runtime directly.
-3. If setup is incomplete, Desktop opens the setup wizard and renders backend-reported component state.
-4. If the backend reports EULA acceptance is required, the wizard requires an explicit checkbox before sending `acceptEula: true`.
-5. During installation, Desktop polls structured status for progress presentation.
-6. Desktop verifies again before launch.
-7. Failures expose backend-reported world-data safety and retry safety. Desktop does not invent either property.
-8. If automatic runtime commands are absent, install/start controls stay unavailable and the player can open Advanced setup.
-
-## Expected Tauri commands
-
-The runtime integration is isolated in `src/backend-adapter.js`.
-
-### `runtime_status`
-
-Input:
-
-```json
-{ "world": "scworld:..." }
+```text
+status
+plan
+install
+repair
+verify
+launch
 ```
 
-Output: JSON object or a JSON string following the status shape below.
+Desktop invokes these through thin Tauri commands in `apps/desktop/src-tauri`. Status/plan/verify are machine-readable JSON. Install/repair expose backend progress and return the final structured install report.
 
-### `runtime_plan`
+## Normal Play flow
 
-Input:
+1. Desktop requests `runtime_status` for the selected world.
+2. If required components are incomplete, Runtime Wizard renders backend component state.
+3. If EULA acceptance is required, the UI requires an explicit player checkbox before sending `acceptEula: true`.
+4. Desktop requests backend install/repair as needed. It does not download artifacts itself.
+5. Desktop requests backend verification.
+6. Required server-mod readiness remains a separate fail-closed proof boundary.
+7. Managed launch delegates to the shared Rust runtime/migration orchestration path and persisted `RuntimeLaunchConfig`.
 
-```json
-{ "world": "scworld:..." }
-```
+The wizard never treats file existence alone as Host Readiness. Runtime proof becomes authoritative only after the configured runtime launches and completes the authenticated Fabric compatibility/readiness handshake.
 
-Output: structured JSON describing planned backend actions. Desktop does not execute download URLs or compatibility rules from this object.
+## Core Tauri commands
 
-### `runtime_install`
+- `runtime_status`
+- `runtime_plan`
+- `runtime_install`
+- `runtime_repair`
+- `runtime_verify`
+- `runtime_launch`
 
-Input:
+Each command is a thin bridge to the Rust backend/sidecar. Desktop normalizes presentation fields but does not recalculate backend safety decisions.
 
-```json
-{
-  "world": "scworld:...",
-  "acceptEula": true
-}
-```
+## EULA
 
-`acceptEula` is `true` only after the player explicitly checks the EULA box. Output uses the runtime status shape.
+Minecraft server EULA acceptance is explicit. A player action is required before `acceptEula: true` is sent. Importing an existing world does not import EULA state.
 
-### `runtime_repair`
+## Existing-world import
 
-Input:
+Import is a separate typed backend path exposed by `swarmcraft-import` and the Tauri `import_world` command. It imports canonical world data and compatibility requirements, then returns to the normal Runtime Wizard + Play path. Runtime binaries, Java selection, launch configuration and EULA state remain machine-local.
 
-```json
-{ "world": "scworld:..." }
-```
+## Failure behavior
 
-Output uses the runtime status shape.
-
-### `runtime_verify`
-
-Input:
-
-```json
-{ "world": "scworld:..." }
-```
-
-Output uses the runtime status shape. Desktop requires `ready: true` before managed launch.
-
-### `runtime_launch`
-
-Input:
-
-```json
-{ "world": "scworld:..." }
-```
-
-Output: process identifier or another success value suitable for player-facing confirmation.
-
-This command is intentionally backend-owned. The managed flow does not reconstruct Java/JAR paths or compatibility rules in JavaScript. If Agent 1 chooses a different launch command, only the adapter should change.
-
-## Runtime status shape
-
-Desktop accepts snake_case and common camelCase transport variants, but backend should prefer one stable JSON schema.
-
-```json
-{
-  "state": "checking | eula_required | installing | verifying | ready | failed",
-  "phase": "checking | downloading_java | downloading_server | installing_fabric | installing_fabric_api | installing_swarmcraft_mod | preparing_directories | verifying | ready | failed",
-  "ready": false,
-  "detail": "Human-readable summary",
-  "eula_accepted": false,
-  "eula_required": true,
-  "world_data_safe": true,
-  "retry_safe": true,
-  "components": {
-    "java": { "state": "ready", "version": "21", "detail": "managed" },
-    "minecraft_server": { "state": "ready", "version": "..." },
-    "fabric_loader": { "state": "missing" },
-    "fabric_api": { "state": "missing" },
-    "swarmcraft_integration": { "state": "missing" },
-    "world_directories": { "state": "ready" },
-    "server_mods": { "state": "ready" }
-  },
-  "failure": {
-    "message": "...",
-    "detail": "..."
-  }
-}
-```
-
-Recognized component states are presentation-only categories: `ready`, `working`, `missing`, `incompatible`, `corrupt`, `failed`, and `unknown`. The backend remains authoritative about which category applies.
-
-## Progress
-
-While `runtime_install` is active, Desktop polls `runtime_status` approximately every 650 ms and renders the reported phase/components. Poll failures are ignored because the installation call owns the actionable error.
-
-No frontend download loop exists. Desktop never fetches Fabric, Java, Minecraft, or mod artifacts itself.
-
-## Failure contract
-
-For a useful failure screen, backend should report:
-
-- what failed in `detail` / `failure`;
-- `world_data_safe: true|false` when it can make that assertion;
-- `retry_safe: true|false` when it can make that assertion.
-
-If either safety property is absent, Desktop displays “Not reported by backend” and does not enable automatic retry unless `retry_safe` is explicitly `true`.
-
-## Advanced mode
-
-The existing Diagnostics runtime fields remain the manual fallback for Java/server/mod paths and EULA acceptance. The wizard links to that section as **Advanced setup**.
-
-Additional requested overrides such as server directory, JVM options, RAM, launch arguments, Fabric overrides, and server configuration are not fabricated by this branch because no backend contract currently persists/consumes them. They remain an integration dependency.
+Backend errors remain errors. The UI may offer retry/repair/Advanced diagnostics, but it must not fake `ready`, suppress corrupt runtime state, auto-accept the EULA, or bypass server-mod/authority checks.
