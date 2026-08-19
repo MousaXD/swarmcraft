@@ -14,10 +14,11 @@ use swarm_cli::{
     },
 };
 use swarm_consensus::AuthorityGeneration;
-use swarm_core::{create_world_genesis, DataPaths, PeerIdentity};
+use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
 use swarm_protocol::{
-    EpochMode, EpochRecordV1, MembershipRecordV1, SleepRecordV1, WorldDescriptorV1, WorldId, WorldMemberV1,
-    PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    AuthorityPolicyV1, EpochMode, EpochRecordV1, MembershipPolicyV1, MembershipRecordV1,
+    RuntimeCompatibilityManifestV1, SleepRecordV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1,
+    WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 use tokio::{
@@ -44,8 +45,24 @@ fn peer(root: PathBuf) -> PeerFixture {
 }
 
 fn initialize_two_peer_world(alice: &PeerFixture, bob: &PeerFixture, source: &Path) -> SharedWorld {
-    let (world, genesis) =
-        create_world_genesis(&alice.identity, "26.1.2".into(), "0.19.3".into(), b"migration-core").unwrap();
+    let compatibility = RuntimeCompatibilityManifestV1 {
+        minecraft_version: "26.1.2".into(),
+        loader_id: "fabric".into(),
+        loader_version: "0.19.3".into(),
+        swarmcraft_protocol_version: PROTOCOL_VERSION,
+        fabric_adapter_version: env!("CARGO_PKG_VERSION").into(),
+        required_server_mods: Vec::new(),
+        required_client_mods: Vec::new(),
+        datapacks: Vec::new(),
+    };
+    let fingerprint = compatibility.fingerprint().unwrap();
+    let (world, genesis) = create_world_genesis_with_fingerprint(
+        &alice.identity,
+        compatibility.minecraft_version.clone(),
+        compatibility.loader_version.clone(),
+        fingerprint,
+    )
+    .unwrap();
     let metadata = WorldMetadataV1 {
         storage_schema_version: STORAGE_SCHEMA_VERSION,
         display_name: "migration-core".into(),
@@ -79,6 +96,30 @@ fn initialize_two_peer_world(alice: &PeerFixture, bob: &PeerFixture, source: &Pa
     alice.identity.sign_membership(&mut membership).unwrap();
     alice.storage.save_membership_record(&membership).unwrap();
     bob.storage.save_membership_record(&membership).unwrap();
+
+    let mut config = WorldConfigV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        sequence: 1,
+        previous_config_hash: None,
+        compatibility,
+        visibility: WorldVisibilityV1::Private,
+        authority_policy: AuthorityPolicyV1 { allow_solo_advancement: true, preferred_replication_factor: 2 },
+        membership_policy: MembershipPolicyV1::InviteOnly,
+        presentation: WorldPresentationV1 {
+            name: "migration-core".into(),
+            description: String::new(),
+            tags: Vec::new(),
+            icon_hash: None,
+            approximate_region: None,
+        },
+        authority_peer_id: alice.identity.peer_id(),
+        authority_public_key: alice.identity.public_key(),
+        signature: Vec::new(),
+    };
+    sign_world_config(&alice.identity, &mut config).unwrap();
+    alice.storage.save_world_config(&config).unwrap();
+    bob.storage.save_world_config(&config).unwrap();
 
     let alice_snapshot = snapshot(&alice.storage, &alice.identity, world, source);
     let bob_snapshot = snapshot(&bob.storage, &alice.identity, world, source);
@@ -175,6 +216,65 @@ fn configure_mock_runtime(temp: &Path, peer: &PeerFixture, world: WorldId, endpo
     .unwrap();
 }
 
+fn configure_safe_stop_runtime(temp: &Path, peer: &PeerFixture, world: WorldId, endpoint: &str) {
+    let mock_java = temp.join(format!("safe-stop-java-{}", world.to_hex()));
+    write_safe_stop_java(&mock_java);
+    let server = temp.join(format!("safe-stop-server-{}.jar", world.to_hex()));
+    let fabric = temp.join(format!("safe-stop-fabric-{}.jar", world.to_hex()));
+    fs::write(&server, b"mock").unwrap();
+    fs::write(&fabric, b"mock").unwrap();
+    migration::save_runtime_config(
+        &peer.paths,
+        world,
+        &RuntimeLaunchConfig {
+            java: mock_java,
+            server_jar: server,
+            mod_jar: fabric,
+            accept_eula: true,
+            game_endpoint: Some(endpoint.into()),
+        },
+    )
+    .unwrap();
+}
+
+fn write_safe_stop_java(path: &Path) {
+    fs::write(
+        path,
+        r#"#!/usr/bin/env python3
+import os
+import pathlib
+import socket
+
+host = os.environ["SWARMCRAFT_IPC_HOST"]
+port = int(os.environ["SWARMCRAFT_IPC_PORT"])
+token = os.environ["SWARMCRAFT_IPC_TOKEN"]
+world = os.environ["SWARMCRAFT_WORLD_DIR"]
+fingerprint = os.environ["SWARMCRAFT_COMPAT_FINGERPRINT"]
+
+def encoded(value):
+    return value.encode("utf-8").hex()
+
+with socket.create_connection((host, port), timeout=5) as connection:
+    reader = connection.makefile("r", encoding="utf-8", newline="\n")
+    writer = connection.makefile("w", encoding="utf-8", newline="\n")
+    writer.write("AUTH\t" + token + "\n")
+    writer.write("WORLD_INFO\t" + encoded("26.1.2") + "\t" + encoded("0.19.3") + "\t" + encoded(world) + "\t" + fingerprint + "\n")
+    writer.flush()
+    for line in reader:
+        fields = line.strip().split("\t")
+        if len(fields) == 2 and fields[0] == "PREPARE_SHUTDOWN":
+            pathlib.Path(world, "safe-stop-latest.txt").write_text("saved-at-shutdown\n", encoding="utf-8")
+            writer.write("READY_FOR_SHUTDOWN\t" + fields[1] + "\n")
+            writer.flush()
+            break
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).unwrap();
+}
+
 fn spawn_heartbeat(paths: DataPaths, world: WorldId, generation: AuthorityGeneration) -> JoinHandle<()> {
     tokio::spawn(async move {
         for sequence in 1..100u64 {
@@ -213,6 +313,53 @@ async fn wait_until_sleeping(peer: &PeerFixture, world: WorldId) {
     })
     .await
     .expect("authority never checkpointed after runtime exit");
+}
+
+#[tokio::test]
+async fn safe_stop_waits_for_fabric_barrier_then_commits_latest_state_and_sleep_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let alice = peer(temp.path().join("alice-safe-stop"));
+    let bob = peer(temp.path().join("bob-safe-stop"));
+    let source = temp.path().join("source-safe-stop");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("level.dat"), b"canonical-before-safe-stop\n").unwrap();
+    let shared = initialize_two_peer_world(&alice, &bob, &source);
+    let before = alice.storage.latest_snapshot(shared.world).unwrap().unwrap();
+    let before_hash = before.manifest_hash().unwrap();
+
+    let endpoint = "127.0.0.1:25568";
+    configure_safe_stop_runtime(temp.path(), &alice, shared.world, endpoint);
+    let generation =
+        AuthorityGeneration { epoch: shared.epoch.epoch_number, fencing_token: shared.epoch.fencing_token };
+    let heartbeat = spawn_heartbeat(alice.paths.clone(), shared.world, generation);
+    let supervisor_paths = alice.paths.clone();
+    let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });
+
+    wait_until_ready(&alice, shared.world, endpoint).await;
+    migration::request_world_stop(&alice.paths, &alice.storage, shared.world).unwrap();
+    wait_until_sleeping(&alice, shared.world).await;
+
+    let status = migration::load_migration_status(&alice.paths, shared.world).unwrap();
+    assert_eq!(status.phase, MigrationPhase::Sleeping);
+    assert!(!status.runtime_ready);
+
+    let final_snapshot = alice.storage.latest_snapshot(shared.world).unwrap().unwrap();
+    alice.storage.verify_snapshot(&final_snapshot).unwrap();
+    assert_eq!(final_snapshot.snapshot_number, before.snapshot_number + 1);
+    assert_eq!(final_snapshot.previous_snapshot_hash, Some(before_hash));
+
+    let sleep_record = alice.storage.load_sleep_record(shared.world).unwrap();
+    assert_eq!(sleep_record.latest_snapshot_hash, final_snapshot.manifest_hash().unwrap());
+    assert_eq!(sleep_record.epoch, shared.epoch.epoch_number);
+    assert_eq!(sleep_record.fencing_token, shared.epoch.fencing_token);
+
+    let restored = temp.path().join("safe-stop-restored");
+    alice.storage.restore_snapshot(&final_snapshot, &restored).unwrap();
+    assert_eq!(fs::read_to_string(restored.join("safe-stop-latest.txt")).unwrap(), "saved-at-shutdown\n");
+    assert_eq!(fs::read_to_string(restored.join("level.dat")).unwrap(), "canonical-before-safe-stop\n");
+
+    supervisor.abort();
+    heartbeat.abort();
 }
 
 #[tokio::test]
@@ -364,6 +511,8 @@ with socket.create_connection((host, port), timeout=5) as connection:
 fn add_third_peer(alice: &PeerFixture, bob: &PeerFixture, carol: &PeerFixture, shared: &SharedWorld, source: &Path) {
     let metadata = alice.storage.load_world(shared.world).unwrap();
     carol.storage.create_world(&metadata).unwrap();
+    let config = alice.storage.load_world_config(shared.world).unwrap();
+    carol.storage.save_world_config(&config).unwrap();
 
     let mut descriptor = alice.storage.load_world_descriptor(shared.world).unwrap();
     descriptor.members.push(member(&carol.identity));

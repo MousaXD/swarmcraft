@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   rust:
@@ -52,12 +52,24 @@ jobs:
         run: cargo test -p swarm-storage --test publication_ownership_race --locked
       - name: Storage failure injection
         run: cargo test -p swarm-storage --test failure_injection --locked
+      - name: Existing-world import journey
+        run: cargo test -p swarm-cli world_import --lib --locked
+      - name: Sleep/wake direct launch guard regressions
+        run: cargo test -p swarm-cli launch_guard::tests --lib --locked
+      - name: Standby corrupt-sleep regression
+        run: cargo test -p swarm-cli --bin swarmcraft-host standby_wait_until_ready_rejects_corrupt_sleep_record_before_host_launch --locked
+      - name: Migration corrupt-sleep regression
+        run: cargo test -p swarm-cli --test sleep_state_fail_closed --locked
+      - name: Host Readiness negative matrix and two-member quorum fail-closed
+        run: cargo test -p swarm-cli host_readiness::tests --lib --locked
       - name: Live join replication
         run: cargo test -p swarm-cli --test live_join_replication --locked
       - name: Host process lifecycle
         run: cargo test -p swarm-cli --test host_process --locked
       - name: Migration orchestration
         run: cargo test -p swarm-cli --test migration_core --locked
+      - name: Runtime setup failure hardening
+        run: cargo test -p swarm-cli --test runtime_setup_hardening --locked
       - name: Three-daemon recovery
         run: cargo test -p swarm-cli --test three_daemon_recovery --locked
       - name: Recovery successor dies before epoch promotion
@@ -125,9 +137,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Frontend backend-contract tests
+      - name: Frontend Desktop tests
         if: runner.os == 'Linux'
-        run: node --test apps/desktop/tests/frontend-contract.test.mjs
+        run: node --test apps/desktop/tests/*.test.mjs
       - name: Validate Tauri frontend bridge
         if: runner.os == 'Linux'
         shell: bash
@@ -169,8 +181,12 @@ jobs:
           mkdir -p apps/desktop/src-tauri/binaries
           cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
           cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+          cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
+          cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
           "apps/desktop/src-tauri/binaries/swarmcraft-$target" --version
           "apps/desktop/src-tauri/binaries/swarmcraft-host-$target" --version
+          "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target" --version
+          "apps/desktop/src-tauri/binaries/swarmcraft-import-$target" --version
       - name: Stage Windows sidecars
         if: runner.os == 'Windows'
         shell: pwsh
@@ -179,8 +195,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path apps/desktop/src-tauri/binaries | Out-Null
           Copy-Item target/release/swarmcraft.exe "apps/desktop/src-tauri/binaries/swarmcraft-$target.exe"
           Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"
+          Copy-Item target/release/swarmcraft-runtime.exe "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target.exe"
+          Copy-Item target/release/swarmcraft-import.exe "apps/desktop/src-tauri/binaries/swarmcraft-import-$target.exe"
           & "apps/desktop/src-tauri/binaries/swarmcraft-$target.exe" --version
           & "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe" --version
+          & "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target.exe" --version
+          & "apps/desktop/src-tauri/binaries/swarmcraft-import-$target.exe" --version
       - name: Build native desktop package
         working-directory: apps/desktop
         run: cargo tauri build --bundles ${{ matrix.bundle }} --ci
@@ -208,6 +228,22 @@ jobs:
           gradle-version: '9.5.1'
       - name: Build Fabric mod
         run: gradle build --stacktrace
+      - name: Verify released Fabric artifact embeds Fabric API
+        run: |
+          python3 - <<'PY'
+          import glob
+          import zipfile
+
+          jars = [path for path in glob.glob('build/libs/*.jar') if '-sources' not in path]
+          assert jars, 'Fabric build produced no release JAR'
+          with zipfile.ZipFile(jars[0]) as archive:
+              nested = [
+                  name for name in archive.namelist()
+                  if name.startswith('META-INF/jars/') and 'fabric-api' in name.lower() and name.endswith('.jar')
+              ]
+          assert nested, 'released SwarmCraft Fabric JAR does not embed Fabric API under META-INF/jars'
+          print('Embedded Fabric API:', ', '.join(nested))
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: swarmcraft-fabric

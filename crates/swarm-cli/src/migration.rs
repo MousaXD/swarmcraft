@@ -1,4 +1,4 @@
-use crate::authority_permit::PermitWatch;
+use crate::{authority_permit::PermitWatch, host_readiness, launch_guard, server_mods};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -110,6 +110,8 @@ pub enum TransferPrepareResult {
 }
 
 pub fn save_runtime_config(paths: &DataPaths, world: WorldId, config: &RuntimeLaunchConfig) -> Result<()> {
+    // Any launch-path change invalidates the prior machine-local runtime proof.
+    host_readiness::invalidate_runtime_verification(paths, world)?;
     let path = runtime_config_path(paths, world);
     atomic_json(&path, config)?;
     Ok(())
@@ -126,6 +128,24 @@ pub fn load_migration_status(paths: &DataPaths, world: WorldId) -> Result<Migrat
     let path = migration_status_path(paths, world);
     let bytes = fs::read(&path).with_context(|| format!("migration status is unavailable at {}", path.display()))?;
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+pub fn request_world_stop(paths: &DataPaths, storage: &Storage, world: WorldId) -> Result<()> {
+    storage.load_world(world)?;
+    if launch_guard::load_sleep_record_fail_closed(storage, world)?.is_some() {
+        return Ok(());
+    }
+    let identity = PeerIdentity::load_or_create(paths)?;
+    let epoch = storage.load_epoch_record(world)?;
+    if epoch.authority_peer_id != identity.peer_id() || epoch.authority_public_key != identity.public_key() {
+        bail!("only the current authority may request a safe world stop");
+    }
+    let path = stop_intent_path(paths, world);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, b"stop\n").with_context(|| format!("cannot write safe-stop intent {}", path.display()))?;
+    Ok(())
 }
 
 pub fn request_world_wake(paths: &DataPaths, storage: &Storage, world: WorldId) -> Result<()> {
@@ -232,53 +252,71 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
             continue;
         }
 
-        if storage.load_sleep_record(world).is_ok() {
-            if !wake_intent_path(&paths, world).exists() {
-                publish_status(
+        match launch_guard::load_sleep_record_fail_closed(&storage, world) {
+            Ok(Some(_)) => {
+                if !wake_intent_path(&paths, world).exists() {
+                    publish_status(
+                        &paths,
+                        &storage,
+                        world,
+                        None,
+                        MigrationPhase::Sleeping,
+                        false,
+                        config.game_endpoint.clone(),
+                        storage.latest_snapshot(world)?.and_then(|snapshot| snapshot.manifest_hash().ok()),
+                        None,
+                    )?;
+                    sleep(SUPERVISOR_POLL).await;
+                    continue;
+                }
+                let descriptor = storage.load_world_descriptor(world)?;
+                let members = descriptor.members.iter().filter(|member| !member.banned).count();
+                if members > 1 {
+                    publish_status(
+                        &paths,
+                        &storage,
+                        world,
+                        Some(MigrationTrigger::WorldWake),
+                        MigrationPhase::Blocked,
+                        false,
+                        config.game_endpoint.clone(),
+                        storage.latest_snapshot(world)?.and_then(|snapshot| snapshot.manifest_hash().ok()),
+                        Some("multi-member wake requires a quorum-backed authority transition; unsafe solo wake is not automatic".into()),
+                    )?;
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                let result = run_authority_runtime_inner(
                     &paths,
                     &storage,
-                    world,
-                    None,
-                    MigrationPhase::Sleeping,
-                    false,
+                    config.host_options(world),
+                    MigrationTrigger::WorldWake,
                     config.game_endpoint.clone(),
-                    storage.latest_snapshot(world)?.and_then(|snapshot| snapshot.manifest_hash().ok()),
-                    None,
-                )?;
-                sleep(SUPERVISOR_POLL).await;
+                    false,
+                )
+                .await;
+                if let Err(error) = result {
+                    publish_failure(&paths, &storage, world, MigrationTrigger::WorldWake, &config, &error)?;
+                    sleep(Duration::from_secs(1)).await;
+                }
                 continue;
             }
-            let descriptor = storage.load_world_descriptor(world)?;
-            let members = descriptor.members.iter().filter(|member| !member.banned).count();
-            if members > 1 {
+            Ok(None) => {}
+            Err(error) => {
                 publish_status(
                     &paths,
                     &storage,
                     world,
-                    Some(MigrationTrigger::WorldWake),
+                    None,
                     MigrationPhase::Blocked,
                     false,
                     config.game_endpoint.clone(),
                     storage.latest_snapshot(world)?.and_then(|snapshot| snapshot.manifest_hash().ok()),
-                    Some("multi-member wake requires a quorum-backed authority transition; unsafe solo wake is not automatic".into()),
+                    Some(format!("sleep state is unreadable or corrupt; authority launch is blocked: {error}")),
                 )?;
                 sleep(Duration::from_secs(1)).await;
                 continue;
             }
-            let result = run_authority_runtime_inner(
-                &paths,
-                &storage,
-                config.host_options(world),
-                MigrationTrigger::WorldWake,
-                config.game_endpoint.clone(),
-                false,
-            )
-            .await;
-            if let Err(error) = result {
-                publish_failure(&paths, &storage, world, MigrationTrigger::WorldWake, &config, &error)?;
-                sleep(Duration::from_secs(1)).await;
-            }
-            continue;
         }
 
         let descriptor = storage.load_world_descriptor(world)?;
@@ -432,8 +470,9 @@ pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options
     let identity = PeerIdentity::load_or_create(paths)?;
     let descriptor = storage.load_world_descriptor(options.world)?;
     let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
+    let sleep_record = launch_guard::load_sleep_record_fail_closed(storage, options.world)?;
     if member_count > 1 {
-        if storage.load_sleep_record(options.world).is_ok() {
+        if sleep_record.is_some() {
             bail!("multi-member sleeping worlds must be woken through the migration supervisor");
         }
         let epoch = storage.load_epoch_record(options.world)?;
@@ -487,6 +526,13 @@ async fn run_authority_runtime_inner(
     storage.verify_snapshot(&latest)?;
     verify_snapshot_signature(&latest)?;
     ensure_authority_generation(storage, &identity, &epoch)?;
+    let world_config =
+        storage.load_world_config(options.world).context("canonical runtime profile is not synchronized")?;
+    let mod_readiness = server_mods::evaluate_world_mods(paths, options.world, &world_config.compatibility)?;
+    if !mod_readiness.ready {
+        let details = mod_readiness.issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>().join("; ");
+        bail!("local device is not server-mod ready for authority runtime: {details}");
+    }
 
     let runtime = paths.root.join("runtime").join(options.world.to_hex());
     let world_dir = runtime.join("world");
@@ -505,6 +551,7 @@ async fn run_authority_runtime_inner(
     fs::create_dir_all(runtime.join("mods"))?;
     fs::copy(&options.mod_jar, runtime.join("mods/swarmcraft-fabric.jar"))
         .with_context(|| format!("cannot install Fabric bridge from {}", options.mod_jar.display()))?;
+    server_mods::install_verified_user_mods(paths, options.world, &world_config.compatibility, &runtime.join("mods"))?;
     fs::write(runtime.join("eula.txt"), "eula=true\n")?;
 
     publish_status(
@@ -586,6 +633,23 @@ async fn run_authority_runtime_inner(
         )?;
         return Err(error);
     }
+    // A runtime becomes host-ready only after the actual Fabric process has
+    // launched and reported the exact world compatibility fingerprint. Persist
+    // that machine-local proof so another peer can distinguish configured paths
+    // from a runtime that has truly passed launch verification.
+    let verified_config = RuntimeLaunchConfig {
+        java: options.java.clone(),
+        server_jar: options.server_jar.clone(),
+        mod_jar: options.mod_jar.clone(),
+        accept_eula: options.accept_eula,
+        game_endpoint: game_endpoint.clone(),
+    };
+    host_readiness::record_runtime_verified(
+        paths,
+        options.world,
+        &verified_config,
+        metadata.genesis.compatibility_fingerprint,
+    )?;
     publish_status(
         paths,
         storage,
@@ -722,6 +786,24 @@ async fn wait_for_runtime_exit(
             return Ok(RuntimeDisposition::Sleep);
         }
         ensure_authority_generation(storage, identity, epoch)?;
+        if stop_intent_path(paths, epoch.world_id).exists() {
+            let stop_result = async {
+                session.prepare_shutdown(1, FABRIC_SHUTDOWN_TIMEOUT).await?;
+                timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
+                    .await
+                    .map_err(|_| anyhow!("Minecraft did not stop after the shutdown save barrier"))??;
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+            clear_stop_intent(paths, epoch.world_id)?;
+            match stop_result {
+                Ok(()) => return Ok(RuntimeDisposition::Sleep),
+                Err(error) => {
+                    warn!(world = %epoch.world_id, %error, "safe stop save barrier failed; keeping Minecraft running");
+                    continue;
+                }
+            }
+        }
         match load_transfer_intent(paths, epoch.world_id) {
             Ok(Some(target)) => {
                 validate_transfer_target(storage, identity, epoch.world_id, target)?;
@@ -776,8 +858,7 @@ pub fn prepare_manual_transfer(
         bail!("another authority transfer is already active for this authority generation");
     }
 
-    if let Ok(sleep_record) = storage.load_sleep_record(world) {
-        verify_sleep_record_signature(&sleep_record)?;
+    if let Some(sleep_record) = launch_guard::load_sleep_record_fail_closed(storage, world)? {
         if sleep_record.latest_snapshot_hash != latest.manifest_hash()?
             || sleep_record.epoch != epoch.epoch_number
             || sleep_record.fencing_token != epoch.fencing_token
@@ -1188,8 +1269,7 @@ fn prepare_authority_epoch(
         bail!("local peer is not eligible to host this world");
     }
 
-    if let Ok(sleep_record) = storage.load_sleep_record(world) {
-        verify_sleep_record_signature(&sleep_record)?;
+    if let Some(sleep_record) = launch_guard::load_sleep_record_fail_closed(storage, world)? {
         if sleep_record.latest_snapshot_hash != latest.manifest_hash()? {
             bail!("local replica is stale and cannot wake the sleeping world");
         }
@@ -1435,6 +1515,18 @@ fn runtime_config_path(paths: &DataPaths, world: WorldId) -> PathBuf {
 
 fn migration_status_path(paths: &DataPaths, world: WorldId) -> PathBuf {
     control_dir(paths, world).join("migration-status.json")
+}
+
+fn stop_intent_path(paths: &DataPaths, world: WorldId) -> PathBuf {
+    paths.root.join("runtime-control").join(world.to_hex()).join("stop.intent")
+}
+
+fn clear_stop_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
+    let path = stop_intent_path(paths, world);
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| format!("cannot clear safe-stop intent {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn wake_intent_path(paths: &DataPaths, world: WorldId) -> PathBuf {

@@ -1,4 +1,5 @@
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
+import { createImportRequest, parseImportResult } from './import-flow.js';
 
 const $ = (id) => document.getElementById(id);
 const invoke = window.__TAURI__?.core?.invoke;
@@ -7,6 +8,8 @@ const worldCache = new Map();
 let selectedWorldId = '';
 let currentView = 'worlds';
 let migrationRequestGeneration = 0;
+let hostReadinessRequestGeneration = 0;
+let modsRequestGeneration = 0;
 let connectivityRefreshInFlight = false;
 let structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });
 let serviceWarning = '';
@@ -16,6 +19,7 @@ const CONNECTIVITY_REFRESH_MS = 10000;
 const viewMeta = {
   worlds: ['Worlds', 'Choose a world and play'],
   create: ['Create', 'Start a replicated Minecraft world'],
+  import: ['Import', 'Bring an existing Minecraft world into SwarmCraft'],
   join: ['Join', 'Join with a signed invite'],
   activity: ['Activity', 'Recent actions and detailed errors'],
   diagnostics: ['Diagnostics', 'Advanced connectivity, runtime, and recovery tools'],
@@ -259,6 +263,8 @@ function updateWorldSpecificControls() {
 function clearSelection() {
   selectedWorldId = '';
   migrationRequestGeneration += 1;
+  hostReadinessRequestGeneration += 1;
+  modsRequestGeneration += 1;
   $('world').value = '';
   $('selectionContent').hidden = true;
   $('noSelection').hidden = false;
@@ -354,6 +360,171 @@ function refreshVisibleMigration() {
   if (world) refreshMigrationState(world);
 }
 
+
+function renderHostReadiness(readiness) {
+  const panel = $('hostReadinessPanel');
+  if (!panel) return;
+  const state = readiness?.state || 'unknown';
+  const copy = {
+    safe: ['Safe to shut down this PC', 'Another ready device can take over this world.'],
+    sleeping: ['Safe to shut down this PC', 'This world is durably stopped and its latest checkpoint is saved.'],
+    blocked_by_runtime: ['Keep this PC on', 'Another device has a current copy, but its Minecraft runtime is not ready.'],
+    blocked_by_mods: ['Keep this PC on', 'Another device is missing or has incompatible required server mods.'],
+    syncing: ['Wait before shutting down', 'Another device is still syncing the latest world state.'],
+    world_will_stop: ['World will go offline', 'No other ready host is currently reachable.'],
+    blocked_by_quorum: ['World will go offline', 'Another device has a copy, but the remaining members cannot safely complete host takeover.'],
+    conflict: ['Host handoff unavailable', 'This world has conflicting history that needs attention.'],
+    degraded_safety: ['Keep this PC on', 'SwarmCraft cannot currently prove a safe host takeover.'],
+    not_current_host: ['Shutdown safety not proven', 'This device is not the current host; SwarmCraft is not claiming takeover safety from this report.'],
+    unknown: ['Checking shutdown safety…', readiness?.detail || 'SwarmCraft has not produced a fresh host-readiness report yet.'],
+  };
+  const [title, detail] = copy[state] || copy.unknown;
+  const tone = state === 'safe' || state === 'sleeping'
+    ? 'safe'
+    : state === 'conflict'
+      ? 'danger'
+      : state === 'unknown'
+        ? 'neutral'
+        : 'warning';
+  panel.className = `safety-panel ${tone}`;
+  $('hostReadinessTitle').textContent = title;
+  $('hostReadinessDetail').textContent = detail;
+}
+
+async function refreshHostReadiness(world) {
+  if (!world) {
+    renderHostReadiness(null);
+    return;
+  }
+  const requestedWorldId = world.id;
+  const requestGeneration = ++hostReadinessRequestGeneration;
+  try {
+    const readiness = await backend.hostReadiness(requestedWorldId);
+    if (selectedWorldId === requestedWorldId && requestGeneration === hostReadinessRequestGeneration) {
+      renderHostReadiness(readiness);
+    }
+  } catch (error) {
+    if (selectedWorldId === requestedWorldId && requestGeneration === hostReadinessRequestGeneration) {
+      renderHostReadiness({ state: 'unknown', detail: `Shutdown safety is unavailable: ${String(error)}` });
+    }
+  }
+}
+
+function refreshVisibleHostReadiness() {
+  if (document.hidden) return;
+  const world = selectedWorld();
+  if (world) refreshHostReadiness(world);
+}
+
+function modComponent(runtimeStatus, id) {
+  return runtimeStatus?.components?.find((component) => component.id === id) || null;
+}
+
+function renderWorldMods(runtimeStatus, modsStatus) {
+  const fabricApi = modComponent(runtimeStatus, 'fabric_api');
+  const swarmcraft = modComponent(runtimeStatus, 'swarmcraft_integration');
+  $('fabricApiState').textContent = fabricApi ? `${fabricApi.state}${fabricApi.version ? ` · ${fabricApi.version}` : ''}` : 'Not reported';
+  $('swarmcraftModState').textContent = swarmcraft ? `${swarmcraft.state}${swarmcraft.version ? ` · ${swarmcraft.version}` : ''}` : 'Not reported';
+
+  const list = $('serverModsList');
+  list.replaceChildren();
+  const required = Array.isArray(modsStatus?.required)
+    ? modsStatus.required.filter((item) => item.component_kind !== 'managed_runtime')
+    : [];
+  const installed = Array.isArray(modsStatus?.installed)
+    ? modsStatus.installed.filter((item) => item.component_kind !== 'managed_runtime')
+    : [];
+  const issues = Array.isArray(modsStatus?.issues) ? modsStatus.issues : [];
+
+  if (!required.length) {
+    const row = document.createElement('div');
+    row.className = 'detail-row';
+    row.textContent = 'No third-party server mods are required by this world.';
+    list.append(row);
+  } else {
+    for (const requirement of required) {
+      const row = document.createElement('div');
+      row.className = 'detail-row';
+      const label = document.createElement('span');
+      label.textContent = `${requirement.mod_id} ${requirement.version}`;
+      const problem = issues.find((issue) => issue.mod_id === requirement.mod_id);
+      const status = document.createElement('strong');
+      status.textContent = problem ? problem.message : 'Verified';
+      row.append(label, status);
+      list.append(row);
+    }
+  }
+
+  for (const item of installed) {
+    const row = document.createElement('div');
+    row.className = 'detail-row';
+    const label = document.createElement('span');
+    label.textContent = `${item.mod_id} ${item.version} · local`;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'text-button';
+    remove.textContent = 'Remove local copy';
+    remove.addEventListener('click', async () => {
+      try {
+        await run('Removing local server mod…', () => backend.mods.removeLocal(worldId(), item.mod_id), {
+          successMessage: `Removed the local ${item.mod_id} artifact. The signed world modpack was not changed.`,
+        });
+        refreshWorldMods(selectedWorld());
+      } catch (_) {}
+    });
+    row.append(label, remove);
+    list.append(row);
+  }
+
+  const ready = modsStatus?.ready === true;
+  $('modsBadge').textContent = ready ? 'Verified' : 'Needs attention';
+  $('modsBadge').className = `status-badge ${ready ? 'safe' : 'warning'}`;
+  $('modsSummary').textContent = ready
+    ? 'All required third-party server mods on this computer match the signed world profile.'
+    : 'One or more required server mods are missing, incompatible, duplicated, or corrupt.';
+  $('modsIssues').hidden = !issues.length;
+  $('modsIssues').textContent = issues.map((issue) => issue.message).join(' · ');
+}
+
+async function refreshWorldMods(world) {
+  if (!world) return;
+  const requestedWorldId = world.id;
+  const requestGeneration = ++modsRequestGeneration;
+  const [runtimeResult, modsResult] = await Promise.allSettled([
+    backend.runtime.status(requestedWorldId),
+    backend.mods.status(requestedWorldId),
+  ]);
+  if (selectedWorldId !== requestedWorldId || requestGeneration !== modsRequestGeneration) return;
+  const runtimeStatus = runtimeResult.status === 'fulfilled' ? runtimeResult.value : null;
+  const modsStatus = modsResult.status === 'fulfilled'
+    ? modsResult.value
+    : { ready: false, required: [], installed: [], issues: [{ message: String(modsResult.reason) }] };
+  renderWorldMods(runtimeStatus, modsStatus);
+}
+
+async function supplyRequiredMod() {
+  const jarPath = $('modJarPath').value.trim();
+  if (!jarPath) {
+    showInline('worldNotice', 'Choose or enter the local path to the required Fabric mod JAR first.', 'warning');
+    $('modJarPath').focus();
+    return;
+  }
+  try {
+    await run('Supplying required server mod…', () => backend.mods.supplyRequiredJar(worldId(), jarPath), {
+      successMessage: 'Required server mod verified and copied into this world’s local runtime profile.',
+    });
+    $('modJarPath').value = '';
+    await refreshWorldMods(selectedWorld());
+    await refreshHostReadiness(selectedWorld());
+  } catch (_) {}
+}
+
+async function openModsFolder() {
+  try {
+    await run('Opening mods folder…', () => backend.mods.openFolder(worldId()), { logResult: false });
+  } catch (_) {}
+}
+
 function selectWorld(world, { focusDetail = false } = {}) {
   selectedWorldId = world.id;
   $('world').value = world.id;
@@ -385,6 +556,8 @@ function selectWorld(world, { focusDetail = false } = {}) {
   updatePlayState(world);
   updateDiagnosticsContext();
   refreshMigrationState(world);
+  refreshHostReadiness(world);
+  refreshWorldMods(world);
   if (focusDetail) $('selectedName').scrollIntoView({ block: 'nearest' });
 }
 
@@ -437,7 +610,7 @@ function renderEmptyWorlds() {
   const title = document.createElement('h2');
   title.textContent = 'No worlds yet';
   const body = document.createElement('p');
-  body.textContent = 'Create a world for your group or join one with a signed invite.';
+  body.textContent = 'Create a world, import an existing Minecraft save, or join with a signed invite.';
   const actions = document.createElement('div');
   actions.className = 'compact-actions';
   const create = document.createElement('button');
@@ -445,12 +618,17 @@ function renderEmptyWorlds() {
   create.className = 'button button-primary';
   create.textContent = 'Create world';
   create.addEventListener('click', () => showView('create'));
+  const importExisting = document.createElement('button');
+  importExisting.type = 'button';
+  importExisting.className = 'button button-secondary';
+  importExisting.textContent = 'Import existing world';
+  importExisting.addEventListener('click', () => showView('import'));
   const join = document.createElement('button');
   join.type = 'button';
   join.className = 'button button-secondary';
   join.textContent = 'Join with invite';
   join.addEventListener('click', () => showView('join'));
-  actions.append(create, join);
+  actions.append(create, importExisting, join);
   empty.append(mark, title, body, actions);
   container.append(empty);
   container.setAttribute('aria-busy', 'false');
@@ -551,6 +729,7 @@ async function startup() {
   await showIdentity({ quiet: true });
   await refreshWorlds();
   refreshVisibleMigration();
+  refreshVisibleHostReadiness();
 }
 
 async function showIdentity({ quiet = false } = {}) {
@@ -608,6 +787,60 @@ async function createWorld() {
   $('createCompatibility').value = 'vanilla-fabric';
   await refreshWorlds();
   showView('worlds');
+}
+
+function importRequestFromForm() {
+  return createImportRequest({
+    source: $('importSource').value,
+    name: $('importName').value,
+    minecraft: $('importMinecraft').value,
+    fabricLoader: $('importLoader').value,
+    visibility: $('importVisibility').value,
+    serverMods: $('importServerMods').value,
+    noServerMods: $('importNoServerMods').checked,
+  });
+}
+
+async function importWorld() {
+  let request;
+  try {
+    request = importRequestFromForm();
+    showInline('importError', '');
+  } catch (error) {
+    showInline('importError', String(error.message || error), 'danger');
+    if (error.field) $(error.field)?.focus();
+    return;
+  }
+
+  let result;
+  try {
+    result = await run('Importing existing world…', () => backend.importWorld(request), {
+      logResult: false,
+      successMessage: 'Existing world imported into canonical SwarmCraft storage.',
+    });
+  } catch (error) {
+    showInline('importError', `Could not import world: ${String(error)}`, 'danger');
+    return;
+  }
+
+  let importedWorldId;
+  try {
+    importedWorldId = parseImportResult(result).worldId;
+  } catch (error) {
+    showInline('importError', `Import completed but its result could not be read: ${String(error)}`, 'danger');
+    return;
+  }
+  selectedWorldId = importedWorldId;
+  $('importForm').reset();
+  $('importMinecraft').value = '26.1.2';
+  $('importLoader').value = '0.19.3';
+  await refreshWorlds();
+  showView('worlds');
+  showInline(
+    'worldNotice',
+    'Existing world imported. Minecraft EULA acceptance and this device’s runtime setup were not changed.',
+    'safe',
+  );
 }
 
 async function joinWorld() {
@@ -730,7 +963,7 @@ function openSleepDialog() {
 }
 
 async function sleepWorld() {
-  await run('Stopping local Minecraft runtime…', () => backend.stopHost(), {
+  await run('Stopping local Minecraft runtime…', () => backend.stopHost(worldId()), {
     successMessage: 'World runtime stopped gracefully. Replica storage can continue separately.',
   });
   $('sleepDialog').close();
@@ -796,7 +1029,7 @@ async function hostWorld() {
 }
 
 async function stopHost() {
-  await run('Stopping Minecraft runtime…', () => backend.stopHost(), { successMessage: 'Minecraft runtime stopped.' });
+  await run('Stopping Minecraft runtime…', () => backend.stopHost(worldId()), { successMessage: 'World stopped safely. Latest world state is checkpointed and sleeping.' });
 }
 
 async function startDaemon() {
@@ -870,8 +1103,10 @@ function bindAction(id, handler, { submit = false } = {}) {
 for (const nav of document.querySelectorAll('.nav-item[data-view]')) nav.addEventListener('click', () => showView(nav.dataset.view));
 for (const back of document.querySelectorAll('[data-back-worlds]')) back.addEventListener('click', () => showView('worlds'));
 $('quickCreate').addEventListener('click', () => showView('create'));
+$('quickImport').addEventListener('click', () => showView('import'));
 $('quickJoin').addEventListener('click', () => showView('join'));
 $('cancelCreate').addEventListener('click', () => showView('worlds'));
+$('cancelImport').addEventListener('click', () => showView('worlds'));
 $('cancelJoin').addEventListener('click', () => showView('worlds'));
 $('openWorldDiagnostics').addEventListener('click', () => showView('diagnostics'));
 $('clearActivity').addEventListener('click', () => { $('output').textContent = 'Activity cleared.'; });
@@ -886,6 +1121,7 @@ bindAction('init', initialize);
 bindAction('identityButton', () => showIdentity());
 bindAction('refresh', refreshWorlds);
 bindAction('createForm', createWorld, { submit: true });
+bindAction('importForm', importWorld, { submit: true });
 bindAction('joinForm', joinWorld, { submit: true });
 bindAction('joinWorldIdButton', joinWorldId);
 bindAction('createInvite', createInvite);
@@ -899,6 +1135,9 @@ bindAction('seedOn', () => setSeeding(true));
 bindAction('seedOff', () => setSeeding(false));
 bindAction('diagnosticSeedOn', () => setSeeding(true));
 bindAction('diagnosticSeedOff', () => setSeeding(false));
+bindAction('supplyRequiredMod', supplyRequiredMod);
+bindAction('refreshMods', () => refreshWorldMods(selectedWorld()));
+bindAction('openModsFolder', openModsFolder);
 bindAction('confirmSleep', sleepWorld);
 bindAction('confirmLeave', performLeaveWorld);
 bindAction('playWorld', hostWorld);
@@ -920,6 +1159,7 @@ startup().catch((error) => {
 });
 document.addEventListener('visibilitychange', refreshVisibleMigration);
 setInterval(refreshVisibleMigration, MIGRATION_REFRESH_MS);
+setInterval(refreshVisibleHostReadiness, MIGRATION_REFRESH_MS);
 setInterval(() => {
   if (!document.hidden) refreshConnectivityDiagnostics({ logFailure: false }).catch(() => {});
 }, CONNECTIVITY_REFRESH_MS);

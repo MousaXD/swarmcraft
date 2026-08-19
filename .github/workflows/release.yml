@@ -31,6 +31,8 @@ jobs:
           mkdir -p apps/desktop/src-tauri/binaries
           cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
           cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+          cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
+          cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
       - name: Build native Linux packages
         working-directory: apps/desktop
         run: cargo tauri build --bundles deb,appimage --ci
@@ -73,6 +75,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path apps/desktop/src-tauri/binaries | Out-Null
           Copy-Item target/release/swarmcraft.exe "apps/desktop/src-tauri/binaries/swarmcraft-$target.exe"
           Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"
+          Copy-Item target/release/swarmcraft-runtime.exe "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target.exe"
+          Copy-Item target/release/swarmcraft-import.exe "apps/desktop/src-tauri/binaries/swarmcraft-import-$target.exe"
       - name: Authenticode-sign bundled executables when certificate is configured
         shell: pwsh
         run: |
@@ -163,6 +167,8 @@ jobs:
           mkdir -p apps/desktop/src-tauri/binaries
           cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
           cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+          cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
+          cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
       - name: Build signed/notarized macOS installer when Apple credentials are configured
         if: env.APPLE_CERTIFICATE != '' && env.APPLE_SIGNING_IDENTITY != ''
         working-directory: apps/desktop

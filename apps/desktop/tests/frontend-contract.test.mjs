@@ -240,3 +240,59 @@ test('frontend source and Tauri config preserve the global bridge contract', asy
   assert.match(app, /Automatic networking service could not start/);
   assert.equal(tauri.app.withGlobalTauri, true);
 });
+
+
+test('authoritative host readiness is visible in the normal selected-world journey', async () => {
+  const app = await text('app.js');
+  const html = await text('index.html');
+  assert.match(html, /id="hostReadinessPanel"/);
+  assert.match(html, /Can I turn off this PC\?/);
+  assert.match(app, /backend\.hostReadiness\(requestedWorldId\)/);
+  assert.match(app, /Safe to shut down this PC/);
+  assert.match(app, /Keep this PC on/);
+  assert.match(app, /Wait before shutting down/);
+  assert.match(app, /World will go offline/);
+  assert.match(app, /Host handoff unavailable/);
+});
+
+test('normal Play is intercepted by the managed runtime wizard rather than requiring manual JAR hunting', async () => {
+  const adapter = await text('backend-adapter.js');
+  const wizard = await text('runtime-wizard.js');
+  assert.match(adapter, /registerRuntimeWizard\(adapter\)/);
+  assert.match(wizard, /event\.target\.closest\?\.\('#playWorld'\)/);
+  assert.match(wizard, /backend\.runtime\.status\(world\.id\)/);
+  assert.match(wizard, /backend\.runtime\.install\(world\.id/);
+  assert.match(wizard, /backend\.runtime\.verify\(world\.id\)/);
+  assert.match(wizard, /backend\.runtime\.launch\(world\.id\)/);
+  assert.match(wizard, /runtimeEulaAccept/);
+});
+
+test('Mods panel supplies only canonical local artifacts and exposes exact backend verification', async () => {
+  const html = await text('index.html');
+  const app = await text('app.js');
+  const adapter = await text('backend-adapter.js');
+  const tauriMain = await desktopText('src-tauri/src/main.rs');
+  assert.match(html, /id="modsPanel"/);
+  assert.match(html, /Supply required JAR/);
+  assert.match(html, /does not change the world's signed modpack/);
+  assert.match(app, /backend\.mods\.status/);
+  assert.match(app, /Remove local copy/);
+  assert.match(adapter, /world_mods_status/);
+  assert.match(adapter, /world_mods_add/);
+  assert.match(adapter, /world_mods_remove/);
+  assert.match(adapter, /open_world_mods_folder/);
+  assert.match(tauriMain, /"mods-status"\.into\(\)/);
+  assert.match(tauriMain, /"mods-add"\.into\(\)/);
+  assert.match(tauriMain, /"mods-remove"\.into\(\)/);
+});
+
+test('Desktop Stop world waits for durable sleeping state instead of reporting raw process kill as success', async () => {
+  const commands = await desktopText('src-tauri/src/runtime_commands.rs');
+  const migration = await desktopText('../../crates/swarm-cli/src/migration.rs');
+  assert.match(commands, /"migration-status"\.into\(\)/);
+  assert.match(commands, /phase == "sleeping"/);
+  assert.doesNotMatch(commands, /processes\.stop_host\(\)/);
+  assert.match(migration, /session\.prepare_shutdown/);
+  assert.match(migration, /RuntimeDisposition::Sleep/);
+  assert.match(migration, /save_sleep_record/);
+});

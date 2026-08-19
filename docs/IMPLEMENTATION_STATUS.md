@@ -1,30 +1,35 @@
-# SwarmCraft 0.2.1 Implementation Status
+# SwarmCraft 0.4.0 Implementation Status
 
 This document is the current source of truth for what the repository **actually implements** versus what remains roadmap or product-vision work.
 
-It replaces the original v0.1.0 foundation status, which became stale as networking, Fabric integration, recovery, desktop UI and packaging landed.
-
-Application version and wire protocol version are separate concepts. SwarmCraft 0.2.1 still uses protocol version 1 unless a protocol-breaking change explicitly requires otherwise.
+Application version and wire protocol version are separate concepts. SwarmCraft 0.4.0 still uses protocol version 1 unless a protocol-breaking change explicitly requires otherwise.
 
 ## Executive summary
 
 SwarmCraft is an **advanced technical preview**, not merely an architecture prototype and not yet a seamless consumer product.
 
-The repository already implements the difficult control-plane foundations:
+The repository implements the difficult control-plane and runtime foundations:
 
 - cryptographic peer/world identity;
 - signed world configuration and membership;
 - content-addressed snapshot storage and verification;
 - authenticated libp2p/QUIC networking;
-- snapshot replication;
-- authority leases, fencing and crash recovery;
+- snapshot replication and resumable transfer;
+- authority leases, fencing and quorum-backed crash recovery;
 - durable recovery ballots;
 - explicit solo history and conflict preservation;
 - Fabric lifecycle/save integration;
+- backend-managed Java/Minecraft/Fabric runtime setup;
+- explicit EULA handling and deterministic server-mod readiness;
+- shared authority-migration/runtime orchestration;
+- existing-world import;
+- backend Host Readiness;
 - a player-facing Tauri desktop shell;
 - cross-platform CI and installer packaging.
 
-The largest missing product milestone is connecting **safe authority recovery** to **automatic Minecraft runtime migration and player reconnection**.
+Safe authority recovery is now connected to automatic successor Minecraft runtime orchestration. The largest visible migration gap is **seamless client redirection/reconnection after the successor is running**, not successor runtime startup itself.
+
+Two safety limitations are intentional: a two-voter world cannot automatically recover after one voter disappears because the survivor lacks majority quorum, and sleeping multi-member worlds remain fail-closed until a dedicated sleep-bound quorum wake protocol exists.
 
 ---
 
@@ -46,6 +51,9 @@ The largest missing product milestone is connecting **safe authority recovery** 
 - Crash-conscious temporary-write, fsync and rename persistence paths.
 - Signed snapshot manifests, verification and corruption detection.
 - Snapshot restore, recovery and normal-world export.
+- Publication ownership pins bind in-progress blob publication to the owning transaction rather than only to a blob hash.
+- Replica verification bounds decompression by the signed declared uncompressed size.
+- GC coordination covers normal local publication as well as replication publication, with crash-stale lock handling and deterministic race regression coverage.
 
 ### Peer networking and replication
 
@@ -59,7 +67,8 @@ The largest missing product milestone is connecting **safe authority recovery** 
 - AutoNAT state.
 - DCUtR hole-punch support.
 - Relay client/reservation and relay dialing support.
-- Structured connectivity diagnostics.
+- Structured connectivity diagnostics backed by **current active paths**, not sticky historical-success booleans.
+- Bootstrap/relay infrastructure is classified separately from application reachability.
 - Bounded wire message sizes for high-risk request classes.
 - Snapshot manifest negotiation.
 - Missing-blob negotiation.
@@ -70,7 +79,7 @@ The largest missing product milestone is connecting **safe authority recovery** 
 - Fourth-peer reconstruction from surviving replicas is covered by a permanent acceptance gate.
 - Corrupt replica data is rejected, and poisoned partial blobs are discarded so a clean retry can proceed from another replica.
 - A permanent impaired-network gate proves reconnect/resume behavior under latency variation, packet loss and bandwidth shaping.
-- A path-scoped and weekly multi-gigabyte QUIC soak defaults to 2 GiB, repeatedly hard-restarts the sender, deliberately loses acknowledgements, re-authenticates the durable peer identity and resumes from the receiver's committed offset.
+- A weekly/manual multi-gigabyte QUIC soak defaults to 2 GiB, repeatedly hard-restarts the sender, deliberately loses acknowledgements, re-authenticates the durable peer identity and resumes from the receiver's committed offset.
 
 ### Authority, recovery and safety
 
@@ -86,6 +95,8 @@ The largest missing product milestone is connecting **safe authority recovery** 
 - Later recovery rounds can supersede an abandoned successor while remaining anchored to the same canonical base.
 - Recovery epoch replication.
 - Stale returning peers cannot continue writing with an old authority generation.
+- Three-daemon hard-kill recovery is a permanent process-level acceptance gate.
+- Two-member crash recovery intentionally returns `BlockedByQuorum` when one of two voters disappears; no one-of-two recovery shortcut exists.
 
 ### Solo history
 
@@ -111,25 +122,83 @@ The largest missing product milestone is connecting **safe authority recovery** 
 - Final signed snapshot commit after successful shutdown.
 - Durable sleep record.
 - Authority permit watchdog that terminates a multi-member server when a live permit is lost.
+- Safe Stop World reports success only after the save/checkpoint/shutdown barrier, process exit, canonical snapshot publication and durable sleep state.
+- Corrupt/unreadable sleep state fails closed in direct host launch, standby and migration/runtime supervision.
+
+### Managed runtime installation
+
+- Backend-owned `swarmcraft-runtime` sidecar for status, plan, install, repair, verify and managed launch.
+- Managed compatible Java resolution rather than relying on an inherited build JVM.
+- Official Mojang/Fabric metadata resolution and artifact hashing.
+- Fabric API preparation.
+- SwarmCraft Fabric bridge resolution with exact version and checksum verification.
+- Immutable `vX.Y.Z` release assets are preferred; the rolling `main-latest` snapshot is accepted only if it contains the exact requested versioned bridge JAR and checksum.
+- OS-backed runtime install locking so crashed setup processes do not permanently wedge a world while concurrent live installers remain excluded.
+- Rollback-safe artifact replacement.
+- Explicit Minecraft server EULA acceptance; no implicit or automatic acceptance.
+- Durable machine-local `RuntimeLaunchConfig` used by normal hosting and automatic migration.
+- Runtime proof is not considered Host Ready until the exact configured runtime completes authenticated Fabric compatibility/readiness verification.
+
+### Server-mod readiness
+
+- Canonical third-party server-mod requirements bind exact mod ID, version, side/environment and artifact hash into world compatibility.
+- Local JAR inspection reads Fabric metadata without executing mod code.
+- Missing, wrong-version, wrong-hash, duplicate/conflicting, invalid or client-only required mods block readiness.
+- Machine-local user-mod bytes remain separate from signed world history.
+- Deleting/replacing a previously verified mod invalidates readiness rather than inheriting stale green proof.
+- Arbitrary third-party mod bytes are **not** silently downloaded or redistributed.
+
+### Migration orchestration and backend manual transfer
+
+- Automatic authority recovery, the backend manual-transfer protocol and supported wake paths share Rust migration/runtime orchestration rather than inventing separate runtime-launch implementations.
+- The successor restores the canonical snapshot, prepares its configured runtime, launches Minecraft, verifies Fabric readiness and publishes the running endpoint.
+- Migration status is exposed to Desktop as structured phases.
+- The backend manual-transfer protocol has signed generation-scoped prepare/export/accept/commit/activate/observe stages.
+- A migration successor that lacks valid runtime/mod/sleep prerequisites blocks rather than launching an unsafe host.
+- **Desktop manual authority transfer is not yet fully wired:** the current Tauri migration capability bridge exposes status and wake, and the frontend adapter keeps `transferAuthority` unavailable rather than pretending a one-click handoff exists.
+
+### Host Readiness
+
+- `swarmcraft world host-readiness <world> --json` exposes the backend decision used by Desktop.
+- A green successor must be a current reachable eligible member with the exact canonical snapshot/state, verified runtime, verified required mods, no conflict and a recovery quorum that survives without the current authority.
+- Stale historical reachability is not reused as a green decision.
+- Two-member Alice/Bob shutdown safety is fail-closed when Bob would be left without quorum; explicit backend handoff remains separate from crash recovery.
+- Runtime or mod mutation after verification invalidates readiness.
+
+### Existing-world import
+
+- Typed Rust import path plus packaged `swarmcraft-import` sidecar.
+- Desktop exposes **Import existing world** as a normal player flow.
+- Import validates exact compatibility metadata and explicit third-party mod requirements.
+- Source world bytes remain unchanged.
+- Canonical state is assembled and verified in hidden staging, then published atomically.
+- Failed/interrupted imports do not expose a visible half-world and can be retried safely.
+- EULA state, Java/runtime binaries and `RuntimeLaunchConfig` are deliberately not imported.
+- Imported worlds return to the normal Runtime Wizard + Play flow.
 
 ### Desktop application
 
 - Tauri 2 desktop shell.
-- Bundled SwarmCraft runtime sidecars.
+- Four bundled SwarmCraft sidecars: `swarmcraft`, `swarmcraft-host`, `swarmcraft-runtime`, `swarmcraft-import`.
 - World list and selected-world detail UI.
 - Create world flow.
+- Existing-world import flow.
 - Signed invite creation.
 - Signed invite join flow.
 - Leave request flow.
+- Runtime Wizard for backend-managed setup and explicit EULA handling.
 - Play/host flow with authority-eligibility checks.
+- Migration status presentation and backend-validated wake capability handling.
 - Graceful sleep/stop controls.
 - Background seeding toggle.
+- Backend-derived Host Readiness display.
+- Runtime/server-mod remediation UI.
 - World safety display.
 - Compatibility display.
 - Preserved-conflict inspection.
 - Peer/membership inspection.
 - Snapshot verification, export and recovery controls.
-- Replication daemon controls and diagnostics.
+- Replication daemon controls and structured connectivity diagnostics.
 
 ### CI and packaging
 
@@ -138,18 +207,25 @@ The largest missing product milestone is connecting **safe authority recovery** 
 - RustSec dependency audit against the committed lockfile.
 - Process-level acceptance tests for:
   - hard peer restart with stable transport identity, re-authentication and authenticated request recovery;
+  - hostile network input and handshake hardening;
   - fourth-peer snapshot reconstruction from surviving replicas, including missing/corrupt-source fallback and cross-replica resume;
+  - publication ownership, replica verification, GC/retention races and storage failure injection;
+  - existing-world import;
+  - direct, standby and migration corrupt-sleep fail-closed behavior;
+  - Host Readiness negative states and two-member quorum behavior;
   - live join and immediate replication;
   - host lifecycle and final sleep snapshot;
+  - migration orchestration and runtime setup failure hardening;
   - three-daemon hard-kill authority recovery;
   - recovery successor disappearing before epoch promotion;
   - solo-history acceptance and divergence detection.
 - Dedicated QUIC impairment gate with latency variation, packet loss, bandwidth limiting, repeated hard restarts and lost-ack resume recovery.
-- Multi-gigabyte interrupted QUIC soak on networking/storage pull requests and matching `main` changes, plus weekly and manual profiles.
-- Fabric server mod build.
-- Native desktop package builds for Linux, Windows and macOS.
+- Multi-gigabyte interrupted QUIC soak on its dedicated scheduled/manual workflow.
+- Fabric server-mod build plus embedded Fabric API verification.
+- Native Desktop package builds for Linux `.deb` + AppImage, Windows NSIS, macOS ARM64 `.dmg`, and macOS x86_64 `.dmg`.
 - Rolling `main-latest` development snapshot workflow.
-- Release workflow support for installer checksums, Fabric artifacts and optional platform signing credentials.
+- Tagged release workflow support for checksums, versioned Fabric artifacts and optional platform signing credentials.
+- Main and tagged Desktop packaging stage the same four required runtime sidecars.
 
 ---
 
@@ -159,72 +235,69 @@ These areas contain real code but do **not** yet satisfy the full product/roadma
 
 ### Seamless automatic host migration
 
-The distributed control plane can elect and fence a new authority after the current authority disappears.
+The distributed control plane can elect and fence a new authority, and the shared migration path can automatically start the successor's configured Minecraft runtime after a safe authority transition.
 
-Still missing:
+Still incomplete:
 
-- automatically launching the successor's Minecraft runtime as a direct consequence of winning authority;
-- automatically directing/reconnecting players to that new runtime;
-- proving the entire gameplay handoff under repeated real Minecraft crash scenarios.
+- universally directing/reconnecting Minecraft clients to the new running authority without manual coordination;
+- broader repeated real-Minecraft crash/migration campaigns across multiple physical devices and network conditions.
 
-This is the most important remaining MVP integration gap.
+The remaining product gap is therefore client continuity and field evidence, not basic successor runtime startup.
 
 ### Manual authority transfer
 
-Consensus/state-machine support exists for prepared/accepted/committed authority transfer records.
+The backend has signed transfer stages and shares runtime orchestration with automatic recovery.
 
-Still missing:
+Still incomplete:
 
-- a complete CLI command flow;
-- a desktop **Transfer authority** action;
-- target runtime preparation and automatic launch;
-- player reconnection UX.
+- wiring the full transfer protocol through the Tauri command/capability layer;
+- replacing the current Desktop adapter's intentionally unavailable `transferAuthority` with a real backend-backed flow;
+- target selection/readiness guidance when several successors are available;
+- player reconnection UX during the handoff;
+- broader real-device transfer acceptance across adverse networks.
 
 ### World sleep/wake
 
-Durable sleep records, safe latest-snapshot checks and wake epoch logic exist.
+Durable signed sleep records and safe single-member wake semantics exist.
 
-Still missing:
-
-- a fully automatic world-wake orchestration path that hides runtime plumbing from normal players;
-- broader multi-peer full-outage acceptance coverage matching the roadmap's complete sleep/wake scenario.
+For more than one non-banned member, wake intentionally remains blocked because a dedicated quorum-backed transition bound to the sleep record/canonical snapshot does not yet exist. SwarmCraft does not substitute first-click-wins or ordinary crash recovery for that missing protocol.
 
 ### Snapshot swarm breadth
 
-The roadmap-shaped fourth-peer reconstruction scenario is now automated: a source replica can disappear, surviving replicas can have asymmetric availability, corrupt data is rejected, a partial transfer can resume from a different replica, and the new peer restores the exact verified world.
+The roadmap-shaped fourth-peer reconstruction scenario is automated: a source replica can disappear, surviving replicas can have asymmetric availability, corrupt data is rejected, a partial transfer can resume from a different replica, and the new peer restores the exact verified world.
 
-Still incomplete relative to the mature roadmap target:
+Publication ownership, GC coordination and retention races now have stronger correctness gates. Remaining maturity work can still include:
 
-- a production scheduler that downloads different missing blobs from multiple peers in parallel rather than relying on sequential source fallback;
-- snapshot retention policy maturity;
-- safe garbage collection of blobs no longer referenced by retained snapshots.
+- a production scheduler that downloads different missing blobs from multiple peers in parallel rather than relying primarily on source fallback;
+- longer retention/GC soak campaigns under sustained churn;
+- broader hardware/disk-failure profiles beyond deterministic failure injection.
 
 ### NAT traversal and internet usability
 
-The code supports AutoNAT, DCUtR and relays.
+The code supports AutoNAT, DCUtR, direct-first dialing and relays, with current-path structured diagnostics.
 
-This must **not** be described as universally proven NAT traversal. Representative field testing across real home routers, CGNAT, mobile hotspots, firewall policies and IPv6 networks remains pending. See [NETWORK_VALIDATION.md](NETWORK_VALIDATION.md).
+This must **not** be described as universally proven NAT traversal. Representative field testing across real home routers, symmetric NAT, CGNAT, mobile hotspots, firewall policies, blocked UDP and independent-ISP IPv6 networks remains pending. See [NETWORK_VALIDATION.md](NETWORK_VALIDATION.md).
 
 ### Desktop product experience
 
-The desktop application is real and usable for technical preview workflows.
+The desktop application now owns the normal managed Runtime Wizard path, import, Host Readiness and migration presentation rather than requiring ordinary users to manually assemble Java/Minecraft/Fabric paths.
 
-It is not yet the final launcher experience because users may still need to provide:
+Technical-preview friction remains around:
 
-- Java/runtime configuration;
-- a Fabric server JAR;
-- the SwarmCraft Fabric mod JAR;
-- explicit EULA acceptance.
-
-Automatic per-world Minecraft/Fabric/modpack preparation is future work.
+- explicit EULA acceptance, which is intentionally required;
+- locally supplying arbitrary third-party server-mod JARs when a world requires them;
+- the not-yet-wired manual authority-transfer Desktop flow;
+- seamless client reconnection after migration;
+- safe multi-member wake;
+- public/friend discovery and broader first-run polish.
 
 ---
 
 ## Not implemented yet
 
-- Seamless automatic player reconnection after authority migration.
-- Fully productized manual authority transfer.
-- Automatic acquisition/preparation of per-world Minecraft/Fabric/mod environments.
+- Seamless automatic Minecraft client reconnection/redirection after authority migration.
+- Complete Desktop manual authority-transfer flow.
+- Safe sleep-bound quorum wake election for multi-member worlds.
 - Central or federated public-world search/lobby services.
 - Friends/social discovery.
 - Automatic third-party mod redistribution.
@@ -232,8 +305,8 @@ Automatic per-world Minecraft/Fabric/modpack preparation is future work.
 - Incremental region/chunk replication as the primary recovery path.
 - Erasure-coded world storage.
 - Production-grade metrics/telemetry infrastructure.
-- Comprehensive fuzzing and malicious-peer campaign coverage.
 - Universal production signing/notarization setup for every release environment.
+- Comprehensive real-world NAT/carrier certification.
 - Distributed region/tick simulation.
 - Bedrock Edition support.
 
@@ -246,35 +319,37 @@ The roadmap is intentionally aspirational and phases have not landed in a perfec
 | Phase | Current assessment | Notes |
 | --- | --- | --- |
 | 0 — Research/protocol skeleton | Complete for preview | Core identity, storage, signed state and deterministic protocol machinery are established. |
-| 1 — Peer networking | Complete for preview | Authenticated networking, durable reconnect, resume semantics and impaired multi-GiB transfer are permanently gated; representative NAT/carrier certification is tracked in Phase 9. |
-| 2 — Snapshot swarm | Mostly complete | Fourth-peer reconstruction, corruption rejection and cross-replica resume are gated; parallel scheduling plus retention/GC maturity remain. |
-| 3 — Minecraft save integration | Complete for preview | Fabric IPC, restore, save barrier and final snapshot flow are implemented and tested. |
-| 4 — Manual host migration | Partial | State-machine support exists; complete user/runtime transfer workflow does not. |
-| 5 — Automatic host migration | Control plane complete, product flow partial | Recovery/election/fencing are real; successor Minecraft launch + player reconnect remain. |
-| 6 — World sleep/wake | Mostly complete internally | Durable sleep/wake semantics exist; orchestration is not yet invisible to players. |
+| 1 — Peer networking | Complete for preview | Authenticated networking, durable reconnect, resume semantics and impaired multi-GiB transfer are gated; representative NAT/carrier certification is tracked in Phase 9. |
+| 2 — Snapshot swarm | Mostly complete | Fourth-peer reconstruction, corruption rejection, cross-replica resume and stronger publication/GC safety are gated; parallel scheduling and long-duration retention maturity remain. |
+| 3 — Minecraft save integration | Complete for preview | Fabric IPC, restore, save/shutdown barrier and final snapshot flow are implemented and tested. |
+| 4 — Manual host migration | Backend partial | Signed transfer stages/shared runtime orchestration exist; the complete Tauri/Desktop transfer flow remains unavailable. |
+| 5 — Automatic host migration | Runtime path complete for preview, client UX partial | Recovery/election/fencing plus successor runtime startup are real; seamless player reconnect remains. |
+| 6 — World sleep/wake | Safe solo path + fail-closed multi-member | Durable sleep semantics exist; multi-member quorum wake protocol remains intentionally unavailable. |
 | 7 — Solo mode | Complete for preview | Explicit solo history, reconciliation and divergence preservation are implemented/tested. |
-| 8 — Better replication | Early/partial | Background replica support exists; incremental/journal/erasure-code work remains. |
-| 9 — NAT/public usability | Partial | Protocol support exists; representative field certification does not. |
-| 10 — UX | Partial | Desktop UI exists; launcher/runtime automation and lobby experience remain. |
-| 11 — Production hardening | Partial | CI/audit/process recovery are strong; fuzzing, longer soak campaigns, signing and field validation remain. |
+| 8 — Better replication | Partial | Background replicas, resume and source fallback exist; incremental/journal/erasure-code work remains. |
+| 9 — NAT/public usability | Partial | Protocol support and diagnostics exist; representative field certification does not. |
+| 10 — UX | Advanced preview | Managed runtime, import, readiness and migration status UI exist; manual transfer, reconnect, lobby and multi-member wake polish remain. |
+| 11 — Production hardening | Partial/strong preview | CI, fuzz smoke, failure injection and process recovery are strong; longer campaigns, signing and field validation remain. |
 | 12 — Distributed simulation | Not implemented | Deliberately future research. |
 
 ---
 
 ## Current MVP boundary
 
-The central MVP demo is not considered fully complete until all of the following happen as one end-to-end flow:
+The crash-recovery demo must use a topology that can genuinely retain majority quorum. A representative target is:
 
-1. one peer hosts a world;
-2. another peer holds a verified replica;
-3. the authority process is hard-killed;
-4. the successor safely wins authority;
-5. the successor automatically launches the correct Minecraft runtime;
+1. Alice hosts a world;
+2. Bob and Carol hold verified replicas;
+3. Alice's authority process is hard-killed;
+4. Bob safely wins authority with a surviving quorum;
+5. Bob automatically restores/prepares/launches the correct Minecraft runtime;
 6. players reconnect and continue from the accepted state;
-7. the stale peer later returns and synchronizes without being able to overwrite canonical history;
-8. the world can later wake from replicated state without the original creator.
+7. stale Alice later returns and synchronizes without being able to overwrite canonical history;
+8. the world can later sleep and a supported peer can restore it without the original creator.
 
-The repository already proves steps 2, 4 and 7 at the distributed control-plane level and implements much of the supporting host/sleep machinery. Steps 5 and 6 are the largest remaining end-to-end gap.
+The repository now proves the storage/replication, recovery/fencing and successor-runtime portions of that sequence and separately proves the real clean-machine Minecraft setup/launch/stop/restart path. Seamless client reconnection in step 6 and safe multi-member wake remain the major product/protocol gaps.
+
+An Alice/Bob-only crash test is **not** a valid positive automatic-failover target: after Alice disappears, Bob alone is one of two voters and must remain `BlockedByQuorum`.
 
 ---
 
@@ -288,6 +363,10 @@ Safe claims:
 - peer reconnect/resume behavior is permanently tested under synthetic impairment and multi-gigabyte transfer;
 - signed snapshots and world history are implemented;
 - quorum-backed authority recovery and fencing are implemented;
+- automatic successor Minecraft runtime orchestration after a safe authority transition is implemented;
+- managed Java/Minecraft/Fabric setup with explicit EULA acceptance is implemented;
+- deterministic server-mod readiness and existing-world import are implemented;
+- safe stop/sleep and corrupt-sleep fail-closed behavior are implemented;
 - solo-history conflict preservation is implemented;
 - Fabric save/lifecycle integration is implemented;
 - a Tauri desktop technical preview and cross-platform installers exist.
@@ -295,11 +374,14 @@ Safe claims:
 Claims to avoid for now:
 
 - "host migration is seamless";
+- "manual authority transfer is fully productized in Desktop";
 - "players automatically reconnect after any host crash";
+- "two-player worlds can always fail over after either player crashes";
+- "multi-member sleeping worlds use first-click automatic wake";
 - "works behind every NAT without configuration";
 - "production ready";
 - "public decentralized lobby is complete";
-- "mods install automatically";
+- "third-party mods install automatically";
 - "Minecraft simulation itself is distributed across peers".
 
 Those distinctions are deliberate. SwarmCraft should under-claim rather than blur protocol capability into product completeness.

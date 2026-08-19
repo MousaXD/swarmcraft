@@ -32,7 +32,34 @@ pub fn stop_daemon(processes: State<'_, RuntimeProcesses>) -> Result<(), String>
     processes.stop_daemon()
 }
 
+async fn run_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, String> {
+    use tauri_plugin_shell::ShellExt;
+    let output = app.shell().sidecar("swarmcraft").map_err(|error| error.to_string())?
+        .args(arguments).output().await.map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if error.is_empty() { "SwarmCraft CLI command failed".into() } else { error });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 #[tauri::command]
-pub fn stop_host(processes: State<'_, RuntimeProcesses>) -> Result<(), String> {
-    processes.stop_host()
+pub async fn stop_host(app: AppHandle, world: String) -> Result<String, String> {
+    let world = required(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "stop".into(), world.clone()]).await?;
+    for _ in 0..160 {
+        let raw = run_cli(&app, vec!["world".into(), "migration-status".into(), world.clone(), "--json".into()]).await?;
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+            let phase = value.get("phase").and_then(|v| v.as_str()).unwrap_or_default();
+            if phase == "sleeping" {
+                return Ok("World stopped safely after save barrier and canonical checkpoint.".into());
+            }
+            if phase == "failed" {
+                let detail = value.get("failure_reason").and_then(|v| v.as_str()).unwrap_or("safe stop failed");
+                return Err(format!("World was not reported safely stopped: {detail}"));
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    Err("World was not reported safely stopped; Minecraft was not force-killed by Desktop".into())
 }

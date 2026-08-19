@@ -4,16 +4,17 @@ mod invite;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
+use swarm_cli::host_readiness;
 use swarm_cli::migration::{self, RuntimeLaunchConfig, TransferPrepareResult};
+use swarm_cli::server_mods;
 use swarm_core::{
     create_world_genesis_with_fingerprint, random_nonce, sign_world_config, verify_membership_signature,
     verify_snapshot_signature, DataPaths, PeerIdentity,
 };
 use swarm_protocol::{
-    ArtifactRequirementV1, ArtifactSideV1, AuthorityPolicyV1, EpochMode, Hash32, InviteV1, JoinRequestV1,
-    LeaveRequestV1, MembershipPolicyV1, MembershipRecordV1, PeerId, RuntimeCompatibilityManifestV1, WorldConfigV1,
-    WorldDescriptorV1, WorldId, WorldMemberV1, WorldPresentationV1, WorldSafetyLevelV1, WorldVisibilityV1,
-    PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    AuthorityPolicyV1, EpochMode, InviteV1, JoinRequestV1, LeaveRequestV1, MembershipPolicyV1, MembershipRecordV1,
+    PeerId, RuntimeCompatibilityManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1,
+    WorldPresentationV1, WorldSafetyLevelV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 use tracing::info;
@@ -79,6 +80,9 @@ enum WorldCommand {
         /// Legacy exact compatibility material retained for CLI compatibility. Prefer the canonical manifest shown by `world compatibility`.
         #[arg(long, default_value = "vanilla-fabric")]
         compatibility: String,
+        /// Exact third-party Fabric server mods to bind into this world runtime profile.
+        #[arg(long = "server-mod")]
+        server_mod: Vec<PathBuf>,
         /// private, unlisted, or public.
         #[arg(long, default_value = "private")]
         visibility: String,
@@ -111,6 +115,14 @@ enum WorldCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Show the authoritative backend answer to whether this device may safely shut down.
+    HostReadiness {
+        world: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Request a safe stop. Success is reported only after the Fabric save barrier, final checkpoint and durable sleep record complete.
+    Stop { world: String },
     /// Request a safe wake of a sleeping world. Multi-member worlds remain blocked until a quorum transition exists.
     Wake { world: String },
     /// Request a final checkpoint and prepare a manual authority transfer.
@@ -127,6 +139,18 @@ enum WorldCommand {
     TransferObserve { world: String, token: String },
     /// Inspect the canonical execution compatibility manifest and authority eligibility.
     Compatibility { world: String },
+    /// Inspect local third-party server mods against the canonical world runtime profile.
+    ModsStatus {
+        world: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add the exact locally supplied JAR for a canonical server-mod requirement.
+    ModsAdd { world: String, jar: PathBuf },
+    /// Remove a locally installed third-party server mod by Fabric mod ID.
+    ModsRemove { world: String, mod_id: String },
+    /// Print the persistent per-world third-party server mods directory.
+    ModsPath { world: String },
     /// Enable or disable background replica seeding while Minecraft is off.
     Seed { world: String, enabled: bool },
     /// List preserved conflicting solo-history branches requiring manual resolution.
@@ -200,24 +224,21 @@ fn main() -> Result<()> {
 
 fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> Result<()> {
     match command {
-        WorldCommand::Create { name, minecraft, fabric_loader, compatibility, visibility } => {
+        WorldCommand::Create { name, minecraft, fabric_loader, compatibility, server_mod, visibility } => {
             let identity = PeerIdentity::load_or_create(paths)?;
             let visibility = parse_visibility(&visibility)?;
-            let legacy_hash =
-                Hash32::from_domain_bytes(b"swarmcraft/legacy-compatibility/v1\0", compatibility.as_bytes());
+            // The legacy compatibility text is retained only as a CLI compatibility input.
+            // It is not a physical server-mod requirement and must never make a clean world
+            // appear to be missing a fictional JAR.
+            let _legacy_compatibility = compatibility;
+            let required_server_mods = server_mods::requirements_from_jars(&server_mod)?;
             let manifest = RuntimeCompatibilityManifestV1 {
                 minecraft_version: minecraft.clone(),
                 loader_id: "fabric".into(),
                 loader_version: fabric_loader.clone(),
                 swarmcraft_protocol_version: PROTOCOL_VERSION,
                 fabric_adapter_version: env!("CARGO_PKG_VERSION").into(),
-                required_server_mods: vec![ArtifactRequirementV1 {
-                    artifact_id: "swarmcraft.legacy-compatibility".into(),
-                    version: "1".into(),
-                    artifact_hash: legacy_hash,
-                    side: ArtifactSideV1::Server,
-                    provider_hint: None,
-                }],
+                required_server_mods,
                 required_client_mods: Vec::new(),
                 datapacks: Vec::new(),
             };
@@ -276,6 +297,32 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             };
             sign_world_config(&identity, &mut config)?;
             storage.save_world_config(&config)?;
+
+            // Seed an initial empty canonical snapshot. The shared authority runtime restores this
+            // empty directory and Minecraft creates the actual world on first launch; from then on
+            // all state is checkpointed through the normal canonical snapshot path.
+            let initial_source = paths.root.join("initial-world").join(world_id.to_hex());
+            std::fs::create_dir_all(&initial_source)?;
+            let mut initial_snapshot = storage.snapshot_directory(
+                &initial_source,
+                swarm_storage::SnapshotContext {
+                    world: world_id,
+                    snapshot_number: 1,
+                    epoch: 0,
+                    sequence: 1,
+                    previous_snapshot_hash: None,
+                    authority_peer_id: identity.peer_id(),
+                    authority_public_key: identity.public_key(),
+                },
+            )?;
+            identity.sign_snapshot(&mut initial_snapshot)?;
+            storage.commit_snapshot(&initial_snapshot)?;
+            let _ = std::fs::remove_dir_all(&initial_source);
+            // initial empty canonical snapshot
+
+            for source in &server_mod {
+                server_mods::add_local_mod(paths, world_id, &config.compatibility, source)?;
+            }
             println!("Created world: {name}");
             println!("World ID: {world_id}");
         }
@@ -444,6 +491,39 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 }
             }
         }
+        WorldCommand::HostReadiness { world, json } => {
+            let world = parse_world(&world)?;
+            storage.load_world(world)?;
+            let report = match host_readiness::load_host_readiness_report(paths, world) {
+                Ok(report) => report,
+                Err(error) => {
+                    let identity = PeerIdentity::load_or_create(paths)?;
+                    host_readiness::unknown_report(
+                        world,
+                        identity.peer_id(),
+                        storage.load_epoch_record(world).ok().map(|epoch| epoch.authority_peer_id),
+                        format!("Host-readiness service has not produced a fresh report yet: {error}"),
+                    )
+                }
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Shutdown safety: {:?}", report.state);
+                println!("Safe to shut down: {}", report.safe_to_shutdown);
+                println!("{}", report.detail);
+                if let Some(successor) = report.successor_peer_id {
+                    println!("Automatic successor: {successor}");
+                } else if let Some(candidate) = report.handoff_candidate_peer_id {
+                    println!("Transfer-first candidate: {candidate}");
+                }
+            }
+        }
+        WorldCommand::Stop { world } => {
+            let world = parse_world(&world)?;
+            migration::request_world_stop(paths, storage, world)?;
+            println!("Safe stop requested for {world}; wait for migration status to become sleeping before treating shutdown as complete.");
+        }
         WorldCommand::Wake { world } => {
             let world = parse_world(&world)?;
             migration::request_world_wake(paths, storage, world)?;
@@ -489,6 +569,7 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             match storage.load_world_config(world) {
                 Ok(config) => {
                     let fingerprint = config.compatibility_fingerprint()?;
+                    let mod_readiness = server_mods::evaluate_world_mods(paths, world, &config.compatibility)?;
                     println!("Compatibility fingerprint: {fingerprint}");
                     println!("Minecraft: {}", config.compatibility.minecraft_version);
                     println!("Loader: {} {}", config.compatibility.loader_id, config.compatibility.loader_version);
@@ -497,14 +578,17 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                     println!("Client mods: {}", config.compatibility.required_client_mods.len());
                     println!("Datapacks: {}", config.compatibility.datapacks.len());
                     println!("Genesis match: {}", fingerprint == metadata.genesis.compatibility_fingerprint);
+                    println!("Server mods ready: {}", mod_readiness.ready);
                     let identity = PeerIdentity::load_or_create(paths)?;
                     let eligible = storage
                         .load_world_descriptor(world)
                         .ok()
                         .and_then(|descriptor| descriptor.member(identity.peer_id()).cloned())
                         .is_some_and(|member| member.authority_eligible && !member.banned);
-                    if eligible && fingerprint == metadata.genesis.compatibility_fingerprint {
+                    if eligible && fingerprint == metadata.genesis.compatibility_fingerprint && mod_readiness.ready {
                         println!("Authority eligibility: Compatible");
+                    } else if !mod_readiness.ready {
+                        println!("Authority eligibility: Replica only: server mods missing or incompatible");
                     } else {
                         println!("Authority eligibility: Replica only: not authority eligible");
                     }
@@ -514,6 +598,59 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                     println!("Authority eligibility: Replica only: not authority eligible");
                 }
             }
+        }
+        WorldCommand::ModsStatus { world, json } => {
+            let world = parse_world(&world)?;
+            let config =
+                storage.load_world_config(world).context("canonical runtime profile is not yet synchronized")?;
+            let status = server_mods::evaluate_world_mods(paths, world, &config.compatibility)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            } else {
+                println!("Server mods directory: {}", status.mods_dir.display());
+                println!("Ready: {}", status.ready);
+                println!("Canonical requirements: {}", status.required.len());
+                for required in &status.required {
+                    println!(
+                        "required {} {} {} {:?}",
+                        required.mod_id, required.version, required.artifact_hash, required.component_kind
+                    );
+                }
+                for installed in &status.installed {
+                    println!(
+                        "installed {} {} {} {:?}",
+                        installed.mod_id, installed.version, installed.artifact_hash, installed.environment
+                    );
+                }
+                for issue in &status.issues {
+                    println!("issue {:?}: {}", issue.kind, issue.message);
+                }
+            }
+        }
+        WorldCommand::ModsAdd { world, jar } => {
+            let world = parse_world(&world)?;
+            let config =
+                storage.load_world_config(world).context("canonical runtime profile is not yet synchronized")?;
+            let installed = server_mods::add_local_mod(paths, world, &config.compatibility, &jar)?;
+            println!(
+                "Installed {} {} with artifact hash {}",
+                installed.mod_id, installed.version, installed.artifact_hash
+            );
+        }
+        WorldCommand::ModsRemove { world, mod_id } => {
+            let world = parse_world(&world)?;
+            storage.load_world(world)?;
+            let removed = server_mods::remove_local_mod(paths, world, &mod_id)?;
+            if removed.is_empty() {
+                println!("No local server mod with id {mod_id} was installed.");
+            } else {
+                println!("Removed {} from local server mods.", removed[0].display());
+            }
+        }
+        WorldCommand::ModsPath { world } => {
+            let world = parse_world(&world)?;
+            storage.load_world(world)?;
+            println!("{}", server_mods::mods_dir(paths, world).display());
         }
         WorldCommand::Seed { world, enabled } => {
             let world = parse_world(&world)?;

@@ -24,6 +24,38 @@ async fn run_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, Stri
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+async fn run_runtime_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, String> {
+    let output = app
+        .shell()
+        .sidecar("swarmcraft-runtime")
+        .map_err(|error| error.to_string())?
+        .args(arguments)
+        .output()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if error.is_empty() { "SwarmCraft runtime command failed".into() } else { error });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+async fn run_import_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, String> {
+    let output = app
+        .shell()
+        .sidecar("swarmcraft-import")
+        .map_err(|error| error.to_string())?
+        .args(arguments)
+        .output()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if error.is_empty() { "SwarmCraft world import failed".into() } else { error });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 fn require_value(value: String, label: &str) -> Result<String, String> {
     let value = value.trim().to_owned();
     if value.is_empty() {
@@ -82,6 +114,48 @@ async fn create_world(
     .await
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn import_world(
+    app: AppHandle,
+    source: String,
+    name: String,
+    minecraft: String,
+    fabric_loader: String,
+    visibility: String,
+    server_mods: Vec<String>,
+    no_server_mods: bool,
+) -> Result<String, String> {
+    let source = require_value(source, "Minecraft world folder")?;
+    let name = require_value(name, "World name")?;
+    let minecraft = require_value(minecraft, "Minecraft version")?;
+    let fabric_loader = require_value(fabric_loader, "Fabric loader version")?;
+    let visibility = require_value(visibility, "Visibility")?;
+    let mut arguments = vec![
+        "--source".into(),
+        source,
+        "--name".into(),
+        name,
+        "--minecraft".into(),
+        minecraft,
+        "--fabric-loader".into(),
+        fabric_loader,
+        "--visibility".into(),
+        visibility,
+    ];
+    for jar in server_mods
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        arguments.push("--server-mod".into());
+        arguments.push(jar);
+    }
+    if no_server_mods {
+        arguments.push("--no-server-mods".into());
+    }
+    run_import_cli(&app, arguments).await
+}
+
 #[tauri::command]
 async fn join_world(app: AppHandle, invite: String) -> Result<String, String> {
     let invite = require_value(invite, "Invite")?;
@@ -124,6 +198,49 @@ async fn create_invite(
 async fn world_status(app: AppHandle, world: String) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
     run_cli(&app, vec!["world".into(), "status".into(), world]).await
+}
+
+#[tauri::command]
+async fn host_readiness(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "host-readiness".into(), world, "--json".into()]).await
+}
+
+#[tauri::command]
+async fn world_mods_status(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "mods-status".into(), world, "--json".into()]).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn world_mods_add(app: AppHandle, world: String, jar_path: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    let jar_path = require_value(jar_path, "Required mod JAR path")?;
+    run_cli(&app, vec!["world".into(), "mods-add".into(), world, jar_path]).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn world_mods_remove(app: AppHandle, world: String, mod_id: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    let mod_id = require_value(mod_id, "Mod ID")?;
+    run_cli(&app, vec!["world".into(), "mods-remove".into(), world, mod_id]).await
+}
+
+#[tauri::command]
+async fn open_world_mods_folder(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    let raw = run_cli(&app, vec!["world".into(), "mods-path".into(), world]).await?;
+    let path = require_value(raw, "Server mods folder")?;
+
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "linux")]
+    let mut command = std::process::Command::new("xdg-open");
+
+    command.arg(&path).spawn().map_err(|error| format!("Could not open server mods folder: {error}"))?;
+    Ok(path)
 }
 
 #[tauri::command]
@@ -254,6 +371,78 @@ async fn configure_world_runtime(
 }
 
 #[tauri::command]
+async fn runtime_status(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_runtime_cli(&app, vec!["status".into(), world]).await
+}
+
+#[tauri::command]
+async fn runtime_plan(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_runtime_cli(&app, vec!["plan".into(), world]).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn runtime_install(app: AppHandle, world: String, accept_eula: bool) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    let mut arguments = vec!["install".into(), world];
+    if accept_eula {
+        arguments.push("--accept-eula".into());
+    }
+    run_runtime_cli(&app, arguments).await
+}
+
+#[tauri::command]
+async fn runtime_repair(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_runtime_cli(&app, vec!["repair".into(), world]).await
+}
+
+#[tauri::command]
+async fn runtime_verify(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_runtime_cli(&app, vec!["verify".into(), world]).await
+}
+
+#[tauri::command]
+async fn runtime_launch(
+    app: AppHandle,
+    processes: State<'_, RuntimeProcesses>,
+    world: String,
+) -> Result<Option<u32>, String> {
+    let world = require_value(world, "World ID")?;
+    // Networking/recovery supervision and the foreground managed authority
+    // runtime are separate owned processes. The managed host enters the same
+    // Rust migration::run_authority_runtime path as Advanced hosting, which can
+    // safely establish the first solo authority generation for a new world.
+    processes.ensure_daemon_running(&app, "/ip4/0.0.0.0/udp/0/quic-v1".into())?;
+    let pid = processes.start_managed_host(&app, world.clone())?;
+    for _ in 0..160 {
+        match run_cli(&app, vec!["world".into(), "migration-status".into(), world.clone(), "--json".into()]).await {
+            Ok(raw) => {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let phase = value.get("phase").and_then(|v| v.as_str()).unwrap_or_default();
+                    let ready = value.get("runtime_ready").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if phase == "ready" && ready {
+                        return Ok(Some(pid));
+                    }
+                    if matches!(phase, "failed" | "blocked") {
+                        let detail = value
+                            .get("failure_reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("shared runtime launch was blocked");
+                        return Err(detail.to_owned());
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    Err("Minecraft did not reach the shared runtime ready state before the launch timeout".into())
+}
+
+#[tauri::command]
 async fn connectivity_diagnostics(
     app: AppHandle,
     processes: State<'_, RuntimeProcesses>,
@@ -310,10 +499,16 @@ fn main() {
             node_identity,
             list_worlds,
             create_world,
+            import_world,
             join_world,
             leave_world,
             create_invite,
             world_status,
+            host_readiness,
+            world_mods_status,
+            world_mods_add,
+            world_mods_remove,
+            open_world_mods_folder,
             world_compatibility,
             world_conflicts,
             set_background_seeding,
@@ -325,6 +520,12 @@ fn main() {
             migration_status,
             wake_world,
             configure_world_runtime,
+            runtime_status,
+            runtime_plan,
+            runtime_install,
+            runtime_repair,
+            runtime_verify,
+            runtime_launch,
             connectivity_diagnostics,
             ensure_daemon_running,
             start_daemon,

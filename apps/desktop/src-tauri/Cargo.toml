@@ -1,6 +1,6 @@
 [package]
 name = "swarmcraft-desktop"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -18,3 +18,5 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2.3.5"
+serde_json = "1.0"
+tokio = { version = "1.47", features = ["time"] }
