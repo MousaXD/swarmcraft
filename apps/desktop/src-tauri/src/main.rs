@@ -2,11 +2,13 @@
 
 mod runtime;
 mod runtime_commands;
+mod transfer_commands;
 
 use runtime::RuntimeProcesses;
 use runtime_commands::{ensure_daemon_running, start_daemon, stop_daemon, stop_host};
 use tauri::{AppHandle, State};
 use tauri_plugin_shell::ShellExt;
+use transfer_commands::{manual_transfer_step, transfer_supported};
 
 async fn run_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, String> {
     let output = app
@@ -305,6 +307,9 @@ async fn migration_capabilities(app: AppHandle) -> String {
     {
         supported.push("status");
     }
+    if transfer_supported(&app).await {
+        supported.push("transfer");
+    }
     if run_cli(&app, vec!["world".into(), "wake".into(), "--help".into()])
         .await
         .is_ok()
@@ -518,6 +523,7 @@ fn main() {
             recover_world,
             migration_capabilities,
             migration_status,
+            manual_transfer_step,
             wake_world,
             configure_world_runtime,
             runtime_status,
