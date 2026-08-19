@@ -148,20 +148,21 @@ Two safety limitations are intentional: a two-voter world cannot automatically r
 - Deleting/replacing a previously verified mod invalidates readiness rather than inheriting stale green proof.
 - Arbitrary third-party mod bytes are **not** silently downloaded or redistributed.
 
-### Migration and manual transfer
+### Migration orchestration and backend manual transfer
 
-- Automatic authority recovery, manual authority transfer and supported wake paths share one Rust migration/runtime orchestration path.
+- Automatic authority recovery, the backend manual-transfer protocol and supported wake paths share Rust migration/runtime orchestration rather than inventing separate runtime-launch implementations.
 - The successor restores the canonical snapshot, prepares its configured runtime, launches Minecraft, verifies Fabric readiness and publishes the running endpoint.
 - Migration status is exposed to Desktop as structured phases.
-- Desktop exposes the manual host-transfer action when backend capabilities and safety checks permit it; JavaScript does not grant authority itself.
+- The backend manual-transfer protocol has signed generation-scoped prepare/export/accept/commit/activate/observe stages.
 - A migration successor that lacks valid runtime/mod/sleep prerequisites blocks rather than launching an unsafe host.
+- **Desktop manual authority transfer is not yet fully wired:** the current Tauri migration capability bridge exposes status and wake, and the frontend adapter keeps `transferAuthority` unavailable rather than pretending a one-click handoff exists.
 
 ### Host Readiness
 
 - `swarmcraft world host-readiness <world> --json` exposes the backend decision used by Desktop.
 - A green successor must be a current reachable eligible member with the exact canonical snapshot/state, verified runtime, verified required mods, no conflict and a recovery quorum that survives without the current authority.
 - Stale historical reachability is not reused as a green decision.
-- Two-member Alice/Bob shutdown safety is fail-closed when Bob would be left without quorum; explicit handoff remains separate from crash recovery.
+- Two-member Alice/Bob shutdown safety is fail-closed when Bob would be left without quorum; explicit backend handoff remains separate from crash recovery.
 - Runtime or mod mutation after verification invalidates readiness.
 
 ### Existing-world import
@@ -187,7 +188,7 @@ Two safety limitations are intentional: a two-voter world cannot automatically r
 - Leave request flow.
 - Runtime Wizard for backend-managed setup and explicit EULA handling.
 - Play/host flow with authority-eligibility checks.
-- Manual host-transfer action backed by migration APIs.
+- Migration status presentation and backend-validated wake capability handling.
 - Graceful sleep/stop controls.
 - Background seeding toggle.
 - Backend-derived Host Readiness display.
@@ -245,12 +246,14 @@ The remaining product gap is therefore client continuity and field evidence, not
 
 ### Manual authority transfer
 
-The backend authority-transfer machinery, shared runtime orchestration and Desktop transfer action exist.
+The backend has signed transfer stages and shares runtime orchestration with automatic recovery.
 
-Still incomplete relative to a polished consumer flow:
+Still incomplete:
 
-- richer target-selection/readiness guidance where several successors are available;
-- seamless player reconnection UX during the handoff;
+- wiring the full transfer protocol through the Tauri command/capability layer;
+- replacing the current Desktop adapter's intentionally unavailable `transferAuthority` with a real backend-backed flow;
+- target selection/readiness guidance when several successors are available;
+- player reconnection UX during the handoff;
 - broader real-device transfer acceptance across adverse networks.
 
 ### World sleep/wake
@@ -283,6 +286,7 @@ Technical-preview friction remains around:
 
 - explicit EULA acceptance, which is intentionally required;
 - locally supplying arbitrary third-party server-mod JARs when a world requires them;
+- the not-yet-wired manual authority-transfer Desktop flow;
 - seamless client reconnection after migration;
 - safe multi-member wake;
 - public/friend discovery and broader first-run polish.
@@ -292,6 +296,7 @@ Technical-preview friction remains around:
 ## Not implemented yet
 
 - Seamless automatic Minecraft client reconnection/redirection after authority migration.
+- Complete Desktop manual authority-transfer flow.
 - Safe sleep-bound quorum wake election for multi-member worlds.
 - Central or federated public-world search/lobby services.
 - Friends/social discovery.
@@ -317,13 +322,13 @@ The roadmap is intentionally aspirational and phases have not landed in a perfec
 | 1 — Peer networking | Complete for preview | Authenticated networking, durable reconnect, resume semantics and impaired multi-GiB transfer are gated; representative NAT/carrier certification is tracked in Phase 9. |
 | 2 — Snapshot swarm | Mostly complete | Fourth-peer reconstruction, corruption rejection, cross-replica resume and stronger publication/GC safety are gated; parallel scheduling and long-duration retention maturity remain. |
 | 3 — Minecraft save integration | Complete for preview | Fabric IPC, restore, save/shutdown barrier and final snapshot flow are implemented and tested. |
-| 4 — Manual host migration | Implemented for preview | Backend transfer, shared runtime orchestration and Desktop action exist; richer handoff/reconnection UX remains. |
+| 4 — Manual host migration | Backend partial | Signed transfer stages/shared runtime orchestration exist; the complete Tauri/Desktop transfer flow remains unavailable. |
 | 5 — Automatic host migration | Runtime path complete for preview, client UX partial | Recovery/election/fencing plus successor runtime startup are real; seamless player reconnect remains. |
 | 6 — World sleep/wake | Safe solo path + fail-closed multi-member | Durable sleep semantics exist; multi-member quorum wake protocol remains intentionally unavailable. |
 | 7 — Solo mode | Complete for preview | Explicit solo history, reconciliation and divergence preservation are implemented/tested. |
 | 8 — Better replication | Partial | Background replicas, resume and source fallback exist; incremental/journal/erasure-code work remains. |
 | 9 — NAT/public usability | Partial | Protocol support and diagnostics exist; representative field certification does not. |
-| 10 — UX | Advanced preview | Managed runtime, import, readiness and migration UI exist; reconnect/lobby/multi-member wake polish remains. |
+| 10 — UX | Advanced preview | Managed runtime, import, readiness and migration status UI exist; manual transfer, reconnect, lobby and multi-member wake polish remain. |
 | 11 — Production hardening | Partial/strong preview | CI, fuzz smoke, failure injection and process recovery are strong; longer campaigns, signing and field validation remain. |
 | 12 — Distributed simulation | Not implemented | Deliberately future research. |
 
@@ -369,6 +374,7 @@ Safe claims:
 Claims to avoid for now:
 
 - "host migration is seamless";
+- "manual authority transfer is fully productized in Desktop";
 - "players automatically reconnect after any host crash";
 - "two-player worlds can always fail over after either player crashes";
 - "multi-member sleeping worlds use first-click automatic wake";
