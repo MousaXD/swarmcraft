@@ -79,7 +79,7 @@ Two safety limitations are intentional: a two-voter world cannot automatically r
 - Fourth-peer reconstruction from surviving replicas is covered by a permanent acceptance gate.
 - Corrupt replica data is rejected, and poisoned partial blobs are discarded so a clean retry can proceed from another replica.
 - A permanent impaired-network gate proves reconnect/resume behavior under latency variation, packet loss and bandwidth shaping.
-- A weekly/manual multi-gigabyte QUIC soak defaults to 2 GiB, repeatedly hard-restarts the sender, deliberately loses acknowledgements, re-authenticates the durable peer identity and resumes from the receiver's committed offset.
+- A path-scoped, weekly/manual multi-gigabyte QUIC soak defaults to 2 GiB, repeatedly hard-restarts the sender, deliberately loses acknowledgements, re-authenticates the durable peer identity and resumes from the receiver's committed offset.
 
 ### Authority, recovery and safety
 
@@ -220,7 +220,7 @@ Two safety limitations are intentional: a two-voter world cannot automatically r
   - recovery successor disappearing before epoch promotion;
   - solo-history acceptance and divergence detection.
 - Dedicated QUIC impairment gate with latency variation, packet loss, bandwidth limiting, repeated hard restarts and lost-ack resume recovery.
-- Multi-gigabyte interrupted QUIC soak on its dedicated scheduled/manual workflow.
+- Multi-gigabyte interrupted QUIC soak on networking/storage pull requests and matching `main` changes, plus weekly and manual profiles.
 - Fabric server-mod build plus embedded Fabric API verification.
 - Native Desktop package builds for Linux `.deb` + AppImage, Windows NSIS, macOS ARM64 `.dmg`, and macOS x86_64 `.dmg`.
 - Rolling `main-latest` development snapshot workflow.
