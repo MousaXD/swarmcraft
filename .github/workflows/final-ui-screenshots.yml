@@ -1,0 +1,144 @@
+name: Capture final PR 10 UI evidence
+
+on:
+  push:
+    branches:
+      - artifacts/pr-10-ui-audit
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: artifacts/pr-10-ui-audit
+          fetch-depth: 0
+      - name: Read reviewed frontend from PR branch
+        run: |
+          git fetch origin redesign/desktop-frontend-overhaul
+          mkdir -p /tmp/swarmcraft-ui
+          git show origin/redesign/desktop-frontend-overhaul:apps/desktop/src/index.html > /tmp/swarmcraft-ui/index.html
+          git show origin/redesign/desktop-frontend-overhaul:apps/desktop/src/style.css > /tmp/swarmcraft-ui/style.css
+          git show origin/redesign/desktop-frontend-overhaul:apps/desktop/src/app.js > /tmp/swarmcraft-ui/app.js
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Chromium QA runtime
+        run: |
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: Capture native-size screenshots
+        shell: python
+        run: |
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          import struct
+
+          root = Path('/tmp/swarmcraft-ui')
+          out = Path('artifacts/pr-10-ui-audit/final')
+          out.mkdir(parents=True, exist_ok=True)
+          html_source = (root / 'index.html').read_text()
+          css_source = (root / 'style.css').read_text()
+          app_source = (root / 'app.js').read_text()
+
+          mock_js = r'''
+          (() => {
+            const worlds = [
+              {id:'scworld:canonical-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name:'Friends SMP', snapshots:12},
+              {id:'scworld:solo-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', name:'Offline Build', snapshots:8},
+              {id:'scworld:conflict-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', name:'Branch Conflict', snapshots:6},
+              {id:'scworld:replica-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', name:'Storage Replica', snapshots:4}
+            ];
+            const ids = Object.fromEntries(worlds.map(w => [w.name, w.id]));
+            const fixture = window.__fixture = {calls: []};
+            function status(world) {
+              if (world === ids['Friends SMP']) return `World: Friends SMP\nWorld ID: ${world}\nMinecraft: 1.21.1\nAuthorized peers: 3\nPreferred replicas: 2\nSafety: Canonical\nLatest snapshot: 12\nAuthority: 12D3KooWCanonicalAuthorityPeerIdentifierThatIsIntentionallyLongForLayoutTesting0123456789`;
+              if (world === ids['Offline Build']) return `World: Offline Build\nWorld ID: ${world}\nMinecraft: 1.21.1\nAuthorized peers: 2\nPreferred replicas: 2\nSafety: SoloUnreplicated\nLatest snapshot: 8\nAuthority: 12D3KooWSoloAuthority`;
+              if (world === ids['Branch Conflict']) return `World: Branch Conflict\nWorld ID: ${world}\nMinecraft: 1.21.1\nAuthorized peers: 4\nPreferred replicas: 2\nSafety: Conflict\nLatest snapshot: 6\nAuthority: 12D3KooWConflictSnapshotWriter`;
+              return `World: Storage Replica\nWorld ID: ${world}\nMinecraft: 1.21.1\nAuthorized peers: 5\nPreferred replicas: 2\nSafety: Canonical\nLatest snapshot: 4\nAuthority: 12D3KooWRemoteAuthority`;
+            }
+            function compatibility(world) {
+              if (world === ids['Storage Replica']) return 'Compatibility fingerprint: abc\nAuthority eligibility: Replica only: not authority eligible';
+              return 'Compatibility fingerprint: abc\nAuthority eligibility: Compatible';
+            }
+            window.__TAURI__ = {core:{invoke: async (command,payload={}) => {
+              fixture.calls.push({command,payload});
+              if (command === 'node_identity') return 'Peer ID: 12D3KooWLocalNode\nPublic key: abcdef';
+              if (command === 'list_worlds') return worlds.map(w => `${w.id}  ${w.name}  snapshots=${w.snapshots}`).join('\n');
+              if (command === 'world_status') return status(payload.world);
+              if (command === 'world_compatibility') return compatibility(payload.world);
+              if (command === 'world_peers') return '12D3KooWOne authority_eligible=true banned=false';
+              if (command === 'world_conflicts') return 'Solo history conflicts: 2\nNo automatic Minecraft world merge is attempted; preserve both branches until manually resolved.';
+              if (command === 'host_world') return 4321;
+              if (command === 'initialize_node') return 'SwarmCraft initialized';
+              return '';
+            }}};
+          })();
+          '''
+
+          document = html_source.replace('<link rel="stylesheet" href="./style.css" />', f'<style>{css_source}</style>')
+          document = document.replace('<script type="module" src="./app.js"></script>', f'<script>{mock_js}</script><script>{app_source}</script>')
+
+          def assert_png_size(path, width, height):
+            data = path.read_bytes()
+            actual = struct.unpack('>II', data[16:24])
+            if actual != (width, height):
+              raise RuntimeError(f'{path} is {actual}, expected {(width, height)}')
+
+          with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            for width, height in ((720, 560), (980, 760), (1280, 900)):
+              context = browser.new_context(viewport={'width': width, 'height': height})
+              page = context.new_page()
+              page.set_content(document, wait_until='load')
+              page.wait_for_function("document.querySelector('#selectedName')?.textContent === 'Friends SMP'")
+              page.wait_for_timeout(100)
+              overflow = page.evaluate("() => document.documentElement.scrollWidth > innerWidth || document.body.scrollWidth > innerWidth")
+              if overflow:
+                raise RuntimeError(f'horizontal page overflow at {width}x{height}')
+              if page.locator('#playWorld').is_disabled():
+                raise RuntimeError(f'Canonical Compatible Play unexpectedly disabled at {width}x{height}')
+              target = out / f'worlds-{width}x{height}.png'
+              page.screenshot(path=str(target), full_page=False)
+              assert_png_size(target, width, height)
+              context.close()
+
+            context = browser.new_context(viewport={'width': 980, 'height': 760})
+            page = context.new_page()
+            page.set_content(document, wait_until='load')
+            page.wait_for_function("document.querySelector('#selectedName')?.textContent === 'Friends SMP'")
+            page.locator('.world-row', has_text='Branch Conflict').click()
+            page.wait_for_function("document.querySelector('#selectedName')?.textContent === 'Branch Conflict'")
+            if not page.locator('#playWorld').is_disabled():
+              raise RuntimeError('Conflict Play is not disabled')
+            reason = page.locator('#playAvailability').inner_text()
+            expected = 'Play unavailable while divergent history is unresolved. Inspect conflicts and recover or select a safe branch before starting an authority runtime.'
+            if reason.strip() != expected:
+              raise RuntimeError(f'unexpected conflict reason: {reason}')
+            if page.locator('.secondary-actions').get_attribute('open') is None:
+              raise RuntimeError('Inspect conflicts is not exposed for Conflict state')
+            calls_before = page.evaluate("window.__fixture.calls.filter(c => c.command === 'host_world').length")
+            page.evaluate("document.querySelector('#playWorld').click()")
+            page.wait_for_timeout(50)
+            calls_after = page.evaluate("window.__fixture.calls.filter(c => c.command === 'host_world').length")
+            if calls_after != calls_before:
+              raise RuntimeError('Conflict Play invoked host_world')
+            target = out / 'conflict-play-disabled-980x760.png'
+            page.screenshot(path=str(target), full_page=False)
+            assert_png_size(target, 980, 760)
+            context.close()
+            browser.close()
+
+          for path in sorted(out.glob('*.png')):
+            print(f'{path.name}: {path.stat().st_size} bytes')
+      - name: Commit screenshot evidence
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add artifacts/pr-10-ui-audit/final/*.png
+          git commit -m "docs: add native-size final UI evidence"
+          git push origin HEAD:artifacts/pr-10-ui-audit

@@ -12,7 +12,7 @@ For the exact current-code assessment, use [docs/IMPLEMENTATION_STATUS.md](docs/
 | 1 — Peer networking | ✅ Preview-complete | Authenticated libp2p/QUIC, durable identity/reconnect, bounded requests and resumable transfer are permanently gated, including impaired multi-GiB soak. |
 | 2 — Snapshot swarm | 🟢 Mostly complete | Real resumable snapshot replication exists; multi-source/retention maturity remains. |
 | 3 — Minecraft save integration | ✅ Preview-complete | Fabric IPC, restore, save barriers and final snapshot commit are implemented/tested. |
-| 4 — Manual host migration | 🟠 Partial | Transfer state machinery exists; complete CLI/desktop/runtime handoff does not. |
+| 4 — Manual host migration | 🟢 Mostly complete | Signed CLI/desktop transfer wizard exists; real-device acceptance and player reconnection polish remain. |
 | 5 — Automatic host migration | 🟡 Control plane complete | Election, quorum recovery and fencing work; automatic successor Minecraft launch/reconnect remains. |
 | 6 — World sleep/wake | 🟢 Mostly complete internally | Durable sleep/wake semantics exist; orchestration still exposes runtime plumbing. |
 | 7 — Solo mode | ✅ Preview-complete | Explicit solo history, reconciliation and divergence preservation are implemented/tested. |
@@ -148,7 +148,7 @@ The current Fabric bridge and host process implement these foundations.
 
 # Phase 4: Manual host migration
 
-**Status: partial.**
+**Status: mostly complete for preview.**
 
 Goal:
 
@@ -174,7 +174,7 @@ Exit criteria:
 6. Alice/players reconnect to Bob.
 7. No manual world-file copying occurs.
 
-Transfer state-machine primitives exist, but the complete player-facing flow does not yet.
+The complete signed transfer flow now runs end-to-end through the CLI and the Desktop Transfer host wizard. Player reconnection polish and broader real-device acceptance across adverse networks remain.
 
 ---
 

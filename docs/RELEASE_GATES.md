@@ -202,7 +202,7 @@ The candidate workflow may inject the freshly built SwarmCraft Fabric JAR becaus
 
 ## Multi-gigabyte network soak
 
-The separate `Network Soak` workflow is a permanent transport gate and also runs on its scheduled/manual profiles.
+The separate `Network Soak` workflow is a permanent transport gate; it runs on networking/storage pull requests and matching `main` changes, plus its scheduled/manual profiles.
 
 Default profile:
 

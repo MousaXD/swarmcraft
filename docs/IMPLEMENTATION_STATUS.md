@@ -79,7 +79,7 @@ Two safety limitations are intentional: a two-voter world cannot automatically r
 - Fourth-peer reconstruction from surviving replicas is covered by a permanent acceptance gate.
 - Corrupt replica data is rejected, and poisoned partial blobs are discarded so a clean retry can proceed from another replica.
 - A permanent impaired-network gate proves reconnect/resume behavior under latency variation, packet loss and bandwidth shaping.
-- A weekly/manual multi-gigabyte QUIC soak defaults to 2 GiB, repeatedly hard-restarts the sender, deliberately loses acknowledgements, re-authenticates the durable peer identity and resumes from the receiver's committed offset.
+- A path-scoped, weekly/manual multi-gigabyte QUIC soak defaults to 2 GiB, repeatedly hard-restarts the sender, deliberately loses acknowledgements, re-authenticates the durable peer identity and resumes from the receiver's committed offset.
 
 ### Authority, recovery and safety
 
@@ -220,7 +220,7 @@ Two safety limitations are intentional: a two-voter world cannot automatically r
   - recovery successor disappearing before epoch promotion;
   - solo-history acceptance and divergence detection.
 - Dedicated QUIC impairment gate with latency variation, packet loss, bandwidth limiting, repeated hard restarts and lost-ack resume recovery.
-- Multi-gigabyte interrupted QUIC soak on its dedicated scheduled/manual workflow.
+- Multi-gigabyte interrupted QUIC soak on networking/storage pull requests and matching `main` changes, plus weekly and manual profiles.
 - Fabric server-mod build plus embedded Fabric API verification.
 - Native Desktop package builds for Linux `.deb` + AppImage, Windows NSIS, macOS ARM64 `.dmg`, and macOS x86_64 `.dmg`.
 - Rolling `main-latest` development snapshot workflow.
@@ -248,11 +248,14 @@ The remaining product gap is therefore client continuity and field evidence, not
 
 The backend has signed transfer stages and shares runtime orchestration with automatic recovery.
 
+Implemented:
+
+- the full signed transfer protocol (prepare, export, accept, commit, activate, observe) wired through the Tauri command/capability layer with fail-closed capability gating;
+- a Desktop Transfer host wizard with source/target role detection, ineligible/banned peer filtering, and Host Readiness-guided target recommendation;
+- a Minecraft checkpoint wait before prepared tokens are exposed to either participant.
+
 Still incomplete:
 
-- wiring the full transfer protocol through the Tauri command/capability layer;
-- replacing the current Desktop adapter's intentionally unavailable `transferAuthority` with a real backend-backed flow;
-- target selection/readiness guidance when several successors are available;
 - player reconnection UX during the handoff;
 - broader real-device transfer acceptance across adverse networks.
 
@@ -296,7 +299,6 @@ Technical-preview friction remains around:
 ## Not implemented yet
 
 - Seamless automatic Minecraft client reconnection/redirection after authority migration.
-- Complete Desktop manual authority-transfer flow.
 - Safe sleep-bound quorum wake election for multi-member worlds.
 - Central or federated public-world search/lobby services.
 - Friends/social discovery.
@@ -322,13 +324,13 @@ The roadmap is intentionally aspirational and phases have not landed in a perfec
 | 1 — Peer networking | Complete for preview | Authenticated networking, durable reconnect, resume semantics and impaired multi-GiB transfer are gated; representative NAT/carrier certification is tracked in Phase 9. |
 | 2 — Snapshot swarm | Mostly complete | Fourth-peer reconstruction, corruption rejection, cross-replica resume and stronger publication/GC safety are gated; parallel scheduling and long-duration retention maturity remain. |
 | 3 — Minecraft save integration | Complete for preview | Fabric IPC, restore, save/shutdown barrier and final snapshot flow are implemented and tested. |
-| 4 — Manual host migration | Backend partial | Signed transfer stages/shared runtime orchestration exist; the complete Tauri/Desktop transfer flow remains unavailable. |
+| 4 — Manual host migration | Mostly complete | Signed transfer stages and the Desktop transfer wizard (role detection, peer filtering, readiness-guided targets) exist; real-device acceptance and player reconnection polish remain. |
 | 5 — Automatic host migration | Runtime path complete for preview, client UX partial | Recovery/election/fencing plus successor runtime startup are real; seamless player reconnect remains. |
 | 6 — World sleep/wake | Safe solo path + fail-closed multi-member | Durable sleep semantics exist; multi-member quorum wake protocol remains intentionally unavailable. |
 | 7 — Solo mode | Complete for preview | Explicit solo history, reconciliation and divergence preservation are implemented/tested. |
 | 8 — Better replication | Partial | Background replicas, resume and source fallback exist; incremental/journal/erasure-code work remains. |
 | 9 — NAT/public usability | Partial | Protocol support and diagnostics exist; representative field certification does not. |
-| 10 — UX | Advanced preview | Managed runtime, import, readiness and migration status UI exist; manual transfer, reconnect, lobby and multi-member wake polish remain. |
+| 10 — UX | Advanced preview | Managed runtime, import, readiness and migration status UI exist; reconnect, lobby and multi-member wake polish remain. |
 | 11 — Production hardening | Partial/strong preview | CI, fuzz smoke, failure injection and process recovery are strong; longer campaigns, signing and field validation remain. |
 | 12 — Distributed simulation | Not implemented | Deliberately future research. |
 
