@@ -27,6 +27,69 @@ export function parseTransferPeers(raw, localPeerId = '') {
     .filter((peer) => peer && peer.peerId !== localPeerId && peer.authorityEligible && !peer.banned);
 }
 
+export function observeStatusLine(statusText) {
+  const authority = parseAuthority(statusText);
+  if (!authority || authority === 'unknown') return '';
+  const epoch = String(statusText || '').match(/^Epoch:\s*(\S+)$/m)?.[1] || '';
+  const epochKnown = Boolean(epoch) && epoch !== 'unknown';
+  return `Authority is now ${authority}${epochKnown ? ` at epoch ${epoch}` : ''}.`;
+}
+
+const OBSERVE_GUIDANCE =
+  'The successor epoch was accepted on this peer. Keep networking online while quorum propagation and the new host runtime readiness complete.';
+const OBSERVE_POLL_INTERVAL_MS = 3000;
+const OBSERVE_POLL_ATTEMPTS = 20;
+
+const TRANSFER_TOKEN_FIELD_IDS = [
+  'preparedTransferToken',
+  'acceptedTransferToken',
+  'committedTransferToken',
+  'successorEpochToken',
+  'incomingPreparedTransfer',
+  'outgoingAcceptedTransfer',
+  'incomingCommittedTransfer',
+  'outgoingEpochTransfer',
+];
+
+const TRANSFER_RESULT_WRAP_IDS = [
+  'preparedTransferWrap',
+  'committedTransferWrap',
+  'acceptedTransferWrap',
+  'epochTransferWrap',
+];
+
+// Tokens are world-bound: progress captured for one world must never remain
+// visible when the wizard is reopened against a different world.
+function clearTransferProgress() {
+  for (const id of TRANSFER_TOKEN_FIELD_IDS) {
+    const field = document.getElementById(id);
+    if (field) field.value = '';
+  }
+  hideTransferResults();
+}
+
+function hideTransferResults() {
+  for (const id of TRANSFER_RESULT_WRAP_IDS) {
+    const wrap = document.getElementById(id);
+    if (wrap) wrap.hidden = true;
+  }
+  const complete = document.getElementById('sourceTransferComplete');
+  if (complete) {
+    complete.hidden = true;
+    complete.textContent = '';
+  }
+}
+
+function restoreTransferResults() {
+  for (const id of TRANSFER_RESULT_WRAP_IDS) {
+    const wrap = document.getElementById(id);
+    const output = wrap?.querySelector('textarea');
+    if (wrap && output?.value.trim()) wrap.hidden = false;
+  }
+  const complete = document.getElementById('sourceTransferComplete');
+  if (complete?.textContent.trim()) complete.hidden = false;
+}
+
 function ensureDialog() {
   let dialog = document.getElementById('transferDialog');
   if (dialog) return dialog;
@@ -163,6 +226,38 @@ export function registerTransferWizard(backend) {
     document.getElementById('closeTransferDialog').addEventListener('click', close);
     document.getElementById('doneTransferDialog').addEventListener('click', close);
     dialog.addEventListener('cancel', () => setError(''));
+    dialog.addEventListener('close', () => stopObservePolling());
+
+    let observeTimer = null;
+    const stopObservePolling = () => {
+      if (observeTimer !== null) {
+        clearInterval(observeTimer);
+        observeTimer = null;
+      }
+    };
+
+    const startObservePolling = (world, complete) => {
+      stopObservePolling();
+      let attempts = 0;
+      observeTimer = setInterval(async () => {
+        attempts += 1;
+        if (attempts > OBSERVE_POLL_ATTEMPTS) {
+          stopObservePolling();
+          return;
+        }
+        try {
+          const statusText = await backend.worldStatus(world);
+          const line = observeStatusLine(statusText);
+          if (line && dialog.open && dialog.dataset.world === world) {
+            complete.textContent = `The successor epoch was accepted on this peer. ${line} Keep networking online while quorum propagation completes.`;
+            complete.dataset.tone = 'safe';
+          }
+        } catch {
+          if (dialog.open && dialog.dataset.world === world) complete.textContent = OBSERVE_GUIDANCE;
+        }
+        if (attempts >= OBSERVE_POLL_ATTEMPTS) stopObservePolling();
+      }, OBSERVE_POLL_INTERVAL_MS);
+    };
 
     const runStep = async (buttonId, work) => {
       const button = document.getElementById(buttonId);
@@ -201,9 +296,10 @@ export function registerTransferWizard(backend) {
       if (!token) throw new Error('Paste the signed successor epoch returned by the new host.');
       const result = await backend.migration.transferObserve(currentWorld, token);
       const complete = document.getElementById('sourceTransferComplete');
-      complete.textContent = 'The successor epoch was accepted on this peer. Keep networking online while quorum propagation and the new host runtime readiness complete.';
+      complete.textContent = OBSERVE_GUIDANCE;
       complete.dataset.tone = 'safe';
       complete.hidden = false;
+      startObservePolling(currentWorld, complete);
       return result;
     }));
 
@@ -249,6 +345,11 @@ export function registerTransferWizard(backend) {
         dialog.showModal();
         return;
       }
+      if ((dialog.dataset.world || '') !== currentWorld) {
+        stopObservePolling();
+        clearTransferProgress();
+      }
+      dialog.dataset.world = currentWorld;
 
       try {
         await backend.migration.refreshCapabilities();
@@ -268,7 +369,7 @@ export function registerTransferWizard(backend) {
         document.getElementById('transferRoleNote').textContent = roleCopy(isSource, localPeer, authority);
         document.getElementById('transferSourceFlow').hidden = !isSource;
         document.getElementById('transferTargetFlow').hidden = isSource;
-        document.getElementById('sourceTransferComplete').hidden = true;
+        restoreTransferResults();
 
         if (isSource) {
           const select = document.getElementById('transferTargetPeer');

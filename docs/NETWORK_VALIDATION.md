@@ -182,6 +182,32 @@ Do not change a row to **Verified** unless it has been exercised between real ma
 | Direct path fails but relay is reachable | one bounded relay fallback for an explicit dial plan | Real relay deployment test required |
 | Relay disappears after world was replicated | another direct/relay path may reconnect; canonical world history remains independent of relay | Multi-path/multi-relay field validation required |
 
+## Manual authority transfer under adverse networks
+
+The Desktop transfer wizard drives six signed stages (`prepare`, `export`, `accept`, `commit`, `activate`, `observe`) between two devices. Each stage is validated by the Rust backend against canonical membership, the exact checkpoint, signatures and generation fencing, so a transport disruption fails safely instead of producing a divergent world. The following checklist records what must be exercised before transfer acceptance can be claimed across real networks. None of these rows are certified yet.
+
+For each scenario, run one complete host transfer from the Desktop wizard on both devices and record:
+
+1. which stage failed or stalled, if any, and the exact wizard error text;
+2. that no prepared/accepted/committed token was accepted after the source stopped being authority for that generation;
+3. that both wizards showed the same successor peer ID and epoch after `activate`/`observe`;
+4. whether reconnection of the two peers after the network change restored wizard readiness without restarting either app;
+5. sanitized diagnostics from both endpoints attached to the field-validation record.
+
+Scenarios to certify:
+
+- [ ] Stable same-LAN baseline: complete happy-path transfer with direct QUIC.
+- [ ] Normal home NAT pair: complete transfer over a hole-punched path.
+- [ ] Two independently NATed home networks: transfer across DCUtR hole punch, then repeat across relay fallback.
+- [ ] Relay-only connectivity (symmetric NAT/CGNAT): full transfer while both peers are relayed.
+- [ ] Network change mid-flow: Wi-Fi/carrier switch between `prepare` and `accept`, then again between `commit` and `activate`; confirm bounded failure or safe resume, never partial adoption.
+- [ ] Relay drop mid-flow: relay disappears after `export`; confirm the accept device either reconnects through another path or fails closed.
+- [ ] Mobile hotspot on either side: complete transfer with the hotspot peer as target, then as source.
+- [ ] IPv6-only path where routable: complete transfer without IPv4.
+- [ ] Long checkpoint wait: source Minecraft runtime takes minutes to reach the transfer save barrier over an impaired link; confirm the wizard stays bounded and never force-kills the game.
+
+Transfer completion is measured in signed generations, not bytes: unlike snapshot replication there is no resume offset. An interrupted flow must end in a clear error plus a retryable state on both sides, and any record claiming certification must include both endpoints' migration status output showing the same authority and epoch.
+
 ## Field-validation record
 
 Use [`network-validation/FIELD_RECORD_TEMPLATE.md`](network-validation/FIELD_RECORD_TEMPLATE.md) for each real-network run. A useful record includes:

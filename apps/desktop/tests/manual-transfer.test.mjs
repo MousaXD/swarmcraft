@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { createBackendAdapter } from '../src/backend-adapter.js';
-import { parseAuthority, parsePeerId, parseTransferPeers } from '../src/transfer-wizard.js';
+import { observeStatusLine, parseAuthority, parsePeerId, parseTransferPeers } from '../src/transfer-wizard.js';
 
 const srcRoot = new URL('../src/', import.meta.url);
 const desktopRoot = new URL('../', import.meta.url);
@@ -114,4 +114,60 @@ test('transfer presentation delegates authority semantics to backend commands ra
   assert.doesNotMatch(wizard, /nextEpoch|next_epoch|fencingToken|fencing_token/i);
   assert.doesNotMatch(wizard, /quorum\s*=|memberCount\s*\/\s*2|member_count\s*\/\s*2|Math\.(?:floor|ceil)\([^\n]*quorum/i);
   assert.doesNotMatch(wizard, /saveEpoch|writeEpoch|setAuthority|authorityPeerId\s*=|authority_peer_id\s*=/i);
+});
+
+test('transfer wizard scopes persisted token progress to the selected world', async () => {
+  const wizard = await text('transfer-wizard.js');
+
+  assert.match(wizard, /dialog\.dataset\.world/);
+  assert.match(wizard, /clearTransferProgress/);
+  assert.match(wizard, /restoreTransferResults/);
+
+  // Reopening with a changed world must clear every persisted token field and
+  // result wrap before any backend step can run against the new world.
+  for (const field of [
+    'preparedTransferToken',
+    'acceptedTransferToken',
+    'committedTransferToken',
+    'successorEpochToken',
+    'incomingPreparedTransfer',
+    'outgoingAcceptedTransfer',
+    'incomingCommittedTransfer',
+    'outgoingEpochTransfer',
+  ]) {
+    assert.match(wizard, new RegExp(`'${field}'`));
+  }
+
+  // Reopening with the same world keeps completed progress visible instead of
+  // force-hiding it while the tokens remain.
+  assert.doesNotMatch(wizard, /getElementById\('sourceTransferComplete'\)\.hidden = true;\n\s*\n?\s*if \(isSource\)/);
+});
+
+test('post-observe live status reuses the existing world status command without new Tauri surface', async () => {
+  const wizard = await text('transfer-wizard.js');
+  const adapter = await text('backend-adapter.js');
+
+  assert.match(wizard, /backend\.worldStatus\(world\)/);
+  assert.match(wizard, /observeStatusLine\(statusText\)/);
+  assert.match(wizard, /OBSERVE_POLL_INTERVAL_MS = 3000/);
+  assert.match(wizard, /OBSERVE_POLL_ATTEMPTS = 20/);
+  assert.match(wizard, /stopObservePolling/);
+  // Polling must stop when the dialog closes so no stale write lands after a
+  // reopen against a different world.
+  assert.match(wizard, /dialog\.open && dialog\.dataset\.world === world/);
+
+  // No new Tauri command was introduced for polling: worldStatus is already
+  // served by `world_status` through the adapter.
+  assert.equal(adapter.split('world_status').length - 1 >= 1, true);
+});
+
+test('observeStatusLine summarizes live authority confirmation from world status output', () => {
+  assert.equal(
+    observeStatusLine('World: Demo\nAuthority: peer-b\nEpoch: 4'),
+    'Authority is now peer-b at epoch 4.',
+  );
+  assert.equal(observeStatusLine('World: Demo\nAuthority: peer-b\nEpoch: unknown'), 'Authority is now peer-b.');
+  assert.equal(observeStatusLine('World: Demo\nAuthority: unknown\nEpoch: 7'), '');
+  assert.equal(observeStatusLine('World: Demo'), '');
+  assert.equal(observeStatusLine(''), '');
 });
