@@ -1,4 +1,5 @@
 import { registerRuntimeWizard } from './runtime-wizard.js';
+import { registerTransferWizard } from './transfer-wizard.js';
 
 const unavailable = (feature) => {
   const error = new Error(`${feature} is not available in this build.`);
@@ -434,15 +435,19 @@ export function createBackendAdapter(invoke) {
         .then((raw) => {
           const supported = new Set(String(raw || '').split(',').map(slug).filter(Boolean));
           migrationCapabilities.status = supported.has('status');
+          migrationCapabilities.transfer = supported.has('transfer');
           migrationCapabilities.wake = supported.has('wake');
-          // Manual transfer is deliberately disabled until migration-core exposes one
-          // Desktop-safe orchestration command for the complete signed transfer flow.
-          migrationCapabilities.transfer = false;
           return migrationCapabilities;
         })
         .catch(() => migrationCapabilities);
     }
     return migrationCapabilityProbe;
+  };
+
+  const transferStep = async (world, action, value = null) => {
+    await ensureMigrationCapabilities();
+    if (!migrationCapabilities.transfer) throw unavailable('Transfer host');
+    return call('manual_transfer_step', { world, action, value });
   };
 
   const configureWorldRuntime = (payload) => call('configure_world_runtime', {
@@ -570,7 +575,15 @@ export function createBackendAdapter(invoke) {
           throw new Error(`Migration status was not valid JSON: ${error}`);
         }
       },
-      transferAuthority: async () => { throw unavailable('Transfer host'); },
+      transferPrepare: (world, target) => transferStep(world, 'prepare', target),
+      transferAccept: (world, token) => transferStep(world, 'accept', token),
+      transferCommit: (world, token) => transferStep(world, 'commit', token),
+      transferActivate: (world, token) => transferStep(world, 'activate', token),
+      transferObserve: (world, token) => transferStep(world, 'observe', token),
+      // Compatibility shim for the old single-action button handler. The
+      // transfer wizard owns transfer-capable builds because the signed backend
+      // protocol requires an explicit target and participant-specific stages.
+      transferAuthority: async () => { throw unavailable('Use the signed Transfer host wizard'); },
       wakeWorld: async (world) => {
         await ensureMigrationCapabilities();
         if (!migrationCapabilities.wake) throw unavailable('Wake world');
@@ -580,5 +593,6 @@ export function createBackendAdapter(invoke) {
   });
 
   registerRuntimeWizard(adapter);
+  registerTransferWizard(adapter);
   return adapter;
 }
