@@ -19,9 +19,9 @@ use std::{
 use swarm_cli::migration::load_migration_status;
 use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
 use swarm_protocol::{
-    EpochMode, EpochRecordV1, MembershipPolicyV1, MembershipRecordV1, RuntimeCompatibilityManifestV1, SleepRecordV1,
-    TransferPhase, AuthorityPolicyV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1,
-    WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    AuthorityPolicyV1, EpochMode, EpochRecordV1, MembershipPolicyV1, MembershipRecordV1,
+    RuntimeCompatibilityManifestV1, SleepRecordV1, TransferPhase, WorldConfigV1, WorldDescriptorV1, WorldId,
+    WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 use tempfile::TempDir;
@@ -57,11 +57,7 @@ fn run_cli(peer: &PeerFixture, args: &[&str]) -> Output {
 
 fn run_cli_ok(peer: &PeerFixture, args: &[&str]) -> String {
     let output = run_cli(peer, args);
-    assert!(
-        output.status.success(),
-        "sidecar stage {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "sidecar stage {args:?} failed: {}", String::from_utf8_lossy(&output.stderr));
     String::from_utf8(output.stdout).unwrap()
 }
 
@@ -85,7 +81,12 @@ fn member(identity: &PeerIdentity) -> WorldMemberV1 {
     }
 }
 
-fn snapshot(storage: &Storage, authority: &PeerIdentity, world: WorldId, source: &Path) -> swarm_protocol::SnapshotManifestV1 {
+fn snapshot(
+    storage: &Storage,
+    authority: &PeerIdentity,
+    world: WorldId,
+    source: &Path,
+) -> swarm_protocol::SnapshotManifestV1 {
     let mut manifest = storage
         .snapshot_directory(
             source,
@@ -117,9 +118,13 @@ fn initialize_two_peer_world(alice: &PeerFixture, bob: &PeerFixture, source: &Pa
         datapacks: Vec::new(),
     };
     let fingerprint = compatibility.fingerprint().unwrap();
-    let (world, genesis) =
-        create_world_genesis_with_fingerprint(&alice.identity, compatibility.minecraft_version.clone(), compatibility.loader_version.clone(), fingerprint)
-            .unwrap();
+    let (world, genesis) = create_world_genesis_with_fingerprint(
+        &alice.identity,
+        compatibility.minecraft_version.clone(),
+        compatibility.loader_version.clone(),
+        fingerprint,
+    )
+    .unwrap();
     let metadata = WorldMetadataV1 {
         storage_schema_version: STORAGE_SCHEMA_VERSION,
         display_name: "transfer-process-gate".into(),
@@ -251,7 +256,8 @@ fn manual_transfer_stages_run_as_separate_sidecar_processes_without_minecraft() 
     let committed = first_line(&run_cli_ok(&alice, &["world", "transfer-commit", &world_hex, &accepted])).to_string();
     assert_ne!(decode_token::<swarm_protocol::AuthorityTransferV1>(&committed).phase, TransferPhase::Prepared);
     // Stage 5/6: activate mints the successor epoch on the target.
-    let epoch_token = first_line(&run_cli_ok(&bob, &["world", "transfer-activate", &world_hex, &committed])).to_string();
+    let epoch_token =
+        first_line(&run_cli_ok(&bob, &["world", "transfer-activate", &world_hex, &committed])).to_string();
 
     let decoded_epoch: EpochRecordV1 = decode_token(&epoch_token);
     assert_eq!(decoded_epoch.epoch_number, shared.epoch.epoch_number + 1);
