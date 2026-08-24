@@ -1,3 +1,5 @@
+import './catalog-selectors.js';
+
 function invalid(field, message) {
   const error = new Error(message);
   error.field = field;
