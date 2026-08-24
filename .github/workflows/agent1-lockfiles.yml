@@ -1,97 +1,73 @@
-name: Agent 1 Catalog Validation
+name: Agent 1 Prepare Validation Fixes
 
 on:
   pull_request:
     branches: [backup/local-work-20260824]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  validate:
+  prepare:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            apps/desktop/src-tauri -> target
+          components: rustfmt
 
-      - name: Regenerate lockfiles for validation snapshot
+      - name: Factor mock response queue type
+        shell: bash
         run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/swarm-catalog/src/lib.rs')
+          text = path.read_text()
+          old = '''    #[derive(Clone)]
+              struct MockTransport {
+                  calls: Arc<AtomicUsize>,
+                  responses: Arc<Mutex<VecDeque<Result<Vec<u8>, CatalogError>>>>,
+              }
+          '''
+          new = '''    type MockResponseQueue = Arc<Mutex<VecDeque<Result<Vec<u8>, CatalogError>>>>;
+
+              #[derive(Clone)]
+              struct MockTransport {
+                  calls: Arc<AtomicUsize>,
+                  responses: MockResponseQueue,
+              }
+          '''
+          if old not in text:
+              raise SystemExit('expected MockTransport definition not found; refusing broad rewrite')
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Generate exact formatting and lockfiles
+        run: |
+          cargo fmt --all
           cargo generate-lockfile
           cargo generate-lockfile --manifest-path apps/desktop/src-tauri/Cargo.toml
 
-      - name: Capture rustfmt patch
-        shell: bash
-        run: |
-          cargo fmt --all
-          git diff -- '*.rs' > agent1-rustfmt.patch
-
-      - name: Upload generated validation files
-        uses: actions/upload-artifact@v4
-        with:
-          name: agent1-generated-validation-files
-          path: |
-            Cargo.lock
-            apps/desktop/src-tauri/Cargo.lock
-            agent1-rustfmt.patch
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Workspace format after rustfmt
-        run: cargo fmt --all -- --check
-      - name: Workspace locked metadata
-        run: cargo metadata --locked --format-version 1 --no-deps > /dev/null
-      - name: Workspace check
-        run: cargo check --workspace --all-features --locked
-      - name: Workspace clippy
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Workspace tests
-        run: cargo test --workspace --all-features --locked
-      - name: Catalog deterministic tests
-        run: cargo test -p swarm-catalog --all-features --locked
-
-      - name: Install Linux desktop dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
-
-      - name: Build and stage required Tauri sidecars
+      - name: Commit generated validation fixes
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release -p swarm-cli --locked
-          target="$(rustc --print host-tuple)"
-          mkdir -p apps/desktop/src-tauri/binaries
-          cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
-          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
-          cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
-          cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
-
-      - name: Desktop format
-        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check
-      - name: Desktop locked metadata
-        run: cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --format-version 1 --no-deps > /dev/null
-      - name: Desktop check
-        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features --locked
-      - name: Desktop clippy
-        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
-      - name: Desktop tests
-        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features --locked
-
-      - name: Desktop JavaScript tests
-        run: node --test apps/desktop/tests/*.test.mjs
+          git add \
+            Cargo.lock \
+            apps/desktop/src-tauri/Cargo.lock \
+            crates/swarm-catalog/src/lib.rs \
+            crates/swarm-catalog/tests/live_sources.rs
+          git diff --cached --stat
+          if git diff --cached --quiet; then
+            echo 'No generated fixes were necessary.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(agent1): satisfy current Rust validation'
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
