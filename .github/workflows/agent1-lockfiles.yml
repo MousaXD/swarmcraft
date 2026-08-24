@@ -30,17 +30,24 @@ jobs:
           cargo generate-lockfile
           cargo generate-lockfile --manifest-path apps/desktop/src-tauri/Cargo.toml
 
-      - name: Upload generated lockfiles
+      - name: Capture rustfmt patch
+        shell: bash
+        run: |
+          cargo fmt --all
+          git diff -- '*.rs' > agent1-rustfmt.patch
+
+      - name: Upload generated validation files
         uses: actions/upload-artifact@v4
         with:
-          name: agent1-generated-lockfiles
+          name: agent1-generated-validation-files
           path: |
             Cargo.lock
             apps/desktop/src-tauri/Cargo.lock
+            agent1-rustfmt.patch
           if-no-files-found: error
           retention-days: 1
 
-      - name: Workspace format
+      - name: Workspace format after rustfmt
         run: cargo fmt --all -- --check
       - name: Workspace locked metadata
         run: cargo metadata --locked --format-version 1 --no-deps > /dev/null
