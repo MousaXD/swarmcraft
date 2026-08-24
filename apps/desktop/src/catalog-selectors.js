@@ -160,21 +160,131 @@ function responseNotice(response, fallback) {
   return `${fallback} versions are up to date.`;
 }
 
+function upgradeInputToSelect(documentRef, input, describedBy) {
+  if (input?.tagName?.toLowerCase() === 'select') return input;
+  if (!input) return null;
+  const select = documentRef.createElement('select');
+  select.id = input.id;
+  select.required = input.required;
+  select.disabled = true;
+  if (describedBy) select.setAttribute('aria-describedby', describedBy);
+  input.replaceWith(select);
+  return select;
+}
+
+export function ensureCatalogUi(documentRef) {
+  const form = documentRef?.getElementById('createForm');
+  let minecraft = documentRef?.getElementById('createMinecraft');
+  let fabric = documentRef?.getElementById('createLoader');
+  if (!form || !minecraft || !fabric) return null;
+
+  let status = documentRef.getElementById('createCatalogStatus');
+  let error = documentRef.getElementById('createCatalogError');
+  let retry = documentRef.getElementById('createCatalogRetry');
+  let refresh = documentRef.getElementById('createCatalogRefresh');
+  let snapshots = documentRef.getElementById('createSnapshots');
+  const details = minecraft.closest('details.form-details') || minecraft.closest('details');
+
+  if (!status && details) {
+    const minecraftField = minecraft.closest('.field');
+    const fabricField = fabric.closest('.field');
+    const selectorGrid = documentRef.createElement('div');
+    selectorGrid.className = 'field-grid field-wide catalog-selector-grid';
+    details.before(selectorGrid);
+    if (minecraftField) selectorGrid.append(minecraftField);
+    if (fabricField) selectorGrid.append(fabricField);
+
+    const summary = details.querySelector('summary');
+    if (summary) summary.textContent = 'Advanced compatibility settings';
+
+    status = documentRef.createElement('p');
+    status.id = 'createCatalogStatus';
+    status.className = 'field-help field-wide';
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    status.textContent = 'Fetching Minecraft versions...';
+
+    error = documentRef.createElement('div');
+    error.id = 'createCatalogError';
+    error.className = 'form-error field-wide';
+    error.setAttribute('role', 'alert');
+    error.hidden = true;
+
+    const actions = documentRef.createElement('div');
+    actions.className = 'compact-actions field-wide';
+    retry = documentRef.createElement('button');
+    retry.id = 'createCatalogRetry';
+    retry.className = 'button button-secondary button-small';
+    retry.type = 'button';
+    retry.textContent = 'Retry';
+    retry.hidden = true;
+    refresh = documentRef.createElement('button');
+    refresh.id = 'createCatalogRefresh';
+    refresh.className = 'button button-subtle button-small';
+    refresh.type = 'button';
+    refresh.textContent = 'Refresh versions';
+    actions.append(retry, refresh);
+    details.before(status, error, actions);
+
+    const detailsFields = details.querySelector('.details-fields');
+    if (detailsFields && !snapshots) {
+      const snapshotLabel = documentRef.createElement('label');
+      snapshotLabel.className = 'check-row field-wide';
+      snapshotLabel.setAttribute('for', 'createSnapshots');
+      snapshots = documentRef.createElement('input');
+      snapshots.id = 'createSnapshots';
+      snapshots.type = 'checkbox';
+      const copy = documentRef.createElement('span');
+      copy.textContent = 'Show Minecraft snapshots in the version selector.';
+      snapshotLabel.append(snapshots, copy);
+      detailsFields.append(snapshotLabel);
+    }
+
+    const helper = details.querySelector('.helper');
+    if (helper) {
+      helper.textContent = 'The selected exact Minecraft and Fabric Loader versions become signed world metadata. They determine which devices are eligible to host, not which devices may store replicas.';
+    }
+  }
+
+  minecraft = upgradeInputToSelect(documentRef, documentRef.getElementById('createMinecraft'), 'createCatalogStatus');
+  fabric = upgradeInputToSelect(documentRef, documentRef.getElementById('createLoader'), 'createCatalogStatus');
+  status = documentRef.getElementById('createCatalogStatus');
+  error = documentRef.getElementById('createCatalogError');
+  retry = documentRef.getElementById('createCatalogRetry');
+  refresh = documentRef.getElementById('createCatalogRefresh');
+  snapshots = documentRef.getElementById('createSnapshots');
+
+  return {
+    form,
+    minecraft,
+    fabric,
+    snapshots,
+    retry,
+    refresh,
+    status,
+    error,
+    createButton: documentRef.getElementById('createWorld'),
+  };
+}
+
 export function registerCatalogSelectors({ invoke, documentRef } = {}) {
   const tauriInvoke = invoke || globalThis.window?.__TAURI__?.core?.invoke;
   const doc = documentRef || globalThis.document;
   if (!doc) return null;
 
-  const form = doc.getElementById('createForm');
-  const minecraftSelect = doc.getElementById('createMinecraft');
-  const fabricSelect = doc.getElementById('createLoader');
-  const snapshotToggle = doc.getElementById('createSnapshots');
-  const retryButton = doc.getElementById('createCatalogRetry');
-  const refreshButton = doc.getElementById('createCatalogRefresh');
-  const status = doc.getElementById('createCatalogStatus');
-  const error = doc.getElementById('createCatalogError');
-  const createButton = doc.getElementById('createWorld');
-  if (!form || !minecraftSelect || !fabricSelect || !status || !error || !createButton) return null;
+  const ui = ensureCatalogUi(doc);
+  if (!ui?.form || !ui.minecraft || !ui.fabric || !ui.status || !ui.error || !ui.createButton) return null;
+  const {
+    form,
+    minecraft: minecraftSelect,
+    fabric: fabricSelect,
+    snapshots: snapshotToggle,
+    retry: retryButton,
+    refresh: refreshButton,
+    status,
+    error,
+    createButton,
+  } = ui;
 
   const state = new CatalogSelectionState();
   let minecraftRequest = 0;
