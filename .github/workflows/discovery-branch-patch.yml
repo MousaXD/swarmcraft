@@ -1,0 +1,57 @@
+name: Discovery branch surgical patch
+
+on:
+  push:
+    branches:
+      - agent/discovery
+
+permissions:
+  contents: write
+
+jobs:
+  patch-daemon-boundary:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/discovery
+          fetch-depth: 0
+      - name: Patch discovery request boundary
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("crates/swarm-cli/src/daemon.rs")
+          text = path.read_text()
+          needle = '        WireRequest::Hello(_) => return Err(anyhow!("PeerHello is handled by the network authentication layer")),\n'
+          replacement = '''        WireRequest::DiscoveryPublic { .. }
+          | WireRequest::DiscoveryResolve { .. }
+          | WireRequest::FriendPresence { .. } => {
+              node.respond(
+                  channel,
+                  WireResponse::Error {
+                      code: "DISCOVERY_ENDPOINT_REQUIRED".into(),
+                      message: "discovery requests are handled by the discovery service".into(),
+                  },
+              )?;
+          }
+          WireRequest::Hello(_) => return Err(anyhow!("PeerHello is handled by the network authentication layer")),
+          '''
+          if needle not in text:
+              raise SystemExit("expected daemon match boundary not found")
+          if "DISCOVERY_ENDPOINT_REQUIRED" in text:
+              raise SystemExit("daemon boundary already patched")
+          path.write_text(text.replace(needle, replacement, 1))
+      - name: Format patched Rust
+        run: |
+          rustup component add rustfmt
+          cargo fmt --all
+      - name: Remove one-shot workflow and commit
+        run: |
+          rm .github/workflows/discovery-branch-patch.yml
+          git config user.name "swarmcraft-ci"
+          git config user.email "swarmcraft-ci@users.noreply.github.com"
+          git add crates/swarm-cli/src/daemon.rs .github/workflows/discovery-branch-patch.yml
+          git commit -m "Route discovery-only requests away from daemon"
+          git push origin HEAD:agent/discovery
