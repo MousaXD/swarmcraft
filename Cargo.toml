@@ -7,6 +7,7 @@ members = [
   "crates/swarm-consensus",
   "crates/swarm-network",
   "crates/swarm-ipc",
+  "crates/swarm-provider",
   "crates/swarm-cli",
 ]
 exclude = ["apps/desktop/src-tauri"]
