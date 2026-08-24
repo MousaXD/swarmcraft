@@ -349,7 +349,8 @@ fn handle_discovery_request(
                 .get(&world_id)
                 .filter(|value| value.expires_unix_ms >= now)
                 .filter(|value| !matches!(value.visibility, WorldVisibilityV1::Private))
-                .cloned();
+                .cloned()
+                .map(Box::new);
             node.respond(channel, WireResponse::DiscoveryResolved(value))?;
         }
         WireRequest::FriendPresence { expected_peer_id, requester_peer_id, nonce } => {
@@ -403,8 +404,9 @@ pub fn add_friend(paths: &DataPaths, peer: &str, public_key_hex: &str, label: &s
             bail!("friend identity collision: the peer ID is already stored with another public key");
         }
         existing.label = label.to_owned();
+        let existing = existing.clone();
         save_friend_store(paths, &store)?;
-        return Ok(existing.clone());
+        return Ok(existing);
     }
     let contact = FriendContactV1 {
         peer_id: peer_id.to_string(),
@@ -628,14 +630,16 @@ pub async fn resolve_world(
                     }
                     match verify_world_announcement(&value, unix_millis()?) {
                         Ok(()) => {
-                            result = Some(value);
+                            result = Some(*value);
                             break;
                         }
                         Err(DiscoveryRecordError::Expired) => stale = true,
                         Err(_) => invalid = true,
                     }
                 }
-                DiscoveryNetworkEvent::OutboundFailure { error, .. } => detail.get_or_insert(error),
+                DiscoveryNetworkEvent::OutboundFailure { error, .. } => {
+                    detail.get_or_insert(error);
+                }
                 _ => {}
             }
         }
@@ -733,7 +737,9 @@ pub async fn friend_presence(
                     });
                     break;
                 }
-                DiscoveryNetworkEvent::OutboundFailure { error, .. } => detail.get_or_insert(error),
+                DiscoveryNetworkEvent::OutboundFailure { error, .. } => {
+                    detail.get_or_insert(error);
+                }
                 _ => {}
             }
         }
