@@ -1,9 +1,8 @@
 name: Agent 3 CurseForge provider validation
 
 on:
-  push:
-    branches:
-      - agent/curseforge-provider
+  pull_request:
+    branches: [backup/local-work-20260824]
 
 permissions:
   contents: write
@@ -12,10 +11,14 @@ permissions:
 jobs:
   curseforge-provider:
     name: CurseForge provider exact-head gate
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: agent/curseforge-provider
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
