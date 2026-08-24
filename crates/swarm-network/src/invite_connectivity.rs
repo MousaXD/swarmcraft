@@ -199,7 +199,8 @@ pub fn validate_invite_addresses(addresses: &[String]) -> Result<Vec<String>, In
 }
 
 pub fn invite_connectivity_from_snapshot(path: &Path) -> Result<InviteConnectivityV1, InviteConnectivityError> {
-    let metadata = fs::metadata(path).map_err(|error| InviteConnectivityError::SnapshotUnavailable(error.to_string()))?;
+    let metadata =
+        fs::metadata(path).map_err(|error| InviteConnectivityError::SnapshotUnavailable(error.to_string()))?;
     if metadata.len() > MAX_CONNECTIVITY_SNAPSHOT_BYTES {
         return Err(InviteConnectivityError::SnapshotTooLarge {
             actual: metadata.len(),
@@ -239,15 +240,10 @@ fn validate_address(value: &str) -> Result<ValidatedAddress, InviteConnectivityE
     }
     let char_count = value.chars().count();
     if char_count > MAX_INVITE_ADDRESS_CHARS {
-        return Err(InviteConnectivityError::AddressTooLong {
-            actual: char_count,
-            maximum: MAX_INVITE_ADDRESS_CHARS,
-        });
+        return Err(InviteConnectivityError::AddressTooLong { actual: char_count, maximum: MAX_INVITE_ADDRESS_CHARS });
     }
 
-    let address: Multiaddr = value
-        .parse()
-        .map_err(|_| InviteConnectivityError::InvalidAddress(value.to_owned()))?;
+    let address: Multiaddr = value.parse().map_err(|_| InviteConnectivityError::InvalidAddress(value.to_owned()))?;
 
     let mut has_host = false;
     let mut has_tcp = false;
@@ -371,11 +367,7 @@ mod tests {
     }
 
     fn relay_address() -> String {
-        format!(
-            "/dns4/relay.example/tcp/443/p2p/{}/p2p-circuit/p2p/{}",
-            peer(),
-            peer()
-        )
+        format!("/dns4/relay.example/tcp/443/p2p/{}/p2p-circuit/p2p/{}", peer(), peer())
     }
 
     #[test]
@@ -474,11 +466,8 @@ mod tests {
 
     #[test]
     fn bootstrap_infrastructure_never_becomes_an_inviter_endpoint() {
-        let diagnostics = ConnectivityDiagnosticsV1 {
-            bootstrap_configured: 1,
-            bootstrap_connectivity: true,
-            ..Default::default()
-        };
+        let diagnostics =
+            ConnectivityDiagnosticsV1 { bootstrap_configured: 1, bootstrap_connectivity: true, ..Default::default() };
         let connectivity = InviteConnectivityV1::from_diagnostics(&diagnostics, 13);
         assert_eq!(connectivity.reachability, InviteReachabilityV1::Unavailable);
         assert!(connectivity.shareable_addresses.is_empty());
@@ -509,10 +498,7 @@ mod tests {
         let too_many = (0..=MAX_INVITE_ADDRESSES)
             .map(|index| format!("/ip4/10.0.0.{}/udp/4000/quic-v1", index + 1))
             .collect::<Vec<_>>();
-        assert!(matches!(
-            validate_invite_addresses(&too_many),
-            Err(InviteConnectivityError::TooManyAddresses { .. })
-        ));
+        assert!(matches!(validate_invite_addresses(&too_many), Err(InviteConnectivityError::TooManyAddresses { .. })));
     }
 
     #[test]
@@ -525,14 +511,7 @@ mod tests {
 
     #[test]
     fn private_relay_endpoint_is_not_claimed_as_an_internet_relay() {
-        let address = format!(
-            "/ip4/192.168.1.10/tcp/4001/p2p/{}/p2p-circuit/p2p/{}",
-            peer(),
-            peer()
-        );
-        assert!(matches!(
-            validate_invite_addresses(&[address]),
-            Err(InviteConnectivityError::UnusableAddress(_))
-        ));
+        let address = format!("/ip4/192.168.1.10/tcp/4001/p2p/{}/p2p-circuit/p2p/{}", peer(), peer());
+        assert!(matches!(validate_invite_addresses(&[address]), Err(InviteConnectivityError::UnusableAddress(_))));
     }
 }
