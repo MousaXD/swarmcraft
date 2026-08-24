@@ -10,7 +10,7 @@ Implementation is complete enough for final validation, but the branch is not RE
 
 - Branch: `agent/discovery`
 - Last implementation head before this ledger refresh: `a4237bb864b3522bcce5606c4bca14da949a3d48`
-- Exact green/final head: pending exact-head CI after this ledger commit
+- Exact green/final head: pending exact-head CI after fixture correction
 - Validation PR: `#45` (`agent/discovery` -> `backup/local-work-20260824`), CI vehicle only; do not merge
 
 ## Mission
@@ -81,7 +81,9 @@ Exact-head CI at `f08028ab157f6bead53dcaabff695cc65338ac91` proved:
 
 That run then exposed one shared remaining compile defect: the normal daemon's exhaustive `WireRequest` match did not cover the three discovery-only variants. The same E0004 explained Rust Clippy, Desktop bundled-runtime builds, and the later process-acceptance compile failure across platforms. It was fixed at implementation head `a4237bb864b3522bcce5606c4bca14da949a3d48` with an explicit endpoint-boundary response, not a wildcard arm.
 
-Do not treat any earlier partial green jobs as exact-final-head proof. The post-ledger SHA must pass fresh CI.
+Exact-head CI at `33f9677b58d921fce20de5cda0edd3cf6bdbcfbf` then proved Ubuntu formatting and Clippy and macOS Clippy pass through the daemon boundary fix. Ubuntu and macOS tests both exposed the same deterministic fixture defect: `banned_or_removed_friend_is_not_reported_as_shared_world` constructed an arbitrary `WorldId([6; 32])` that did not match `genesis.world_id()`, correctly causing `WorldMetadataMismatch`. The fixture is being corrected to derive the canonical world ID from the genesis; the production storage invariant is not being weakened.
+
+Do not treat any earlier partial green jobs as exact-final-head proof. The post-fixture SHA must pass fresh CI.
 
 ## Decisions / invariants
 
@@ -90,11 +92,12 @@ Do not treat any earlier partial green jobs as exact-final-head proof. The post-
 - Friend/contact identity is distinct from membership and authority eligibility.
 - Private worlds must not leak through browse, exact resolution, or unnecessary metadata paths.
 - Exhaustive wire-request matching is retained so future protocol additions require an explicit ownership decision.
+- Storage world identity remains derived from canonical genesis; tests must obey this invariant rather than weakening production validation.
 - No lint blanket allows, ignored tests, wildcard match escape hatches, or fabricated green status are acceptable.
 
 ## Known issues / blockers
 
-- Final blocker is exact-head CI validation after this ledger refresh.
+- Final blocker is exact-head CI validation after the canonical-world fixture correction.
 - Agent 5 connectivity hints must be consumed during later combined integration without duplicating its reachability authority.
 
 ## Handoff for dependent agents
@@ -107,4 +110,5 @@ Agent 7 may consume this branch only after this ledger records an exact green SH
 - 2026-08-24 — implemented signed world/friend discovery, Kademlia provider lookup, Desktop bridge, and privacy semantics.
 - 2026-08-24 — used exact-head GitHub CI to fix compiler errors, borrow conflicts, rustfmt diffs, stale test imports, and Clippy findings.
 - 2026-08-24 — structurally boxed exact-world discovery response instead of suppressing enum-size lint.
-- 2026-08-24 — `a4237bb864b3522bcce5606c4bca14da949a3d48` — added explicit normal-daemon rejection response for discovery-only wire requests; fresh exact-head validation follows this ledger commit.
+- 2026-08-24 — `a4237bb864b3522bcce5606c4bca14da949a3d48` — added explicit normal-daemon rejection response for discovery-only wire requests.
+- 2026-08-24 — exact-head `33f9677b58d921fce20de5cda0edd3cf6bdbcfbf` reached clean format/Clippy and exposed a cross-platform invalid test fixture; canonical genesis-derived world identity is the required fix.
