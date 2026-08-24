@@ -1,9 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod catalog_commands;
 mod runtime;
 mod runtime_commands;
 mod transfer_commands;
 
+use catalog_commands::{fabric_loader_versions, minecraft_versions};
 use runtime::RuntimeProcesses;
 use runtime_commands::{ensure_daemon_running, start_daemon, stop_daemon, stop_host};
 use tauri::{AppHandle, State};
@@ -94,6 +96,18 @@ async fn create_world(
     let name = require_value(name, "World name")?;
     let minecraft = require_value(minecraft, "Minecraft version")?;
     let fabric_loader = require_value(fabric_loader, "Fabric loader version")?;
+    catalog_commands::validate_fabric_selection(minecraft.clone(), fabric_loader.clone())
+        .await
+        .map_err(|error| match error.code.as_str() {
+            "incompatible_fabric_selection" => format!(
+                "Selected Fabric Loader {} is not compatible with Minecraft {}. Refresh versions and choose a compatible loader.",
+                fabric_loader, minecraft
+            ),
+            _ => format!(
+                "Could not validate Minecraft/Fabric compatibility against Fabric Meta: {}",
+                error.message
+            ),
+        })?;
     let compatibility = require_value(compatibility, "Compatibility profile")?;
     let visibility = require_value(visibility, "Visibility")?;
     run_cli(
@@ -503,6 +517,8 @@ fn main() {
             initialize_node,
             node_identity,
             list_worlds,
+            minecraft_versions,
+            fabric_loader_versions,
             create_world,
             import_world,
             join_world,
