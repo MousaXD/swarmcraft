@@ -1,0 +1,62 @@
+name: Agent 2 format helper
+
+on:
+  pull_request:
+    branches: [backup/local-work-20260824]
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    if: github.head_ref == 'agent/modrinth-provider'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Fix fixture type complexity
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/swarm-cli/tests/modrinth_provider.rs')
+          text = path.read_text()
+          old = '''#[derive(Clone, Default)]
+          struct FixtureTransport {
+              responses: Arc<Mutex<VecDeque<Result<HttpResponse, ProviderFailure>>>>,
+              downloads: Arc<Mutex<VecDeque<Result<Vec<u8>, ProviderFailure>>>>,
+              requested_urls: Arc<Mutex<Vec<String>>>,
+          }
+          '''
+          new = '''type FixtureResponses = Arc<Mutex<VecDeque<Result<HttpResponse, ProviderFailure>>>>;
+          type FixtureDownloads = Arc<Mutex<VecDeque<Result<Vec<u8>, ProviderFailure>>>>;
+
+          #[derive(Clone, Default)]
+          struct FixtureTransport {
+              responses: FixtureResponses,
+              downloads: FixtureDownloads,
+              requested_urls: Arc<Mutex<Vec<String>>>,
+          }
+          '''
+          if old in text:
+              path.write_text(text.replace(old, new, 1))
+          PY
+      - name: Format Rust
+        shell: bash
+        run: |
+          cargo fmt --all
+          rustfmt --edition 2021 apps/desktop/src-tauri/src/main.rs apps/desktop/src-tauri/src/modrinth_commands.rs crates/swarm-provider/src/lib.rs
+      - name: Commit formatting
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add crates/swarm-cli/src/package_provider.rs crates/swarm-cli/src/package_provider/modrinth.rs crates/swarm-cli/tests/modrinth_provider.rs crates/swarm-cli/src/lib.rs apps/desktop/src-tauri/src/main.rs apps/desktop/src-tauri/src/modrinth_commands.rs crates/swarm-provider/src/lib.rs
+          if ! git diff --cached --quiet; then
+            git commit -m "Format Modrinth provider"
+            git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          fi
