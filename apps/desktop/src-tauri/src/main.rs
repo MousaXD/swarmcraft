@@ -1,9 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod modrinth_commands;
 mod runtime;
 mod runtime_commands;
 mod transfer_commands;
 
+use modrinth_commands::{modrinth_download, modrinth_project, modrinth_resolve, modrinth_search, modrinth_versions};
 use runtime::RuntimeProcesses;
 use runtime_commands::{ensure_daemon_running, start_daemon, stop_daemon, stop_host};
 use tauri::{AppHandle, State};
@@ -533,6 +535,11 @@ fn main() {
             runtime_verify,
             runtime_launch,
             connectivity_diagnostics,
+            modrinth_search,
+            modrinth_project,
+            modrinth_versions,
+            modrinth_resolve,
+            modrinth_download,
             ensure_daemon_running,
             start_daemon,
             stop_daemon,
