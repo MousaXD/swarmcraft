@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
-use swarm_protocol::{
-    FriendPresenceV1, PeerId, WorldAnnouncementV1, WorldId, WorldVisibilityV1, PROTOCOL_VERSION,
-};
+use swarm_protocol::{FriendPresenceV1, PeerId, WorldAnnouncementV1, WorldId, WorldVisibilityV1, PROTOCOL_VERSION};
 
 use crate::{verify_signature, CoreError, PeerIdentity};
 
@@ -92,12 +90,7 @@ pub fn verify_friend_presence(
     if presence.nonce != nonce {
         return Err(DiscoveryRecordError::PresenceNonceMismatch);
     }
-    validate_lifetime(
-        presence.issued_unix_ms,
-        presence.expires_unix_ms,
-        FRIEND_PRESENCE_MAX_LIFETIME_MS,
-        now_unix_ms,
-    )?;
+    validate_lifetime(presence.issued_unix_ms, presence.expires_unix_ms, FRIEND_PRESENCE_MAX_LIFETIME_MS, now_unix_ms)?;
     verify_signature(
         presence.peer_id,
         presence.public_key,
@@ -147,9 +140,7 @@ impl AnnouncementReplayGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use swarm_protocol::{
-        DiscoveryCompatibilityV1, Hash32, MembershipPolicyV1, WorldPresentationV1,
-    };
+    use swarm_protocol::{DiscoveryCompatibilityV1, Hash32, MembershipPolicyV1, WorldPresentationV1};
 
     fn signed_announcement(identity: &PeerIdentity, issued: u64, expires: u64) -> WorldAnnouncementV1 {
         let mut value = WorldAnnouncementV1 {
@@ -192,10 +183,7 @@ mod tests {
         let mut value = signed_announcement(&identity, 1_000, 2_000);
         verify_world_announcement(&value, 1_500).unwrap();
         value.presentation.name = "forged".into();
-        assert_eq!(
-            verify_world_announcement(&value, 1_500),
-            Err(DiscoveryRecordError::InvalidSignature)
-        );
+        assert_eq!(verify_world_announcement(&value, 1_500), Err(DiscoveryRecordError::InvalidSignature));
     }
 
     #[test]
@@ -205,10 +193,7 @@ mod tests {
         assert_eq!(verify_world_announcement(&stale, 2_001), Err(DiscoveryRecordError::Expired));
 
         let overlong = signed_announcement(&identity, 1_000, 1_000 + WORLD_ANNOUNCEMENT_MAX_LIFETIME_MS + 1);
-        assert_eq!(
-            verify_world_announcement(&overlong, 1_500),
-            Err(DiscoveryRecordError::InvalidLifetime)
-        );
+        assert_eq!(verify_world_announcement(&overlong, 1_500), Err(DiscoveryRecordError::InvalidLifetime));
     }
 
     #[test]
