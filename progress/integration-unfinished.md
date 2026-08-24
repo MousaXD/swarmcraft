@@ -1,240 +1,132 @@
 # August 24 Feature Completion + Integration Audit
 
 ## STATUS
+
 IN PROGRESS
 
-This file is the source-of-truth integration ledger for the unfinished August 24 feature wave.
+This is the integration ledger for the unfinished August 24 feature wave. GitHub remote branches, exact SHAs, PR metadata, and Actions results are authoritative in this environment because the local container cannot fetch GitHub or run Cargo directly.
 
-Environment note: this execution environment does not expose a local repository checkout, so local `git fetch --all --prune` / local branch inventory cannot be run honestly here. Remote branches, exact SHAs, PR metadata, and exact-head GitHub Actions are verified directly through GitHub and are treated as authoritative. No change in this ledger should be read as proof of an unrun local command.
+## Guardrails
 
-## Repository state before fixes
+- Do not merge feature validation PRs into `backup/local-work-20260824`.
+- Do not merge anything into `main`.
+- GitHub CI is the remote compiler, linter, test runner, acceptance lab, and cross-platform validation oracle.
+- A stale `progress/agent*.md` does not override branch heads or CI.
+- Later integration stages may consume only exact-green upstream heads.
 
-Remote branches verified before any engineering edits:
+## Baseline remote state
 
-- `main` @ `105b19ade82be606e5a855df4e82ce18bb7e885a`
-- `backup/local-work-20260824` @ `41c9b5b650aac1e320195f6e1855945f2722abc4`
-- `agent/minecraft-fabric-catalog` @ `68c6713d6658b0bcc6011803f9684564e3e562c1`
-- `agent/modrinth-provider` @ `c5d76875c33645bd64c6bc0109c8adef68d68621`
-- `agent/curseforge-provider` @ `344f086eaa7499ba2e4dfa86f6e27cd3410f5d5a`
-- `agent/automatic-invites` @ `110ed6f9558ab2417b281725018fc11dc70ae5fc`
-- `agent/discovery` @ `2105d4f5d897fcfbbd24918fdaf8609fa2a0c2b7`
+- `main` initially audited at `105b19ade82be606e5a855df4e82ce18bb7e885a`
+- `backup/local-work-20260824` at `41c9b5b650aac1e320195f6e1855945f2722abc4`
+- PR #44: `agent/modrinth-provider` -> backup
+- PR #45: `agent/discovery` -> backup
+- PR #46: `agent/automatic-invites` -> backup
+- PR #47: `agent/minecraft-fabric-catalog` -> backup
+- PR #48: `agent/curseforge-provider` -> backup
+- PR #42: backup -> `main`
 
-Expected later-stage branches are absent remotely and must not be treated as existing work:
-
-- `agent/canonical-modpack`
-- `agent/player-launcher-journey`
-- `integration/player-launcher-v1`
-
-All audited feature heads matched the checkpoint SHAs supplied in the completion brief before this ledger was added.
-
-Open PRs verified from current GitHub PR metadata:
-
-- #42 `backup/local-work-20260824` -> `main`, head `41c9b5b650aac1e320195f6e1855945f2722abc4`, draft, mergeable, 15 changed files
-- #44 `agent/modrinth-provider` -> `backup/local-work-20260824`, head `c5d76875c33645bd64c6bc0109c8adef68d68621`, draft, mergeable, 13 changed files
-- #45 `agent/discovery` -> `backup/local-work-20260824`, head advanced to `a3e8cc4e0e45bbb10ced99369c4a931642f19940` when this audit ledger was first committed, draft, mergeable, 11 changed files
-- #46 `agent/automatic-invites` -> `backup/local-work-20260824`, head `110ed6f9558ab2417b281725018fc11dc70ae5fc`, draft, mergeable, 6 changed files
-- #47 `agent/minecraft-fabric-catalog` -> `backup/local-work-20260824`, head `68c6713d6658b0bcc6011803f9684564e3e562c1`, draft, mergeable, 16 changed files
-- #48 `agent/curseforge-provider` -> `backup/local-work-20260824`, head `344f086eaa7499ba2e4dfa86f6e27cd3410f5d5a`, draft, mergeable, 10 changed files
-
-Audit corrections:
-
-- PR #48 is the CurseForge validation PR. The backup-to-main PR is #42.
-- The feature validation PR mapping is Modrinth #44, Discovery #45, Automatic Invites #46, Catalog #47, CurseForge #48.
-
-Branch classification:
-
-- `main`: stable base; no August 24 feature PR above is merged into it.
-- `backup/local-work-20260824`: active unmerged foundation/staging branch, not disposable debris. Live compare against `main` is 2 commits ahead, 0 behind, 15 changed files. It contains tracked Desktop lockfile work, runtime/migration hardening, runtime setup hardening tests, installer documentation changes, gitignore hardening, and the progress ledger framework. It must be audited intentionally before use as an integration base and must not be merged to `main` merely because feature branches descend from it.
-- Catalog, Modrinth, CurseForge, Automatic Invites, Discovery: active and unmerged.
-- No verified superseded remote branch was found in the audited branch set.
-- `progress/agent*.md` ledgers are advisory only. Several record older SHAs or pending validation and therefore do not supersede live GitHub state.
+`backup/local-work-20260824` is meaningful foundation/staging work, not disposable debris, and must not be merged to `main` as part of this wave.
 
 ## Branch: agent/discovery
 
-STATUS: BLOCKED (compile/lint failures; fix in progress)
+STATUS: READY CANDIDATE
 
-BRANCH: `agent/discovery`
+- Green implementation head: `fc52e288730bcdd98eabef3a0eaaf73c7ff92e1c`
+- PR: #45
+- CI `32779349426`: SUCCESS
+- Network Soak `32779349422`: SUCCESS
+- Release Guard `32779349498`: SUCCESS
 
-EXACT HEAD SHA before audit ledger: `2105d4f5d897fcfbbd24918fdaf8609fa2a0c2b7`
+Bugs repaired through exact-head CI:
 
-BASE SHA: `41c9b5b650aac1e320195f6e1855945f2722abc4`
+- E0308 outbound failure match-arm type mismatch.
+- E0502 friend-store borrow conflict.
+- `large_enum_variant` from exact-world discovery response size, fixed structurally by boxing the response payload.
+- rustfmt deviations.
+- stale `STORAGE_SCHEMA_VERSION` test import.
+- Clippy `needless_as_bytes`.
+- E0004 non-exhaustive normal-daemon wire-request handling, fixed with explicit `DISCOVERY_ENDPOINT_REQUIRED` protocol-boundary responses while retaining exhaustive matching.
+- invalid shared-world fixture using an arbitrary `WorldId`, fixed by deriving canonical identity from genesis instead of weakening storage validation.
 
-PR: #45 -> `backup/local-work-20260824`
+Contract preserved: PRIVATE hidden, UNLISTED non-browsable but exact-resolvable where designed, PUBLIC discoverable, signed/fresh records only, and discovery never grants membership or authority.
 
-FILES CHANGED versus PR base: 11 after the audit ledger commit
+Remaining gate: the documentation-only ledger descendant must pass exact-head CI before final READY promotion.
 
-BUGS FOUND:
-
-- Rust E0308 in `crates/swarm-cli/src/discovery.rs`: match arms using `detail.get_or_insert(error)` return `&mut String` where `()` is required.
-- Rust E0502 in friend update flow: mutable borrow from `store.friends.iter_mut()` remains live across `save_friend_store(paths, &store)`.
-- Clippy `large_enum_variant` failures in discovery/network-related enums reported by exact-head CI.
-- Discovery CI also reports unused-assignment warnings around observed host/world state.
-- Formatting/lint validation is red and must not be bypassed.
-
-FIXES: pending engineering patch.
-
-CONTRACT CHANGES: none accepted yet. Required semantics remain PRIVATE hidden, UNLISTED non-browsable but exact/invite resolvable where designed, PUBLIC discoverable, using existing authenticated SwarmCraft networking.
-
-TEST COMMANDS required:
-
-- `cargo fmt --check`
-- `cargo check --workspace`
-- `cargo clippy --workspace --all-targets --all-features`
-- `cargo test --workspace`
-- project-specific discovery/network tests
-
-TEST RESULTS: pre-fix exact-head CI is red.
-
-CI RUN/CHECK RESULTS before fixes:
-
-- CI run `32727751915`: FAILURE
-- PR Target Guard run `32727751916`: SUCCESS
-- Release Guard run `32727751906`: SUCCESS
-- dedicated discovery validation run `32745647013`: FAILURE
-
-BLOCKERS: genuine compiler and clippy failures.
-
-NEXT DEPENDENCY: Minecraft/Fabric catalog only after Discovery is technically green.
+NEXT: `agent/minecraft-fabric-catalog` immediately after this documentation head is green.
 
 ## Branch: agent/minecraft-fabric-catalog
 
-STATUS: BLOCKED (dedicated validation stops at formatting)
+STATUS: BLOCKED
 
-BRANCH: `agent/minecraft-fabric-catalog`
+- Last audited head: `68c6713d6658b0bcc6011803f9684564e3e562c1`
+- PR: #47
+- Normal CI `32721432165`: SUCCESS
+- Dedicated catalog validation `32744102086`: FAILURE
 
-EXACT HEAD SHA: `68c6713d6658b0bcc6011803f9684564e3e562c1`
+Known failure: dedicated validation stops at `cargo fmt --check`, so downstream catalog-specific validation has not yet earned green evidence. Fix formatter output first, then run the complete dedicated suite and repair any deeper failures it reveals.
 
-BASE SHA: `41c9b5b650aac1e320195f6e1855945f2722abc4`
-
-PR: #47 -> `backup/local-work-20260824`
-
-FILES CHANGED versus PR base: 16
-
-BUGS FOUND: dedicated catalog validation fails at `cargo fmt --check`; downstream functional validation does not run.
-
-FIXES: pending.
-
-CONTRACT CHANGES: none accepted yet; Mojang/Fabric authoritative catalogs and compatibility enforcement remain required.
-
-TEST COMMANDS intended by dedicated validation include catalog fixture generation/cache tests, Minecraft version validation, frontend fixture checks, catalog regeneration comparisons, and authoritative Fabric/Minecraft checks.
-
-TEST RESULTS:
-
-- normal CI run `32721432165`: SUCCESS
-- dedicated catalog validation run `32744102086`: FAILURE at formatting before functional validation
-
-BLOCKERS: formatting must be corrected, then the whole dedicated suite must run.
-
-NEXT DEPENDENCY: Modrinth provider.
+Required contract: source-backed Mojang Minecraft catalog, Fabric Meta compatible-loader catalog, deterministic/cacheable behavior, and compatibility enforcement.
 
 ## Branch: agent/modrinth-provider
 
-STATUS: BLOCKED (Desktop validation job red)
+STATUS: BLOCKED
 
-BRANCH: `agent/modrinth-provider`
+- Last audited head: `c5d76875c33645bd64c6bc0109c8adef68d68621`
+- PR: #44
+- Normal CI, PR Target Guard, and Release Guard: green at last audit
+- Dedicated validation `32735413224`: FAILURE overall
+- Provider validation, Rust workspace tests, Network Soak, and Actionlint inside that run: SUCCESS
+- Desktop build/checks: FAILURE
 
-EXACT HEAD SHA: `c5d76875c33645bd64c6bc0109c8adef68d68621`
-
-BASE SHA: `41c9b5b650aac1e320195f6e1855945f2722abc4`
-
-PR: #44 -> `backup/local-work-20260824`
-
-FILES CHANGED versus PR base: 13
-
-BUGS FOUND: the supplied audit description saying provider unit tests are red is stale. Live dedicated run `32735413224` shows provider validation, Rust workspace tests, Network soak, and Actionlint green; the failing job is Desktop build/checks.
-
-FIXES: pending exact Desktop failure diagnosis.
-
-CONTRACT CHANGES: none accepted yet. Official Modrinth API, compatibility filtering, dependency resolution, permitted download, artifact verification, and deterministic provider metadata remain required.
-
-TEST RESULTS:
-
-- normal CI: SUCCESS
-- PR Target Guard: SUCCESS
-- Release Guard: SUCCESS
-- dedicated validation run `32735413224`: FAILURE overall
-- dedicated Modrinth provider validation job: SUCCESS
-- Rust workspace tests job: SUCCESS
-- Network soak job: SUCCESS
-- Actionlint job: SUCCESS
-- Desktop build/checks job: FAILURE
-
-BLOCKERS: exact Desktop validation failure must be fixed rather than weakening provider tests.
-
-NEXT DEPENDENCY: Automatic Invites.
+The old claim that provider unit tests are red is stale. The remaining technical issue is the exact Desktop/Tauri validation failure and must be diagnosed from current logs rather than guessed.
 
 ## Branch: agent/automatic-invites
 
-STATUS: BLOCKED (cross-platform CI failure)
+STATUS: BLOCKED
 
-BRANCH: `agent/automatic-invites`
-
-EXACT HEAD SHA: `110ed6f9558ab2417b281725018fc11dc70ae5fc`
-
-BASE SHA: `41c9b5b650aac1e320195f6e1855945f2722abc4`
-
-PR: #46 -> `backup/local-work-20260824`
-
-FILES CHANGED versus PR base: 6
-
-BUGS FOUND: CI is red while Network Soak and release/target guards are green. Last audit symptom is macOS membership convergence timing out after invite acceptance; root cause still requires exact diagnosis and must not be papered over with an arbitrary sleep increase.
-
-FIXES: pending.
-
-CONTRACT CHANGES: connectivity hints must come from backend networking state; normal users must not construct libp2p multiaddresses or infer NAT truth in JavaScript.
-
-TEST RESULTS:
-
-- Release Guard: SUCCESS
-- PR Target Guard: SUCCESS
-- Network Soak: SUCCESS
+- Last audited head: `110ed6f9558ab2417b281725018fc11dc70ae5fc`
+- PR: #46
+- Release Guard, PR Target Guard, Network Soak: green at last audit
 - CI: FAILURE
 
-BLOCKERS: macOS/integration convergence failure needs diagnosis.
+Last observed symptom: macOS membership convergence times out after invite acceptance. Diagnose the actual synchronization/reachability cause. Do not hide it with arbitrary sleep inflation.
 
-NEXT DEPENDENCY: CurseForge provider.
+Contract: normal invites derive connectivity hints from backend networking state; users do not manually construct multiaddresses or infer NAT truth in JavaScript.
 
 ## Branch: agent/curseforge-provider
 
 STATUS: READY TECHNICALLY / RELEASE BOOKKEEPING RED
 
-BRANCH: `agent/curseforge-provider`
-
-EXACT HEAD SHA: `344f086eaa7499ba2e4dfa86f6e27cd3410f5d5a`
-
-BASE SHA: `41c9b5b650aac1e320195f6e1855945f2722abc4`
-
-PR: #48 -> `backup/local-work-20260824`
-
-FILES CHANGED versus PR base: 10
-
-BUGS FOUND: no technical CI failure currently observed; Release Guard is red.
-
-FIXES: no isolated version bump will be made until combined release strategy is understood.
-
-CONTRACT CHANGES: none accepted yet; official CurseForge API/no scraping/no committed secret/machine-local credential configuration/compatibility/dependency/permitted download/deterministic metadata/graceful missing-credential behavior must remain verified.
-
-TEST RESULTS:
-
-- normal CI: SUCCESS
+- Last audited head: `344f086eaa7499ba2e4dfa86f6e27cd3410f5d5a`
+- PR: #48
+- Normal CI: SUCCESS
 - PR Target Guard: SUCCESS
-- dedicated CurseForge validation: SUCCESS
+- Dedicated CurseForge validation: SUCCESS
 - Release Guard: FAILURE
 
-BLOCKERS: release-version bookkeeping only unless further validation uncovers a technical defect.
+No technical failure was observed. Do not make an isolated version bump until the combined release/version strategy is known.
 
-NEXT DEPENDENCY: combined integration after upstream technical reds are cleared.
+Contract remains official CurseForge API, no scraping, no committed secrets, graceful missing credentials, compatibility/dependency resolution, permitted artifact download, and deterministic metadata.
 
 ## Integration stages
 
-`integration/package-discovery-foundation`: NOT CREATED. Must wait for upstream technical green.
+- `integration/package-discovery-foundation`: NOT CREATED. Create only after the required upstream feature branches are technically green.
+- `agent/canonical-modpack`: NOT CREATED. Create from exact-green package/discovery foundation.
+- `agent/player-launcher-journey`: NOT CREATED. Create after canonical modpack plus required invite/discovery inputs are green.
+- `integration/player-launcher-v1`: NOT CREATED. Create only after player journey is exact-green and acceptance-ready.
 
-`agent/canonical-modpack`: NOT CREATED. Must wait for exact-green package/discovery foundation.
+## Required work order from here
 
-`agent/player-launcher-journey`: NOT CREATED. Must wait for exact-green canonical modpack.
-
-`integration/player-launcher-v1`: NOT CREATED. Must wait for exact-green player journey and final acceptance audit.
+1. Finish exact-head Discovery documentation validation and promote Agent 6.
+2. Fix and fully validate Minecraft/Fabric Catalog.
+3. Diagnose/fix Modrinth Desktop validation.
+4. Diagnose/fix Automatic Invites macOS convergence.
+5. Reconfirm CurseForge technical green and resolve release bookkeeping in the combined strategy.
+6. Create and validate `integration/package-discovery-foundation`.
+7. Build and validate `agent/canonical-modpack`.
+8. Build and validate `agent/player-launcher-journey`.
+9. Build and validate `integration/player-launcher-v1` with fresh-install/cross-platform acceptance.
 
 ## Current next action
 
-Fix `agent/discovery` at its current remote head, update this ledger plus `progress/agent6.md`, then require exact-head GitHub validation before proceeding downstream.
+Validate the current Discovery documentation head. If green, make the final READY ledger promotion and validate that exact head, then move directly to Catalog formatting and its dedicated suite.
