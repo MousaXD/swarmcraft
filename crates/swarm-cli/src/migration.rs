@@ -1,9 +1,12 @@
 use crate::{authority_permit::PermitWatch, host_readiness, launch_guard, server_mods};
 use anyhow::{anyhow, bail, Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus},
     str::FromStr,
@@ -286,6 +289,12 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
                     sleep(Duration::from_secs(1)).await;
                     continue;
                 }
+                // Another process may already own hosting (Desktop Play). Stay
+                // silent and retry later instead of racing its runtime reset.
+                let Some(authority_slot) = AuthorityRuntimeGuard::try_acquire(&paths, world)? else {
+                    sleep(SUPERVISOR_POLL).await;
+                    continue;
+                };
                 let result = run_authority_runtime_inner(
                     &paths,
                     &storage,
@@ -295,6 +304,7 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
                     false,
                 )
                 .await;
+                drop(authority_slot);
                 if let Err(error) = result {
                     publish_failure(&paths, &storage, world, MigrationTrigger::WorldWake, &config, &error)?;
                     sleep(Duration::from_secs(1)).await;
@@ -389,7 +399,14 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
             continue;
         }
         let trigger = infer_trigger(&storage, &epoch, identity.peer_id());
-        match run_authority_runtime_inner(
+        // Another process may already own hosting (Desktop Play or a CLI
+        // launch). Skip this tick silently instead of resetting its runtime
+        // directory underneath a live Minecraft process.
+        let Some(authority_slot) = AuthorityRuntimeGuard::try_acquire(&paths, world)? else {
+            sleep(SUPERVISOR_POLL).await;
+            continue;
+        };
+        let result = run_authority_runtime_inner(
             &paths,
             &storage,
             config.host_options(world),
@@ -397,8 +414,9 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
             config.game_endpoint.clone(),
             false,
         )
-        .await
-        {
+        .await;
+        drop(authority_slot);
+        match result {
             Ok(()) => {}
             Err(error) => {
                 publish_failure(&paths, &storage, world, trigger, &config, &error)?;
@@ -466,6 +484,68 @@ fn infer_trigger(storage: &Storage, epoch: &EpochRecordV1, local_peer: PeerId) -
     MigrationTrigger::DirectHost
 }
 
+/// Single-flight ownership of one world's authority runtime on this device.
+///
+/// The Desktop Play action (`swarmcraft-runtime launch`) and the daemon
+/// migration supervisor can both try to host the same solo world. A second
+/// concurrent authority runtime resets `runtime/<world>/` underneath the live
+/// Minecraft process and races its Fabric boot downloads, which surfaces to
+/// players as confusing "No such file or directory" setup failures. This
+/// advisory whole-file lock makes later attempts fail fast (explicit launches)
+/// or stay silent and retry later (supervisor ticks) instead of racing.
+struct AuthorityRuntimeGuard {
+    file: fs::File,
+}
+
+impl AuthorityRuntimeGuard {
+    fn lock_path(paths: &DataPaths, world: WorldId) -> PathBuf {
+        paths.root.join("control").join(world.to_hex()).join("authority-runtime.lock")
+    }
+
+    /// Fail-fast acquisition for explicit launch entry points.
+    fn acquire(paths: &DataPaths, world: WorldId) -> Result<Self> {
+        Self::try_acquire(paths, world)?.ok_or_else(|| {
+            anyhow!(
+                "this world already has an active authority runtime on this device; stop it before starting another"
+            )
+        })
+    }
+
+    /// Non-fatal contention probe for the background supervisor. Only a
+    /// real held lock becomes `Ok(None)`; filesystem and locking failures
+    /// are propagated so recovery cannot silently stall forever.
+    fn try_acquire(paths: &DataPaths, world: WorldId) -> Result<Option<Self>> {
+        let path = Self::lock_path(paths, world);
+        let parent = path.parent().context("authority runtime lock path has no parent directory")?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("cannot prepare authority runtime lock directory {}", parent.display()))?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("cannot open authority runtime lock {}", path.display()))?;
+        match file.try_lock_exclusive() {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot acquire authority runtime lock {}", path.display()));
+            }
+        }
+        file.set_len(0).with_context(|| format!("cannot reset authority runtime lock {}", path.display()))?;
+        write!(file, "pid={}", std::process::id())
+            .with_context(|| format!("cannot record owner in authority runtime lock {}", path.display()))?;
+        Ok(Some(Self { file }))
+    }
+}
+
+impl Drop for AuthorityRuntimeGuard {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
 pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options: HostOptions) -> Result<()> {
     let identity = PeerIdentity::load_or_create(paths)?;
     let descriptor = storage.load_world_descriptor(options.world)?;
@@ -490,6 +570,10 @@ pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options
             bail!("authority generation changed while waiting for launch safety");
         }
     }
+    // Fail fast when another authority runtime (Desktop launch, CLI launch, or
+    // the daemon supervisor) already owns this world's hosting slot. Racing
+    // here would reset the live runtime directory underneath a running server.
+    let _authority_slot = AuthorityRuntimeGuard::acquire(paths, options.world)?;
     run_authority_runtime_inner(paths, storage, options, MigrationTrigger::DirectHost, None, true).await
 }
 
@@ -553,6 +637,7 @@ async fn run_authority_runtime_inner(
         .with_context(|| format!("cannot install Fabric bridge from {}", options.mod_jar.display()))?;
     server_mods::install_verified_user_mods(paths, options.world, &world_config.compatibility, &runtime.join("mods"))?;
     fs::write(runtime.join("eula.txt"), "eula=true\n")?;
+    seed_fabric_game_jar(paths, options.world, &metadata.genesis.minecraft_version, &runtime)?;
 
     publish_status(
         paths,
@@ -1440,6 +1525,94 @@ fn reset_runtime_directory(runtime: &Path) -> Result<()> {
         fs::remove_dir_all(runtime).with_context(|| format!("cannot reset runtime directory {}", runtime.display()))?;
     }
     fs::create_dir_all(runtime)?;
+    Ok(())
+}
+
+fn managed_seed_expected_sha256(paths: &DataPaths, world: WorldId, minecraft_version: &str) -> Result<Option<String>> {
+    let lock_path = crate::runtime_layout::runtime_lock_path(paths, world);
+    if !lock_path.is_file() {
+        return Ok(None);
+    }
+    let bytes =
+        fs::read(&lock_path).with_context(|| format!("cannot read managed runtime lock {}", lock_path.display()))?;
+    let lock: serde_json::Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("managed runtime lock is malformed at {}", lock_path.display()))?;
+    let schema_version = lock
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .context("managed runtime lock is missing schema_version")?;
+    if schema_version != u64::from(crate::runtime_layout::RUNTIME_LOCK_SCHEMA_VERSION) {
+        bail!("managed runtime lock schema is incompatible with this build");
+    }
+    let lock_world =
+        lock.get("world_id").and_then(serde_json::Value::as_str).context("managed runtime lock is missing world_id")?;
+    if lock_world != world.to_string() {
+        bail!("managed runtime lock belongs to a different world");
+    }
+    let lock_minecraft = lock
+        .get("minecraft_version")
+        .and_then(serde_json::Value::as_str)
+        .context("managed runtime lock is missing minecraft_version")?;
+    if lock_minecraft != minecraft_version {
+        bail!("managed runtime lock belongs to a different Minecraft version");
+    }
+    let expected = lock
+        .pointer("/artifacts/minecraft_server/sha256")
+        .and_then(serde_json::Value::as_str)
+        .context("managed runtime lock is missing the Minecraft server SHA-256")?;
+    let decoded = hex::decode(expected).context("managed runtime lock contains an invalid Minecraft SHA-256")?;
+    if decoded.len() != 32 {
+        bail!("managed runtime lock contains an invalid Minecraft SHA-256 length");
+    }
+    Ok(Some(expected.to_ascii_lowercase()))
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file =
+        fs::File::open(path).with_context(|| format!("cannot open {} for SHA-256 verification", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("cannot read {} for SHA-256 verification", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Seed the Fabric server launcher's expected game-jar location
+/// (`<runtime>/.fabric/server/<minecraft>-server.jar`) only from a
+/// managed artifact that still matches its runtime-lock SHA-256.
+///
+/// Manual/advanced runtime profiles without a managed runtime lock keep
+/// their existing behavior and do not consume stray staged artifacts.
+fn seed_fabric_game_jar(paths: &DataPaths, world: WorldId, minecraft_version: &str, runtime: &Path) -> Result<()> {
+    let Some(expected_sha256) = managed_seed_expected_sha256(paths, world, minecraft_version)? else {
+        return Ok(());
+    };
+    let staged = crate::runtime_layout::managed_world_server_dir(paths, world).join("server.jar");
+    if !staged.is_file() {
+        bail!("managed runtime lock references a staged Minecraft server jar that is missing at {}", staged.display());
+    }
+    let actual_sha256 = sha256_file(&staged)?;
+    if actual_sha256 != expected_sha256 {
+        bail!("staged managed Minecraft server jar failed runtime-lock SHA-256 verification");
+    }
+    let server_dir = runtime.join(".fabric").join("server");
+    fs::create_dir_all(&server_dir).with_context(|| format!("cannot create {}", server_dir.display()))?;
+    let game_jar = server_dir.join(format!("{minecraft_version}-server.jar"));
+    if game_jar.exists() {
+        return Ok(());
+    }
+    let temporary = server_dir.join(format!("{minecraft_version}-server.jar.tmp-seed"));
+    let _ = fs::remove_file(&temporary);
+    fs::copy(&staged, &temporary)
+        .with_context(|| format!("cannot stage {} into {}", staged.display(), server_dir.display()))?;
+    fs::rename(&temporary, &game_jar).with_context(|| format!("cannot publish {}", game_jar.display()))?;
     Ok(())
 }
 

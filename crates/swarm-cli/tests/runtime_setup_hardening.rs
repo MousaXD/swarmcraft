@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -388,4 +389,186 @@ fn manual_advanced_config_is_launchable_without_being_reclassified_as_missing_ma
     )
     .unwrap();
     assert_eq!(readiness, swarm_network::HostRuntimeReadinessV1::Unverified);
+}
+
+#[tokio::test]
+async fn concurrent_authority_launch_fails_fast_across_processes_and_recovers_after_release() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fixture(temp.path().join("peer-concurrent"));
+    let lock_path = fixture.paths.root.join("control").join(fixture.world.to_hex()).join("authority-runtime.lock");
+    let ready_path = temp.path().join("lock-holder-ready");
+    let helper_path = temp.path().join("hold-lock.py");
+    fs::write(
+        &helper_path,
+        r#"import fcntl
+import pathlib
+import sys
+import time
+
+lock_path = pathlib.Path(sys.argv[1])
+ready_path = pathlib.Path(sys.argv[2])
+lock_path.parent.mkdir(parents=True, exist_ok=True)
+with lock_path.open("a+") as handle:
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    ready_path.write_text("locked", encoding="utf-8")
+    time.sleep(30)
+"#,
+    )
+    .unwrap();
+    let mut holder =
+        std::process::Command::new("python3").arg(&helper_path).arg(&lock_path).arg(&ready_path).spawn().unwrap();
+    for _ in 0..100 {
+        if ready_path.is_file() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(ready_path.is_file(), "cross-process lock holder did not become ready");
+
+    let error = run_authority_runtime(
+        &fixture.paths,
+        &fixture.storage,
+        HostOptions {
+            world: fixture.world,
+            java: temp.path().join("unused-java"),
+            server_jar: temp.path().join("unused-server.jar"),
+            mod_jar: temp.path().join("unused-bridge.jar"),
+            accept_eula: true,
+        },
+    )
+    .await
+    .unwrap_err();
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+
+    assert!(
+        error.to_string().contains("already has an active authority runtime"),
+        "second process must fail fast with a clear message: {error}"
+    );
+    assert_eq!(canonical_hash(&fixture), fixture.baseline_hash);
+    assert!(
+        load_migration_status(&fixture.paths, fixture.world).is_err(),
+        "a raced-out launch must not publish migration status"
+    );
+
+    let (java, server, bridge) = manual_runtime_files(temp.path(), "26.1.2", "0.19.3");
+    run_authority_runtime(
+        &fixture.paths,
+        &fixture.storage,
+        HostOptions { world: fixture.world, java, server_jar: server, mod_jar: bridge, accept_eula: true },
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn authority_lock_io_failure_is_not_misreported_as_contention() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fixture(temp.path().join("peer-lock-io"));
+    let control = fixture.paths.root.join("control");
+    fs::write(&control, b"not-a-directory").unwrap();
+
+    let error = run_authority_runtime(
+        &fixture.paths,
+        &fixture.storage,
+        HostOptions {
+            world: fixture.world,
+            java: temp.path().join("unused-java"),
+            server_jar: temp.path().join("unused-server.jar"),
+            mod_jar: temp.path().join("unused-bridge.jar"),
+            accept_eula: true,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("authority runtime lock directory"),
+        "lock-path I/O failure should be surfaced: {error}"
+    );
+    assert!(!error.to_string().contains("already has an active authority runtime"));
+    assert_eq!(canonical_hash(&fixture), fixture.baseline_hash);
+}
+
+fn write_seed_runtime_lock(fixture: &RuntimeFixture, minecraft: &str, sha256: &str) {
+    let lock_path =
+        fixture.paths.root.join("runtime-components").join(fixture.world.to_hex()).join("runtime-lock.json");
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let lock = serde_json::json!({
+        "schema_version": 1,
+        "world_id": fixture.world.to_string(),
+        "minecraft_version": minecraft,
+        "artifacts": { "minecraft_server": { "sha256": sha256 } }
+    });
+    fs::write(lock_path, serde_json::to_vec_pretty(&lock).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn fresh_runtime_is_seeded_only_from_hash_verified_staged_game_jar() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fixture(temp.path().join("peer-seed"));
+    let java = temp.path().join("mock-java");
+    let server = temp.path().join("fabric-server.jar");
+    let bridge = temp.path().join("swarmcraft-fabric.jar");
+    write_mock_java(&java, "26.1.2", "0.19.3");
+    fs::write(&server, b"mock-server").unwrap();
+    fs::write(&bridge, b"mock-bridge").unwrap();
+
+    let staged_bytes = b"staged-game-jar-bytes";
+    let staged_sha256 = hex::encode(Sha256::digest(staged_bytes));
+    let staged_dir = fixture.paths.root.join("runtime-components").join(fixture.world.to_hex()).join("server");
+    fs::create_dir_all(&staged_dir).unwrap();
+    fs::write(staged_dir.join("server.jar"), staged_bytes).unwrap();
+    write_seed_runtime_lock(&fixture, "26.1.2", &staged_sha256);
+
+    run_authority_runtime(
+        &fixture.paths,
+        &fixture.storage,
+        HostOptions { world: fixture.world, java, server_jar: server, mod_jar: bridge, accept_eula: true },
+    )
+    .await
+    .unwrap();
+
+    let seeded = runtime_dir(&fixture).join(".fabric/server/26.1.2-server.jar");
+    assert_eq!(
+        fs::read(&seeded).unwrap(),
+        staged_bytes,
+        "the Fabric launcher must find the verified staged game jar without re-downloading Minecraft at boot"
+    );
+}
+
+#[tokio::test]
+async fn corrupt_staged_game_jar_is_rejected_before_java_launch() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fixture(temp.path().join("peer-seed-corrupt"));
+    let server = temp.path().join("fabric-server.jar");
+    let bridge = temp.path().join("swarmcraft-fabric.jar");
+    fs::write(&server, b"mock-server").unwrap();
+    fs::write(&bridge, b"mock-bridge").unwrap();
+
+    let expected_sha256 = hex::encode(Sha256::digest(b"expected-game-jar-bytes"));
+    let staged_dir = fixture.paths.root.join("runtime-components").join(fixture.world.to_hex()).join("server");
+    fs::create_dir_all(&staged_dir).unwrap();
+    fs::write(staged_dir.join("server.jar"), b"tampered-game-jar-bytes").unwrap();
+    write_seed_runtime_lock(&fixture, "26.1.2", &expected_sha256);
+
+    let error = run_authority_runtime(
+        &fixture.paths,
+        &fixture.storage,
+        HostOptions {
+            world: fixture.world,
+            java: temp.path().join("java-must-not-launch"),
+            server_jar: server,
+            mod_jar: bridge,
+            accept_eula: true,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("runtime-lock SHA-256 verification"),
+        "corrupt staged game jar must fail closed before Java launch: {error}"
+    );
+    assert_eq!(canonical_hash(&fixture), fixture.baseline_hash);
 }

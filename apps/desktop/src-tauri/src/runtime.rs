@@ -119,10 +119,6 @@ impl RuntimeProcesses {
             "Managed authority host",
         )
     }
-
-    pub fn stop_host(&self) -> Result<(), String> {
-        stop(&self.host, "Authority host")
-    }
 }
 
 impl Drop for RuntimeProcesses {

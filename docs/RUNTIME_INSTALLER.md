@@ -121,6 +121,8 @@ Downloads are written to temporary files, checked before publication, fsynced, a
 
 Installer locking uses an OS-backed per-world file lock. Concurrent live installers are rejected, while a process crash does not leave a permanent PID-file wedge. Replacement preserves the known-good destination until the new verified artifact is ready to publish and attempts rollback if publication fails.
 
+Authority hosting uses the same class of protection: each world has one machine-local authority-runtime slot (`control/<world>/authority-runtime.lock`). An explicit launch (Desktop Play, `swarmcraft-runtime launch`) fails fast when another process actually holds that slot, while the daemon supervisor retries only genuine lock contention; lock-path and locking I/O failures are surfaced instead of being mistaken for an active host. A freshly prepared runtime directory is seeded from `runtime-components/<world>/server/server.jar` only when a compatible managed runtime lock exists and the staged JAR still matches its recorded SHA-256, so first launch avoids a Mojang re-download without trusting stale or stray staged bytes.
+
 The implementation uses the platform `curl` for HTTPS transfer and platform archive extraction where required, but it does not download or execute arbitrary third-party installer scripts.
 
 ## Java

@@ -5,3 +5,7 @@
 .DS_Store
 *.log
 *.tmp
+
+# Local Tauri sidecar binaries
+apps/desktop/src-tauri/binaries/
+apps/desktop/src-tauri/gen/
