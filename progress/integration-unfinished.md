@@ -9,7 +9,7 @@ Environment note: this execution environment does not expose a local repository 
 
 ## Repository state before fixes
 
-Remote branches verified:
+Remote branches verified before any engineering edits:
 
 - `main` @ `105b19ade82be606e5a855df4e82ce18bb7e885a`
 - `backup/local-work-20260824` @ `41c9b5b650aac1e320195f6e1855945f2722abc4`
@@ -25,23 +25,26 @@ Expected later-stage branches are absent remotely and must not be treated as exi
 - `agent/player-launcher-journey`
 - `integration/player-launcher-v1`
 
-All audited feature heads match the last checkpoint SHAs supplied in the completion brief.
+All audited feature heads matched the checkpoint SHAs supplied in the completion brief before this ledger was added.
 
-Open PRs:
+Open PRs verified from current GitHub PR metadata:
 
-- #42 `backup/local-work-20260824` -> `main`, head `41c9b5b650aac1e320195f6e1855945f2722abc4`
-- #44 `agent/minecraft-fabric-catalog` -> `backup/local-work-20260824`, head `68c6713d6658b0bcc6011803f9684564e3e562c1`
-- #45 `agent/modrinth-provider` -> `backup/local-work-20260824`, head `c5d76875c33645bd64c6bc0109c8adef68d68621`
-- #46 `agent/automatic-invites` -> `backup/local-work-20260824`, head `110ed6f9558ab2417b281725018fc11dc70ae5fc`
-- #47 `agent/discovery` -> `backup/local-work-20260824`, head `2105d4f5d897fcfbbd24918fdaf8609fa2a0c2b7`
-- #48 `agent/curseforge-provider` -> `backup/local-work-20260824`, head `344f086eaa7499ba2e4dfa86f6e27cd3410f5d5a`
+- #42 `backup/local-work-20260824` -> `main`, head `41c9b5b650aac1e320195f6e1855945f2722abc4`, draft, mergeable, 15 changed files
+- #44 `agent/modrinth-provider` -> `backup/local-work-20260824`, head `c5d76875c33645bd64c6bc0109c8adef68d68621`, draft, mergeable, 13 changed files
+- #45 `agent/discovery` -> `backup/local-work-20260824`, head advanced to `a3e8cc4e0e45bbb10ced99369c4a931642f19940` when this audit ledger was first committed, draft, mergeable, 11 changed files
+- #46 `agent/automatic-invites` -> `backup/local-work-20260824`, head `110ed6f9558ab2417b281725018fc11dc70ae5fc`, draft, mergeable, 6 changed files
+- #47 `agent/minecraft-fabric-catalog` -> `backup/local-work-20260824`, head `68c6713d6658b0bcc6011803f9684564e3e562c1`, draft, mergeable, 16 changed files
+- #48 `agent/curseforge-provider` -> `backup/local-work-20260824`, head `344f086eaa7499ba2e4dfa86f6e27cd3410f5d5a`, draft, mergeable, 10 changed files
 
-Audit correction: PR #48 is the CurseForge validation PR. The backup-to-main PR is #42.
+Audit corrections:
+
+- PR #48 is the CurseForge validation PR. The backup-to-main PR is #42.
+- The feature validation PR mapping is Modrinth #44, Discovery #45, Automatic Invites #46, Catalog #47, CurseForge #48.
 
 Branch classification:
 
 - `main`: stable base; no August 24 feature PR above is merged into it.
-- `backup/local-work-20260824`: active unmerged foundation/staging branch, not disposable debris. Compared with `main`, it is 14 commits ahead, 0 behind, with substantial runtime/Desktop/player-journey foundation changes. It must be audited intentionally before use as an integration base and must not be merged to `main` merely because feature branches descend from it.
+- `backup/local-work-20260824`: active unmerged foundation/staging branch, not disposable debris. Live compare against `main` is 2 commits ahead, 0 behind, 15 changed files. It contains tracked Desktop lockfile work, runtime/migration hardening, runtime setup hardening tests, installer documentation changes, gitignore hardening, and the progress ledger framework. It must be audited intentionally before use as an integration base and must not be merged to `main` merely because feature branches descend from it.
 - Catalog, Modrinth, CurseForge, Automatic Invites, Discovery: active and unmerged.
 - No verified superseded remote branch was found in the audited branch set.
 - `progress/agent*.md` ledgers are advisory only. Several record older SHAs or pending validation and therefore do not supersede live GitHub state.
@@ -52,23 +55,23 @@ STATUS: BLOCKED (compile/lint failures; fix in progress)
 
 BRANCH: `agent/discovery`
 
-EXACT HEAD SHA before fixes: `2105d4f5d897fcfbbd24918fdaf8609fa2a0c2b7`
+EXACT HEAD SHA before audit ledger: `2105d4f5d897fcfbbd24918fdaf8609fa2a0c2b7`
 
 BASE SHA: `41c9b5b650aac1e320195f6e1855945f2722abc4`
 
-PR: #47 -> `backup/local-work-20260824`
+PR: #45 -> `backup/local-work-20260824`
 
-FILES CHANGED versus PR base: 11
+FILES CHANGED versus PR base: 11 after the audit ledger commit
 
 BUGS FOUND:
 
 - Rust E0308 in `crates/swarm-cli/src/discovery.rs`: match arms using `detail.get_or_insert(error)` return `&mut String` where `()` is required.
 - Rust E0502 in friend update flow: mutable borrow from `store.friends.iter_mut()` remains live across `save_friend_store(paths, &store)`.
-- Clippy `large_enum_variant` failures in discovery/network-related enums (`crates/swarm-net/src/node.rs` and `crates/swarm-net/src/wire.rs`).
+- Clippy `large_enum_variant` failures in discovery/network-related enums reported by exact-head CI.
 - Discovery CI also reports unused-assignment warnings around observed host/world state.
 - Formatting/lint validation is red and must not be bypassed.
 
-FIXES: pending.
+FIXES: pending engineering patch.
 
 CONTRACT CHANGES: none accepted yet. Required semantics remain PRIVATE hidden, UNLISTED non-browsable but exact/invite resolvable where designed, PUBLIC discoverable, using existing authenticated SwarmCraft networking.
 
@@ -80,9 +83,9 @@ TEST COMMANDS required:
 - `cargo test --workspace`
 - project-specific discovery/network tests
 
-TEST RESULTS: exact-head CI is currently red.
+TEST RESULTS: pre-fix exact-head CI is red.
 
-CI RUN/CHECK RESULTS:
+CI RUN/CHECK RESULTS before fixes:
 
 - CI run `32727751915`: FAILURE
 - PR Target Guard run `32727751916`: SUCCESS
@@ -103,9 +106,9 @@ EXACT HEAD SHA: `68c6713d6658b0bcc6011803f9684564e3e562c1`
 
 BASE SHA: `41c9b5b650aac1e320195f6e1855945f2722abc4`
 
-PR: #44 -> `backup/local-work-20260824`
+PR: #47 -> `backup/local-work-20260824`
 
-FILES CHANGED versus PR base: 11
+FILES CHANGED versus PR base: 16
 
 BUGS FOUND: dedicated catalog validation fails at `cargo fmt --check`; downstream functional validation does not run.
 
@@ -134,9 +137,9 @@ EXACT HEAD SHA: `c5d76875c33645bd64c6bc0109c8adef68d68621`
 
 BASE SHA: `41c9b5b650aac1e320195f6e1855945f2722abc4`
 
-PR: #45 -> `backup/local-work-20260824`
+PR: #44 -> `backup/local-work-20260824`
 
-FILES CHANGED versus PR base: 7
+FILES CHANGED versus PR base: 13
 
 BUGS FOUND: the supplied audit description saying provider unit tests are red is stale. Live dedicated run `32735413224` shows provider validation, Rust workspace tests, Network soak, and Actionlint green; the failing job is Desktop build/checks.
 
@@ -172,7 +175,7 @@ BASE SHA: `41c9b5b650aac1e320195f6e1855945f2722abc4`
 
 PR: #46 -> `backup/local-work-20260824`
 
-FILES CHANGED versus PR base: 8
+FILES CHANGED versus PR base: 6
 
 BUGS FOUND: CI is red while Network Soak and release/target guards are green. Last audit symptom is macOS membership convergence timing out after invite acceptance; root cause still requires exact diagnosis and must not be papered over with an arbitrary sleep increase.
 
@@ -203,7 +206,7 @@ BASE SHA: `41c9b5b650aac1e320195f6e1855945f2722abc4`
 
 PR: #48 -> `backup/local-work-20260824`
 
-FILES CHANGED versus PR base: 7
+FILES CHANGED versus PR base: 10
 
 BUGS FOUND: no technical CI failure currently observed; Release Guard is red.
 
@@ -234,4 +237,4 @@ NEXT DEPENDENCY: combined integration after upstream technical reds are cleared.
 
 ## Current next action
 
-Fix `agent/discovery` at the exact remote head, update this ledger plus `progress/agent6.md`, then require exact-head GitHub validation before proceeding downstream.
+Fix `agent/discovery` at its current remote head, update this ledger plus `progress/agent6.md`, then require exact-head GitHub validation before proceeding downstream.
