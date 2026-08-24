@@ -122,10 +122,7 @@ mod tests {
 
     #[test]
     fn signed_invite_round_trip() {
-        let invite = signed_invite(
-            unix_time_ms().unwrap() + 60_000,
-            vec!["/ip4/1.1.1.1/udp/4001/quic-v1".into()],
-        );
+        let invite = signed_invite(unix_time_ms().unwrap() + 60_000, vec!["/ip4/1.1.1.1/udp/4001/quic-v1".into()]);
         assert_eq!(decode(&encode(&invite).unwrap()).unwrap(), invite);
     }
 
@@ -138,18 +135,14 @@ mod tests {
 
     #[test]
     fn loopback_hint_is_rejected_even_when_signed() {
-        let invite = signed_invite(
-            unix_time_ms().unwrap() + 60_000,
-            vec!["/ip4/127.0.0.1/udp/4001/quic-v1".into()],
-        );
+        let invite = signed_invite(unix_time_ms().unwrap() + 60_000, vec!["/ip4/127.0.0.1/udp/4001/quic-v1".into()]);
         assert!(encode(&invite).unwrap_err().to_string().contains("connection hints"));
     }
 
     #[test]
     fn too_many_hints_are_rejected() {
-        let addresses = (0..=MAX_INVITE_ADDRESSES)
-            .map(|index| format!("/ip4/10.0.0.{}/udp/4001/quic-v1", index + 1))
-            .collect();
+        let addresses =
+            (0..=MAX_INVITE_ADDRESSES).map(|index| format!("/ip4/10.0.0.{}/udp/4001/quic-v1", index + 1)).collect();
         let invite = signed_invite(unix_time_ms().unwrap() + 60_000, addresses);
         assert!(encode(&invite).is_err());
     }
@@ -169,10 +162,7 @@ mod tests {
 
         let connectivity = invite_connectivity_from_snapshot(&snapshot).unwrap();
         assert_eq!(connectivity.reachability, InviteReachabilityV1::PublicDirect);
-        assert_eq!(
-            resolve_bootstrap_addrs(&paths, Vec::new()).unwrap(),
-            vec!["/ip4/1.1.1.1/udp/41000/quic-v1"]
-        );
+        assert_eq!(resolve_bootstrap_addrs(&paths, Vec::new()).unwrap(), vec!["/ip4/1.1.1.1/udp/41000/quic-v1"]);
     }
 
     #[test]
