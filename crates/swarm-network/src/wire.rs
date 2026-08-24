@@ -156,7 +156,7 @@ pub enum WireResponse {
     HostCapability(Option<HostCapabilityV1>),
     // Discovery extensions are append-only for postcard compatibility.
     DiscoveryWorlds(Vec<WorldAnnouncementV1>),
-    DiscoveryResolved(Option<WorldAnnouncementV1>),
+    DiscoveryResolved(Option<Box<WorldAnnouncementV1>>),
     FriendPresence(Option<FriendPresenceV1>),
 }
 
@@ -335,7 +335,7 @@ mod tests {
             signature: vec![0; 64],
         };
         assert!(matches!(
-            WireResponse::DiscoveryResolved(Some(announcement)).validate_limits(),
+            WireResponse::DiscoveryResolved(Some(Box::new(announcement))).validate_limits(),
             Err(WireLimitError::DiscoveryAnnouncementTooLarge(_))
         ));
     }
