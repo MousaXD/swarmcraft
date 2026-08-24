@@ -1,0 +1,25 @@
+name: Agent 1 Lockfiles
+
+on:
+  pull_request:
+    branches: [backup/local-work-20260824]
+
+permissions:
+  contents: read
+
+jobs:
+  lockfiles:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate workspace and desktop lockfiles
+        run: |
+          cargo generate-lockfile
+          cargo generate-lockfile --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent1-lockfiles
+          path: |
+            Cargo.lock
+            apps/desktop/src-tauri/Cargo.lock
