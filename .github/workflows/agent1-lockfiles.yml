@@ -29,6 +29,21 @@ jobs:
         run: |
           cargo fmt --all
           cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+      - name: Fix owned catalog test type complexity
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/swarm-catalog/src/lib.rs')
+          text = path.read_text()
+          old = '''    #[derive(Clone)]\n    struct MockTransport {\n        calls: Arc<AtomicUsize>,\n        responses: Arc<Mutex<VecDeque<Result<Vec<u8>, CatalogError>>>>,\n    }\n'''
+          new = '''    type MockResponses = Arc<Mutex<VecDeque<Result<Vec<u8>, CatalogError>>>>;\n\n    #[derive(Clone)]\n    struct MockTransport {\n        calls: Arc<AtomicUsize>,\n        responses: MockResponses,\n    }\n'''
+          if old not in text:
+              raise SystemExit('expected MockTransport type block not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          cargo fmt --all
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
           cargo fmt --all -- --check
           cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
 
