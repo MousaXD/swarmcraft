@@ -1,4 +1,4 @@
-name: Agent 1 Desktop Diagnostic
+name: Agent 1 Catalog Validation
 
 on:
   pull_request:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  diagnose-desktop:
+  validate:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
@@ -19,11 +19,39 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
 
-      - name: Regenerate required lockfiles for diagnosis
+      - name: Regenerate lockfiles for validation snapshot
         run: |
           cargo generate-lockfile
           cargo generate-lockfile --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+      - name: Upload generated lockfiles
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent1-generated-lockfiles
+          path: |
+            Cargo.lock
+            apps/desktop/src-tauri/Cargo.lock
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Workspace format
+        run: cargo fmt --all -- --check
+      - name: Workspace locked metadata
+        run: cargo metadata --locked --format-version 1 --no-deps > /dev/null
+      - name: Workspace check
+        run: cargo check --workspace --all-features --locked
+      - name: Workspace clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Workspace tests
+        run: cargo test --workspace --all-features --locked
+      - name: Catalog deterministic tests
+        run: cargo test -p swarm-catalog --all-features --locked
 
       - name: Install Linux desktop dependencies
         run: |
@@ -35,26 +63,28 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      - name: Desktop Tauri check
-        id: desktop_check
-        continue-on-error: true
+      - name: Build and stage required Tauri sidecars
         shell: bash
         run: |
-          set -o pipefail
-          cargo check \
-            --manifest-path apps/desktop/src-tauri/Cargo.toml \
-            --all-features \
-            --locked 2>&1 | tee desktop-tauri-check.log
+          set -euo pipefail
+          cargo build --release -p swarm-cli --locked
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
+          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+          cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
+          cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
 
-      - name: Upload Desktop compiler diagnostic
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: agent1-desktop-tauri-check
-          path: desktop-tauri-check.log
-          if-no-files-found: error
-          retention-days: 1
+      - name: Desktop format
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check
+      - name: Desktop locked metadata
+        run: cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --format-version 1 --no-deps > /dev/null
+      - name: Desktop check
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features --locked
+      - name: Desktop clippy
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
+      - name: Desktop tests
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features --locked
 
-      - name: Fail when Desktop check failed
-        if: steps.desktop_check.outcome == 'failure'
-        run: exit 1
+      - name: Desktop JavaScript tests
+        run: node --test apps/desktop/tests/*.test.mjs
