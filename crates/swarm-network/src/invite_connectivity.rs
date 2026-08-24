@@ -299,8 +299,9 @@ fn validate_address(value: &str) -> Result<ValidatedAddress, InviteConnectivityE
     let kind = if saw_circuit {
         // A concrete relay hint must name both the relay peer and destination
         // peer. /p2p-circuit alone is only a transport intent, not a remotely
-        // dialable address for this inviter.
-        if !peer_before_circuit || !peer_after_circuit {
+        // dialable address for this inviter. A private/LAN relay host also
+        // cannot be claimed as an internet-usable fallback.
+        if !peer_before_circuit || !peer_after_circuit || local_scope {
             return Err(InviteConnectivityError::UnusableAddress(value.to_owned()));
         }
         AddressKind::Relay
@@ -518,6 +519,19 @@ mod tests {
     fn relay_hint_requires_concrete_relay_and_destination_peers() {
         assert!(matches!(
             validate_invite_addresses(&["/ip4/1.1.1.1/tcp/4001/p2p-circuit".into()]),
+            Err(InviteConnectivityError::UnusableAddress(_))
+        ));
+    }
+
+    #[test]
+    fn private_relay_endpoint_is_not_claimed_as_an_internet_relay() {
+        let address = format!(
+            "/ip4/192.168.1.10/tcp/4001/p2p/{}/p2p-circuit/p2p/{}",
+            peer(),
+            peer()
+        );
+        assert!(matches!(
+            validate_invite_addresses(&[address]),
             Err(InviteConnectivityError::UnusableAddress(_))
         ));
     }
