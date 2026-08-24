@@ -1,9 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod curseforge;
 mod runtime;
 mod runtime_commands;
 mod transfer_commands;
 
+use curseforge::{
+    curseforge_download, curseforge_project, curseforge_provider_status, curseforge_resolve,
+    curseforge_search, curseforge_versions,
+};
 use runtime::RuntimeProcesses;
 use runtime_commands::{ensure_daemon_running, start_daemon, stop_daemon, stop_host};
 use tauri::{AppHandle, State};
@@ -533,6 +538,12 @@ fn main() {
             runtime_verify,
             runtime_launch,
             connectivity_diagnostics,
+            curseforge_provider_status,
+            curseforge_search,
+            curseforge_project,
+            curseforge_versions,
+            curseforge_resolve,
+            curseforge_download,
             ensure_daemon_running,
             start_daemon,
             stop_daemon,
