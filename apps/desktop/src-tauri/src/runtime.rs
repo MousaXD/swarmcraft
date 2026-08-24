@@ -69,8 +69,10 @@ impl Default for RuntimeProcesses {
         Self {
             daemon: ProcessSlot::default(),
             host: ProcessSlot::default(),
-            connectivity_json: std::env::temp_dir()
-                .join(format!("swarmcraft-connectivity-{}.json", std::process::id())),
+            connectivity_json: std::env::temp_dir().join(format!(
+                "swarmcraft-connectivity-{}.json",
+                std::process::id()
+            )),
         }
     }
 }
@@ -78,7 +80,13 @@ impl Default for RuntimeProcesses {
 impl RuntimeProcesses {
     pub fn ensure_daemon_running(&self, app: &AppHandle, listen: String) -> Result<u32, String> {
         std::env::set_var(CONNECTIVITY_DIAGNOSTICS_JSON_ENV, &self.connectivity_json);
-        spawn(app, "swarmcraft", vec!["daemon".into(), "--listen".into(), listen], &self.daemon, "Replication daemon")
+        spawn(
+            app,
+            "swarmcraft",
+            vec!["daemon".into(), "--listen".into(), listen],
+            &self.daemon,
+            "Replication daemon",
+        )
     }
 
     pub fn start_daemon(&self, app: &AppHandle, listen: String) -> Result<u32, String> {
@@ -103,7 +111,13 @@ impl RuntimeProcesses {
     }
 
     pub fn start_managed_host(&self, app: &AppHandle, world: String) -> Result<u32, String> {
-        spawn(app, "swarmcraft-runtime", vec!["launch".into(), world], &self.host, "Managed authority host")
+        spawn(
+            app,
+            "swarmcraft-runtime",
+            vec!["launch".into(), world],
+            &self.host,
+            "Managed authority host",
+        )
     }
 }
 
@@ -151,7 +165,11 @@ fn spawn(
 }
 
 fn stop(slot: &ProcessSlot, label: &str) -> Result<(), String> {
-    let child = slot.state.lock().map_err(|_| format!("{label} process state is poisoned"))?.take();
+    let child = slot
+        .state
+        .lock()
+        .map_err(|_| format!("{label} process state is poisoned"))?
+        .take();
     match child {
         Some(child) => child.kill().map_err(|error| error.to_string()),
         None => Err(format!("{label} is not owned by this Desktop process")),
