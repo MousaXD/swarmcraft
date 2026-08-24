@@ -13,10 +13,13 @@ use swarm_cli::package_provider::{
     ModVersionFilter, PackageEnvironment, ProviderFailure, ProviderFailureKind, ProviderId, ReleaseType,
 };
 
+type FixtureResponses = Arc<Mutex<VecDeque<Result<HttpResponse, ProviderFailure>>>>;
+type FixtureDownloads = Arc<Mutex<VecDeque<Result<Vec<u8>, ProviderFailure>>>>;
+
 #[derive(Clone, Default)]
 struct FixtureTransport {
-    responses: Arc<Mutex<VecDeque<Result<HttpResponse, ProviderFailure>>>>,
-    downloads: Arc<Mutex<VecDeque<Result<Vec<u8>, ProviderFailure>>>>,
+    responses: FixtureResponses,
+    downloads: FixtureDownloads,
     requested_urls: Arc<Mutex<Vec<String>>>,
 }
 
@@ -26,18 +29,11 @@ impl FixtureTransport {
     }
 
     fn raw(&self, status: u16, headers: BTreeMap<String, String>, body: impl Into<Vec<u8>>) {
-        self.responses.lock().unwrap().push_back(Ok(HttpResponse {
-            status,
-            headers,
-            body: body.into(),
-        }));
+        self.responses.lock().unwrap().push_back(Ok(HttpResponse { status, headers, body: body.into() }));
     }
 
     fn get_error(&self, kind: ProviderFailureKind) {
-        self.responses
-            .lock()
-            .unwrap()
-            .push_back(Err(ProviderFailure::new(kind, "fixture failure")));
+        self.responses.lock().unwrap().push_back(Err(ProviderFailure::new(kind, "fixture failure")));
     }
 
     fn download(&self, bytes: &[u8]) {
@@ -45,31 +41,21 @@ impl FixtureTransport {
     }
 
     fn download_error(&self) {
-        self.downloads.lock().unwrap().push_back(Err(ProviderFailure::new(
-            ProviderFailureKind::DownloadInterrupted,
-            "fixture connection reset",
-        )));
+        self.downloads
+            .lock()
+            .unwrap()
+            .push_back(Err(ProviderFailure::new(ProviderFailureKind::DownloadInterrupted, "fixture connection reset")));
     }
 }
 
 impl ModrinthTransport for FixtureTransport {
     fn get(&self, url: &str) -> Result<HttpResponse, ProviderFailure> {
         self.requested_urls.lock().unwrap().push(url.to_owned());
-        self.responses
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("fixture response queue exhausted")
+        self.responses.lock().unwrap().pop_front().expect("fixture response queue exhausted")
     }
 
     fn download(&self, _url: &str, destination: &Path, _max_bytes: u64) -> Result<(), ProviderFailure> {
-        match self
-            .downloads
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("fixture download queue exhausted")
-        {
+        match self.downloads.lock().unwrap().pop_front().expect("fixture download queue exhausted") {
             Ok(bytes) => {
                 fs::write(destination, bytes).unwrap();
                 Ok(())
@@ -87,10 +73,7 @@ fn client(transport: FixtureTransport) -> ModrinthClient<FixtureTransport> {
 }
 
 fn headers(values: &[(&str, &str)]) -> BTreeMap<String, String> {
-    values
-        .iter()
-        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-        .collect()
+    values.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())).collect()
 }
 
 fn version(
@@ -176,11 +159,7 @@ fn search_parses_pagination_rate_limits_and_backend_compatibility_facets() {
     let transport = FixtureTransport::default();
     transport.raw(
         200,
-        headers(&[
-            ("x-ratelimit-limit", "300"),
-            ("x-ratelimit-remaining", "299"),
-            ("x-ratelimit-reset", "42"),
-        ]),
+        headers(&[("x-ratelimit-limit", "300"), ("x-ratelimit-remaining", "299"), ("x-ratelimit-reset", "42")]),
         serde_json::to_vec(&json!({
             "hits": [{
                 "project_id": "P1",
@@ -274,10 +253,7 @@ fn dependency_metadata_keeps_required_optional_incompatible_and_embedded_distinc
 fn malformed_404_rate_limit_and_unavailable_fail_structurally() {
     let malformed = FixtureTransport::default();
     malformed.raw(200, BTreeMap::new(), b"{not-json".to_vec());
-    assert_eq!(
-        client(malformed).project("P1").unwrap_err().kind,
-        ProviderFailureKind::MalformedResponse
-    );
+    assert_eq!(client(malformed).project("P1").unwrap_err().kind, ProviderFailureKind::MalformedResponse);
 
     let missing = FixtureTransport::default();
     missing.raw(404, BTreeMap::new(), b"{}".to_vec());
@@ -291,10 +267,7 @@ fn malformed_404_rate_limit_and_unavailable_fail_structurally() {
 
     let unavailable = FixtureTransport::default();
     unavailable.get_error(ProviderFailureKind::Unavailable);
-    assert_eq!(
-        client(unavailable).project("P1").unwrap_err().kind,
-        ProviderFailureKind::Unavailable
-    );
+    assert_eq!(client(unavailable).project("P1").unwrap_err().kind, ProviderFailureKind::Unavailable);
 }
 
 #[test]
@@ -382,23 +355,14 @@ fn resolver_reports_unresolved_or_conflicting_required_versions() {
 #[test]
 fn client_only_exact_version_is_invalid_for_required_server_resolution() {
     let transport = FixtureTransport::default();
-    transport.json(
-        200,
-        version("V1", "P1", "client_only", &["1.21.1"], &["fabric"], json!([]), b"client"),
-    );
-    assert_eq!(
-        client(transport).resolve(&resolve_request("V1")).unwrap_err().kind,
-        ProviderFailureKind::Incompatible
-    );
+    transport.json(200, version("V1", "P1", "client_only", &["1.21.1"], &["fabric"], json!([]), b"client"));
+    assert_eq!(client(transport).resolve(&resolve_request("V1")).unwrap_err().kind, ProviderFailureKind::Incompatible);
 }
 
 #[test]
 fn hash_mismatch_and_interrupted_download_never_publish_partial_artifacts() {
     let mismatch = FixtureTransport::default();
-    mismatch.json(
-        200,
-        version("V1", "P1", "server_only", &["1.21.1"], &["fabric"], json!([]), b"good"),
-    );
+    mismatch.json(200, version("V1", "P1", "server_only", &["1.21.1"], &["fabric"], json!([]), b"good"));
     mismatch.download(b"evil");
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("V1.jar");
@@ -409,20 +373,16 @@ fn hash_mismatch_and_interrupted_download_never_publish_partial_artifacts() {
         max_bytes: Some(1024),
     };
     let error = client(mismatch).download(&request).unwrap_err();
-    assert!(matches!(
-        error.kind,
-        ProviderFailureKind::DownloadInterrupted | ProviderFailureKind::HashMismatch
-    ));
+    assert!(matches!(error.kind, ProviderFailureKind::DownloadInterrupted | ProviderFailureKind::HashMismatch));
     assert_eq!(fs::read(&destination).unwrap(), b"old");
-    assert!(fs::read_dir(directory.path())
+    assert!(fs::read_dir(directory.path()).unwrap().all(|entry| !entry
         .unwrap()
-        .all(|entry| !entry.unwrap().file_name().to_string_lossy().contains(".part-")));
+        .file_name()
+        .to_string_lossy()
+        .contains(".part-")));
 
     let interrupted = FixtureTransport::default();
-    interrupted.json(
-        200,
-        version("V2", "P2", "server_only", &["1.21.1"], &["fabric"], json!([]), b"good"),
-    );
+    interrupted.json(200, version("V2", "P2", "server_only", &["1.21.1"], &["fabric"], json!([]), b"good"));
     interrupted.download_error();
     let directory = tempfile::tempdir().unwrap();
     let request = ModDownloadRequest {
@@ -430,10 +390,7 @@ fn hash_mismatch_and_interrupted_download_never_publish_partial_artifacts() {
         destination_dir: directory.path().to_path_buf(),
         max_bytes: Some(1024),
     };
-    assert_eq!(
-        client(interrupted).download(&request).unwrap_err().kind,
-        ProviderFailureKind::DownloadInterrupted
-    );
+    assert_eq!(client(interrupted).download(&request).unwrap_err().kind, ProviderFailureKind::DownloadInterrupted);
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
 }
 
@@ -441,10 +398,7 @@ fn hash_mismatch_and_interrupted_download_never_publish_partial_artifacts() {
 fn verified_download_is_fsynced_published_and_records_local_sha256() {
     let transport = FixtureTransport::default();
     let bytes = b"verified mod bytes";
-    transport.json(
-        200,
-        version("V1", "P1", "server_only", &["1.21.1"], &["fabric"], json!([]), bytes),
-    );
+    transport.json(200, version("V1", "P1", "server_only", &["1.21.1"], &["fabric"], json!([]), bytes));
     transport.download(bytes);
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("V1.jar"), b"old").unwrap();

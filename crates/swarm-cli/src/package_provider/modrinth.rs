@@ -55,17 +55,7 @@ impl ModrinthTransport for CurlTransport {
         let headers_path = temporary_path("modrinth-headers");
         let body_path = temporary_path("modrinth-body");
         let output = Command::new("curl")
-            .args([
-                "-sS",
-                "-L",
-                "--proto",
-                "=https",
-                "--connect-timeout",
-                "15",
-                "--max-time",
-                "60",
-                "-A",
-            ])
+            .args(["-sS", "-L", "--proto", "=https", "--connect-timeout", "15", "--max-time", "60", "-A"])
             .arg(&self.user_agent)
             .arg("-D")
             .arg(&headers_path)
@@ -75,7 +65,9 @@ impl ModrinthTransport for CurlTransport {
             .arg("%{http_code}")
             .arg(url)
             .output()
-            .map_err(|error| failure(ProviderFailureKind::Unavailable, format!("cannot start curl for Modrinth: {error}")))?;
+            .map_err(|error| {
+                failure(ProviderFailureKind::Unavailable, format!("cannot start curl for Modrinth: {error}"))
+            })?;
 
         let status_text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         if !output.status.success() {
@@ -92,9 +84,7 @@ impl ModrinthTransport for CurlTransport {
                 format!("curl returned an invalid HTTP status for Modrinth: {status_text}"),
             )
         })?;
-        let headers = fs::read_to_string(&headers_path)
-            .map(|text| parse_headers(&text))
-            .unwrap_or_default();
+        let headers = fs::read_to_string(&headers_path).map(|text| parse_headers(&text)).unwrap_or_default();
         let body = fs::read(&body_path).map_err(|error| {
             failure(ProviderFailureKind::Io, format!("cannot read Modrinth response body: {error}"))
         })?;
@@ -106,17 +96,7 @@ impl ModrinthTransport for CurlTransport {
     fn download(&self, url: &str, destination: &Path, max_bytes: u64) -> ProviderResult<()> {
         trusted_https(url, &["cdn.modrinth.com"])?;
         let output = Command::new("curl")
-            .args([
-                "-sS",
-                "-L",
-                "--proto",
-                "=https",
-                "--connect-timeout",
-                "15",
-                "--max-time",
-                "900",
-                "--max-filesize",
-            ])
+            .args(["-sS", "-L", "--proto", "=https", "--connect-timeout", "15", "--max-time", "900", "--max-filesize"])
             .arg(max_bytes.to_string())
             .arg("-A")
             .arg(&self.user_agent)
@@ -126,7 +106,9 @@ impl ModrinthTransport for CurlTransport {
             .arg("%{http_code}")
             .arg(url)
             .output()
-            .map_err(|error| failure(ProviderFailureKind::DownloadInterrupted, format!("cannot start Modrinth download: {error}")))?;
+            .map_err(|error| {
+                failure(ProviderFailureKind::DownloadInterrupted, format!("cannot start Modrinth download: {error}"))
+            })?;
 
         if !output.status.success() {
             let _ = fs::remove_file(destination);
@@ -136,14 +118,19 @@ impl ModrinthTransport for CurlTransport {
             ));
         }
         let status = String::from_utf8_lossy(&output.stdout).trim().parse::<u16>().map_err(|_| {
-            failure(ProviderFailureKind::MalformedResponse, "Modrinth artifact download returned an invalid HTTP status")
+            failure(
+                ProviderFailureKind::MalformedResponse,
+                "Modrinth artifact download returned an invalid HTTP status",
+            )
         })?;
         if !(200..300).contains(&status) {
             let _ = fs::remove_file(destination);
             return Err(http_failure(status, &BTreeMap::new(), "Modrinth artifact"));
         }
         let size = fs::metadata(destination)
-            .map_err(|error| failure(ProviderFailureKind::Io, format!("cannot inspect downloaded Modrinth artifact: {error}")))?
+            .map_err(|error| {
+                failure(ProviderFailureKind::Io, format!("cannot inspect downloaded Modrinth artifact: {error}"))
+            })?
             .len();
         if size > max_bytes {
             let _ = fs::remove_file(destination);
@@ -163,10 +150,8 @@ pub struct ModrinthClient<T = CurlTransport> {
 
 impl ModrinthClient<CurlTransport> {
     pub fn production() -> ProviderResult<Self> {
-        let user_agent = format!(
-            "MousaXD/swarmcraft/{} (https://github.com/MousaXD/swarmcraft)",
-            env!("CARGO_PKG_VERSION")
-        );
+        let user_agent =
+            format!("MousaXD/swarmcraft/{} (https://github.com/MousaXD/swarmcraft)", env!("CARGO_PKG_VERSION"));
         Ok(Self { transport: CurlTransport::new(user_agent)?, base_url: MODRINTH_API_BASE.to_owned() })
     }
 }
@@ -181,8 +166,9 @@ impl<T: ModrinthTransport> ModrinthClient<T> {
     pub fn search(&self, query: &ModSearchQuery) -> ProviderResult<ModSearchResult> {
         validate_search_query(query)?;
         let facets = search_facets(query.environment, &query.minecraft_version, &query.loader);
-        let facets = serde_json::to_string(&facets)
-            .map_err(|error| failure(ProviderFailureKind::InvalidRequest, format!("cannot encode Modrinth search facets: {error}")))?;
+        let facets = serde_json::to_string(&facets).map_err(|error| {
+            failure(ProviderFailureKind::InvalidRequest, format!("cannot encode Modrinth search facets: {error}"))
+        })?;
         let url = self.url(
             "/search",
             &[
@@ -261,11 +247,7 @@ impl<T: ModrinthTransport> ModrinthClient<T> {
         let path = format!("/project/{}/version", encode_path_segment(project_id));
         let url = self.url(
             &path,
-            &[
-                ("loaders", loaders.as_str()),
-                ("game_versions", game_versions.as_str()),
-                ("include_changelog", "false"),
-            ],
+            &[("loaders", loaders.as_str()), ("game_versions", game_versions.as_str()), ("include_changelog", "false")],
         );
         let (raw, headers): (Vec<RawVersion>, _) = self.request_json(&url, "Modrinth project versions")?;
         let mut items = Vec::new();
@@ -320,12 +302,13 @@ impl<T: ModrinthTransport> ModrinthClient<T> {
                 "Modrinth version does not belong to the requested project",
             ));
         }
-        let artifact = version
-            .files
-            .iter()
-            .find(|file| locator_matches(&request.locator, file))
-            .cloned()
-            .ok_or_else(|| failure(ProviderFailureKind::NotFound, "exact Modrinth file hash is no longer present on the selected version"))?;
+        let artifact =
+            version.files.iter().find(|file| locator_matches(&request.locator, file)).cloned().ok_or_else(|| {
+                failure(
+                    ProviderFailureKind::NotFound,
+                    "exact Modrinth file hash is no longer present on the selected version",
+                )
+            })?;
         let source_url = match &artifact.retrieval {
             ArtifactRetrieval::ProviderDownload => artifact.url.clone().ok_or_else(|| {
                 failure(ProviderFailureKind::RetrievalRestricted, "Modrinth file has no provider download URL")
@@ -348,7 +331,10 @@ impl<T: ModrinthTransport> ModrinthClient<T> {
         if artifact.size > max_bytes {
             return Err(failure(
                 ProviderFailureKind::RetrievalRestricted,
-                format!("Modrinth artifact is {} bytes, exceeding the configured {max_bytes}-byte bound", artifact.size),
+                format!(
+                    "Modrinth artifact is {} bytes, exceeding the configured {max_bytes}-byte bound",
+                    artifact.size
+                ),
             ));
         }
         safe_filename(&artifact.filename)?;
@@ -356,9 +342,7 @@ impl<T: ModrinthTransport> ModrinthClient<T> {
             failure(ProviderFailureKind::Io, format!("cannot create Modrinth artifact directory: {error}"))
         })?;
         let destination = request.destination_dir.join(&artifact.filename);
-        let temporary = request
-            .destination_dir
-            .join(format!(".{}.part-{}", artifact.filename, unique_suffix()));
+        let temporary = request.destination_dir.join(format!(".{}.part-{}", artifact.filename, unique_suffix()));
         if let Err(error) = self.transport.download(&source_url, &temporary, max_bytes) {
             let _ = fs::remove_file(&temporary);
             return Err(error);
@@ -376,11 +360,9 @@ impl<T: ModrinthTransport> ModrinthClient<T> {
             }
             let hashes = hash_file(&temporary)?;
             verify_provider_hashes(&artifact.hashes, &hashes)?;
-            OpenOptions::new()
-                .write(true)
-                .open(&temporary)
-                .and_then(|file| file.sync_all())
-                .map_err(|error| failure(ProviderFailureKind::Io, format!("cannot fsync Modrinth artifact: {error}")))?;
+            OpenOptions::new().write(true).open(&temporary).and_then(|file| file.sync_all()).map_err(|error| {
+                failure(ProviderFailureKind::Io, format!("cannot fsync Modrinth artifact: {error}"))
+            })?;
             Ok(hashes)
         })();
 
@@ -504,16 +486,17 @@ impl<T: ModrinthTransport> ModrinthClient<T> {
         })
     }
 
-    fn request_json<R: DeserializeOwned>(&self, url: &str, label: &str) -> ProviderResult<(R, BTreeMap<String, String>)> {
+    fn request_json<R: DeserializeOwned>(
+        &self,
+        url: &str,
+        label: &str,
+    ) -> ProviderResult<(R, BTreeMap<String, String>)> {
         let response = self.transport.get(url)?;
         if !(200..300).contains(&response.status) {
             return Err(http_failure(response.status, &response.headers, label));
         }
         let parsed = serde_json::from_slice(&response.body).map_err(|error| {
-            failure(
-                ProviderFailureKind::MalformedResponse,
-                format!("{label} returned malformed JSON: {error}"),
-            )
+            failure(ProviderFailureKind::MalformedResponse, format!("{label} returned malformed JSON: {error}"))
         })?;
         Ok((parsed, response.headers))
     }
@@ -831,8 +814,14 @@ fn validate_incompatibilities(state: &ResolutionState) -> ProviderResult<()> {
 fn locator_matches(locator: &ModArtifactLocator, artifact: &ModArtifact) -> bool {
     locator.project_id == artifact.locator.project_id
         && locator.version_id == artifact.locator.version_id
-        && locator.sha1.as_ref().is_none_or(|expected| artifact.hashes.sha1.as_ref().is_some_and(|actual| eq_hash(expected, actual)))
-        && locator.sha512.as_ref().is_none_or(|expected| artifact.hashes.sha512.as_ref().is_some_and(|actual| eq_hash(expected, actual)))
+        && locator
+            .sha1
+            .as_ref()
+            .is_none_or(|expected| artifact.hashes.sha1.as_ref().is_some_and(|actual| eq_hash(expected, actual)))
+        && locator
+            .sha512
+            .as_ref()
+            .is_none_or(|expected| artifact.hashes.sha512.as_ref().is_some_and(|actual| eq_hash(expected, actual)))
 }
 
 fn verify_provider_hashes(expected: &ArtifactHashes, actual: &ArtifactHashes) -> ProviderResult<()> {
@@ -858,16 +847,17 @@ fn verify_provider_hashes(expected: &ArtifactHashes, actual: &ArtifactHashes) ->
 }
 
 fn hash_file(path: &Path) -> ProviderResult<ArtifactHashes> {
-    let mut file = fs::File::open(path)
-        .map_err(|error| failure(ProviderFailureKind::Io, format!("cannot open Modrinth artifact for hashing: {error}")))?;
+    let mut file = fs::File::open(path).map_err(|error| {
+        failure(ProviderFailureKind::Io, format!("cannot open Modrinth artifact for hashing: {error}"))
+    })?;
     let mut sha1 = Sha1::new();
     let mut sha256 = Sha256::new();
     let mut sha512 = Sha512::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| failure(ProviderFailureKind::Io, format!("cannot read Modrinth artifact for hashing: {error}")))?;
+        let read = file.read(&mut buffer).map_err(|error| {
+            failure(ProviderFailureKind::Io, format!("cannot read Modrinth artifact for hashing: {error}"))
+        })?;
         if read == 0 {
             break;
         }
@@ -897,10 +887,7 @@ fn search_facets(environment: PackageEnvironment, minecraft_version: &str, loade
         vec!["project_type:mod".to_owned()],
         vec![format!("categories:{}", loader.to_ascii_lowercase())],
         vec![format!("versions:{minecraft_version}")],
-        environment_facet_values(environment)
-            .into_iter()
-            .map(|value| format!("environment:{value}"))
-            .collect(),
+        environment_facet_values(environment).into_iter().map(|value| format!("environment:{value}")).collect(),
     ]
 }
 
@@ -944,7 +931,9 @@ fn http_failure(status: u16, headers: &BTreeMap<String, String>, label: &str) ->
         .with_remediation("Update SwarmCraft to a version that supports Modrinth's current API."),
         429 => failure(ProviderFailureKind::RateLimited, "Modrinth rate limit exceeded")
             .with_retry_after(header_u64(headers, "retry-after").or_else(|| header_u64(headers, "x-ratelimit-reset"))),
-        500..=599 => failure(ProviderFailureKind::Unavailable, format!("{label} is temporarily unavailable (HTTP {status})")),
+        500..=599 => {
+            failure(ProviderFailureKind::Unavailable, format!("{label} is temporarily unavailable (HTTP {status})"))
+        }
         _ => failure(ProviderFailureKind::Unavailable, format!("{label} failed with HTTP {status}")),
     }
 }
@@ -979,8 +968,9 @@ fn publish_replace(temporary: &Path, destination: &Path) -> ProviderResult<()> {
             .map_err(|error| failure(ProviderFailureKind::Io, format!("cannot publish Modrinth artifact: {error}")));
     }
     let backup = destination.with_extension(format!("backup-{}", unique_suffix()));
-    fs::rename(destination, &backup)
-        .map_err(|error| failure(ProviderFailureKind::Io, format!("cannot preserve existing artifact before replacement: {error}")))?;
+    fs::rename(destination, &backup).map_err(|error| {
+        failure(ProviderFailureKind::Io, format!("cannot preserve existing artifact before replacement: {error}"))
+    })?;
     match fs::rename(temporary, destination) {
         Ok(()) => {
             let _ = fs::remove_file(&backup);
@@ -1013,13 +1003,7 @@ fn trusted_https(url: &str, hosts: &[&str]) -> ProviderResult<()> {
     let rest = url.strip_prefix("https://").ok_or_else(|| {
         failure(ProviderFailureKind::RetrievalRestricted, "Modrinth provider requests and downloads must use HTTPS")
     })?;
-    let host = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default()
-        .split(':')
-        .next()
-        .unwrap_or_default();
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default().split(':').next().unwrap_or_default();
     if hosts.iter().any(|allowed| host.eq_ignore_ascii_case(allowed)) {
         Ok(())
     } else {
