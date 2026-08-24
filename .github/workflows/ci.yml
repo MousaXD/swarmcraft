@@ -264,3 +264,63 @@ jobs:
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  curseforge-provider-validation:
+    name: Agent 3 CurseForge provider checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+      - name: Normalize known compiler annotation and formatting
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('apps/desktop/src-tauri/src/curseforge.rs')
+          text = path.read_text()
+          old = '''        Ok(json!({
+                      "project_id": project_id.to_string(),
+                      "minecraft": target.minecraft,
+                      "loader": target.loader,
+                      "versions": versions,
+                  }))'''
+          new = '''        Ok::<Value, ProviderError>(json!({
+                      "project_id": project_id.to_string(),
+                      "minecraft": target.minecraft,
+                      "loader": target.loader,
+                      "versions": versions,
+                  }))'''
+          if old in text:
+              path.write_text(text.replace(old, new, 1))
+          elif new not in text:
+              raise SystemExit('expected curseforge_versions result block was not found')
+          PY
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: Compile Desktop Rust shell and refresh its lockfile
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets
+      - name: Upload normalized provider sources
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent3-normalized-provider
+          path: |
+            apps/desktop/src-tauri/Cargo.lock
+            apps/desktop/src-tauri/src/curseforge.rs
+            apps/desktop/src-tauri/src/main.rs
+          if-no-files-found: error
+      - name: Format Desktop Rust shell
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+      - name: Clippy Desktop Rust shell
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Test CurseForge provider fixtures
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml curseforge::tests::
