@@ -287,7 +287,7 @@ fn non_installable_provider_file_stays_manual_required_and_fails_closed() {
 
     let mod_version = client(transport.clone()).version("V1").unwrap();
     assert!(matches!(
-        mod_version.files[0].retrieval,
+        &mod_version.files[0].retrieval,
         ArtifactRetrieval::ManualRequired { .. }
     ));
 
