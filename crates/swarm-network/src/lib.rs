@@ -1,6 +1,7 @@
 //! Encrypted peer transport, discovery, authentication, and bounded replication messages.
 
 mod diagnostics;
+mod invite_connectivity;
 mod node;
 mod transport;
 pub mod wire;
@@ -8,6 +9,11 @@ pub mod wire;
 pub use diagnostics::{
     ConnectivityDiagnosticsV1, ConnectivityIssueKindV1, ConnectivityIssueV1, ConnectivityStateV1, HolePunchStateV1,
     NatStatusV1, CONNECTIVITY_DIAGNOSTICS_JSON_ENV, CONNECTIVITY_DIAGNOSTICS_SNAPSHOT_FILE, MAX_CONNECTIVITY_FAILURES,
+};
+pub use invite_connectivity::{
+    invite_connectivity_from_snapshot, validate_invite_addresses, InviteConnectivityError, InviteConnectivityV1,
+    InviteReachabilityV1, DEFAULT_CONNECTIVITY_DIAGNOSTICS_JSON_FILE, MAX_CONNECTIVITY_SNAPSHOT_BYTES,
+    MAX_INVITE_ADDRESSES, MAX_INVITE_ADDRESS_CHARS,
 };
 pub use libp2p::request_response::ResponseChannel;
 pub use libp2p::PeerId as TransportPeerId;
