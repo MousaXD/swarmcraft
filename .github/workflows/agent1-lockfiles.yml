@@ -1,25 +1,86 @@
-name: Agent 1 Lockfiles
+name: Agent 1 Finalize
 
 on:
   pull_request:
     branches: [backup/local-work-20260824]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  lockfiles:
+  finalize:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: agent/minecraft-fabric-catalog
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Generate workspace and desktop lockfiles
+        with:
+          components: rustfmt, clippy
+
+      - name: Regenerate required lockfiles
         run: |
           cargo generate-lockfile
           cargo generate-lockfile --manifest-path apps/desktop/src-tauri/Cargo.toml
-      - uses: actions/upload-artifact@v4
-        with:
-          name: agent1-lockfiles
-          path: |
-            Cargo.lock
-            apps/desktop/src-tauri/Cargo.lock
+
+      - name: Format Rust
+        run: |
+          cargo fmt --all
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+
+      - name: Workspace check
+        run: cargo check --workspace --locked
+
+      - name: Workspace clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Workspace tests
+        run: cargo test --workspace --all-features --locked
+
+      - name: Catalog deterministic tests
+        run: cargo test -p swarm-catalog --all-features --locked
+
+      - name: Catalog live official-source validation
+        run: cargo test -p swarm-catalog --test live_sources --locked -- --ignored --nocapture
+
+      - name: Desktop Tauri check
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+
+      - name: Desktop Tauri clippy
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
+
+      - name: Desktop Tauri tests
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features --locked
+
+      - name: Desktop frontend tests
+        run: node --test apps/desktop/tests/*.test.mjs
+
+      - name: Validate Tauri frontend bridge
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          config = json.loads(Path('apps/desktop/src-tauri/tauri.conf.json').read_text())
+          frontend = Path('apps/desktop/src/app.js').read_text()
+          assert 'window.__TAURI__' in frontend
+          assert config.get('app', {}).get('withGlobalTauri') is True
+          PY
+
+      - name: Commit validated generated outputs and remove temporary workflow
+        run: |
+          set -euxo pipefail
+          rm .github/workflows/agent1-lockfiles.yml
+          git config user.name "SwarmCraft Agent 1"
+          git config user.email "actions@users.noreply.github.com"
+          git add Cargo.lock apps/desktop/src-tauri/Cargo.lock crates/swarm-catalog/src/lib.rs crates/swarm-catalog/tests/live_sources.rs apps/desktop/src-tauri/src .github/workflows/agent1-lockfiles.yml
+          if git diff --cached --quiet; then
+            echo "No finalize changes to commit"
+            exit 0
+          fi
+          git commit -m "chore(catalog): finalize lockfiles and validation formatting"
+          git push origin HEAD:agent/minecraft-fabric-catalog
