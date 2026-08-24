@@ -395,7 +395,7 @@ pub fn add_friend(paths: &DataPaths, peer: &str, public_key_hex: &str, label: &s
         bail!("friend peer ID does not match the supplied public key");
     }
     let label = label.trim();
-    if label.as_bytes().len() > MAX_FRIEND_LABEL_BYTES {
+    if label.len() > MAX_FRIEND_LABEL_BYTES {
         bail!("friend label is too long");
     }
     let mut store = load_friend_store(paths)?;
@@ -966,9 +966,9 @@ mod tests {
     use swarm_core::PeerIdentity;
     use swarm_protocol::{
         AuthorityPolicyV1, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, RuntimeCompatibilityManifestV1,
-        WorldConfigV1, WorldMemberV1, WorldPresentationV1,
+        WorldConfigV1, WorldMemberV1, WorldPresentationV1, STORAGE_SCHEMA_VERSION,
     };
-    use swarm_storage::{WorldMetadataV1, STORAGE_SCHEMA_VERSION};
+    use swarm_storage::WorldMetadataV1;
 
     #[test]
     fn friend_store_is_cryptographic_and_label_collisions_are_harmless() {
