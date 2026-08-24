@@ -7,8 +7,8 @@
 ## Branch / exact head
 
 - Branch: `agent/modrinth-provider`
-- Current implementation head before this ledger-only commit: `618672b9867f30da1f2c7cbd464d6442deb1d290`
-- Green/final head: pending CI validation.
+- Latest implementation/validation head before this ledger commit: `621085f34adf6ccdfef780694099637a8c1cd784`
+- Green/final head: pending exact-head CI validation.
 
 ## Mission
 
@@ -17,26 +17,28 @@ Implement a backend-owned Modrinth provider for browsing/searching projects, sel
 ## Dependencies to read
 
 - `progress/README.md`
-- Read Agent 1 when consuming shared Minecraft/Fabric version identifiers or compatibility contracts.
+- Agent 1 Minecraft/Fabric catalog contract before final handoff.
 
 ## Dependencies consumed
 
-- `progress/README.md` at `41c9b5b650aac1e320195f6e1855945f2722abc4`.
-- `progress/agent1.md` at `41c9b5b650aac1e320195f6e1855945f2722abc4`; Agent 1 was `NOT STARTED` and had not published shared catalog identifier types. This provider therefore accepts explicit Minecraft/loader strings and does not invent Agent 1 catalog types.
+- Coordination rules from `progress/README.md` on the Agent 2 branch.
+- Agent 1 current implementation contract at `agent/minecraft-fabric-catalog` head `f450c0ffb2029671006c831bc3cfe26dbd7bb752` (PR #47). Agent 1 exposes source-backed exact values as `MinecraftVersion.id: String` and `FabricLoaderVersion.version: String`, with `CatalogService::validate_fabric_selection(minecraft_version: &str, fabric_loader_version: &str, refresh: bool)` as the authority for validating the pair.
+- Reconciliation decision: no Agent 2 code change is required. `ModSearchQuery`, `ModVersionFilter`, and `ModResolveRequest` already consume exact Minecraft and loader strings. Agent 2 does not duplicate Mojang/Fabric catalog lookup or pair validation. Agent 4/7 should feed Agent 1-validated values into these provider requests.
 
 ## Work completed
 
-- Verified the requested base commit and created `agent/modrinth-provider` from it.
-- Reviewed the Runtime Installer artifact publication pattern and mirrored its temp-file/hash/fsync/rename/rollback safety invariants.
-- Reviewed current official Modrinth v2 API documentation for search facets, project/version endpoints, dependency/file metadata, rate-limit headers, stable IDs, file hashes, and identifying `User-Agent` behavior.
+- Verified the requested base and created/continued `agent/modrinth-provider` without rewinding newer valid work. The branch had advanced beyond the previously reported `618672b9867f30da1f2c7cbd464d6442deb1d290`; that newer work was preserved.
+- Reviewed current official Modrinth v2 documentation for search facets, project/version endpoints, stable identifiers, version-file hashes, dependency metadata, rate-limit headers, identifying `User-Agent`, and 410 behavior for retired API generations.
 - Added backend-owned provider-neutral package types under `swarm_cli::package_provider` and a production Modrinth implementation under `swarm_cli::package_provider::modrinth`.
 - Added exact Minecraft/Fabric/environment/release filtering and explicit client-only rejection for required server preparation.
-- Added dependency resolution that preserves optional dependencies, detects cycles, unresolved required dependencies, incompatible selected versions, and missing compatible dependency versions.
-- Added exact artifact download by provider project/version/hash identity with HTTPS/CDN trust boundary, configurable bounded size, temporary file, provider SHA-1/SHA-512 verification, local SHA-256, fsync, atomic/rollback-safe publication, and partial-file cleanup.
+- Added dependency resolution that preserves optional dependencies, detects cycles, unresolved required dependencies, incompatible selected versions, and conflicting required versions of one project.
+- Added exact artifact download by provider project/version/hash identity with HTTPS/CDN trust boundary, configurable bounded size, temporary file, provider SHA-1/SHA-512 verification, computed local SHA-256, fsync, rollback-safe publication, and partial-file cleanup.
 - Added structured provider failures for malformed data, rate limiting, unavailable provider, removed resources, compatibility failures, dependency failures, hash mismatch, interrupted download, restricted retrieval, and I/O errors.
-- Added a small excluded `swarm-provider` Desktop adapter crate that re-exports the canonical `swarm-cli` provider source rather than duplicating provider logic. This keeps the root committed `Cargo.lock` graph unchanged while allowing Tauri to use strongly typed requests/results.
+- Added excluded `swarm-provider` Desktop adapter crate that re-exports the canonical `swarm-cli` provider contract rather than duplicating provider logic.
 - Added thin Tauri commands: `modrinth_search`, `modrinth_project`, `modrinth_versions`, `modrinth_resolve`, `modrinth_download`.
-- Added deterministic mocked provider tests to the locked root workspace plus an ignored opt-in live Modrinth validation.
+- Added deterministic mocked provider tests plus an ignored opt-in live Modrinth validation.
+- Expanded the deterministic matrix with positive required-dependency resolution, optional-edge preservation in a successful graph, selected incompatibility rejection, oversize pre-download rejection, exact artifact identity enforcement, manual-remediation behavior, and structured provider-error serialization.
+- Removed temporary formatting and lockfile-regeneration workflows after their one-shot validation purpose; no Agent 2 helper workflow remains in the handoff tree.
 
 ## Contracts / APIs added or changed
 
@@ -63,30 +65,35 @@ Dependency representation:
 
 - `ModDependency { kind, project_id, version_id, file_name }`
 - `DependencyKind::{Required, Optional, Incompatible, Embedded}`.
-- Optional dependencies remain optional and are returned in `ResolvedModGraph.optional_dependencies`; they are not silently promoted to required.
+- Required dependencies are recursively resolved to exact versions compatible with the requested Minecraft/Fabric/environment/release policy.
+- Optional dependencies remain optional in `ResolvedModGraph.optional_dependencies`; they are never silently promoted.
+- Incompatible edges are preserved and checked against selected versions/projects; a conflict fails closed.
+- Embedded dependencies are metadata, not recursively installed as separate required artifacts.
 
 Artifact identity/retrieval:
 
 - `ModArtifactLocator { provider, project_id, version_id, sha1, sha512 }`.
 - `ModArtifact { filename, url, locator, primary, size, hashes, file_type, retrieval }`.
 - `ArtifactRetrieval::ProviderDownload` or `ArtifactRetrieval::ManualRequired { reason }`.
-- `ArtifactHashes` carries provider SHA-1/SHA-512 and local SHA-256 after download.
-- Automatic download requires an exact provider hash locator and re-fetches the exact version before matching the file. Filename alone is never trusted.
+- `ArtifactHashes` carries provider SHA-1/SHA-512 and computed local SHA-256 after acquisition.
+- Automatic download requires exact provider project/version plus at least one provider hash. The exact version is re-fetched and the file is matched by hash; filename alone is never trusted.
+- A provider URL is retrieval metadata only, not canonical identity. Ephemeral/mutable URLs must not be signed into canonical package identity.
 
 Structured failure contract:
 
 - `ProviderFailure { provider, kind, message, retry_after_seconds, remediation, details }`.
 - `ProviderFailureKind::{InvalidRequest, RateLimited, Unavailable, NotFound, MalformedResponse, Incompatible, DependencyCycle, UnresolvedDependency, HashMismatch, DownloadInterrupted, RetrievalRestricted, Io}`.
+- The type derives `Serialize`; Tauri commands return `Result<_, ProviderFailure>` directly so provider failures remain structured across the bridge rather than being flattened to strings.
 
 Tauri commands:
 
-- `modrinth_search(query)`
-- `modrinth_project(projectId)`
-- `modrinth_versions(projectId, filter)`
-- `modrinth_resolve(request)`
-- `modrinth_download(request)`
+- `modrinth_search(query: ModSearchQuery) -> Result<ModSearchResult, ProviderFailure>`
+- `modrinth_project(projectId: String) -> Result<ModProjectDetails, ProviderFailure>`
+- `modrinth_versions(projectId: String, filter: ModVersionFilter) -> Result<ModVersionList, ProviderFailure>`
+- `modrinth_resolve(request: ModResolveRequest) -> Result<ResolvedModGraph, ProviderFailure>`
+- `modrinth_download(request: ModDownloadRequest) -> Result<DownloadedArtifact, ProviderFailure>`
 
-Provider endpoints are centralized in backend code under the official `https://api.modrinth.com/v2` base. Production requests identify as `MousaXD/swarmcraft/<version> (https://github.com/MousaXD/swarmcraft)`.
+Provider endpoints are centralized in backend code under `https://api.modrinth.com/v2`. Production requests identify as `MousaXD/swarmcraft/<version> (https://github.com/MousaXD/swarmcraft)`.
 
 ## Files changed
 
@@ -98,62 +105,103 @@ Provider endpoints are centralized in backend code under the official `https://a
 - `crates/swarm-cli/src/package_provider.rs`
 - `crates/swarm-cli/src/package_provider/modrinth.rs`
 - `crates/swarm-cli/tests/modrinth_provider.rs`
+- `crates/swarm-cli/tests/modrinth_provider_matrix.rs`
 - `crates/swarm-provider/Cargo.toml`
 - `crates/swarm-provider/src/lib.rs`
 - `progress/agent2.md`
 
+Temporary validation-only workflows were created and removed on this branch; they are not part of the final handoff tree.
+
 ## Tests and evidence
 
-Implemented deterministic coverage for:
+Deterministic provider coverage now exercises:
 
-- search parsing, pagination, rate-limit metadata and server compatibility facets;
-- exact Minecraft/Fabric/server filtering and incompatible client/loader/Minecraft versions;
-- required/optional/incompatible/embedded dependency parsing;
-- malformed JSON;
-- HTTP 404;
-- HTTP 429 and retry/reset metadata;
+- search parsing;
+- pagination and rate-limit metadata;
+- exact Minecraft compatibility;
+- Fabric compatibility and loader rejection;
+- server environment filtering;
+- incompatible client-only mods;
+- required dependency resolution;
+- optional dependency preservation;
+- incompatible dependency rejection;
+- dependency cycles;
+- unresolved dependencies;
+- conflicting selected versions;
+- malformed provider response;
 - provider unavailable transport failure;
-- dependency cycle detection;
-- unresolved required dependency;
-- conflicting required versions of the same project;
-- client-only exact version rejected for required server resolution;
-- hash mismatch cleanup without replacing an existing artifact;
-- interrupted download cleanup with no partial publication;
-- verified publication and local SHA-256 recording;
-- ignored opt-in live provider validation gated by `SWARMCRAFT_LIVE_MODRINTH=1`.
+- HTTP 404;
+- rate limiting and retry/reset metadata;
+- interrupted download;
+- oversize download rejection before transport/publication;
+- provider hash mismatch;
+- successful verified download;
+- computed SHA-256 production;
+- cleanup of partial files and preservation of an existing destination on failure;
+- exact provider project/version/hash artifact identity;
+- manual-remediation state for non-installable/restricted artifacts;
+- structured `ProviderFailure` serialization used by Tauri.
 
-Execution evidence: pending GitHub CI on the current branch because this execution container has no Rust toolchain or outbound Git transport.
+Live provider validation remains ignored/opt-in via `SWARMCRAFT_LIVE_MODRINTH=1`; deterministic CI does not depend on Modrinth availability.
+
+Lockfile evidence:
+
+- A one-shot CI job ran Cargo metadata resolution for both the root workspace and excluded Desktop manifest, then immediately re-ran both with `--locked` successfully.
+- Neither `Cargo.lock` nor `apps/desktop/src-tauri/Cargo.lock` changed, so both committed lockfiles already represented the Agent 2 dependency graphs. The one-shot workflow removed itself in commit `621085f34adf6ccdfef780694099637a8c1cd784`.
+
+Full formatting/compile/clippy/test and Desktop package CI on the exact handoff head is pending below; do not treat this ledger state as READY until that exact head is green.
 
 ## Decisions / invariants
 
-- Do not sign or install ambiguous “latest” requirements.
+- Do not sign or install ambiguous `latest` requirements.
+- Agent 1 remains the version-selection authority. Agent 2 accepts exact validated Minecraft/Fabric strings and does not maintain a second catalog.
 - Preserve exact provider project/version/file identifiers and hashes for Agent 4.
-- Modrinth stable project/version IDs are the canonical provider identifiers; mutable slugs are display/navigation metadata only.
+- Modrinth stable project/version IDs are durable provider locators; mutable slugs are display/navigation metadata only.
+- Provider-published SHA-1/SHA-512 identify the exact provider file; computed SHA-256 is the acquired-byte integrity identity SwarmCraft can freeze locally/canonically.
+- Provider URLs are retrieval metadata, never canonical identity.
+- Machine-local filesystem paths are installation state, never canonical identity.
 - Respect Modrinth provider/source download boundaries. No peer-to-peer redistribution is introduced.
 - Provider/API failures surface as structured failures, never empty-success fallbacks.
-- Production metadata requests use Modrinth API v2 and a uniquely identifying SwarmCraft `User-Agent`.
 - Compatibility stays backend-owned. Search/version resolution requires exact Minecraft version and Fabric loader inputs for server preparation.
 - Clearly client-only and unknown-environment versions are not accepted as required server mods.
 - Automatic artifact download is HTTPS-only, bounded, provider-hash-verified, and atomically published only after fsync.
-- A file that is not a trusted Modrinth CDN JAR with a provider-published SHA-1 or SHA-512 is exposed as `manual_required`; the provider does not bypass that state.
+- A file that is not a trusted Modrinth CDN installable JAR with a provider-published SHA-1 or SHA-512 is exposed as `manual_required`; the provider does not bypass that state or substitute another artifact.
 
 ## Known issues / blockers
 
-- Agent 1 had not published a shared catalog identifier contract at the consumed base SHA. This is not a blocker because provider compatibility inputs remain explicit strings and can consume Agent 1 IDs later without changing Modrinth HTTP semantics.
-- Final status is blocked only on exact-head formatting/compile/test validation.
+- Exact-head CI is the only remaining gate. Until formatting, clippy, workspace tests, acceptance checks, dependency audit, and Desktop packaging finish green on the same pushed head, status remains `IN PROGRESS`.
 
 ## Handoff for dependent agents
 
-Agent 4 should consume `swarm_cli::package_provider` rather than reimplement provider JSON or HTTP details. Canonicalization should pin `provider=modrinth`, exact `project_id`, exact `version_id`, an exact artifact locator/hash identity, Minecraft version, Fabric loader/environment, and the required resolved dependency set. Optional dependencies are separately represented and must remain optional unless Agent 4 explicitly changes canonical policy.
+Agent 4 should consume `swarm_cli::package_provider` rather than reimplementing Modrinth JSON/HTTP rules.
 
-`DownloadedArtifact` is machine-local installation output and contains the exact provider IDs, filename, provider source URL, provider hashes, computed local SHA-256 and final path. Agent 4 should canonicalize identity/hashes, not the machine-local path.
+Canonical package identity should freeze:
 
-Restricted/unavailable retrieval is fail-closed through `ArtifactRetrieval::ManualRequired` or `ProviderFailureKind::RetrievalRestricted` with a remediation string. Do not substitute another version/file.
+- `provider = modrinth`;
+- exact `project_id`;
+- exact `version_id`;
+- exact provider file identity via SHA-1 and/or SHA-512 locator;
+- selected Minecraft version and Fabric compatibility values that originated from Agent 1 validation;
+- environment;
+- resolved required dependency edges/versions;
+- optional dependency edges separately, without promotion;
+- provider SHA-1/SHA-512;
+- computed artifact SHA-256 once acquired;
+- automatic-download vs manual-remediation state.
 
-Exact final green SHA: pending CI validation.
+Do not canonicalize mutable slug, source/download URL, or machine-local filesystem path. Modrinth project/version IDs are the durable locator; hashes are authoritative for exact file bytes.
+
+`DownloadedArtifact` is machine-local acquisition output. Agent 4 should retain IDs/hashes/size/filename as appropriate but must not sign the local path or depend on the source URL for identity.
+
+Restricted/unavailable retrieval fails closed through `ArtifactRetrieval::ManualRequired` or `ProviderFailureKind::RetrievalRestricted` with remediation. Do not silently select another version or file.
+
+Exact final green SHA: pending exact-head CI validation.
 
 ## Activity log
 
 - 2026-08-24 — ledger created; implementation not started.
-- 2026-08-24 @ `41c9b5b650aac1e320195f6e1855945f2722abc4` — started Agent 2 on `agent/modrinth-provider`; consumed required progress dependencies and official Modrinth API contract; implementation in progress.
-- 2026-08-24 @ `618672b9867f30da1f2c7cbd464d6442deb1d290` — provider types/client/resolver/download safety, Tauri bridge and deterministic tests implemented; moved canonical source into the existing locked `swarm-cli` workspace package before CI validation.
+- 2026-08-24 @ `41c9b5b650aac1e320195f6e1855945f2722abc4` — started Agent 2 on `agent/modrinth-provider`; consumed coordination guidance and official Modrinth API contract.
+- 2026-08-24 @ `618672b9867f30da1f2c7cbd464d6442deb1d290` — provider types/client/resolver/download safety, Tauri bridge and deterministic tests implemented.
+- 2026-08-24 @ `d383fba934f20d5cbcdeca951392b43017b2abeb` — preserved later formatting/cleanup work already present on the branch instead of rewinding to the earlier milestone.
+- 2026-08-24 @ `e3a12887e6605626802dad2d7fbed3c004de2af4` — expanded deterministic provider matrix for required/optional/incompatible dependencies, oversize behavior, exact identity, manual remediation, and structured bridge errors.
+- 2026-08-24 @ `621085f34adf6ccdfef780694099637a8c1cd784` — root and Desktop Cargo metadata both validated with `--locked`; temporary lockfile helper removed itself with no lockfile diff.
