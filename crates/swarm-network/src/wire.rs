@@ -182,7 +182,7 @@ fn validate_discovery_filter(filter: &DiscoveryFilterV1) -> Result<(), WireLimit
     if filter.tags.len() > MAX_DISCOVERY_TAGS {
         return Err(WireLimitError::TooManyDiscoveryTags(filter.tags.len()));
     }
-    let bytes = postcard::to_allocvec(filter).map_err(|_| WireLimitError::DiscoveryFilterTooLarge(usize::MAX))?;
+    let bytes = serde_json::to_vec(filter).map_err(|_| WireLimitError::DiscoveryFilterTooLarge(usize::MAX))?;
     if bytes.len() > MAX_DISCOVERY_QUERY_BYTES {
         return Err(WireLimitError::DiscoveryFilterTooLarge(bytes.len()));
     }
@@ -190,7 +190,7 @@ fn validate_discovery_filter(filter: &DiscoveryFilterV1) -> Result<(), WireLimit
 }
 
 fn validate_announcement_size(value: &WorldAnnouncementV1) -> Result<(), WireLimitError> {
-    let bytes = postcard::to_allocvec(value).map_err(|_| WireLimitError::DiscoveryAnnouncementTooLarge(usize::MAX))?;
+    let bytes = serde_json::to_vec(value).map_err(|_| WireLimitError::DiscoveryAnnouncementTooLarge(usize::MAX))?;
     if bytes.len() > MAX_DISCOVERY_ANNOUNCEMENT_BYTES {
         return Err(WireLimitError::DiscoveryAnnouncementTooLarge(bytes.len()));
     }
