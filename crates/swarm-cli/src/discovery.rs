@@ -18,8 +18,8 @@ use swarm_network::{
     WireResponse, MAX_DISCOVERY_RESULTS,
 };
 use swarm_protocol::{
-    peer_id_from_public_key, DiscoveryCompatibilityV1, DiscoveryFilterV1, FriendPresenceV1, MembershipPolicyV1,
-    PeerId, WorldAnnouncementV1, WorldId, WorldVisibilityV1, PROTOCOL_VERSION,
+    peer_id_from_public_key, DiscoveryCompatibilityV1, DiscoveryFilterV1, FriendPresenceV1, MembershipPolicyV1, PeerId,
+    WorldAnnouncementV1, WorldId, WorldVisibilityV1, PROTOCOL_VERSION,
 };
 use swarm_storage::Storage;
 use tokio::time::{timeout, MissedTickBehavior};
@@ -508,7 +508,8 @@ pub async fn search_public_worlds(
                 }
                 DiscoveryNetworkEvent::Authenticated { transport_peer, .. } if providers.contains(&transport_peer) => {
                     if requested.insert(transport_peer) {
-                        let request_id = node.send_request(&transport_peer, WireRequest::DiscoveryPublic { filter: filter.clone() })?;
+                        let request_id = node
+                            .send_request(&transport_peer, WireRequest::DiscoveryPublic { filter: filter.clone() })?;
                         pending.insert(format!("{request_id:?}"));
                     }
                 }
@@ -516,7 +517,9 @@ pub async fn search_public_worlds(
                     pending.remove(&format!("{request_id:?}"));
                     if let WireResponse::DiscoveryWorlds(values) = response {
                         for value in values {
-                            if !matches!(value.visibility, WorldVisibilityV1::Public) || !announcement_matches(&value, &filter) {
+                            if !matches!(value.visibility, WorldVisibilityV1::Public)
+                                || !announcement_matches(&value, &filter)
+                            {
                                 rejected_invalid += 1;
                                 continue;
                             }
@@ -568,9 +571,17 @@ pub async fn search_public_worlds(
     values.truncate(usize::from(filter.limit.clamp(1, MAX_DISCOVERY_RESULTS as u16)));
     let cards = values.into_iter().map(WorldDiscoveryCardV1::from).collect::<Vec<_>>();
     let state = if providers.is_empty() {
-        if network_error.is_some() { "network_unavailable" } else { "provider_unavailable" }
+        if network_error.is_some() {
+            "network_unavailable"
+        } else {
+            "provider_unavailable"
+        }
     } else if cards.is_empty() {
-        if rejected_invalid > 0 || rejected_stale > 0 { "partial" } else { "empty" }
+        if rejected_invalid > 0 || rejected_stale > 0 {
+            "partial"
+        } else {
+            "empty"
+        }
     } else if rejected_invalid > 0 || rejected_stale > 0 {
         "partial"
     } else {
@@ -613,10 +624,14 @@ pub async fn resolve_world(
                         let _ = node.dial_peer(peer);
                     }
                 }
-                DiscoveryNetworkEvent::ProvidersFinished { query_id } if query_id == query && providers.is_empty() => break,
+                DiscoveryNetworkEvent::ProvidersFinished { query_id } if query_id == query && providers.is_empty() => {
+                    break
+                }
                 DiscoveryNetworkEvent::ProvidersFailed { query_id, error } if query_id == query => {
                     detail = Some(error);
-                    if providers.is_empty() { break; }
+                    if providers.is_empty() {
+                        break;
+                    }
                 }
                 DiscoveryNetworkEvent::Authenticated { transport_peer, .. } if providers.contains(&transport_peer) => {
                     if requested.insert(transport_peer) {
@@ -646,7 +661,9 @@ pub async fn resolve_world(
         Ok::<(), anyhow::Error>(())
     })
     .await;
-    if let Ok(value) = run { value?; }
+    if let Ok(value) = run {
+        value?;
+    }
 
     let state = if result.is_some() {
         "found"
@@ -655,7 +672,11 @@ pub async fn resolve_world(
     } else if invalid {
         "invalid"
     } else if providers.is_empty() {
-        if detail.is_some() { "network_unavailable" } else { "provider_unavailable" }
+        if detail.is_some() {
+            "network_unavailable"
+        } else {
+            "provider_unavailable"
+        }
     } else {
         "not_found"
     };
@@ -700,23 +721,25 @@ pub async fn friend_presence(
                         let _ = node.dial_peer(provider);
                     }
                 }
-                DiscoveryNetworkEvent::ProvidersFinished { query_id } if query_id == query && providers.is_empty() => break,
+                DiscoveryNetworkEvent::ProvidersFinished { query_id } if query_id == query && providers.is_empty() => {
+                    break
+                }
                 DiscoveryNetworkEvent::ProvidersFailed { query_id, error } if query_id == query => {
                     detail = Some(error);
-                    if providers.is_empty() { break; }
+                    if providers.is_empty() {
+                        break;
+                    }
                 }
-                DiscoveryNetworkEvent::Authenticated { transport_peer, application_peer } if providers.contains(&transport_peer) => {
+                DiscoveryNetworkEvent::Authenticated { transport_peer, application_peer }
+                    if providers.contains(&transport_peer) =>
+                {
                     if application_peer != peer {
                         continue;
                     }
                     if requested.insert(transport_peer) {
                         node.send_request(
                             &transport_peer,
-                            WireRequest::FriendPresence {
-                                expected_peer_id: peer,
-                                requester_peer_id: requester,
-                                nonce,
-                            },
+                            WireRequest::FriendPresence { expected_peer_id: peer, requester_peer_id: requester, nonce },
                         )?;
                     }
                 }
@@ -746,15 +769,13 @@ pub async fn friend_presence(
         Ok::<(), anyhow::Error>(())
     })
     .await;
-    if let Ok(value) = run { value?; }
+    if let Ok(value) = run {
+        value?;
+    }
 
     Ok(report.unwrap_or_else(|| FriendPresenceReportV1 {
         peer_id: peer.to_string(),
-        state: if providers.is_empty() && detail.is_some() {
-            "network_unavailable".into()
-        } else {
-            "offline".into()
-        },
+        state: if providers.is_empty() && detail.is_some() { "network_unavailable".into() } else { "offline".into() },
         observed_unix_ms: None,
         expires_unix_ms: None,
         detail,
@@ -798,11 +819,7 @@ fn announcement_matches(value: &WorldAnnouncementV1, filter: &DiscoveryFilterV1)
         }
     }
     if let Some(expected) = filter.approximate_region.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
-        if !value
-            .presentation
-            .approximate_region
-            .as_deref()
-            .is_some_and(|region| region.eq_ignore_ascii_case(expected))
+        if !value.presentation.approximate_region.as_deref().is_some_and(|region| region.eq_ignore_ascii_case(expected))
         {
             return false;
         }
@@ -859,7 +876,9 @@ impl From<WorldAnnouncementV1> for WorldDiscoveryCardV1 {
 fn add_explicit_bootstraps(node: &mut DiscoveryNode, values: &[String]) -> Result<()> {
     let mut any = false;
     for value in values.iter().map(|value| value.trim()).filter(|value| !value.is_empty()) {
-        node.add_bootstrap_address(value.parse().with_context(|| format!("invalid discovery bootstrap address: {value}"))?)?;
+        node.add_bootstrap_address(
+            value.parse().with_context(|| format!("invalid discovery bootstrap address: {value}"))?,
+        )?;
         any = true;
     }
     if any {
@@ -930,9 +949,7 @@ fn sync_parent(parent: &Path) -> Result<()> {
 
 fn parse_public_key(value: &str) -> Result<[u8; 32]> {
     let bytes = hex::decode(value.trim()).context("friend public key must be hex")?;
-    bytes
-        .try_into()
-        .map_err(|bytes: Vec<u8>| anyhow!("friend public key must be 32 bytes, got {}", bytes.len()))
+    bytes.try_into().map_err(|bytes: Vec<u8>| anyhow!("friend public key must be 32 bytes, got {}", bytes.len()))
 }
 
 fn clean_optional(value: Option<String>) -> Option<String> {
