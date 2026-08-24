@@ -1003,7 +1003,6 @@ mod tests {
         let storage = Storage::open(paths.root.clone()).unwrap();
         let local = PeerIdentity::from_secret_bytes([4; 32]);
         let friend = PeerIdentity::from_secret_bytes([5; 32]);
-        let world = WorldId([6; 32]);
         let genesis = swarm_protocol::WorldGenesisV1 {
             protocol_version: PROTOCOL_VERSION,
             minecraft_version: "1.21.8".into(),
@@ -1013,6 +1012,7 @@ mod tests {
             creator_public_key: local.public_key(),
             initial_membership: vec![local.peer_id()],
         };
+        let world = genesis.world_id().unwrap();
         storage
             .create_world(&WorldMetadataV1 {
                 storage_schema_version: STORAGE_SCHEMA_VERSION,
