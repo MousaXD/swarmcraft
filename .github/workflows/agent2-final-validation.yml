@@ -1,0 +1,61 @@
+name: Agent 2 final validation
+
+on:
+  pull_request:
+    branches: [backup/local-work-20260824]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.head_ref == 'agent/modrinth-provider'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+      - name: Install Linux Desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Workspace format
+        run: cargo fmt --all -- --check
+      - name: Excluded provider bridge format
+        run: rustfmt --edition 2021 --check apps/desktop/src-tauri/src/modrinth_commands.rs crates/swarm-provider/src/lib.rs
+      - name: Workspace check
+        run: cargo check --workspace --locked
+      - name: Workspace clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Workspace tests
+        run: cargo test --workspace --locked
+      - name: Modrinth deterministic provider tests
+        run: |
+          cargo test -p swarm-cli --test modrinth_provider --locked
+          cargo test -p swarm-cli --test modrinth_provider_matrix --locked
+      - name: Desktop check
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+      - name: Desktop clippy
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
+      - name: Desktop tests
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+      - name: Provider adapter check
+        run: cargo check --manifest-path crates/swarm-provider/Cargo.toml --locked
+      - name: Retire validation helper after success
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/agent2-final-validation.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/workflows/agent2-final-validation.yml
+          git commit -m "Remove completed Agent 2 validation helper"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
