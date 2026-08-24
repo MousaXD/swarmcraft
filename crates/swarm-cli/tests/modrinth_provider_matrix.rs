@@ -9,8 +9,8 @@ use std::{
 };
 use swarm_cli::package_provider::{
     modrinth::{HttpResponse, ModrinthClient, ModrinthTransport},
-    ArtifactRetrieval, DependencyKind, ModArtifactLocator, ModDownloadRequest, ModResolveRequest,
-    PackageEnvironment, ProviderFailure, ProviderFailureKind, ProviderId, ReleaseType,
+    ArtifactRetrieval, DependencyKind, ModArtifactLocator, ModDownloadRequest, ModResolveRequest, PackageEnvironment,
+    ProviderFailure, ProviderFailureKind, ProviderId, ReleaseType,
 };
 
 #[derive(Clone, Default)]
@@ -36,27 +36,12 @@ impl FixtureTransport {
 
 impl ModrinthTransport for FixtureTransport {
     fn get(&self, _url: &str) -> Result<HttpResponse, ProviderFailure> {
-        self.responses
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("fixture response queue exhausted")
+        self.responses.lock().unwrap().pop_front().expect("fixture response queue exhausted")
     }
 
-    fn download(
-        &self,
-        _url: &str,
-        destination: &Path,
-        _max_bytes: u64,
-    ) -> Result<(), ProviderFailure> {
+    fn download(&self, _url: &str, destination: &Path, _max_bytes: u64) -> Result<(), ProviderFailure> {
         *self.download_calls.lock().unwrap() += 1;
-        match self
-            .downloads
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("fixture download queue exhausted")
-        {
+        match self.downloads.lock().unwrap().pop_front().expect("fixture download queue exhausted") {
             Ok(bytes) => {
                 fs::write(destination, bytes).unwrap();
                 Ok(())
@@ -165,14 +150,7 @@ fn resolver_includes_required_dependencies_and_preserves_optional_edges() {
         b"root",
         4,
     ));
-    transport.json(version(
-        "DEP",
-        "P_DEP",
-        json!([]),
-        "dep.jar",
-        b"dep",
-        3,
-    ));
+    transport.json(version("DEP", "P_DEP", json!([]), "dep.jar", b"dep", 3));
 
     let graph = client(transport).resolve(&resolve_request("ROOT")).unwrap();
 
@@ -208,14 +186,7 @@ fn resolver_rejects_selected_versions_marked_incompatible() {
         b"root",
         4,
     ));
-    transport.json(version(
-        "DEP",
-        "P_DEP",
-        json!([]),
-        "dep.jar",
-        b"dep",
-        3,
-    ));
+    transport.json(version("DEP", "P_DEP", json!([]), "dep.jar", b"dep", 3));
 
     let error = client(transport).resolve(&resolve_request("ROOT")).unwrap_err();
     assert_eq!(error.kind, ProviderFailureKind::Incompatible);
@@ -224,14 +195,7 @@ fn resolver_rejects_selected_versions_marked_incompatible() {
 #[test]
 fn oversized_artifact_is_rejected_before_any_download_or_partial_file() {
     let transport = FixtureTransport::default();
-    transport.json(version(
-        "V1",
-        "P1",
-        json!([]),
-        "V1.jar",
-        b"artifact",
-        4096,
-    ));
+    transport.json(version("V1", "P1", json!([]), "V1.jar", b"artifact", 4096));
     let directory = tempfile::tempdir().unwrap();
     let request = ModDownloadRequest {
         locator: locator("P1", "V1", b"artifact"),
@@ -249,14 +213,7 @@ fn oversized_artifact_is_rejected_before_any_download_or_partial_file() {
 #[test]
 fn artifact_download_requires_exact_provider_project_version_and_hash_identity() {
     let transport = FixtureTransport::default();
-    transport.json(version(
-        "V1",
-        "P1",
-        json!([]),
-        "V1.jar",
-        b"artifact",
-        8,
-    ));
+    transport.json(version("V1", "P1", json!([]), "V1.jar", b"artifact", 8));
     let directory = tempfile::tempdir().unwrap();
     let request = ModDownloadRequest {
         locator: locator("P1", "V1", b"different"),
@@ -274,22 +231,12 @@ fn artifact_download_requires_exact_provider_project_version_and_hash_identity()
 #[test]
 fn non_installable_provider_file_stays_manual_required_and_fails_closed() {
     let transport = FixtureTransport::default();
-    let raw = version(
-        "V1",
-        "P1",
-        json!([]),
-        "V1.zip",
-        b"artifact",
-        8,
-    );
+    let raw = version("V1", "P1", json!([]), "V1.zip", b"artifact", 8);
     transport.json(raw.clone());
     transport.json(raw);
 
     let mod_version = client(transport.clone()).version("V1").unwrap();
-    assert!(matches!(
-        &mod_version.files[0].retrieval,
-        ArtifactRetrieval::ManualRequired { .. }
-    ));
+    assert!(matches!(&mod_version.files[0].retrieval, ArtifactRetrieval::ManualRequired { .. }));
 
     let directory = tempfile::tempdir().unwrap();
     let request = ModDownloadRequest {
