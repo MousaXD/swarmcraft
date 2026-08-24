@@ -198,10 +198,7 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
 
     // Seed the exact backend diagnostics snapshot that ordinary invite creation
     // consumes. No --bootstrap argument is supplied below.
-    let diagnostics = ConnectivityDiagnosticsV1 {
-        local_addresses: vec![a_address.clone()],
-        ..Default::default()
-    };
+    let diagnostics = ConnectivityDiagnosticsV1 { local_addresses: vec![a_address.clone()], ..Default::default() };
     let diagnostics_path = a.paths.root.join(DEFAULT_CONNECTIVITY_DIAGNOSTICS_JSON_FILE);
     fs::create_dir_all(&a.paths.root).unwrap();
     fs::write(&diagnostics_path, serde_json::to_vec(&diagnostics).unwrap()).unwrap();
