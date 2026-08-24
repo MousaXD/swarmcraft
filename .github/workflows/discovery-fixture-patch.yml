@@ -1,16 +1,15 @@
 name: Discovery fixture surgical patch
 
 on:
-  pull_request:
+  push:
     branches:
-      - backup/local-work-20260824
+      - agent/discovery
 
 permissions:
   contents: write
 
 jobs:
   patch-discovery-fixture:
-    if: github.head_ref == 'agent/discovery' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
