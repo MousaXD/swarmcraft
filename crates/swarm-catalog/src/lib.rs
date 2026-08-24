@@ -10,8 +10,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
-pub const MOJANG_VERSION_MANIFEST_URL: &str =
-    "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+pub const MOJANG_VERSION_MANIFEST_URL: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 pub const FABRIC_META_BASE_URL: &str = "https://meta.fabricmc.net/";
 pub const DEFAULT_CACHE_TTL_SECONDS: u64 = 30 * 60;
 const MOJANG_MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -80,11 +79,7 @@ pub struct CatalogErrorPayload {
 
 impl CatalogErrorPayload {
     pub fn from_error(provider: CatalogProvider, error: &CatalogError) -> Self {
-        Self {
-            code: error.code().to_owned(),
-            provider: provider.as_str().to_owned(),
-            message: error.to_string(),
-        }
+        Self { code: error.code().to_owned(), provider: provider.as_str().to_owned(), message: error.to_string() }
     }
 }
 
@@ -152,9 +147,7 @@ impl HttpTransport {
 impl CatalogTransport for HttpTransport {
     fn get(&self, url: &Url, max_response_bytes: usize) -> Result<Vec<u8>, CatalogError> {
         if url.scheme() != "https" {
-            return Err(CatalogError::InvalidInput(
-                "catalog providers must use HTTPS".into(),
-            ));
+            return Err(CatalogError::InvalidInput("catalog providers must use HTTPS".into()));
         }
         let response = self
             .client
@@ -162,11 +155,7 @@ impl CatalogTransport for HttpTransport {
             .send()
             .map_err(|error| CatalogError::ProviderUnavailable(error.to_string()))?;
         if !response.status().is_success() {
-            return Err(CatalogError::ProviderUnavailable(format!(
-                "HTTP {} from {}",
-                response.status(),
-                url
-            )));
+            return Err(CatalogError::ProviderUnavailable(format!("HTTP {} from {}", response.status(), url)));
         }
 
         let mut body = Vec::new();
@@ -175,9 +164,7 @@ impl CatalogTransport for HttpTransport {
             .read_to_end(&mut body)
             .map_err(|error| CatalogError::ProviderUnavailable(error.to_string()))?;
         if body.len() > max_response_bytes {
-            return Err(CatalogError::ResponseTooLarge {
-                limit_bytes: max_response_bytes,
-            });
+            return Err(CatalogError::ResponseTooLarge { limit_bytes: max_response_bytes });
         }
         Ok(body)
     }
@@ -217,11 +204,7 @@ impl CatalogService<HttpTransport> {
 
 impl<T: CatalogTransport> CatalogService<T> {
     pub fn new(transport: T, cache_dir: PathBuf) -> Self {
-        Self {
-            transport,
-            cache_dir,
-            cache_ttl: Duration::from_secs(DEFAULT_CACHE_TTL_SECONDS),
-        }
+        Self { transport, cache_dir, cache_ttl: Duration::from_secs(DEFAULT_CACHE_TTL_SECONDS) }
     }
 
     pub fn with_cache_ttl(mut self, cache_ttl: Duration) -> Self {
@@ -234,22 +217,15 @@ impl<T: CatalogTransport> CatalogService<T> {
         include_snapshots: bool,
         refresh: bool,
     ) -> Result<CatalogResponse<MinecraftVersion>, CatalogError> {
-        let url = Url::parse(MOJANG_VERSION_MANIFEST_URL)
-            .map_err(|error| CatalogError::InvalidInput(error.to_string()))?;
-        let resolved = self.resolve(
-            &url,
-            MOJANG_MAX_RESPONSE_BYTES,
-            refresh,
-            parse_minecraft_catalog,
-        )?;
+        let url =
+            Url::parse(MOJANG_VERSION_MANIFEST_URL).map_err(|error| CatalogError::InvalidInput(error.to_string()))?;
+        let resolved = self.resolve(&url, MOJANG_MAX_RESPONSE_BYTES, refresh, parse_minecraft_catalog)?;
         let versions = filter_minecraft_versions(&resolved.value, include_snapshots)?;
         Ok(CatalogResponse {
             provider: CatalogProvider::Mojang,
             source_url: url.to_string(),
             fetched_at_unix_seconds: resolved.fetched_at_unix_seconds,
-            cache_expires_at_unix_seconds: resolved
-                .fetched_at_unix_seconds
-                .saturating_add(self.cache_ttl.as_secs()),
+            cache_expires_at_unix_seconds: resolved.fetched_at_unix_seconds.saturating_add(self.cache_ttl.as_secs()),
             origin: resolved.origin,
             warning: resolved.warning,
             versions,
@@ -264,16 +240,13 @@ impl<T: CatalogTransport> CatalogService<T> {
         validate_token("Minecraft version", minecraft_version)?;
         let url = fabric_loader_url(minecraft_version)?;
         let minecraft = minecraft_version.to_owned();
-        let resolved = self.resolve(&url, FABRIC_MAX_RESPONSE_BYTES, refresh, |body| {
-            parse_fabric_loader_catalog(&minecraft, body)
-        })?;
+        let resolved = self
+            .resolve(&url, FABRIC_MAX_RESPONSE_BYTES, refresh, |body| parse_fabric_loader_catalog(&minecraft, body))?;
         Ok(CatalogResponse {
             provider: CatalogProvider::Fabric,
             source_url: url.to_string(),
             fetched_at_unix_seconds: resolved.fetched_at_unix_seconds,
-            cache_expires_at_unix_seconds: resolved
-                .fetched_at_unix_seconds
-                .saturating_add(self.cache_ttl.as_secs()),
+            cache_expires_at_unix_seconds: resolved.fetched_at_unix_seconds.saturating_add(self.cache_ttl.as_secs()),
             origin: resolved.origin,
             warning: resolved.warning,
             versions: resolved.value,
@@ -288,11 +261,7 @@ impl<T: CatalogTransport> CatalogService<T> {
     ) -> Result<FabricLoaderVersion, CatalogError> {
         validate_token("Fabric Loader version", fabric_loader_version)?;
         let response = self.fabric_loader_versions(minecraft_version, refresh)?;
-        validate_fabric_loader_selection(
-            minecraft_version,
-            fabric_loader_version,
-            &response.versions,
-        )
+        validate_fabric_loader_selection(minecraft_version, fabric_loader_version, &response.versions)
     }
 
     fn resolve<R, F>(
@@ -327,25 +296,14 @@ impl<T: CatalogTransport> CatalogService<T> {
             Ok(body) => match parse(&body) {
                 Ok(value) => {
                     let body = String::from_utf8(body).map_err(|error| {
-                        CatalogError::MalformedResponse(format!(
-                            "provider JSON was not UTF-8: {error}"
-                        ))
+                        CatalogError::MalformedResponse(format!("provider JSON was not UTF-8: {error}"))
                     })?;
-                    let record = CacheRecord {
-                        fetched_at_unix_seconds: now,
-                        source_url: url.to_string(),
-                        body,
-                    };
+                    let record = CacheRecord { fetched_at_unix_seconds: now, source_url: url.to_string(), body };
                     let warning = self
                         .write_cache(url, &record)
                         .err()
                         .map(|error| format!("Catalog cache could not be updated: {error}"));
-                    Ok(Resolved {
-                        value,
-                        fetched_at_unix_seconds: now,
-                        origin: CatalogOrigin::Network,
-                        warning,
-                    })
+                    Ok(Resolved { value, fetched_at_unix_seconds: now, origin: CatalogOrigin::Network, warning })
                 }
                 Err(network_parse_error) => self.stale_or_error(
                     cached.as_ref(),
@@ -354,12 +312,9 @@ impl<T: CatalogTransport> CatalogService<T> {
                     "Provider refresh returned malformed data",
                 ),
             },
-            Err(network_error) => self.stale_or_error(
-                cached.as_ref(),
-                &parse,
-                network_error,
-                "Provider refresh is unavailable",
-            ),
+            Err(network_error) => {
+                self.stale_or_error(cached.as_ref(), &parse, network_error, "Provider refresh is unavailable")
+            }
         }
     }
 
@@ -389,15 +344,10 @@ impl<T: CatalogTransport> CatalogService<T> {
     fn cache_path(&self, url: &Url) -> PathBuf {
         let mut digest = Sha256::new();
         digest.update(url.as_str().as_bytes());
-        self.cache_dir
-            .join(format!("{}.json", hex::encode(digest.finalize())))
+        self.cache_dir.join(format!("{}.json", hex::encode(digest.finalize())))
     }
 
-    fn read_cache(
-        &self,
-        url: &Url,
-        max_response_bytes: usize,
-    ) -> Result<Option<CacheRecord>, CatalogError> {
+    fn read_cache(&self, url: &Url, max_response_bytes: usize) -> Result<Option<CacheRecord>, CatalogError> {
         let path = self.cache_path(url);
         let file = match File::open(path) {
             Ok(file) => file,
@@ -423,12 +373,9 @@ impl<T: CatalogTransport> CatalogService<T> {
     }
 
     fn write_cache(&self, url: &Url, record: &CacheRecord) -> Result<(), CatalogError> {
-        std::fs::create_dir_all(&self.cache_dir)
-            .map_err(|error| CatalogError::CacheUnavailable(error.to_string()))?;
-        let bytes = serde_json::to_vec(record)
-            .map_err(|error| CatalogError::CacheUnavailable(error.to_string()))?;
-        std::fs::write(self.cache_path(url), bytes)
-            .map_err(|error| CatalogError::CacheUnavailable(error.to_string()))
+        std::fs::create_dir_all(&self.cache_dir).map_err(|error| CatalogError::CacheUnavailable(error.to_string()))?;
+        let bytes = serde_json::to_vec(record).map_err(|error| CatalogError::CacheUnavailable(error.to_string()))?;
+        std::fs::write(self.cache_path(url), bytes).map_err(|error| CatalogError::CacheUnavailable(error.to_string()))
     }
 }
 
@@ -454,8 +401,8 @@ pub fn parse_minecraft_catalog(body: &[u8]) -> Result<Vec<MinecraftVersion>, Cat
         release_time: String,
     }
 
-    let manifest: Manifest = serde_json::from_slice(body)
-        .map_err(|error| CatalogError::MalformedResponse(error.to_string()))?;
+    let manifest: Manifest =
+        serde_json::from_slice(body).map_err(|error| CatalogError::MalformedResponse(error.to_string()))?;
     if manifest.versions.is_empty() {
         return Err(CatalogError::EmptyCatalog("Mojang"));
     }
@@ -470,22 +417,12 @@ pub fn parse_minecraft_catalog(body: &[u8]) -> Result<Vec<MinecraftVersion>, Cat
     for entry in manifest.versions {
         validate_provider_string("Minecraft version id", &entry.id, MAX_TOKEN_BYTES)?;
         validate_provider_string("Minecraft version type", &entry.version_type, 32)?;
-        validate_provider_string(
-            "Minecraft release time",
-            &entry.release_time,
-            MAX_RELEASE_TIME_BYTES,
-        )?;
+        validate_provider_string("Minecraft release time", &entry.release_time, MAX_RELEASE_TIME_BYTES)?;
         if !entry.release_time.contains('T') {
-            return Err(CatalogError::MalformedResponse(format!(
-                "Minecraft {} has an invalid releaseTime",
-                entry.id
-            )));
+            return Err(CatalogError::MalformedResponse(format!("Minecraft {} has an invalid releaseTime", entry.id)));
         }
         if !seen.insert(entry.id.clone()) {
-            return Err(CatalogError::MalformedResponse(format!(
-                "duplicate Minecraft version {}",
-                entry.id
-            )));
+            return Err(CatalogError::MalformedResponse(format!("duplicate Minecraft version {}", entry.id)));
         }
         let supported = matches!(entry.version_type.as_str(), "release" | "snapshot");
         versions.push(MinecraftVersion {
@@ -506,8 +443,7 @@ pub fn filter_minecraft_versions(
         .iter()
         .filter(|version| {
             version.supported
-                && (version.version_type == "release"
-                    || (include_snapshots && version.version_type == "snapshot"))
+                && (version.version_type == "release" || (include_snapshots && version.version_type == "snapshot"))
         })
         .cloned()
         .collect();
@@ -538,8 +474,8 @@ pub fn parse_fabric_loader_catalog(
         stable: bool,
     }
 
-    let entries: Vec<FabricEntry> = serde_json::from_slice(body)
-        .map_err(|error| CatalogError::MalformedResponse(error.to_string()))?;
+    let entries: Vec<FabricEntry> =
+        serde_json::from_slice(body).map_err(|error| CatalogError::MalformedResponse(error.to_string()))?;
     if entries.len() > MAX_PROVIDER_ENTRIES {
         return Err(CatalogError::MalformedResponse(format!(
             "Fabric returned more than {MAX_PROVIDER_ENTRIES} loader versions"
@@ -575,8 +511,7 @@ pub fn validate_fabric_loader_selection(
     versions
         .iter()
         .find(|candidate| {
-            candidate.minecraft_version == minecraft_version
-                && candidate.version == fabric_loader_version
+            candidate.minecraft_version == minecraft_version && candidate.version == fabric_loader_version
         })
         .cloned()
         .ok_or_else(|| CatalogError::IncompatibleFabricSelection {
@@ -586,8 +521,7 @@ pub fn validate_fabric_loader_selection(
 }
 
 fn fabric_loader_url(minecraft_version: &str) -> Result<Url, CatalogError> {
-    let mut url = Url::parse(FABRIC_META_BASE_URL)
-        .map_err(|error| CatalogError::InvalidInput(error.to_string()))?;
+    let mut url = Url::parse(FABRIC_META_BASE_URL).map_err(|error| CatalogError::InvalidInput(error.to_string()))?;
     url.path_segments_mut()
         .map_err(|_| CatalogError::InvalidInput("Fabric Meta URL cannot be a base URL".into()))?
         .extend(["v2", "versions", "loader", minecraft_version]);
@@ -601,9 +535,7 @@ fn validate_token(label: &str, value: &str) -> Result<(), CatalogError> {
         )));
     }
     if value.chars().any(char::is_control) {
-        return Err(CatalogError::InvalidInput(format!(
-            "{label} contains control characters"
-        )));
+        return Err(CatalogError::InvalidInput(format!("{label} contains control characters")));
     }
     Ok(())
 }
@@ -618,10 +550,7 @@ fn validate_provider_string(label: &str, value: &str, max: usize) -> Result<(), 
 }
 
 fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 #[cfg(test)]
@@ -635,18 +564,17 @@ mod tests {
     const MOJANG_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/mojang_manifest.json");
     const FABRIC_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/fabric_loaders_26_2.json");
 
+    type MockResponseQueue = Arc<Mutex<VecDeque<Result<Vec<u8>, CatalogError>>>>;
+
     #[derive(Clone)]
     struct MockTransport {
         calls: Arc<AtomicUsize>,
-        responses: Arc<Mutex<VecDeque<Result<Vec<u8>, CatalogError>>>>,
+        responses: MockResponseQueue,
     }
 
     impl MockTransport {
         fn new(responses: Vec<Result<Vec<u8>, CatalogError>>) -> Self {
-            Self {
-                calls: Arc::new(AtomicUsize::new(0)),
-                responses: Arc::new(Mutex::new(responses.into())),
-            }
+            Self { calls: Arc::new(AtomicUsize::new(0)), responses: Arc::new(Mutex::new(responses.into())) }
         }
 
         fn calls(&self) -> usize {
@@ -683,7 +611,10 @@ mod tests {
         let stable = filter_minecraft_versions(&versions, false).expect("stable releases");
         assert_eq!(stable.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec!["26.2", "26.1.5"]);
         let with_snapshots = filter_minecraft_versions(&versions, true).expect("release and snapshots");
-        assert_eq!(with_snapshots.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec!["26.3-snapshot-1", "26.2", "26.1.5"]);
+        assert_eq!(
+            with_snapshots.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec!["26.3-snapshot-1", "26.2", "26.1.5"]
+        );
     }
 
     #[test]
@@ -699,10 +630,7 @@ mod tests {
     #[test]
     fn rejects_malformed_provider_payloads() {
         let malformed_mojang = br#"{"versions":[{"id":"26.2","type":"release"}]}"#;
-        assert!(matches!(
-            parse_minecraft_catalog(malformed_mojang),
-            Err(CatalogError::MalformedResponse(_))
-        ));
+        assert!(matches!(parse_minecraft_catalog(malformed_mojang), Err(CatalogError::MalformedResponse(_))));
         let malformed_fabric = br#"[{"loader":{"version":"0.19.3"}}]"#;
         assert!(matches!(
             parse_fabric_loader_catalog("26.2", malformed_fabric),
@@ -712,11 +640,9 @@ mod tests {
 
     #[test]
     fn empty_catalogs_have_explicit_semantics() {
-        assert!(matches!(
-            parse_minecraft_catalog(br#"{"versions":[]}"#),
-            Err(CatalogError::EmptyCatalog("Mojang"))
-        ));
-        let fabric = parse_fabric_loader_catalog("26.2", b"[]").expect("empty Fabric list is a valid no-compatible-loader result");
+        assert!(matches!(parse_minecraft_catalog(br#"{"versions":[]}"#), Err(CatalogError::EmptyCatalog("Mojang"))));
+        let fabric = parse_fabric_loader_catalog("26.2", b"[]")
+            .expect("empty Fabric list is a valid no-compatible-loader result");
         assert!(fabric.is_empty());
     }
 
@@ -738,10 +664,7 @@ mod tests {
         let directory = tempdir().expect("tempdir");
         let transport = MockTransport::new(vec![Err(CatalogError::ProviderUnavailable("offline".into()))]);
         let service = CatalogService::new(transport, directory.path().to_owned());
-        assert!(matches!(
-            service.minecraft_versions(false, false),
-            Err(CatalogError::ProviderUnavailable(_))
-        ));
+        assert!(matches!(service.minecraft_versions(false, false), Err(CatalogError::ProviderUnavailable(_))));
     }
 
     #[test]
@@ -775,10 +698,7 @@ mod tests {
     #[test]
     fn fabric_mapping_and_cache_are_scoped_to_minecraft_version() {
         let directory = tempdir().expect("tempdir");
-        let transport = MockTransport::new(vec![
-            Ok(FABRIC_FIXTURE.to_vec()),
-            Ok(b"[]".to_vec()),
-        ]);
+        let transport = MockTransport::new(vec![Ok(FABRIC_FIXTURE.to_vec()), Ok(b"[]".to_vec())]);
         let service = CatalogService::new(transport, directory.path().to_owned());
         let compatible = service.fabric_loader_versions("26.2", false).expect("26.2 loaders");
         assert_eq!(compatible.versions[0].minecraft_version, "26.2");
