@@ -365,7 +365,9 @@ impl DiscoveryNode {
                             providers: providers.into_iter().collect(),
                         });
                     }
-                    kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. })) => {
+                    kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FinishedWithNoAdditionalRecord {
+                        ..
+                    })) => {
                         return Ok(DiscoveryNetworkEvent::ProvidersFinished { query_id: id });
                     }
                     kad::QueryResult::GetProviders(Err(error)) => {
