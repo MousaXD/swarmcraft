@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -399,7 +399,7 @@ impl<T: CatalogTransport> CatalogService<T> {
         max_response_bytes: usize,
     ) -> Result<Option<CacheRecord>, CatalogError> {
         let path = self.cache_path(url);
-        let mut file = match File::open(path) {
+        let file = match File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(CatalogError::CacheUnavailable(error.to_string())),
