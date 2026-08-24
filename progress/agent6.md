@@ -2,12 +2,12 @@
 
 ## Status
 
-`NOT STARTED`
+`IN PROGRESS`
 
 ## Branch / exact head
 
-- Branch: `agent/friend-public-discovery`
-- Exact head: `TBD`
+- Branch: `agent/discovery`
+- Exact head: `41c9b5b650aac1e320195f6e1855945f2722abc4` (implementation base; ledger update commit follows)
 
 ## Mission
 
@@ -22,15 +22,18 @@ Consume Agent 5's exact current-address/connectivity advertisement contract befo
 
 ## Dependencies consumed
 
-- None yet.
+- `backup/local-work-20260824` / `41c9b5b650aac1e320195f6e1855945f2722abc4` as the mandated implementation base.
+- Agent 5 dependency checked on 2026-08-24: no `agent/automatic-invites` branch is published yet and base `progress/agent5.md` remains `NOT STARTED`, so no Agent 5 implementation SHA can be consumed yet.
 
 ## Work completed
 
-- None yet.
+- Created `agent/discovery` from exact base `41c9b5b650aac1e320195f6e1855945f2722abc4`.
+- Read the shared progress protocol and Agent 6/Agent 5 ledgers before changing implementation code.
+- Began architecture inspection of existing authenticated libp2p/Kademlia, signed world config visibility, and Desktop bridge contracts.
 
 ## Contracts / APIs added or changed
 
-- None yet.
+- None yet. Discovery reachability fields will not be frozen until Agent 5 publishes its owned advertisement contract.
 
 Expected ownership includes:
 
@@ -44,11 +47,11 @@ Expected ownership includes:
 
 ## Files changed
 
-- None yet.
+- `progress/agent6.md`
 
 ## Tests and evidence
 
-- None yet.
+- No implementation tests executed yet.
 
 ## Decisions / invariants
 
@@ -57,10 +60,12 @@ Expected ownership includes:
 - Discovery records must expire and must not turn historical reachability into current reachability.
 - Do not conflate friend/contact identity with world membership or authority eligibility.
 - Any centralized/federated service dependency must have a clear trust boundary and failure mode.
+- Agent 5 owns the connectivity advertisement shape; Agent 6 will consume it rather than create a competing address-selection contract.
 
 ## Known issues / blockers
 
-- Final discovery transport/advertisement shape depends on Agent 5's connectivity contract.
+- Final discovery transport/advertisement reachability shape depends on Agent 5's connectivity contract.
+- Agent 5 has not yet published its implementation branch/SHA, so final integration readiness is currently blocked on that dependency even though discovery core work can proceed independently.
 
 ## Handoff for dependent agents
 
@@ -69,3 +74,4 @@ Agent 7 consumes friend/world discovery APIs and UI states. Agent 8 needs deploy
 ## Activity log
 
 - 2026-08-24 — ledger created; implementation not started.
+- 2026-08-24 — `41c9b5b650aac1e320195f6e1855945f2722abc4` — created `agent/discovery`, verified exact base, read required ledgers, and recorded Agent 5 dependency as not yet published.
