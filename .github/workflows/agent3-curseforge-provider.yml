@@ -1,0 +1,37 @@
+name: Agent 3 CurseForge provider validation
+
+on:
+  pull_request:
+    paths:
+      - 'apps/desktop/src-tauri/Cargo.toml'
+      - 'apps/desktop/src-tauri/Cargo.lock'
+      - 'apps/desktop/src-tauri/src/curseforge.rs'
+      - 'apps/desktop/src-tauri/src/main.rs'
+      - '.github/workflows/agent3-curseforge-provider.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  curseforge-provider:
+    name: CurseForge provider Rust checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+      - name: Format Desktop Rust shell
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+      - name: Clippy Desktop Rust shell
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Test CurseForge provider fixtures
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml curseforge::tests::
