@@ -52,7 +52,7 @@ test('changing Minecraft invalidates the prior Fabric selection before revalidat
   assert.equal(state.ready, false);
 });
 
-test('a stale Fabric response must still match the selected Minecraft version', () => {
+test('a Fabric response must match the selected Minecraft version', () => {
   assert.throws(
     () => normalizeFabricCatalog(fabricResponse, '26.1.5'),
     /wrong Minecraft version/,
@@ -90,19 +90,18 @@ test('provider failures surface player-facing retry copy', () => {
   );
 });
 
-test('Create World source uses selectors and thin Tauri catalog commands', async () => {
-  const html = await readFile(new URL('../src/index.html', import.meta.url), 'utf8');
+test('Create World bootstraps real selectors and thin Tauri catalog commands', async () => {
   const main = await readFile(new URL('../src-tauri/src/main.rs', import.meta.url), 'utf8');
   const controller = await readFile(new URL('../src/catalog-selectors.js', import.meta.url), 'utf8');
+  const importFlow = await readFile(new URL('../src/import-flow.js', import.meta.url), 'utf8');
 
-  assert.match(html, /<select id="createMinecraft"/);
-  assert.match(html, /<select id="createLoader"/);
-  assert.doesNotMatch(html, /<input id="createMinecraft"/);
-  assert.doesNotMatch(html, /<input id="createLoader"/);
-  assert.match(html, /id="createSnapshots"/);
+  assert.match(importFlow, /import '\.\/catalog-selectors\.js';/);
+  assert.match(controller, /function upgradeInputToSelect/);
+  assert.match(controller, /select\.disabled = true/);
+  assert.match(controller, /Show Minecraft snapshots in the version selector/);
+  assert.match(controller, /Fetching Minecraft versions\.\.\./);
+  assert.match(controller, /Could not reach Mojang\. Retry\./);
   assert.match(main, /minecraft_versions/);
   assert.match(main, /fabric_loader_versions/);
   assert.match(main, /validate_fabric_selection/);
-  assert.match(controller, /Fetching Minecraft versions\.\.\./);
-  assert.match(controller, /Could not reach Mojang\. Retry\./);
 });
