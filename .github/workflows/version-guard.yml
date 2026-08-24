@@ -1,180 +1,19 @@
-name: Agent 3 exact-head finalizer
+name: Release version guard
 
 on:
   pull_request:
+  push:
+    branches:
+      - main
 
 permissions:
-  contents: write
-  statuses: write
+  contents: read
 
 jobs:
   version:
-    name: Finalize and validate CurseForge provider
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'agent/curseforge-provider'
+    name: Verify release metadata
     runs-on: ubuntu-latest
-    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: agent/curseforge-provider
-          fetch-depth: 0
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Install Linux desktop dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            apps/desktop/src-tauri -> target
-
-      - name: Apply provider hardening and lockfile normalization
-        run: |
-          set -euo pipefail
-          if [ -f .github/agent3_finalize.py ]; then
-            python3 .github/agent3_finalize.py
-          fi
-          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
-          cargo generate-lockfile --manifest-path apps/desktop/src-tauri/Cargo.toml
-          cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked
-
-      - name: Remove temporary validation machinery and restore general CI
-        run: |
-          set -euo pipefail
-          git fetch origin backup/local-work-20260824
-          git checkout origin/backup/local-work-20260824 -- .github/workflows/ci.yml .github/workflows/version-guard.yml
-          rm -f .github/agent3_finalize.py
-          rm -f .github/workflows/agent3-curseforge-provider.yml
-          rm -f .github/workflows/agent1-lockfiles.yml
-          rm -f .github/agent3-validation-trigger.txt
-          git config user.name "swarmcraft-agent3-ci"
-          git config user.email "agent3-ci@users.noreply.github.com"
-          git add -A apps/desktop/src-tauri/src apps/desktop/src-tauri/Cargo.lock .github
-          if ! git diff --cached --quiet; then
-            git commit -m "Finalize CurseForge provider validation state"
-            git push origin HEAD:agent/curseforge-provider
-          fi
-          echo "AGENT3_VALIDATED_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-
-      - name: Verify cleanup is complete
-        run: |
-          set -euo pipefail
-          test ! -e .github/agent3_finalize.py
-          test ! -e .github/workflows/agent3-curseforge-provider.yml
-          test ! -e .github/workflows/agent1-lockfiles.yml
-          test ! -e .github/agent3-validation-trigger.txt
-          git diff --exit-code origin/backup/local-work-20260824 -- .github/workflows/ci.yml .github/workflows/version-guard.yml
-
-      - name: Verify root lockfile is current
-        run: cargo metadata --locked --format-version 1 --no-deps > /dev/null
-
-      - name: Workspace format
-        run: cargo fmt --all -- --check
-
-      - name: Workspace check
-        run: cargo check --workspace --all-features --locked
-
-      - name: Workspace clippy
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-
-      - name: Workspace tests
-        run: cargo test --workspace --all-features --locked
-
-      - name: Desktop format
-        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
-
-      - name: Desktop check
-        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features --locked
-
-      - name: Desktop clippy
-        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
-
-      - name: Desktop tests
-        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features --locked
-
-      - name: CurseForge deterministic matrix
-        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml curseforge::tests:: --all-features --locked
-
-      - name: Validate Tauri registrations and structured states
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          source = Path('apps/desktop/src-tauri/src/curseforge.rs').read_text()
-          main = Path('apps/desktop/src-tauri/src/main.rs').read_text()
-          commands = [
-              'curseforge_provider_status',
-              'curseforge_search',
-              'curseforge_project',
-              'curseforge_versions',
-              'curseforge_resolve',
-              'curseforge_download',
-          ]
-          for command in commands:
-              assert f'fn {command}' in source, f'missing implementation: {command}'
-              assert command in main, f'missing registration: {command}'
-          for state in [
-              '"available"',
-              '"configuration_required"',
-              '"rate_limited"',
-              '"incompatible"',
-              '"manual_artifact_required"',
-              '"download_failed"',
-              '"downloaded"',
-              '"status": "ok"',
-          ]:
-              assert state in source, f'missing structured state: {state}'
-          assert 'SWARMCRAFT_CURSEFORGE_API_KEY' in source
-          assert 'https://api.curseforge.com' in source
-          assert 'local_sha256' in source
-          assert 'provider_hashes_verified' in source
-          assert 'provider_download_unavailable' in source
-          assert 'supply_exact_file_id' in source
-          print('Validated commands:', ', '.join(commands))
-          PY
-
-      - name: Verify validation left the commit clean
-        run: |
-          set -euo pipefail
-          test -z "$(git status --porcelain)"
-          test "$(git rev-parse HEAD)" = "$AGENT3_VALIDATED_SHA"
-
-      - name: Publish exact-head Agent 3 status
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          JOB_STATUS: ${{ job.status }}
-          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          sha="$(git rev-parse HEAD)"
-          state='failure'
-          description='Agent 3 exact-head gate failed'
-          if [ "$JOB_STATUS" = 'success' ]; then
-            state='success'
-            description='Agent 3 exact-head gate passed'
-          fi
-          python3 - "$state" "$description" "$RUN_URL" <<'PY' > /tmp/agent3-status.json
-          import json
-          import sys
-          print(json.dumps({
-              'state': sys.argv[1],
-              'context': 'agent3/curseforge-provider',
-              'description': sys.argv[2],
-              'target_url': sys.argv[3],
-          }))
-          PY
-          curl --fail-with-body --silent --show-error \
-            -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${REPOSITORY}/statuses/${sha}" \
-            --data-binary @/tmp/agent3-status.json
+      - name: Verify application and protocol versions
+        run: python3 scripts/check_release_version.py
