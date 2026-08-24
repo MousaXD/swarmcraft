@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use std::{
     env,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 use swarm_core::{verify_invite_signature, DataPaths};
