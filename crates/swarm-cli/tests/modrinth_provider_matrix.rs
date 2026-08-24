@@ -13,10 +13,12 @@ use swarm_cli::package_provider::{
     ProviderFailure, ProviderFailureKind, ProviderId, ReleaseType,
 };
 
+type DownloadQueue = Arc<Mutex<VecDeque<Result<Vec<u8>, ProviderFailure>>>>;
+
 #[derive(Clone, Default)]
 struct FixtureTransport {
     responses: Arc<Mutex<VecDeque<Result<HttpResponse, ProviderFailure>>>>,
-    downloads: Arc<Mutex<VecDeque<Result<Vec<u8>, ProviderFailure>>>>,
+    downloads: DownloadQueue,
     download_calls: Arc<Mutex<usize>>,
 }
 
@@ -27,10 +29,6 @@ impl FixtureTransport {
             headers: BTreeMap::new(),
             body: serde_json::to_vec(&value).unwrap(),
         }));
-    }
-
-    fn download(&self, bytes: &[u8]) {
-        self.downloads.lock().unwrap().push_back(Ok(bytes.to_vec()));
     }
 }
 
