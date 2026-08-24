@@ -31,17 +31,9 @@ struct DiscoveryBehaviour {
 
 #[derive(Debug)]
 pub enum DiscoveryNetworkEvent {
-    Listening {
-        address: Multiaddr,
-    },
-    Authenticated {
-        transport_peer: TransportPeerId,
-        application_peer: PeerId,
-    },
-    Disconnected {
-        transport_peer: TransportPeerId,
-        application_peer: Option<PeerId>,
-    },
+    Listening { address: Multiaddr },
+    Authenticated { transport_peer: TransportPeerId, application_peer: PeerId },
+    Disconnected { transport_peer: TransportPeerId, application_peer: Option<PeerId> },
     InboundRequest {
         transport_peer: TransportPeerId,
         application_peer: PeerId,
@@ -58,24 +50,11 @@ pub enum DiscoveryNetworkEvent {
         request_id: request_response::OutboundRequestId,
         error: String,
     },
-    ProvidersFound {
-        query_id: kad::QueryId,
-        providers: Vec<TransportPeerId>,
-    },
-    ProvidersFinished {
-        query_id: kad::QueryId,
-    },
-    ProvidersFailed {
-        query_id: kad::QueryId,
-        error: String,
-    },
-    ProviderPublished {
-        query_id: kad::QueryId,
-    },
-    ProviderPublishFailed {
-        query_id: kad::QueryId,
-        error: String,
-    },
+    ProvidersFound { query_id: kad::QueryId, providers: Vec<TransportPeerId> },
+    ProvidersFinished { query_id: kad::QueryId },
+    ProvidersFailed { query_id: kad::QueryId, error: String },
+    ProviderPublished { query_id: kad::QueryId },
+    ProviderPublishFailed { query_id: kad::QueryId, error: String },
 }
 
 pub struct DiscoveryNode {
@@ -94,8 +73,8 @@ impl DiscoveryNode {
                 .with_request_timeout(Duration::from_secs(15))
                 .with_max_concurrent_streams(64),
         );
-        let mdns =
-            mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer).context("failed to initialize discovery mDNS")?;
+        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer)
+            .context("failed to initialize discovery mDNS")?;
         let identify = identify::Behaviour::new(identify::Config::new(
             DISCOVERY_WIRE_PROTOCOL.to_owned(),
             transport_key.public(),
@@ -103,8 +82,6 @@ impl DiscoveryNode {
         let mut kad_config = kad::Config::default();
         kad_config.set_query_timeout(Duration::from_secs(15));
         let mut kad = kad::Behaviour::with_config(local_peer, MemoryStore::new(local_peer), kad_config);
-        // Discovery nodes must answer provider lookups even on private/LAN test
-        // networks where AutoNAT has not classified an external address yet.
         kad.set_mode(Some(kad::Mode::Server));
 
         let swarm = SwarmBuilder::with_existing_identity(transport_key)
@@ -147,8 +124,9 @@ impl DiscoveryNode {
             .ok_or_else(|| anyhow!("bootstrap address must contain /p2p/<peer-id>"))?;
         self.add_peer_address(peer, address.clone());
         if !self.swarm.is_connected(&peer) {
-            let options = DialOpts::peer_id(peer).addresses(vec![address]).build();
-            self.swarm.dial(options).context("failed to dial discovery bootstrap peer")?;
+            self.swarm
+                .dial(DialOpts::peer_id(peer).addresses(vec![address]).build())
+                .context("failed to dial discovery bootstrap peer")?;
         }
         Ok(peer)
     }
@@ -169,12 +147,12 @@ impl DiscoveryNode {
     }
 
     pub fn dial_peer(&mut self, peer: TransportPeerId) -> Result<()> {
-        if self.swarm.is_connected(&peer) {
-            return Ok(());
+        if !self.swarm.is_connected(&peer) {
+            self.swarm
+                .dial(DialOpts::peer_id(peer).build())
+                .context("failed to dial discovery provider")?;
         }
-        self.swarm
-            .dial(DialOpts::peer_id(peer).build())
-            .context("failed to dial discovery provider")
+        Ok(())
     }
 
     pub fn send_request(
@@ -246,9 +224,7 @@ impl DiscoveryNode {
     pub async fn next_event(&mut self) -> Result<DiscoveryNetworkEvent> {
         loop {
             match self.swarm.select_next_some().await {
-                SwarmEvent::NewListenAddr { address, .. } => {
-                    return Ok(DiscoveryNetworkEvent::Listening { address });
-                }
+                SwarmEvent::NewListenAddr { address, .. } => return Ok(DiscoveryNetworkEvent::Listening { address }),
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     self.swarm
                         .behaviour_mut()
@@ -357,31 +333,29 @@ impl DiscoveryNode {
                     }
                     request_response::Event::ResponseSent { .. } => {}
                 },
-                SwarmEvent::Behaviour(DiscoveryBehaviourEvent::Kad(kad::Event::OutboundQueryProgressed {
-                    id,
-                    result,
-                    ..
-                })) => match result {
-                    kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders { providers, .. })) => {
-                        return Ok(DiscoveryNetworkEvent::ProvidersFound {
-                            query_id: id,
-                            providers: providers.into_iter().collect(),
-                        });
+                SwarmEvent::Behaviour(DiscoveryBehaviourEvent::Kad(kad::Event::OutboundQueryProgressed { id, result, .. })) => {
+                    match result {
+                        kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders { providers, .. })) => {
+                            return Ok(DiscoveryNetworkEvent::ProvidersFound {
+                                query_id: id,
+                                providers: providers.into_iter().collect(),
+                            });
+                        }
+                        kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. })) => {
+                            return Ok(DiscoveryNetworkEvent::ProvidersFinished { query_id: id });
+                        }
+                        kad::QueryResult::GetProviders(Err(error)) => {
+                            return Ok(DiscoveryNetworkEvent::ProvidersFailed { query_id: id, error: error.to_string() });
+                        }
+                        kad::QueryResult::StartProviding(Ok(_)) => {
+                            return Ok(DiscoveryNetworkEvent::ProviderPublished { query_id: id });
+                        }
+                        kad::QueryResult::StartProviding(Err(error)) => {
+                            return Ok(DiscoveryNetworkEvent::ProviderPublishFailed { query_id: id, error: error.to_string() });
+                        }
+                        _ => {}
                     }
-                    kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. })) => {
-                        return Ok(DiscoveryNetworkEvent::ProvidersFinished { query_id: id });
-                    }
-                    kad::QueryResult::GetProviders(Err(error)) => {
-                        return Ok(DiscoveryNetworkEvent::ProvidersFailed { query_id: id, error: error.to_string() });
-                    }
-                    kad::QueryResult::StartProviding(Ok(_)) => {
-                        return Ok(DiscoveryNetworkEvent::ProviderPublished { query_id: id });
-                    }
-                    kad::QueryResult::StartProviding(Err(error)) => {
-                        return Ok(DiscoveryNetworkEvent::ProviderPublishFailed { query_id: id, error: error.to_string() });
-                    }
-                    _ => {}
-                },
+                }
                 SwarmEvent::Behaviour(DiscoveryBehaviourEvent::Ping(_))
                 | SwarmEvent::Behaviour(DiscoveryBehaviourEvent::Identify(_))
                 | SwarmEvent::Behaviour(DiscoveryBehaviourEvent::Kad(_)) => {}
@@ -395,7 +369,7 @@ impl DiscoveryNode {
 }
 
 pub fn public_directory_key() -> kad::RecordKey {
-    kad::RecordKey::new(PUBLIC_DIRECTORY_KEY)
+    kad::RecordKey::new(&PUBLIC_DIRECTORY_KEY)
 }
 
 pub fn world_discovery_key(world: WorldId) -> kad::RecordKey {
