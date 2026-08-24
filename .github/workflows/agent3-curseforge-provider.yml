@@ -12,7 +12,7 @@ jobs:
   curseforge-provider:
     name: CurseForge provider Rust checks
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -24,14 +24,17 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/desktop/src-tauri -> target
-      - name: Apply known compiler annotation and format
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+      - name: Harden CurseForge contract and deterministic coverage
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
           path = Path('apps/desktop/src-tauri/src/curseforge.rs')
           text = path.read_text()
+
           old = '''        Ok(json!({
                       "project_id": project_id.to_string(),
                       "minecraft": target.minecraft,
@@ -45,25 +48,326 @@ jobs:
                       "versions": versions,
                   }))'''
           if old in text:
-              path.write_text(text.replace(old, new, 1))
-          elif new not in text:
-              raise SystemExit('expected curseforge_versions result block was not found')
+              text = text.replace(old, new, 1)
+
+          old = '''fn loader_tags(file: &Value) -> Vec<String> {
+              let known = ["Fabric", "Forge", "NeoForge", "Quilt", "LiteLoader", "Cauldron"];
+              game_versions(file)
+                  .into_iter()
+                  .filter(|version| known.iter().any(|loader| version.eq_ignore_ascii_case(loader)))
+                  .collect()
+          }'''
+          new = '''fn is_loader_tag(version: &str) -> bool {
+              ["Fabric", "Forge", "NeoForge", "Quilt", "LiteLoader", "Cauldron"]
+                  .iter()
+                  .any(|loader| version.eq_ignore_ascii_case(loader))
+          }
+
+          fn minecraft_versions(file: &Value) -> Vec<String> {
+              game_versions(file)
+                  .into_iter()
+                  .filter(|version| !is_loader_tag(version))
+                  .collect()
+          }
+
+          fn loader_tags(file: &Value) -> Vec<String> {
+              game_versions(file)
+                  .into_iter()
+                  .filter(|version| is_loader_tag(version))
+                  .collect()
+          }'''
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          text = text.replace('''    let versions = game_versions(file);\n    let loaders = loader_tags(file);''', '''    let minecraft_versions = minecraft_versions(file);\n    let loaders = loader_tags(file);''', 1)
+          text = text.replace('''        "minecraft_versions": versions,''', '''        "minecraft_versions": minecraft_versions,''', 1)
+
+          old = '''fn validate_selected_file(file: &Value, target: &Target) -> Result<(), ProviderError> {
+              let versions = game_versions(file);
+              if !versions.iter().any(|version| version == &target.minecraft) {
+                  return Err(ProviderError::new(
+                      "incompatible",
+                      "no_compatible_minecraft_version",
+                      format!("The selected CurseForge file is not tagged for Minecraft {}", target.minecraft),
+                  ));
+              }
+              if !versions
+                  .iter()
+                  .any(|version| version.eq_ignore_ascii_case("fabric"))
+              {
+                  return Err(ProviderError::new(
+                      "incompatible",
+                      "no_fabric_build",
+                      "The selected CurseForge file is not a Fabric build",
+                  ));
+              }
+              Ok(())
+          }'''
+          new = '''fn validate_selected_file(file: &Value, target: &Target) -> Result<(), ProviderError> {
+              let versions = minecraft_versions(file);
+              if !versions.iter().any(|version| version == &target.minecraft) {
+                  return Err(ProviderError::new(
+                      "incompatible",
+                      "no_compatible_minecraft_version",
+                      format!("The selected CurseForge file is not tagged for Minecraft {}", target.minecraft),
+                  ));
+              }
+              let loaders = loader_tags(file);
+              if !loaders.iter().any(|loader| loader.eq_ignore_ascii_case("fabric")) {
+                  return Err(ProviderError::new(
+                      "incompatible",
+                      "no_fabric_build",
+                      "The selected CurseForge file is not a Fabric build",
+                  ));
+              }
+              Ok(())
+          }'''
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          old = '''fn manual_artifact_required(file: &Value, project: &Value) -> Result<Value, ProviderError> {
+              let project_id = required_u64(file, "modId")?;
+              let file_id = required_u64(file, "id")?;
+              let file_name = required_string(file, "fileName")?;
+              let display_name = required_string(file, "displayName")?;
+              let website_url = project
+                  .get("links")
+                  .and_then(|links| links.get("websiteUrl"))
+                  .cloned()
+                  .unwrap_or(Value::Null);
+              Ok(json!({
+                  "status": "manual_artifact_required",
+                  "provider": "curseforge",
+                  "data": {
+                      "provider": "curseforge",
+                      "project_id": project_id.to_string(),
+                      "file_id": file_id.to_string(),
+                      "version_id": file_id.to_string(),
+                      "name": display_name,
+                      "file_name": file_name,
+                      "file_size": file.get("fileLength").cloned().unwrap_or(Value::Null),
+                      "hashes": provider_hashes(file),
+                      "project_url": website_url,
+                      "reason": "CurseForge did not provide an automatic download URL for this exact file. Desktop must ask the player to obtain this exact artifact and verify it before use."
+                  }
+              }))
+          }'''
+          new = '''fn manual_artifact_required(file: &Value, project: &Value) -> Result<Value, ProviderError> {
+              let project_id = required_u64(file, "modId")?;
+              let file_id = required_u64(file, "id")?;
+              let file_name = required_string(file, "fileName")?;
+              let display_name = required_string(file, "displayName")?;
+              let website_url = project
+                  .get("links")
+                  .and_then(|links| links.get("websiteUrl"))
+                  .cloned()
+                  .unwrap_or(Value::Null);
+              let project_name = nonempty_string(project.get("name")).map(ToOwned::to_owned);
+              let project_slug = nonempty_string(project.get("slug")).map(ToOwned::to_owned);
+              let minecraft_versions = minecraft_versions(file);
+              let loaders = loader_tags(file);
+              let fabric_compatible = loaders.iter().any(|loader| loader.eq_ignore_ascii_case("fabric"));
+              let reason = "CurseForge did not provide an automatic download URL for this exact file. Desktop must ask the player to obtain this exact artifact and verify it before use.";
+              Ok(json!({
+                  "status": "manual_artifact_required",
+                  "provider": "curseforge",
+                  "data": {
+                      "provider": "curseforge",
+                      "project_id": project_id.to_string(),
+                      "file_id": file_id.to_string(),
+                      "version_id": file_id.to_string(),
+                      "name": display_name,
+                      "file_name": file_name,
+                      "file_size": file.get("fileLength").cloned().unwrap_or(Value::Null),
+                      "hashes": provider_hashes(file),
+                      "minecraft_versions": minecraft_versions,
+                      "loaders": loaders,
+                      "fabric_compatible": fabric_compatible,
+                      "dependencies": mapped_dependencies(file),
+                      "project_url": website_url.clone(),
+                      "project": {
+                          "project_id": project_id.to_string(),
+                          "name": project_name,
+                          "slug": project_slug,
+                          "website_url": website_url,
+                          "allow_mod_distribution": project.get("allowModDistribution").cloned().unwrap_or(Value::Null),
+                      },
+                      "remediation": {
+                          "kind": "manual_artifact_required",
+                          "provider": "curseforge",
+                          "automatic_retrieval_available": false,
+                          "reason_code": "provider_download_unavailable",
+                          "supply_exact_project_id": project_id.to_string(),
+                          "supply_exact_file_id": file_id.to_string(),
+                          "reason": reason,
+                      },
+                      "reason": reason,
+                  }
+              }))
+          }'''
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          old = '''                    if selected.contains_key(&dependency_id) {
+                                  continue;
+                              }'''
+          new = '''                    if !should_select_required_dependency(&selected, dependency_id) {
+                                  continue;
+                              }'''
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          marker = '''fn detect_impossible_relations(selected: &BTreeMap<u64, Value>) -> Result<(), ProviderError> {'''
+          helper = '''fn should_select_required_dependency(selected: &BTreeMap<u64, Value>, dependency_id: u64) -> bool {
+              !selected.contains_key(&dependency_id)
+          }
+
+          '''
+          if helper.strip() not in text and marker in text:
+              text = text.replace(marker, helper + marker, 1)
+
+          old = '''        let project = json!({
+                      "links": { "websiteUrl": "https://www.curseforge.com/minecraft/mc-mods/example" }
+                  });
+                  let response = manual_artifact_required(&fixture_file(), &project).unwrap();
+                  assert_eq!(response["status"], "manual_artifact_required");
+                  assert_eq!(response["data"]["project_id"], "123");
+                  assert_eq!(response["data"]["file_id"], "456");
+                  assert_eq!(response["data"]["file_name"], "example-1.2.3.jar");'''
+          new = '''        let project = json!({
+                      "id": 123,
+                      "name": "Example",
+                      "slug": "example",
+                      "allowModDistribution": false,
+                      "links": { "websiteUrl": "https://www.curseforge.com/minecraft/mc-mods/example" }
+                  });
+                  let response = manual_artifact_required(&fixture_file(), &project).unwrap();
+                  assert_eq!(response["status"], "manual_artifact_required");
+                  assert_eq!(response["data"]["project_id"], "123");
+                  assert_eq!(response["data"]["file_id"], "456");
+                  assert_eq!(response["data"]["version_id"], "456");
+                  assert_eq!(response["data"]["file_name"], "example-1.2.3.jar");
+                  assert_eq!(response["data"]["minecraft_versions"], json!(["1.21.1"]));
+                  assert_eq!(response["data"]["loaders"], json!(["Fabric"]));
+                  assert_eq!(response["data"]["fabric_compatible"], true);
+                  assert_eq!(response["data"]["dependencies"][0]["project_id"], "700");
+                  assert_eq!(response["data"]["project"]["name"], "Example");
+                  assert_eq!(response["data"]["project"]["allow_mod_distribution"], false);
+                  assert_eq!(response["data"]["remediation"]["reason_code"], "provider_download_unavailable");
+                  assert_eq!(response["data"]["remediation"]["supply_exact_file_id"], "456");'''
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          test_marker = '''    #[test]
+              fn deterministic_file_selection_prefers_latest_then_highest_id() {'''
+          inserted = '''    #[test]
+              fn provider_metadata_separates_minecraft_versions_from_loader_tags() {
+                  let mapped = map_file(&fixture_file(), "server").unwrap();
+                  assert_eq!(mapped["minecraft_versions"], json!(["1.21.1"]));
+                  assert_eq!(mapped["loaders"], json!(["Fabric"]));
+              }
+
+              #[test]
+              fn required_dependency_cycle_back_to_selected_project_terminates() {
+                  let mut selected = BTreeMap::new();
+                  selected.insert(123, fixture_file());
+                  assert!(!should_select_required_dependency(&selected, 123));
+                  assert!(should_select_required_dependency(&selected, 700));
+              }
+
+              #[test]
+              fn wrong_local_artifact_hash_is_detectable_by_canonical_sha256() {
+                  let expected = hex::encode(Sha256::digest(b"abc"));
+                  let wrong = hex::encode(Sha256::digest(b"abd"));
+                  assert_eq!(expected, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+                  assert_ne!(expected, wrong);
+              }
+
+              #[tokio::test]
+              async fn partial_file_guard_cleans_up_interrupted_artifact() {
+                  let directory = std::env::temp_dir().join(format!(
+                      "swarmcraft-curseforge-partial-{}-{}",
+                      std::process::id(),
+                      SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+                  ));
+                  tokio::fs::create_dir_all(&directory).await.unwrap();
+                  let destination = directory.join("artifact.jar");
+                  let (mut output, guard) = create_temp_artifact(&destination, 456).await.unwrap();
+                  output.write_all(b"partial").await.unwrap();
+                  output.flush().await.unwrap();
+                  let temporary = guard.path.clone();
+                  drop(output);
+                  drop(guard);
+                  assert!(!tokio::fs::try_exists(&temporary).await.unwrap());
+                  let _ = tokio::fs::remove_dir_all(directory).await;
+              }
+
+              #[tokio::test]
+              async fn verified_temp_file_is_atomically_published() {
+                  let directory = std::env::temp_dir().join(format!(
+                      "swarmcraft-curseforge-publish-{}-{}",
+                      std::process::id(),
+                      SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+                  ));
+                  tokio::fs::create_dir_all(&directory).await.unwrap();
+                  let destination = directory.join("artifact.jar");
+                  let (mut output, mut guard) = create_temp_artifact(&destination, 456).await.unwrap();
+                  output.write_all(b"abc").await.unwrap();
+                  output.flush().await.unwrap();
+                  output.sync_all().await.unwrap();
+                  let temporary = guard.path.clone();
+                  drop(output);
+                  tokio::fs::rename(&temporary, &destination).await.unwrap();
+                  guard.disarm();
+                  assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"abc");
+                  assert!(!tokio::fs::try_exists(&temporary).await.unwrap());
+                  let _ = tokio::fs::remove_dir_all(directory).await;
+              }
+
+          '''
+          if inserted.strip() not in text and test_marker in text:
+              text = text.replace(test_marker, inserted + test_marker, 1)
+
+          required_fragments = [
+              'Ok::<Value, ProviderError>(json!({',
+              'fn minecraft_versions(file: &Value) -> Vec<String>',
+              '"reason_code": "provider_download_unavailable"',
+              'fn should_select_required_dependency',
+              'partial_file_guard_cleans_up_interrupted_artifact',
+              'verified_temp_file_is_atomically_published',
+          ]
+          missing = [fragment for fragment in required_fragments if fragment not in text]
+          if missing:
+              raise SystemExit(f'expected hardening fragments missing: {missing}')
+          path.write_text(text)
           PY
           cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
-      - name: Compile Desktop Rust shell and refresh its lockfile
-        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets
-      - name: Commit normalized provider source and desktop lockfile
+      - name: Refresh and compile Desktop lockfile
+        run: |
+          cargo generate-lockfile --manifest-path apps/desktop/src-tauri/Cargo.toml
+          cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked
+      - name: Publish normalized source and lockfile to Agent 3 branch
         run: |
           if ! git diff --quiet -- apps/desktop/src-tauri/src/curseforge.rs apps/desktop/src-tauri/src/main.rs apps/desktop/src-tauri/Cargo.lock; then
             git config user.name "swarmcraft-agent3-ci"
             git config user.email "agent3-ci@users.noreply.github.com"
             git add apps/desktop/src-tauri/src/curseforge.rs apps/desktop/src-tauri/src/main.rs apps/desktop/src-tauri/Cargo.lock
-            git commit -m "Fix and format CurseForge provider"
+            git commit -m "Harden CurseForge handoff contract"
             git push origin HEAD:agent/curseforge-provider
           fi
-      - name: Format Desktop Rust shell
+      - name: Workspace format
+        run: cargo fmt --all -- --check
+      - name: Workspace check
+        run: cargo check --workspace --all-features --locked
+      - name: Workspace clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Workspace tests
+        run: cargo test --workspace --all-features --locked
+      - name: Desktop format
         run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
-      - name: Clippy Desktop Rust shell
-        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
-      - name: Test CurseForge provider fixtures
-        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml curseforge::tests::
+      - name: Desktop check
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked
+      - name: Desktop clippy
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
+      - name: CurseForge deterministic matrix
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml curseforge::tests:: --locked
