@@ -16,6 +16,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "ico
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+swarm-catalog = { path = "../../../crates/swarm-catalog" }
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2.3.5"
 serde_json = "1.0"
