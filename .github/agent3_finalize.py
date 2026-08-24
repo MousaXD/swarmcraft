@@ -28,7 +28,7 @@ def replace_regex(pattern: str, replacement: str, label: str, already: str) -> N
 
 # Rust cannot infer the async block's error type from the outer match alone.
 replace_regex(
-    r'(?P<indent>\s*)Ok\(json!\(\{\n(?P<body>\s*"project_id": project_id\.to_string\(\),\n\s*"minecraft": target\.minecraft,\n\s*"loader": target\.loader,\n\s*"versions": versions,\n\s*\}\)\)',
+    r'(?P<indent>\s*)Ok\(json!\(\{\n(?P<body>\s*"project_id": project_id\.to_string\(\),\n\s*"minecraft": target\.minecraft,\n\s*"loader": target\.loader,\n\s*"versions": versions,\n\s*\}\)\))',
     '        Ok::<Value, ProviderError>(json!({\n            "project_id": project_id.to_string(),\n            "minecraft": target.minecraft,\n            "loader": target.loader,\n            "versions": versions,\n        }))',
     "curseforge_versions result annotation",
     "Ok::<Value, ProviderError>(json!({",
