@@ -33,6 +33,20 @@ jobs:
             . -> target
             apps/desktop/src-tauri -> target
 
+      - name: Build bundled runtimes
+        run: cargo build --release -p swarm-cli --locked
+
+      - name: Stage required Desktop sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
+          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+          cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
+          cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
+
       - name: Apply final provider hardening
         run: |
           python3 .github/agent3_finalize.py
