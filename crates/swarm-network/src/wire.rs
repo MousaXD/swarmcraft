@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use swarm_protocol::{
-    AuthorityLeaseGrantV1, AuthorityTransferV1, BlobEncoding, EpochRecordV1, Hash32, JoinRequestV1, LeaveRequestV1,
-    MembershipRecordV1, PeerHelloV1, RecoveryBallotV1, RecoveryCertificateV1, RecoveryVoteV1, SleepRecordV1,
-    SnapshotManifestV1, SoloBranchV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldStatusV1,
+    AuthorityLeaseGrantV1, AuthorityTransferV1, BlobEncoding, DiscoveryFilterV1, EpochRecordV1, FriendPresenceV1,
+    Hash32, JoinRequestV1, LeaveRequestV1, MembershipRecordV1, PeerHelloV1, PeerId, RecoveryBallotV1,
+    RecoveryCertificateV1, RecoveryVoteV1, SleepRecordV1, SnapshotManifestV1, SoloBranchV1, WorldAnnouncementV1,
+    WorldConfigV1, WorldDescriptorV1, WorldId, WorldStatusV1,
 };
 use thiserror::Error;
 
@@ -12,6 +13,10 @@ pub const MAX_WORLD_MEMBERS: usize = 1_024;
 pub const MAX_RECOVERY_VOTES: usize = 1_024;
 pub const MAX_WORLD_ARTIFACTS: usize = 4_096;
 pub const MAX_PRESENTATION_TAGS: usize = 64;
+pub const MAX_DISCOVERY_RESULTS: usize = 64;
+pub const MAX_DISCOVERY_TAGS: usize = 16;
+pub const MAX_DISCOVERY_QUERY_BYTES: usize = 512;
+pub const MAX_DISCOVERY_ANNOUNCEMENT_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicaAckV1 {
@@ -86,6 +91,10 @@ pub enum WireRequest {
     SoloBranch(Box<SoloBranchV1>),
     // Host readiness is appended so all earlier postcard discriminants stay stable.
     HostCapability { world_id: WorldId },
+    // Discovery extensions are append-only for postcard compatibility.
+    DiscoveryPublic { filter: DiscoveryFilterV1 },
+    DiscoveryResolve { world_id: WorldId },
+    FriendPresence { expected_peer_id: PeerId, requester_peer_id: PeerId, nonce: [u8; 32] },
 }
 
 impl WireRequest {
@@ -115,6 +124,7 @@ impl WireRequest {
                 }
                 Ok(())
             }
+            Self::DiscoveryPublic { filter } => validate_discovery_filter(filter),
             _ => Ok(()),
         }
     }
@@ -144,6 +154,47 @@ pub enum WireResponse {
     SoloBranchAccepted,
     // Host readiness is appended so all earlier postcard discriminants stay stable.
     HostCapability(Option<HostCapabilityV1>),
+    // Discovery extensions are append-only for postcard compatibility.
+    DiscoveryWorlds(Vec<WorldAnnouncementV1>),
+    DiscoveryResolved(Option<Box<WorldAnnouncementV1>>),
+    FriendPresence(Option<FriendPresenceV1>),
+}
+
+impl WireResponse {
+    pub fn validate_limits(&self) -> Result<(), WireLimitError> {
+        match self {
+            Self::DiscoveryWorlds(values) => {
+                if values.len() > MAX_DISCOVERY_RESULTS {
+                    return Err(WireLimitError::TooManyDiscoveryResults(values.len()));
+                }
+                for value in values {
+                    validate_announcement_size(value)?;
+                }
+                Ok(())
+            }
+            Self::DiscoveryResolved(Some(value)) => validate_announcement_size(value),
+            _ => Ok(()),
+        }
+    }
+}
+
+fn validate_discovery_filter(filter: &DiscoveryFilterV1) -> Result<(), WireLimitError> {
+    if filter.tags.len() > MAX_DISCOVERY_TAGS {
+        return Err(WireLimitError::TooManyDiscoveryTags(filter.tags.len()));
+    }
+    let bytes = serde_json::to_vec(filter).map_err(|_| WireLimitError::DiscoveryFilterTooLarge(usize::MAX))?;
+    if bytes.len() > MAX_DISCOVERY_QUERY_BYTES {
+        return Err(WireLimitError::DiscoveryFilterTooLarge(bytes.len()));
+    }
+    Ok(())
+}
+
+fn validate_announcement_size(value: &WorldAnnouncementV1) -> Result<(), WireLimitError> {
+    let bytes = serde_json::to_vec(value).map_err(|_| WireLimitError::DiscoveryAnnouncementTooLarge(usize::MAX))?;
+    if bytes.len() > MAX_DISCOVERY_ANNOUNCEMENT_BYTES {
+        return Err(WireLimitError::DiscoveryAnnouncementTooLarge(bytes.len()));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -160,14 +211,22 @@ pub enum WireLimitError {
     TooManyWorldArtifacts(usize),
     #[error("world presentation contains {0} tags; maximum is {MAX_PRESENTATION_TAGS}")]
     TooManyPresentationTags(usize),
+    #[error("discovery response contains {0} worlds; maximum is {MAX_DISCOVERY_RESULTS}")]
+    TooManyDiscoveryResults(usize),
+    #[error("discovery filter contains {0} tags; maximum is {MAX_DISCOVERY_TAGS}")]
+    TooManyDiscoveryTags(usize),
+    #[error("discovery filter is {0} encoded bytes; maximum is {MAX_DISCOVERY_QUERY_BYTES}")]
+    DiscoveryFilterTooLarge(usize),
+    #[error("world discovery announcement is {0} encoded bytes; maximum is {MAX_DISCOVERY_ANNOUNCEMENT_BYTES}")]
+    DiscoveryAnnouncementTooLarge(usize),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use swarm_protocol::{
-        AuthorityPolicyV1, MembershipPolicyV1, PeerId, RuntimeCompatibilityManifestV1, WorldPresentationV1,
-        WorldVisibilityV1, PROTOCOL_VERSION,
+        AuthorityPolicyV1, DiscoveryCompatibilityV1, MembershipPolicyV1, PeerId, RuntimeCompatibilityManifestV1,
+        WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION,
     };
 
     #[test]
@@ -228,5 +287,56 @@ mod tests {
             WireRequest::WorldConfig(Box::new(config)).validate_limits(),
             Err(WireLimitError::TooManyPresentationTags(MAX_PRESENTATION_TAGS + 1))
         );
+    }
+
+    #[test]
+    fn rejects_oversized_discovery_filter() {
+        let filter = DiscoveryFilterV1 {
+            query: Some("x".repeat(MAX_DISCOVERY_QUERY_BYTES + 1)),
+            limit: 10,
+            ..Default::default()
+        };
+        assert!(matches!(
+            WireRequest::DiscoveryPublic { filter }.validate_limits(),
+            Err(WireLimitError::DiscoveryFilterTooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_world_announcement() {
+        let announcement = WorldAnnouncementV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: WorldId([1; 32]),
+            presentation: WorldPresentationV1 {
+                name: "world".into(),
+                description: "x".repeat(MAX_DISCOVERY_ANNOUNCEMENT_BYTES + 1),
+                tags: Vec::new(),
+                icon_hash: None,
+                approximate_region: None,
+            },
+            compatibility: DiscoveryCompatibilityV1 {
+                minecraft_version: "1.21.8".into(),
+                loader_id: "fabric".into(),
+                loader_version: "0.17.2".into(),
+                fabric_adapter_version: "0.4.0".into(),
+                compatibility_fingerprint: Hash32([2; 32]),
+            },
+            visibility: WorldVisibilityV1::Public,
+            membership_policy: MembershipPolicyV1::InviteOnly,
+            config_sequence: 1,
+            config_hash: Hash32([3; 32]),
+            authority_epoch: 1,
+            fencing_token: 1,
+            announcement_sequence: 1,
+            issued_unix_ms: 1,
+            expires_unix_ms: 2,
+            announcer_peer_id: PeerId([4; 32]),
+            announcer_public_key: [5; 32],
+            signature: vec![0; 64],
+        };
+        assert!(matches!(
+            WireResponse::DiscoveryResolved(Some(Box::new(announcement))).validate_limits(),
+            Err(WireLimitError::DiscoveryAnnouncementTooLarge(_))
+        ));
     }
 }
