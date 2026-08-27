@@ -9,9 +9,9 @@ permissions:
 
 jobs:
   materialize:
-    name: Materialize checked-in Agent 3 source
+    name: Finalize checked-in Agent 3 source
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,52 +20,40 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
 
-      - name: Install Linux desktop dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            apps/desktop/src-tauri -> target
-
-      - name: Build bundled runtimes
-        run: cargo build --release -p swarm-cli --locked
-
-      - name: Stage required Desktop sidecars
+      - name: Materialize final provider source and Desktop lockfile
         shell: bash
         run: |
           set -euo pipefail
-          target="$(rustc --print host-tuple)"
-          mkdir -p apps/desktop/src-tauri/binaries
-          cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
-          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
-          cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
-          cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
-
-      - name: Apply final provider hardening
-        run: |
           python3 .github/agent3_finalize.py
           cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
           cargo generate-lockfile --manifest-path apps/desktop/src-tauri/Cargo.toml
+          cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --format-version 1 --no-deps >/dev/null
 
-      - name: Verify materialized Desktop source
+      - name: Restore canonical repository validation and remove bootstrap machinery
+        shell: bash
         run: |
-          cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked
-          cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
-          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features --locked
+          set -euo pipefail
+          git checkout origin/backup/local-work-20260824 -- .github/workflows/ci.yml scripts/check_release_version.py
+          rm -f .github/agent3_finalize.py .github/agent3-validation-trigger.txt .github/workflows/agent3-curseforge-provider.yml
 
-      - name: Commit materialized source and lockfile
+      - name: Commit final checked-in state
+        shell: bash
         run: |
           set -euo pipefail
           git config user.name "swarmcraft-agent3-ci"
           git config user.email "agent3-ci@users.noreply.github.com"
-          git add apps/desktop/src-tauri/src/curseforge.rs apps/desktop/src-tauri/Cargo.lock
-          if ! git diff --cached --quiet; then
-            git commit -m "Finalize CurseForge provider source"
-            git push origin HEAD:agent/curseforge-provider
+          git add -A -- \
+            .github/agent3_finalize.py \
+            .github/agent3-validation-trigger.txt \
+            .github/workflows/agent3-curseforge-provider.yml \
+            .github/workflows/ci.yml \
+            scripts/check_release_version.py \
+            apps/desktop/src-tauri
+          if git diff --cached --quiet; then
+            echo "No materialization changes were required."
+            exit 0
           fi
+          git commit -m "Finalize CurseForge provider source"
+          git push origin HEAD:agent/curseforge-provider
