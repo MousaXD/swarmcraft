@@ -22,4 +22,3 @@ fn write_icon(path: &Path, size: u32, format: ImageFormat) {
     image::save_buffer_with_format(path, &pixels, size, size, ExtendedColorType::Rgba8, format)
         .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
 }
-

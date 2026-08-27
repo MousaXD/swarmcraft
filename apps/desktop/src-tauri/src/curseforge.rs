@@ -31,12 +31,7 @@ struct ProviderError {
 
 impl ProviderError {
     fn new(status: &'static str, code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            status,
-            code,
-            message: message.into(),
-            retry_after_seconds: None,
-        }
+        Self { status, code, message: message.into(), retry_after_seconds: None }
     }
 
     fn retry_after(mut self, seconds: Option<u64>) -> Self {
@@ -97,11 +92,7 @@ impl Target {
                 "Environment must be server, client, or both",
             ));
         }
-        Ok(Self {
-            minecraft,
-            loader,
-            environment,
-        })
+        Ok(Self { minecraft, loader, environment })
     }
 }
 
@@ -133,10 +124,7 @@ impl CurseForgeClient {
                     format!("Could not initialize CurseForge HTTP client: {error}"),
                 )
             })?;
-        Ok(Self {
-            http,
-            api_key: normalize_api_key(env::var(API_KEY_ENV).ok()),
-        })
+        Ok(Self { http, api_key: normalize_api_key(env::var(API_KEY_ENV).ok()) })
     }
 
     fn require_api_key(&self) -> Result<&str, ProviderError> {
@@ -168,12 +156,7 @@ impl CurseForgeClient {
         parse_json_response(response, missing).await
     }
 
-    async fn post_json(
-        &self,
-        path: &str,
-        body: Value,
-        missing: MissingResource,
-    ) -> Result<Value, ProviderError> {
+    async fn post_json(&self, path: &str, body: Value, missing: MissingResource) -> Result<Value, ProviderError> {
         let key = self.require_api_key()?;
         let response = self
             .http
@@ -188,28 +171,12 @@ impl CurseForgeClient {
     }
 
     async fn fetch_project(&self, project_id: u64) -> Result<Value, ProviderError> {
-        let value = self
-            .get_json(
-                &format!("/v1/mods/{project_id}"),
-                &[],
-                MissingResource::Project,
-            )
-            .await?;
-        value
-            .get("data")
-            .filter(|value| value.is_object())
-            .cloned()
-            .ok_or_else(malformed_response)
+        let value = self.get_json(&format!("/v1/mods/{project_id}"), &[], MissingResource::Project).await?;
+        value.get("data").filter(|value| value.is_object()).cloned().ok_or_else(malformed_response)
     }
 
     async fn fetch_file(&self, file_id: u64) -> Result<Value, ProviderError> {
-        let value = self
-            .post_json(
-                "/v1/mods/files",
-                json!({ "fileIds": [file_id] }),
-                MissingResource::File,
-            )
-            .await?;
+        let value = self.post_json("/v1/mods/files", json!({ "fileIds": [file_id] }), MissingResource::File).await?;
         value
             .get("data")
             .and_then(Value::as_array)
@@ -239,39 +206,18 @@ impl CurseForgeClient {
         if fabric_only {
             query.push(("modLoaderType", FABRIC_MOD_LOADER_TYPE.to_string()));
         }
-        let value = self
-            .get_json(
-                &format!("/v1/mods/{project_id}/files"),
-                &query,
-                MissingResource::Project,
-            )
-            .await?;
-        let files = value
-            .get("data")
-            .and_then(Value::as_array)
-            .ok_or_else(malformed_response)?;
+        let value = self.get_json(&format!("/v1/mods/{project_id}/files"), &query, MissingResource::Project).await?;
+        let files = value.get("data").and_then(Value::as_array).ok_or_else(malformed_response)?;
         Ok(files.clone())
     }
 
-    async fn compatible_files(
-        &self,
-        project_id: u64,
-        target: &Target,
-    ) -> Result<Vec<Value>, ProviderError> {
-        let exact = self
-            .files_for_project(project_id, &target.minecraft, true)
-            .await?;
+    async fn compatible_files(&self, project_id: u64, target: &Target) -> Result<Vec<Value>, ProviderError> {
+        let exact = self.files_for_project(project_id, &target.minecraft, true).await?;
         if !exact.is_empty() {
             return Ok(exact);
         }
-        let game_version = self
-            .files_for_project(project_id, &target.minecraft, false)
-            .await?;
-        Err(classify_version_gap(
-            project_id,
-            &target.minecraft,
-            &game_version,
-        ))
+        let game_version = self.files_for_project(project_id, &target.minecraft, false).await?;
+        Err(classify_version_gap(project_id, &target.minecraft, &game_version))
     }
 
     async fn download_url(&self, file: &Value) -> Result<Option<String>, ProviderError> {
@@ -283,9 +229,7 @@ impl CurseForgeClient {
         let key = self.require_api_key()?;
         let response = self
             .http
-            .get(format!(
-                "{API_BASE}/v1/mods/{project_id}/files/{file_id}/download-url"
-            ))
+            .get(format!("{API_BASE}/v1/mods/{project_id}/files/{file_id}/download-url"))
             .header("Accept", "application/json")
             .header("x-api-key", key)
             .send()
@@ -303,33 +247,20 @@ impl CurseForgeClient {
 }
 
 fn normalize_api_key(raw: Option<String>) -> Option<String> {
-    raw.map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+    raw.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
 }
 
 fn map_request_error(error: reqwest::Error) -> ProviderError {
     if error.is_timeout() {
-        ProviderError::new(
-            "unavailable",
-            "timeout",
-            "The CurseForge API request timed out",
-        )
+        ProviderError::new("unavailable", "timeout", "The CurseForge API request timed out")
     } else {
-        ProviderError::new(
-            "unavailable",
-            "provider_unavailable",
-            format!("CurseForge could not be reached: {error}"),
-        )
+        ProviderError::new("unavailable", "provider_unavailable", format!("CurseForge could not be reached: {error}"))
     }
 }
 
 fn map_download_error(error: reqwest::Error) -> ProviderError {
     if error.is_timeout() {
-        ProviderError::new(
-            "unavailable",
-            "timeout",
-            "The CurseForge artifact download timed out",
-        )
+        ProviderError::new("unavailable", "timeout", "The CurseForge artifact download timed out")
     } else {
         ProviderError::new(
             "download_failed",
@@ -339,33 +270,19 @@ fn map_download_error(error: reqwest::Error) -> ProviderError {
     }
 }
 
-async fn parse_json_response(
-    response: reqwest::Response,
-    missing: MissingResource,
-) -> Result<Value, ProviderError> {
+async fn parse_json_response(response: reqwest::Response, missing: MissingResource) -> Result<Value, ProviderError> {
     if !response.status().is_success() {
         let retry_after = response
             .headers()
             .get("retry-after")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok());
-        return Err(map_http_status(
-            response.status().as_u16(),
-            missing,
-            retry_after,
-        ));
+        return Err(map_http_status(response.status().as_u16(), missing, retry_after));
     }
-    response
-        .json::<Value>()
-        .await
-        .map_err(|_| malformed_response())
+    response.json::<Value>().await.map_err(|_| malformed_response())
 }
 
-fn map_http_status(
-    status: u16,
-    missing: MissingResource,
-    retry_after: Option<u64>,
-) -> ProviderError {
+fn map_http_status(status: u16, missing: MissingResource, retry_after: Option<u64>) -> ProviderError {
     match status {
         401 | 403 => ProviderError::new(
             "configuration_required",
@@ -389,31 +306,17 @@ fn map_http_status(
                 "The requested CurseForge resource was not found",
             ),
         },
-        429 => ProviderError::new(
-            "rate_limited",
-            "rate_limited",
-            "CurseForge rate limited this client",
-        )
-        .retry_after(retry_after),
-        500..=599 => ProviderError::new(
-            "unavailable",
-            "provider_unavailable",
-            format!("CurseForge returned HTTP {status}"),
-        ),
-        _ => ProviderError::new(
-            "error",
-            "provider_request_failed",
-            format!("CurseForge returned HTTP {status}"),
-        ),
+        429 => ProviderError::new("rate_limited", "rate_limited", "CurseForge rate limited this client")
+            .retry_after(retry_after),
+        500..=599 => {
+            ProviderError::new("unavailable", "provider_unavailable", format!("CurseForge returned HTTP {status}"))
+        }
+        _ => ProviderError::new("error", "provider_request_failed", format!("CurseForge returned HTTP {status}")),
     }
 }
 
 fn malformed_response() -> ProviderError {
-    ProviderError::new(
-        "error",
-        "malformed_response",
-        "CurseForge returned a malformed or incomplete response",
-    )
+    ProviderError::new("error", "malformed_response", "CurseForge returned a malformed or incomplete response")
 }
 
 fn ok(data: Value) -> Value {
@@ -425,25 +328,15 @@ fn ok(data: Value) -> Value {
 }
 
 fn required_u64(value: &Value, key: &str) -> Result<u64, ProviderError> {
-    value
-        .get(key)
-        .and_then(Value::as_u64)
-        .ok_or_else(malformed_response)
+    value.get(key).and_then(Value::as_u64).ok_or_else(malformed_response)
 }
 
 fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, ProviderError> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(malformed_response)
+    value.get(key).and_then(Value::as_str).filter(|value| !value.trim().is_empty()).ok_or_else(malformed_response)
 }
 
 fn nonempty_string(value: Option<&Value>) -> Option<&str> {
-    value
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    value.and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty())
 }
 
 fn release_type(value: u64) -> &'static str {
@@ -495,12 +388,18 @@ fn game_versions(file: &Value) -> Vec<String> {
         .collect()
 }
 
+fn is_loader_tag(version: &str) -> bool {
+    ["Fabric", "Forge", "NeoForge", "Quilt", "LiteLoader", "Cauldron"]
+        .iter()
+        .any(|loader| version.eq_ignore_ascii_case(loader))
+}
+
+fn minecraft_versions(file: &Value) -> Vec<String> {
+    game_versions(file).into_iter().filter(|version| !is_loader_tag(version)).collect()
+}
+
 fn loader_tags(file: &Value) -> Vec<String> {
-    let known = ["Fabric", "Forge", "NeoForge", "Quilt", "LiteLoader", "Cauldron"];
-    game_versions(file)
-        .into_iter()
-        .filter(|version| known.iter().any(|loader| version.eq_ignore_ascii_case(loader)))
-        .collect()
+    game_versions(file).into_iter().filter(|version| is_loader_tag(version)).collect()
 }
 
 fn mapped_dependencies(file: &Value) -> Vec<Value> {
@@ -510,10 +409,7 @@ fn mapped_dependencies(file: &Value) -> Vec<Value> {
         .flatten()
         .filter_map(|dependency| {
             let project_id = dependency.get("modId")?.as_u64()?;
-            let relation_type = dependency
-                .get("relationType")
-                .and_then(Value::as_u64)
-                .unwrap_or_default();
+            let relation_type = dependency.get("relationType").and_then(Value::as_u64).unwrap_or_default();
             Some(json!({
                 "project_id": project_id.to_string(),
                 "kind": dependency_kind(relation_type),
@@ -529,16 +425,9 @@ fn map_file(file: &Value, environment: &str) -> Result<Value, ProviderError> {
     let project_id = required_u64(file, "modId")?;
     let display_name = required_string(file, "displayName")?;
     let file_name = required_string(file, "fileName")?;
-    let release = release_type(
-        file.get("releaseType")
-            .and_then(Value::as_u64)
-            .unwrap_or_default(),
-    );
-    let file_size = file
-        .get("fileLength")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let versions = game_versions(file);
+    let release = release_type(file.get("releaseType").and_then(Value::as_u64).unwrap_or_default());
+    let file_size = file.get("fileLength").and_then(Value::as_u64).unwrap_or_default();
+    let minecraft_versions = minecraft_versions(file);
     let loaders = loader_tags(file);
     let direct_url = nonempty_string(file.get("downloadUrl")).is_some();
     Ok(json!({
@@ -548,7 +437,7 @@ fn map_file(file: &Value, environment: &str) -> Result<Value, ProviderError> {
         "version_id": id.to_string(),
         "name": display_name,
         "file_name": file_name,
-        "minecraft_versions": versions,
+        "minecraft_versions": minecraft_versions,
         "loaders": loaders,
         "release_type": release,
         "environment": {
@@ -569,11 +458,7 @@ fn map_project(project: &Value, environment: &str) -> Result<Value, ProviderErro
     let id = required_u64(project, "id")?;
     let name = required_string(project, "name")?;
     let slug = required_string(project, "slug")?;
-    let website_url = project
-        .get("links")
-        .and_then(|links| links.get("websiteUrl"))
-        .cloned()
-        .unwrap_or(Value::Null);
+    let website_url = project.get("links").and_then(|links| links.get("websiteUrl")).cloned().unwrap_or(Value::Null);
     let authors = project
         .get("authors")
         .and_then(Value::as_array)
@@ -600,7 +485,7 @@ fn map_project(project: &Value, environment: &str) -> Result<Value, ProviderErro
 }
 
 fn validate_selected_file(file: &Value, target: &Target) -> Result<(), ProviderError> {
-    let versions = game_versions(file);
+    let versions = minecraft_versions(file);
     if !versions.iter().any(|version| version == &target.minecraft) {
         return Err(ProviderError::new(
             "incompatible",
@@ -608,10 +493,8 @@ fn validate_selected_file(file: &Value, target: &Target) -> Result<(), ProviderE
             format!("The selected CurseForge file is not tagged for Minecraft {}", target.minecraft),
         ));
     }
-    if !versions
-        .iter()
-        .any(|version| version.eq_ignore_ascii_case("fabric"))
-    {
+    let loaders = loader_tags(file);
+    if !loaders.iter().any(|loader| loader.eq_ignore_ascii_case("fabric")) {
         return Err(ProviderError::new(
             "incompatible",
             "no_fabric_build",
@@ -664,13 +547,12 @@ fn relation_entries(file: &Value) -> Vec<(u64, u64)> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|dependency| {
-            Some((
-                dependency.get("modId")?.as_u64()?,
-                dependency.get("relationType")?.as_u64()?,
-            ))
-        })
+        .filter_map(|dependency| Some((dependency.get("modId")?.as_u64()?, dependency.get("relationType")?.as_u64()?)))
         .collect()
+}
+
+fn should_select_required_dependency(selected: &BTreeMap<u64, Value>, dependency_id: u64) -> bool {
+    !selected.contains_key(&dependency_id)
 }
 
 fn detect_impossible_relations(selected: &BTreeMap<u64, Value>) -> Result<(), ProviderError> {
@@ -680,9 +562,7 @@ fn detect_impossible_relations(selected: &BTreeMap<u64, Value>) -> Result<(), Pr
                 return Err(ProviderError::new(
                     "incompatible",
                     "impossible_dependency_selection",
-                    format!(
-                        "CurseForge project {project_id} declares selected project {dependency_id} incompatible"
-                    ),
+                    format!("CurseForge project {project_id} declares selected project {dependency_id} incompatible"),
                 ));
             }
         }
@@ -721,7 +601,7 @@ async fn resolve_dependency_graph(
                         "project_id": dependency_id.to_string(),
                         "kind": "required",
                     }));
-                    if selected.contains_key(&dependency_id) {
+                    if !should_select_required_dependency(&selected, dependency_id) {
                         continue;
                     }
                     if selected.len() >= MAX_DEPENDENCY_PACKAGES {
@@ -773,10 +653,7 @@ async fn resolve_dependency_graph(
     }
 
     detect_impossible_relations(&selected)?;
-    let packages = selected
-        .values()
-        .map(|file| map_file(file, &target.environment))
-        .collect::<Result<Vec<_>, _>>()?;
+    let packages = selected.values().map(|file| map_file(file, &target.environment)).collect::<Result<Vec<_>, _>>()?;
     Ok(json!({
         "provider": "curseforge",
         "root_project_id": root_project.to_string(),
@@ -795,11 +672,7 @@ async fn resolve_dependency_graph(
 
 fn validate_download_url(url: &str) -> Result<String, ProviderError> {
     let parsed = reqwest::Url::parse(url).map_err(|_| {
-        ProviderError::new(
-            "download_failed",
-            "untrusted_download_url",
-            "CurseForge returned an invalid artifact URL",
-        )
+        ProviderError::new("download_failed", "untrusted_download_url", "CurseForge returned an invalid artifact URL")
     })?;
     if parsed.scheme() != "https" || parsed.host_str().is_none() {
         return Err(ProviderError::new(
@@ -816,11 +689,13 @@ fn manual_artifact_required(file: &Value, project: &Value) -> Result<Value, Prov
     let file_id = required_u64(file, "id")?;
     let file_name = required_string(file, "fileName")?;
     let display_name = required_string(file, "displayName")?;
-    let website_url = project
-        .get("links")
-        .and_then(|links| links.get("websiteUrl"))
-        .cloned()
-        .unwrap_or(Value::Null);
+    let website_url = project.get("links").and_then(|links| links.get("websiteUrl")).cloned().unwrap_or(Value::Null);
+    let project_name = nonempty_string(project.get("name")).map(ToOwned::to_owned);
+    let project_slug = nonempty_string(project.get("slug")).map(ToOwned::to_owned);
+    let minecraft_versions = minecraft_versions(file);
+    let loaders = loader_tags(file);
+    let fabric_compatible = loaders.iter().any(|loader| loader.eq_ignore_ascii_case("fabric"));
+    let reason = "CurseForge did not provide an automatic download URL for this exact file. Desktop must ask the player to obtain this exact artifact and verify it before use.";
     Ok(json!({
         "status": "manual_artifact_required",
         "provider": "curseforge",
@@ -833,8 +708,31 @@ fn manual_artifact_required(file: &Value, project: &Value) -> Result<Value, Prov
             "file_name": file_name,
             "file_size": file.get("fileLength").cloned().unwrap_or(Value::Null),
             "hashes": provider_hashes(file),
-            "project_url": website_url,
-            "reason": "CurseForge did not provide an automatic download URL for this exact file. Desktop must ask the player to obtain this exact artifact and verify it before use."
+            "minecraft_versions": minecraft_versions,
+            "loaders": loaders,
+            "fabric_compatible": fabric_compatible,
+            "dependencies": mapped_dependencies(file),
+            "project_url": website_url.clone(),
+            "project": {
+                "project_id": project_id.to_string(),
+                "name": project_name,
+                "slug": project_slug,
+                "website_url": website_url,
+                "allow_mod_distribution": project
+                    .get("allowModDistribution")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            },
+            "remediation": {
+                "kind": "manual_artifact_required",
+                "provider": "curseforge",
+                "automatic_retrieval_available": false,
+                "reason_code": "provider_download_unavailable",
+                "supply_exact_project_id": project_id.to_string(),
+                "supply_exact_file_id": file_id.to_string(),
+                "reason": reason,
+            },
+            "reason": reason,
         }
     }))
 }
@@ -862,7 +760,10 @@ impl Drop for TempArtifact {
     }
 }
 
-async fn create_temp_artifact(destination: &Path, file_id: u64) -> Result<(tokio::fs::File, TempArtifact), ProviderError> {
+async fn create_temp_artifact(
+    destination: &Path,
+    file_id: u64,
+) -> Result<(tokio::fs::File, TempArtifact), ProviderError> {
     let parent = destination.parent().ok_or_else(|| {
         ProviderError::new(
             "download_failed",
@@ -877,25 +778,11 @@ async fn create_temp_artifact(destination: &Path, file_id: u64) -> Result<(tokio
             format!("Could not create artifact destination directory: {error}"),
         )
     })?;
-    let base = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("artifact.jar");
+    let base = destination.file_name().and_then(|name| name.to_str()).unwrap_or("artifact.jar");
     for attempt in 0..8u64 {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let temp = parent.join(format!(
-            ".{base}.swarmcraft-part-{}-{file_id}-{nonce}-{attempt}",
-            std::process::id()
-        ));
-        match tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp)
-            .await
-        {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let temp = parent.join(format!(".{base}.swarmcraft-part-{}-{file_id}-{nonce}-{attempt}", std::process::id()));
+        match tokio::fs::OpenOptions::new().create_new(true).write(true).open(&temp).await {
             Ok(file) => return Ok((file, TempArtifact::new(temp))),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
@@ -912,6 +799,20 @@ async fn create_temp_artifact(destination: &Path, file_id: u64) -> Result<(tokio
         "destination_unavailable",
         "Could not reserve a unique temporary artifact file",
     ))
+}
+
+fn validate_declared_artifact_size(expected_size: u64) -> Result<(), ProviderError> {
+    if expected_size == 0 || expected_size > MAX_ARTIFACT_BYTES {
+        Err(ProviderError::new(
+            "download_failed",
+            "artifact_size_out_of_bounds",
+            format!(
+                "CurseForge declared artifact size {expected_size}; automatic downloads are limited to {MAX_ARTIFACT_BYTES} bytes"
+            ),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn verify_download_size(expected: u64, actual: u64) -> Result<(), ProviderError> {
@@ -932,11 +833,7 @@ fn verify_download_size(expected: u64, actual: u64) -> Result<(), ProviderError>
     }
 }
 
-fn verify_provider_hashes(
-    hashes: &[Value],
-    sha1_hex: &str,
-    md5_hex: &str,
-) -> Result<Vec<String>, ProviderError> {
+fn verify_provider_hashes(hashes: &[Value], sha1_hex: &str, md5_hex: &str) -> Result<Vec<String>, ProviderError> {
     let mut verified = Vec::new();
     let mut recognized = 0usize;
     for hash in hashes {
@@ -970,6 +867,18 @@ fn verify_provider_hashes(
         ));
     }
     Ok(verified)
+}
+
+fn publish_verified_artifact(temp: &mut TempArtifact, destination: &Path) -> Result<(), ProviderError> {
+    std::fs::rename(&temp.path, destination).map_err(|error| {
+        ProviderError::new(
+            "download_failed",
+            "atomic_publication_failed",
+            format!("Could not atomically publish verified artifact: {error}"),
+        )
+    })?;
+    temp.disarm();
+    Ok(())
 }
 
 async fn download_artifact(
@@ -1006,29 +915,13 @@ async fn download_artifact(
             "Refusing to replace an existing artifact destination",
         ));
     }
-    let expected_size = file
-        .get("fileLength")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    if expected_size == 0 || expected_size > MAX_ARTIFACT_BYTES {
-        return Err(ProviderError::new(
-            "download_failed",
-            "artifact_size_out_of_bounds",
-            format!(
-                "CurseForge declared artifact size {expected_size}; automatic downloads are limited to {MAX_ARTIFACT_BYTES} bytes"
-            ),
-        ));
-    }
+    let expected_size = file.get("fileLength").and_then(Value::as_u64).unwrap_or_default();
+    validate_declared_artifact_size(expected_size)?;
     let Some(url) = client.download_url(file).await? else {
         return manual_artifact_required(file, project);
     };
-    let mut response = client
-        .http
-        .get(url)
-        .header("Accept", "application/octet-stream")
-        .send()
-        .await
-        .map_err(map_download_error)?;
+    let mut response =
+        client.http.get(url).header("Accept", "application/octet-stream").send().await.map_err(map_download_error)?;
     if matches!(response.status(), StatusCode::FORBIDDEN | StatusCode::NOT_FOUND) {
         return manual_artifact_required(file, project);
     }
@@ -1111,16 +1004,7 @@ async fn download_artifact(
     let hashes = provider_hashes(file);
     let verified = verify_provider_hashes(&hashes, &sha1_hex, &md5_hex)?;
 
-    tokio::fs::rename(&temp.path, &destination)
-        .await
-        .map_err(|error| {
-            ProviderError::new(
-                "download_failed",
-                "atomic_publication_failed",
-                format!("Could not atomically publish verified artifact: {error}"),
-            )
-        })?;
-    temp.disarm();
+    publish_verified_artifact(&mut temp, &destination)?;
     Ok(json!({
         "status": "downloaded",
         "provider": "curseforge",
@@ -1212,9 +1096,7 @@ async fn curseforge_search_inner(
     if !query.is_empty() {
         params.push(("searchFilter", query));
     }
-    let value = client
-        .get_json("/v1/mods/search", &params, MissingResource::Generic)
-        .await?;
+    let value = client.get_json("/v1/mods/search", &params, MissingResource::Generic).await?;
     let projects = value
         .get("data")
         .and_then(Value::as_array)
@@ -1254,11 +1136,8 @@ pub async fn curseforge_versions(project_id: u64, minecraft: String, loader: Str
         let target = Target::parse(minecraft, loader, "both".to_owned())?;
         let client = CurseForgeClient::from_environment()?;
         let files = client.compatible_files(project_id, &target).await?;
-        let versions = files
-            .iter()
-            .map(|file| map_file(file, "both"))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(json!({
+        let versions = files.iter().map(|file| map_file(file, "both")).collect::<Result<Vec<_>, _>>()?;
+        Ok::<Value, ProviderError>(json!({
             "project_id": project_id.to_string(),
             "minecraft": target.minecraft,
             "loader": target.loader,
@@ -1273,12 +1152,7 @@ pub async fn curseforge_versions(project_id: u64, minecraft: String, loader: Str
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn curseforge_resolve(
-    file_id: u64,
-    minecraft: String,
-    loader: String,
-    environment: String,
-) -> Value {
+pub async fn curseforge_resolve(file_id: u64, minecraft: String, loader: String, environment: String) -> Value {
     match async {
         let target = Target::parse(minecraft, loader, environment)?;
         let client = CurseForgeClient::from_environment()?;
@@ -1388,7 +1262,10 @@ mod tests {
         let target = Target::parse("1.21.1".into(), "fabric".into(), "server".into()).unwrap();
         assert!(validate_selected_file(&fixture_file(), &target).is_ok());
         let wrong_mc = Target::parse("1.20.1".into(), "fabric".into(), "server".into()).unwrap();
-        assert_eq!(validate_selected_file(&fixture_file(), &wrong_mc).unwrap_err().code, "no_compatible_minecraft_version");
+        assert_eq!(
+            validate_selected_file(&fixture_file(), &wrong_mc).unwrap_err().code,
+            "no_compatible_minecraft_version"
+        );
         let mut no_fabric = fixture_file();
         no_fabric["gameVersions"] = json!(["1.21.1", "Forge"]);
         assert_eq!(validate_selected_file(&no_fabric, &target).unwrap_err().code, "no_fabric_build");
@@ -1407,19 +1284,37 @@ mod tests {
     #[test]
     fn absent_automatic_url_produces_exact_manual_remediation() {
         let project = json!({
+            "id": 123,
+            "name": "Example",
+            "slug": "example",
+            "allowModDistribution": false,
             "links": { "websiteUrl": "https://www.curseforge.com/minecraft/mc-mods/example" }
         });
         let response = manual_artifact_required(&fixture_file(), &project).unwrap();
         assert_eq!(response["status"], "manual_artifact_required");
         assert_eq!(response["data"]["project_id"], "123");
         assert_eq!(response["data"]["file_id"], "456");
+        assert_eq!(response["data"]["version_id"], "456");
         assert_eq!(response["data"]["file_name"], "example-1.2.3.jar");
+        assert_eq!(response["data"]["file_size"], 3);
+        assert_eq!(response["data"]["minecraft_versions"], json!(["1.21.1"]));
+        assert_eq!(response["data"]["loaders"], json!(["Fabric"]));
+        assert_eq!(response["data"]["fabric_compatible"], true);
+        assert_eq!(response["data"]["hashes"].as_array().unwrap().len(), 2);
+        assert_eq!(response["data"]["dependencies"][0]["project_id"], "700");
+        assert_eq!(response["data"]["project"]["name"], "Example");
+        assert_eq!(response["data"]["project"]["allow_mod_distribution"], false);
+        assert_eq!(response["data"]["remediation"]["reason_code"], "provider_download_unavailable");
+        assert_eq!(response["data"]["remediation"]["supply_exact_file_id"], "456");
     }
 
     #[test]
     fn only_https_provider_download_urls_are_accepted() {
         assert!(validate_download_url("https://edge.forgecdn.net/files/example.jar").is_ok());
-        assert_eq!(validate_download_url("http://edge.forgecdn.net/files/example.jar").unwrap_err().code, "untrusted_download_url");
+        assert_eq!(
+            validate_download_url("http://edge.forgecdn.net/files/example.jar").unwrap_err().code,
+            "untrusted_download_url"
+        );
     }
 
     #[test]
@@ -1438,6 +1333,76 @@ mod tests {
         assert_eq!(verify_download_size(100, 99).unwrap_err().code, "interrupted_download");
         assert_eq!(verify_download_size(100, 101).unwrap_err().code, "artifact_size_mismatch");
         assert!(verify_download_size(100, 100).is_ok());
+    }
+
+    #[test]
+    fn provider_metadata_separates_minecraft_versions_from_loader_tags() {
+        let mapped = map_file(&fixture_file(), "server").unwrap();
+        assert_eq!(mapped["minecraft_versions"], json!(["1.21.1"]));
+        assert_eq!(mapped["loaders"], json!(["Fabric"]));
+    }
+
+    #[test]
+    fn required_dependency_cycle_back_to_selected_project_terminates() {
+        let mut selected = BTreeMap::new();
+        selected.insert(123, fixture_file());
+        assert!(!should_select_required_dependency(&selected, 123));
+        assert!(should_select_required_dependency(&selected, 700));
+    }
+
+    #[test]
+    fn local_sha256_is_exact_and_changes_with_artifact_bytes() {
+        let expected = hex::encode(Sha256::digest(b"abc"));
+        let different = hex::encode(Sha256::digest(b"abd"));
+        assert_eq!(expected, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_ne!(expected, different);
+    }
+
+    #[test]
+    fn declared_download_size_is_bounded() {
+        assert!(validate_declared_artifact_size(1).is_ok());
+        assert!(validate_declared_artifact_size(MAX_ARTIFACT_BYTES).is_ok());
+        assert_eq!(validate_declared_artifact_size(0).unwrap_err().code, "artifact_size_out_of_bounds");
+        assert_eq!(
+            validate_declared_artifact_size(MAX_ARTIFACT_BYTES + 1).unwrap_err().code,
+            "artifact_size_out_of_bounds"
+        );
+    }
+
+    #[test]
+    fn partial_file_guard_cleans_up_interrupted_artifact() {
+        let directory = std::env::temp_dir().join(format!(
+            "swarmcraft-curseforge-partial-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let temporary = directory.join(".artifact.jar.part");
+        std::fs::write(&temporary, b"partial").unwrap();
+        let guard = TempArtifact::new(temporary.clone());
+        drop(guard);
+        assert!(!temporary.exists());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn successful_verified_artifact_publication_is_atomic_rename() {
+        let directory = std::env::temp_dir().join(format!(
+            "swarmcraft-curseforge-publish-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let temporary = directory.join(".artifact.jar.part");
+        let destination = directory.join("artifact.jar");
+        std::fs::write(&temporary, b"abc").unwrap();
+        let mut guard = TempArtifact::new(temporary.clone());
+        publish_verified_artifact(&mut guard, &destination).unwrap();
+        assert!(!temporary.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"abc");
+        drop(guard);
+        assert!(destination.exists());
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
