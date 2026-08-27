@@ -158,11 +158,7 @@ async fn import_world(
         "--visibility".into(),
         visibility,
     ];
-    for jar in server_mods
-        .into_iter()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
+    for jar in server_mods.into_iter().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
         arguments.push("--server-mod".into());
         arguments.push(jar);
     }
@@ -192,18 +188,9 @@ async fn create_invite(
     bootstrap_addrs: Vec<String>,
 ) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
-    let mut arguments = vec![
-        "invite".into(),
-        "create".into(),
-        world,
-        "--expires-minutes".into(),
-        expires_minutes.max(1).to_string(),
-    ];
-    for address in bootstrap_addrs
-        .into_iter()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
+    let mut arguments =
+        vec!["invite".into(), "create".into(), world, "--expires-minutes".into(), expires_minutes.max(1).to_string()];
+    for address in bootstrap_addrs.into_iter().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
         arguments.push("--bootstrap".into());
         arguments.push(address);
     }
@@ -297,37 +284,22 @@ async fn export_world(app: AppHandle, world: String, destination: String) -> Res
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn recover_world(
-    app: AppHandle,
-    world: String,
-    snapshot: u64,
-    destination: String,
-) -> Result<String, String> {
+async fn recover_world(app: AppHandle, world: String, snapshot: u64, destination: String) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
     let destination = require_value(destination, "Recovery destination")?;
-    run_cli(
-        &app,
-        vec!["world".into(), "recover".into(), world, snapshot.to_string(), destination],
-    )
-    .await
+    run_cli(&app, vec!["world".into(), "recover".into(), world, snapshot.to_string(), destination]).await
 }
 
 #[tauri::command]
 async fn migration_capabilities(app: AppHandle) -> String {
     let mut supported = Vec::new();
-    if run_cli(&app, vec!["world".into(), "migration-status".into(), "--help".into()])
-        .await
-        .is_ok()
-    {
+    if run_cli(&app, vec!["world".into(), "migration-status".into(), "--help".into()]).await.is_ok() {
         supported.push("status");
     }
     if transfer_supported(&app).await {
         supported.push("transfer");
     }
-    if run_cli(&app, vec!["world".into(), "wake".into(), "--help".into()])
-        .await
-        .is_ok()
-    {
+    if run_cli(&app, vec!["world".into(), "wake".into(), "--help".into()]).await.is_ok() {
         supported.push("wake");
     }
     supported.join(",")
@@ -336,11 +308,7 @@ async fn migration_capabilities(app: AppHandle) -> String {
 #[tauri::command]
 async fn migration_status(app: AppHandle, world: String) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
-    run_cli(
-        &app,
-        vec!["world".into(), "migration-status".into(), world, "--json".into()],
-    )
-    .await
+    run_cli(&app, vec!["world".into(), "migration-status".into(), world, "--json".into()]).await
 }
 
 #[tauri::command]
@@ -379,10 +347,7 @@ async fn configure_world_runtime(
         mod_jar,
         "--accept-eula".into(),
     ];
-    if let Some(endpoint) = game_endpoint
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(endpoint) = game_endpoint.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
         arguments.push("--game-endpoint".into());
         arguments.push(endpoint);
     }
@@ -462,16 +427,8 @@ async fn runtime_launch(
 }
 
 #[tauri::command]
-async fn connectivity_diagnostics(
-    app: AppHandle,
-    processes: State<'_, RuntimeProcesses>,
-) -> Result<String, String> {
-    match run_cli(
-        &app,
-        vec!["diagnostics".into(), "connectivity".into(), "--json".into()],
-    )
-    .await
-    {
+async fn connectivity_diagnostics(app: AppHandle, processes: State<'_, RuntimeProcesses>) -> Result<String, String> {
+    match run_cli(&app, vec!["diagnostics".into(), "connectivity".into(), "--json".into()]).await {
         Ok(json) => Ok(json),
         Err(_) => processes.connectivity_diagnostics_json(),
     }

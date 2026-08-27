@@ -1,12 +1,8 @@
 use swarm_catalog::{
-    CatalogErrorPayload, CatalogProvider, CatalogResponse, CatalogService, FabricLoaderVersion,
-    MinecraftVersion,
+    CatalogErrorPayload, CatalogProvider, CatalogResponse, CatalogService, FabricLoaderVersion, MinecraftVersion,
 };
 
-fn error_payload(
-    provider: CatalogProvider,
-    error: swarm_catalog::CatalogError,
-) -> CatalogErrorPayload {
+fn error_payload(provider: CatalogProvider, error: swarm_catalog::CatalogError) -> CatalogErrorPayload {
     CatalogErrorPayload::from_error(provider, &error)
 }
 
@@ -16,8 +12,7 @@ pub async fn minecraft_versions(
     refresh: bool,
 ) -> Result<CatalogResponse<MinecraftVersion>, CatalogErrorPayload> {
     tauri::async_runtime::spawn_blocking(move || {
-        let service = CatalogService::discover()
-            .map_err(|error| error_payload(CatalogProvider::Mojang, error))?;
+        let service = CatalogService::discover().map_err(|error| error_payload(CatalogProvider::Mojang, error))?;
         service
             .minecraft_versions(include_snapshots, refresh)
             .map_err(|error| error_payload(CatalogProvider::Mojang, error))
@@ -36,8 +31,7 @@ pub async fn fabric_loader_versions(
     refresh: bool,
 ) -> Result<CatalogResponse<FabricLoaderVersion>, CatalogErrorPayload> {
     tauri::async_runtime::spawn_blocking(move || {
-        let service = CatalogService::discover()
-            .map_err(|error| error_payload(CatalogProvider::Fabric, error))?;
+        let service = CatalogService::discover().map_err(|error| error_payload(CatalogProvider::Fabric, error))?;
         service
             .fabric_loader_versions(&minecraft_version, refresh)
             .map_err(|error| error_payload(CatalogProvider::Fabric, error))
@@ -55,8 +49,7 @@ pub async fn validate_fabric_selection(
     fabric_loader_version: String,
 ) -> Result<(), CatalogErrorPayload> {
     tauri::async_runtime::spawn_blocking(move || {
-        let service = CatalogService::discover()
-            .map_err(|error| error_payload(CatalogProvider::Fabric, error))?;
+        let service = CatalogService::discover().map_err(|error| error_payload(CatalogProvider::Fabric, error))?;
         service
             .validate_fabric_selection(&minecraft_version, &fabric_loader_version, false)
             .map(|_| ())
