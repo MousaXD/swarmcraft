@@ -35,7 +35,7 @@ jobs:
           fi
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add crates/swarm-protocol/src/canonical_modpack.rs apps/desktop/src-tauri/src/main.rs apps/desktop/src-tauri/src/canonical_commands.rs apps/desktop/src-tauri/src/canonical_world_commands.rs
+          git add -u
           git commit -m 'style(agent4): apply rustfmt'
           git fetch origin agent/canonical-modpack
           git rebase origin/agent/canonical-modpack
