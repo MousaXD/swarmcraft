@@ -1,0 +1,38 @@
+name: Agent 2 desktop lock refresh
+
+on:
+  push:
+    branches: [agent/modrinth-provider]
+    paths:
+      - '.github/workflows/agent2-lock-refresh.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/modrinth-provider
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Refresh desktop lockfile from existing manifest graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --format-version 1 >/dev/null
+          git diff -- apps/desktop/src-tauri/Cargo.lock
+          if git diff --quiet -- apps/desktop/src-tauri/Cargo.lock; then
+            echo 'Desktop Cargo.lock did not change; refusing to fabricate a repair.' >&2
+            exit 1
+          fi
+      - name: Commit refreshed desktop lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add apps/desktop/src-tauri/Cargo.lock
+          git commit -m 'Fix Agent 2 desktop Cargo.lock'
+          git push origin HEAD:agent/modrinth-provider
