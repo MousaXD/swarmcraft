@@ -1,0 +1,66 @@
+name: Agent 4 finalize canonical wiring
+
+on:
+  push:
+    branches: [agent/canonical-modpack]
+    paths:
+      - .github/workflows/agent4-finalize-wiring.yml
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/canonical-modpack
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Register canonical world command
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('apps/desktop/src-tauri/src/main.rs')
+          text = path.read_text()
+          if 'mod canonical_world_commands;' not in text:
+              text = text.replace('mod canonical_commands;\n', 'mod canonical_commands;\nmod canonical_world_commands;\n', 1)
+          if 'use canonical_world_commands::create_canonical_world;' not in text:
+              text = text.replace('use canonical_commands::canonicalize_modpack;\n', 'use canonical_commands::canonicalize_modpack;\nuse canonical_world_commands::create_canonical_world;\n', 1)
+          if '            create_canonical_world,\n' not in text:
+              text = text.replace('            canonicalize_modpack,\n', '            canonicalize_modpack,\n            create_canonical_world,\n', 1)
+          path.write_text(text)
+          PY
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all
+          cargo generate-lockfile --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Compile canonical Desktop backend
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features --locked
+      - name: Lint canonical Desktop backend
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
+      - name: Run canonical backend tests
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml canonical_commands::tests:: --all-features --locked
+      - name: Commit validated wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add apps/desktop/src-tauri/src/main.rs apps/desktop/src-tauri/src/canonical_world_commands.rs apps/desktop/src-tauri/Cargo.lock
+          if git diff --cached --quiet; then
+            echo 'canonical wiring already current'
+            exit 0
+          fi
+          git commit -m 'feat(agent4): register validated canonical world creation'
+          git fetch origin agent/canonical-modpack
+          git rebase origin/agent/canonical-modpack
+          git push origin HEAD:agent/canonical-modpack
