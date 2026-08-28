@@ -1,10 +1,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod canonical_commands;
+mod catalog_commands;
+mod curseforge;
 mod modrinth_commands;
 mod runtime;
 mod runtime_commands;
 mod transfer_commands;
 
+use canonical_commands::canonicalize_modpack;
+use catalog_commands::{fabric_loader_versions, minecraft_versions};
+use curseforge::{
+    curseforge_download, curseforge_project, curseforge_provider_status, curseforge_resolve, curseforge_search,
+    curseforge_versions,
+};
 use modrinth_commands::{modrinth_download, modrinth_project, modrinth_resolve, modrinth_search, modrinth_versions};
 use runtime::RuntimeProcesses;
 use runtime_commands::{ensure_daemon_running, start_daemon, stop_daemon, stop_host};
@@ -383,10 +392,6 @@ async fn runtime_launch(
     world: String,
 ) -> Result<Option<u32>, String> {
     let world = require_value(world, "World ID")?;
-    // Networking/recovery supervision and the foreground managed authority
-    // runtime are separate owned processes. The managed host enters the same
-    // Rust migration::run_authority_runtime path as Advanced hosting, which can
-    // safely establish the first solo authority generation for a new world.
     processes.ensure_daemon_running(&app, "/ip4/0.0.0.0/udp/0/quic-v1".into())?;
     let pid = processes.start_managed_host(&app, world.clone())?;
     for _ in 0..160 {
@@ -462,6 +467,8 @@ fn main() {
             initialize_node,
             node_identity,
             list_worlds,
+            minecraft_versions,
+            fabric_loader_versions,
             create_world,
             import_world,
             join_world,
@@ -492,11 +499,18 @@ fn main() {
             runtime_verify,
             runtime_launch,
             connectivity_diagnostics,
+            canonicalize_modpack,
             modrinth_search,
             modrinth_project,
             modrinth_versions,
             modrinth_resolve,
             modrinth_download,
+            curseforge_provider_status,
+            curseforge_search,
+            curseforge_project,
+            curseforge_versions,
+            curseforge_resolve,
+            curseforge_download,
             ensure_daemon_running,
             start_daemon,
             stop_daemon,
