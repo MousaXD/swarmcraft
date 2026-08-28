@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  wire-player-launcher:
+  format-recovery-sources:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,20 +19,18 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-      - name: Apply authoritative launcher wiring
+          components: rustfmt
+      - name: Format recovery Rust sources
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/recovery/wire_player_launcher.py
           cargo fmt --all
-          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all
           git diff --check
-          node --test apps/desktop/tests/*.test.mjs
-          cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features
-          cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+          if git diff --quiet; then
+            exit 0
+          fi
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add apps/desktop
-          git commit -m 'feat(launcher): wire catalogs providers canonical create and discovery'
+          git add crates/swarm-cli/src/provider_runtime.rs crates/swarm-cli/src/runtime_main.rs
+          git commit -m 'style(runtime): apply rustfmt to provider acquisition'
           git push origin HEAD:integration/player-launcher-v1
