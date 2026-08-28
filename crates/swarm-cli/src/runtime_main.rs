@@ -76,21 +76,15 @@ fn main() -> Result<()> {
         RuntimeCommand::Install { world, accept_eula, game_endpoint } => {
             let world = parse_world(&world)?;
             prepare_provider_mods(&paths, &storage, world)?;
-            let report = installer.install(
-                world,
-                RuntimeInstallOptions { accept_eula, game_endpoint },
-                print_progress,
-            )?;
+            let report =
+                installer.install(world, RuntimeInstallOptions { accept_eula, game_endpoint }, print_progress)?;
             print_json(&report)?;
         }
         RuntimeCommand::Repair { world, accept_eula, game_endpoint } => {
             let world = parse_world(&world)?;
             prepare_provider_mods(&paths, &storage, world)?;
-            let report = installer.repair(
-                world,
-                RuntimeInstallOptions { accept_eula, game_endpoint },
-                print_progress,
-            )?;
+            let report =
+                installer.repair(world, RuntimeInstallOptions { accept_eula, game_endpoint }, print_progress)?;
             print_json(&report)?;
         }
         RuntimeCommand::Verify { world } => {

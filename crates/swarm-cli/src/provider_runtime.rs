@@ -12,9 +12,9 @@ use std::{
 };
 use swarm_core::DataPaths;
 use swarm_protocol::{
-    ArtifactSideV1, CanonicalArtifactSourceV1, CanonicalHashAlgorithmV1, CanonicalModpackV1,
-    CanonicalPackageV1, CanonicalProviderArtifactV1, CanonicalProviderHashV1, CanonicalProviderV1,
-    CanonicalRetrievalV1, RuntimeCompatibilityManifestV1, WorldId,
+    ArtifactSideV1, CanonicalArtifactSourceV1, CanonicalHashAlgorithmV1, CanonicalModpackV1, CanonicalPackageV1,
+    CanonicalProviderArtifactV1, CanonicalProviderHashV1, CanonicalProviderV1, CanonicalRetrievalV1,
+    RuntimeCompatibilityManifestV1, WorldId,
 };
 
 use crate::{
@@ -91,20 +91,14 @@ pub fn acquire_missing_server_mods(
                 );
             }
         }
-        added.push(
-            server_mods::add_local_mod(paths, world, manifest, &downloaded)
-                .with_context(|| format!("downloaded provider artifact {} failed the signed world requirement", artifact.file_name))?,
-        );
+        added.push(server_mods::add_local_mod(paths, world, manifest, &downloaded).with_context(|| {
+            format!("downloaded provider artifact {} failed the signed world requirement", artifact.file_name)
+        })?);
     }
 
     let final_readiness = server_mods::evaluate_world_mods(paths, world, manifest)?;
     if !final_readiness.ready {
-        let details = final_readiness
-            .issues
-            .iter()
-            .map(|issue| issue.message.as_str())
-            .collect::<Vec<_>>()
-            .join("; ");
+        let details = final_readiness.issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>().join("; ");
         bail!("server mod preparation is still incomplete after exact provider acquisition: {details}");
     }
     Ok(added)
@@ -153,16 +147,9 @@ fn acquire_modrinth(artifact: &CanonicalProviderArtifactV1, staging: &Path) -> R
 }
 
 fn acquire_curseforge(artifact: &CanonicalProviderArtifactV1, staging: &Path) -> Result<PathBuf> {
-    let project_id = artifact
-        .identity
-        .project_id
-        .parse::<u64>()
-        .context("canonical CurseForge project ID is not numeric")?;
-    let file_id = artifact
-        .identity
-        .version_id
-        .parse::<u64>()
-        .context("canonical CurseForge file ID is not numeric")?;
+    let project_id =
+        artifact.identity.project_id.parse::<u64>().context("canonical CurseForge project ID is not numeric")?;
+    let file_id = artifact.identity.version_id.parse::<u64>().context("canonical CurseForge file ID is not numeric")?;
     safe_filename(&artifact.file_name)?;
     let api_key = env::var(CURSEFORGE_API_KEY_ENV)
         .ok()
@@ -189,11 +176,8 @@ fn acquire_curseforge(artifact: &CanonicalProviderArtifactV1, staging: &Path) ->
         .ok_or_else(|| anyhow!("CurseForge exact file {file_id} is unavailable or removed"))?;
     validate_curseforge_file(file, project_id, file_id, artifact)?;
 
-    let download_url = if let Some(url) = file
-        .get("downloadUrl")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let download_url = if let Some(url) =
+        file.get("downloadUrl").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty())
     {
         Some(url.to_owned())
     } else {
@@ -250,7 +234,8 @@ fn validate_curseforge_file(
     file_id: u64,
     artifact: &CanonicalProviderArtifactV1,
 ) -> Result<()> {
-    let actual_file_id = file.get("id").and_then(Value::as_u64).ok_or_else(|| anyhow!("CurseForge file response omitted id"))?;
+    let actual_file_id =
+        file.get("id").and_then(Value::as_u64).ok_or_else(|| anyhow!("CurseForge file response omitted id"))?;
     let actual_project_id =
         file.get("modId").and_then(Value::as_u64).ok_or_else(|| anyhow!("CurseForge file response omitted modId"))?;
     if actual_file_id != file_id || actual_project_id != project_id {
@@ -406,17 +391,7 @@ fn ensure_curseforge_status(status: u16, operation: &str) -> Result<()> {
 
 fn curl_download(url: &str, destination: &Path) -> Result<u16> {
     let output = Command::new("curl")
-        .args([
-            "-sS",
-            "-L",
-            "--proto",
-            "=https",
-            "--connect-timeout",
-            "15",
-            "--max-time",
-            "900",
-            "--max-filesize",
-        ])
+        .args(["-sS", "-L", "--proto", "=https", "--connect-timeout", "15", "--max-time", "900", "--max-filesize"])
         .arg(MAX_PROVIDER_ARTIFACT_BYTES.to_string())
         .arg("-o")
         .arg(destination)
@@ -459,11 +434,13 @@ struct StagingDir {
 impl StagingDir {
     fn new(paths: &DataPaths, world: WorldId) -> Result<Self> {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let path = paths
-            .root
-            .join("provider-staging")
-            .join(format!("runtime-{}-{}-{nonce}", world.to_hex(), std::process::id()));
-        fs::create_dir_all(&path).with_context(|| format!("cannot create provider staging directory {}", path.display()))?;
+        let path = paths.root.join("provider-staging").join(format!(
+            "runtime-{}-{}-{nonce}",
+            world.to_hex(),
+            std::process::id()
+        ));
+        fs::create_dir_all(&path)
+            .with_context(|| format!("cannot create provider staging directory {}", path.display()))?;
         Ok(Self { path })
     }
 
