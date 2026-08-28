@@ -20,42 +20,24 @@ jobs:
         with:
           components: rustfmt
       - name: Add retry for pending automatic invite bootstraps
-        shell: python
+        shell: bash
         run: |
+          python - <<'PY'
           from pathlib import Path
           path = Path('crates/swarm-cli/src/daemon.rs')
           text = path.read_text()
-          old = '''    let mut lease_tick = tokio::time::interval(PERMIT_HEARTBEAT_INTERVAL);
-    lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    loop {
-'''
-          new = '''    let mut lease_tick = tokio::time::interval(PERMIT_HEARTBEAT_INTERVAL);
-    lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut invite_bootstrap_tick = tokio::time::interval_at(
-        tokio::time::Instant::now() + Duration::from_secs(1),
-        Duration::from_secs(1),
-    );
-    invite_bootstrap_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    loop {
-'''
+          old = "    let mut lease_tick = tokio::time::interval(PERMIT_HEARTBEAT_INTERVAL);\n    lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);\n\n    loop {\n"
+          new = "    let mut lease_tick = tokio::time::interval(PERMIT_HEARTBEAT_INTERVAL);\n    lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);\n    let mut invite_bootstrap_tick = tokio::time::interval_at(\n        tokio::time::Instant::now() + Duration::from_secs(1),\n        Duration::from_secs(1),\n    );\n    invite_bootstrap_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);\n\n    loop {\n"
           if old not in text:
               raise SystemExit('lease tick anchor not found; refusing unsafe patch')
           text = text.replace(old, new, 1)
-          old_event = '''            event = node.next_event() => {
-'''
-          new_event = '''            _ = invite_bootstrap_tick.tick() => {
-                // A bootstrap dial is asynchronous and can lose a startup race. Keep
-                // retrying only while a signed pending join remains in storage.
-                dial_pending_invite_bootstraps(storage, &mut node)?;
-            }
-            event = node.next_event() => {
-'''
+          old_event = "            event = node.next_event() => {\n"
+          new_event = "            _ = invite_bootstrap_tick.tick() => {\n                // A bootstrap dial is asynchronous and can lose a startup race. Keep\n                // retrying only while a signed pending join remains in storage.\n                dial_pending_invite_bootstraps(storage, &mut node)?;\n            }\n            event = node.next_event() => {\n"
           if old_event not in text:
               raise SystemExit('network event anchor not found; refusing unsafe patch')
           text = text.replace(old_event, new_event, 1)
           path.write_text(text)
+          PY
       - name: Format repair
         run: cargo fmt --all -- --check
       - name: Prove automatic invite join on macOS
