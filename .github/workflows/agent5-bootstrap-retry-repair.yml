@@ -1,55 +1,45 @@
-name: Agent 5 bootstrap retry repair
+name: Agent 5 macOS automatic invite diagnostics
 
 on:
   push:
     branches: [agent/automatic-invites]
     paths:
       - '.github/workflows/agent5-bootstrap-retry-repair.yml'
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  repair-and-prove:
+  diagnose:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: agent/automatic-invites
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - name: Add retry for pending automatic invite bootstraps
+      - name: Runner network diagnostics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ifconfig
+          route -n get 1.1.1.1 || true
+      - name: Instrument test without committing source changes
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
-          path = Path('crates/swarm-cli/src/daemon.rs')
+          path = Path('crates/swarm-cli/tests/automatic_invite_join.rs')
           text = path.read_text()
-          old = "    let mut lease_tick = tokio::time::interval(PERMIT_HEARTBEAT_INTERVAL);\n    lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);\n\n    loop {\n"
-          new = "    let mut lease_tick = tokio::time::interval(PERMIT_HEARTBEAT_INTERVAL);\n    lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);\n    let mut invite_bootstrap_tick = tokio::time::interval_at(\n        tokio::time::Instant::now() + Duration::from_secs(1),\n        Duration::from_secs(1),\n    );\n    invite_bootstrap_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);\n\n    loop {\n"
-          if old not in text:
-              raise SystemExit('lease tick anchor not found; refusing unsafe patch')
-          text = text.replace(old, new, 1)
-          old_event = "            event = node.next_event() => {\n"
-          new_event = "            _ = invite_bootstrap_tick.tick() => {\n                // A bootstrap dial is asynchronous and can lose a startup race. Keep\n                // retrying only while a signed pending join remains in storage.\n                dial_pending_invite_bootstraps(storage, &mut node)?;\n            }\n            event = node.next_event() => {\n"
-          if old_event not in text:
-              raise SystemExit('network event anchor not found; refusing unsafe patch')
-          text = text.replace(old_event, new_event, 1)
+          text = text.replace('.env("RUST_LOG", "warn")', '.env("RUST_LOG", "info")')
+          anchor = '    let local_ip = local_non_loopback_ipv4();\n'
+          replacement = anchor + '    eprintln!("A5_DIAG local_ip={local_ip} a_port={} b_port={}", a.port, b.port);\n'
+          if anchor not in text:
+              raise SystemExit('local-ip anchor not found')
+          text = text.replace(anchor, replacement, 1)
           path.write_text(text)
           PY
-      - name: Format repair
-        run: cargo fmt --all
-      - name: Verify formatted repair
-        run: cargo fmt --all -- --check
-      - name: Prove automatic invite join on macOS
-        run: cargo test -p swarm-cli --test automatic_invite_join --locked
-      - name: Commit proven repair
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add crates/swarm-cli/src/daemon.rs
-          git commit -m 'Retry pending automatic invite bootstrap dials'
-          git push origin HEAD:agent/automatic-invites
+      - name: Prove automatic invite join with transport logs
+        env:
+          RUST_BACKTRACE: '1'
+        run: cargo test -p swarm-cli --test automatic_invite_join --locked -- --nocapture
