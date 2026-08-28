@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   validate:
-    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'agent/curseforge-provider'
+    if: github.event_name == 'workflow_dispatch' || github.base_ref == 'backup/local-work-20260824'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
