@@ -32,71 +32,31 @@ jobs:
           path = Path('crates/swarm-cli/tests/automatic_invite_join.rs')
           text = path.read_text()
           text = text.replace('.env("RUST_LOG", "warn")', '.env("RUST_LOG", "info")')
-          old_child = '''struct ManagedChild(Child);
-
-impl Drop for ManagedChild {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-'''
-          new_child = '''struct ManagedChild {
-    child: Child,
-    log_path: std::path::PathBuf,
-}
-
-impl Drop for ManagedChild {
-    fn drop(&mut self) {
-        let status = self.child.try_wait();
-        eprintln!("A5_DIAG child_status_before_kill={status:?} log={}", self.log_path.display());
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        match fs::read_to_string(&self.log_path) {
-            Ok(log) => eprintln!("A5_DAEMON_LOG {}\\n{}", self.log_path.display(), log),
-            Err(error) => eprintln!("A5_DIAG failed_to_read_log={} error={error}", self.log_path.display()),
-        }
-    }
-}
-'''
-          if old_child not in text:
-              raise SystemExit('ManagedChild anchor not found')
-          text = text.replace(old_child, new_child, 1)
-          old_spawn = '''fn spawn_daemon(peer: &PeerFixture, listen_ip: Ipv4Addr) -> ManagedChild {
-    let child = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
-        .arg("--data-dir")
-        .arg(&peer.paths.root)
-        .arg("daemon")
-        .arg("--listen")
-        .arg(format!("/ip4/{listen_ip}/udp/{}/quic-v1", peer.port))
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
-    ManagedChild(child)
-}
-'''
-          new_spawn = '''fn spawn_daemon(peer: &PeerFixture, listen_ip: Ipv4Addr) -> ManagedChild {
-    let log_path = peer.paths.root.join("daemon.stderr.log");
-    let stderr = fs::File::create(&log_path).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
-        .arg("--data-dir")
-        .arg(&peer.paths.root)
-        .arg("daemon")
-        .arg("--listen")
-        .arg(format!("/ip4/{listen_ip}/udp/{}/quic-v1", peer.port))
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .unwrap();
-    ManagedChild { child, log_path }
-}
-'''
-          if old_spawn not in text:
-              raise SystemExit('spawn_daemon anchor not found')
-          text = text.replace(old_spawn, new_spawn, 1)
+          text = text.replace('struct ManagedChild(Child);', 'struct ManagedChild(Child, std::path::PathBuf);', 1)
+          old_drop = '        let _ = self.0.kill();\n        let _ = self.0.wait();'
+          new_drop = '\n'.join([
+              '        let status = self.0.try_wait();',
+              '        eprintln!("A5_DIAG child_status_before_kill={status:?} log={}", self.1.display());',
+              '        let _ = self.0.kill();',
+              '        let _ = self.0.wait();',
+              '        match fs::read_to_string(&self.1) {',
+              '            Ok(log) => eprintln!("A5_DAEMON_LOG {}\\n{}", self.1.display(), log),',
+              '            Err(error) => eprintln!("A5_DIAG failed_to_read_log={} error={error}", self.1.display()),',
+              '        }',
+          ])
+          if old_drop not in text:
+              raise SystemExit('ManagedChild drop anchor not found')
+          text = text.replace(old_drop, new_drop, 1)
+          old_stderr = '        .stderr(Stdio::inherit())\n        .spawn()\n        .unwrap();\n    ManagedChild(child)'
+          new_stderr = '\n'.join([
+              '        .stderr(Stdio::from(fs::File::create(peer.paths.root.join("daemon.stderr.log")).unwrap()))',
+              '        .spawn()',
+              '        .unwrap();',
+              '    ManagedChild(child, peer.paths.root.join("daemon.stderr.log"))',
+          ])
+          if old_stderr not in text:
+              raise SystemExit('spawn_daemon stderr anchor not found')
+          text = text.replace(old_stderr, new_stderr, 1)
           anchor = '    let local_ip = local_non_loopback_ipv4();\n'
           replacement = anchor + '    eprintln!("A5_DIAG local_ip={local_ip} a_port={} b_port={}", a.port, b.port);\n'
           if anchor not in text:
