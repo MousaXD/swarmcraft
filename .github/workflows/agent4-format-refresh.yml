@@ -1,0 +1,42 @@
+name: Agent 4 format refresh
+
+on:
+  push:
+    branches: [agent/canonical-modpack]
+    paths:
+      - .github/workflows/agent4-format-refresh.yml
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/canonical-modpack
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply rustfmt
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all
+      - name: Commit formatting when changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'formatting already current'
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add crates/swarm-protocol/src/canonical_modpack.rs apps/desktop/src-tauri/src/main.rs apps/desktop/src-tauri/src/canonical_commands.rs apps/desktop/src-tauri/src/canonical_world_commands.rs
+          git commit -m 'style(agent4): apply rustfmt'
+          git fetch origin agent/canonical-modpack
+          git rebase origin/agent/canonical-modpack
+          git push origin HEAD:agent/canonical-modpack
