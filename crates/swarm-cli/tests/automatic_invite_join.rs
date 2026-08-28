@@ -212,7 +212,10 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
     let pending = b.storage.load_pending_join(world).unwrap();
     assert_eq!(pending.invite.bootstrap_addrs, vec![a_address]);
 
-    let _daemon_a = spawn_daemon(&a, Ipv4Addr::UNSPECIFIED);
+    // The fixture advertises this concrete non-loopback address in the diagnostics
+    // snapshot, so its QUIC listener must bind the same address. A wildcard QUIC
+    // listener is not self-dialable through the advertised interface on macOS.
+    let _daemon_a = spawn_daemon(&a, local_ip);
     thread::sleep(Duration::from_secs(1));
     let _daemon_b = spawn_daemon(&b, Ipv4Addr::LOCALHOST);
 
