@@ -1,4 +1,6 @@
-use crate::canonical_commands::{canonicalize_modpack, CanonicalModpackResponse, CanonicalizationFailure, CanonicalizeModpackRequest};
+use crate::canonical_commands::{
+    canonicalize_modpack, CanonicalModpackResponse, CanonicalizationFailure, CanonicalizeModpackRequest,
+};
 use serde::{Deserialize, Serialize};
 use swarm_catalog::CatalogService;
 use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
@@ -41,8 +43,10 @@ pub fn create_canonical_world(
 
     let paths = DataPaths::discover().map_err(|error| failure("storage_unavailable", error.to_string()))?;
     paths.ensure().map_err(|error| failure("storage_unavailable", error.to_string()))?;
-    let storage = Storage::open(paths.root.clone()).map_err(|error| failure("storage_unavailable", error.to_string()))?;
-    let identity = PeerIdentity::load_or_create(&paths).map_err(|error| failure("identity_unavailable", error.to_string()))?;
+    let storage =
+        Storage::open(paths.root.clone()).map_err(|error| failure("storage_unavailable", error.to_string()))?;
+    let identity =
+        PeerIdentity::load_or_create(&paths).map_err(|error| failure("identity_unavailable", error.to_string()))?;
 
     let minecraft = canonical.manifest.minecraft_version.clone();
     let loader = canonical.manifest.loader.version.clone();
@@ -75,9 +79,7 @@ pub fn create_canonical_world(
         members: vec![local_member.clone()],
         preferred_replication_factor: 2,
     };
-    storage
-        .save_world_descriptor(&descriptor)
-        .map_err(|error| failure("world_storage_failed", error.to_string()))?;
+    storage.save_world_descriptor(&descriptor).map_err(|error| failure("world_storage_failed", error.to_string()))?;
 
     let mut membership = MembershipRecordV1 {
         protocol_version: PROTOCOL_VERSION,
@@ -90,12 +92,8 @@ pub fn create_canonical_world(
         authority_public_key: identity.public_key(),
         signature: Vec::new(),
     };
-    identity
-        .sign_membership(&mut membership)
-        .map_err(|error| failure("membership_sign_failed", error.to_string()))?;
-    storage
-        .save_membership_record(&membership)
-        .map_err(|error| failure("world_storage_failed", error.to_string()))?;
+    identity.sign_membership(&mut membership).map_err(|error| failure("membership_sign_failed", error.to_string()))?;
+    storage.save_membership_record(&membership).map_err(|error| failure("world_storage_failed", error.to_string()))?;
 
     let mut config = WorldConfigV1 {
         protocol_version: PROTOCOL_VERSION,
@@ -120,10 +118,9 @@ pub fn create_canonical_world(
         authority_public_key: identity.public_key(),
         signature: Vec::new(),
     };
-    sign_world_config(&identity, &mut config).map_err(|error| failure("world_config_sign_failed", error.to_string()))?;
-    storage
-        .save_world_config(&config)
-        .map_err(|error| failure("world_storage_failed", error.to_string()))?;
+    sign_world_config(&identity, &mut config)
+        .map_err(|error| failure("world_config_sign_failed", error.to_string()))?;
+    storage.save_world_config(&config).map_err(|error| failure("world_storage_failed", error.to_string()))?;
 
     let initial_source = paths.root.join("initial-world").join(world_id.to_hex());
     std::fs::create_dir_all(&initial_source).map_err(|error| failure("snapshot_failed", error.to_string()))?;
@@ -152,9 +149,8 @@ pub fn create_canonical_world(
 
 fn validate_catalog_selection(minecraft: &str, loader: &str) -> Result<(), CanonicalizationFailure> {
     let service = CatalogService::discover().map_err(|error| failure(error.code(), error.to_string()))?;
-    let minecraft_catalog = service
-        .minecraft_versions(true, false)
-        .map_err(|error| failure(error.code(), error.to_string()))?;
+    let minecraft_catalog =
+        service.minecraft_versions(true, false).map_err(|error| failure(error.code(), error.to_string()))?;
     if !minecraft_catalog.versions.iter().any(|version| version.supported && version.id == minecraft) {
         return Err(failure(
             "unsupported_minecraft_version",

@@ -6,8 +6,8 @@ use std::{fs, path::Path};
 use swarm_protocol::{
     runtime_artifact_hash, ArtifactRequirementV1, ArtifactSideV1, CanonicalArtifactSourceV1, CanonicalDependencyKindV1,
     CanonicalDependencyV1, CanonicalHashAlgorithmV1, CanonicalLoaderV1, CanonicalModpackV1, CanonicalPackageIdentityV1,
-    CanonicalPackageV1, CanonicalProviderArtifactV1, CanonicalProviderHashV1, CanonicalProviderV1, CanonicalRetrievalV1,
-    RuntimeCompatibilityManifestV1, CANONICAL_MODPACK_SCHEMA_VERSION,
+    CanonicalPackageV1, CanonicalProviderArtifactV1, CanonicalProviderHashV1, CanonicalProviderV1,
+    CanonicalRetrievalV1, RuntimeCompatibilityManifestV1, CANONICAL_MODPACK_SCHEMA_VERSION,
 };
 
 const MAX_CANONICAL_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
@@ -106,7 +106,9 @@ impl CanonicalizationFailure {
 }
 
 #[tauri::command]
-pub fn canonicalize_modpack(request: CanonicalizeModpackRequest) -> Result<CanonicalModpackResponse, CanonicalizationFailure> {
+pub fn canonicalize_modpack(
+    request: CanonicalizeModpackRequest,
+) -> Result<CanonicalModpackResponse, CanonicalizationFailure> {
     let mut packages = Vec::with_capacity(request.packages.len());
     for package in request.packages {
         packages.push(canonicalize_package(package)?);
@@ -142,11 +144,7 @@ pub fn canonicalize_modpack(request: CanonicalizeModpackRequest) -> Result<Canon
         .fingerprint()
         .map_err(|error| CanonicalizationFailure::new("canonical_fingerprint_failed", error.to_string()))?;
 
-    Ok(CanonicalModpackResponse {
-        manifest,
-        compatibility,
-        compatibility_fingerprint: fingerprint.to_string(),
-    })
+    Ok(CanonicalModpackResponse { manifest, compatibility, compatibility_fingerprint: fingerprint.to_string() })
 }
 
 fn canonicalize_package(request: CanonicalizePackageRequest) -> Result<CanonicalPackageV1, CanonicalizationFailure> {
@@ -161,8 +159,9 @@ fn canonicalize_package(request: CanonicalizePackageRequest) -> Result<Canonical
         }
     }
 
-    let side = parse_side(&request.side)
-        .map_err(|message| CanonicalizationFailure::for_artifact("invalid_environment", &request.artifact_id, message))?;
+    let side = parse_side(&request.side).map_err(|message| {
+        CanonicalizationFailure::for_artifact("invalid_environment", &request.artifact_id, message)
+    })?;
     let source = match request.provider.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
         None | Some("local") => CanonicalArtifactSourceV1::Local {
             file_name: request.file_name.or_else(|| file_name(&request.artifact_path)),
@@ -179,14 +178,12 @@ fn canonicalize_package(request: CanonicalizePackageRequest) -> Result<Canonical
                 &request.artifact_id,
             )?;
             let hashes = verify_provider_hashes(&bytes, &request.provider_hashes, &request.artifact_id)?;
-            let retrieval = parse_retrieval(request.retrieval.as_deref().unwrap_or("provider_download")).map_err(|message| {
-                CanonicalizationFailure::for_artifact("invalid_retrieval_state", &request.artifact_id, message)
-            })?;
-            let dependencies = request
-                .dependencies
-                .into_iter()
-                .map(canonicalize_dependency)
-                .collect::<Result<Vec<_>, _>>()?;
+            let retrieval =
+                parse_retrieval(request.retrieval.as_deref().unwrap_or("provider_download")).map_err(|message| {
+                    CanonicalizationFailure::for_artifact("invalid_retrieval_state", &request.artifact_id, message)
+                })?;
+            let dependencies =
+                request.dependencies.into_iter().map(canonicalize_dependency).collect::<Result<Vec<_>, _>>()?;
             CanonicalArtifactSourceV1::Provider {
                 artifact: CanonicalProviderArtifactV1 {
                     identity: CanonicalPackageIdentityV1 { provider, project_id, version_id },
@@ -217,15 +214,16 @@ fn canonicalize_dependency(request: DependencyRequest) -> Result<CanonicalDepend
         "optional" => CanonicalDependencyKindV1::Optional,
         "incompatible" => CanonicalDependencyKindV1::Incompatible,
         "embedded" => CanonicalDependencyKindV1::Embedded,
-        other => return Err(CanonicalizationFailure::new("invalid_dependency_kind", format!("unsupported dependency kind {other}"))),
+        other => {
+            return Err(CanonicalizationFailure::new(
+                "invalid_dependency_kind",
+                format!("unsupported dependency kind {other}"),
+            ))
+        }
     };
     Ok(CanonicalDependencyV1 {
         kind,
-        target: CanonicalPackageIdentityV1 {
-            provider,
-            project_id: request.project_id,
-            version_id: request.version_id,
-        },
+        target: CanonicalPackageIdentityV1 { provider, project_id: request.project_id, version_id: request.version_id },
     })
 }
 
@@ -269,7 +267,11 @@ fn verify_provider_hashes(
 
 fn read_artifact(path: &str, artifact_id: &str) -> Result<Vec<u8>, CanonicalizationFailure> {
     let metadata = fs::metadata(path).map_err(|error| {
-        CanonicalizationFailure::for_artifact("artifact_unavailable", artifact_id, format!("cannot inspect exact artifact: {error}"))
+        CanonicalizationFailure::for_artifact(
+            "artifact_unavailable",
+            artifact_id,
+            format!("cannot inspect exact artifact: {error}"),
+        )
     })?;
     if !metadata.is_file() {
         return Err(CanonicalizationFailure::for_artifact(
@@ -286,7 +288,11 @@ fn read_artifact(path: &str, artifact_id: &str) -> Result<Vec<u8>, Canonicalizat
         ));
     }
     fs::read(path).map_err(|error| {
-        CanonicalizationFailure::for_artifact("artifact_unavailable", artifact_id, format!("cannot read exact artifact: {error}"))
+        CanonicalizationFailure::for_artifact(
+            "artifact_unavailable",
+            artifact_id,
+            format!("cannot read exact artifact: {error}"),
+        )
     })
 }
 
@@ -295,10 +301,13 @@ fn file_name(path: &str) -> Option<String> {
 }
 
 fn require_field(value: Option<String>, label: &str, artifact_id: &str) -> Result<String, CanonicalizationFailure> {
-    value
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| CanonicalizationFailure::for_artifact("unresolved_provider_identity", artifact_id, format!("exact {label} is required")))
+    value.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()).ok_or_else(|| {
+        CanonicalizationFailure::for_artifact(
+            "unresolved_provider_identity",
+            artifact_id,
+            format!("exact {label} is required"),
+        )
+    })
 }
 
 fn parse_provider(value: &str) -> Result<CanonicalProviderV1, String> {

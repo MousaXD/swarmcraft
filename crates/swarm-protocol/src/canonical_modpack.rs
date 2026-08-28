@@ -115,9 +115,13 @@ pub struct CanonicalProviderArtifactV1 {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CanonicalArtifactSourceV1 {
-    Provider { artifact: CanonicalProviderArtifactV1 },
+    Provider {
+        artifact: CanonicalProviderArtifactV1,
+    },
     /// Exact local bytes, used by explicit local/imported JAR workflows where provider identity is unavailable.
-    Local { file_name: Option<String> },
+    Local {
+        file_name: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -175,12 +179,8 @@ impl CanonicalModpackV1 {
         for package in &self.packages {
             validate_exact_identifier("artifact ID", &package.artifact_id)?;
             validate_exact_version("artifact version", &package.version)?;
-            let runtime_key = (
-                package.artifact_id.clone(),
-                package.version.clone(),
-                package.artifact_hash,
-                package.side,
-            );
+            let runtime_key =
+                (package.artifact_id.clone(), package.version.clone(), package.artifact_hash, package.side);
             if let Some(existing) = runtime_keys.insert(runtime_key, &package.source) {
                 if existing != &package.source {
                     return Err(CanonicalModpackError::DuplicatePackage(package.artifact_id.clone()));
@@ -205,7 +205,9 @@ impl CanonicalModpackV1 {
                 match dependency.kind {
                     CanonicalDependencyKindV1::Required => {
                         if !selected.contains(&dependency.target) {
-                            return Err(CanonicalModpackError::MissingRequiredDependency(dependency.target.display_key()));
+                            return Err(CanonicalModpackError::MissingRequiredDependency(
+                                dependency.target.display_key(),
+                            ));
                         }
                     }
                     CanonicalDependencyKindV1::Incompatible => {
@@ -290,11 +292,7 @@ impl CanonicalModpackV1 {
                     Some(hint) if hint.starts_with(CANONICAL_SOURCE_HINT_PREFIX) => decode_canonical_source(hint)?,
                     _ => CanonicalArtifactSourceV1::Local { file_name: None },
                 };
-                let key = (
-                    requirement.artifact_id.clone(),
-                    requirement.version.clone(),
-                    requirement.artifact_hash,
-                );
+                let key = (requirement.artifact_id.clone(), requirement.version.clone(), requirement.artifact_hash);
                 let observed_side = match requirement.side {
                     ArtifactSideV1::Both => ArtifactSideV1::Both,
                     _ => required_side,
@@ -518,10 +516,7 @@ mod tests {
             first.compatibility_fingerprint("0.4.0").unwrap(),
             second.compatibility_fingerprint("0.4.0").unwrap()
         );
-        assert_eq!(
-            first.to_runtime_compatibility("0.4.0").unwrap(),
-            second.to_runtime_compatibility("0.4.0").unwrap()
-        );
+        assert_eq!(first.to_runtime_compatibility("0.4.0").unwrap(), second.to_runtime_compatibility("0.4.0").unwrap());
     }
 
     #[test]
@@ -568,10 +563,7 @@ mod tests {
     fn artifact_change_changes_existing_authoritative_fingerprint() {
         let a = pack(vec![provider_package("a", CanonicalProviderV1::Modrinth, "a", "v1", 1, Vec::new())]);
         let b = pack(vec![provider_package("a", CanonicalProviderV1::Modrinth, "a", "v1", 2, Vec::new())]);
-        assert_ne!(
-            a.compatibility_fingerprint("0.4.0").unwrap(),
-            b.compatibility_fingerprint("0.4.0").unwrap()
-        );
+        assert_ne!(a.compatibility_fingerprint("0.4.0").unwrap(), b.compatibility_fingerprint("0.4.0").unwrap());
     }
 
     #[test]
@@ -594,6 +586,9 @@ mod tests {
 
     #[test]
     fn runtime_hash_matches_existing_server_mod_domain_contract() {
-        assert_eq!(runtime_artifact_hash(b"jar-bytes"), Hash32::from_domain_bytes(b"swarmcraft/runtime-artifact/v1\0", b"jar-bytes"));
+        assert_eq!(
+            runtime_artifact_hash(b"jar-bytes"),
+            Hash32::from_domain_bytes(b"swarmcraft/runtime-artifact/v1\0", b"jar-bytes")
+        );
     }
 }
