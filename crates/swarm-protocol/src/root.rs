@@ -2,6 +2,9 @@
 mod base;
 pub use base::*;
 
+mod canonical_modpack;
+pub use canonical_modpack::*;
+
 mod v2;
 pub use v2::*;
 
