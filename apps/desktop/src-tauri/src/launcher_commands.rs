@@ -13,10 +13,7 @@ use super::{curseforge, modrinth_commands, run_runtime_cli};
 pub(crate) fn provider_staging_dir() -> Result<String, String> {
     let paths = DataPaths::discover().map_err(|error| error.to_string())?;
     paths.ensure().map_err(|error| error.to_string())?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_nanos();
     let path = paths.root.join("provider-staging").join(format!("desktop-{}-{nonce}", std::process::id()));
     fs::create_dir_all(&path).map_err(|error| format!("Could not create provider staging directory: {error}"))?;
     Ok(path.to_string_lossy().into_owned())
@@ -63,10 +60,8 @@ pub(crate) async fn curseforge_resolve_project(
     if versions_envelope.get("status").and_then(Value::as_str) != Some("ok") {
         return versions_envelope;
     }
-    let Some(versions) = versions_envelope
-        .get("data")
-        .and_then(|value| value.get("versions"))
-        .and_then(Value::as_array)
+    let Some(versions) =
+        versions_envelope.get("data").and_then(|value| value.get("versions")).and_then(Value::as_array)
     else {
         return launcher_error("malformed_response", "CurseForge version response omitted its versions list");
     };
@@ -90,14 +85,14 @@ pub(crate) async fn curseforge_resolve_project(
                 left_id.cmp(&right_id)
             })
         });
-    let Some(file_id) = root
-        .and_then(|value| value.get("file_id"))
-        .and_then(Value::as_str)
-        .and_then(|value| value.parse::<u64>().ok())
+    let Some(file_id) =
+        root.and_then(|value| value.get("file_id")).and_then(Value::as_str).and_then(|value| value.parse::<u64>().ok())
     else {
         return launcher_error(
             "incompatible",
-            &format!("CurseForge project {project_id} has no available compatible Fabric file for Minecraft {minecraft}"),
+            &format!(
+                "CurseForge project {project_id} has no available compatible Fabric file for Minecraft {minecraft}"
+            ),
         );
     };
     curseforge::curseforge_resolve(file_id, minecraft, loader, environment).await
