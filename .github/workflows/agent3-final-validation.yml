@@ -1,0 +1,88 @@
+name: Agent 3 CurseForge final validation
+
+on:
+  pull_request:
+    branches: [backup/local-work-20260824]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'agent/curseforge-provider'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.event.pull_request.head.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+
+      - name: Workspace format
+        run: cargo fmt --all -- --check
+      - name: Workspace locked metadata
+        run: cargo metadata --locked --format-version 1 --no-deps > /dev/null
+      - name: Workspace check
+        run: cargo check --workspace --all-features --locked
+      - name: Workspace clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Workspace tests
+        run: cargo test --workspace --all-features --locked
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Build and stage required Tauri sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p swarm-cli --locked
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
+          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+          cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
+          cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
+
+      - name: Desktop format
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check
+      - name: Desktop locked metadata
+        run: cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --format-version 1 --no-deps > /dev/null
+      - name: Desktop check
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features --locked
+      - name: Desktop clippy
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
+      - name: CurseForge deterministic provider tests
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml curseforge::tests:: --all-features --locked
+      - name: Desktop tests
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features --locked
+      - name: Validate CurseForge command registration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          main = Path('apps/desktop/src-tauri/src/main.rs').read_text()
+          for command in (
+              'curseforge_provider_status',
+              'curseforge_search',
+              'curseforge_project',
+              'curseforge_versions',
+              'curseforge_resolve',
+              'curseforge_download',
+          ):
+              assert command in main, f'missing Tauri registration: {command}'
+          PY
