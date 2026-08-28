@@ -1,0 +1,62 @@
+name: Agent 4 selector repair
+
+on:
+  push:
+    branches: [agent/canonical-modpack]
+    paths:
+      - .github/workflows/agent4-selector-repair.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/canonical-modpack
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Restore backend Fabric selection validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('apps/desktop/src-tauri/src/main.rs')
+          text = path.read_text()
+          old = 'use catalog_commands::{fabric_loader_versions, minecraft_versions};'
+          new = 'use catalog_commands::{fabric_loader_versions, minecraft_versions, validate_fabric_selection};'
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'validate_fabric_selection' not in text:
+              raise SystemExit('catalog command import seam changed unexpectedly')
+          anchor = '    let visibility = require_value(visibility, "Visibility")?;\n    run_cli('
+          replacement = '    let visibility = require_value(visibility, "Visibility")?;\n    validate_fabric_selection(minecraft.clone(), fabric_loader.clone())\n        .await\n        .map_err(|error| error.to_string())?;\n    run_cli('
+          if anchor in text:
+              text = text.replace(anchor, replacement, 1)
+          elif 'validate_fabric_selection(minecraft.clone(), fabric_loader.clone())' not in text:
+              raise SystemExit('create_world validation seam changed unexpectedly')
+          path.write_text(text)
+          PY
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all
+          node --test apps/desktop/tests/catalog-selectors.test.mjs
+      - name: Commit validated selector repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- apps/desktop/src-tauri/src/main.rs; then
+            echo 'selector repair already current'
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add apps/desktop/src-tauri/src/main.rs
+          git commit -m 'fix(agent4): restore Fabric selection validation gate'
+          git fetch origin agent/canonical-modpack
+          git rebase origin/agent/canonical-modpack
+          git push origin HEAD:agent/canonical-modpack
