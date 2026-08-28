@@ -67,7 +67,8 @@ jobs:
       - name: Desktop clippy
         run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
       - name: CurseForge deterministic provider tests
-        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml curseforge::tests:: --all-features --locked
+        run: >-
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml curseforge::tests:: --all-features --locked
       - name: Desktop tests
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features --locked
       - name: Validate CurseForge command registration
