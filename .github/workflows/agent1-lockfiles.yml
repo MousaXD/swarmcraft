@@ -5,7 +5,7 @@ on:
     branches: [backup/local-work-20260824]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   validate:
@@ -24,26 +24,6 @@ jobs:
           workspaces: |
             . -> target
             apps/desktop/src-tauri -> target
-
-      - name: Apply one-time Desktop rustfmt fix
-        if: github.actor != 'github-actions[bot]'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all
-          if ! git diff --quiet -- apps/desktop/src-tauri; then
-            git config user.name github-actions[bot]
-            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-            git add \
-              apps/desktop/src-tauri/build.rs \
-              apps/desktop/src-tauri/src/catalog_commands.rs \
-              apps/desktop/src-tauri/src/main.rs \
-              apps/desktop/src-tauri/src/runtime.rs \
-              apps/desktop/src-tauri/src/runtime_commands.rs \
-              apps/desktop/src-tauri/src/transfer_commands.rs
-            git commit -m 'style(agent1): satisfy Desktop rustfmt'
-            git push origin HEAD:agent/minecraft-fabric-catalog
-          fi
 
       - name: Workspace format
         run: cargo fmt --all -- --check
