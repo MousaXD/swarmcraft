@@ -1,0 +1,63 @@
+name: Agent 4 provenance repair
+
+on:
+  push:
+    branches: [agent/canonical-modpack]
+    paths:
+      - .github/workflows/agent4-provenance-repair.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/canonical-modpack
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Replace serde-tagged provenance with postcard wire enum
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/swarm-protocol/src/canonical_modpack.rs')
+          text = path.read_text()
+          anchor = '''#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]\n#[serde(tag = "kind", rename_all = "snake_case")]\npub enum CanonicalArtifactSourceV1 {\n    Provider {\n        artifact: CanonicalProviderArtifactV1,\n    },\n    /// Exact local bytes, used by explicit local/imported JAR workflows where provider identity is unavailable.\n    Local {\n        file_name: Option<String>,\n    },\n}\n'''
+          replacement = anchor + '''\n// Keep the public JSON/Tauri representation stable while using a postcard-compatible\n// binary envelope for the signed provider_hint provenance bytes. Serde internally\n// tagged enums require deserialize_any, which postcard intentionally does not support.\n#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\nenum CanonicalArtifactSourceWireV1 {\n    Provider(CanonicalProviderArtifactV1),\n    Local(Option<String>),\n}\n\nimpl From<&CanonicalArtifactSourceV1> for CanonicalArtifactSourceWireV1 {\n    fn from(source: &CanonicalArtifactSourceV1) -> Self {\n        match source {\n            CanonicalArtifactSourceV1::Provider { artifact } => Self::Provider(artifact.clone()),\n            CanonicalArtifactSourceV1::Local { file_name } => Self::Local(file_name.clone()),\n        }\n    }\n}\n\nimpl From<CanonicalArtifactSourceWireV1> for CanonicalArtifactSourceV1 {\n    fn from(source: CanonicalArtifactSourceWireV1) -> Self {\n        match source {\n            CanonicalArtifactSourceWireV1::Provider(artifact) => Self::Provider { artifact },\n            CanonicalArtifactSourceWireV1::Local(file_name) => Self::Local { file_name },\n        }\n    }\n}\n'''
+          if 'enum CanonicalArtifactSourceWireV1' not in text:
+              if anchor not in text:
+                  raise SystemExit('canonical source enum seam changed unexpectedly')
+              text = text.replace(anchor, replacement, 1)
+          old_encode = '''pub fn encode_canonical_source(source: &CanonicalArtifactSourceV1) -> Result<String, CanonicalModpackError> {\n    let bytes = postcard::to_allocvec(source).map_err(|error| CanonicalModpackError::Encode(error.to_string()))?;\n    Ok(format!("{CANONICAL_SOURCE_HINT_PREFIX}{}", hex::encode(bytes)))\n}\n\npub fn decode_canonical_source(hint: &str) -> Result<CanonicalArtifactSourceV1, CanonicalModpackError> {\n    let encoded = hint\n        .strip_prefix(CANONICAL_SOURCE_HINT_PREFIX)\n        .ok_or_else(|| CanonicalModpackError::MalformedProviderHint("unsupported prefix".into()))?;\n    let bytes = hex::decode(encoded).map_err(|_| CanonicalModpackError::MalformedProviderHint("invalid hex".into()))?;\n    postcard::from_bytes(&bytes).map_err(|error| CanonicalModpackError::MalformedProviderHint(error.to_string()))\n}\n'''
+          new_encode = '''pub fn encode_canonical_source(source: &CanonicalArtifactSourceV1) -> Result<String, CanonicalModpackError> {\n    let wire = CanonicalArtifactSourceWireV1::from(source);\n    let bytes = postcard::to_allocvec(&wire).map_err(|error| CanonicalModpackError::Encode(error.to_string()))?;\n    Ok(format!("{CANONICAL_SOURCE_HINT_PREFIX}{}", hex::encode(bytes)))\n}\n\npub fn decode_canonical_source(hint: &str) -> Result<CanonicalArtifactSourceV1, CanonicalModpackError> {\n    let encoded = hint\n        .strip_prefix(CANONICAL_SOURCE_HINT_PREFIX)\n        .ok_or_else(|| CanonicalModpackError::MalformedProviderHint("unsupported prefix".into()))?;\n    let bytes = hex::decode(encoded).map_err(|_| CanonicalModpackError::MalformedProviderHint("invalid hex".into()))?;\n    let wire: CanonicalArtifactSourceWireV1 = postcard::from_bytes(&bytes)\n        .map_err(|error| CanonicalModpackError::MalformedProviderHint(error.to_string()))?;\n    Ok(wire.into())\n}\n'''
+          if old_encode in text:
+              text = text.replace(old_encode, new_encode, 1)
+          elif 'let wire: CanonicalArtifactSourceWireV1' not in text:
+              raise SystemExit('canonical provenance encode/decode seam changed unexpectedly')
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          cargo test -p swarm-protocol canonical_modpack --all-features --locked
+          cargo clippy -p swarm-protocol --all-targets --all-features --locked -- -D warnings
+      - name: Commit validated repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- crates/swarm-protocol/src/canonical_modpack.rs; then
+            echo 'provenance repair already current'
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add crates/swarm-protocol/src/canonical_modpack.rs
+          git commit -m 'fix(agent4): use postcard-safe canonical provenance envelope'
+          git fetch origin agent/canonical-modpack
+          git rebase origin/agent/canonical-modpack
+          git push origin HEAD:agent/canonical-modpack
