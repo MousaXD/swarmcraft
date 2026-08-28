@@ -1,0 +1,75 @@
+name: Recovery integration merge
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [integration/player-launcher-v1]
+    paths: [.github/workflows/recovery-integration.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: integration/player-launcher-v1
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Merge canonical/provider stack additively
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git fetch origin agent/canonical-modpack
+          set +e
+          git merge --no-ff --no-commit origin/agent/canonical-modpack
+          merge_rc=$?
+          set -e
+          if [ "$merge_rc" -ne 0 ]; then
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            printf 'Conflicts: %s\n' "${conflicts[*]}"
+            for path in "${conflicts[@]}"; do
+              case "$path" in
+                crates/swarm-cli/src/lib.rs|crates/swarm-protocol/src/root.rs) ;;
+                *) echo "Unexpected integration conflict: $path" >&2; exit 1 ;;
+              esac
+            done
+            git checkout --theirs crates/swarm-cli/src/lib.rs crates/swarm-protocol/src/root.rs
+            python3 - <<'PY'
+          from pathlib import Path
+
+          cli = Path('crates/swarm-cli/src/lib.rs')
+          text = cli.read_text()
+          if 'pub mod discovery;' not in text:
+              text = text.replace('pub mod authority_permit;\n', 'pub mod authority_permit;\npub mod discovery;\n', 1)
+          cli.write_text(text)
+
+          protocol = Path('crates/swarm-protocol/src/root.rs')
+          text = protocol.read_text()
+          if 'mod discovery;' not in text:
+              needle = 'mod canonical_modpack;\npub use canonical_modpack::*;\n'
+              replacement = needle + '\nmod discovery;\npub use discovery::*;\n'
+              if needle not in text:
+                  raise SystemExit('canonical protocol export seam changed unexpectedly')
+              text = text.replace(needle, replacement, 1)
+          protocol.write_text(text)
+          PY
+            git add crates/swarm-cli/src/lib.rs crates/swarm-protocol/src/root.rs
+          fi
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo 'Unresolved conflicts remain' >&2
+            git diff --name-only --diff-filter=U >&2
+            exit 1
+          fi
+          cargo fmt --all
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all
+          git add -A
+          git diff --cached --check
+          git commit -m 'Merge catalog providers and canonical modpack into player launcher integration'
+          git push origin HEAD:integration/player-launcher-v1
