@@ -1,4 +1,5 @@
 pub mod authority_permit;
+pub mod discovery;
 pub mod host_readiness;
 pub mod launch_guard;
 pub mod migration;

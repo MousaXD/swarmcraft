@@ -1,6 +1,7 @@
 //! Encrypted peer transport, discovery, authentication, and bounded replication messages.
 
 mod diagnostics;
+mod discovery;
 mod invite_connectivity;
 mod node;
 mod transport;
@@ -10,6 +11,10 @@ pub use diagnostics::{
     ConnectivityDiagnosticsV1, ConnectivityIssueKindV1, ConnectivityIssueV1, ConnectivityStateV1, HolePunchStateV1,
     NatStatusV1, CONNECTIVITY_DIAGNOSTICS_JSON_ENV, CONNECTIVITY_DIAGNOSTICS_SNAPSHOT_FILE, MAX_CONNECTIVITY_FAILURES,
 };
+pub use discovery::{
+    friend_presence_key, public_directory_key, world_discovery_key, DiscoveryNetworkEvent, DiscoveryNode,
+    DISCOVERY_WIRE_PROTOCOL,
+};
 pub use invite_connectivity::{
     invite_connectivity_from_snapshot, validate_invite_addresses, InviteConnectivityError, InviteConnectivityV1,
     InviteReachabilityV1, DEFAULT_CONNECTIVITY_DIAGNOSTICS_JSON_FILE, MAX_CONNECTIVITY_SNAPSHOT_BYTES,
@@ -17,11 +22,12 @@ pub use invite_connectivity::{
 };
 pub use libp2p::request_response::ResponseChannel;
 pub use libp2p::PeerId as TransportPeerId;
-pub use node::{NetworkEvent, SwarmNode, WIRE_PROTOCOL};
+pub use node::{NetworkEvent, SwarmNode, BOOTSTRAP_ENV, RELAY_ENV, WIRE_PROTOCOL};
 pub use transport::{generate_transport_key, load_or_create_transport_key};
 pub use wire::{
     BlobResumeV1, HostCapabilityV1, HostRuntimeReadinessV1, ReplicaAckV1, ServerModsReadinessV1, WireLimitError,
-    WireRequest, WireResponse, MAX_BLOB_CHUNK, MAX_MISSING_BLOBS, MAX_RECOVERY_VOTES, MAX_WORLD_ARTIFACTS,
+    WireRequest, WireResponse, MAX_BLOB_CHUNK, MAX_DISCOVERY_ANNOUNCEMENT_BYTES, MAX_DISCOVERY_QUERY_BYTES,
+    MAX_DISCOVERY_RESULTS, MAX_DISCOVERY_TAGS, MAX_MISSING_BLOBS, MAX_RECOVERY_VOTES, MAX_WORLD_ARTIFACTS,
     MAX_WORLD_MEMBERS,
 };
 
