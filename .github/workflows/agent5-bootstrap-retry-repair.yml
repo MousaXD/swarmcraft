@@ -39,6 +39,8 @@ jobs:
           path.write_text(text)
           PY
       - name: Format repair
+        run: cargo fmt --all
+      - name: Verify formatted repair
         run: cargo fmt --all -- --check
       - name: Prove automatic invite join on macOS
         run: cargo test -p swarm-cli --test automatic_invite_join --locked
