@@ -11,7 +11,7 @@ mod transfer_commands;
 
 use canonical_commands::canonicalize_modpack;
 use canonical_world_commands::create_canonical_world;
-use catalog_commands::{fabric_loader_versions, minecraft_versions};
+use catalog_commands::{fabric_loader_versions, minecraft_versions, validate_fabric_selection};
 use curseforge::{
     curseforge_download, curseforge_project, curseforge_provider_status, curseforge_resolve, curseforge_search,
     curseforge_versions,
@@ -109,6 +109,7 @@ async fn create_world(
     let fabric_loader = require_value(fabric_loader, "Fabric loader version")?;
     let compatibility = require_value(compatibility, "Compatibility profile")?;
     let visibility = require_value(visibility, "Visibility")?;
+    validate_fabric_selection(minecraft.clone(), fabric_loader.clone()).await.map_err(|error| error.to_string())?;
     run_cli(
         &app,
         vec![
