@@ -4,6 +4,7 @@ mod canonical_commands;
 mod canonical_world_commands;
 mod catalog_commands;
 mod curseforge;
+mod launcher_commands;
 mod modrinth_commands;
 mod runtime;
 mod runtime_commands;
@@ -15,6 +16,10 @@ use catalog_commands::{fabric_loader_versions, minecraft_versions, validate_fabr
 use curseforge::{
     curseforge_download, curseforge_project, curseforge_provider_status, curseforge_resolve, curseforge_search,
     curseforge_versions,
+};
+use launcher_commands::{
+    curseforge_resolve_project, discovery_resolve, discovery_search, inspect_mod_artifact, modrinth_resolve_project,
+    provider_staging_dir,
 };
 use modrinth_commands::{modrinth_download, modrinth_project, modrinth_resolve, modrinth_search, modrinth_versions};
 use runtime::RuntimeProcesses;
@@ -508,13 +513,19 @@ fn main() {
             modrinth_project,
             modrinth_versions,
             modrinth_resolve,
+            modrinth_resolve_project,
             modrinth_download,
             curseforge_provider_status,
             curseforge_search,
             curseforge_project,
             curseforge_versions,
             curseforge_resolve,
+            curseforge_resolve_project,
             curseforge_download,
+            provider_staging_dir,
+            inspect_mod_artifact,
+            discovery_search,
+            discovery_resolve,
             ensure_daemon_running,
             start_daemon,
             stop_daemon,
