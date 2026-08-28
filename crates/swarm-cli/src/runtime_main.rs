@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
 use swarm_cli::{
+    discovery::{self, DiscoverySearchInputV1},
     host_readiness, launch_guard, migration, provider_runtime,
     runtime_installer::{
         RuntimeComponentKind, RuntimeComponentState, RuntimeInstallOptions, RuntimeInstaller, RuntimeProgress,
@@ -53,6 +54,19 @@ enum RuntimeCommand {
     Verify { world: String },
     /// Inspect one exact Fabric mod JAR using the shared Rust authority parser.
     InspectMod { path: PathBuf },
+    /// Search authenticated public world announcements. Discovery never grants membership.
+    DiscoverySearch {
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long = "bootstrap")]
+        bootstrap: Vec<String>,
+    },
+    /// Resolve one authenticated public/unlisted world announcement by exact world ID.
+    DiscoveryResolve {
+        world: String,
+        #[arg(long = "bootstrap")]
+        bootstrap: Vec<String>,
+    },
     /// Launch the persisted managed runtime through the shared Rust authority/migration path.
     Launch { world: String },
 }
@@ -137,6 +151,22 @@ fn main() -> Result<()> {
         }
         RuntimeCommand::InspectMod { path } => {
             print_json(&server_mods::inspect_fabric_mod(&path)?)?;
+        }
+        RuntimeCommand::DiscoverySearch { query, bootstrap } => {
+            let report = tokio::runtime::Runtime::new()?.block_on(discovery::search_public_worlds(
+                &paths,
+                DiscoverySearchInputV1 { query, ..Default::default() },
+                &bootstrap,
+            ))?;
+            print_json(&report)?;
+        }
+        RuntimeCommand::DiscoveryResolve { world, bootstrap } => {
+            let report = tokio::runtime::Runtime::new()?.block_on(discovery::resolve_world(
+                &paths,
+                parse_world(&world)?,
+                &bootstrap,
+            ))?;
+            print_json(&report)?;
         }
         RuntimeCommand::Launch { world } => {
             let world = parse_world(&world)?;
