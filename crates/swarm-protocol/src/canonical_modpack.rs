@@ -124,6 +124,33 @@ pub enum CanonicalArtifactSourceV1 {
     },
 }
 
+// Keep the public JSON/Tauri representation stable while using a postcard-compatible
+// binary envelope for the signed provider_hint provenance bytes. Serde internally
+// tagged enums require deserialize_any, which postcard intentionally does not support.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum CanonicalArtifactSourceWireV1 {
+    Provider(CanonicalProviderArtifactV1),
+    Local(Option<String>),
+}
+
+impl From<&CanonicalArtifactSourceV1> for CanonicalArtifactSourceWireV1 {
+    fn from(source: &CanonicalArtifactSourceV1) -> Self {
+        match source {
+            CanonicalArtifactSourceV1::Provider { artifact } => Self::Provider(artifact.clone()),
+            CanonicalArtifactSourceV1::Local { file_name } => Self::Local(file_name.clone()),
+        }
+    }
+}
+
+impl From<CanonicalArtifactSourceWireV1> for CanonicalArtifactSourceV1 {
+    fn from(source: CanonicalArtifactSourceWireV1) -> Self {
+        match source {
+            CanonicalArtifactSourceWireV1::Provider(artifact) => Self::Provider { artifact },
+            CanonicalArtifactSourceWireV1::Local(file_name) => Self::Local { file_name },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CanonicalPackageV1 {
     /// Fabric mod ID or other stable runtime artifact ID.
@@ -340,7 +367,8 @@ pub fn runtime_artifact_hash(bytes: &[u8]) -> Hash32 {
 }
 
 pub fn encode_canonical_source(source: &CanonicalArtifactSourceV1) -> Result<String, CanonicalModpackError> {
-    let bytes = postcard::to_allocvec(source).map_err(|error| CanonicalModpackError::Encode(error.to_string()))?;
+    let wire = CanonicalArtifactSourceWireV1::from(source);
+    let bytes = postcard::to_allocvec(&wire).map_err(|error| CanonicalModpackError::Encode(error.to_string()))?;
     Ok(format!("{CANONICAL_SOURCE_HINT_PREFIX}{}", hex::encode(bytes)))
 }
 
@@ -349,7 +377,9 @@ pub fn decode_canonical_source(hint: &str) -> Result<CanonicalArtifactSourceV1, 
         .strip_prefix(CANONICAL_SOURCE_HINT_PREFIX)
         .ok_or_else(|| CanonicalModpackError::MalformedProviderHint("unsupported prefix".into()))?;
     let bytes = hex::decode(encoded).map_err(|_| CanonicalModpackError::MalformedProviderHint("invalid hex".into()))?;
-    postcard::from_bytes(&bytes).map_err(|error| CanonicalModpackError::MalformedProviderHint(error.to_string()))
+    let wire: CanonicalArtifactSourceWireV1 = postcard::from_bytes(&bytes)
+        .map_err(|error| CanonicalModpackError::MalformedProviderHint(error.to_string()))?;
+    Ok(wire.into())
 }
 
 fn normalize_source(source: &mut CanonicalArtifactSourceV1) {
