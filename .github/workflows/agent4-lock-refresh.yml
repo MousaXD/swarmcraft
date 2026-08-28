@@ -1,0 +1,40 @@
+name: Agent 4 lockfile refresh
+
+on:
+  push:
+    branches: [agent/canonical-modpack]
+    paths:
+      - Cargo.toml
+      - apps/desktop/src-tauri/Cargo.toml
+      - .github/workflows/agent4-lock-refresh.yml
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/canonical-modpack
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Regenerate exact lockfiles
+        run: |
+          set -euo pipefail
+          cargo generate-lockfile
+          cargo generate-lockfile --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: Commit lockfiles when changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- Cargo.lock apps/desktop/src-tauri/Cargo.lock; then
+            echo 'lockfiles already current'
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Cargo.lock apps/desktop/src-tauri/Cargo.lock
+          git commit -m 'build(agent4): refresh merged lockfiles'
+          git push origin HEAD:agent/canonical-modpack
