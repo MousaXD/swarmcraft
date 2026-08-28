@@ -18,214 +18,38 @@ jobs:
         with:
           ref: agent/automatic-invites
       - uses: dtolnay/rust-toolchain@stable
-      - name: Runner network diagnostics
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify macOS self-addressed UDP reaches a wildcard listener
         shell: bash
         run: |
-          set -euxo pipefail
-          ifconfig
-          route -n get 1.1.1.1 || true
-      - name: Instrument invite join state machine without committing source changes
+          python - <<'PY'
+          import socket
+          receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+          receiver.bind(('0.0.0.0', 0))
+          receiver.settimeout(2)
+          probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+          probe.connect(('1.1.1.1', 53))
+          local_ip = probe.getsockname()[0]
+          sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+          sender.sendto(b'a5-udp-probe', (local_ip, receiver.getsockname()[1]))
+          payload, source = receiver.recvfrom(256)
+          assert payload == b'a5-udp-probe', payload
+          print(f'A5_UDP_SELF_OK local_ip={local_ip} source={source} port={receiver.getsockname()[1]}')
+          PY
+      - name: Bind authority QUIC directly to the advertised interface for diagnosis
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
-
-          def replace_once(text, old, new, label):
-              if old not in text:
-                  raise SystemExit(f'anchor not found: {label}')
-              return text.replace(old, new, 1)
-
-          def replace_between(text, start_marker, end_marker, old, new, label):
-              start = text.index(start_marker)
-              end = text.index(end_marker, start)
-              segment = text[start:end]
-              if old not in segment:
-                  raise SystemExit(f'anchor not found in section: {label}')
-              segment = segment.replace(old, new, 1)
-              return text[:start] + segment + text[end:]
-
-          test_path = Path('crates/swarm-cli/tests/automatic_invite_join.rs')
-          test = test_path.read_text()
-          test = replace_once(test, 'struct ManagedChild(Child);', 'struct ManagedChild(Child, std::path::PathBuf);', 'managed child')
-          test = replace_once(
-              test,
-              '        let _ = self.0.kill();\n        let _ = self.0.wait();',
-              '\n'.join([
-                  '        let status = self.0.try_wait();',
-                  '        eprintln!("A5_DIAG child_status_before_kill={status:?} log={}", self.1.display());',
-                  '        let _ = self.0.kill();',
-                  '        let _ = self.0.wait();',
-                  '        match fs::read_to_string(&self.1) {',
-                  '            Ok(log) => eprintln!("A5_DAEMON_LOG {}\\n{}", self.1.display(), log),',
-                  '            Err(error) => eprintln!("A5_DIAG failed_to_read_log={} error={error}", self.1.display()),',
-                  '        }',
-              ]),
-              'managed child drop',
-          )
-          test = replace_once(
-              test,
-              '        .stderr(Stdio::inherit())\n        .spawn()\n        .unwrap();\n    ManagedChild(child)',
-              '\n'.join([
-                  '        .stderr(Stdio::from(fs::File::create(peer.paths.root.join("daemon.stderr.log")).unwrap()))',
-                  '        .spawn()',
-                  '        .unwrap();',
-                  '    ManagedChild(child, peer.paths.root.join("daemon.stderr.log"))',
-              ]),
-              'daemon stderr capture',
-          )
-          test = replace_once(
-              test,
-              '    let local_ip = local_non_loopback_ipv4();\n',
-              '    let local_ip = local_non_loopback_ipv4();\n    eprintln!("A5_DIAG local_ip={local_ip} a_port={} b_port={} a_root={} b_root={}", a.port, b.port, a.paths.root.display(), b.paths.root.display());\n',
-              'test endpoint diagnostics',
-          )
-          test_path.write_text(test)
-
-          daemon_path = Path('crates/swarm-cli/src/daemon.rs')
-          daemon = daemon_path.read_text()
-          daemon = replace_once(
-              daemon,
-              '                    NetworkEvent::Authenticated { transport_peer, application_peer } => {\n',
-              '                    NetworkEvent::Authenticated { transport_peer, application_peer } => {\n                        eprintln!("A5_EVT daemon_authenticated");\n',
-              'daemon authenticated event',
-          )
-          daemon = replace_once(
-              daemon,
-              '                        if matches!(response, WireResponse::HelloAccepted { .. }) {\n',
-              '                        if matches!(response, WireResponse::HelloAccepted { .. }) {\n                            eprintln!("A5_EVT daemon_hello_accepted");\n',
-              'daemon hello accepted',
-          )
-          daemon = replace_once(
-              daemon,
-              '                    NetworkEvent::OutboundFailure { transport_peer, request_id, error } => {\n',
-              '                    NetworkEvent::OutboundFailure { transport_peer, request_id, error } => {\n                        eprintln!("A5_EVT daemon_outbound_failure error={error}");\n',
-              'daemon outbound failure',
-          )
-          daemon = replace_once(
-              daemon,
-              '                    NetworkEvent::Connected { transport_peer } => {\n',
-              '                    NetworkEvent::Connected { transport_peer } => {\n                        eprintln!("A5_EVT daemon_connected");\n',
-              'daemon connected event',
-          )
-          daemon = replace_between(
-              daemon,
-              'fn dial_pending_invite_bootstraps',
-              'fn push_pending_membership_requests',
-              '                    if let Err(error) = node.dial(address) {',
-              '                    eprintln!("A5_EVT bootstrap_dial_attempt value={value}");\n                    if let Err(error) = node.dial(address) {',
-              'bootstrap dial',
-          )
-          daemon = replace_between(
-              daemon,
-              'fn push_pending_membership_requests',
-              'fn push_known_worlds',
-              '                node.send_request(transport_peer, WireRequest::JoinRequest(Box::new(join)))?;',
-              '                eprintln!("A5_EVT join_request_send");\n                node.send_request(transport_peer, WireRequest::JoinRequest(Box::new(join)))?;',
-              'join request send',
-          )
-          daemon = replace_between(
-              daemon,
-              'fn push_known_worlds',
-              'fn handle_request',
-              '        if let Ok(membership) = storage.load_membership_record(metadata.world_id) {\n            let _ = node.send_request(transport_peer, WireRequest::Membership(membership))?;\n        }',
-              '        if let Ok(membership) = storage.load_membership_record(metadata.world_id) {\n            eprintln!("A5_EVT membership_push_send");\n            let _ = node.send_request(transport_peer, WireRequest::Membership(membership))?;\n        }',
-              'membership push',
-          )
-          daemon = replace_between(
-              daemon,
-              '        WireRequest::JoinRequest(request) => {',
-              '        WireRequest::LeaveRequest(request) => {',
-              '        WireRequest::JoinRequest(request) => {\n',
-              '        WireRequest::JoinRequest(request) => {\n            eprintln!("A5_EVT join_request_received");\n',
-              'join request receive',
-          )
-          daemon = replace_between(
-              daemon,
-              '        WireRequest::JoinRequest(request) => {',
-              '        WireRequest::LeaveRequest(request) => {',
-              '                storage.save_membership_record(&next)?;\n                next',
-              '                storage.save_membership_record(&next)?;\n                eprintln!("A5_EVT authority_membership_saved");\n                next',
-              'authority membership save',
-          )
-          daemon = replace_between(
-              daemon,
-              '        WireRequest::JoinRequest(request) => {',
-              '        WireRequest::LeaveRequest(request) => {',
-              '            node.respond(channel, WireResponse::JoinAccepted { membership_sequence: canonical.sequence })?;',
-              '            eprintln!("A5_EVT join_accepted_respond");\n            node.respond(channel, WireResponse::JoinAccepted { membership_sequence: canonical.sequence })?;',
-              'join accepted response',
-          )
-          daemon = replace_between(
-              daemon,
-              '        WireRequest::Membership(record) => {',
-              '        WireRequest::WorldConfig(config) => {',
-              '        WireRequest::Membership(record) => {\n',
-              '        WireRequest::Membership(record) => {\n            eprintln!("A5_EVT membership_received");\n',
-              'membership receive',
-          )
-          daemon = replace_between(
-              daemon,
-              '        WireRequest::Membership(record) => {',
-              '        WireRequest::WorldConfig(config) => {',
-              '            storage.save_membership_record(&record)?;\n            storage.save_world_descriptor(&descriptor)?;',
-              '            storage.save_membership_record(&record)?;\n            storage.save_world_descriptor(&descriptor)?;\n            eprintln!("A5_EVT membership_applied");',
-              'membership applied',
-          )
-          daemon_path.write_text(daemon)
-
-          node_path = Path('crates/swarm-network/src/node.rs')
-          node = node_path.read_text()
-          node = replace_once(
-              node,
-              '                SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, num_established, .. } => {\n',
-              '                SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, num_established, .. } => {\n                    eprintln!("A5_NET connection_established peer={peer_id}");\n',
-              'connection established',
-          )
-          node = replace_once(
-              node,
-              '                SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {\n',
-              '                SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {\n                    eprintln!("A5_NET outgoing_connection_error peer={peer_id:?} error={error}");\n',
-              'outgoing connection error',
-          )
-          node = replace_once(
-              node,
-              '                                    Ok(()) => {\n                                        self.authenticated.insert(peer, hello.peer_id);',
-              '                                    Ok(()) => {\n                                        eprintln!("A5_NET hello_verified peer={peer}");\n                                        self.authenticated.insert(peer, hello.peer_id);',
-              'hello verified',
-          )
-          node = replace_once(
-              node,
-              '                                    Err(error) => {\n                                        if let Err(response_error) = self.respond(',
-              '                                    Err(error) => {\n                                        eprintln!("A5_NET hello_rejected peer={peer} error={error}");\n                                        if let Err(response_error) = self.respond(',
-              'hello rejected',
-          )
-          node = replace_once(
-              node,
-              '                                request if self.authenticated.contains_key(&peer) => {\n                                    return Ok(NetworkEvent::InboundRequest { transport_peer: peer, request, channel });',
-              '                                request if self.authenticated.contains_key(&peer) => {\n                                    eprintln!("A5_NET authenticated_request peer={peer}");\n                                    return Ok(NetworkEvent::InboundRequest { transport_peer: peer, request, channel });',
-              'authenticated request',
-          )
-          node = replace_once(
-              node,
-              '                                _ => {\n                                    if let Err(response_error) = self.respond(',
-              '                                _ => {\n                                    eprintln!("A5_NET handshake_required peer={peer}");\n                                    if let Err(response_error) = self.respond(',
-              'handshake required',
-          )
-          node = replace_once(
-              node,
-              '                    request_response::Event::OutboundFailure { peer, request_id, error, .. } => {\n',
-              '                    request_response::Event::OutboundFailure { peer, request_id, error, .. } => {\n                        eprintln!("A5_NET request_outbound_failure peer={peer} error={error}");\n',
-              'request outbound failure',
-          )
-          node = replace_once(
-              node,
-              '                    request_response::Event::InboundFailure { peer, error, .. } => {\n',
-              '                    request_response::Event::InboundFailure { peer, error, .. } => {\n                        eprintln!("A5_NET request_inbound_failure peer={peer} error={error}");\n',
-              'request inbound failure',
-          )
-          node_path.write_text(node)
+          path = Path('crates/swarm-cli/tests/automatic_invite_join.rs')
+          text = path.read_text()
+          old = '    let _daemon_a = spawn_daemon(&a, Ipv4Addr::UNSPECIFIED);'
+          new = '    let _daemon_a = spawn_daemon(&a, local_ip);'
+          if old not in text:
+              raise SystemExit('authority wildcard-listen anchor not found')
+          path.write_text(text.replace(old, new, 1))
           PY
-      - name: Prove automatic invite join with state-machine trace
+      - name: Prove automatic invite join with interface-bound authority
         env:
           RUST_BACKTRACE: '1'
         run: cargo test -p swarm-cli --test automatic_invite_join --locked -- --nocapture
