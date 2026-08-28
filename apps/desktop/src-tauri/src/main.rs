@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod canonical_commands;
+mod canonical_world_commands;
 mod catalog_commands;
 mod curseforge;
 mod modrinth_commands;
@@ -9,6 +10,7 @@ mod runtime_commands;
 mod transfer_commands;
 
 use canonical_commands::canonicalize_modpack;
+use canonical_world_commands::create_canonical_world;
 use catalog_commands::{fabric_loader_versions, minecraft_versions};
 use curseforge::{
     curseforge_download, curseforge_project, curseforge_provider_status, curseforge_resolve, curseforge_search,
@@ -500,6 +502,7 @@ fn main() {
             runtime_launch,
             connectivity_diagnostics,
             canonicalize_modpack,
+            create_canonical_world,
             modrinth_search,
             modrinth_project,
             modrinth_versions,
