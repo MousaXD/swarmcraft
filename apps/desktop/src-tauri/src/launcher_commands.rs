@@ -1,5 +1,8 @@
 use serde_json::{json, Value};
-use std::{env, fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    env, fs,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use swarm_core::DataPaths;
 use swarm_provider::{ModResolveRequest, ModVersionFilter, PackageEnvironment, ResolvedModGraph};
 use tauri::AppHandle;
@@ -74,8 +77,16 @@ pub(crate) async fn curseforge_resolve_project(
             let left_date = left.get("file_date").and_then(Value::as_str).unwrap_or_default();
             let right_date = right.get("file_date").and_then(Value::as_str).unwrap_or_default();
             left_date.cmp(right_date).then_with(|| {
-                let left_id = left.get("file_id").and_then(Value::as_str).and_then(|value| value.parse::<u64>().ok()).unwrap_or_default();
-                let right_id = right.get("file_id").and_then(Value::as_str).and_then(|value| value.parse::<u64>().ok()).unwrap_or_default();
+                let left_id = left
+                    .get("file_id")
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or_default();
+                let right_id = right
+                    .get("file_id")
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or_default();
                 left_id.cmp(&right_id)
             })
         });
@@ -176,7 +187,7 @@ mod tests {
 
     #[test]
     fn staging_path_is_not_player_supplied() {
-        let path = PathBuf::from("provider-staging").join("desktop-test");
+        let path = std::path::PathBuf::from("provider-staging").join("desktop-test");
         assert!(path.ends_with("desktop-test"));
     }
 }
