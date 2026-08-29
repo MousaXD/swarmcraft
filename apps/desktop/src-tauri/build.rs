@@ -18,7 +18,7 @@ fn write_icon(path: &Path, size: u32, format: ImageFormat) {
     if path.exists() {
         return;
     }
-    let pixels = vec![45u8, 45, 45, 255].repeat((size * size) as usize);
+    let pixels = [45u8, 45, 45, 255].repeat((size * size) as usize);
     image::save_buffer_with_format(path, &pixels, size, size, ExtendedColorType::Rgba8, format)
         .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
 }
