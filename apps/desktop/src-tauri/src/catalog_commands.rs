@@ -44,6 +44,7 @@ pub async fn fabric_loader_versions(
     })?
 }
 
+#[tauri::command(rename_all = "camelCase")]
 pub async fn validate_fabric_selection(
     minecraft_version: String,
     fabric_loader_version: String,
