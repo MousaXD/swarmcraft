@@ -477,6 +477,7 @@ fn main() {
             list_worlds,
             minecraft_versions,
             fabric_loader_versions,
+            validate_fabric_selection,
             create_world,
             import_world,
             join_world,
