@@ -14,7 +14,7 @@ LATEST INTEGRATION BASE CONSUMED: `f6ff3d4659fd69cef63e03d3cbf573c0490d6826`
 
 BASE RECONCILIATION MERGE: `eee08d8e545bb963e9091572a69a2966a84da82a`
 
-IMPLEMENTATION SOURCE HEAD BEFORE THIS LEDGER-ONLY COMMIT: `6ca930e8177d9104246b40f506b5abef485c7386`
+IMPLEMENTATION SOURCE HEAD: `6ca930e8177d9104246b40f506b5abef485c7386`
 
 INTEGRATED SHA: pending
 
@@ -141,16 +141,16 @@ Do not hide product test failures by weakening required gates.
 Main Desktop Installers run `33582275682` provides an executable negative release-DAG proof:
 
 - nested `Required validation gate` concluded `failure`;
-- Linux `.deb`, Windows `.exe`, Fabric JAR, and macOS package jobs did not succeed and were cancelled;
+- Linux `.deb`, Windows `.exe`, Fabric JAR, and macOS package jobs were cancelled;
 - `Publish rolling main release` was cancelled and did not publish.
 
 This satisfies the required negative assertion that a failed same-SHA gate cannot fall through into rolling publication.
 
-While Required Validation is unresolved, the release-producing workflow remains pending behind its `validation` reusable job and no publisher can start. Current source-head Main Desktop Installers run `33583109503` has no downstream build/publish jobs scheduled while its validation dependency is unresolved.
+While Required Validation is unresolved, the release-producing workflow remains held behind its `validation` reusable job and no publisher can start. Main Desktop Installers runs observed during this campaign remained pending with no downstream publisher while validation was unresolved.
 
 ### Broad green evidence on the latest substantially equivalent executed graph
 
-Required Validation run `33582275450` on earlier implementation head `bcecd2eac7ae796736fb4edaf490f46586794d5c` has completed or reached green for the following substantive gates:
+Required Validation run `33582275450` on earlier implementation head `bcecd2eac7ae796736fb4edaf490f46586794d5c` reached green for the following substantive gates before its known superseded regression-harness failure:
 
 - specialist catalog/Modrinth/CurseForge validation;
 - live clean-machine player journey against official services;
@@ -166,18 +166,20 @@ Required Validation run `33582275450` on earlier implementation head `bcecd2eac7
 
 The only substantive red on that superseded run is the old stale-lock regression methodology. Its failure exposed that `--no-deps` was an inadequate lock-currentness assertion; Agent 8 then strengthened the active checks and regression to full dependency resolution.
 
-### Current exact implementation source head
+### Exact implementation source and supersession behavior
 
 Implementation source head: `6ca930e8177d9104246b40f506b5abef485c7386`.
 
 PR validation vehicle: draft PR #61, `fix/agent-8-ci-release` -> `integration/audit-remediation-v1`.
 
-Current source-head runs:
+Source-head Required Validation run `33583109333` was accepted by GitHub with the complete expected graph. When the first BLOCKED ledger-only closeout commit was pushed, the newly added concurrency policy correctly superseded that older attempt, cancelling its already-started/pending work. It therefore did not produce complete exact-source-head evidence.
 
-- Required Validation: `33583109333`
-- Main Desktop Installers: `33583109503`
+The documentation-only closeout head then created:
 
-At this ledger closeout those runs are queued/pending behind older GitHub-hosted runner work. The current Required Validation graph has been accepted by GitHub and contains all expected jobs, but exact-head completion evidence is therefore still pending. The new concurrency policy prevents future Agent 8 commits from creating the same unbounded superseded-run queue within each validation class.
+- Required Validation run `33583354093`
+- Main Desktop Installers run `33583354291`
+
+Those runs were pending/queued when this correction was recorded. They validate the same implementation source tree plus ledger documentation, but no exact-head completion claim is made.
 
 ## Tests / evidence ledger
 
@@ -191,13 +193,13 @@ At this ledger closeout those runs are queued/pending behind older GitHub-hosted
 | RustSec root + Desktop | PASS | run `33582275450` | Both lock graphs audited. |
 | Windows package portability | PASS | run `33582275450` | Windows package passed after shell fix. |
 | Rust matrix | PASS | run `33582275450` | Ubuntu, Windows, macOS green. |
-| Fabric + live player journey | PASS | run `33582275450` | Current pinned Fabric tooling and live journey green on that source generation. |
+| Fabric + live player journey | PASS | run `33582275450` | Pinned Fabric tooling and live journey green on that source generation. |
 | Failing required validation blocks rolling publication | PASS | Main Installers run `33582275682` | Required gate failed; all package/publish jobs cancelled. |
-| Still-running/unresolved validation blocks publisher | PASS | Main Installers run `33583109503` | Workflow is held at validation dependency; no downstream publisher job has begun. |
+| Unresolved validation blocks publisher | PASS | observed Main Installer dependency graphs | Downstream publish remained unavailable while validation was unresolved. |
 | Stale Desktop lock negative regression, old method | FAIL AS DESIGNED DISCOVERY | governance job `100099213583` | Demonstrated `--no-deps` was insufficient; active implementation was strengthened to full resolution. |
-| Full-resolution stale-lock regression | PENDING | source run `33583109333` | Current source graph queued. |
-| Injected failing provider/Desktop tests rejected | PENDING | source run `33583109333` | Current source graph queued. |
-| Exact source-head complete validation | PENDING | `6ca930e...`, run `33583109333` | GitHub runner queue is unresolved at closeout. |
+| Full-resolution stale-lock regression | PENDING | source run `33583109333` superseded | Source attempt was cancelled by the intentional concurrency policy after a ledger-only commit. |
+| Injected failing provider/Desktop tests rejected | PENDING | source run `33583109333` superseded | Same supersession; no false PASS recorded. |
+| Exact implementation-source complete validation | PENDING | `6ca930e...` | No complete exact-source run before ledger closeout. |
 | Required status rule on `main` | BLOCKED | live ruleset `21764953` | Rule is absent; connector is read-only for rulesets/protection. |
 | Safe stale validation ref deletion | BLOCKED | `ci/discovery-fixture-trigger` | Strict ancestor proven; connector lacks ref deletion. |
 
@@ -207,11 +209,11 @@ At this ledger closeout those runs are queued/pending behind older GitHub-hosted
 - [x] intentionally failing required gate blocks rolling publication
 - [x] unresolved required validation blocks downstream publication
 - [x] mismatched tag/version negative regression
-- [ ] full-resolution stale Desktop lock negative regression on current source head
-- [ ] injected failing Desktop/provider tests on current source head
+- [ ] full-resolution stale Desktop lock negative regression on an unsuperseded exact implementation head
+- [ ] injected failing Desktop/provider tests on an unsuperseded exact implementation head
 - [x] workflow policy rejects mutable `uses:` and excess write permissions
 - [x] production release missing-credential negative/positive regressions
-- [ ] complete exact-source-head Required Validation
+- [ ] complete exact implementation-head Required Validation
 - [ ] enforce `Required validation gate` in repository branch/ruleset policy
 - [ ] delete final safe obsolete validation ref
 
@@ -225,17 +227,15 @@ FINAL-038 cannot be truthfully closed from this environment. Live ruleset `21764
 
 FINAL-046 cleanup has one safe remote ref remaining: `ci/discovery-fixture-trigger` at `fc52e288730bcdd98eabef3a0eaaf73c7ff92e1c`. It is proven a strict ancestor of `agent/discovery`. The connector exposes file deletion but no Git ref deletion operation. A repository administrator must delete that stale ref after preserving the existing historical links.
 
-### BLOCKER 3 — exact-source-head runner completion evidence
+### BLOCKER 3 — exact implementation-head completion evidence
 
-GitHub has accepted Required Validation run `33583109333` for implementation source head `6ca930e8177d9104246b40f506b5abef485c7386`, but its jobs remain queued behind superseded hosted-runner work. This environment exposes rerun operations but no run-cancellation operation, so the old run cannot be forcibly retired here. Agent 8 added concurrency cancellation to prevent future queue amplification, but current exact-head completion evidence is not yet available.
-
-The local checkout/terminal connector also rejects this chat with `CALLER_IDENTITY_REQUIRED`; all implementation and validation evidence therefore uses GitHub repository writes and Actions rather than a local workspace.
+The exact implementation-source run `33583109333` was superseded by the intentionally added concurrency policy when the first ledger-only closeout commit advanced the PR. The resulting closeout-head run `33583354093` was still pending when this ledger correction was made. This environment has no local repository execution path (`CALLER_IDENTITY_REQUIRED`) and no workflow-dispatch/cancel operation that can produce a separate frozen-source run without another ref change. Therefore the final full-resolution stale-lock regression and injected failing-test probes remain unclaimed rather than being waived.
 
 ## Required repository-admin actions to unblock
 
 1. Update repository ruleset/branch protection so `Required validation gate` is a required status for the protected integration/main path, exactly as documented in `docs/RELEASE_GATES.md`.
 2. Delete `refs/heads/ci/discovery-fixture-trigger` after confirming the already-recorded ancestry/evidence.
-3. Allow current source-head Actions run `33583109333` to complete; if its full-resolution lock or injected-test regressions fail for a real implementation reason, return Agent 8 to implementation rather than waiving the gate.
+3. Allow one unsuperseded Required Validation attempt for the final Agent 8 implementation tree to complete. If the full-resolution lock or injected-test regressions fail for a real implementation reason, return Agent 8 to implementation rather than waiving the gate.
 
 ## Handoff
 
@@ -243,7 +243,7 @@ READY FOR INTEGRATION: NO
 
 IMPLEMENTATION SOURCE HEAD: `6ca930e8177d9104246b40f506b5abef485c7386`
 
-Exact ledger head: this documentation-only closeout commit
+Exact ledger head: this documentation-only correction commit
 
 PR: #61 remains draft and must not be merged while this ledger is BLOCKED.
 
