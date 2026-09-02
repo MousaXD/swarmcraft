@@ -17,6 +17,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Refresh root lockfile minimally
+        run: cargo check -p swarm-storage
+      - name: Refresh Desktop lockfile minimally
+        run: cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --format-version 1 > /dev/null
       - name: Apply rustfmt
         run: cargo fmt --all
       - name: Capture clippy diagnostics
@@ -27,15 +31,15 @@ jobs:
           status=$?
           echo "CLIPPY_EXIT=$status" >> implementation/agent-3-clippy.txt
           exit 0
-      - name: Commit formatter and diagnostics
+      - name: Commit lockfiles, formatter, and diagnostics
         shell: bash
         run: |
           if git diff --quiet; then
-            echo "formatter and diagnostics unchanged"
+            echo "lockfiles, formatter, and diagnostics unchanged"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add --all
-          git commit -m "chore(agent3): capture formatted clippy state"
+          git commit -m "chore(agent3): refresh locks and formatted validation state"
           git push origin HEAD:fix/agent-3-storage
