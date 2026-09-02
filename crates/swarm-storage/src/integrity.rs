@@ -262,11 +262,11 @@ impl Storage {
         let mut manifests = Vec::new();
         for entry in fs::read_dir(&dir).map_err(|source| StorageError::Io { path: dir.clone(), source })? {
             let entry = entry.map_err(|source| StorageError::Io { path: dir.clone(), source })?;
-            if entry.path().extension().and_then(|value| value.to_str()) != Some("postcard") {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("postcard") {
                 continue;
             }
-            let stem =
-                entry.path().file_stem().and_then(|value| value.to_str()).ok_or(StorageError::WorldMetadataMismatch)?;
+            let stem = path.file_stem().and_then(|value| value.to_str()).ok_or(StorageError::WorldMetadataMismatch)?;
             let number = stem.parse::<u64>().map_err(|_| StorageError::WorldMetadataMismatch)?;
             let manifest = self.load_snapshot_file_unchecked(world, number)?;
             if manifest.world_id != world || manifest.snapshot_number != number {

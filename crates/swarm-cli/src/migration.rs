@@ -781,6 +781,7 @@ async fn run_authority_runtime_inner(
         None,
     )?;
     ensure_authority_generation(storage, &identity, &epoch)?;
+    let expected_head = storage.canonical_snapshot_head(options.world)?.head;
     let number = storage.next_snapshot_number(options.world)?;
     let previous_hash = Some(latest.manifest_hash()?);
     let mut final_manifest = storage.snapshot_directory(
@@ -797,7 +798,14 @@ async fn run_authority_runtime_inner(
     )?;
     ensure_authority_generation(storage, &identity, &epoch)?;
     identity.sign_snapshot(&mut final_manifest)?;
-    storage.commit_snapshot(&final_manifest)?;
+    storage.commit_snapshot_fenced(
+        &final_manifest,
+        swarm_storage::SnapshotCommitFence {
+            expected_epoch: epoch.epoch_number,
+            expected_fencing_token: epoch.fencing_token,
+            expected_head,
+        },
+    )?;
 
     match disposition {
         RuntimeDisposition::Transfer(target) => {
@@ -1432,7 +1440,15 @@ fn ensure_authority_artifacts(storage: &Storage, identity: &PeerIdentity, epoch:
             signature: Vec::new(),
         };
         identity.sign_snapshot(&mut promoted)?;
-        storage.commit_snapshot(&promoted)?;
+        let promoted_expected_head = storage.canonical_snapshot_head(promoted.world_id)?.head;
+        storage.commit_snapshot_fenced(
+            &promoted,
+            swarm_storage::SnapshotCommitFence {
+                expected_epoch: epoch.epoch_number,
+                expected_fencing_token: epoch.fencing_token,
+                expected_head: promoted_expected_head,
+            },
+        )?;
     } else if latest.epoch != epoch.epoch_number
         || latest.authority_peer_id != identity.peer_id()
         || latest.authority_public_key != identity.public_key()

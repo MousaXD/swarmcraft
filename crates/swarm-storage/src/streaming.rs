@@ -7,7 +7,7 @@ use crate::{
 use std::{
     any::Any,
     collections::BTreeSet,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     ops::{Deref, DerefMut},
     path::{Component, Path, PathBuf},
@@ -645,6 +645,7 @@ fn test_after_complete_blob_published(_world: WorldId) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
     use std::{
         io::{Seek, SeekFrom},
         sync::mpsc,
