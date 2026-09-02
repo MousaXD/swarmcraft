@@ -2,7 +2,7 @@
 
 ## Status
 
-STATUS: IN PROGRESS
+STATUS: BLOCKED
 
 BRANCH: `fix/agent-4-network`
 
@@ -10,7 +10,7 @@ CAMPAIGN PRODUCTION BASE SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
 
 BRANCH SEED SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` (campaign ledger commit only; production tree matches the campaign base)
 
-CURRENT HEAD SHA: `1a5708bf70119d9da86d963cf0e9941abf76bdba` validated production milestone; this ledger commit follows it
+CURRENT HEAD SHA: `1a5708bf70119d9da86d963cf0e9941abf76bdba` validated independent Agent 4 production head; ledger-only commits follow it
 
 INTEGRATED SHA: pending
 
@@ -31,11 +31,15 @@ Read `audits/FINAL-AUDIT.md`, Auditor 4 Network/Discovery, and Auditor 7 Securit
 
 ## Dependencies
 
-Required before starting: none.
+Required before starting: none for independent network/privacy hardening.
 
-Coordinate any membership-generation authorization lookup changes with Agent 1/2 after integration.
+FINAL-028 requires the finalized canonical authority/history proof contract from Agents 1 and 2 before first-contact discovery can truthfully bind a remote announcement signer to the claimed world after legitimate authority transitions.
 
-Dependency heads consumed: none.
+Live dependency state at final Agent 4 handoff:
+
+- Agent 1 ledger on `fix/agent-1-consensus`: `STATUS: IN PROGRESS`; its Milestone 4 closure staging head is `d6d1e0e6cb17df2cf9f726a7faa1ecf400908919`, final self-cleaned production SHA pending green validation, and `INTEGRATED SHA: pending`.
+- Agent 2 ledger remains blocked on Agent 1 by campaign design, and remote branch `fix/agent-2-protocol` does not yet exist.
+- No Agent 1/2 dependency head has therefore been consumed by this Wave 1 branch.
 
 Audit sources read before production edits:
 
@@ -64,14 +68,14 @@ Do not change canonical membership election semantics.
 - [x] Build an exhaustive authorization matrix for every world-scoped `WireRequest`.
 - [x] Require current, non-banned membership for WorldDescriptor, WorldStatus, HostCapability and other canonical metadata unless a narrowly scoped pre-membership protocol explicitly applies.
 - [x] Ensure removed/banned members lose metadata access through inbound canonical request handling.
-- [ ] Anchor discovery announcements to verifiable canonical world authority/authorization, not merely self-signed announcer identity.
+- [ ] Anchor discovery announcements to verifiable canonical world authority/authorization, not merely self-signed announcer identity. BLOCKED on finalized Agent 1/2 canonical authority/history proof contract.
 - [x] Add per-peer and global connection/request admission limits, separate for unauthenticated/authenticated traffic.
 - [x] Specify/enforce friend presence privacy policy: only locally accepted friends receive requester-specific presence rendezvous and responses.
 - [x] Specify invite replay/reuse semantics and test them.
 - [x] Reclassify DNS invite targets after resolution according to scope policy.
 - [x] Add captured-proof replay test proving a different transport cannot reuse a valid application proof.
 - [x] Add stranger/removed/banned/current-member authorization matrix tests.
-- [ ] Add malicious discovery provider claiming another world ID test.
+- [ ] Add malicious discovery provider claiming another world ID test. BLOCKED until the authority-proof verifier contract exists.
 - [x] Add hostile-load/admission regression tests beyond deterministic budget/controller units.
 - [x] Harden proactive world pushes against removed/banned/key-mismatched members.
 
@@ -97,6 +101,8 @@ Do not change canonical membership election semantics.
 - Added immediate pre-dial DNS re-resolution for invite DNS/DNS4/DNS6 hints and apply the same public-scope policy to every resolved answer. DNS names cannot silently rebind an Internet-looking invite hint to loopback/private/link-local scope; explicit LAN invites remain represented by literal private-IP multiaddresses.
 - Added direct authorization-matrix tests for current member, stranger/removed member, banned member, and peer/public-key mismatch, sharing the same descriptor authorization helper used by proactive synchronization.
 - Added a live pre-auth request flood regression that exhausts the unauthenticated request budget, proves bounded rejection, waits for budget recovery, then confirms a valid client can authenticate and complete useful traffic.
+- Ran a real impaired QUIC restart/resume regression after all independent hardening, using 15ms ± 3ms delay, 0.5% packet loss, 100mbit rate shaping, forced sender restart and lost-ACK recovery. It passed.
+- Deliberately did not invent a creator-only, self-signed, or TOFU discovery authority shortcut. Such a shortcut would fail the audited invariant after legitimate authority transfer and would make FINAL-028 look closed without a valid trust chain.
 
 ## Tests run
 
@@ -123,19 +129,19 @@ Do not change canonical membership election semantics.
 | `cargo clippy -p swarm-network -p swarm-cli --all-targets --locked -- -D warnings` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | Strict affected-crate lint gate after transport hardening. |
 | `cargo test -p swarm-network --locked` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | Full network suite remains green with transport limits and challenge expiry. |
 | `cargo test -p swarm-cli --bin swarmcraft --locked` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | CLI/network-facing authorization units remain green. |
-| impaired `interrupted_quic_transfer_resumes_after_lost_ack` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | 64 MiB forced-restart/lost-ACK transfer under 15ms±3ms delay, 0.5% loss and 100mbit loopback shaping. |
+| impaired `interrupted_quic_transfer_resumes_after_lost_ack` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | 64 MiB forced-restart/lost-ACK transfer under 15ms±3ms delay, 0.5% loss and 100mbit loopback shaping. Actions run `33614422441`. |
 
 ## Required validation before handoff
 
 - [x] format for authorization milestone
 - [x] format for handshake milestone
 - [x] format/check/tests for privacy/admission milestone
-- [x] clippy/lint for affected crates through invite/DNS milestone
+- [x] clippy/lint for affected crates through final independent Agent 4 head
 - [x] network unit/integration tests for authorization milestone
 - [x] captured hello/proof replay rejection
 - [x] world request authorization matrix regression test
 - [x] private-world confidentiality authorization path regression
-- [ ] discovery unauthorized-signer regression
+- [ ] discovery unauthorized-signer regression — BLOCKED on canonical authority proof contract
 - [x] hostile-load admission test
 - [x] ordinary hard reconnect test remains green after admission/privacy changes
 - [x] explicitly run impaired reconnect/transfer regression with delay/loss/rate shaping; scheduled multi-GiB soak remains a post-integration acceptance gate
@@ -143,21 +149,40 @@ Do not change canonical membership election semantics.
 
 ## Blockers
 
-- Local workspace terminal connector is unavailable because it cannot establish this chat's extension identity. GitHub repository read/write access is available; executable validation is being performed with branch-scoped, self-cleaning GitHub Actions runners.
-- First-contact discovery authority proof requires a cryptographically verifiable canonical membership/authority chain. Agent 1 has introduced joint membership certificate primitives and daemon activation work on `fix/agent-1-consensus`, but Agent 1 remains `IN PROGRESS`; Agent 2 is explicitly blocked on Agent 1 and has not established the final current-authority/history validator. Agent 4 will not replace that missing chain with creator-only or TOFU discovery semantics that would fail after legitimate authority transfer.
+FINAL-028 is blocked on upstream canonical authority/history semantics, not on Agent 4 tooling or unfinished independent network work.
+
+At this handoff:
+
+- Agent 1 is still `STATUS: IN PROGRESS` and not integrated. Its ledger records Milestone 4 closure staging head `d6d1e0e6cb17df2cf9f726a7faa1ecf400908919`, with final production validation and integration still pending.
+- Agent 2 is defined by the campaign as blocked on Agent 1 and must branch from the integration head after Agent 1 integration. Remote branch `fix/agent-2-protocol` is currently absent.
+- Therefore there is no finalized current-authority/history proof contract Agent 4 can consume to make a first-contact client verify that an arbitrary discovery announcement signer is authorized for the claimed world across membership and authority transitions.
+
+The correct continuation after those dependencies land is to extend the discovery announcement/proof format using the finalized canonical contract, reject a valid self-signed announcement from an unauthorized identity for another world, and add the malicious-provider browse/exact-resolve regression required by N4-003/FINAL-028.
 
 ## Remaining work
 
-All independent Agent 4 network/privacy hardening is implemented and domain-validated. Remaining work is FINAL-028 only: consume the finalized Agent 1/2 canonical authority-proof contract for first-contact discovery, or declare the ledger dependency-blocked with exact upstream status evidence. Scheduled multi-GiB soak remains a post-integration acceptance gate rather than an unimplemented production fix.
+Only dependency-bound FINAL-028 remains in Agent 4 scope:
+
+1. consume the integrated Agent 1 membership/authority proof semantics and Agent 2 current-authority/history validator;
+2. attach or reference a compact verifiable canonical authority proof in discovery announcements;
+3. verify the proof before public browse or exact resolve accepts player-visible world metadata;
+4. add the malicious provider test where B self-signs an otherwise valid announcement for A's world and both browse and exact resolution reject it;
+5. rerun the Agent 4 domain gate on the integration-derived branch/head.
+
+Scheduled multi-GiB network soak remains a post-integration acceptance gate, not an unimplemented independent Agent 4 production fix.
 
 ## Handoff
 
 READY FOR INTEGRATION: NO
 
-Exact final head: pending
+Exact validated independent production head: `1a5708bf70119d9da86d963cf0e9941abf76bdba`
 
-Known conflict areas: network event authentication, daemon request handling, discovery records and authority-proof integration.
+Blocker: FINAL-028 requires finalized and integrated Agent 1 + Agent 2 canonical authority/history proof semantics.
+
+Known conflict areas after dependency integration: discovery announcement/proof records, discovery acceptance paths, and any shared canonical authority validator used by `daemon.rs`/protocol core.
+
+Post-dependency validation required: unauthorized-world discovery signer regression, public browse/exact-resolve authority-proof matrix, then full Agent 4 network/privacy gate.
 
 ## Agent final statement
 
-NOT COMPLETE
+BLOCKED
