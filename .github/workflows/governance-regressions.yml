@@ -30,7 +30,7 @@ jobs:
           set -euo pipefail
           manifest=apps/desktop/src-tauri/Cargo.toml
           backup="$RUNNER_TEMP/desktop-Cargo.toml"
-          probe=.agent8-lock-probe
+          probe=apps/desktop/src-tauri/.agent8-lock-probe
           cp "$manifest" "$backup"
           cleanup() {
             cp "$backup" "$manifest"
@@ -49,7 +49,7 @@ jobs:
           pub fn lock_probe() {}
           RS
           cat >> "$manifest" <<'TOML'
-          agent8-lock-probe = { path = "../../../.agent8-lock-probe" }
+          agent8-lock-probe = { path = ".agent8-lock-probe" }
           TOML
           if cargo metadata --manifest-path "$manifest" --locked --format-version 1 --no-deps >/dev/null 2>&1; then
             echo 'stale Desktop dependency graph unexpectedly passed --locked metadata' >&2
