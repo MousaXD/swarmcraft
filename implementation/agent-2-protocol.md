@@ -2,13 +2,13 @@
 
 ## Status
 
-STATUS: BLOCKED ON AGENT 1
+STATUS: IN PROGRESS
 
 BRANCH: `fix/agent-2-protocol`
 
-STARTING SHA: must be newest `integration/audit-remediation-v1` head after Agent 1 integration
+STARTING SHA: `c69cb0a75c82688a91692bcd2ca47efa6827b958`
 
-CURRENT HEAD SHA: pending
+CURRENT HEAD SHA: `c69cb0a75c82688a91692bcd2ca47efa6827b958` (verified remote head before first Agent 2 ledger commit)
 
 INTEGRATED SHA: pending
 
@@ -23,14 +23,26 @@ Make canonical signed records semantically safe, not merely cryptographically va
 - FINAL-025 — protocol-version/canonical semantic validation gaps
 - FINAL-026 — canonical representation/history validation gaps
 
-Read `audits/FINAL-AUDIT.md`, Auditor 1 Protocol/Core, and Agent 1 ledger before editing.
+## Audit inputs read
+
+- `implementation/README.md`
+- this ledger
+- `implementation/agent-1-consensus.md`
+- `audits/FINAL-AUDIT.md` from `audit/final-integration-report`
+- `audits/01-protocol-core.md` from `audit/protocol-core`
+
+Auditor 1 maps the owned findings to APC-001 through APC-006: stale-authority membership, non-authority WorldConfig, non-direct/conflicting snapshot history, unsupported protocol versions, provider-hint fingerprint ambiguity, and noncanonical set-like signed collections.
 
 ## Dependencies
 
-Required before starting:
+Dependency gate satisfied:
 
-- Agent 1 status: READY FOR INTEGRATION and integrated
-- Start from the exact integration head containing Agent 1
+- Agent 1 validated production SHA: `67493374544d91ad7bbb36be17e9312adb5654f6`
+- Agent 1 exact-head validation: run `33619420045` — SUCCESS
+- Agent 1 integration merge: `a0e0dec659d0b1eb21f9be34c44730edc6ff3984`
+- Agent 2 branch/start integration SHA: `c69cb0a75c82688a91692bcd2ca47efa6827b958`
+
+Agent 1 quorum, committed-membership, fencing, recovery value-locking, and counter-exhaustion semantics are integration invariants and must not be redesigned here.
 
 ## Ownership boundaries
 
@@ -41,7 +53,7 @@ Primary ownership:
 - semantic acceptance paths in `crates/swarm-cli/src/daemon.rs`
 - history-aware protocol tests
 
-Coordinate with Agent 3 when storage APIs enforce the same history invariants.
+Coordinate with Agent 3 when storage APIs enforce the same history invariants. Agent 2 may enforce snapshot direct-parent/exact-sequence semantics at the protocol/daemon acceptance boundary, but does not claim Agent 3-owned atomic final-commit/head-CAS or immutable-slot work as complete.
 
 Do not change quorum membership design established by Agent 1 without documenting and coordinating it.
 
@@ -66,34 +78,38 @@ Do not change quorum membership design established by Agent 1 without documentin
 
 ## Work completed
 
-None yet.
+### Start-state reconciliation
+
+- Verified remote `fix/agent-2-protocol` head was still exactly `c69cb0a75c82688a91692bcd2ca47efa6827b958`; no newer legitimate Agent 2 commits existed to preserve.
+- Confirmed the branch starts from the post-Agent-1 integration state requested by the campaign coordinator.
+- Read the authoritative Agent 1 handoff and the Protocol/Core audit evidence for APC-001 through APC-006.
 
 ## Tests run
 
 | Test | Result | Commit/SHA | Notes |
 |---|---|---|---|
-| None yet | - | - | - |
+| Remote branch ancestry/state verification | PASS | `c69cb0a75c82688a91692bcd2ca47efa6827b958` | Exact branch head matched required start; no newer work present. |
 
 ## Required validation before handoff
 
 - [ ] format
-- [ ] clippy/lint
+- [ ] clippy/lint with warnings denied where applicable
 - [ ] protocol/core unit tests
 - [ ] daemon semantic acceptance integration tests
 - [ ] stale membership authority regression
 - [ ] WorldConfig authorization regression
 - [ ] protocol-version negative matrix
 - [ ] snapshot history conflict matrix
-- [ ] canonicalization determinism tests
+- [ ] canonicalization determinism/permutation/duplicate tests
 - [ ] exact-head CI/dedicated validation
 
 ## Blockers
 
-Agent 1 must first define/integrate canonical membership generation semantics.
+None at start. Agent 1 dependency gate is open.
 
 ## Remaining work
 
-All implementation checklist items.
+All production implementation checklist items and exact-head validation remain.
 
 ## Handoff
 
@@ -103,8 +119,8 @@ Exact final head: pending
 
 Required integration order: after Agent 1.
 
-Known conflict areas: `daemon.rs`, protocol record definitions/validators, snapshot acceptance boundary.
+Known conflict areas: `daemon.rs`, protocol record definitions/validators, snapshot acceptance boundary. Preserve Agent 1 consensus safety semantics and defer Agent 3-owned storage atomicity claims.
 
 ## Agent final statement
 
-BLOCKED
+NOT COMPLETE
