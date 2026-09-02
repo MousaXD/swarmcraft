@@ -489,7 +489,11 @@ fn sync_directory(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{migration, runtime_installer::RuntimeInstaller};
-    use std::str::FromStr;
+    use std::{process::Command, str::FromStr, thread, time::Duration};
+
+    const LOCK_HELPER_PATH_ENV: &str = "SWARMCRAFT_TEST_IMPORT_LOCK_PATH";
+    const LOCK_HELPER_READY_ENV: &str = "SWARMCRAFT_TEST_IMPORT_LOCK_READY";
+    const LOCK_HELPER_RELEASE_ENV: &str = "SWARMCRAFT_TEST_IMPORT_LOCK_RELEASE";
 
     fn source_world(root: &Path) -> PathBuf {
         let source = root.join("source-world");
@@ -586,17 +590,53 @@ mod tests {
     }
 
     #[test]
+    fn minecraft_session_lock_helper_process() {
+        let Ok(lock_path) = std::env::var(LOCK_HELPER_PATH_ENV) else {
+            return;
+        };
+        let ready = PathBuf::from(std::env::var(LOCK_HELPER_READY_ENV).unwrap());
+        let release = PathBuf::from(std::env::var(LOCK_HELPER_RELEASE_ENV).unwrap());
+        let file = OpenOptions::new().read(true).write(true).open(lock_path).unwrap();
+        try_minecraft_session_lock(&file).unwrap();
+        fs::write(&ready, b"locked\n").unwrap();
+        while !release.exists() {
+            thread::sleep(Duration::from_millis(10));
+        }
+        release_minecraft_session_lock(&file);
+    }
+
+    #[test]
     fn import_refuses_source_while_minecraft_session_lock_is_held() {
         let temp = tempfile::tempdir().unwrap();
         let paths = DataPaths::from_root(temp.path().join("data"));
         let source = source_world(temp.path());
-        let lock_file = OpenOptions::new().read(true).write(true).open(source.join("session.lock")).unwrap();
-        try_minecraft_session_lock(&lock_file).unwrap();
+        let ready = temp.path().join("lock-ready");
+        let release = temp.path().join("lock-release");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("minecraft_session_lock_helper_process")
+            .arg("--nocapture")
+            .env(LOCK_HELPER_PATH_ENV, source.join("session.lock"))
+            .env(LOCK_HELPER_READY_ENV, &ready)
+            .env(LOCK_HELPER_RELEASE_ENV, &release)
+            .spawn()
+            .unwrap();
+
+        for _ in 0..500 {
+            if ready.exists() {
+                break;
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("session-lock helper exited before acquiring the lock: {status}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "session-lock helper never acquired the lock");
 
         let error = import_world(&paths, &request(source.clone())).unwrap_err();
         assert!(error.to_string().contains("currently open") || error.to_string().contains("session lock"));
-        release_minecraft_session_lock(&lock_file);
 
+        fs::write(&release, b"release\n").unwrap();
+        assert!(child.wait().unwrap().success());
         assert!(import_world(&paths, &request(source)).is_ok());
     }
 
