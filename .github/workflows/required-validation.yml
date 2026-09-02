@@ -40,6 +40,12 @@ jobs:
       contents: read
       checks: write
 
+  specialist:
+    name: Specialist validation
+    uses: ./.github/workflows/specialist-validation.yml
+    permissions:
+      contents: read
+
   version:
     name: Release identity
     uses: ./.github/workflows/version-guard.yml
@@ -64,28 +70,29 @@ jobs:
   gate:
     name: Required validation gate
     if: ${{ always() }}
-    needs: [core, version, player-journey, network-soak]
+    needs: [core, specialist, version, player-journey, network-soak]
     runs-on: ubuntu-latest
     permissions:
       contents: read
     env:
       CORE_RESULT: ${{ needs.core.result }}
+      SPECIALIST_RESULT: ${{ needs.specialist.result }}
       VERSION_RESULT: ${{ needs.version.result }}
       PLAYER_RESULT: ${{ needs.player-journey.result }}
       SOAK_RESULT: ${{ needs.network-soak.result }}
       REQUIRE_SOAK: ${{ inputs.run_network_soak }}
     steps:
-      - name: Require every selected exact-SHA validation component
+      - name: Require selected exact-SHA validation components
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$CORE_RESULT" == success ]] || { echo "Core CI: $CORE_RESULT" >&2; exit 1; }
-          [[ "$VERSION_RESULT" == success ]] || { echo "Release identity: $VERSION_RESULT" >&2; exit 1; }
-          [[ "$PLAYER_RESULT" == success ]] || { echo "Live player journey: $PLAYER_RESULT" >&2; exit 1; }
+          test "$CORE_RESULT" = success
+          test "$SPECIALIST_RESULT" = success
+          test "$VERSION_RESULT" = success
+          test "$PLAYER_RESULT" = success
           if [[ "$REQUIRE_SOAK" == true ]]; then
-            [[ "$SOAK_RESULT" == success ]] || { echo "Network soak: $SOAK_RESULT" >&2; exit 1; }
-          elif [[ "$SOAK_RESULT" != skipped && "$SOAK_RESULT" != success ]]; then
-            echo "Unexpected network soak result: $SOAK_RESULT" >&2
-            exit 1
+            test "$SOAK_RESULT" = success
+          else
+            [[ "$SOAK_RESULT" == skipped || "$SOAK_RESULT" == success ]]
           fi
           echo "Required validation accepted exact SHA $GITHUB_SHA"
