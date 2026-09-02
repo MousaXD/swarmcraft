@@ -1,0 +1,47 @@
+name: Agent 1 membership primitives worker
+
+on:
+  push:
+    branches:
+      - fix/agent-1-consensus
+    paths:
+      - implementation/agent1-milestone2.py
+      - .github/workflows/agent1-milestone-worker.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-validate-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact branch head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/agent-1-consensus
+          fetch-depth: 0
+
+      - name: Apply joint-membership primitives
+        run: python3 implementation/agent1-milestone2.py
+
+      - name: Format Rust workspace
+        run: cargo fmt --all
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+
+      - name: Test consensus protocol and storage
+        run: cargo test -p swarm-protocol -p swarm-consensus -p swarm-storage
+
+      - name: Commit validated milestone
+        env:
+          BRANCH: fix/agent-1-consensus
+        run: |
+          rm implementation/agent1-milestone2.py
+          rm .github/workflows/agent1-milestone-worker.yml
+          git add -A
+          git config user.name "swarmcraft-agent-1"
+          git config user.email "actions@users.noreply.github.com"
+          git commit -m "feat(consensus): add joint membership commit primitives"
+          git push origin "HEAD:${BRANCH}"
