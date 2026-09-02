@@ -120,9 +120,9 @@ fn member(identity: &PeerIdentity) -> WorldMemberV1 {
 
 fn install_canonical_replica(peer: &PeerFixture, seed: &CanonicalReplicaSeed<'_>) {
     peer.storage.create_world(seed.metadata).unwrap();
-    peer.storage.save_world_config(seed.config).unwrap();
     peer.storage.save_world_descriptor(seed.descriptor).unwrap();
     peer.storage.save_membership_record(seed.membership).unwrap();
+    peer.storage.save_world_config(seed.config).unwrap();
     peer.storage.save_epoch_record(seed.epoch).unwrap();
     let mut promoted_membership = seed.membership.clone();
     promoted_membership.epoch = seed.epoch.epoch_number;
