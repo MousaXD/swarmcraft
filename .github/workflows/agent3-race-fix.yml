@@ -1,0 +1,126 @@
+name: Agent 3 publication race fix
+
+on:
+  push:
+    branches: [fix/agent-3-storage]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/agent-3-storage
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Patch exact-publication idempotency race and portable test imports
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/swarm-storage/src/streaming.rs')
+          text = path.read_text()
+
+          old = '''        // Exact historical duplicates are idempotent, but a numbered slot is
+        // immutable forever once present. Validate the canonical namespace first
+        // so an interrupted orphan above the head can never be blessed as a duplicate.
+        if path.exists() {
+            self.validate_canonical_snapshot_namespace(manifest.world_id)?;
+            let existing = self.load_snapshot_file_unchecked(manifest.world_id, manifest.snapshot_number)?;
+            let existing_hash = existing.manifest_hash()?;
+            if existing_hash != attempted_hash {
+                return Err(StorageError::SnapshotManifestConflict {
+                    world: manifest.world_id,
+                    snapshot_number: manifest.snapshot_number,
+                    existing: existing_hash,
+                    attempted: attempted_hash,
+                });
+            }
+            if let Some(publication) = publication {
+                let _gc_guard = self.lock_blob_gc_for_snapshot_commit(manifest.world_id)?;
+                self.release_snapshot_publication_pins(manifest.world_id, publication.publication_id())?;
+            }
+            return Ok(());
+        }
+
+        let bytes = postcard::to_allocvec(manifest)?;
+        // Lock order is GC then world transaction. GC currently reads canonical
+        // snapshot state while holding its lock, so taking the world lock first
+        // would create a lock-order inversion.
+        let _gc_guard = self.lock_blob_gc_for_snapshot_commit(manifest.world_id)?;
+        let transaction = self.begin_snapshot_commit_transaction(manifest, fence)?;
+'''
+          new = '''        // Lock order is GC then world transaction. GC currently reads canonical
+        // snapshot state while holding its lock, so taking the world lock first
+        // would create a lock-order inversion. The existing-slot check is also
+        // serialized under this lock: two publishers may both observe the slot
+        // absent before commit, but after the first publishes the exact manifest
+        // the second must become an idempotent success rather than a history conflict.
+        let _gc_guard = self.lock_blob_gc_for_snapshot_commit(manifest.world_id)?;
+
+        // Exact historical duplicates are idempotent, but a numbered slot is
+        // immutable forever once present. Validate the canonical namespace first
+        // so an interrupted orphan above the head can never be blessed as a duplicate.
+        if path.exists() {
+            self.validate_canonical_snapshot_namespace(manifest.world_id)?;
+            let existing = self.load_snapshot_file_unchecked(manifest.world_id, manifest.snapshot_number)?;
+            let existing_hash = existing.manifest_hash()?;
+            if existing_hash != attempted_hash {
+                return Err(StorageError::SnapshotManifestConflict {
+                    world: manifest.world_id,
+                    snapshot_number: manifest.snapshot_number,
+                    existing: existing_hash,
+                    attempted: attempted_hash,
+                });
+            }
+            if let Some(publication) = publication {
+                self.release_snapshot_publication_pins(manifest.world_id, publication.publication_id())?;
+            }
+            return Ok(());
+        }
+
+        let bytes = postcard::to_allocvec(manifest)?;
+        let transaction = self.begin_snapshot_commit_transaction(manifest, fence)?;
+'''
+          if old not in text:
+              raise SystemExit('commit race target not found')
+          text = text.replace(old, new, 1)
+
+          old_import = '''    use std::{
+        io::{Seek, SeekFrom},
+        sync::mpsc,
+        thread,
+    };
+'''
+          new_import = '''    use std::{sync::mpsc, thread};
+'''
+          if old_import not in text:
+              raise SystemExit('test import target not found')
+          text = text.replace(old_import, new_import, 1)
+          path.write_text(text)
+          PY
+      - name: Format
+        run: cargo fmt --all
+      - name: Storage clippy
+        run: cargo clippy -p swarm-storage --all-targets --all-features --locked -- -D warnings
+      - name: Publication ownership race
+        run: cargo test -p swarm-storage --test publication_ownership_race --locked -- --nocapture
+      - name: Storage integrity regressions
+        run: cargo test -p swarm-storage --test storage_integrity --locked -- --nocapture
+      - name: Commit validated patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/swarm-storage/src/streaming.rs
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit'
+            exit 0
+          fi
+          git commit -m "fix(storage): serialize exact publication idempotency"
+          git push origin HEAD:fix/agent-3-storage
