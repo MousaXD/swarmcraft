@@ -11,6 +11,11 @@ pub mod state;
 pub mod streaming;
 pub mod world;
 
+mod integrity;
+mod portable;
+mod transaction;
+
+pub use integrity::{CanonicalSnapshotHeadV1, CanonicalSnapshotRefV1, SnapshotCommitFence};
 pub use retention::{
     ActiveReplicationLease, RetentionError, RetentionPolicy, RetentionReport, SnapshotPublicationLease,
 };
