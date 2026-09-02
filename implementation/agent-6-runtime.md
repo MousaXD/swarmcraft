@@ -2,13 +2,13 @@
 
 ## Status
 
-STATUS: NOT STARTED
+STATUS: IN PROGRESS
 
 BRANCH: `fix/agent-6-runtime`
 
 STARTING SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
 
-CURRENT HEAD SHA: pending
+CURRENT HEAD SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` (branch creation point; implementation-plan-only child of required campaign base)
 
 INTEGRATED SHA: pending
 
@@ -65,13 +65,16 @@ Do not weaken authority quorum semantics to keep Java running.
 
 ## Work completed
 
-None yet.
+- Campaign contract read from `implementation/README.md` and this ledger.
+- Audit evidence read from `audits/FINAL-AUDIT.md` on `audit/final-integration-report` and `audits/05-runtime-minecraft.md` on `audit/runtime-minecraft`.
+- Verified no Agent 6 implementation branch existed remotely before start.
+- Created `fix/agent-6-runtime` from `a9736b159d9e9618a3ed8515c20e93f92c1453cb`; that commit contains only implementation ledgers and has required production baseline `b4bab08562cf0eb53763674407375b023e1d0858` as its parent.
 
 ## Tests run
 
 | Test | Result | Commit/SHA | Notes |
 |---|---|---|---|
-| None yet | - | - | - |
+| Pre-implementation audit review | PASS | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | Scope and failure mechanisms confirmed from final and domain audits. |
 
 ## Required validation before handoff
 
@@ -87,7 +90,7 @@ None yet.
 
 ## Blockers
 
-None at campaign start.
+- Local terminal bridge is currently unavailable to this chat because the desktop connector cannot establish worker identity. GitHub repository read/write remains available. This does not yet block source implementation, but local build/process validation may require CI unless the terminal bridge recovers.
 
 ## Handoff
 
