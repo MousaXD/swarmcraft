@@ -46,7 +46,7 @@ jobs:
     permissions:
       contents: read
 
-  governance-regressions:
+  governance_regressions:
     name: CI governance regressions
     uses: ./.github/workflows/governance-regressions.yml
     permissions:
@@ -60,13 +60,13 @@ jobs:
     permissions:
       contents: read
 
-  player-journey:
+  player_journey:
     name: Live player journey
     uses: ./.github/workflows/player-journey-live.yml
     permissions:
       contents: read
 
-  network-soak:
+  network_soak:
     name: Network soak
     if: ${{ inputs.run_network_soak == true }}
     uses: ./.github/workflows/network-soak.yml
@@ -76,17 +76,17 @@ jobs:
   gate:
     name: Required validation gate
     if: ${{ always() }}
-    needs: [core, specialist, governance-regressions, version, player-journey, network-soak]
+    needs: [core, specialist, governance_regressions, version, player_journey, network_soak]
     runs-on: ubuntu-latest
     permissions:
       contents: read
     env:
       CORE_RESULT: ${{ needs.core.result }}
       SPECIALIST_RESULT: ${{ needs.specialist.result }}
-      GOVERNANCE_RESULT: ${{ needs.governance-regressions.result }}
+      GOVERNANCE_RESULT: ${{ needs.governance_regressions.result }}
       VERSION_RESULT: ${{ needs.version.result }}
-      PLAYER_RESULT: ${{ needs.player-journey.result }}
-      SOAK_RESULT: ${{ needs.network-soak.result }}
+      PLAYER_RESULT: ${{ needs.player_journey.result }}
+      SOAK_RESULT: ${{ needs.network_soak.result }}
       REQUIRE_SOAK: ${{ inputs.run_network_soak }}
     steps:
       - name: Require selected exact-SHA validation components
