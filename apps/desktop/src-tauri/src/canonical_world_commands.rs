@@ -33,7 +33,7 @@ pub fn create_canonical_world(
     if name.is_empty() {
         return Err(failure("invalid_world_name", "World name is required"));
     }
-    if request.modpack.loader_id.trim().to_ascii_lowercase() != "fabric" {
+    if !request.modpack.loader_id.trim().eq_ignore_ascii_case("fabric") {
         return Err(failure("unsupported_loader", "SwarmCraft v1 currently supports the Fabric loader contract"));
     }
 
