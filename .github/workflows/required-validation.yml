@@ -32,6 +32,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: required-validation-${{ github.event.pull_request.number || github.ref }}-${{ inputs.run_network_soak }}-${{ inputs.release_tag || 'none' }}
+  cancel-in-progress: true
+
 jobs:
   core:
     name: Core CI
