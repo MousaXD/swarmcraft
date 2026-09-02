@@ -1,0 +1,45 @@
+name: Agent 1 regression gate
+
+on:
+  push:
+    branches:
+      - fix/agent-1-consensus
+    paths:
+      - .github/workflows/agent1-regression-gate.yml
+      - crates/swarm-consensus/**
+      - crates/swarm-protocol/**
+      - crates/swarm-storage/**
+      - crates/swarm-network/**
+      - crates/swarm-cli/**
+
+permissions:
+  contents: read
+
+jobs:
+  regression-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact branch head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/agent-1-consensus
+          fetch-depth: 0
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy affected Rust crates
+        run: cargo clippy -p swarm-protocol -p swarm-consensus -p swarm-storage -p swarm-network -p swarm-cli --all-targets -- -D warnings
+
+      - name: Three-daemon recovery process regression
+        run: cargo test -p swarm-cli --test three_daemon_recovery -- --nocapture
+
+      - name: Recovery certificate crash-resume process regression
+        run: cargo test -p swarm-cli --test recovery_successor_dies -- --nocapture
+
+      - name: Joint membership live regression
+        run: cargo test -p swarm-cli --test live_join_replication -- --nocapture
+
+      - name: Consensus and storage safety suites
+        run: cargo test -p swarm-consensus -p swarm-storage
