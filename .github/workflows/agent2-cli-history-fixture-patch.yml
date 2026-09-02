@@ -34,27 +34,23 @@ jobs:
 
           live = Path("crates/swarm-cli/tests/live_join_replication.rs")
           text = live.read_text()
-          old = '''        epoch: 1,
-                  sequence: 1,
-                  previous_membership_hash: None,'''
-          new = '''        epoch: 0,
-                  sequence: 0,
-                  previous_membership_hash: None,'''
+          old = '        epoch: 1,\n        sequence: 1,\n        previous_membership_hash: None,'
+          new = '        epoch: 0,\n        sequence: 0,\n        previous_membership_hash: None,'
           if old not in text:
               raise SystemExit("live join initial membership anchor missing")
           text = text.replace(old, new, 1)
           anchor = '    a.storage.save_epoch_record(&epoch).unwrap();\n\n    b.storage.create_world(&metadata).unwrap();'
           insert = '''    a.storage.save_epoch_record(&epoch).unwrap();
 
-              let mut promoted_membership = membership.clone();
-              promoted_membership.epoch = 1;
-              promoted_membership.sequence = 1;
-              promoted_membership.previous_membership_hash = Some(membership.record_hash().unwrap());
-              promoted_membership.signature.clear();
-              a.identity.sign_membership(&mut promoted_membership).unwrap();
-              a.storage.save_membership_record(&promoted_membership).unwrap();
+          let mut promoted_membership = membership.clone();
+          promoted_membership.epoch = 1;
+          promoted_membership.sequence = 1;
+          promoted_membership.previous_membership_hash = Some(membership.record_hash().unwrap());
+          promoted_membership.signature.clear();
+          a.identity.sign_membership(&mut promoted_membership).unwrap();
+          a.storage.save_membership_record(&promoted_membership).unwrap();
 
-              b.storage.create_world(&metadata).unwrap();'''
+          b.storage.create_world(&metadata).unwrap();'''
           if anchor not in text:
               raise SystemExit("live join promotion anchor missing")
           live.write_text(text.replace(anchor, insert, 1))
@@ -62,26 +58,21 @@ jobs:
           for filename in ["three_daemon_recovery.rs", "recovery_successor_dies.rs"]:
               path = Path("crates/swarm-cli/tests") / filename
               text = path.read_text()
-              old = '''        epoch: 1,
-                  sequence: 1,
-                  previous_membership_hash: None,'''
-              new = '''        epoch: 0,
-                  sequence: 0,
-                  previous_membership_hash: None,'''
+              old = '        epoch: 1,\n        sequence: 1,\n        previous_membership_hash: None,'
+              new = '        epoch: 0,\n        sequence: 0,\n        previous_membership_hash: None,'
               if old not in text:
                   raise SystemExit(f"{filename}: initial membership anchor missing")
               text = text.replace(old, new, 1)
-              anchor = '''    peer.storage.save_membership_record(seed.membership).unwrap();
-                  peer.storage.save_epoch_record(seed.epoch).unwrap();'''
+              anchor = '    peer.storage.save_membership_record(seed.membership).unwrap();\n    peer.storage.save_epoch_record(seed.epoch).unwrap();'
               insert = '''    peer.storage.save_membership_record(seed.membership).unwrap();
-                  peer.storage.save_epoch_record(seed.epoch).unwrap();
-                  let mut promoted_membership = seed.membership.clone();
-                  promoted_membership.epoch = seed.epoch.epoch_number;
-                  promoted_membership.sequence = seed.membership.sequence.checked_add(1).unwrap();
-                  promoted_membership.previous_membership_hash = Some(seed.membership.record_hash().unwrap());
-                  promoted_membership.signature.clear();
-                  seed.authority.sign_membership(&mut promoted_membership).unwrap();
-                  peer.storage.save_membership_record(&promoted_membership).unwrap();'''
+          peer.storage.save_epoch_record(seed.epoch).unwrap();
+          let mut promoted_membership = seed.membership.clone();
+          promoted_membership.epoch = seed.epoch.epoch_number;
+          promoted_membership.sequence = seed.membership.sequence.checked_add(1).unwrap();
+          promoted_membership.previous_membership_hash = Some(seed.membership.record_hash().unwrap());
+          promoted_membership.signature.clear();
+          seed.authority.sign_membership(&mut promoted_membership).unwrap();
+          peer.storage.save_membership_record(&promoted_membership).unwrap();'''
               if anchor not in text:
                   raise SystemExit(f"{filename}: replica promotion anchor missing")
               path.write_text(text.replace(anchor, insert, 1))
