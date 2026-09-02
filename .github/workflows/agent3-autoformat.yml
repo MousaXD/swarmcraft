@@ -16,18 +16,26 @@ jobs:
           ref: fix/agent-3-storage
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
       - name: Apply rustfmt
         run: cargo fmt --all
-      - name: Commit formatting if needed
+      - name: Capture clippy diagnostics
+        shell: bash
+        run: |
+          set +e
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings > implementation/agent-3-clippy.txt 2>&1
+          status=$?
+          echo "CLIPPY_EXIT=$status" >> implementation/agent-3-clippy.txt
+          exit 0
+      - name: Commit formatter and diagnostics
         shell: bash
         run: |
           if git diff --quiet; then
-            echo "rustfmt already clean"
+            echo "formatter and diagnostics unchanged"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add --all
-          git commit -m "style(storage): apply rustfmt"
+          git commit -m "chore(agent3): capture formatted clippy state"
           git push origin HEAD:fix/agent-3-storage
