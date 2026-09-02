@@ -63,7 +63,12 @@ jobs:
           cp target/debug/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
           cp target/debug/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
           cp target/debug/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
-      - name: Desktop check
+      - name: Refresh and inspect Desktop lockfile
+        run: |
+          cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
+          echo '--- Desktop Cargo.lock delta ---'
+          git diff -- apps/desktop/src-tauri/Cargo.lock || true
+      - name: Desktop check with refreshed lock
         run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
       - name: Desktop tests
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
@@ -73,7 +78,7 @@ jobs:
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add apps/desktop/src-tauri/src/runtime.rs apps/desktop/src-tauri/src/runtime_commands.rs apps/desktop/src-tauri/src/main.rs
+          git add apps/desktop/src-tauri/Cargo.lock apps/desktop/src-tauri/src/runtime.rs apps/desktop/src-tauri/src/runtime_commands.rs apps/desktop/src-tauri/src/main.rs
           git diff --cached --check
           git commit -m "fix(desktop): retain runtime diagnostics with references"
           git push origin HEAD:fix/agent-6-runtime
