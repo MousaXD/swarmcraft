@@ -25,6 +25,27 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("implementation/agent4-handshake-runner.py")
+          text = path.read_text()
+          old = '''replace_once(
+              "crates/swarm-cli/src/discovery.rs",
+              "let mut node = DiscoveryNode::new(generate_transport_key(), hello)?;",
+              "let mut node = DiscoveryNode::new(generate_transport_key(), hello, identity.network_signing_key())?;",
+          )'''
+          new = '''path = "crates/swarm-cli/src/discovery.rs"
+          text = read(path)
+          old = "let mut node = DiscoveryNode::new(generate_transport_key(), hello)?;"
+          new = "let mut node = DiscoveryNode::new(generate_transport_key(), hello, identity.network_signing_key())?;"
+          count = text.count(old)
+          if count != 3:
+              raise SystemExit(f"{path}: expected three discovery constructor targets, found {count}")
+          write(path, text.replace(old, new))'''
+          if text.count(old) != 1:
+              raise SystemExit("handshake runner constructor patch shape changed")
+          path.write_text(text.replace(old, new, 1))
+          PY
           python implementation/agent4-handshake-runner.py 2>&1 | tee implementation/agent4-handshake-apply.log
 
       - name: Format
@@ -82,6 +103,6 @@ jobs:
           rm -f implementation/agent4-handshake-apply.log implementation/agent4-handshake-format.log implementation/agent4-handshake-check.log implementation/agent4-handshake-tests.log
           git config user.name "swarmcraft-agent-4"
           git config user.email "actions@users.noreply.github.com"
-          git add implementation/agent4-handshake-failure.log
+          git add -f implementation/agent4-handshake-failure.log
           git commit -m "chore(agent4): preserve handshake validation failure" || exit 0
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:fix/agent-4-network
