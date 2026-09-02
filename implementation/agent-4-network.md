@@ -2,13 +2,15 @@
 
 ## Status
 
-STATUS: NOT STARTED
+STATUS: IN PROGRESS
 
 BRANCH: `fix/agent-4-network`
 
-STARTING SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
+CAMPAIGN PRODUCTION BASE SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
 
-CURRENT HEAD SHA: pending
+BRANCH SEED SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` (campaign ledger commit only; production tree matches the campaign base)
+
+CURRENT HEAD SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` before this start-state ledger commit
 
 INTEGRATED SHA: pending
 
@@ -32,6 +34,14 @@ Read `audits/FINAL-AUDIT.md`, Auditor 4 Network/Discovery, and Auditor 7 Securit
 Required before starting: none.
 
 Coordinate any membership-generation authorization lookup changes with Agent 1/2 after integration.
+
+Dependency heads consumed: none.
+
+Audit sources read before production edits:
+
+- `audits/FINAL-AUDIT.md` from `audit/final-integration-report`
+- `audits/04-network-discovery.md` from `audit/network-discovery`
+- `audits/07-security.md` from `audit/security`
 
 ## Ownership boundaries
 
@@ -66,13 +76,15 @@ Do not change canonical membership election semantics.
 
 ## Work completed
 
-None yet.
+- Verified the authoritative Agent 4 ledger is `implementation/agent-4-network.md`; the requested `implementation/agent-4-consensus.md` does not exist in the campaign plan.
+- Verified the branch production baseline is `b4bab08562cf0eb53763674407375b023e1d0858`; branch seed `a9736b159d9e9618a3ed8515c20e93f92c1453cb` adds only implementation ledgers.
+- Read all required audit sources and extracted the concrete trust-boundary and regression requirements for FINAL-012/013/028/029/030/040.
 
 ## Tests run
 
 | Test | Result | Commit/SHA | Notes |
 |---|---|---|---|
-| None yet | - | - | - |
+| Branch/baseline compare | PASS | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | Integration seed is exactly one documentation-only commit ahead of campaign production base. |
 
 ## Required validation before handoff
 
@@ -89,7 +101,11 @@ None yet.
 
 ## Blockers
 
-None at campaign start.
+- Local workspace terminal connector is currently unavailable because it cannot establish this chat's extension identity. GitHub repository read/write access is available, so implementation is proceeding through repository APIs and exact-head CI will be used as the executable validation surface.
+
+## Remaining work
+
+All production and regression items in the implementation checklist remain to be implemented and validated.
 
 ## Handoff
 
