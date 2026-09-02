@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::{
     env, fs,
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 use swarm_core::DataPaths;
@@ -14,9 +15,33 @@ pub(crate) fn provider_staging_dir() -> Result<String, String> {
     let paths = DataPaths::discover().map_err(|error| error.to_string())?;
     paths.ensure().map_err(|error| error.to_string())?;
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_nanos();
-    let path = paths.root.join("provider-staging").join(format!("desktop-{}-{nonce}", std::process::id()));
+    let session = format!("desktop-{}-{nonce}", std::process::id());
+    let path = paths.root.join("provider-staging").join(&session);
     fs::create_dir_all(&path).map_err(|error| format!("Could not create provider staging directory: {error}"))?;
-    Ok(path.to_string_lossy().into_owned())
+    Ok(session)
+}
+
+pub(crate) fn resolve_provider_staging_session(session: &str) -> Result<PathBuf, String> {
+    let session = session.trim();
+    if !valid_provider_staging_session(session) {
+        return Err("Provider staging session is invalid or expired".into());
+    }
+    let paths = DataPaths::discover().map_err(|error| error.to_string())?;
+    paths.ensure().map_err(|error| error.to_string())?;
+    let root = paths.root.join("provider-staging");
+    let candidate = root.join(session);
+    let metadata =
+        fs::symlink_metadata(&candidate).map_err(|_| "Provider staging session is invalid or expired".to_owned())?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("Provider staging session is not a private directory".into());
+    }
+    Ok(candidate)
+}
+
+fn valid_provider_staging_session(session: &str) -> bool {
+    session.starts_with("desktop-")
+        && session.len() <= 128
+        && session.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -181,8 +206,17 @@ mod tests {
     }
 
     #[test]
-    fn staging_path_is_not_player_supplied() {
-        let path = std::path::PathBuf::from("provider-staging").join("desktop-test");
-        assert!(path.ends_with("desktop-test"));
+    fn staging_session_is_opaque_and_path_free() {
+        assert!(valid_provider_staging_session("desktop-123-456"));
+        for invalid in [
+            "../desktop-123",
+            "desktop/123",
+            "desktop\\123",
+            "C:\\desktop-123",
+            "desktop-123/../../escape",
+            "not-desktop-123",
+        ] {
+            assert!(!valid_provider_staging_session(invalid), "accepted {invalid}");
+        }
     }
 }

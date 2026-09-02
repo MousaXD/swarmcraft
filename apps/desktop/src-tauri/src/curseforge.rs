@@ -11,6 +11,8 @@ use std::{
 };
 use tokio::io::AsyncWriteExt;
 
+use super::launcher_commands::resolve_provider_staging_session;
+
 const API_BASE: &str = "https://api.curseforge.com";
 const API_KEY_ENV: &str = "SWARMCRAFT_CURSEFORGE_API_KEY";
 const MINECRAFT_GAME_ID: u64 = 432;
@@ -425,6 +427,7 @@ fn map_file(file: &Value, environment: &str) -> Result<Value, ProviderError> {
     let project_id = required_u64(file, "modId")?;
     let display_name = required_string(file, "displayName")?;
     let file_name = required_string(file, "fileName")?;
+    safe_jar_filename(file_name)?;
     let release = release_type(file.get("releaseType").and_then(Value::as_u64).unwrap_or_default());
     let file_size = file.get("fileLength").and_then(Value::as_u64).unwrap_or_default();
     let minecraft_versions = minecraft_versions(file);
@@ -670,6 +673,35 @@ async fn resolve_dependency_graph(
     }))
 }
 
+fn safe_jar_filename(value: &str) -> Result<(), ProviderError> {
+    let path = Path::new(value);
+    let stem = value.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    let windows_reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+    let portable = value.len() > 4
+        && value == value.trim()
+        && value.len() <= 255
+        && !path.is_absolute()
+        && path.components().count() == 1
+        && !value.contains(['/', '\\', ':', '\0'])
+        && value != "."
+        && value != ".."
+        && !value.ends_with(['.', ' '])
+        && !windows_reserved
+        && value.to_ascii_lowercase().ends_with(".jar");
+    if portable {
+        Ok(())
+    } else {
+        Err(ProviderError::new(
+            "download_failed",
+            "unsafe_artifact_filename",
+            format!("CurseForge returned an unsafe JAR filename: {value}"),
+        ))
+    }
+}
+
 fn validate_download_url(url: &str) -> Result<String, ProviderError> {
     let parsed = reqwest::Url::parse(url).map_err(|_| {
         ProviderError::new("download_failed", "untrusted_download_url", "CurseForge returned an invalid artifact URL")
@@ -688,6 +720,7 @@ fn manual_artifact_required(file: &Value, project: &Value) -> Result<Value, Prov
     let project_id = required_u64(file, "modId")?;
     let file_id = required_u64(file, "id")?;
     let file_name = required_string(file, "fileName")?;
+    safe_jar_filename(file_name)?;
     let display_name = required_string(file, "displayName")?;
     let website_url = project.get("links").and_then(|links| links.get("websiteUrl")).cloned().unwrap_or(Value::Null);
     let project_name = nonempty_string(project.get("name")).map(ToOwned::to_owned);
@@ -889,25 +922,7 @@ async fn download_artifact(
 ) -> Result<Value, ProviderError> {
     let file_id = required_u64(file, "id")?;
     let file_name = required_string(file, "fileName")?;
-    if !file_name.to_ascii_lowercase().ends_with(".jar") {
-        return Err(ProviderError::new(
-            "download_failed",
-            "unsupported_artifact_type",
-            "SwarmCraft will not automatically execute or install non-JAR CurseForge artifacts",
-        ));
-    }
-    if destination
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| !extension.eq_ignore_ascii_case("jar"))
-        .unwrap_or(true)
-    {
-        return Err(ProviderError::new(
-            "download_failed",
-            "invalid_destination",
-            "CurseForge mod artifacts must be published to a .jar destination",
-        ));
-    }
+    safe_jar_filename(file_name)?;
     if tokio::fs::try_exists(&destination).await.unwrap_or(false) {
         return Err(ProviderError::new(
             "download_failed",
@@ -1167,21 +1182,19 @@ pub async fn curseforge_resolve(file_id: u64, minecraft: String, loader: String,
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn curseforge_download(file_id: u64, destination: String) -> Value {
+pub async fn curseforge_download(file_id: u64, staging_session: String) -> Value {
     match async {
-        let destination = destination.trim();
-        if destination.is_empty() {
-            return Err(ProviderError::new(
-                "invalid_request",
-                "destination_required",
-                "Artifact destination is required",
-            ));
-        }
+        let staging = resolve_provider_staging_session(&staging_session)
+            .map_err(|message| ProviderError::new("invalid_request", "invalid_staging_session", message))?;
         let client = CurseForgeClient::from_environment()?;
         let file = client.fetch_file(file_id).await?;
         let project_id = required_u64(&file, "modId")?;
+        let file_name = required_string(&file, "fileName")?;
+        safe_jar_filename(file_name)?;
         let project = client.fetch_project(project_id).await?;
-        download_artifact(&client, &file, &project, PathBuf::from(destination)).await
+        let destination =
+            staging.join("curseforge").join(project_id.to_string()).join(file_id.to_string()).join(file_name);
+        download_artifact(&client, &file, &project, destination).await
     }
     .await
     {
@@ -1417,5 +1430,31 @@ mod tests {
         latest_high["id"] = json!(21);
         let selected = select_best_file(vec![latest_low, older, latest_high]).unwrap();
         assert_eq!(selected["id"], 21);
+    }
+}
+
+#[cfg(test)]
+mod agent5_security_tests {
+    use super::*;
+
+    #[test]
+    fn provider_filename_traversal_matrix_fails_closed() {
+        for invalid in [
+            "../evil.jar",
+            "..\\evil.jar",
+            "/tmp/evil.jar",
+            "C:\\tmp\\evil.jar",
+            "\\\\server\\share\\evil.jar",
+            ".jar",
+            "CON.jar",
+            "NUL.jar",
+            "evil.jar.",
+            "evil.jar ",
+            "dir/evil.jar",
+            "dir\\evil.jar",
+        ] {
+            assert!(safe_jar_filename(invalid).is_err(), "accepted {invalid}");
+        }
+        assert!(safe_jar_filename("safe-mod_1.2.3.jar").is_ok());
     }
 }

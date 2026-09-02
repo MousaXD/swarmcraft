@@ -46,3 +46,16 @@ test('missing exact required dependency fails closed', () => {
 test('structured backend error remains actionable', () => {
   assert.equal(errorText({ error: { message: 'CurseForge API key is not configured.' } }), 'CurseForge API key is not configured.');
 });
+
+
+test('MD5-only provider provenance is canonicalized as manual-required', () => {
+  const result = canonicalPackageFromDownloaded({
+    provider: 'curseforge',
+    version: { project_id: '1', version_id: '2', dependencies: [] },
+    file: { file_name: 'x.jar', hashes: [{ algorithm: 'md5', value: 'ab'.repeat(16) }] },
+    downloaded: { destination: '/tmp/x.jar', bytes: 1 },
+    inspection: { mod_id: 'x', version: '1', environment: 'server' },
+    selectedByProject: new Map(),
+  });
+  assert.equal(result.retrieval, 'manual_required');
+});

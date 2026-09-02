@@ -81,6 +81,8 @@ export function canonicalPackageFromDownloaded({ provider, version, file, downlo
     throw new Error(`${inspection.mod_id || inspection.modId} is client-only and cannot be required by a server world.`);
   }
   const side = environment === 'universal' ? 'both' : 'server';
+  const hashes = providerHashes(downloaded.hashes ?? file.hashes);
+  const hasStrongProviderHash = hashes.some((hash) => ['sha512', 'sha256', 'sha1'].includes(hash.algorithm.toLowerCase()));
   return {
     artifactId: clean(inspection.mod_id ?? inspection.modId),
     version: clean(inspection.version),
@@ -91,8 +93,8 @@ export function canonicalPackageFromDownloaded({ provider, version, file, downlo
     versionId,
     fileName: clean(downloaded.filename ?? file.filename ?? file.file_name ?? file.fileName),
     fileSize: Number(downloaded.size ?? downloaded.bytes ?? file.file_size ?? file.fileSize) || undefined,
-    providerHashes: providerHashes(downloaded.hashes ?? file.hashes),
-    retrieval: 'provider_download',
+    providerHashes: hashes,
+    retrieval: hasStrongProviderHash ? 'provider_download' : 'manual_required',
     dependencies: dependencyTargets(version.dependencies ?? file.dependencies, selectedByProject),
   };
 }
@@ -318,7 +320,7 @@ function install() {
     return call('inspect_mod_artifact', { path });
   }
 
-  async function prepareModrinth(root, staging) {
+  async function prepareModrinth(root, stagingSession) {
     const graph = await call('modrinth_resolve_project', {
       projectId: root.projectId,
       minecraftVersion: clean(byId('createMinecraft').value),
@@ -335,9 +337,10 @@ function install() {
       if (!file) {
         throw new Error(`${version.display_name || version.project_id} cannot be downloaded automatically from Modrinth.`);
       }
-      const destinationDir = `${staging}/modrinth/${version.project_id}/${version.version_id}`;
       const downloaded = await call('modrinth_download', {
-        request: { locator: file.locator, destination_dir: destinationDir, max_bytes: null },
+        locator: file.locator,
+        stagingSession,
+        maxBytes: null,
       });
       const inspection = await inspectPackage(downloaded.path);
       packages.push(canonicalPackageFromDownloaded({ provider: 'modrinth', version, file, downloaded, inspection, selectedByProject }));
@@ -345,7 +348,7 @@ function install() {
     return packages;
   }
 
-  async function prepareCurseForge(root, staging) {
+  async function prepareCurseForge(root, stagingSession) {
     const envelope = await call('curseforge_resolve_project', {
       projectId: Number(root.projectId),
       minecraft: clean(byId('createMinecraft').value),
@@ -359,11 +362,9 @@ function install() {
     );
     const packages = [];
     for (const version of versions) {
-      const fileName = clean(version.file_name);
-      const destination = `${staging}/curseforge/${version.project_id}/${version.version_id}/${fileName}`;
       const downloadedEnvelope = await call('curseforge_download', {
         fileId: Number(version.file_id),
-        destination,
+        stagingSession,
       });
       const downloaded = requireOkEnvelope(downloadedEnvelope, 'CurseForge');
       const inspection = await inspectPackage(downloaded.destination);
@@ -391,10 +392,10 @@ function install() {
       if (submit) submit.disabled = true;
       setCreateMessage('Resolving exact mods and dependencies…');
       try {
-        const staging = await call('provider_staging_dir');
+        const stagingSession = await call('provider_staging_dir');
         const packages = [];
         for (const root of [...roots].sort((a, b) => `${a.provider}:${a.projectId}`.localeCompare(`${b.provider}:${b.projectId}`))) {
-          packages.push(...(await (root.provider === 'modrinth' ? prepareModrinth(root, staging) : prepareCurseForge(root, staging))));
+          packages.push(...(await (root.provider === 'modrinth' ? prepareModrinth(root, stagingSession) : prepareCurseForge(root, stagingSession))));
         }
         const unique = new Map(packages.map((item) => [`${item.provider}:${item.projectId}:${item.versionId}`, item]));
         setCreateMessage('Creating canonical world…');
