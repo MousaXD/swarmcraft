@@ -1,0 +1,90 @@
+name: Required Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Optional production release tag to bind to application metadata.
+        required: false
+        type: string
+        default: ''
+      run_network_soak:
+        description: Include the multi-GiB network soak in this exact-SHA gate.
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional production release tag to validate.
+        required: false
+        type: string
+        default: ''
+      run_network_soak:
+        description: Include the multi-GiB network soak.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Core CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  version:
+    name: Release identity
+    uses: ./.github/workflows/version-guard.yml
+    with:
+      release_tag: ${{ inputs.release_tag }}
+    permissions:
+      contents: read
+
+  player-journey:
+    name: Live player journey
+    uses: ./.github/workflows/player-journey-live.yml
+    permissions:
+      contents: read
+
+  network-soak:
+    name: Network soak
+    if: ${{ inputs.run_network_soak == true }}
+    uses: ./.github/workflows/network-soak.yml
+    permissions:
+      contents: read
+
+  gate:
+    name: Required validation gate
+    if: ${{ always() }}
+    needs: [core, version, player-journey, network-soak]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CORE_RESULT: ${{ needs.core.result }}
+      VERSION_RESULT: ${{ needs.version.result }}
+      PLAYER_RESULT: ${{ needs.player-journey.result }}
+      SOAK_RESULT: ${{ needs.network-soak.result }}
+      REQUIRE_SOAK: ${{ inputs.run_network_soak }}
+    steps:
+      - name: Require every selected exact-SHA validation component
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CORE_RESULT" == success ]] || { echo "Core CI: $CORE_RESULT" >&2; exit 1; }
+          [[ "$VERSION_RESULT" == success ]] || { echo "Release identity: $VERSION_RESULT" >&2; exit 1; }
+          [[ "$PLAYER_RESULT" == success ]] || { echo "Live player journey: $PLAYER_RESULT" >&2; exit 1; }
+          if [[ "$REQUIRE_SOAK" == true ]]; then
+            [[ "$SOAK_RESULT" == success ]] || { echo "Network soak: $SOAK_RESULT" >&2; exit 1; }
+          elif [[ "$SOAK_RESULT" != skipped && "$SOAK_RESULT" != success ]]; then
+            echo "Unexpected network soak result: $SOAK_RESULT" >&2
+            exit 1
+          fi
+          echo "Required validation accepted exact SHA $GITHUB_SHA"
