@@ -1,0 +1,79 @@
+name: Agent 6 Desktop Diagnostics Validation
+
+on:
+  push:
+    branches: [fix/agent-6-runtime]
+    paths: [.github/workflows/agent6-desktop-diagnostics.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/agent-6-runtime
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+      - name: Install Desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Wire runtime diagnostics command
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('apps/desktop/src-tauri/src/main.rs')
+          text = path.read_text()
+          replacements = [
+              (
+                  'use runtime_commands::{ensure_daemon_running, start_daemon, stop_daemon, stop_host};',
+                  'use runtime_commands::{ensure_daemon_running, runtime_diagnostics, start_daemon, stop_daemon, stop_host};',
+              ),
+              (
+                  '            runtime_launch,\n            connectivity_diagnostics,',
+                  '            runtime_launch,\n            runtime_diagnostics,\n            connectivity_diagnostics,',
+              ),
+          ]
+          for before, after in replacements:
+              count = text.count(before)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one Desktop replacement, found {count}: {before!r}')
+              text = text.replace(before, after, 1)
+          path.write_text(text)
+      - name: Format Desktop
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: Build sidecars for Desktop compile context
+        run: |
+          cargo build -p swarm-cli --locked
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/debug/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
+          cp target/debug/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+          cp target/debug/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
+          cp target/debug/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
+      - name: Desktop check
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+      - name: Desktop tests
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+      - name: Desktop clippy
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Commit validated diagnostics wiring
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add apps/desktop/src-tauri/src/runtime.rs apps/desktop/src-tauri/src/runtime_commands.rs apps/desktop/src-tauri/src/main.rs
+          git diff --cached --check
+          git commit -m "fix(desktop): retain runtime diagnostics with references"
+          git push origin HEAD:fix/agent-6-runtime
