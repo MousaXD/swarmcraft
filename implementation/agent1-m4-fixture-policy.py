@@ -25,7 +25,7 @@ replace(
 ''',
     '''use swarm_protocol::{
     AuthorityPolicyV1, EpochMode, EpochRecordV1, InviteV1, JoinRequestV1, MembershipPolicyV1,
-    MembershipProposalV1, MembershipRecordV1, PeerId, RuntimeCompatibilityManifestV1, SnapshotManifestV1,
+    MembershipProposalV1, MembershipRecordV1, RuntimeCompatibilityManifestV1, SnapshotManifestV1,
     WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1, WorldPresentationV1, WorldVisibilityV1,
     PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
@@ -107,6 +107,16 @@ replace(
     sign_world_config(&authority.identity, &mut config).unwrap();
     authority.storage.save_world_config(&config).unwrap();
     let mut descriptor = WorldDescriptorV1 {
+''',
+)
+replace(
+    path,
+    '''    authority.storage.commit_snapshot(&manifest).unwrap();
+    let mut epoch = EpochRecordV1 {
+''',
+    '''    authority.storage.commit_snapshot(&manifest).unwrap();
+    let manifest = manifest.manifest().clone();
+    let mut epoch = EpochRecordV1 {
 ''',
 )
 replace(
