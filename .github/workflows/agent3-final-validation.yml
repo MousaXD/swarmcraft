@@ -1,0 +1,90 @@
+name: Agent 3 final storage validation
+
+on:
+  push:
+    branches: [fix/agent-3-storage]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent3-final-storage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lockfiles:
+    name: Lockfile truth
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Root lockfile is current
+        run: cargo metadata --locked --format-version 1 --no-deps > /dev/null
+      - name: Desktop lockfile is current
+        run: cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --format-version 1 --no-deps > /dev/null
+
+  rust:
+    name: Rust storage matrix (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+      - name: Clippy workspace
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Test workspace
+        run: cargo test --workspace --all-features --locked
+
+  storage-acceptance:
+    name: Storage integrity acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Full storage suite
+        run: cargo test -p swarm-storage --all-features --locked
+      - name: Canonical head, fencing, portability, and two-process promise race
+        run: cargo test -p swarm-storage --test storage_integrity --locked -- --nocapture
+      - name: Publication ownership race
+        run: cargo test -p swarm-storage --test publication_ownership_race --locked -- --nocapture
+      - name: Snapshot swarm reconstruction
+        run: cargo test -p swarm-storage --test snapshot_swarm_acceptance --locked
+      - name: Storage failure injection
+        run: cargo test -p swarm-storage --test failure_injection --locked
+
+  network-soak:
+    name: Interrupted QUIC 1 GiB soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SWARMCRAFT_NETWORK_SOAK_GIB: '1'
+      SWARMCRAFT_NETWORK_SOAK_RESTART_MIB: '128'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile soak gate
+        run: cargo test --release -p swarm-network --test network_transfer_soak --locked --no-run
+      - name: Apply sustained impairment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          command -v tc
+          sudo tc qdisc replace dev lo root netem delay 1ms 0.5ms distribution normal loss 0.2% rate 250mbit
+          tc qdisc show dev lo
+      - name: Multi-gigabyte interrupted transfer
+        shell: bash
+        run: cargo test --release -p swarm-network --test network_transfer_soak multi_gib_interrupted_quic_transfer_soak --locked -- --ignored --nocapture
+      - name: Remove impairment
+        if: always()
+        run: sudo tc qdisc del dev lo root || true
