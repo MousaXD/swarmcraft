@@ -17,9 +17,9 @@ pub use discovery::{
     DISCOVERY_WIRE_PROTOCOL,
 };
 pub use invite_connectivity::{
-    invite_connectivity_from_snapshot, validate_invite_addresses, InviteConnectivityError, InviteConnectivityV1,
-    InviteReachabilityV1, DEFAULT_CONNECTIVITY_DIAGNOSTICS_JSON_FILE, MAX_CONNECTIVITY_SNAPSHOT_BYTES,
-    MAX_INVITE_ADDRESSES, MAX_INVITE_ADDRESS_CHARS,
+    invite_connectivity_from_snapshot, validate_invite_addresses, validate_invite_dial_address,
+    InviteConnectivityError, InviteConnectivityV1, InviteReachabilityV1, DEFAULT_CONNECTIVITY_DIAGNOSTICS_JSON_FILE,
+    MAX_CONNECTIVITY_SNAPSHOT_BYTES, MAX_INVITE_ADDRESSES, MAX_INVITE_ADDRESS_CHARS,
 };
 pub use libp2p::request_response::ResponseChannel;
 pub use libp2p::PeerId as TransportPeerId;

@@ -246,3 +246,57 @@ async fn vanished_response_channel_is_peer_local_and_node_continues() {
     authenticate_pair(&mut valid, &mut victim, address).await;
     assert_ping_round_trip(&mut valid, &mut victim, 42).await;
 }
+
+#[tokio::test]
+async fn pre_auth_request_flood_is_rate_limited_without_blocking_a_valid_peer() {
+    let mut victim = new_node();
+    let victim_peer = victim.local_transport_peer_id();
+    victim.listen("/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()).unwrap();
+    let address = listen_address(&mut victim).await;
+
+    let behaviour = cbor::Behaviour::new(
+        [(StreamProtocol::new(WIRE_PROTOCOL), ProtocolSupport::Full)],
+        request_response::Config::default().with_request_timeout(Duration::from_secs(5)),
+    );
+    let mut attacker =
+        SwarmBuilder::with_new_identity().with_tokio().with_quic().with_behaviour(|_| behaviour).unwrap().build();
+    attacker.dial(address.clone()).unwrap();
+
+    let mut sent = false;
+    timeout(Duration::from_secs(15), async {
+        loop {
+            tokio::select! {
+                victim_event = victim.next_event() => {
+                    if let Err(error) = victim_event {
+                        panic!("request flood terminated the victim event loop: {error:#}");
+                    }
+                }
+                attacker_event = attacker.select_next_some() => match attacker_event {
+                    SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == victim_peer && !sent => {
+                        for nonce in 0..16_u64 {
+                            attacker.behaviour_mut().send_request(&victim_peer, WireRequest::Ping { nonce });
+                        }
+                        sent = true;
+                    }
+                    SwarmEvent::Behaviour(request_response::Event::Message {
+                        message: request_response::Message::Response {
+                            response: WireResponse::Error { code, .. },
+                            ..
+                        },
+                        ..
+                    }) if code == "RATE_LIMITED" => break,
+                    _ => {}
+                }
+            }
+        }
+    })
+    .await
+    .expect("pre-auth flood should hit an explicit admission budget");
+
+    // Keep the abusive transport connected. A separate valid peer must still
+    // authenticate and complete application traffic while the attacker is isolated.
+    let mut valid = new_node();
+    authenticate_pair(&mut valid, &mut victim, address).await;
+    assert_ping_round_trip(&mut valid, &mut victim, 0x51afe).await;
+    drop(attacker);
+}

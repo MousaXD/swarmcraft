@@ -13,6 +13,8 @@ use swarm_protocol::{InviteV1, PROTOCOL_VERSION};
 
 const PREFIX: &str = "scinvite:";
 pub const MAX_INVITE_TOKEN_CHARS: usize = 32 * 1024;
+pub const MAX_INVITE_LIFETIME_MINUTES: u64 = 24 * 60;
+pub const MAX_INVITE_LIFETIME_MS: u64 = MAX_INVITE_LIFETIME_MINUTES * 60_000;
 
 pub fn encode(invite: &InviteV1) -> Result<String> {
     validate_invite_addresses(&invite.bootstrap_addrs).context("invite connection hints are invalid")?;
@@ -39,11 +41,34 @@ pub fn decode(value: &str) -> Result<InviteV1> {
     }
     validate_invite_addresses(&invite.bootstrap_addrs).context("invite connection hints are invalid")?;
     verify_invite_signature(&invite).context("invite signature is invalid")?;
-    let now = unix_time_ms()?;
-    if invite.expires_unix_ms <= now {
+    validate_invite_expiry(invite.expires_unix_ms, unix_time_ms()?)?;
+    Ok(invite)
+}
+
+/// Validate the bearer-token exposure window. Invitations are intentionally
+/// reusable by multiple joining identities until expiry, but only while the
+/// signer remains the world's current authority. There is no hidden single-use
+/// nonce state: the signed nonce provides token uniqueness, not consumption.
+pub fn validate_invite_expiry(expires_unix_ms: u64, now_unix_ms: u64) -> Result<()> {
+    if expires_unix_ms <= now_unix_ms {
         return Err(anyhow!("invite expired"));
     }
-    Ok(invite)
+    let latest_allowed = now_unix_ms
+        .checked_add(MAX_INVITE_LIFETIME_MS)
+        .ok_or_else(|| anyhow!("invite lifetime overflows the timestamp range"))?;
+    if expires_unix_ms > latest_allowed {
+        return Err(anyhow!("invite expiry exceeds the maximum {MAX_INVITE_LIFETIME_MINUTES}-minute bearer lifetime"));
+    }
+    Ok(())
+}
+
+pub fn expiry_from_minutes(now_unix_ms: u64, expires_minutes: u64) -> Result<u64> {
+    if expires_minutes == 0 || expires_minutes > MAX_INVITE_LIFETIME_MINUTES {
+        return Err(anyhow!("invite lifetime must be between 1 and {MAX_INVITE_LIFETIME_MINUTES} minutes"));
+    }
+    let lifetime_ms =
+        expires_minutes.checked_mul(60_000).ok_or_else(|| anyhow!("invite lifetime overflows milliseconds"))?;
+    now_unix_ms.checked_add(lifetime_ms).ok_or_else(|| anyhow!("invite expiry overflows the timestamp range"))
 }
 
 pub fn configure_connectivity_snapshot(paths: &DataPaths) {
@@ -124,6 +149,25 @@ mod tests {
     fn signed_invite_round_trip() {
         let invite = signed_invite(unix_time_ms().unwrap() + 60_000, vec!["/ip4/1.1.1.1/udp/4001/quic-v1".into()]);
         assert_eq!(decode(&encode(&invite).unwrap()).unwrap(), invite);
+    }
+
+    #[test]
+    fn invite_is_explicitly_reusable_until_expiry() {
+        let invite = signed_invite(unix_time_ms().unwrap() + 60_000, vec!["/ip4/1.1.1.1/udp/4001/quic-v1".into()]);
+        let encoded = encode(&invite).unwrap();
+        assert_eq!(decode(&encoded).unwrap(), invite);
+        assert_eq!(decode(&encoded).unwrap(), invite);
+    }
+
+    #[test]
+    fn invite_lifetime_is_bounded_and_checked() {
+        let now = unix_time_ms().unwrap();
+        assert!(expiry_from_minutes(now, 0).is_err());
+        assert!(expiry_from_minutes(now, MAX_INVITE_LIFETIME_MINUTES + 1).is_err());
+        assert_eq!(expiry_from_minutes(now, MAX_INVITE_LIFETIME_MINUTES).unwrap(), now + MAX_INVITE_LIFETIME_MS);
+        let overlong =
+            signed_invite(now + MAX_INVITE_LIFETIME_MS + 60_000, vec!["/ip4/1.1.1.1/udp/4001/quic-v1".into()]);
+        assert!(decode(&encode(&overlong).unwrap()).unwrap_err().to_string().contains("maximum"));
     }
 
     #[test]
