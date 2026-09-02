@@ -8,6 +8,7 @@ on:
       - implementation/agent1-m4-hardening.py
       - implementation/agent1-m4-fixture-policy.py
       - implementation/agent1-m4-removal-test.py
+      - implementation/agent1-m4-closure.py
       - crates/swarm-cli/tests/consensus_partition_safety.rs
       - .github/workflows/agent1-m4-worker.yml
 
@@ -98,16 +99,20 @@ jobs:
 
       - name: Validate and apply hardening
         run: |
-          python3 -m py_compile implementation/agent1-m4-hardening.py implementation/agent1-m4-fixture-policy.py implementation/agent1-m4-removal-test.py
+          python3 -m py_compile implementation/agent1-m4-hardening.py implementation/agent1-m4-fixture-policy.py implementation/agent1-m4-removal-test.py implementation/agent1-m4-closure.py
           python3 implementation/agent1-m4-hardening.py
           python3 implementation/agent1-m4-fixture-policy.py
           python3 implementation/agent1-m4-removal-test.py
+          python3 implementation/agent1-m4-closure.py
 
       - name: Format Rust workspace
         run: cargo fmt --all
 
       - name: Check workspace
         run: cargo check --workspace --all-targets
+
+      - name: Clippy affected Rust crates
+        run: cargo clippy -p swarm-protocol -p swarm-consensus -p swarm-storage -p swarm-network -p swarm-cli --all-targets -- -D warnings
 
       - name: Test consensus core
         run: cargo test -p swarm-consensus
@@ -134,6 +139,7 @@ jobs:
           rm implementation/agent1-m4-hardening.py
           rm implementation/agent1-m4-fixture-policy.py
           rm implementation/agent1-m4-removal-test.py
+          rm implementation/agent1-m4-closure.py
           rm .github/workflows/agent1-m4-worker.yml
           git add -A
           git config user.name "swarmcraft-agent-1"
