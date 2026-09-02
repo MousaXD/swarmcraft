@@ -25,70 +25,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          python - <<'PY'
-          from pathlib import Path
-          path = Path("implementation/agent4-transport-admission-runner.py")
-          text = path.read_text()
-          old = '''replace_once(
-              "crates/swarm-network/src/discovery.rs",
-              "    identify,\\n",
-              "    connection_limits, identify,\\n",
-          )'''
-          new = '''replace_once(
-              "crates/swarm-network/src/discovery.rs",
-              "use libp2p::{\\n    identify,\\n    identity::Keypair,\\n",
-              "use libp2p::{\\n    connection_limits, identify,\\n    identity::Keypair,\\n",
-          )'''
-          if old not in text:
-              raise SystemExit("discovery import runner target not found")
-          path.write_text(text.replace(old, new, 1))
-          PY
           python implementation/agent4-transport-admission-runner.py 2>&1 | tee implementation/agent4-transport-admission-apply.log
-          python - <<'PY'
-          from pathlib import Path
-          path = Path("crates/swarm-network/src/admission.rs")
-          text = path.read_text()
-          old = '''    #[test]
-              fn transport_caps_bound_handshake_and_connection_state() {
-                  assert!(MAX_PENDING_INCOMING_CONNECTIONS < MAX_ESTABLISHED_CONNECTIONS);
-                  assert!(MAX_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS);
-                  assert!(MAX_APPLICATION_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS as usize);
-                  assert!(MAX_DISCOVERY_PENDING_INCOMING_CONNECTIONS < MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
-                  assert!(MAX_DISCOVERY_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
-                  assert!(MAX_ESTABLISHED_CONNECTIONS_PER_PEER >= 2);
-              }
-          '''
-          # rustfmt has not run yet, so match the unindented runner output too.
-          if old not in text:
-              old = '''    #[test]
-    fn transport_caps_bound_handshake_and_connection_state() {
-        assert!(MAX_PENDING_INCOMING_CONNECTIONS < MAX_ESTABLISHED_CONNECTIONS);
-        assert!(MAX_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS);
-        assert!(MAX_APPLICATION_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS as usize);
-        assert!(MAX_DISCOVERY_PENDING_INCOMING_CONNECTIONS < MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
-        assert!(MAX_DISCOVERY_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
-        assert!(MAX_ESTABLISHED_CONNECTIONS_PER_PEER >= 2);
-    }
-'''
-          new = '''    const _: () = {
-        assert!(MAX_PENDING_INCOMING_CONNECTIONS < MAX_ESTABLISHED_CONNECTIONS);
-        assert!(MAX_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS);
-        assert!(MAX_APPLICATION_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS as usize);
-        assert!(MAX_DISCOVERY_PENDING_INCOMING_CONNECTIONS < MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
-        assert!(MAX_DISCOVERY_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
-        assert!(MAX_ESTABLISHED_CONNECTIONS_PER_PEER >= 2);
-    };
-
-    #[test]
-    fn transport_limit_behaviours_are_constructible() {
-        let _ = primary_connection_limits();
-        let _ = discovery_connection_limits();
-    }
-'''
-          if old not in text:
-              raise SystemExit("generated transport cap test block not found")
-          path.write_text(text.replace(old, new, 1))
-          PY
 
       - name: Format
         shell: bash
@@ -146,8 +83,7 @@ jobs:
         shell: bash
         run: |
           rm implementation/agent4-transport-admission-runner.py .github/workflows/agent4-transport-admission-runner.yml
-          rm -f implementation/agent4-transport-admission-*.log
-          rm -f implementation/agent4-transport-admission-failure.md
+          rm -f implementation/agent4-transport-admission-*.log implementation/agent4-transport-admission-failure.md
           git config user.name "swarmcraft-agent-4"
           git config user.email "actions@users.noreply.github.com"
           git add -A
@@ -157,22 +93,28 @@ jobs:
           python - <<'PY'
           import os
           from pathlib import Path
+
           path = Path("implementation/agent-4-network.md")
           text = path.read_text()
           prod = os.environ["PROD_SHA"]
-          text = text.replace(
-              "CURRENT HEAD SHA: `af48ed80f78beec7a2866a90ce6de35e4cfc86a8` validated production milestone; this ledger commit follows it",
-              f"CURRENT HEAD SHA: `{prod}` validated production milestone; this ledger commit follows it",
-          )
-          text = text.replace(
-              "- Added bounded network admission shared by primary and discovery nodes: 64 active application connections, separate per-peer authenticated/pre-auth request windows, and separate global authenticated/pre-auth request budgets. Replacement connections for an already known transport are not blocked by the application cap.\n",
-              "- Added bounded network admission shared by primary and discovery nodes: 64 active application connections, separate per-peer authenticated/pre-auth request windows, and separate global authenticated/pre-auth request budgets. Replacement connections for an already known transport are not blocked by the application cap.\n- Composed libp2p `connection_limits::Behaviour` into both primary and discovery swarms so pending and established connection floods are rejected before long-lived application state is allocated. Primary transport limits cap pending incoming/outgoing work at 32 each, established incoming at 72, total established at 96, and per-transport-peer connections at 2; discovery uses tighter 24/48/64 bounds with the same per-peer cap.\n- Added a 10-second receiver-challenge lifetime to both network stacks. Silent peers that occupy an authentication slot without proving the application key are disconnected and their pending/authentication state is cleared.\n",
-          )
-          marker = "| `cargo test -p swarm-cli --bin swarmcraft --locked` | PASS | `af48ed80f78beec7a2866a90ce6de35e4cfc86a8` | Invite reuse/lifetime and daemon authorization-matrix units green. |\n"
-          additions = marker + f"| `cargo fmt --all -- --check` | PASS | `{prod}` | Transport-level admission/handshake-lifetime milestone. |\n" + f"| `cargo check -p swarm-network -p swarm-cli --all-targets --locked` | PASS | `{prod}` | Primary/discovery connection-limit behaviours and challenge expiry compile together. |\n" + f"| `cargo clippy -p swarm-network -p swarm-cli --all-targets --locked -- -D warnings` | PASS | `{prod}` | Strict affected-crate lint gate after transport hardening. |\n" + f"| `cargo test -p swarm-network --locked` | PASS | `{prod}` | Full network suite remains green with transport limits and challenge expiry. |\n" + f"| `cargo test -p swarm-cli --bin swarmcraft --locked` | PASS | `{prod}` | CLI/network-facing authorization units remain green. |\n" + f"| impaired `interrupted_quic_transfer_resumes_after_lost_ack` | PASS | `{prod}` | 64 MiB forced-restart/lost-ACK transfer under 15ms±3ms delay, 0.5% loss and 100mbit loopback shaping. |\n"
-          if marker not in text:
+          old_head = "CURRENT HEAD SHA: `af48ed80f78beec7a2866a90ce6de35e4cfc86a8` validated production milestone; this ledger commit follows it"
+          new_head = f"CURRENT HEAD SHA: `{prod}` validated production milestone; this ledger commit follows it"
+          if old_head not in text:
+              raise SystemExit("ledger current-head marker not found")
+          text = text.replace(old_head, new_head, 1)
+
+          admission_marker = "- Added bounded network admission shared by primary and discovery nodes: 64 active application connections, separate per-peer authenticated/pre-auth request windows, and separate global authenticated/pre-auth request budgets. Replacement connections for an already known transport are not blocked by the application cap.\n"
+          admission_addition = admission_marker + "- Composed libp2p `connection_limits::Behaviour` into both primary and discovery swarms so pending and established connection floods are rejected before long-lived application state is allocated. Primary transport limits cap pending incoming/outgoing work at 32 each, established incoming at 72, total established at 96, and per-transport-peer connections at 2; discovery uses tighter 24/48/64 bounds with the same per-peer cap.\n- Added a 10-second receiver-challenge lifetime to both network stacks. Silent peers that occupy an authentication slot without proving the application key are disconnected and their pending/authentication state is cleared.\n"
+          if admission_marker not in text:
+              raise SystemExit("ledger admission marker not found")
+          text = text.replace(admission_marker, admission_addition, 1)
+
+          test_marker = "| `cargo test -p swarm-cli --bin swarmcraft --locked` | PASS | `af48ed80f78beec7a2866a90ce6de35e4cfc86a8` | Invite reuse/lifetime and daemon authorization-matrix units green. |\n"
+          test_addition = test_marker + f"| `cargo fmt --all -- --check` | PASS | `{prod}` | Transport-level admission/handshake-lifetime milestone. |\n" + f"| `cargo check -p swarm-network -p swarm-cli --all-targets --locked` | PASS | `{prod}` | Primary/discovery connection-limit behaviours and challenge expiry compile together. |\n" + f"| `cargo clippy -p swarm-network -p swarm-cli --all-targets --locked -- -D warnings` | PASS | `{prod}` | Strict affected-crate lint gate after transport hardening. |\n" + f"| `cargo test -p swarm-network --locked` | PASS | `{prod}` | Full network suite remains green with transport limits and challenge expiry. |\n" + f"| `cargo test -p swarm-cli --bin swarmcraft --locked` | PASS | `{prod}` | CLI/network-facing authorization units remain green. |\n" + f"| impaired `interrupted_quic_transfer_resumes_after_lost_ack` | PASS | `{prod}` | 64 MiB forced-restart/lost-ACK transfer under 15ms±3ms delay, 0.5% loss and 100mbit loopback shaping. |\n"
+          if test_marker not in text:
               raise SystemExit("ledger test marker not found")
-          text = text.replace(marker, additions, 1)
+          text = text.replace(test_marker, test_addition, 1)
+
           text = text.replace("- [ ] explicitly run impaired reconnect/transfer test and scheduled-scale soak equivalent where practical", "- [x] explicitly run impaired reconnect/transfer regression with delay/loss/rate shaping; scheduled multi-GiB soak remains a post-integration acceptance gate")
           text = text.replace("- [ ] exact-head CI/dedicated validation after final independent code change", "- [x] exact-head dedicated Agent 4 validation for all independent network/privacy code")
           text = text.replace(
