@@ -10,14 +10,6 @@ def replace(path: str, old: str, new: str, count: int = 1) -> None:
     p.write_text(text.replace(old, new, count))
 
 
-# Strict Clippy closure for the member gate introduced by the membership hardening.
-daemon = "crates/swarm-cli/src/daemon.rs"
-replace(
-    daemon,
-    "        if descriptor.member(application_peer).map_or(true, |member| member.banned) {\n",
-    "        if descriptor.member(application_peer).is_none_or(|member| member.banned) {\n",
-)
-
 # FINAL-039: world-config history must have an explicit checked successor rather
 # than relying on saturating arithmetic at u64::MAX.
 state = "crates/swarm-storage/src/state.rs"
