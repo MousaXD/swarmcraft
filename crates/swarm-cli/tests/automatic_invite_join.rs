@@ -146,8 +146,8 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
     let mut membership = MembershipRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
-        epoch: 1,
-        sequence: 1,
+        epoch: 0,
+        sequence: 0,
         previous_membership_hash: None,
         members: descriptor.members.clone(),
         authority_peer_id: a.identity.peer_id(),
@@ -195,6 +195,14 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
     };
     epoch.signature = a.identity.sign(&epoch.signing_bytes().unwrap());
     a.storage.save_epoch_record(&epoch).unwrap();
+
+    let mut promoted_membership = membership.clone();
+    promoted_membership.epoch = 1;
+    promoted_membership.sequence = 1;
+    promoted_membership.previous_membership_hash = Some(membership.record_hash().unwrap());
+    promoted_membership.signature.clear();
+    a.identity.sign_membership(&mut promoted_membership).unwrap();
+    a.storage.save_membership_record(&promoted_membership).unwrap();
 
     // Seed the exact backend diagnostics snapshot that ordinary invite creation
     // consumes. No --bootstrap argument is supplied below.
