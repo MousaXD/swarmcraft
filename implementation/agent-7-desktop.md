@@ -2,13 +2,15 @@
 
 ## Status
 
-STATUS: NOT STARTED
+STATUS: IN PROGRESS
 
 BRANCH: `fix/agent-7-desktop`
 
 STARTING SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
 
-CURRENT HEAD SHA: pending
+BRANCH BASE SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` (`integration/audit-remediation-v1`; implementation-ledger-only commit on top of the production starting SHA)
+
+CURRENT HEAD SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` at work start; milestone commits are recorded below as they are pushed
 
 INTEGRATED SHA: pending
 
@@ -29,6 +31,12 @@ Read `audits/FINAL-AUDIT.md` and Auditor 8 Desktop UX before editing.
 ## Dependencies
 
 Required before starting: none for the initialization and contract work.
+
+Dependency state verified at campaign start:
+
+- Agent 5 (`implementation/agent-5-supply-chain.md`): `NOT STARTED`; provider staging/Tauri contract may change later, so Agent 7 must not guess its future payload.
+- Agent 6 (`implementation/agent-6-runtime.md`): `NOT STARTED`; authoritative runtime support-matrix UX contract does not exist yet.
+- Agent 9 (`implementation/agent-9-recovery-wake.md`): `BLOCKED ON AGENTS 1 + 6`; recovery/wake UX coordination cannot be finalized yet.
 
 Coordinate with:
 
@@ -68,13 +76,20 @@ Do not duplicate backend security checks in frontend as the sole defense.
 
 ## Work completed
 
-None yet.
+### Campaign start / audit intake
+
+- Verified the requested `implementation/agent-7-consensus.md` does not exist; the master ledger assigns Agent 7 to `implementation/agent-7-desktop.md` and branch `fix/agent-7-desktop`.
+- Read `implementation/README.md`, `audits/FINAL-AUDIT.md`, Auditor 8 `audits/08-desktop-ux.md`, all dependency ledgers named above, repository `AGENTS.md`, and the required Desktop UI quality/design skills.
+- Verified the production campaign base and the implementation integration head differ only by the implementation ledger commit.
+- Verified no pre-existing `fix/agent-7-desktop` remote branch existed before this session; created it from exact integration head `a9736b159d9e9618a3ed8515c20e93f92c1453cb` without rebasing or discarding work.
+- Confirmed the audited defects remain present in the production baseline: invalid `insertBefore` launcher initialization, missing Import catalog Tauri booleans, post-create local-mod failure conflation, wrong exact-World-ID status target, stale injected component classes, and inaccurate Stop-world copy.
 
 ## Tests run
 
 | Test | Result | Commit/SHA | Notes |
 |---|---|---|---|
-| None yet | - | - | - |
+| Repository/audit state verification | PASS | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | Production tree is campaign base plus ledger-only integration commit; Agent 7 branch did not previously exist. |
+| Source/audit contract review | PASS | `b4bab08562cf0eb53763674407375b023e1d0858` | Reconfirmed A8-001 through A8-007 against launcher/index source. |
 
 ## Required validation before handoff
 
@@ -91,7 +106,10 @@ None yet.
 
 ## Blockers
 
-None for initial work. Recovery/wake UX coordination waits on Agent 9.
+- No blocker for Agent 7-owned initialization, Import-contract, partial-success, status/copy/component, browser-smoke, render, and keyboard work.
+- Agent 5 must define and land the server-owned provider staging contract before the corresponding frontend payload can be finalized.
+- Agent 6 must define and land the authoritative runtime support matrix before Agent 7 can add final tuple-source contract coverage.
+- Agent 9 remains blocked on Agents 1 + 6, so FINAL-023/FINAL-024 recovery/wake UX coordination is not currently implementable.
 
 ## Handoff
 
