@@ -38,7 +38,7 @@ jobs:
           else
             python3 scripts/check_release_version.py
           fi
-      - name: Regression: mismatched release tag must fail closed
+      - name: Mismatched release tag must fail closed
         shell: bash
         run: |
           set -euo pipefail
@@ -46,7 +46,7 @@ jobs:
             echo 'version guard incorrectly accepted a mismatched tag' >&2
             exit 1
           fi
-      - name: Regression: missing production signing credentials must fail closed
+      - name: Missing production signing credentials must fail closed
         shell: bash
         run: |
           set -euo pipefail
@@ -63,7 +63,7 @@ jobs:
             echo 'production credential policy incorrectly accepted missing credentials' >&2
             exit 1
           fi
-      - name: Regression: complete production signing credential set is accepted
+      - name: Complete production signing credential set is accepted
         shell: bash
         env:
           WINDOWS_CERTIFICATE_BASE64: test-only
