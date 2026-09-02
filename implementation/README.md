@@ -130,8 +130,8 @@ Do not hide progress only in commit messages.
 
 | Agent | Domain | Status | Branch | Exact Head | Integrated | Notes |
 |---|---|---|---|---|---|---|
-| 1 | Consensus configuration safety | NOT STARTED | `fix/agent-1-consensus` | - | No | Wave 1 |
-| 2 | Protocol authorization/history | BLOCKED ON AGENT 1 | `fix/agent-2-protocol` | - | No | Wave 2 |
+| 1 | Consensus configuration safety | INTEGRATED | `fix/agent-1-consensus` | `67493374544d91ad7bbb36be17e9312adb5654f6` | Yes | Exact-head run `33619420045` SUCCESS; merge `a0e0dec659d0b1eb21f9be34c44730edc6ff3984` |
+| 2 | Protocol authorization/history | NOT STARTED — UNBLOCKED | `fix/agent-2-protocol` | - | No | Wave 2; branch from newest integration head |
 | 3 | Storage transactional integrity | NOT STARTED | `fix/agent-3-storage` | - | No | Wave 1 |
 | 4 | Network authentication/privacy | NOT STARTED | `fix/agent-4-network` | - | No | Wave 1 |
 | 5 | Package/provider security | NOT STARTED | `fix/agent-5-supply-chain` | - | No | Wave 1 |
@@ -244,6 +244,19 @@ After every integration, update this README with:
 - resulting integration head SHA
 - validation run/results
 - conflicts resolved
+
+### Integration history
+
+#### Agent 1 — Consensus configuration safety
+
+- Integrated source production SHA: `67493374544d91ad7bbb36be17e9312adb5654f6`
+- Source ledger head: `8bcbef2bb24478c5a9938872643c7103ba8a4573` (docs-only after validated production SHA)
+- Integration PR: `#63`
+- Integration commit/resulting production integration head: `a0e0dec659d0b1eb21f9be34c44730edc6ff3984`
+- Validation: Agent 1 exact-head regression run `33619420045` — SUCCESS on `67493374544d91ad7bbb36be17e9312adb5654f6`
+- Merge-tree proof: comparing Agent 1 ledger head `8bcbef2...` to integration commit `a0e0dec...` changes only `implementation/agent-10-final-acceptance.md`; no Agent 1 production path differs from the validated branch tree.
+- Conflicts resolved: none. The integration branch's only divergence since the common campaign-plan base was the Agent 10 dependency-gate ledger, so GitHub produced a clean two-parent merge without production conflict.
+- Deferred composed proof: Agent 3 cross-process recovery-promise/non-equivocation and production transport/restart composition remains required when Agent 3 is integrated. This is not unfinished Agent 1-owned work and does not block Agent 2 from starting from the newest integration head.
 
 ## Final acceptance and re-audit
 
