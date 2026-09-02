@@ -26,6 +26,8 @@ jobs:
       - name: Focused invite canonical-genesis regressions
         run: |
           cargo test -p swarm-cli --bin swarmcraft invite::tests:: --locked
+      - name: Focused automatic invite join regression
+        run: cargo test -p swarm-cli --test automatic_invite_join --locked
       - name: Format
         run: cargo fmt --all -- --check
       - name: Workspace check
