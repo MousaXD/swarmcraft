@@ -2,7 +2,7 @@
 
 ## Status
 
-STATUS: IN PROGRESS
+STATUS: READY FOR INTEGRATION
 
 BRANCH: `fix/agent-1-consensus`
 
@@ -10,9 +10,11 @@ STARTING SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
 
 BRANCH CREATION SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb`
 
-CURRENT HEAD SHA: `d6d1e0e6cb17df2cf9f726a7faa1ecf400908919` (Milestone 4 closure staging head; final self-cleaned production SHA pending green validation)
+FINAL PRODUCTION SHA: `67493374544d91ad7bbb36be17e9312adb5654f6`
 
-INTEGRATED SHA: pending
+FINAL EXACT-HEAD VALIDATION RUN: `33619420045` — SUCCESS
+
+INTEGRATED SHA: pending integration into `integration/audit-remediation-v1`
 
 ## Mission
 
@@ -28,38 +30,23 @@ Repair the canonical voter-set and authority-safety model so supported partition
 
 ## Audit inputs read
 
-- `implementation/README.md` from `integration/audit-remediation-v1`
+- `implementation/README.md`
 - this ledger
 - `audits/FINAL-AUDIT.md` from `audit/final-integration-report`
 - `audits/02-authority-consensus.md` from `audit/authority-consensus`
 
-The final audit maps Agent 1 to FINAL-001, FINAL-002, FINAL-006, FINAL-039, and FINAL-045. The authority audit provides the concrete AC-01/02/03/06/07 scenarios. AC-05 duplicate-process non-equivocation is coordinated with Agent 3 storage and is not silently claimed as an Agent 1 storage implementation.
-
-## Dependencies
-
-Required before starting: none.
-
-Dependency heads consumed: none.
-
-Coordination dependency for final integration:
-
-- Agent 3 storage owns OS-backed per-world locking/non-equivocation. Its ledger records a two-process conflicting recovery-promise regression on `fix/agent-3-storage`; Agent 1 must be integrated together with that storage primitive before the composed product can claim cross-process atomic recovery promises.
-
-Downstream dependencies:
-
-- Agent 2 Protocol waits for Agent 1 integration.
-- Agent 9 Recovery/Wake waits for Agent 1 and Agent 6 integration.
+The final audit maps Agent 1 to FINAL-001, FINAL-002, FINAL-006, FINAL-039, and FINAL-045. The authority audit provides the concrete AC-01/02/03/06/07 scenarios. Agent 3 owns the cross-process storage-lock/non-equivocation primitive and its composed cross-process proof; Agent 1 does not claim that work.
 
 ## Ownership boundaries
 
-Primary ownership:
+Primary ownership completed here:
 
 - `crates/swarm-consensus`
 - authority/recovery/membership quorum logic in `crates/swarm-cli`
-- consensus-linked protocol/storage call sites only as needed
-- process/integration tests for elections, leases, recovery, partitions, membership transitions
+- consensus-linked protocol/storage call sites needed to make the safety model fail closed
+- process/integration tests for elections, leases, recovery, partitions, membership transitions, and counter exhaustion
 
-Do not redesign package providers, Desktop UX, runtime installation, or Agent 3's storage locking model.
+No package-provider, Desktop UX, runtime-installation, Agent 2, or unrelated feature work was started.
 
 ## Implementation checklist
 
@@ -70,24 +57,26 @@ Do not redesign package providers, Desktop UX, runtime installation, or Agent 3'
 - [x] Remove unsafe automatic writable Solo fallback after unclean multi-member quorum loss.
 - [x] Preserve safe single-member quorum-of-one behavior while rejecting unproven multi-member Solo transitions.
 - [x] Make higher recovery rounds preserve the previously accepted candidate/value for the target generation.
-- [ ] Confirm composed cross-process recovery-promise non-equivocation after Agent 3 storage integration; Agent 3 owns the OS-lock implementation/test.
-- [x] Replace Agent 1-owned security-significant next-generation/history saturation/wrap paths with checked fail-closed exhaustion behavior in the Milestone 4 closure transform; final validation pending.
-- [x] Add 3-peer and 5-peer divergent-membership/partition process regressions in the Milestone 4 closure transform; final validation pending.
-- [x] Add 3-peer and 5-peer Solo-enabled unclean-quorum-loss versus majority-recovery regressions; final validation pending.
-- [x] Add recovery candidate crash/resume after certificate persistence coverage through `recovery_successor_dies`; final validation pending.
-- [x] Add MAX-1/MAX generation boundary tests, including legacy migration/simulator exhaustion closure; final validation pending.
+- [x] Replace Agent 1-owned security-significant next-generation/history saturation, raw overflow, and wrap paths with checked fail-closed exhaustion behavior.
+- [x] Add 3-peer and 5-peer divergent-membership/partition process regressions.
+- [x] Add 3-peer and 5-peer Solo-enabled unclean-quorum-loss versus majority-recovery regressions.
+- [x] Add recovery candidate crash/resume after certificate persistence coverage through `recovery_successor_dies`.
+- [x] Add MAX-1/MAX generation and snapshot-history boundary regressions.
+- [x] Add live joint-membership replication coverage.
+- [x] Compile every `swarm-cli` integration test on the final production SHA.
+- [x] Replace the old self-modifying regression workflow with a read-only exact-event-SHA gate.
+- [x] Remove committed Python bytecode/generated artifacts and ignore future `__pycache__` / `.pyc` output.
 
-## Work completed
+## Milestones
 
 ### Milestone 1 — generation/recovery/Solo fencing
 
 Implementation commit: `8ee2f81fa43a30deb196aeb85364fb13840928f2`
 
-- Added `AuthorityGeneration::checked_next()` and exhaustion errors/tests.
-- Converted core crash-recovery, recovery promotion, Solo-to-quorum, inbound epoch, recovery round and canonical sequence paths to checked arithmetic.
+- Added `AuthorityGeneration::checked_next()` with fail-closed exhaustion.
+- Converted core crash-recovery, recovery promotion, Solo-to-quorum, inbound epoch, recovery round, and canonical sequence paths to checked arithmetic.
 - Removed unsafe automatic writable Solo fallback on multi-member quorum loss.
-- Kept single-member worlds writable through their normal quorum-of-one rule.
-- Rejected received multi-member Solo transitions without a future explicit clean-relinquishment proof.
+- Rejected unproven multi-member Solo transitions.
 - Strengthened durable recovery promises so higher rounds cannot switch the accepted candidate/value.
 
 ### Milestone 2 — joint-membership protocol and durable prepare
@@ -95,7 +84,7 @@ Implementation commit: `8ee2f81fa43a30deb196aeb85364fb13840928f2`
 Implementation commit: `b69b9e210ab217ddf84d119b2d4dd9a424ac7f41`
 
 - Added signed/hash-bound membership proposal/vote/certificate records.
-- Added joint old+new majority validation with 3→5, 5→3 and 1→2 unit regressions.
+- Added joint old+new majority validation with 3→5, 5→3, and 1→2 regressions.
 - Added durable membership promises and persisted membership certificates.
 - Added restart-safe conflicting-prepare rejection.
 - Aligned shared consensus recovery evaluation with production value locking.
@@ -111,83 +100,93 @@ Implementation commit: `e1a3dd09d24ef12a14f23af1507650dc770c0004`
 - Prevented legacy direct membership delivery from bypassing voter-set consensus.
 - Added live 1→2 membership replication and fixed the late-vote-after-commit race.
 
-### Milestone 4 — adversarial partition/convergence/counter closure
+### Milestone 4 — adversarial partition, convergence, and counter closure
 
-Closure staging commits through `d6d1e0e6cb17df2cf9f726a7faa1ecf400908919`.
+Hardening production commit: `4b1fed01171ced3b30750882a58d3d0242489920`
 
-Staged behavior/test closure:
+Closure/safety production commit: `67493374544d91ad7bbb36be17e9312adb5654f6`
 
 - Added 3-peer and 5-peer membership partition campaigns.
-- Added 3-peer and 5-peer Solo-enabled unclean-quorum-loss campaigns, proving a minority does not fall back to writable Solo and a legitimate majority can recover.
-- Added 5→3 stale removed-voter regression: a voter that durably prepared the shrink remains fenced in a stale old majority and later receives the exact committed revocation certificate on reconnect.
-- Changed committed membership dissemination to notify the union of old and new voter sets so removed prepared voters converge and clear their prepare.
-- Prevented historical membership certificates from rolling back a newer same-world membership generation.
-- Completed production migration counter closure for wake epoch/fencing, snapshot epoch/sequence and membership sequence advancement.
-- Aligned legacy consensus migration/simulator generation arithmetic with fail-closed checked exhaustion and added MAX regressions.
-- Closed known `-D warnings` lint debt in membership response handling/lifetimes.
-- Corrected the 5-peer majority test topology from a star to a real three-voter mesh; the previous failure was a fixture liveness artifact because a deterministic leaf candidate could see only 2/5 voters.
+- Added 3-peer and 5-peer Solo-enabled unclean-quorum-loss campaigns proving a minority cannot become writable while a legitimate majority can recover.
+- Added stale removed-voter convergence/revocation coverage.
+- Disseminated committed membership to the union of old and new voter sets so removed prepared voters converge and clear their prepare.
+- Prevented historical membership certificates from rolling back newer same-world membership generations.
+- Closed checked-arithmetic gaps for wake epoch/fencing, snapshot epoch/sequence, membership/config sequence, simulator recovery generation, and storage snapshot numbering.
+- Added explicit MAX boundary regressions for authority generation and snapshot numbering.
+- Removed 13 accidentally committed `implementation/__pycache__/*.pyc` artifacts and added repository ignore rules.
+- Replaced the previous write-back regression workflow with a read-only exact-head workflow that checks the GitHub event SHA and runs the complete Agent 1 closure matrix.
 
-Validation evidence so far:
+## Final source counter audit
 
-- Run `33613348638` reached the process partition suite after workspace check, consensus tests, CLI library tests and live join all passed.
-- In that run, 4/5 adversarial partition tests passed. The sole failure was the five-peer majority-recovery timeout caused by the star fixture topology; no unsafe permit was observed on the minority.
-- The stronger closure worker at staging head `d6d1e0e6...` now includes workspace check, `-D warnings` clippy, consensus tests, CLI tests, live membership, full partition suite, `recovery_successor_dies`, all CLI-test compilation, and self-cleaned production commit only if every step is green.
+Final production SHA `67493374544d91ad7bbb36be17e9312adb5654f6` passed the automated canonical-counter source audit in run `33619420045`.
 
-## Counter audit disposition
+Canonical authority/history counters now fail closed instead of saturating or wrapping. This includes authority epoch/fencing generations, membership/config sequences, snapshot generation/history numbering, recovery generation, and the legacy simulator/migration paths touched by Agent 1.
 
-Agent 1-owned canonical generation/history increments have been converted to checked failure in the Milestone 4 closure staging transform. Remaining saturation identified in Agent 1 areas is intentionally non-canonical liveness/transport arithmetic such as permit heartbeat counters, byte resume offsets, monotonic lease deadlines, and test-time counters. Final transformed-source verification remains required after the worker commits.
+Remaining saturation in Agent 1-adjacent code is non-canonical liveness/transport arithmetic, such as in-memory permit heartbeat progression, blob resume offsets, and monotonic lease deadlines. Those values do not mint a new canonical authority/history generation.
 
-## Tests run
+The closure audit also found and fixed one previously missed raw overflow path in `Storage::next_snapshot_number()`: `snapshot_number + 1` is now checked and returns a fail-closed `CounterExhausted` error at `u64::MAX`.
 
-| Test | Result | Commit/SHA | Notes |
-|---|---|---|---|
-| Audit/source review | PASS | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | Required implementation/audit inputs read. |
-| Milestone 1 format/check/consensus+storage/CLI lib/CLI compile | PASS | `8ee2f81fa43a30deb196aeb85364fb13840928f2` | Run `33580807303`. |
-| Milestone 2 format/check/protocol+consensus+storage | PASS | `b69b9e210ab217ddf84d119b2d4dd9a424ac7f41` | Run `33581156235`. |
-| Milestone 3 format/check/protocol+consensus+storage+network/CLI lib/live join/CLI compile | PASS | `e1a3dd09d24ef12a14f23af1507650dc770c0004` | Run `33582595124`. |
-| Milestone 4 workspace check | PASS | transformed `f7e7ef0f...` staging tree | Run `33613348638`. |
-| Milestone 4 consensus suite | PASS | transformed `f7e7ef0f...` staging tree | 29 unit tests plus chaos/failover/migration/preview/solo-history suites green. |
-| Milestone 4 CLI library | PASS | transformed `f7e7ef0f...` staging tree | 48 tests green. |
-| Milestone 4 live joint membership | PASS | transformed `f7e7ef0f...` staging tree | Live join green. |
-| Milestone 4 adversarial partition suite | PARTIAL | transformed `f7e7ef0f...` staging tree | 4/5 green; five-peer majority liveness fixture corrected for rerun. |
-| Final closure worker | RUNNING/QUEUED | `d6d1e0e6cb17df2cf9f726a7faa1ecf400908919` staging head | Run `33614048765`; includes clippy and all required Agent 1 process gates. |
+## Exact-head validation
 
-## Required validation before handoff
+### Pre-closure hardening evidence
 
-- [ ] final-head format/check
-- [ ] final-head clippy `-D warnings`
-- [ ] final-head consensus tests
-- [ ] final-head CLI library/live membership tests
-- [ ] final-head 3-peer/5-peer adversarial partition suite
-- [ ] final-head recovery certificate crash/resume test
-- [ ] final-head all CLI integration-test compilation
-- [ ] persistent exact-head Agent 1 regression gate
-- [ ] final transformed-source counter audit
+Run `33615103885` — SUCCESS. It validated the hardened production tree that became `4b1fed01171ced3b30750882a58d3d0242489920`, including workspace check, `-D warnings` clippy, consensus tests, CLI library tests, live membership, the full partition/Solo campaign, recovery successor crash/resume, and CLI integration-test compilation.
 
-## Blockers
+That worker also exposed accidental committed Python bytecode, which was removed in the final production commit instead of being accepted as handoff state.
 
-No product implementation blocker. Local checkout execution is unavailable in this chat, so exact executable validation uses branch-scoped GitHub Actions workers. An older concurrent Milestone 4 worker is still in flight; this ledger-only commit intentionally advances the branch without triggering the worker so an older checkout cannot fast-forward-push over the stronger closure validation head.
+### Final production exact-head gate
 
-## Remaining work
+Run `33619420045` — SUCCESS on exact SHA `67493374544d91ad7bbb36be17e9312adb5654f6`.
 
-1. Let the stronger Milestone 4 closure worker validate and self-clean the branch; reject/reconcile any older worker push.
-2. Fix any exact clippy/process failure without weakening adversarial assertions.
-3. Verify final transformed sources contain no canonical generation/history saturation/wrap paths.
-4. Require the persistent Agent 1 exact-head regression gate to pass.
-5. Record the exact validated production head and Agent 3 integration dependency, then change this ledger to the truthful terminal state.
+| Validation | Result |
+|---|---|
+| Exact event SHA checkout assertion | PASS |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo check --workspace --all-targets` | PASS |
+| `cargo clippy -p swarm-protocol -p swarm-consensus -p swarm-storage -p swarm-network -p swarm-cli --all-targets -- -D warnings` | PASS |
+| Canonical counter saturation/wrap/raw-`+1` source audit | PASS |
+| `cargo test -p swarm-consensus` | PASS |
+| `cargo test -p swarm-cli --lib` | PASS |
+| Authority-generation MAX exhaustion regression | PASS |
+| Snapshot-number MAX exhaustion regression | PASS |
+| `live_join_replication` | PASS |
+| `consensus_partition_safety` — all 3-peer/5-peer partition and Solo-loss cases | PASS |
+| `three_daemon_recovery` | PASS |
+| `recovery_successor_dies` | PASS |
+| `cargo test -p swarm-cli --tests --no-run` | PASS |
+
+All Agent 1-owned implementation and exact-head validation gates are green.
+
+## Remaining Agent 3 cross-process integration dependency
+
+This is intentionally not claimed as Agent 1-owned completion:
+
+- Agent 3 must provide/retain OS-backed per-world locking and cross-process non-equivocation for conflicting durable recovery promises.
+- Composed integration must prove the final recovery certificate travels through the production transport/daemon path to the successor process and that a successor crash/restart converges without dual authority.
+- The Agent 1 `three_daemon_recovery` and `recovery_successor_dies` regressions are green, but they do not replace Agent 3's storage/process atomicity proof or the final composed integration acceptance.
+
+This dependency belongs to integration/Agent 3 and does not leave unfinished Agent 1-owned production work.
+
+## Known integration conflict areas
+
+Reconcile rather than overwrite when integrating:
+
+- `crates/swarm-cli/src/daemon.rs` — overlaps Agent 3 storage/network integration and Agent 9 recovery runtime work.
+- `crates/swarm-cli/src/migration.rs` — overlaps Agent 3/Agent 9 migration and recovery call sites.
+- `crates/swarm-storage/src/lib.rs` and consensus-linked storage state — overlaps Agent 3 storage ownership; preserve the checked snapshot-number exhaustion fix.
+- `crates/swarm-network/**` call sites used by daemon membership/recovery replication — overlaps Agent 4 network work.
+- consensus/recovery protocol state used by membership/recovery certificates — coordinate with Agent 2 protocol integration.
+
+Do not resolve these by taking one branch wholesale. Preserve Agent 1's quorum, fencing, committed-membership, value-locking, and checked-counter invariants while incorporating the downstream owner changes.
 
 ## Handoff
 
-READY FOR INTEGRATION: NO
+READY FOR INTEGRATION: YES
 
-Exact final head: pending final closure validation
+Validated production SHA: `67493374544d91ad7bbb36be17e9312adb5654f6`
 
-Required integration order: before Agent 2; before Agent 9 together with Agent 6.
+Target: `integration/audit-remediation-v1`
 
-Known conflict areas: `crates/swarm-cli/src/daemon.rs`, `crates/swarm-cli/src/migration.rs`, `crates/swarm-consensus`, consensus/recovery protocol state, membership persistence semantics, and Agent 3's per-world storage lock integration.
+Post-merge composed validation still required: Agent 1 exact-head matrix plus Agent 3 cross-process recovery-promise/non-equivocation and production transport/restart proof.
 
-Post-merge validation required: full authority/recovery process suite including the new partition campaign plus Agent 3 cross-process promise regression.
-
-## Agent final statement
-
-NOT COMPLETE
+READY FOR INTEGRATION
