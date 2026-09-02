@@ -267,6 +267,14 @@ impl Storage {
         let path = snapshots.join(format!("{:020}.postcard", manifest.snapshot_number));
         let attempted_hash = manifest.manifest_hash()?;
 
+        // Lock order is GC then world transaction. GC currently reads canonical
+        // snapshot state while holding its lock, so taking the world lock first
+        // would create a lock-order inversion. The existing-slot check is also
+        // serialized under this lock: two publishers may both observe the slot
+        // absent before commit, but after the first publishes the exact manifest
+        // the second must become an idempotent success rather than a history conflict.
+        let _gc_guard = self.lock_blob_gc_for_snapshot_commit(manifest.world_id)?;
+
         // Exact historical duplicates are idempotent, but a numbered slot is
         // immutable forever once present. Validate the canonical namespace first
         // so an interrupted orphan above the head can never be blessed as a duplicate.
@@ -283,17 +291,12 @@ impl Storage {
                 });
             }
             if let Some(publication) = publication {
-                let _gc_guard = self.lock_blob_gc_for_snapshot_commit(manifest.world_id)?;
                 self.release_snapshot_publication_pins(manifest.world_id, publication.publication_id())?;
             }
             return Ok(());
         }
 
         let bytes = postcard::to_allocvec(manifest)?;
-        // Lock order is GC then world transaction. GC currently reads canonical
-        // snapshot state while holding its lock, so taking the world lock first
-        // would create a lock-order inversion.
-        let _gc_guard = self.lock_blob_gc_for_snapshot_commit(manifest.world_id)?;
         let transaction = self.begin_snapshot_commit_transaction(manifest, fence)?;
         let publish = publish_immutable_manifest(&path, &bytes);
         if let Err(error) = publish {
@@ -646,11 +649,7 @@ fn test_after_complete_blob_published(_world: WorldId) {}
 mod tests {
     use super::*;
     use std::fs::OpenOptions;
-    use std::{
-        io::{Seek, SeekFrom},
-        sync::mpsc,
-        thread,
-    };
+    use std::{sync::mpsc, thread};
     use swarm_protocol::PeerId;
 
     fn context(world: WorldId) -> SnapshotContext {
