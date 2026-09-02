@@ -32,7 +32,9 @@ impl Storage {
 
     pub fn save_membership_record(&self, record: &MembershipRecordV1) -> Result<(), StorageError> {
         record.validate_semantics()?;
-        if let Ok(current) = self.load_membership_record(record.world_id) {
+        let membership_path = self.world_protocol_path(record.world_id, "membership.postcard");
+        if membership_path.exists() {
+            let current = self.load_membership_record(record.world_id)?;
             if record == &current {
                 return Ok(());
             }
@@ -58,7 +60,8 @@ impl Storage {
                 return Err(StorageError::WorldMetadataMismatch);
             }
         } else {
-            if record.sequence != 0 || record.previous_membership_hash.is_some() {
+            let certified_bootstrap = self.certified_membership_bootstrap(record)?;
+            if !certified_bootstrap && (record.sequence != 0 || record.previous_membership_hash.is_some()) {
                 return Err(StorageError::WorldMetadataMismatch);
             }
             if let Ok(epoch) = self.load_epoch_record(record.world_id) {
@@ -68,12 +71,40 @@ impl Storage {
                 {
                     return Err(StorageError::WorldMetadataMismatch);
                 }
-            } else if record.epoch != 0 {
+            } else if record.epoch != 0 && !certified_bootstrap {
                 return Err(StorageError::WorldMetadataMismatch);
             }
         }
         let bytes = postcard::to_allocvec(record)?;
-        atomic_write(&self.world_protocol_path(record.world_id, "membership.postcard"), &bytes)
+        atomic_write(&membership_path, &bytes)
+    }
+
+    fn certified_membership_bootstrap(&self, record: &MembershipRecordV1) -> Result<bool, StorageError> {
+        let certificate_path = self.world_protocol_path(record.world_id, "membership-certificate.postcard");
+        let pending_join_path = self.world_protocol_path(record.world_id, "pending-join.postcard");
+        if !certificate_path.exists() || !pending_join_path.exists() {
+            return Ok(false);
+        }
+
+        let certificate = self.load_membership_certificate(record.world_id)?;
+        let pending_join = self.load_pending_join(record.world_id)?;
+        let metadata = self.load_world(record.world_id)?;
+        if !certificate.proposal.validate_shape()? {
+            return Ok(false);
+        }
+
+        Ok(certificate.proposal.proposed == *record
+            && pending_join.world_id == record.world_id
+            && pending_join.invite.world_id == record.world_id
+            && pending_join.invite.genesis == metadata.genesis
+            && pending_join.invite.inviter_peer_id == certificate.proposal.previous.authority_peer_id
+            && pending_join.invite.inviter_public_key == certificate.proposal.previous.authority_public_key
+            && certificate
+                .proposal
+                .proposed
+                .members
+                .iter()
+                .any(|member| member == &pending_join.joining_member))
     }
 
     pub fn load_membership_record(&self, world: WorldId) -> Result<MembershipRecordV1, StorageError> {
