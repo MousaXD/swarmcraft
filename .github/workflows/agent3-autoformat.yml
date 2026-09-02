@@ -27,19 +27,19 @@ jobs:
         shell: bash
         run: |
           set +e
-          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings > implementation/agent-3-clippy.txt 2>&1
-          status=$?
-          echo "CLIPPY_EXIT=$status" >> implementation/agent-3-clippy.txt
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings 2>&1 | tee implementation/agent-3-clippy.txt
+          status=${PIPESTATUS[0]}
+          echo "CLIPPY_EXIT=$status" | tee -a implementation/agent-3-clippy.txt
           exit 0
       - name: Commit lockfiles, formatter, and diagnostics
         shell: bash
         run: |
-          if git diff --quiet; then
+          if [[ -z "$(git status --porcelain)" ]]; then
             echo "lockfiles, formatter, and diagnostics unchanged"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add --all
-          git commit -m "chore(agent3): refresh locks and formatted validation state"
+          git commit -m "chore(agent3): refresh locks and validation diagnostics"
           git push origin HEAD:fix/agent-3-storage
