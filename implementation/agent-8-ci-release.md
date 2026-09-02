@@ -16,238 +16,214 @@ BASE RECONCILIATION MERGE: `eee08d8e545bb963e9091572a69a2966a84da82a`
 
 IMPLEMENTATION SOURCE HEAD: `6ca930e8177d9104246b40f506b5abef485c7386`
 
+VALIDATED PR HEAD BEFORE THIS LEDGER-ONLY UPDATE: `1ef2ab283c45bb3f7d39dc45422e14891eb30aba`
+
+VALIDATED PR MERGE CANDIDATE: `a691c41dc4cbcf73a7837fd87c6d6aa37c7772a6`
+
 INTEGRATED SHA: pending
 
 ## Mission
 
-Make release publication mean that the exact published SHA passed the project’s required validation gates, while reducing workflow supply-chain privilege and making current-main validation authoritative for all shipped crates.
+Make release publication mean that the exact published SHA passed the project’s required validation gates, reduce workflow supply-chain privilege, and make current validation authoritative for every shipped crate and package path.
 
 ## Findings owned
 
 - FINAL-021 — publication not gated on successful same-SHA validation
 - FINAL-022 — mutable GitHub Action refs with write-capable workflow tokens
 - FINAL-035 — excluded Desktop/provider direct lint/test blind spots
-- FINAL-036 — release identity/reproducibility controls: tag/version binding, immutable Fabric build tooling, locked Desktop packaging, production signing/notarization policy
+- FINAL-036 — release identity/reproducibility controls, Desktop locks, Fabric tooling, signing/notarization
 - FINAL-038 — repository governance truth / required-check enforcement
 - FINAL-044 — Desktop dependency audit and validation-evidence lifecycle
 - FINAL-046 — obsolete validation PR/branch/workflow cleanup
 
-## Audit inputs read
+## Dependencies consumed
 
-- `implementation/README.md` from `integration/audit-remediation-v1`
-- this ledger (`implementation/agent-8-ci-release.md`; no `implementation/agent-8-consensus.md` exists)
-- `audits/FINAL-AUDIT.md` from `audit/final-integration-report`
-- `audits/09-ci-release.md` from `audit/ci-release`
-- repository-wide `AGENTS.md`
+Agent 8 had no implementation dependency gate.
 
-The final audit and Auditor 9 agree on the core failure: installer/release publication was not coupled to completed validation of the exact published SHA. Auditor 9 additionally supplied the action-pin, excluded-crate, tag/version, Loom, Desktop lock, signing, retention, and historical-workflow failure scenarios addressed below.
+The remediation base advanced during the work only through Agent 10 ledger changes. `integration/audit-remediation-v1` at `f6ff3d4659fd69cef63e03d3cbf573c0490d6826` was reconciled into Agent 8 at merge commit `eee08d8e545bb963e9091572a69a2966a84da82a`; no Agent 8 production/workflow changes were overwritten.
 
-## Dependencies
+## Implementation completed
 
-Required before starting: none.
+### Authoritative exact-SHA validation
 
-Dependency heads consumed: none.
+- Added reusable `.github/workflows/required-validation.yml` with terminal status `Required validation gate`.
+- Required gate aggregates Core CI, specialist provider/catalog validation, release identity/policy, CI governance regressions, live player journey, and optionally the multi-GiB network soak.
+- Release-producing callers require the network soak.
+- Added caller/input-scoped concurrency so superseded validation attempts cancel without cross-cancelling the separate soak-enabled release-candidate gate.
 
-The remediation base advanced during Agent 8 work only through Agent 10 ledger updates. `integration/audit-remediation-v1` at `f6ff3d4659fd69cef63e03d3cbf573c0490d6826` was reconciled into this branch at merge commit `eee08d8e545bb963e9091572a69a2966a84da82a`; no Agent 8 production/workflow changes were overwritten.
+### Release publication gating
 
-## Ownership boundaries
+- `main-installers.yml` waits for Required Validation with soak before any package/publish path.
+- `release.yml` reruns Required Validation for the exact tag target with exact `vX.Y.Z` binding and soak.
+- Final publishers depend on validation plus every required package job.
+- Rolling `main-latest` publication is limited to `refs/heads/main`; PR validation builds packages but skips publication.
+- Negative execution evidence proves failed and unresolved validation cannot fall through to publication.
 
-Primary ownership:
+### Supply-chain hardening
 
-- `.github/workflows/*`
-- release/version guard scripts
-- dependency lock validation in CI
-- branch/ruleset policy documentation/configuration where repository capabilities permit
-- release evidence retention policy
-
-Do not hide product test failures by weakening required gates.
-
-## Implementation checklist
-
-- [x] Define one authoritative reusable same-SHA validation gate for release candidates.
-- [x] Make `main-latest` publication wait until every required same-SHA gate completes successfully.
-- [x] Make versioned tag release rerun the full required gate for the exact tag target SHA.
-- [x] Encode and lint the release DAG so packaging/publication cannot bypass required validation.
-- [x] Pin every third-party GitHub Action in active workflows to immutable full commit SHA with human-readable version comments.
-- [x] Default workflow permissions to read; grant `contents: write` only to final publisher jobs that need it.
-- [x] Add direct Desktop Rust lint/tests to authoritative CI.
-- [x] Add direct provider lint/tests to authoritative CI.
-- [x] Add explicit Desktop `Cargo.lock` preflights to authoritative CI and package paths.
-- [x] Force full dependency resolution in lock preflights; do not use `cargo metadata --no-deps` as a lock-currentness proof.
-- [x] Keep package lock preflights cross-platform by selecting an explicit portable shell where output redirection is used.
-- [x] Bind `vX.Y.Z` tag exactly to authoritative app version metadata.
-- [x] Validate shipped component versions/locks, including excluded `swarm-provider` and Desktop lock graph.
-- [x] Replace mutable Fabric Loom snapshot tooling with released Loom `1.17.2` and reject future snapshot coordinates in policy/version checks.
-- [x] Define production release signing/notarization policy and fail closed when required credentials are missing.
-- [x] Keep unsigned builds only on explicitly preview-grade `main-latest` channel.
-- [ ] Add/enable `main` branch/ruleset required-status enforcement for `Required validation gate`. Live repository state does not contain this rule and this connector exposes no mutation operation.
-- [x] Standardize artifact/evidence retention by class in active workflows.
-- [x] Migrate useful legacy Agent validation checks into current CI before removing historical workflow files.
-- [ ] Delete final safe obsolete remote validation branch `ci/discovery-fixture-trigger`. It is proven a strict ancestor of `agent/discovery`, but this connector exposes no ref-deletion operation.
-
-## Work completed
-
-### Release identity and reproducibility
-
-- Aligned excluded `crates/swarm-provider/Cargo.toml` from stale `0.4.0` metadata to application `0.5.0`; the committed Desktop lock already recorded provider `0.5.0`.
-- Reworked `scripts/check_release_version.py` to derive the authoritative application version from the root workspace, validate Desktop/provider/Tauri/Fabric metadata, validate both committed lock graphs, preserve independent wire-protocol versioning, reject snapshot Loom coordinates, and optionally require an exact `v<version>` release tag.
-- Replaced `loom_version=1.17-SNAPSHOT` with released `1.17.2` and added CI/policy rejection of snapshot tooling.
-
-### Authoritative validation
-
-- Converted core CI, release-version validation, live player journey, and network soak into reusable workflows callable against the caller's exact SHA.
-- Added `.github/workflows/required-validation.yml` as the single aggregate gate with terminal job `Required validation gate`.
-- The aggregate gate requires Core CI, migrated specialist validation, version/release identity, CI-governance regressions, and live player journey; release-producing callers additionally require the multi-GiB network soak.
-- Added caller/input-scoped concurrency to Required Validation so superseded attempts cancel without allowing an ordinary PR gate to cancel the separately soak-enabled release-candidate gate.
-- Added `.github/workflows/specialist-validation.yml` and migrated live catalog validation, Modrinth deterministic tests, CurseForge deterministic tests/command registration, and Desktop locked metadata from historical Agent workflows.
-- Added direct Desktop check/clippy/tests and direct provider check/clippy/tests to Core CI.
-- Added a separate Desktop RustSec audit using the committed Desktop lock graph.
-- Fixed Windows Desktop package lock validation after Actions exposed Unix `/dev/null` syntax being interpreted by PowerShell.
-- Strengthened all authoritative Desktop lock-currentness checks after regression testing proved `cargo metadata --locked --no-deps` can accept a changed dependency graph. Active checks now force full dependency resolution.
-- Added deterministic CI governance probes that temporarily mutate the Desktop dependency graph and inject failing tests into excluded Desktop/provider crates; the workflow expects Cargo to reject each negative case.
-
-### Publication control and least privilege
-
-- `main-installers.yml` calls Required Validation with network soak before package jobs; final publication depends on validation plus every package job and is additionally limited to `refs/heads/main`.
-- `release.yml` calls Required Validation for the exact tag target with `release_tag=${{ github.ref_name }}` and network soak before package jobs.
-- Added `scripts/check_release_credentials.py`; production tag releases fail closed unless Windows signing and complete Apple signing/notarization credentials are present.
-- Removed Windows unsigned and macOS ad-hoc fallbacks from production tag releases. The rolling `main-latest` channel remains explicitly preview-grade and documents its unsigned/ad-hoc status.
-- Active workflows default to `contents: read`; only final `publish` jobs in `main-installers.yml` and `release.yml` receive `contents: write`.
+- Pinned active third-party Actions to immutable full commit SHAs with readable version comments.
+- Defaulted workflow permissions to read; only final publisher jobs receive `contents: write`.
 - Publisher checkout disables persisted Git credentials.
+- Added `scripts/check_workflow_policy.py` to reject mutable `uses:` refs, excessive write permissions, publication DAG bypasses, missing tag binding, missing credential policy, and mutable Fabric Loom snapshots.
+- Replaced snapshot Fabric Loom tooling with released `1.17.2` and added policy rejection of snapshot coordinates.
 
-### Supply-chain workflow policy
+### Release identity and production credentials
 
-- Resolved all active third-party Action refs to exact full commit SHAs, including annotated-tag dereferencing for Rust cache and Gradle actions, while retaining human-readable version comments.
-- Added `scripts/check_workflow_policy.py`, executed by the required version gate, to reject mutable external `uses:` refs, missing pin comments, workflow-level/excess `contents: write`, release DAGs that bypass Required Validation/network soak, missing release-tag binding, missing credential policy, and mutable Fabric Loom snapshots.
-- Pinned the scheduled fuzz workflow as well, so the active workflow surface follows the same immutable-action rule.
+- Aligned excluded `swarm-provider` package metadata with application version `0.5.0`.
+- Reworked `scripts/check_release_version.py` to validate app/Desktop/provider/Tauri/Fabric versions, root/Desktop lock graphs, protocol metadata, Fabric tooling, and optional exact release tag.
+- Added `scripts/check_release_credentials.py`.
+- Production tag releases fail closed unless required Windows signing and Apple signing/notarization credentials are complete.
+- Unsigned/ad-hoc output is restricted to the explicitly preview-grade rolling channel.
 
-### Evidence lifecycle and historical cleanup
+### Excluded-crate and lock coverage
 
-- Standardized active artifact retention: ordinary CI packages 7 days, live player journey/main/release staging 14 days, network-soak evidence 30 days.
-- Retired `.github/workflows/agent1-lockfiles.yml`, `agent2-final-validation.yml`, `agent3-curseforge-provider.yml`, and historical `final-ui-screenshots.yml` only after their useful checks were promoted into current validation. Git history and audit references remain preserved evidence.
-- Confirmed historical validation PRs #44, #47, and #49 are closed and unmerged; the old Agent 1/2 validation refs are gone.
-- Confirmed the remaining `ci/discovery-fixture-trigger` ref at `fc52e288730bcdd98eabef3a0eaaf73c7ff92e1c` is a strict ancestor of `agent/discovery`, which is three commits ahead with no divergence. It is safe to delete, but the connector cannot delete refs.
+- Added direct Desktop check, clippy, and tests to authoritative CI.
+- Added direct excluded provider check, clippy, and tests.
+- Added Desktop RustSec audit against the committed Desktop lock graph.
+- Fixed Windows lock preflight shell portability.
+- Strengthened lock-currentness checks to force full dependency resolution after regression testing showed `cargo metadata --locked --no-deps` could accept a changed dependency graph.
+- Added CI governance regressions that mutate the Desktop dependency graph and inject intentionally failing Desktop/provider tests; the aggregate workflow succeeds only when those negative cases are correctly rejected.
 
-### Repository governance inspection
+### Historical validation cleanup and evidence lifecycle
 
-- Live repository ruleset `21764953` (`meow`) is active and contains deletion, non-fast-forward, and code-quality rules only. It contains no required-status-check rule.
-- Direct branch-protection read is inaccessible to this GitHub integration (403), and the available connector exposes ruleset reads but no ruleset/protection mutation action.
-- `docs/RELEASE_GATES.md` records the exact repository-admin change required to make `Required validation gate` a protected required status rather than falsely claiming it is already enabled.
+- Migrated still-useful specialist checks into current authoritative workflows before removing obsolete workflow files.
+- Removed historical `agent1-lockfiles.yml`, `agent2-final-validation.yml`, `agent3-curseforge-provider.yml`, and `final-ui-screenshots.yml` from the active workflow surface.
+- Historical validation PRs #44, #47, and #49 are closed and unmerged; the old Agent 1/2 validation refs are gone.
+- Standardized artifact retention: ordinary CI packages 7 days, live/main/release evidence 14 days, network-soak evidence 30 days.
 
-## Dynamic validation evidence
+## Final dynamic validation evidence
 
-### Publication fails closed
+### Required Validation — GREEN
 
-Main Desktop Installers run `33582275682` provides an executable negative release-DAG proof:
+Run: `33583427402`
 
-- nested `Required validation gate` concluded `failure`;
-- Linux `.deb`, Windows `.exe`, Fabric JAR, and macOS package jobs were cancelled;
-- `Publish rolling main release` was cancelled and did not publish.
+PR head: `1ef2ab283c45bb3f7d39dc45422e14891eb30aba`
 
-This satisfies the required negative assertion that a failed same-SHA gate cannot fall through into rolling publication.
+PR merge candidate executed by the pull-request workflow: `a691c41dc4cbcf73a7837fd87c6d6aa37c7772a6`
 
-While Required Validation is unresolved, the release-producing workflow remains held behind its `validation` reusable job and no publisher can start. Main Desktop Installers runs observed during this campaign remained pending with no downstream publisher while validation was unresolved.
+Result: `SUCCESS`
 
-### Broad green evidence on the latest substantially equivalent executed graph
+Green components include:
 
-Required Validation run `33582275450` on earlier implementation head `bcecd2eac7ae796736fb4edaf490f46586794d5c` reached green for the following substantive gates before its known superseded regression-harness failure:
+- `Required validation gate`
+- CI governance regressions
+  - stale Desktop dependency graph is rejected by full locked resolution
+  - intentionally failing provider test is rejected
+  - intentionally failing Desktop test is rejected
+- specialist catalog/Modrinth/CurseForge checks
+- live clean-machine player journey against official services
+- Rust format/clippy/test matrix on Ubuntu, Windows, and macOS
+- Desktop/provider direct check/clippy/tests
+- root and Desktop RustSec audits
+- QUIC impairment regression
+- fuzz smoke
+- Fabric build and embedded Fabric API verification
+- Linux, Windows, macOS arm64, and macOS x86_64 Desktop packaging
+- release identity/workflow policy, mismatched-tag negative test, missing-signing negative test, and positive credential-set test
 
-- specialist catalog/Modrinth/CurseForge validation;
-- live clean-machine player journey against official services;
-- Fabric server mod build and embedded Fabric API check;
-- process-level acceptance suite;
-- direct Desktop/provider check, clippy, and tests;
-- QUIC impairment regression;
-- fuzz smoke;
-- Rust check/test matrix on Ubuntu, Windows, and macOS;
-- release identity/workflow-policy validation, including tag mismatch and signing-credential negative/positive regressions;
-- root and Desktop RustSec audits;
-- Windows and both macOS Desktop packages.
+### Release-candidate package path with soak — GREEN
 
-The only substantive red on that superseded run is the old stale-lock regression methodology. Its failure exposed that `--no-deps` was an inadequate lock-currentness assertion; Agent 8 then strengthened the active checks and regression to full dependency resolution.
+Main Desktop Installers run: `33583427535`
 
-### Exact implementation source and supersession behavior
+Result: `SUCCESS`
 
-Implementation source head: `6ca930e8177d9104246b40f506b5abef485c7386`.
+The nested exact-SHA Required Validation completed successfully and included `Network soak / Interrupted QUIC multi-GiB soak`, which passed. Downstream Linux `.deb`, Windows `.exe`, both macOS `.dmg` jobs, and the Fabric bridge JAR all succeeded and uploaded artifacts. `Publish rolling main release` was correctly `skipped` because this was a PR, not `refs/heads/main`.
 
-PR validation vehicle: draft PR #61, `fix/agent-8-ci-release` -> `integration/audit-remediation-v1`.
+Evidence artifacts include:
 
-Source-head Required Validation run `33583109333` was accepted by GitHub with the complete expected graph. When the first BLOCKED ledger-only closeout commit was pushed, the newly added concurrency policy correctly superseded that older attempt, cancelling its already-started/pending work. It therefore did not produce complete exact-source-head evidence.
+- network soak evidence, 30-day retention
+- clean-machine live evidence
+- Linux `.deb`
+- Windows `.exe`
+- macOS arm64 `.dmg`
+- macOS x86_64 `.dmg`
+- Fabric JAR
+- ordinary Desktop matrix packages
 
-The documentation-only closeout head then created:
+### Failed-validation publication regression — GREEN
 
-- Required Validation run `33583354093`
-- Main Desktop Installers run `33583354291`
+Main Desktop Installers run `33582275682` exercised the negative DAG:
 
-Those runs were pending/queued when this correction was recorded. They validate the same implementation source tree plus ledger documentation, but no exact-head completion claim is made.
+- nested `Required validation gate` failed;
+- Linux, Windows, macOS, and Fabric package jobs did not succeed;
+- `Publish rolling main release` was cancelled;
+- no rolling release was published.
 
-## Tests / evidence ledger
+### Unresolved-validation publication regression — GREEN
 
-| Test | Result | Exact SHA / run | Notes |
-|---|---|---|---|
-| Required source/audit review | PASS | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | Scope and regression requirements reconciled before production edits. |
-| Latest remediation-base reconciliation | PASS | merge `eee08d8e545bb963e9091572a69a2966a84da82a` | Upstream delta was Agent 10 ledger-only; Agent 8 production tree preserved. |
-| Workflow parser / reusable DAG | PASS | multiple PR runs including `33582275450` | GitHub accepted and executed the reusable workflow graph. |
-| Release identity + workflow policy | PASS | run `33582275450` | Tag mismatch, missing production signing credentials, positive credential set, immutable Action/write-policy checks green. |
-| Direct Desktop/provider lint/tests | PASS | run `33582275450` | Both excluded Rust crates were checked directly. |
-| RustSec root + Desktop | PASS | run `33582275450` | Both lock graphs audited. |
-| Windows package portability | PASS | run `33582275450` | Windows package passed after shell fix. |
-| Rust matrix | PASS | run `33582275450` | Ubuntu, Windows, macOS green. |
-| Fabric + live player journey | PASS | run `33582275450` | Pinned Fabric tooling and live journey green on that source generation. |
-| Failing required validation blocks rolling publication | PASS | Main Installers run `33582275682` | Required gate failed; all package/publish jobs cancelled. |
-| Unresolved validation blocks publisher | PASS | observed Main Installer dependency graphs | Downstream publish remained unavailable while validation was unresolved. |
-| Stale Desktop lock negative regression, old method | FAIL AS DESIGNED DISCOVERY | governance job `100099213583` | Demonstrated `--no-deps` was insufficient; active implementation was strengthened to full resolution. |
-| Full-resolution stale-lock regression | PENDING | source run `33583109333` superseded | Source attempt was cancelled by the intentional concurrency policy after a ledger-only commit. |
-| Injected failing provider/Desktop tests rejected | PENDING | source run `33583109333` superseded | Same supersession; no false PASS recorded. |
-| Exact implementation-source complete validation | PENDING | `6ca930e...` | No complete exact-source run before ledger closeout. |
-| Required status rule on `main` | BLOCKED | live ruleset `21764953` | Rule is absent; connector is read-only for rulesets/protection. |
-| Safe stale validation ref deletion | BLOCKED | `ci/discovery-fixture-trigger` | Strict ancestor proven; connector lacks ref deletion. |
+Observed Main Desktop Installers runs remained held at the reusable validation dependency while Required Validation was unresolved. Downstream publication could not start before validation completion.
 
-## Required validation before READY handoff
+## Final test ledger
 
-- [x] workflow syntax / reusable DAG accepted by GitHub
-- [x] intentionally failing required gate blocks rolling publication
-- [x] unresolved required validation blocks downstream publication
-- [x] mismatched tag/version negative regression
-- [ ] full-resolution stale Desktop lock negative regression on an unsuperseded exact implementation head
-- [ ] injected failing Desktop/provider tests on an unsuperseded exact implementation head
-- [x] workflow policy rejects mutable `uses:` and excess write permissions
-- [x] production release missing-credential negative/positive regressions
-- [ ] complete exact implementation-head Required Validation
-- [ ] enforce `Required validation gate` in repository branch/ruleset policy
-- [ ] delete final safe obsolete validation ref
+| Test / Gate | Result | Evidence |
+|---|---|---|
+| Required reusable DAG accepted | PASS | run `33583427402` |
+| Aggregate Required validation gate | PASS | run `33583427402` |
+| Full-resolution stale Desktop lock regression | PASS | governance job in `33583427402` |
+| Injected failing provider test rejected | PASS | governance job in `33583427402` |
+| Injected failing Desktop test rejected | PASS | governance job in `33583427402` |
+| Direct Desktop/provider lint/tests | PASS | `33583427402` |
+| Root + Desktop RustSec | PASS | `33583427402` |
+| Rust Ubuntu/Windows/macOS matrix | PASS | `33583427402` |
+| Windows package shell portability | PASS | `33583427402` and `33583427535` |
+| Linux/Windows/macOS package builds | PASS | `33583427402`; release-path packages also green in `33583427535` |
+| Fabric build/tooling policy | PASS | `33583427402`, `33583427535` |
+| Live player journey | PASS | `33583427402`, nested release validation in `33583427535` |
+| Network impairment | PASS | `33583427402`, `33583427535` |
+| Multi-GiB release-candidate soak | PASS | `33583427535` |
+| Mutable-action/write-permission policy | PASS | release identity job in `33583427402` |
+| Mismatched tag fails closed | PASS | release identity job in `33583427402` |
+| Missing production credentials fail closed | PASS | release identity job in `33583427402` |
+| Complete production credential set accepted | PASS | release identity job in `33583427402` |
+| Failed validation blocks rolling publication | PASS | `33582275682` |
+| Unresolved validation blocks publication | PASS | observed reusable dependency DAG |
+| Required status rule installed in repository | BLOCKED | live ruleset `21764953` lacks required-status rule |
+| Final stale validation ref deleted | BLOCKED | `ci/discovery-fixture-trigger` still exists |
 
-## Blockers
+## Remaining blockers
 
 ### BLOCKER 1 — repository required-status enforcement
 
-FINAL-038 cannot be truthfully closed from this environment. Live ruleset `21764953` does not require `Required validation gate`. The connected GitHub capability can read the ruleset but exposes no ruleset or branch-protection mutation operation. A repository administrator must add a required-status-check rule for the exact terminal status `Required validation gate` on the protected integration/main path described in `docs/RELEASE_GATES.md`.
+FINAL-038 cannot be truthfully closed from this execution environment.
+
+Live ruleset `21764953` (`meow`) remains active with deletion, non-fast-forward, and code-quality rules only. It still does **not** contain a required-status-check rule for `Required validation gate`.
+
+The connected GitHub capability exposes ruleset and branch-protection reads only; no ruleset/protection mutation operation is available. The local execution environment has no GitHub credential/token that could be used to perform the administrative API write independently.
+
+Required repository-admin action is documented in `docs/RELEASE_GATES.md`: require the exact terminal status `Required validation gate` on the protected integration/main path.
 
 ### BLOCKER 2 — final obsolete remote ref cleanup
 
-FINAL-046 cleanup has one safe remote ref remaining: `ci/discovery-fixture-trigger` at `fc52e288730bcdd98eabef3a0eaaf73c7ff92e1c`. It is proven a strict ancestor of `agent/discovery`. The connector exposes file deletion but no Git ref deletion operation. A repository administrator must delete that stale ref after preserving the existing historical links.
+FINAL-046 has one safe stale remote ref remaining:
 
-### BLOCKER 3 — exact implementation-head completion evidence
+`ci/discovery-fixture-trigger` -> `fc52e288730bcdd98eabef3a0eaaf73c7ff92e1c`
 
-The exact implementation-source run `33583109333` was superseded by the intentionally added concurrency policy when the first ledger-only closeout commit advanced the PR. The resulting closeout-head run `33583354093` was still pending when this ledger correction was made. This environment has no local repository execution path (`CALLER_IDENTITY_REQUIRED`) and no workflow-dispatch/cancel operation that can produce a separate frozen-source run without another ref change. Therefore the final full-resolution stale-lock regression and injected failing-test probes remain unclaimed rather than being waived.
+It is a strict ancestor of `agent/discovery`, which is three commits ahead with no divergence, so deletion is safe. The connected GitHub capability exposes ref creation/update but no ref deletion operation, and the local environment has no authenticated GitHub token.
 
-## Required repository-admin actions to unblock
+Required repository-admin action: delete `refs/heads/ci/discovery-fixture-trigger`.
 
-1. Update repository ruleset/branch protection so `Required validation gate` is a required status for the protected integration/main path, exactly as documented in `docs/RELEASE_GATES.md`.
-2. Delete `refs/heads/ci/discovery-fixture-trigger` after confirming the already-recorded ancestry/evidence.
-3. Allow one unsuperseded Required Validation attempt for the final Agent 8 implementation tree to complete. If the full-resolution lock or injected-test regressions fail for a real implementation reason, return Agent 8 to implementation rather than waiving the gate.
+## Remaining work
+
+No known Agent 8 production/workflow defect remains. All executable validation requirements owned by Agent 8 are green.
+
+To unblock handoff:
+
+1. Add repository required-status enforcement for exact status `Required validation gate`.
+2. Delete `ci/discovery-fixture-trigger`.
+3. Re-read live repository state.
+4. If both administrative changes are confirmed and no new code/workflow drift occurred, change this ledger to `READY FOR INTEGRATION` and record the exact handoff head.
 
 ## Handoff
 
 READY FOR INTEGRATION: NO
 
-IMPLEMENTATION SOURCE HEAD: `6ca930e8177d9104246b40f506b5abef485c7386`
+Validated implementation tree: PR head `1ef2ab283c45bb3f7d39dc45422e14891eb30aba`, PR merge candidate `a691c41dc4cbcf73a7837fd87c6d6aa37c7772a6`.
 
-Exact ledger head: this documentation-only correction commit
+Required Validation: `33583427402` — SUCCESS.
 
-PR: #61 remains draft and must not be merged while this ledger is BLOCKED.
+Release-path validation + multi-GiB soak + package build: `33583427535` — SUCCESS.
 
-Known conflict areas: workflows may need to consume new tests created by Agents 1-7/9 during later integration. Preserve the terminal `Required validation gate` contract and its same-SHA publication dependency.
+Known conflict areas: active workflow files and release/version policy scripts. Integration must preserve the aggregate `Required validation gate` contract and the release DAG dependency on it.
 
 ## Agent final statement
 
