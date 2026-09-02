@@ -98,6 +98,40 @@ pub enum WireRequest {
 }
 
 impl WireRequest {
+    /// Return the canonical world whose current membership is required before
+    /// this request may be dispatched by the replication daemon.
+    ///
+    /// This match is intentionally exhaustive. Adding a new wire request must
+    /// make an explicit authorization decision instead of silently inheriting
+    /// an unsafe default.
+    pub fn membership_world_id(&self) -> Option<WorldId> {
+        match self {
+            Self::Hello(_)
+            | Self::Ping { .. }
+            | Self::JoinRequest(_)
+            | Self::DiscoveryPublic { .. }
+            | Self::DiscoveryResolve { .. }
+            | Self::FriendPresence { .. } => None,
+            Self::WorldStatus { world_id }
+            | Self::WorldDescriptor { world_id }
+            | Self::MissingBlobs { world_id, .. }
+            | Self::BlobChunk { world_id, .. }
+            | Self::HostCapability { world_id } => Some(*world_id),
+            Self::LeaveRequest(request) => Some(request.world_id),
+            Self::SnapshotManifest(manifest) => Some(manifest.world_id),
+            Self::ReplicaAck(ack) => Some(ack.world_id),
+            Self::Membership(record) => Some(record.world_id),
+            Self::Epoch(record) => Some(record.world_id),
+            Self::AuthorityTransfer(transfer) => Some(transfer.world_id),
+            Self::LeaseGrant(lease) => Some(lease.world_id),
+            Self::Sleep(record) => Some(record.world_id),
+            Self::RecoveryBallot(ballot) => Some(ballot.world_id),
+            Self::RecoveryEpoch { record, .. } => Some(record.world_id),
+            Self::WorldConfig(config) => Some(config.world_id),
+            Self::SoloBranch(branch) => Some(branch.world_id),
+        }
+    }
+
     pub fn validate_limits(&self) -> Result<(), WireLimitError> {
         match self {
             Self::BlobChunk { data, .. } if data.len() > MAX_BLOB_CHUNK => {

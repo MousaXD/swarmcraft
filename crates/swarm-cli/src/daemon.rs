@@ -1262,6 +1262,9 @@ fn handle_request(
 ) -> Result<()> {
     let identity = context.identity;
     let storage = context.storage;
+    if let Some(world_id) = request.membership_world_id() {
+        authorize_member(storage, world_id, application_peer)?;
+    }
     match request {
         WireRequest::Ping { nonce } => node.respond(channel, WireResponse::Pong { nonce })?,
         WireRequest::WorldStatus { world_id } => {
@@ -2087,6 +2090,9 @@ fn validate_transfer(storage: &Storage, transfer: &swarm_protocol::AuthorityTran
 fn authorize_member(storage: &Storage, world: WorldId, peer: PeerId) -> Result<()> {
     let descriptor = storage.load_world_descriptor(world)?;
     let member = descriptor.member(peer).context("peer is not an authorized member of this world")?;
+    if swarm_protocol::peer_id_from_public_key(&member.public_key) != peer {
+        return Err(anyhow!("world membership public key does not match peer identity"));
+    }
     if member.banned {
         return Err(anyhow!("peer is banned from this world"));
     }
