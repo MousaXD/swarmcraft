@@ -1,4 +1,4 @@
-use crate::{Storage, StorageError};
+use crate::{transaction::sync_parent, Storage, StorageError};
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
@@ -88,7 +88,9 @@ impl Storage {
         if current != offset {
             return Err(ReplicationError::OffsetMismatch { expected: current, received: offset });
         }
-        let next = current.saturating_add(data.len() as u64);
+        let next = current
+            .checked_add(data.len() as u64)
+            .ok_or(ReplicationError::SizeMismatch { expected: descriptor.encoded_size, received: u64::MAX })?;
         if next > descriptor.encoded_size {
             return Err(ReplicationError::SizeMismatch { expected: descriptor.encoded_size, received: next });
         }
@@ -101,7 +103,7 @@ impl Storage {
             }
             if let Err(error) = verify_encoded_blob(&partial, descriptor) {
                 match fs::remove_file(&partial) {
-                    Ok(()) => {}
+                    Ok(()) => sync_parent(&dir)?,
                     Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
                     Err(source) => return Err(StorageError::Io { path: partial, source }.into()),
                 }
@@ -110,8 +112,11 @@ impl Storage {
             let final_path = blob_path(self, world, descriptor);
             if final_path.exists() {
                 fs::remove_file(&final_path).map_err(|source| StorageError::Io { path: final_path.clone(), source })?;
+                sync_parent(&dir)?;
             }
-            fs::rename(&partial, &final_path).map_err(|source| StorageError::Io { path: final_path, source })?;
+            fs::rename(&partial, &final_path)
+                .map_err(|source| StorageError::Io { path: final_path.clone(), source })?;
+            sync_parent(&dir)?;
         }
         Ok(next)
     }
