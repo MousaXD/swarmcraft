@@ -36,7 +36,8 @@ impl Storage {
             if record == &current {
                 return Ok(());
             }
-            let expected_sequence = current.sequence.checked_add(1).ok_or(StorageError::CounterExhausted("membership sequence"))?;
+            let expected_sequence =
+                current.sequence.checked_add(1).ok_or(StorageError::CounterExhausted("membership sequence"))?;
             if record.sequence != expected_sequence
                 || record.previous_membership_hash != Some(current.record_hash()?)
                 || record.epoch < current.epoch
@@ -194,12 +195,7 @@ mod tests {
     };
 
     fn member(peer: u8) -> WorldMemberV1 {
-        WorldMemberV1 {
-            peer_id: PeerId([peer; 32]),
-            public_key: [peer; 32],
-            authority_eligible: true,
-            banned: false,
-        }
+        WorldMemberV1 { peer_id: PeerId([peer; 32]), public_key: [peer; 32], authority_eligible: true, banned: false }
     }
 
     fn create_test_world(store: &Storage) -> WorldId {
@@ -233,7 +229,13 @@ mod tests {
         world
     }
 
-    fn membership(world: WorldId, authority: u8, epoch: u64, sequence: u64, previous: Option<Hash32>) -> MembershipRecordV1 {
+    fn membership(
+        world: WorldId,
+        authority: u8,
+        epoch: u64,
+        sequence: u64,
+        previous: Option<Hash32>,
+    ) -> MembershipRecordV1 {
         MembershipRecordV1 {
             protocol_version: PROTOCOL_VERSION,
             world_id: world,

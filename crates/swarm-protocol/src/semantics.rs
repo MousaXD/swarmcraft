@@ -3,10 +3,7 @@ use std::collections::BTreeSet;
 use super::*;
 
 fn semantic_error(record: &'static str, detail: impl Into<String>) -> ProtocolError {
-    ProtocolError::InvalidIdentifier {
-        kind: record,
-        value: detail.into(),
-    }
+    ProtocolError::InvalidIdentifier { kind: record, value: detail.into() }
 }
 
 pub fn require_protocol_version(record: &'static str, version: u16) -> Result<(), ProtocolError> {
@@ -24,10 +21,7 @@ fn require_strict_peer_order(record: &'static str, members: &[WorldMemberV1]) ->
         return Err(semantic_error(record, "member set must not be empty"));
     }
     if members.windows(2).any(|pair| pair[0].peer_id >= pair[1].peer_id) {
-        return Err(semantic_error(
-            record,
-            "members must be strictly ordered by peer_id with no duplicates",
-        ));
+        return Err(semantic_error(record, "members must be strictly ordered by peer_id with no duplicates"));
     }
     Ok(())
 }
@@ -37,36 +31,22 @@ fn require_strict_peer_id_order(record: &'static str, peers: &[PeerId]) -> Resul
         return Err(semantic_error(record, "initial membership must not be empty"));
     }
     if peers.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(semantic_error(
-            record,
-            "initial membership must be strictly ordered with no duplicates",
-        ));
+        return Err(semantic_error(record, "initial membership must be strictly ordered with no duplicates"));
     }
     Ok(())
 }
 
 fn require_snapshot_entry_order(entries: &[SnapshotEntry]) -> Result<(), ProtocolError> {
     if entries.windows(2).any(|pair| pair[0].path >= pair[1].path) {
-        return Err(semantic_error(
-            "snapshot manifest",
-            "entries must be strictly ordered by path with no duplicates",
-        ));
+        return Err(semantic_error("snapshot manifest", "entries must be strictly ordered by path with no duplicates"));
     }
     Ok(())
 }
 
-fn require_unique_artifact_keys(
-    record: &'static str,
-    values: &[ArtifactRequirementV1],
-) -> Result<(), ProtocolError> {
+fn require_unique_artifact_keys(record: &'static str, values: &[ArtifactRequirementV1]) -> Result<(), ProtocolError> {
     let mut seen = BTreeSet::new();
     for value in values {
-        let key = (
-            value.artifact_id.as_str(),
-            value.version.as_str(),
-            value.artifact_hash,
-            value.side,
-        );
+        let key = (value.artifact_id.as_str(), value.version.as_str(), value.artifact_hash, value.side);
         if !seen.insert(key) {
             return Err(semantic_error(
                 record,
@@ -220,12 +200,7 @@ mod tests {
     use super::*;
 
     fn member(peer: u8) -> WorldMemberV1 {
-        WorldMemberV1 {
-            peer_id: PeerId([peer; 32]),
-            public_key: [peer; 32],
-            authority_eligible: true,
-            banned: false,
-        }
+        WorldMemberV1 { peer_id: PeerId([peer; 32]), public_key: [peer; 32], authority_eligible: true, banned: false }
     }
 
     fn artifact(hint: Option<&str>) -> ArtifactRequirementV1 {

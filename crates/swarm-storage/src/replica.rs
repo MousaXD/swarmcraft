@@ -12,6 +12,8 @@ use thiserror::Error;
 pub enum ReplicationError {
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    Protocol(#[from] swarm_protocol::ProtocolError),
     #[error("blob offset mismatch: receiver has {expected} bytes but sender used offset {received}")]
     OffsetMismatch { expected: u64, received: u64 },
     #[error("blob encoded size mismatch: expected {expected} bytes, got {received}")]
@@ -154,10 +156,8 @@ fn validate_replica_direct_extension(
             if manifest == previous {
                 return Ok(());
             }
-            let expected_number = previous
-                .snapshot_number
-                .checked_add(1)
-                .ok_or(StorageError::CounterExhausted("snapshot number"))?;
+            let expected_number =
+                previous.snapshot_number.checked_add(1).ok_or(StorageError::CounterExhausted("snapshot number"))?;
             let expected_sequence =
                 previous.sequence.checked_add(1).ok_or(StorageError::CounterExhausted("snapshot sequence"))?;
             let expected_parent = previous.manifest_hash()?;

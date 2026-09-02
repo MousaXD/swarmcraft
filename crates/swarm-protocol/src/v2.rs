@@ -29,7 +29,7 @@ pub struct ArtifactRequirementV1 {
     /// Hash of the exact artifact bytes expected by the world configuration.
     pub artifact_hash: Hash32,
     pub side: ArtifactSideV1,
-    /// Optional non-canonical discovery hint such as a Modrinth project ID.
+    /// Optional canonical provider/source hint. When present it is signed and participates in compatibility identity.
     pub provider_hint: Option<String>,
 }
 
@@ -53,6 +53,7 @@ impl RuntimeCompatibilityManifestV1 {
     }
 
     pub fn fingerprint(&self) -> Result<Hash32, ProtocolError> {
+        self.validate_semantics()?;
         let mut normalized = self.clone();
         normalized.normalize();
         let bytes = postcard::to_allocvec(&normalized)?;
@@ -67,12 +68,14 @@ fn normalize_artifacts(values: &mut Vec<ArtifactRequirementV1>) {
             .then(a.version.cmp(&b.version))
             .then(a.artifact_hash.0.cmp(&b.artifact_hash.0))
             .then(a.side.cmp(&b.side))
+            .then(a.provider_hint.cmp(&b.provider_hint))
     });
     values.dedup_by(|a, b| {
         a.artifact_id == b.artifact_id
             && a.version == b.version
             && a.artifact_hash == b.artifact_hash
             && a.side == b.side
+            && a.provider_hint == b.provider_hint
     });
 }
 

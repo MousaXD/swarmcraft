@@ -2362,13 +2362,12 @@ fn authorize_manifest(storage: &Storage, sender: PeerId, manifest: &SnapshotMani
         return Err(anyhow!("snapshot authority is not eligible or public key does not match membership"));
     }
     verify_snapshot_signature(manifest)?;
-    if let Some(current) = storage.latest_snapshot(manifest.world_id)? {
-        if manifest.epoch < current.epoch || (manifest.epoch == current.epoch && manifest.sequence < current.sequence) {
-            return Err(anyhow!("stale snapshot manifest rejected"));
-        }
-    }
+    storage.validate_replica_history(manifest)?;
     if let Ok(epoch) = storage.load_epoch_record(manifest.world_id) {
-        if manifest.epoch != epoch.epoch_number || manifest.authority_peer_id != epoch.authority_peer_id {
+        if manifest.epoch != epoch.epoch_number
+            || manifest.authority_peer_id != epoch.authority_peer_id
+            || manifest.authority_public_key != epoch.authority_public_key
+        {
             return Err(anyhow!("snapshot does not belong to the accepted authority epoch"));
         }
     }
@@ -2456,6 +2455,7 @@ fn validate_non_recovery_epoch_transition(
 }
 
 fn authorize_epoch(storage: &Storage, sender: PeerId, record: &EpochRecordV1) -> Result<()> {
+    record.validate_semantics()?;
     authorize_member(storage, record.world_id, sender)?;
     authorize_member(storage, record.world_id, record.authority_peer_id)?;
     let descriptor = storage.load_world_descriptor(record.world_id)?;
