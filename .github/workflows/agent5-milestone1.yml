@@ -23,7 +23,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - name: Apply Agent 5 milestone
         run: |
-          rm -f agent5-protocol.log
+          rm -f agent5-protocol.log agent5-desktop.log
           python scripts/agent5_milestone1.py
           python scripts/agent5_milestone1_fix.py
       - name: Format Rust
@@ -31,27 +31,27 @@ jobs:
           cargo fmt --all
           cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
       - name: Validate canonical provider contract
-        id: protocol
+        run: cargo test -p swarm-protocol --locked
+      - name: Validate Desktop provider boundary
+        id: desktop
         continue-on-error: true
-        run: cargo test -p swarm-protocol --locked > agent5-protocol.log 2>&1
-      - name: Preserve protocol diagnostic on failure
-        if: steps.protocol.outcome == 'failure'
+        run: |
+          set -o pipefail
+          { cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked && cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked; } > agent5-desktop.log 2>&1
+      - name: Preserve Desktop diagnostic on failure
+        if: steps.desktop.outcome == 'failure'
         run: |
           git config user.name "SwarmCraft Agent 5"
           git config user.email "101021011+MousaXD@users.noreply.github.com"
-          git add -f agent5-protocol.log
-          git commit -m "ci(agent5): capture protocol failure"
+          git add -f agent5-desktop.log
+          git commit -m "ci(agent5): capture desktop failure"
           git push origin HEAD:fix/agent-5-supply-chain
           exit 1
-      - name: Validate Desktop provider boundary
-        run: |
-          cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
-          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
       - name: Validate launcher provider mapping
         run: node --test apps/desktop/tests/launcher-controller.test.mjs
       - name: Commit milestone and self-clean helpers
         run: |
-          rm -f agent5-protocol.log scripts/agent5_milestone1.py scripts/agent5_milestone1_fix.py .github/workflows/agent5-milestone1.yml
+          rm -f agent5-protocol.log agent5-desktop.log scripts/agent5_milestone1.py scripts/agent5_milestone1_fix.py .github/workflows/agent5-milestone1.yml
           git add -A
           git config user.name "SwarmCraft Agent 5"
           git config user.email "101021011+MousaXD@users.noreply.github.com"
