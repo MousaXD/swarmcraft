@@ -69,7 +69,7 @@ new_push = '''    for metadata in storage.list_worlds()? {
                 }
             }
         }
-        if descriptor.member(application_peer).map_or(true, |member| member.banned) {
+        if descriptor.member(application_peer).is_none_or(|member| member.banned) {
             continue;
         }
         push_committed_world_payload(storage, node, transport_peer, world, outbound, true)?;
