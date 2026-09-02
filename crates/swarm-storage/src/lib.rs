@@ -48,14 +48,8 @@ pub enum StorageError {
     SnapshotNotFound(u64),
     #[error("canonical snapshot head record is missing for world {0}")]
     MissingCanonicalHead(WorldId),
-    #[error(
-        "canonical snapshot head for world {world} targets missing snapshot #{snapshot_number} ({manifest_hash})"
-    )]
-    MissingCanonicalHeadTarget {
-        world: WorldId,
-        snapshot_number: u64,
-        manifest_hash: Hash32,
-    },
+    #[error("canonical snapshot head for world {world} targets missing snapshot #{snapshot_number} ({manifest_hash})")]
+    MissingCanonicalHeadTarget { world: WorldId, snapshot_number: u64, manifest_hash: Hash32 },
     #[error("canonical snapshot head for world {world} does not match snapshot #{snapshot_number}")]
     CanonicalHeadMismatch { world: WorldId, snapshot_number: u64 },
     #[error("snapshot commit for world {world} snapshot #{snapshot_number} was interrupted and requires recovery")]
@@ -69,20 +63,11 @@ pub enum StorageError {
     #[error(
         "snapshot authority fence mismatch for world {world}; expected epoch {expected_epoch} fencing token {expected_fencing_token}"
     )]
-    SnapshotFenceMismatch {
-        world: WorldId,
-        expected_epoch: u64,
-        expected_fencing_token: u64,
-    },
+    SnapshotFenceMismatch { world: WorldId, expected_epoch: u64, expected_fencing_token: u64 },
     #[error(
         "snapshot #{snapshot_number} for world {world} is immutable; existing hash {existing}, attempted hash {attempted}"
     )]
-    SnapshotManifestConflict {
-        world: WorldId,
-        snapshot_number: u64,
-        existing: Hash32,
-        attempted: Hash32,
-    },
+    SnapshotManifestConflict { world: WorldId, snapshot_number: u64, existing: Hash32, attempted: Hash32 },
     #[error("restore destination is marked incomplete and must be discarded before retry: {0}")]
     RestoreIncomplete(PathBuf),
     #[error("world metadata does not exist: {0}")]
@@ -210,7 +195,8 @@ impl Storage {
                 worlds.push(metadata);
             }
         }
-        worlds.sort_by(|left, right| left.display_name.cmp(&right.display_name).then(left.world_id.cmp(&right.world_id)));
+        worlds
+            .sort_by(|left, right| left.display_name.cmp(&right.display_name).then(left.world_id.cmp(&right.world_id)));
         Ok(worlds)
     }
 
@@ -250,15 +236,13 @@ impl Storage {
         let mut reader: Box<dyn Read> = match descriptor.encoding {
             BlobEncoding::Raw => Box::new(encoded),
             BlobEncoding::Zstd => Box::new(
-                zstd::stream::read::Decoder::new(encoded)
-                    .map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?,
+                zstd::stream::read::Decoder::new(encoded).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?,
             ),
         };
-        let capacity = usize::try_from(descriptor.uncompressed_size)
-            .map_err(|_| StorageError::BlobReadTooLarge {
-                declared: descriptor.uncompressed_size,
-                maximum: LEGACY_READ_BLOB_MAX_BYTES,
-            })?;
+        let capacity = usize::try_from(descriptor.uncompressed_size).map_err(|_| StorageError::BlobReadTooLarge {
+            declared: descriptor.uncompressed_size,
+            maximum: LEGACY_READ_BLOB_MAX_BYTES,
+        })?;
         let mut bytes = Vec::with_capacity(capacity);
         let mut hasher = blake3::Hasher::new();
         hasher.update(BLOB_HASH_DOMAIN);
@@ -267,9 +251,8 @@ impl Storage {
         loop {
             let remaining = descriptor.uncompressed_size.saturating_sub(total);
             let read_limit = remaining.saturating_add(1).min(buffer.len() as u64) as usize;
-            let read = reader
-                .read(&mut buffer[..read_limit])
-                .map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
+            let read =
+                reader.read(&mut buffer[..read_limit]).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
             if read == 0 {
                 break;
             }
@@ -311,9 +294,7 @@ impl Storage {
     pub fn latest_snapshot(&self, world: WorldId) -> Result<Option<SnapshotManifestV1>, StorageError> {
         self.validate_canonical_snapshot_namespace(world)?;
         let head = self.canonical_snapshot_head(world)?;
-        head.head
-            .map(|reference| self.load_snapshot_file_unchecked(world, reference.snapshot_number))
-            .transpose()
+        head.head.map(|reference| self.load_snapshot_file_unchecked(world, reference.snapshot_number)).transpose()
     }
 
     pub fn verify_snapshot(&self, manifest: &SnapshotManifestV1) -> Result<(), StorageError> {
@@ -328,10 +309,7 @@ impl Storage {
         let head = self.canonical_snapshot_head(world)?;
         match head.head {
             None => Ok(1),
-            Some(reference) => reference
-                .snapshot_number
-                .checked_add(1)
-                .ok_or(StorageError::SnapshotNumberExhausted),
+            Some(reference) => reference.snapshot_number.checked_add(1).ok_or(StorageError::SnapshotNumberExhausted),
         }
     }
 
@@ -423,9 +401,6 @@ mod tests {
             encoded_size: 0,
             encoding: BlobEncoding::Zstd,
         };
-        assert!(matches!(
-            store.read_blob(world(), &descriptor),
-            Err(StorageError::BlobReadTooLarge { .. })
-        ));
+        assert!(matches!(store.read_blob(world(), &descriptor), Err(StorageError::BlobReadTooLarge { .. })));
     }
 }

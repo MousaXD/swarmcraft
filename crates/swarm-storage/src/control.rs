@@ -190,10 +190,7 @@ mod tests {
         let stale = epoch_record(world, 3, 7, 11);
         assert!(matches!(store.save_epoch_record(&stale), Err(StorageError::WorldMetadataMismatch)));
         let conflicting = epoch_record(world, 3, 8, 12);
-        assert!(matches!(
-            store.save_epoch_record(&conflicting),
-            Err(StorageError::WorldMetadataMismatch)
-        ));
+        assert!(matches!(store.save_epoch_record(&conflicting), Err(StorageError::WorldMetadataMismatch)));
         assert_eq!(store.load_epoch_record(world).unwrap(), accepted);
     }
 
@@ -233,10 +230,7 @@ mod tests {
         let accepted = reservation(world, 6, 9, 13);
         let stale = reservation(world, 7, 8, 12);
         store.save_recovery_reservation(&accepted).unwrap();
-        assert!(matches!(
-            store.save_recovery_reservation(&stale),
-            Err(StorageError::WorldMetadataMismatch)
-        ));
+        assert!(matches!(store.save_recovery_reservation(&stale), Err(StorageError::WorldMetadataMismatch)));
         assert_eq!(store.load_recovery_reservation(world).unwrap().authority_peer_id, accepted.authority_peer_id);
     }
 

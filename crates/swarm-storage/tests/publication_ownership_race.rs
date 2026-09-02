@@ -134,7 +134,10 @@ fn simultaneous_local_publishers_survive_replica_commit_gc_and_retention() {
         during.removed_blobs, 0,
         "shared blob must remain live because both local publication owners pin it after older manifests are pruned"
     );
-    assert_eq!(storage.list_snapshots(world).unwrap().iter().map(|manifest| manifest.snapshot_number).collect::<Vec<_>>(), vec![3]);
+    assert_eq!(
+        storage.list_snapshots(world).unwrap().iter().map(|manifest| manifest.snapshot_number).collect::<Vec<_>>(),
+        vec![3]
+    );
     assert!(publication_has_pin(&storage, world, &locals[0].1, shared_hash));
     assert!(publication_has_pin(&storage, world, &locals[1].1, shared_hash));
 

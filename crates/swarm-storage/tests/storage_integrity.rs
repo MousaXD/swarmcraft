@@ -9,9 +9,7 @@ use swarm_protocol::{
     peer_id_from_public_key, snapshot_state_root, BlobDescriptor, BlobEncoding, EpochMode, EpochRecordV1, Hash32,
     PeerId, RecoveryBallotV1, RecoveryVoteV1, SnapshotEntry, SnapshotManifestV1, WorldId, PROTOCOL_VERSION,
 };
-use swarm_storage::{
-    RecoveryPromiseResult, SnapshotCommitFence, SnapshotContext, Storage, StorageError,
-};
+use swarm_storage::{RecoveryPromiseResult, SnapshotCommitFence, SnapshotContext, Storage, StorageError};
 
 fn context(
     world: WorldId,
@@ -45,14 +43,7 @@ fn snapshot(
     let mut publication = storage
         .snapshot_directory(
             source,
-            context(
-                world,
-                number,
-                sequence,
-                previous_snapshot_hash,
-                authority_peer_id,
-                authority_public_key,
-            ),
+            context(world, number, sequence, previous_snapshot_hash, authority_peer_id, authority_public_key),
         )
         .unwrap();
     publication.signature = vec![number as u8; 64];
@@ -74,16 +65,7 @@ fn missing_canonical_head_target_fails_closed_without_number_reuse() {
     storage.commit_snapshot(&first).unwrap();
     let first_hash = first.manifest_hash().unwrap();
     fs::write(source.join("level.dat"), b"two").unwrap();
-    let second = snapshot(
-        &storage,
-        &source,
-        world,
-        2,
-        2,
-        Some(first_hash),
-        authority_peer_id,
-        authority_public_key,
-    );
+    let second = snapshot(&storage, &source, world, 2, 2, Some(first_hash), authority_peer_id, authority_public_key);
     storage.commit_snapshot(&second).unwrap();
 
     let newest_path = storage.world_dir(world).join("snapshots").join(format!("{:020}.postcard", 2));
@@ -98,16 +80,8 @@ fn missing_canonical_head_target_fails_closed_without_number_reuse() {
         Err(StorageError::MissingCanonicalHeadTarget { snapshot_number: 2, .. })
     ));
 
-    let replacement = snapshot(
-        &storage,
-        &source,
-        world,
-        2,
-        2,
-        Some(first_hash),
-        authority_peer_id,
-        authority_public_key,
-    );
+    let replacement =
+        snapshot(&storage, &source, world, 2, 2, Some(first_hash), authority_peer_id, authority_public_key);
     assert!(matches!(
         storage.commit_snapshot(&replacement),
         Err(StorageError::MissingCanonicalHeadTarget { snapshot_number: 2, .. })
@@ -151,16 +125,7 @@ fn durable_fence_rejects_same_epoch_after_fencing_token_changes() {
     let observed_head = storage.canonical_snapshot_head(world).unwrap().head;
 
     fs::write(source.join("level.dat"), b"two").unwrap();
-    let second = snapshot(
-        &storage,
-        &source,
-        world,
-        2,
-        2,
-        Some(first_hash),
-        authority_peer_id,
-        authority_public_key,
-    );
+    let second = snapshot(&storage, &source, world, 2, 2, Some(first_hash), authority_peer_id, authority_public_key);
     let mut superseding = epoch.clone();
     superseding.fencing_token = 11;
     superseding.reason = "supersede stale writer".into();
@@ -169,17 +134,9 @@ fn durable_fence_rejects_same_epoch_after_fencing_token_changes() {
     assert!(matches!(
         storage.commit_snapshot_fenced(
             &second,
-            SnapshotCommitFence {
-                expected_epoch: 1,
-                expected_fencing_token: 10,
-                expected_head: observed_head,
-            },
+            SnapshotCommitFence { expected_epoch: 1, expected_fencing_token: 10, expected_head: observed_head },
         ),
-        Err(StorageError::SnapshotFenceMismatch {
-            expected_epoch: 1,
-            expected_fencing_token: 10,
-            ..
-        })
+        Err(StorageError::SnapshotFenceMismatch { expected_epoch: 1, expected_fencing_token: 10, .. })
     ));
     assert_eq!(storage.latest_snapshot(world).unwrap().unwrap().snapshot_number, 1);
 }
@@ -205,22 +162,14 @@ fn load_snapshot_rejects_embedded_namespace_mismatch() {
         authority_public_key: [3; 32],
         signature: vec![0; 64],
     };
-    fs::write(
-        snapshots.join(format!("{:020}.postcard", 1)),
-        postcard::to_allocvec(&wrong).unwrap(),
-    )
-    .unwrap();
+    fs::write(snapshots.join(format!("{:020}.postcard", 1)), postcard::to_allocvec(&wrong).unwrap()).unwrap();
     assert!(matches!(storage.load_snapshot(world, 1), Err(StorageError::WorldMetadataMismatch)));
 }
 
 #[test]
 fn portable_case_aliases_are_rejected_before_blob_access() {
-    let descriptor = BlobDescriptor {
-        hash: Hash32([9; 32]),
-        uncompressed_size: 1,
-        encoded_size: 1,
-        encoding: BlobEncoding::Raw,
-    };
+    let descriptor =
+        BlobDescriptor { hash: Hash32([9; 32]), uncompressed_size: 1, encoded_size: 1, encoding: BlobEncoding::Raw };
     let entries = vec![
         SnapshotEntry { path: "region/Foo.dat".into(), blob: descriptor.clone() },
         SnapshotEntry { path: "region/foo.dat".into(), blob: descriptor },

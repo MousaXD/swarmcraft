@@ -171,9 +171,8 @@ impl Storage {
             }
             hasher.update(&buffer[..read]);
             encoder.write_all(&buffer[..read]).map_err(|error| io_error(&temporary_path, error))?;
-            uncompressed_size = uncompressed_size
-                .checked_add(read as u64)
-                .ok_or(StorageError::SnapshotNumberExhausted)?;
+            uncompressed_size =
+                uncompressed_size.checked_add(read as u64).ok_or(StorageError::SnapshotNumberExhausted)?;
         }
 
         let encoded_file = encoder.finish().map_err(|error| io_error(&temporary_path, error))?;
@@ -357,9 +356,7 @@ impl Storage {
 }
 
 fn publish_immutable_manifest(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
+    let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
     let (temporary_path, mut temporary_file) = create_unique_temp(parent, "manifest", "tmp")?;
     temporary_file.write_all(bytes).map_err(|error| io_error(&temporary_path, error))?;
     temporary_file.sync_all().map_err(|error| io_error(&temporary_path, error))?;
@@ -367,11 +364,8 @@ fn publish_immutable_manifest(path: &Path, bytes: &[u8]) -> Result<(), StorageEr
 
     if path.exists() {
         remove_if_present(&temporary_path)?;
-        let snapshot_number = path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(0);
+        let snapshot_number =
+            path.file_stem().and_then(|value| value.to_str()).and_then(|value| value.parse::<u64>().ok()).unwrap_or(0);
         return Err(StorageError::SnapshotHistoryConflict { snapshot_number });
     }
     fs::rename(&temporary_path, path).map_err(|error| io_error(path, error))?;
@@ -857,7 +851,8 @@ mod tests {
         let world = WorldId([0x90; 32]);
         let (published_tx, published_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();
-        *TEST_PUBLICATION_HOOK.lock().unwrap() = Some(PublicationHook { world, published: published_tx, resume: resume_rx });
+        *TEST_PUBLICATION_HOOK.lock().unwrap() =
+            Some(PublicationHook { world, published: published_tx, resume: resume_rx });
 
         let worker_storage = storage.clone();
         let worker_source = source.clone();
@@ -889,10 +884,7 @@ mod tests {
             encoded_size: encoded.len() as u64,
             encoding: BlobEncoding::Zstd,
         };
-        assert!(matches!(
-            verify_encoded_blob_streaming(&path, &descriptor),
-            Err(StorageError::BlobCorrupt(_))
-        ));
+        assert!(matches!(verify_encoded_blob_streaming(&path, &descriptor), Err(StorageError::BlobCorrupt(_))));
     }
 
     #[test]

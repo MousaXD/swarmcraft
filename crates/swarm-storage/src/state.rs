@@ -177,10 +177,7 @@ impl Storage {
     pub fn set_background_seeding(&self, world: WorldId, enabled: bool) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(world)?;
         self.load_world(world)?;
-        durable_atomic_write(
-            &self.control_path_v2(world, "background-seeding"),
-            if enabled { b"1\n" } else { b"0\n" },
-        )
+        durable_atomic_write(&self.control_path_v2(world, "background-seeding"), if enabled { b"1\n" } else { b"0\n" })
     }
 
     pub fn background_seeding_enabled(&self, world: WorldId) -> Result<bool, StorageError> {
@@ -281,7 +278,10 @@ mod tests {
 
         let store = Storage::open(temp.path()).unwrap();
         let charlie = ballot(world, 3, 2);
-        assert_eq!(store.promise_recovery_ballot(&charlie, &vote(&charlie, 6)).unwrap(), RecoveryPromiseResult::Accepted);
+        assert_eq!(
+            store.promise_recovery_ballot(&charlie, &vote(&charlie, 6)).unwrap(),
+            RecoveryPromiseResult::Accepted
+        );
         assert_eq!(
             store.promise_recovery_ballot(&bob, &vote(&bob, 6)).unwrap(),
             RecoveryPromiseResult::Rejected { highest_round: 2 }

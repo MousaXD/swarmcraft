@@ -38,9 +38,7 @@ impl Storage {
 }
 
 pub(crate) fn durable_atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
+    let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
     fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
     let (temporary_path, mut temporary_file) = create_unique_temp(parent, "atomic", "tmp")?;
     temporary_file.write_all(bytes).map_err(|source| io_error(&temporary_path, source))?;
@@ -70,9 +68,7 @@ pub(crate) fn durable_atomic_write(path: &Path, bytes: &[u8]) -> Result<(), Stor
 }
 
 pub(crate) fn durable_create_once(path: &Path, bytes: &[u8]) -> Result<bool, StorageError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
+    let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
     fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
     let mut file = match OpenOptions::new().create_new(true).write(true).open(path) {
         Ok(file) => file,
@@ -89,9 +85,7 @@ pub(crate) fn durable_create_once(path: &Path, bytes: &[u8]) -> Result<bool, Sto
 }
 
 pub(crate) fn durable_remove(path: &Path) -> Result<bool, StorageError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
+    let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
     match fs::remove_file(path) {
         Ok(()) => {
             sync_parent(parent)?;
@@ -126,9 +120,7 @@ pub(crate) fn create_unique_temp(
 pub(crate) fn sync_parent(parent: &Path) -> Result<(), StorageError> {
     #[cfg(unix)]
     {
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|source| io_error(parent, source))?;
+        File::open(parent).and_then(|directory| directory.sync_all()).map_err(|source| io_error(parent, source))?;
     }
     #[cfg(not(unix))]
     {

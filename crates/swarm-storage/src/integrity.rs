@@ -112,11 +112,7 @@ impl Storage {
         }
 
         let next_head = canonical_ref(manifest)?;
-        let intent = SnapshotCommitIntentV1 {
-            world_id: manifest.world_id,
-            previous_head: previous,
-            next_head,
-        };
+        let intent = SnapshotCommitIntentV1 { world_id: manifest.world_id, previous_head: previous, next_head };
         let intent_path = self.commit_intent_path(manifest.world_id);
         durable_atomic_write(&intent_path, &postcard::to_allocvec(&intent)?)?;
 
@@ -163,7 +159,8 @@ impl Storage {
         let intent_path = self.commit_intent_path(world);
 
         if intent_path.exists() {
-            let bytes = fs::read(&intent_path).map_err(|source| StorageError::Io { path: intent_path.clone(), source })?;
+            let bytes =
+                fs::read(&intent_path).map_err(|source| StorageError::Io { path: intent_path.clone(), source })?;
             let intent: SnapshotCommitIntentV1 = postcard::from_bytes(&bytes)?;
             if intent.world_id != world {
                 return Err(StorageError::WorldMetadataMismatch);
@@ -199,10 +196,7 @@ impl Storage {
         // adopted exactly once. The required marker is then made durable; any
         // later head loss is distinguishable and fails closed.
         let legacy = self.highest_legacy_manifest_locked(world)?;
-        let head = CanonicalSnapshotHeadV1 {
-            world_id: world,
-            head: legacy.as_ref().map(canonical_ref).transpose()?,
-        };
+        let head = CanonicalSnapshotHeadV1 { world_id: world, head: legacy.as_ref().map(canonical_ref).transpose()? };
         durable_atomic_write(&head_path, &postcard::to_allocvec(&head)?)?;
         durable_create_once(&required_path, HEAD_REQUIRED_BYTES)?;
         self.validate_head_target_locked(world, head.head)?;
@@ -236,10 +230,7 @@ impl Storage {
         })?;
         let actual = canonical_ref(&manifest)?;
         if actual != head {
-            return Err(StorageError::CanonicalHeadMismatch {
-                world,
-                snapshot_number: head.snapshot_number,
-            });
+            return Err(StorageError::CanonicalHeadMismatch { world, snapshot_number: head.snapshot_number });
         }
         Ok(())
     }
@@ -252,10 +243,7 @@ impl Storage {
         let manifests = self.raw_snapshot_manifests(world)?;
         let highest_allowed = head.map(|value| value.snapshot_number).unwrap_or(0);
         if let Some(orphan) = manifests.iter().find(|manifest| manifest.snapshot_number > highest_allowed) {
-            return Err(StorageError::UncommittedSnapshotOrphan {
-                world,
-                snapshot_number: orphan.snapshot_number,
-            });
+            return Err(StorageError::UncommittedSnapshotOrphan { world, snapshot_number: orphan.snapshot_number });
         }
         Ok(())
     }
@@ -277,7 +265,8 @@ impl Storage {
             if entry.path().extension().and_then(|value| value.to_str()) != Some("postcard") {
                 continue;
             }
-            let stem = entry.path().file_stem().and_then(|value| value.to_str()).ok_or(StorageError::WorldMetadataMismatch)?;
+            let stem =
+                entry.path().file_stem().and_then(|value| value.to_str()).ok_or(StorageError::WorldMetadataMismatch)?;
             let number = stem.parse::<u64>().map_err(|_| StorageError::WorldMetadataMismatch)?;
             let manifest = self.load_snapshot_file_unchecked(world, number)?;
             if manifest.world_id != world || manifest.snapshot_number != number {
@@ -335,24 +324,18 @@ fn validate_direct_extension(
     match previous {
         None => {
             if manifest.snapshot_number != 1 || manifest.previous_snapshot_hash.is_some() {
-                return Err(StorageError::SnapshotHistoryConflict {
-                    snapshot_number: manifest.snapshot_number,
-                });
+                return Err(StorageError::SnapshotHistoryConflict { snapshot_number: manifest.snapshot_number });
             }
         }
         Some(previous) => {
-            let expected_number = previous
-                .snapshot_number
-                .checked_add(1)
-                .ok_or(StorageError::SnapshotNumberExhausted)?;
+            let expected_number =
+                previous.snapshot_number.checked_add(1).ok_or(StorageError::SnapshotNumberExhausted)?;
             let expected_sequence = previous.sequence.checked_add(1).ok_or(StorageError::SnapshotNumberExhausted)?;
             if manifest.snapshot_number != expected_number
                 || manifest.sequence != expected_sequence
                 || manifest.previous_snapshot_hash != Some(previous.manifest_hash)
             {
-                return Err(StorageError::SnapshotHistoryConflict {
-                    snapshot_number: manifest.snapshot_number,
-                });
+                return Err(StorageError::SnapshotHistoryConflict { snapshot_number: manifest.snapshot_number });
             }
         }
     }

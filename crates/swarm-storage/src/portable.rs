@@ -61,11 +61,10 @@ fn portable_component_key(component: &str, full_path: &str) -> Result<String, St
     if component.ends_with('.') || component.ends_with(' ') {
         return Err(StorageError::UnsafeRelativePath(full_path.to_owned()));
     }
-    if component.bytes().any(|byte| {
-        byte < 0x20
-            || byte == 0x7f
-            || matches!(byte, b'<' | b'>' | b':' | b'"' | b'|' | b'?' | b'*')
-    }) {
+    if component
+        .bytes()
+        .any(|byte| byte < 0x20 || byte == 0x7f || matches!(byte, b'<' | b'>' | b':' | b'"' | b'|' | b'?' | b'*'))
+    {
         return Err(StorageError::UnsafeRelativePath(full_path.to_owned()));
     }
 
