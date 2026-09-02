@@ -24,6 +24,77 @@ jobs:
           ref: fix/agent-1-consensus
           fetch-depth: 0
 
+      - name: Refresh transformation targets
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("implementation/agent1-m4-hardening.py")
+          text = p.read_text()
+          text = text.replace(
+              'bail!("committed transfer no longer advances the current authority generation");',
+              'bail!("committed transfer no longer extends the accepted authority generation");',
+          )
+          old = '''replace(
+              migration,
+              ''' + "'''" + '''    if next.epoch_number != current.epoch_number.saturating_add(1)
+                  || next.fencing_token != current.fencing_token.saturating_add(1)
+                  || next.previous_epoch_hash != Some(epoch_record_hash(&current)?)
+              {
+                  bail!("observed epoch does not directly advance the local accepted generation");
+              }
+          ''' + "'''" + ''',
+              ''' + "'''" + '''    let expected_generation = AuthorityGeneration {
+                  epoch: current.epoch_number,
+                  fencing_token: current.fencing_token,
+              }
+              .checked_next()
+              .context("accepted authority generation is exhausted")?;
+              if next.epoch_number != expected_generation.epoch
+                  || next.fencing_token != expected_generation.fencing_token
+                  || next.previous_epoch_hash != Some(epoch_record_hash(&current)?)
+              {
+                  bail!("observed epoch does not directly advance the local accepted generation");
+              }
+          ''' + "'''" + ''',
+          )'''
+          new = '''replace(
+              migration,
+              ''' + "'''" + '''    if transfer.phase != TransferPhase::Committed
+                  || transfer.from_peer_id != current.authority_peer_id
+                  || transfer.to_peer_id != next.authority_peer_id
+                  || transfer.next_epoch != next.epoch_number
+                  || transfer.next_fencing_token != next.fencing_token
+                  || next.epoch_number != current.epoch_number.saturating_add(1)
+                  || next.fencing_token != current.fencing_token.saturating_add(1)
+                  || next.previous_epoch_hash != Some(epoch_record_hash(&current)?)
+              {
+                  bail!("manual epoch does not exactly extend the committed transfer");
+              }
+          ''' + "'''" + ''',
+              ''' + "'''" + '''    let expected_generation = AuthorityGeneration {
+                  epoch: current.epoch_number,
+                  fencing_token: current.fencing_token,
+              }
+              .checked_next()
+              .context("accepted authority generation is exhausted")?;
+              if transfer.phase != TransferPhase::Committed
+                  || transfer.from_peer_id != current.authority_peer_id
+                  || transfer.to_peer_id != next.authority_peer_id
+                  || transfer.next_epoch != next.epoch_number
+                  || transfer.next_fencing_token != next.fencing_token
+                  || next.epoch_number != expected_generation.epoch
+                  || next.fencing_token != expected_generation.fencing_token
+                  || next.previous_epoch_hash != Some(epoch_record_hash(&current)?)
+              {
+                  bail!("manual epoch does not exactly extend the committed transfer");
+              }
+          ''' + "'''" + ''',
+          )'''
+          if old not in text:
+              raise SystemExit("stale observe-manual-transfer transform block not found")
+          p.write_text(text.replace(old, new, 1))
+          PY
+
       - name: Validate and apply hardening
         run: |
           python3 -m py_compile implementation/agent1-m4-hardening.py implementation/agent1-m4-fixture-policy.py
