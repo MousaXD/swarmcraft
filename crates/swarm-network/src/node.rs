@@ -1,5 +1,8 @@
 use crate::{
-    admission::{application_connection_allowed, AdmissionController},
+    admission::{
+        application_connection_allowed, auth_challenge_expired, primary_connection_limits, AdmissionController,
+        AUTH_CHALLENGE_TIMEOUT,
+    },
     build_peer_hello_proof, verify_peer_hello, verify_peer_hello_proof,
     wire::WireRequest,
     wire::WireResponse,
@@ -10,7 +13,7 @@ use ed25519_dalek::SigningKey;
 use futures::StreamExt;
 use libp2p::multiaddr::Protocol;
 use libp2p::{
-    autonat, dcutr, identify,
+    autonat, connection_limits, dcutr, identify,
     identity::Keypair,
     kad::{self, store::MemoryStore},
     mdns, noise, ping, relay,
@@ -41,6 +44,7 @@ struct Behaviour {
     relay_client: relay::client::Behaviour,
     dcutr: dcutr::Behaviour,
     auto_nat: autonat::Behaviour,
+    limits: connection_limits::Behaviour,
 }
 
 #[derive(Debug)]
@@ -98,7 +102,7 @@ pub struct SwarmNode {
     local_hello: PeerHelloV1,
     application_signing_key: SigningKey,
     authenticated: HashMap<TransportPeerId, (PeerId, ConnectionId)>,
-    pending_challenges: HashMap<TransportPeerId, (ConnectionId, [u8; 32])>,
+    pending_challenges: HashMap<TransportPeerId, (ConnectionId, [u8; 32], Instant)>,
     active_connections: HashMap<TransportPeerId, ConnectionId>,
     connection_counts: HashMap<TransportPeerId, usize>,
     connection_paths: HashMap<ConnectionId, ConnectionPathKind>,
@@ -157,6 +161,7 @@ impl SwarmNode {
                 relay_client,
                 dcutr,
                 auto_nat,
+                limits: connection_limits::Behaviour::new(primary_connection_limits()),
             })?
             .build();
 
@@ -407,7 +412,13 @@ impl SwarmNode {
 
     pub async fn next_event(&mut self) -> Result<NetworkEvent> {
         loop {
-            match self.swarm.select_next_some().await {
+            self.expire_stale_auth_challenges();
+            let event = match tokio::time::timeout(AUTH_CHALLENGE_TIMEOUT, self.swarm.select_next_some()).await {
+                Ok(event) => event,
+                Err(_) => continue,
+            };
+            self.expire_stale_auth_challenges();
+            match event {
                 SwarmEvent::NewListenAddr { address, .. } => {
                     self.diagnostics.record_local_address(address.to_string());
                     info!(%address, "network listening");
@@ -486,7 +497,7 @@ impl SwarmNode {
                     if self
                         .pending_challenges
                         .get(&peer_id)
-                        .is_some_and(|(challenge_connection, _)| *challenge_connection == connection_id)
+                        .is_some_and(|(challenge_connection, _, _)| *challenge_connection == connection_id)
                     {
                         self.pending_challenges.remove(&peer_id);
                     }
@@ -648,7 +659,7 @@ impl SwarmNode {
                                 }
                                 WireRequest::HelloProof(proof) => {
                                     let expected = self.pending_challenges.remove(&peer);
-                                    let Some((challenge_connection, expected_challenge)) = expected else {
+                                    let Some((challenge_connection, expected_challenge, _issued_at)) = expected else {
                                         let _ = self.respond(
                                             channel,
                                             WireResponse::Error {
@@ -779,9 +790,29 @@ impl SwarmNode {
         let mut challenge = [0_u8; 32];
         OsRng.fill_bytes(&mut challenge);
         self.authenticated.remove(&peer);
-        self.pending_challenges.insert(peer, (connection_id, challenge));
+        self.pending_challenges.insert(peer, (connection_id, challenge, Instant::now()));
         self.swarm.behaviour_mut().request_response.send_request(&peer, WireRequest::HelloChallenge { challenge });
         Ok(())
+    }
+
+    fn expire_stale_auth_challenges(&mut self) {
+        let now = Instant::now();
+        let stale = self
+            .pending_challenges
+            .iter()
+            .filter_map(|(peer, (connection_id, _, issued_at))| {
+                auth_challenge_expired(*issued_at, now).then_some((*peer, *connection_id))
+            })
+            .collect::<Vec<_>>();
+        for (peer, connection_id) in stale {
+            self.pending_challenges.remove(&peer);
+            self.authenticated.remove(&peer);
+            if self.active_connections.get(&peer).is_some_and(|active| *active == connection_id) {
+                self.active_connections.remove(&peer);
+            }
+            let _ = self.swarm.close_connection(connection_id);
+            warn!(transport_peer = %peer, %connection_id, "authentication challenge expired; closing silent connection");
+        }
     }
 
     fn refresh_connectivity_paths(&mut self) {

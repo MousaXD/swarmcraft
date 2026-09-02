@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::SigningKey;
 use futures::StreamExt;
 use libp2p::{
-    identify,
+    connection_limits, identify,
     identity::Keypair,
     kad::{self, store::MemoryStore},
     mdns, noise, ping,
@@ -20,7 +20,10 @@ use swarm_protocol::{PeerHelloV1, PeerId, WorldId, PROTOCOL_VERSION};
 use tracing::{debug, warn};
 
 use crate::{
-    admission::{application_connection_allowed, AdmissionController},
+    admission::{
+        application_connection_allowed, auth_challenge_expired, discovery_connection_limits, AdmissionController,
+        AUTH_CHALLENGE_TIMEOUT,
+    },
     build_peer_hello_proof, verify_peer_hello, verify_peer_hello_proof, WireRequest, WireResponse, BOOTSTRAP_ENV,
 };
 
@@ -36,6 +39,7 @@ struct DiscoveryBehaviour {
     identify: identify::Behaviour,
     ping: ping::Behaviour,
     kad: kad::Behaviour<MemoryStore>,
+    limits: connection_limits::Behaviour,
 }
 
 #[derive(Debug)]
@@ -92,7 +96,7 @@ pub struct DiscoveryNode {
     local_hello: PeerHelloV1,
     application_signing_key: SigningKey,
     authenticated: HashMap<TransportPeerId, (PeerId, ConnectionId)>,
-    pending_challenges: HashMap<TransportPeerId, (ConnectionId, [u8; 32])>,
+    pending_challenges: HashMap<TransportPeerId, (ConnectionId, [u8; 32], Instant)>,
     active_connections: HashMap<TransportPeerId, ConnectionId>,
     connection_counts: HashMap<TransportPeerId, usize>,
     admission: AdmissionController,
@@ -132,6 +136,7 @@ impl DiscoveryNode {
                 identify,
                 ping: ping::Behaviour::default(),
                 kad,
+                limits: connection_limits::Behaviour::new(discovery_connection_limits()),
             })?
             .build();
 
@@ -271,7 +276,13 @@ impl DiscoveryNode {
 
     pub async fn next_event(&mut self) -> Result<DiscoveryNetworkEvent> {
         loop {
-            match self.swarm.select_next_some().await {
+            self.expire_stale_auth_challenges();
+            let event = match tokio::time::timeout(AUTH_CHALLENGE_TIMEOUT, self.swarm.select_next_some()).await {
+                Ok(event) => event,
+                Err(_) => continue,
+            };
+            self.expire_stale_auth_challenges();
+            match event {
                 SwarmEvent::NewListenAddr { address, .. } => return Ok(DiscoveryNetworkEvent::Listening { address }),
                 SwarmEvent::ConnectionEstablished { peer_id, connection_id, num_established, .. } => {
                     if !application_connection_allowed(
@@ -305,7 +316,7 @@ impl DiscoveryNode {
                     if self
                         .pending_challenges
                         .get(&peer_id)
-                        .is_some_and(|(challenge_connection, _)| *challenge_connection == connection_id)
+                        .is_some_and(|(challenge_connection, _, _)| *challenge_connection == connection_id)
                     {
                         self.pending_challenges.remove(&peer_id);
                     }
@@ -418,7 +429,7 @@ impl DiscoveryNode {
                                         .send_request(&peer, WireRequest::HelloProof(Box::new(proof)));
                                 }
                                 WireRequest::HelloProof(proof) => {
-                                    let Some((challenge_connection, expected_challenge)) =
+                                    let Some((challenge_connection, expected_challenge, _issued_at)) =
                                         self.pending_challenges.remove(&peer)
                                     else {
                                         let _ = self.respond(
@@ -562,9 +573,29 @@ impl DiscoveryNode {
         let mut challenge = [0_u8; 32];
         OsRng.fill_bytes(&mut challenge);
         self.authenticated.remove(&peer);
-        self.pending_challenges.insert(peer, (connection_id, challenge));
+        self.pending_challenges.insert(peer, (connection_id, challenge, Instant::now()));
         self.swarm.behaviour_mut().request_response.send_request(&peer, WireRequest::HelloChallenge { challenge });
         Ok(())
+    }
+
+    fn expire_stale_auth_challenges(&mut self) {
+        let now = Instant::now();
+        let stale = self
+            .pending_challenges
+            .iter()
+            .filter_map(|(peer, (connection_id, _, issued_at))| {
+                auth_challenge_expired(*issued_at, now).then_some((*peer, *connection_id))
+            })
+            .collect::<Vec<_>>();
+        for (peer, connection_id) in stale {
+            self.pending_challenges.remove(&peer);
+            self.authenticated.remove(&peer);
+            if self.active_connections.get(&peer).is_some_and(|active| *active == connection_id) {
+                self.active_connections.remove(&peer);
+            }
+            let _ = self.swarm.close_connection(connection_id);
+            warn!(transport_peer = %peer, %connection_id, "discovery authentication challenge expired; closing silent connection");
+        }
     }
 }
 

@@ -5,6 +5,16 @@ use std::{
 };
 
 pub(crate) const MAX_APPLICATION_CONNECTIONS: usize = 64;
+pub(crate) const MAX_PENDING_INCOMING_CONNECTIONS: u32 = 32;
+pub(crate) const MAX_PENDING_OUTGOING_CONNECTIONS: u32 = 32;
+pub(crate) const MAX_ESTABLISHED_INCOMING_CONNECTIONS: u32 = 72;
+pub(crate) const MAX_ESTABLISHED_CONNECTIONS: u32 = 96;
+pub(crate) const MAX_ESTABLISHED_CONNECTIONS_PER_PEER: u32 = 2;
+pub(crate) const MAX_DISCOVERY_PENDING_INCOMING_CONNECTIONS: u32 = 24;
+pub(crate) const MAX_DISCOVERY_PENDING_OUTGOING_CONNECTIONS: u32 = 24;
+pub(crate) const MAX_DISCOVERY_ESTABLISHED_INCOMING_CONNECTIONS: u32 = 48;
+pub(crate) const MAX_DISCOVERY_ESTABLISHED_CONNECTIONS: u32 = 64;
+pub(crate) const AUTH_CHALLENGE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const REQUEST_WINDOW: Duration = Duration::from_secs(10);
 pub(crate) const MAX_UNAUTHENTICATED_REQUESTS_PER_PEER: u32 = 8;
 pub(crate) const MAX_AUTHENTICATED_REQUESTS_PER_PEER: u32 = 128;
@@ -90,6 +100,28 @@ pub(crate) fn application_connection_allowed(active_application_connections: usi
     replacing_peer || active_application_connections < MAX_APPLICATION_CONNECTIONS
 }
 
+pub(crate) fn primary_connection_limits() -> libp2p::connection_limits::ConnectionLimits {
+    libp2p::connection_limits::ConnectionLimits::default()
+        .with_max_pending_incoming(Some(MAX_PENDING_INCOMING_CONNECTIONS))
+        .with_max_pending_outgoing(Some(MAX_PENDING_OUTGOING_CONNECTIONS))
+        .with_max_established_incoming(Some(MAX_ESTABLISHED_INCOMING_CONNECTIONS))
+        .with_max_established(Some(MAX_ESTABLISHED_CONNECTIONS))
+        .with_max_established_per_peer(Some(MAX_ESTABLISHED_CONNECTIONS_PER_PEER))
+}
+
+pub(crate) fn discovery_connection_limits() -> libp2p::connection_limits::ConnectionLimits {
+    libp2p::connection_limits::ConnectionLimits::default()
+        .with_max_pending_incoming(Some(MAX_DISCOVERY_PENDING_INCOMING_CONNECTIONS))
+        .with_max_pending_outgoing(Some(MAX_DISCOVERY_PENDING_OUTGOING_CONNECTIONS))
+        .with_max_established_incoming(Some(MAX_DISCOVERY_ESTABLISHED_INCOMING_CONNECTIONS))
+        .with_max_established(Some(MAX_DISCOVERY_ESTABLISHED_CONNECTIONS))
+        .with_max_established_per_peer(Some(MAX_ESTABLISHED_CONNECTIONS_PER_PEER))
+}
+
+pub(crate) fn auth_challenge_expired(issued_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(issued_at) >= AUTH_CHALLENGE_TIMEOUT
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +159,27 @@ mod tests {
         assert!(application_connection_allowed(MAX_APPLICATION_CONNECTIONS - 1, false));
         assert!(!application_connection_allowed(MAX_APPLICATION_CONNECTIONS, false));
         assert!(application_connection_allowed(MAX_APPLICATION_CONNECTIONS, true));
+    }
+
+    const _: () = {
+        assert!(MAX_PENDING_INCOMING_CONNECTIONS < MAX_ESTABLISHED_CONNECTIONS);
+        assert!(MAX_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS);
+        assert!(MAX_APPLICATION_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS as usize);
+        assert!(MAX_DISCOVERY_PENDING_INCOMING_CONNECTIONS < MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
+        assert!(MAX_DISCOVERY_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
+        assert!(MAX_ESTABLISHED_CONNECTIONS_PER_PEER >= 2);
+    };
+
+    #[test]
+    fn transport_limit_behaviours_are_constructible() {
+        let _ = primary_connection_limits();
+        let _ = discovery_connection_limits();
+    }
+
+    #[test]
+    fn silent_authentication_challenge_expires() {
+        let issued = Instant::now();
+        assert!(!auth_challenge_expired(issued, issued));
+        assert!(auth_challenge_expired(issued, issued + AUTH_CHALLENGE_TIMEOUT));
     }
 }
