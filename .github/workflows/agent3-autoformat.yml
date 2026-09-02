@@ -33,6 +33,7 @@ jobs:
               text = text.replace(needle, replacement, 1)
           if "entry.path().file_stem()" in text:
               text = text.replace("entry.path().file_stem()", "path.file_stem()", 1)
+
           epoch_old = "        let current_epoch = self.load_epoch_record(manifest.world_id).ok();\n"
           if epoch_old in text:
               epoch_new = "\n".join([
@@ -47,9 +48,17 @@ jobs:
               text = text.replace(epoch_old, epoch_new, 1)
           elif "let epoch_path = self.world_dir(manifest.world_id)" not in text:
               raise SystemExit("integrity.rs epoch fail-closed target not found")
-          text = text.replace("    previous_head: Option<CanonicalSnapshotRefV1>,\n", "", 1)
-          text = text.replace("            previous_head: previous,\n", "", 1)
-          unused_impl = "\n".join([
+
+          old_transaction = "\n".join([
+              "#[derive(Debug)]",
+              "pub(crate) struct SnapshotCommitTransaction {",
+              "    _guard: WorldTransactionGuard,",
+              "    world: WorldId,",
+              "    previous_head: Option<CanonicalSnapshotRefV1>,",
+              "    next_head: CanonicalSnapshotRefV1,",
+              "    intent_path: PathBuf,",
+              "}",
+              "",
               "impl SnapshotCommitTransaction {",
               "    pub(crate) fn previous_head(&self) -> Option<CanonicalSnapshotRefV1> {",
               "        self.previous_head",
@@ -59,9 +68,22 @@ jobs:
               "        self.next_head",
               "    }",
               "}",
-              "",
           ])
-          text = text.replace(unused_impl, "", 1)
+          new_transaction = "\n".join([
+              "#[derive(Debug)]",
+              "pub(crate) struct SnapshotCommitTransaction {",
+              "    _guard: WorldTransactionGuard,",
+              "    world: WorldId,",
+              "    next_head: CanonicalSnapshotRefV1,",
+              "    intent_path: PathBuf,",
+              "}",
+          ])
+          if old_transaction in text:
+              text = text.replace(old_transaction, new_transaction, 1)
+          elif "pub(crate) fn previous_head(&self)" in text or "pub(crate) fn next_head(&self)" in text:
+              raise SystemExit("integrity.rs transaction cleanup target changed unexpectedly")
+
+          text = text.replace("            previous_head: previous,\n", "", 1)
           integrity.write_text(text)
 
           streaming = Path("crates/swarm-storage/src/streaming.rs")
