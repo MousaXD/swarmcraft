@@ -10,7 +10,7 @@ CAMPAIGN PRODUCTION BASE SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
 
 BRANCH SEED SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` (campaign ledger commit only; production tree matches the campaign base)
 
-CURRENT HEAD SHA: `c2ac38c0a94156285fa841fdfdd382a269940a03` production milestone; this ledger commit follows it
+CURRENT HEAD SHA: continuing from remote head; authorization and connection-bound handshake milestones are committed and validated
 
 INTEGRATED SHA: pending
 
@@ -63,17 +63,17 @@ Do not change canonical membership election semantics.
 - [x] Do not reuse authenticated application identity across replacement connections without fresh proof.
 - [x] Build an exhaustive authorization matrix for every world-scoped `WireRequest`.
 - [x] Require current, non-banned membership for WorldDescriptor, WorldStatus, HostCapability and other canonical metadata unless a narrowly scoped pre-membership protocol explicitly applies.
-- [x] Ensure removed/banned members lose metadata access.
+- [x] Ensure removed/banned members lose metadata access through inbound canonical request handling.
 - [ ] Anchor discovery announcements to verifiable canonical world authority/authorization, not merely self-signed announcer identity.
 - [ ] Add per-peer and global connection/request admission limits, separate for unauthenticated/authenticated traffic.
 - [ ] Specify/enforce friend presence privacy policy.
 - [ ] Specify invite replay/reuse semantics and test them.
 - [ ] Reclassify DNS invite targets after resolution according to scope policy.
-- [x] Add three-peer captured-hello replay cryptographic regression proving a captured B→A connection proof cannot authenticate C's transport as B.
-- [ ] Add end-to-end private snapshot/metadata non-disclosure regression around the replay case.
+- [x] Add captured-proof replay test proving a different transport cannot reuse a valid application proof.
 - [ ] Add stranger/removed/banned/current-member authorization matrix tests.
 - [ ] Add malicious discovery provider claiming another world ID test.
 - [ ] Add hostile-load/admission regression tests.
+- [ ] Harden proactive world pushes against removed/banned/key-mismatched members.
 
 ## Work completed
 
@@ -83,13 +83,10 @@ Do not change canonical membership election semantics.
 - Added exhaustive `WireRequest::membership_world_id()` classification. Adding a new wire variant now requires an explicit membership decision at compile time.
 - Added one fail-closed daemon membership gate before canonical request dispatch. `JoinRequest` remains the intentional pre-membership path; discovery and Ping remain outside canonical-world authorization.
 - Hardened membership authorization so banned members are rejected and descriptor public keys must derive the authenticated peer ID.
-- Closed FINAL-013 production handler path for `WorldDescriptor`, `WorldStatus`, `HostCapability`, and all other canonical world requests.
-- Replaced reusable `PeerHelloV1` authentication with receiver-challenged `PeerHelloProofV1`: the application key signs the static hello, a fresh receiver challenge, claimant transport identity, and receiver transport identity under a separate domain.
-- Bound authenticated application identities to the exact libp2p request-response `ConnectionId`; proof challenges are single-use and replacement connections clear authentication and require a fresh challenge/proof exchange.
-- Legacy `WireRequest::Hello` is no longer accepted as authentication. Both replication and discovery network nodes reject it with a connection-proof-required response.
-- `SwarmNode` and `DiscoveryNode` now receive an in-process application signing key clone and self-test it against their advertised hello before networking starts; the signing key is not serialized by networking.
-- Added bounded wire encoding for transport peer identifiers used in proofs.
-- Added a three-transport replay regression: a valid B→A captured proof verifies for B/A but is rejected when replayed as C→A because the transport binding differs.
+- Closed FINAL-013 inbound production path for `WorldDescriptor`, `WorldStatus`, `HostCapability`, and all other canonical world requests.
+- Replaced reusable application hello authentication with receiver-generated connection challenges and a fresh Ed25519 application-key proof bound to the challenge, local transport peer, remote transport peer, and the exact live libp2p `ConnectionId`.
+- Authentication state is now connection-specific and is cleared on disconnect/replacement. Legacy standalone `Hello` requests no longer establish authentication.
+- Added a three-transport replay regression: a proof captured on B→A is rejected when replayed from C→A.
 
 ## Tests run
 
@@ -97,32 +94,33 @@ Do not change canonical membership election semantics.
 |---|---|---|---|
 | Branch/baseline compare | PASS | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | Integration seed is exactly one documentation-only commit ahead of campaign production base. |
 | `cargo fmt --all -- --check` | PASS | `8dd7d685e2295a561bc5c1958786bd77a6829815` | Authorization milestone GitHub Actions validation runner. |
-| `cargo check -p swarm-network -p swarm-cli --all-targets --locked` | PASS | `8dd7d685e2295a561bc5c1958786bd77a6829815` | Authorization milestone affected crates compile. |
-| `cargo test -p swarm-network --locked` | PASS | `8dd7d685e2295a561bc5c1958786bd77a6829815` | Authorization milestone full network crate suite green. |
-| `cargo fmt --all -- --check` | PASS | `c2ac38c0a94156285fa841fdfdd382a269940a03` | Connection-bound authentication milestone. |
-| `cargo check -p swarm-network -p swarm-cli --all-targets --locked` | PASS | `c2ac38c0a94156285fa841fdfdd382a269940a03` | Protocol extensions, both network nodes, daemon/CLI constructors, examples and all affected test targets compile. |
-| `cargo test -p swarm-network --locked` | PASS | `c2ac38c0a94156285fa841fdfdd382a269940a03` | Full network suite includes QUIC mutual authentication and captured-proof transport-replay rejection. |
+| `cargo check -p swarm-network -p swarm-cli --all-targets --locked` | PASS | `8dd7d685e2295a561bc5c1958786bd77a6829815` | Affected crates compile after fail-closed request gate. |
+| `cargo test -p swarm-network --locked` | PASS | `8dd7d685e2295a561bc5c1958786bd77a6829815` | Full network crate suite green. |
+| `cargo fmt --all -- --check` | PASS | `c2ac38c0a94156285fa841fdfdd382a269940a03` | Connection-bound handshake milestone. |
+| `cargo check -p swarm-network -p swarm-cli --all-targets --locked` | PASS | `c2ac38c0a94156285fa841fdfdd382a269940a03` | Handshake protocol, network node, daemon, discovery constructors and tests compile together. |
+| `cargo test -p swarm-network --locked` | PASS | `c2ac38c0a94156285fa841fdfdd382a269940a03` | Full network suite including captured-proof replay regression. |
 
 ## Required validation before handoff
 
-- [x] format for completed milestones
+- [x] format for authorization milestone
+- [x] format for handshake milestone
 - [ ] clippy/lint
-- [x] network unit/integration tests for completed milestones
-- [x] captured connection-proof replay rejection
+- [x] network unit/integration tests for authorization milestone
+- [x] captured hello/proof replay rejection
 - [ ] world request authorization matrix regression test
 - [ ] private-world confidentiality regression
 - [ ] discovery unauthorized-signer regression
 - [ ] hostile-load admission test
-- [ ] network soak/reconnect tests remain green on final head
+- [ ] network soak/reconnect tests remain green after all changes
 - [ ] exact-head CI/dedicated validation
 
 ## Blockers
 
-- Local workspace terminal connector is currently unavailable because it cannot establish this chat's extension identity. GitHub repository read/write access is available; executable validation is being performed with branch-scoped, self-cleaning GitHub Actions runners.
+- Local workspace terminal connector is unavailable because it cannot establish this chat's extension identity. GitHub repository read/write access is available; executable validation is being performed with branch-scoped, self-cleaning GitHub Actions runners.
 
 ## Remaining work
 
-Dedicated authorization/privacy regressions, discovery authority proof, admission/rate limiting, friend-presence privacy, invite replay/reuse semantics, DNS post-resolution scope hardening, soak/reconnect validation, clippy, and exact-head CI remain.
+Discovery authority proof, admission/rate limiting, friend-presence privacy, invite/DNS hardening, proactive world-push hardening, dedicated authorization/privacy regressions, soak/reconnect validation, clippy, and exact-head CI remain.
 
 ## Handoff
 
