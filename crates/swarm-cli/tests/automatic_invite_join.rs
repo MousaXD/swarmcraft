@@ -188,9 +188,9 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
         base_state_hash: manifest.state_root,
         authority_peer_id: a.identity.peer_id(),
         authority_public_key: a.identity.public_key(),
-        mode: EpochMode::Solo,
+        mode: EpochMode::Quorum,
         fencing_token: 1,
-        reason: "automatic invite acceptance seed".into(),
+        reason: "automatic invite quorum-of-one seed".into(),
         signature: Vec::new(),
     };
     epoch.signature = a.identity.sign(&epoch.signing_bytes().unwrap());

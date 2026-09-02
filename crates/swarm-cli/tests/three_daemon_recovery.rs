@@ -124,6 +124,13 @@ fn install_canonical_replica(peer: &PeerFixture, seed: &CanonicalReplicaSeed<'_>
     peer.storage.save_world_descriptor(seed.descriptor).unwrap();
     peer.storage.save_membership_record(seed.membership).unwrap();
     peer.storage.save_epoch_record(seed.epoch).unwrap();
+    let mut promoted_membership = seed.membership.clone();
+    promoted_membership.epoch = seed.epoch.epoch_number;
+    promoted_membership.sequence = seed.membership.sequence.checked_add(1).unwrap();
+    promoted_membership.previous_membership_hash = Some(seed.membership.record_hash().unwrap());
+    promoted_membership.signature.clear();
+    seed.authority.sign_membership(&mut promoted_membership).unwrap();
+    peer.storage.save_membership_record(&promoted_membership).unwrap();
     let mut local = peer
         .storage
         .snapshot_directory(
@@ -291,8 +298,8 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     let mut membership = MembershipRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
-        epoch: 1,
-        sequence: 1,
+        epoch: 0,
+        sequence: 0,
         previous_membership_hash: None,
         members: descriptor.members.clone(),
         authority_peer_id: a.identity.peer_id(),
