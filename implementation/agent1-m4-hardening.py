@@ -217,6 +217,7 @@ replace(
     migration,
     "            sequence: latest.sequence.saturating_add(1),\n",
     "            sequence: latest.sequence.checked_add(1).context(\"snapshot sequence counter exhausted\")?,\n",
+    count=2,
 )
 replace(
     migration,
