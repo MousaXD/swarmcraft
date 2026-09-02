@@ -99,12 +99,7 @@ impl Storage {
             && pending_join.invite.genesis == metadata.genesis
             && pending_join.invite.inviter_peer_id == certificate.proposal.previous.authority_peer_id
             && pending_join.invite.inviter_public_key == certificate.proposal.previous.authority_public_key
-            && certificate
-                .proposal
-                .proposed
-                .members
-                .iter()
-                .any(|member| member == &pending_join.joining_member))
+            && certificate.proposal.proposed.members.iter().any(|member| member == &pending_join.joining_member))
     }
 
     pub fn load_membership_record(&self, world: WorldId) -> Result<MembershipRecordV1, StorageError> {
