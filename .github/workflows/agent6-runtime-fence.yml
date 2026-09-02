@@ -1,0 +1,85 @@
+name: Agent 6 Runtime Fence Patch
+
+on:
+  push:
+    branches: [fix/agent-6-runtime]
+    paths: [.github/workflows/agent6-runtime-fence.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/agent-6-runtime
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Apply runtime ownership fence
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('crates/swarm-cli/src/migration.rs')
+          text = path.read_text()
+
+          replacements = [
+              (
+                  'use crate::{authority_permit::PermitWatch, host_readiness, launch_guard, server_mods};',
+                  'use crate::{\n    authority_permit::PermitWatch, host_readiness, launch_guard, runtime_process_guard::RuntimeProcessGuard,\n    server_mods,\n};',
+              ),
+              (
+                  '    AuthorityTransferV1, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, PeerId, SleepRecordV1,\n    SnapshotManifestV1, TransferPhase, WorldId, PROTOCOL_VERSION,',
+                  '    validate_runtime_selection, AuthorityTransferV1, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1,\n    PeerId, SleepRecordV1, SnapshotManifestV1, TransferPhase, WorldId, PROTOCOL_VERSION,',
+              ),
+              (
+                  '    let world_config =\n        storage.load_world_config(options.world).context("canonical runtime profile is not synchronized")?;\n    let mod_readiness = server_mods::evaluate_world_mods(paths, options.world, &world_config.compatibility)?;',
+                  '    let world_config =\n        storage.load_world_config(options.world).context("canonical runtime profile is not synchronized")?;\n    validate_runtime_selection(\n        &world_config.compatibility.minecraft_version,\n        &world_config.compatibility.loader_version,\n        None,\n    )\n    .context("canonical runtime profile is outside the shipped SwarmCraft Fabric adapter contract")?;\n    let mod_readiness = server_mods::evaluate_world_mods(paths, options.world, &world_config.compatibility)?;',
+              ),
+              (
+                  '    reset_runtime_directory(&runtime)?;',
+                  '    // This persistent ownership record survives a hard-killed Rust supervisor.\n    // A subsequent launcher must prove the old Java PID is gone before any runtime bytes are reset.\n    let mut runtime_process = RuntimeProcessGuard::begin(paths, options.world)?;\n    reset_runtime_directory(&runtime)?;',
+              ),
+              (
+                  '    let mut child = launch_server(\n        &options.java,\n        &options.server_jar,\n        &runtime,\n        &world_dir,\n        metadata.genesis.compatibility_fingerprint,\n        &launch.environment(),\n    )?;\n\n    publish_status(',
+                  '    let mut child = launch_server(\n        &options.java,\n        &options.server_jar,\n        &runtime,\n        &world_dir,\n        metadata.genesis.compatibility_fingerprint,\n        &launch.environment(),\n    )?;\n    if let Err(error) = runtime_process.record_java(child.id()) {\n        terminate_child(&mut child);\n        return Err(error);\n    }\n\n    publish_status(',
+              ),
+          ]
+
+          for before, after in replacements:
+              count = text.count(before)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one migration replacement, found {count}: {before[:80]!r}')
+              text = text.replace(before, after, 1)
+
+          path.write_text(text)
+
+          guard = Path('crates/swarm-cli/src/runtime_process_guard.rs')
+          guard_text = guard.read_text().replace('unsafe extern "C" {', 'extern "C" {').replace('unsafe extern "system" {', 'extern "system" {')
+          guard.write_text(guard_text)
+      - name: Format
+        run: cargo fmt --all
+      - name: Runtime support contract tests
+        run: cargo test -p swarm-protocol runtime_support --lib --locked
+      - name: IPC controller lease tests
+        run: cargo test -p swarm-ipc --locked
+      - name: Runtime process fence tests
+        run: cargo test -p swarm-cli runtime_process_guard --lib --locked
+      - name: Existing-world import tests
+        run: cargo test -p swarm-cli world_import --lib --locked
+      - name: Clippy touched runtime crates
+        run: cargo clippy -p swarm-protocol -p swarm-ipc -p swarm-cli --all-targets --all-features --locked -- -D warnings
+      - name: Commit validated runtime fence
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add crates/swarm-cli/src/migration.rs crates/swarm-cli/src/runtime_process_guard.rs crates/swarm-cli/src/lib.rs crates/swarm-ipc/src/lib.rs crates/swarm-ipc/src/transport.rs crates/swarm-protocol/src/runtime_support.rs crates/swarm-protocol/src/root.rs crates/swarm-cli/src/world_import.rs apps/desktop/src-tauri/src/canonical_world_commands.rs minecraft/fabric/src/main/java/dev/swarmcraft/fabric/SwarmCraftMod.java
+          git diff --cached --check
+          git commit -m "fix(runtime): fence Java ownership across supervisor death"
+          git push origin HEAD:fix/agent-6-runtime
