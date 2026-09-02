@@ -82,14 +82,14 @@ pub(crate) fn durable_remove(path: &Path) -> Result<bool, StorageError> {
 
     #[cfg(unix)]
     {
-        return match fs::remove_file(path) {
+        match fs::remove_file(path) {
             Ok(()) => {
                 sync_parent(parent)?;
                 Ok(true)
             }
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(source) => Err(io_error(path, source)),
-        };
+        }
     }
 
     #[cfg(windows)]
@@ -111,7 +111,7 @@ pub(crate) fn durable_remove(path: &Path) -> Result<bool, StorageError> {
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => return Err(io_error(&tombstone, source)),
         }
-        return Ok(true);
+        Ok(true)
     }
 
     #[cfg(all(not(unix), not(windows)))]
