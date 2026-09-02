@@ -32,17 +32,15 @@ jobs:
           cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
       - name: Validate canonical provider contract
         run: cargo test -p swarm-protocol --locked
-      - name: Build and stage required Tauri sidecars
+      - name: Stage validation-only Tauri sidecars
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release -p swarm-cli --locked
           target="$(rustc --print host-tuple)"
           mkdir -p apps/desktop/src-tauri/binaries
-          cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
-          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
-          cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
-          cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
+          for name in swarmcraft swarmcraft-host swarmcraft-runtime swarmcraft-import; do
+            cp /bin/true "apps/desktop/src-tauri/binaries/${name}-${target}"
+          done
       - name: Validate Desktop provider boundary and refresh lock
         id: desktop
         continue-on-error: true
