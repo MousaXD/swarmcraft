@@ -10,7 +10,7 @@ STARTING SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
 
 BRANCH CREATION SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` (campaign planning head; production tree remains the declared campaign baseline plus implementation ledgers)
 
-CURRENT HEAD SHA: `8ee2f81fa43a30deb196aeb85364fb13840928f2` (validated Milestone 1 implementation head; this ledger update advances the branch afterward)
+CURRENT HEAD SHA: `b69b9e210ab217ddf84d119b2d4dd9a424ac7f41` (validated Milestone 2 implementation head; this ledger update advances the branch afterward)
 
 INTEGRATED SHA: pending
 
@@ -61,15 +61,15 @@ Do not redesign package providers, Desktop UX, or runtime artifact installation.
 
 ## Implementation checklist
 
-- [ ] Define a canonical committed membership generation used by authority quorum calculations.
-- [ ] Prevent an uncommitted membership update from immediately redefining the active voter set.
-- [ ] Implement safe membership transitions, preferably joint-consensus/old+new quorum semantics or another proven equivalent.
-- [ ] Ensure removed/banned stale members cannot continue voting from an obsolete local membership universe.
+- [x] Define a canonical committed membership generation used by authority quorum calculations at the protocol/consensus/storage layer; daemon activation still pending.
+- [ ] Prevent an uncommitted membership update from immediately redefining the active voter set. (Durable prepare lock exists; daemon join/leave activation still pending.)
+- [ ] Implement safe membership transitions, preferably joint-consensus/old+new quorum semantics or another proven equivalent. (Old+new certificate validation implemented; daemon wire/activation still pending.)
+- [ ] Ensure removed/banned stale members cannot continue voting from an obsolete local membership universe. (Joint quorum invariant implemented; production activation/fencing still pending.)
 - [x] Remove unsafe automatic writable Solo fallback after unclean multi-member quorum loss, or redesign it so it cannot race canonical recovery.
 - [x] Preserve explicitly safe single-member semantics while failing closed for multi-member Solo transitions that lack a committed clean relinquishment proof.
-- [ ] Make higher recovery rounds preserve any previously accepted/certified value for the target generation. (Durable voter-side value lock implemented; shared consensus helper and end-to-end regression still pending.)
+- [x] Make higher recovery rounds preserve any previously accepted/certified value for the target generation at both durable storage and shared consensus layers; end-to-end crash/resume regression still pending.
 - [ ] Ensure recovery promises/votes cannot equivocate under the production execution model in coordination with Agent 3 storage locking if needed.
-- [ ] Replace security-significant saturating next-generation arithmetic with checked fail-closed exhaustion behavior. (Authority/recovery production paths converted; repository-wide owned-path audit still pending.)
+- [ ] Replace security-significant saturating next-generation arithmetic with checked fail-closed exhaustion behavior. (Authority/recovery production paths converted; owned-path audit still pending.)
 - [ ] Add 3-peer and 5-peer divergent-membership partition regression tests.
 - [ ] Add minority-old-authority Solo versus majority recovery regression test.
 - [ ] Add recovery candidate crash/resume after certificate persistence regression test.
@@ -88,23 +88,33 @@ Do not redesign package providers, Desktop UX, or runtime artifact installation.
   - allowed a single-member world to use its ordinary quorum-of-one path instead of being artificially denied a permit;
   - reject received multi-member Solo transitions unless a future committed clean-relinquishment proof exists, rather than treating the signed `allow_solo_advancement` flag alone as sufficient safety proof;
   - strengthened durable recovery promises so a higher round cannot switch the accepted candidate/value on the same voter for the same target generation.
+- Milestone 2 implementation commit `b69b9e210ab217ddf84d119b2d4dd9a424ac7f41`:
+  - added signed/hash-bound `MembershipProposalV1`, `MembershipVoteV1`, and `MembershipCertificateV1` protocol primitives;
+  - added shared joint-consensus validation requiring majorities of both the old and proposed active voter universes;
+  - added 3-to-5, 5-to-3, and 1-to-2 membership quorum unit regressions demonstrating quorum intersection;
+  - added durable membership proposal promises and persisted membership certificates with crash-safe atomic writes;
+  - added storage regression proving a prepared voter cannot switch to a conflicting membership proposal after restart;
+  - aligned `swarm-consensus` recovery ballot evaluation with the durable production value-lock rule so a higher round cannot switch candidates.
 
 ## Current exact state
 
-Fixed in Milestone 1:
+Fixed through Milestone 2:
 
 - the audited minority-old-authority automatic Solo path no longer becomes writable merely because quorum disappears;
 - single-member worlds remain writable through the normal canonical quorum rule;
-- authority generation and fencing counters now fail closed at exhaustion on the touched production paths;
-- a voter that accepted recovery candidate/value B cannot later promise candidate/value C for the same target generation, so a quorum certificate locks an intersecting quorum to one recovery value.
+- authority generation and fencing counters fail closed at exhaustion on the touched production paths;
+- recovery voters and shared consensus helpers preserve the accepted candidate/value across higher rounds;
+- membership transitions now have explicit old/new proposal hashes, signed voter acknowledgements, a joint old+new quorum certificate rule, and durable per-voter prepare locks.
 
 Still incomplete:
 
-- membership records still need an explicit prepared/committed configuration transition and joint old/new quorum certificate;
-- quorum calculations still need to bind only to committed membership while prepared voters are fail-closed;
-- the shared `swarm-consensus` recovery helper still models higher-round candidate switching and must be aligned with the durable production rule;
-- process-level divergent-membership, Solo/recovery, and recovery-certificate crash/resume regressions remain to be added/run;
-- owned-path saturating counter audit remains to be completed;
+- daemon join/leave flows still directly activate membership and must be switched to prepare/vote/commit;
+- membership proposal/commit wire messages and response handling must be integrated;
+- peers with a durable membership prepare must fail closed for authority/recovery until the exact commit arrives;
+- committed membership certificate recovery/replay after crash must be wired into daemon startup/ticks;
+- direct `WireRequest::Membership` must be restricted so it cannot bypass joint voter-set changes;
+- process-level divergent-membership, Solo/recovery, and recovery-certificate crash/resume regressions remain;
+- owned-path saturating counter audit remains;
 - duplicate-process atomic non-equivocation remains coordinated with Agent 3 storage locking.
 
 ## Tests run
@@ -112,18 +122,21 @@ Still incomplete:
 | Test | Result | Commit/SHA | Notes |
 |---|---|---|---|
 | Audit/source review | PASS | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | Required implementation and audit inputs read. |
-| `cargo fmt --all` | PASS | tree committed as `8ee2f81fa43a30deb196aeb85364fb13840928f2` | GitHub Actions run `33580807303`. |
-| `cargo check --workspace --all-targets` | PASS | `8ee2f81fa43a30deb196aeb85364fb13840928f2` | GitHub Actions run `33580807303`. |
-| `cargo test -p swarm-consensus -p swarm-storage` | PASS | `8ee2f81fa43a30deb196aeb85364fb13840928f2` | Includes durable recovery value-lock and generation boundary tests. |
-| `cargo test -p swarm-cli --lib` | PASS | `8ee2f81fa43a30deb196aeb85364fb13840928f2` | GitHub Actions run `33580807303`. |
-| `cargo test -p swarm-cli --tests --no-run` | PASS | `8ee2f81fa43a30deb196aeb85364fb13840928f2` | All CLI process/integration tests compile after Milestone 1. |
+| Milestone 1 `cargo fmt --all` | PASS | `8ee2f81fa43a30deb196aeb85364fb13840928f2` | GitHub Actions run `33580807303`. |
+| Milestone 1 `cargo check --workspace --all-targets` | PASS | `8ee2f81fa43a30deb196aeb85364fb13840928f2` | GitHub Actions run `33580807303`. |
+| Milestone 1 `cargo test -p swarm-consensus -p swarm-storage` | PASS | `8ee2f81fa43a30deb196aeb85364fb13840928f2` | Durable recovery value-lock and generation boundaries. |
+| Milestone 1 `cargo test -p swarm-cli --lib` | PASS | `8ee2f81fa43a30deb196aeb85364fb13840928f2` | GitHub Actions run `33580807303`. |
+| Milestone 1 `cargo test -p swarm-cli --tests --no-run` | PASS | `8ee2f81fa43a30deb196aeb85364fb13840928f2` | All CLI process/integration tests compile. |
+| Milestone 2 `cargo fmt --all` | PASS | `b69b9e210ab217ddf84d119b2d4dd9a424ac7f41` | GitHub Actions run `33581156235`. |
+| Milestone 2 `cargo check --workspace --all-targets` | PASS | `b69b9e210ab217ddf84d119b2d4dd9a424ac7f41` | GitHub Actions run `33581156235`. |
+| Milestone 2 `cargo test -p swarm-protocol -p swarm-consensus -p swarm-storage` | PASS | `b69b9e210ab217ddf84d119b2d4dd9a424ac7f41` | Joint old/new quorum, durable prepare, shared recovery value-lock. |
 
 ## Required validation before handoff
 
-- [x] format (Milestone 1; rerun on final head required)
+- [x] format (Milestones 1/2; rerun on final head required)
 - [ ] clippy/lint for affected Rust crates
-- [x] unit tests (Milestone 1 subset; rerun on final head required)
-- [x] consensus tests (Milestone 1; rerun on final head required)
+- [x] unit tests (Milestones 1/2; rerun on final head required)
+- [x] consensus tests (Milestones 1/2; rerun on final head required)
 - [ ] process-level 3-peer recovery tests
 - [ ] process-level 5-peer divergent-membership partition tests
 - [ ] Solo/recovery race test
@@ -132,11 +145,11 @@ Still incomplete:
 
 ## Blockers
 
-No implementation blocker. Local checkout execution remains unavailable because the desktop/local repository connector rejects this chat with `CALLER_IDENTITY_REQUIRED`; exact transformations and validation are being executed by a branch-scoped, self-cleaning GitHub Actions worker. Its first staged run failed before production edits due a Python syntax typo; corrected run `33580807303` passed every gate and produced Milestone 1 commit `8ee2f81fa43a30deb196aeb85364fb13840928f2`.
+No implementation blocker. Local checkout execution remains unavailable because the desktop/local repository connector rejects this chat with `CALLER_IDENTITY_REQUIRED`; exact transformations and validation are being executed by branch-scoped, self-cleaning GitHub Actions workers. The first staged Milestone 1 run failed before production edits due a Python syntax typo; corrected Milestone 1 run `33580807303` and Milestone 2 run `33581156235` passed their full gates.
 
 ## Remaining work
 
-Implement and validate joint committed membership transitions, align the shared recovery model with production value locking, add the required partition/race/crash regressions, complete the owned-path counter audit, coordinate the duplicate-process boundary with Agent 3, then run final exact-head validation.
+Wire joint membership prepare/vote/commit into the daemon, make prepared voters fail closed, recover committed certificates across crashes, restrict direct membership activation, add the required process/race/crash regressions, complete the owned-path counter audit, coordinate the duplicate-process boundary with Agent 3, then run final exact-head validation.
 
 ## Handoff
 
