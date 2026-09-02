@@ -1,69 +1,24 @@
-# Agent 3 — CurseForge Integration
+# Agent 3 — CurseForge provider
 
-## Status
+## Recovery status
 
-`NOT STARTED`
+`INTEGRATED`
 
-## Branch / exact head
+- Branch: `agent/curseforge-provider`
+- Exact live head: `2ec9005591de71fffe8e504607a4ffb3145ff9c8`
+- Live ancestry audit: this exact head is an ancestor of `integration/player-launcher-v1` with zero Agent 3 commits left ahead.
 
-- Branch: `agent/curseforge-integration`
-- Exact head: `TBD`
+## Integrated contract
 
-## Mission
+- Official CurseForge REST API only; no site scraping.
+- Credential is machine-local via `SWARMCRAFT_CURSEFORGE_API_KEY`; no key is committed or hardcoded.
+- Search/project/compatible-file selection, deterministic dependency closure, and download behavior are integrated into Desktop.
+- Exact project/file provenance and hashes are preserved in the canonical manifest/runtime hint.
+- Runtime install/repair reacquires only the frozen exact file. Provider-restricted or unavailable downloads fail closed with explicit manual-artifact remediation.
+- Downloaded JAR identity/hash is verified against the signed canonical requirement before publication.
 
-Implement a backend-owned CurseForge provider for project/file browsing, compatible file selection, dependency metadata, and permitted download/install flows for Fabric server worlds.
+## Validation evidence
 
-## Dependencies to read
+The exact-head final integration workspace check, strict Clippy, tests, Desktop frontend/bridge tests, dependency audit, and process acceptance execute with this provider implementation present. Credential/restriction behavior remains explicit rather than being masked by fallback scraping or version substitution.
 
-- `progress/README.md`
-- Read Agent 1 when consuming shared Minecraft/Fabric version identifiers or compatibility contracts.
-- Read Agent 2 if a shared provider abstraction is already established. Reuse it rather than creating a competing provider model.
-
-## Dependencies consumed
-
-- None yet.
-
-## Work completed
-
-- None yet.
-
-## Contracts / APIs added or changed
-
-- None yet.
-
-Expected ownership includes:
-
-- CurseForge API/auth configuration;
-- search/browse project/file metadata;
-- Minecraft/Fabric/environment filtering;
-- dependency metadata;
-- exact file identity and hashes where available;
-- provider download restrictions/fallback remediation;
-- backend/Tauri contracts for Desktop browsing and installation.
-
-## Files changed
-
-- None yet.
-
-## Tests and evidence
-
-- None yet.
-
-## Decisions / invariants
-
-- Respect CurseForge API terms, project permissions, and download restrictions.
-- Do not proxy or peer-redistribute artifacts that are not permitted for redistribution.
-- Exact provider/file identity must be available to Agent 4 for canonical locking.
-- If automatic download is unavailable, return a structured remediation requirement rather than pretending installation succeeded.
-
-## Known issues / blockers
-
-- None recorded yet.
-
-## Handoff for dependent agents
-
-Agent 4 consumes provider identity/dependency/installability contracts. Agent 7 consumes browse/install UX contracts. Record API/auth requirements, exact types/JSON, download restrictions, test fixtures, and exact green commit SHA before marking ready.
-
-## Activity log
-
-- 2026-08-24 — ledger created; implementation not started.
+Final acceptance is owned by Agent 8; no standalone Agent 3 blocker remains.

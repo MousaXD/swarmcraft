@@ -1,3 +1,6 @@
+import './catalog-selectors.js';
+import './launcher-controller.js';
+
 function invalid(field, message) {
   const error = new Error(message);
   error.field = field;

@@ -1,68 +1,22 @@
-# Agent 5 — Invite + Internet Bootstrap
+# Agent 5 — Automatic invites
 
-## Status
+## Recovery status
 
-`NOT STARTED`
+`INTEGRATED`
 
-## Branch / exact head
+- Branch: `agent/automatic-invites`
+- Exact live head: `e13a4fd57e3c26121275db0b1628808e2e036a44`
+- Live ancestry audit: this exact head is an ancestor of `integration/player-launcher-v1` with zero Agent 5 commits left ahead.
 
-- Branch: `agent/invite-internet-bootstrap`
-- Exact head: `TBD`
+## Integrated contract
 
-## Mission
+- Signed invite tokens contain authority reachability without requiring ordinary players to type libp2p multiaddresses.
+- Empty normal-path bootstrap input derives usable reachability from backend connectivity diagnostics.
+- Join remains authority-mediated; possessing or discovering an invite does not bypass membership policy.
+- Token bootstrap addresses remain inside the signed/encoded invite rather than being exposed as UI setup material.
 
-Make normal invites automatically carry usable connectivity/bootstrap information without asking players to type libp2p multiaddresses. Keep discovery/connectivity separate from membership and authority.
+## Validation evidence
 
-## Dependencies to read
+`automatic_invite_join` is part of exact-head workspace tests. It creates an invite with no manual `--bootstrap`, stages a Bob join via the actual CLI, starts two real daemon processes, advances canonical membership on both peers, clears the pending join, and verifies exact snapshot replication. Workspace tests were green on the integrated validation head.
 
-- `progress/README.md`
-- No implementation-agent dependency required to start.
-
-## Dependencies consumed
-
-- None yet.
-
-## Work completed
-
-- None yet.
-
-## Contracts / APIs added or changed
-
-- None yet.
-
-Expected ownership includes:
-
-- selecting safe current direct/relay/bootstrap addresses from backend connectivity state;
-- automatically populating signed invites with usable contact information;
-- relay/bootstrap fallback semantics;
-- address freshness/expiry behavior;
-- privacy-safe invite payloads;
-- structured backend/Tauri state for invite readiness/remediation.
-
-## Files changed
-
-- None yet.
-
-## Tests and evidence
-
-- None yet.
-
-## Decisions / invariants
-
-- Invite connectivity hints never grant membership.
-- Relay reachability never grants authority.
-- Do not embed stale historical-success addresses as if currently reachable.
-- Avoid leaking unnecessary local/private addresses when they are not useful to the recipient.
-- Manual bootstrap entry may remain an advanced override, but normal invite creation should not require it.
-
-## Known issues / blockers
-
-- Real-world NAT/CGNAT coverage remains a certification concern even after automatic invite construction works.
-
-## Handoff for dependent agents
-
-Agent 6 consumes the connectivity advertisement contract for discovery. Agent 7 consumes the player-facing invite readiness flow. Record exact address-selection rules, signed invite field behavior, privacy decisions, tests, and exact green SHA.
-
-## Activity log
-
-- 2026-08-24 — ledger created; implementation not started.
+Final acceptance is owned by Agent 8; no standalone Agent 5 blocker remains.

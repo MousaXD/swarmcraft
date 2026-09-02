@@ -207,6 +207,7 @@ fn main() -> Result<()> {
             println!("Public key: {}", hex_string(&identity.public_key()));
         }
         Command::Daemon { listen } => {
+            invite::configure_connectivity_snapshot(&paths);
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
                 let supervisor = tokio::spawn(migration::supervise(paths.clone()));
@@ -779,6 +780,7 @@ fn handle_invite(command: InviteCommand, paths: &DataPaths, storage: &Storage) -
             {
                 bail!("only the current authority may create join invitations");
             }
+            let bootstrap_addrs = invite::resolve_bootstrap_addrs(paths, bootstrap_addrs)?;
             let lifetime_ms = expires_minutes.saturating_mul(60_000);
             let mut invite = InviteV1 {
                 protocol_version: PROTOCOL_VERSION,

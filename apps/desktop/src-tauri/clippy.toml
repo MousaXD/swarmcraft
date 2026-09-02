@@ -1,0 +1,3 @@
+# Tauri IPC commands intentionally expose up to eight parameters to preserve the
+# existing frontend invoke contract without packing unrelated values into a DTO.
+too-many-arguments-threshold = 8

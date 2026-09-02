@@ -1,68 +1,24 @@
-# Agent 2 — Modrinth Integration
+# Agent 2 — Modrinth provider
 
-## Status
+## Recovery status
 
-`NOT STARTED`
+`INTEGRATED`
 
-## Branch / exact head
+- Branch: `agent/modrinth-provider`
+- Exact live head: `355d1f0762fe04391643eabcb802bc4641b1b0a8`
+- Live ancestry audit: this exact head is an ancestor of `integration/player-launcher-v1` with zero Agent 2 commits left ahead.
 
-- Branch: `agent/modrinth-integration`
-- Exact head: `TBD`
+## Integrated contract
 
-## Mission
+- Official Modrinth API search/project/version integration.
+- Deterministic compatible version ordering and required dependency closure.
+- Exact provider file identity and provider hashes.
+- HTTPS-only provider/CDN access with bounded downloads and atomic publication.
+- Runtime reacquisition uses frozen canonical project/version/file provenance. It never resolves a newer compatible version during Bob's install/repair.
+- Exact downloaded JAR is subsequently checked against canonical Fabric mod ID/version/hash before becoming a world mod.
 
-Implement a backend-owned Modrinth provider for browsing/searching projects, selecting compatible versions/files, resolving dependencies, and downloading/verifying permitted artifacts for Fabric server worlds.
+## Validation evidence
 
-## Dependencies to read
+The final integration exact-head workspace/Linux/macOS/Windows test and strict-Clippy suites include the Modrinth implementation and its deterministic provider tests. Historical Agent 2 strict-Clippy defects are superseded by the integrated green source tree.
 
-- `progress/README.md`
-- Read Agent 1 when consuming shared Minecraft/Fabric version identifiers or compatibility contracts.
-
-## Dependencies consumed
-
-- None yet.
-
-## Work completed
-
-- None yet.
-
-## Contracts / APIs added or changed
-
-- None yet.
-
-Expected ownership includes:
-
-- Modrinth search/browse API client;
-- Minecraft/Fabric/environment filtering;
-- project/version/file identity;
-- dependency metadata;
-- source URL/provenance handling;
-- artifact hash verification;
-- backend/Tauri contracts for Desktop browsing and installation.
-
-## Files changed
-
-- None yet.
-
-## Tests and evidence
-
-- None yet.
-
-## Decisions / invariants
-
-- Do not sign or install ambiguous “latest” requirements.
-- Preserve exact provider project/version/file identifiers and hashes for Agent 4.
-- Respect Modrinth project licensing and download rules.
-- Provider/API failures must surface as structured unavailable/error states, not silently fall back to unrelated artifacts.
-
-## Known issues / blockers
-
-- None recorded yet.
-
-## Handoff for dependent agents
-
-Agent 4 consumes provider identity/dependency/download contracts. Agent 7 consumes browse/install UX contracts. Record exact types/JSON, provider rate-limit/cache behavior, permitted download behavior, and exact green commit SHA before marking ready.
-
-## Activity log
-
-- 2026-08-24 — ledger created; implementation not started.
+Final acceptance is owned by Agent 8; no standalone Agent 2 blocker remains.

@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
 use swarm_cli::{
-    host_readiness, launch_guard, migration,
+    discovery::{self, DiscoverySearchInputV1},
+    host_readiness, launch_guard, migration, provider_runtime,
     runtime_installer::{
         RuntimeComponentKind, RuntimeComponentState, RuntimeInstallOptions, RuntimeInstaller, RuntimeProgress,
         RuntimeStatus,
@@ -51,6 +52,21 @@ enum RuntimeCommand {
     },
     /// Re-hash and re-check the installed runtime without downloading anything.
     Verify { world: String },
+    /// Inspect one exact Fabric mod JAR using the shared Rust authority parser.
+    InspectMod { path: PathBuf },
+    /// Search authenticated public world announcements. Discovery never grants membership.
+    DiscoverySearch {
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long = "bootstrap")]
+        bootstrap: Vec<String>,
+    },
+    /// Resolve one authenticated public/unlisted world announcement by exact world ID.
+    DiscoveryResolve {
+        world: String,
+        #[arg(long = "bootstrap")]
+        bootstrap: Vec<String>,
+    },
     /// Launch the persisted managed runtime through the shared Rust authority/migration path.
     Launch { world: String },
 }
@@ -72,19 +88,17 @@ fn main() -> Result<()> {
             print_json(&installer.plan(parse_world(&world)?)?)?;
         }
         RuntimeCommand::Install { world, accept_eula, game_endpoint } => {
-            let report = installer.install(
-                parse_world(&world)?,
-                RuntimeInstallOptions { accept_eula, game_endpoint },
-                print_progress,
-            )?;
+            let world = parse_world(&world)?;
+            prepare_provider_mods(&paths, &storage, world)?;
+            let report =
+                installer.install(world, RuntimeInstallOptions { accept_eula, game_endpoint }, print_progress)?;
             print_json(&report)?;
         }
         RuntimeCommand::Repair { world, accept_eula, game_endpoint } => {
-            let report = installer.repair(
-                parse_world(&world)?,
-                RuntimeInstallOptions { accept_eula, game_endpoint },
-                print_progress,
-            )?;
+            let world = parse_world(&world)?;
+            prepare_provider_mods(&paths, &storage, world)?;
+            let report =
+                installer.repair(world, RuntimeInstallOptions { accept_eula, game_endpoint }, print_progress)?;
             print_json(&report)?;
         }
         RuntimeCommand::Verify { world } => {
@@ -135,6 +149,25 @@ fn main() -> Result<()> {
             }
             print_json(&status)?;
         }
+        RuntimeCommand::InspectMod { path } => {
+            print_json(&server_mods::inspect_fabric_mod(&path)?)?;
+        }
+        RuntimeCommand::DiscoverySearch { query, bootstrap } => {
+            let report = tokio::runtime::Runtime::new()?.block_on(discovery::search_public_worlds(
+                &paths,
+                DiscoverySearchInputV1 { query, ..Default::default() },
+                &bootstrap,
+            ))?;
+            print_json(&report)?;
+        }
+        RuntimeCommand::DiscoveryResolve { world, bootstrap } => {
+            let report = tokio::runtime::Runtime::new()?.block_on(discovery::resolve_world(
+                &paths,
+                parse_world(&world)?,
+                &bootstrap,
+            ))?;
+            print_json(&report)?;
+        }
         RuntimeCommand::Launch { world } => {
             let world = parse_world(&world)?;
             let status = installer.verify(world)?;
@@ -153,6 +186,12 @@ fn main() -> Result<()> {
             tokio::runtime::Runtime::new()?.block_on(migration::run_authority_runtime(&paths, &storage, options))?;
         }
     }
+    Ok(())
+}
+
+fn prepare_provider_mods(paths: &DataPaths, storage: &Storage, world: WorldId) -> Result<()> {
+    let world_config = storage.load_world_config(world)?;
+    provider_runtime::acquire_missing_server_mods(paths, world, &world_config.compatibility)?;
     Ok(())
 }
 

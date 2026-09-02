@@ -1,92 +1,59 @@
-# SwarmCraft Agent Progress
+# SwarmCraft player-launcher integration status
 
-This directory is the shared coordination ledger for the player-launcher work.
+Updated: 2026-08-29
 
-Every implementation agent owns exactly one progress file:
+This directory records the live recovery/integration state for the player-launcher cohort. Historical agent notes were reconciled against current GitHub branch ancestry, source code, and exact-head Actions evidence. Stale status text is not treated as authority.
 
-- `agent1.md` — Minecraft + Fabric Catalog
-- `agent2.md` — Modrinth Integration
-- `agent3.md` — CurseForge Integration
-- `agent4.md` — Canonical Modpack + Import
-- `agent5.md` — Invite + Internet Bootstrap
-- `agent6.md` — Friend + Public Discovery
-- `agent7.md` — Player Setup + Migration UX
-- `agent8.md` — Integration + Acceptance
+## Final integration line
 
-## Mandatory protocol
+- Product branch: `integration/player-launcher-v1`
+- Product tree before this ledger-only reconciliation: `bbba167df27493a8e90478f2ce177839db91a4b7`
+- Final acceptance SHA: the ledger reconciliation commit that contains this file, pending exact-head validation. Its immutable SHA and workflow IDs are recorded on validation PR #57 after the gates complete.
+- `main` has not been merged into or rewritten by this recovery effort.
 
-1. Before changing code, read this file and your own `progress/agentN.md`.
-2. If your file lists upstream dependencies, read every required upstream `progress/agentN.md` before designing or changing a shared contract.
-3. Record the exact upstream commit SHA(s) you consumed under **Dependencies consumed**. Do not rely on memory, chat summaries, or assumptions about another branch.
-4. Do not invent a second competing contract when an upstream agent already owns that contract. If the upstream contract is insufficient, record the requested change in your own log and coordinate through the integration agent.
-5. Update your own progress file after every meaningful implementation milestone and before every handoff/PR. Keep it accurate enough that another agent can resume from the repository alone.
-6. Never edit another implementation agent's progress file to make their work appear complete. Agent 8 may add integration observations, but the original implementation record stays owned by its agent.
-7. `DONE` means implementation plus owned tests are green on the exact recorded head. Anything less is `IN PROGRESS`, `BLOCKED`, or `READY FOR INTEGRATION`.
-8. Every contract/API/schema change must be listed explicitly, including JSON shapes, Rust types, Tauri commands, protocol fields, environment variables, source/provider rules, and migration behavior.
-9. Every progress file must list tests actually executed and their result. Do not write “tests pass” without naming them.
-10. Do not merge feature branches directly into `main`. Agent 8 owns final integration into the designated integration branch unless an explicit later instruction changes that rule.
+## Live source classification
 
-## Required status values
+| Cohort | Live source | Recovery classification |
+| --- | --- | --- |
+| Agent 1 catalog | `agent/minecraft-fabric-catalog` | INTEGRATED. Functional source is present. The live branch has one extra bot-authored Rustfmt-only tail commit, `a581195bfff3fd3a050e1978910fe77288237cbc`; final integration received its own later Rustfmt over the combined Desktop tree. |
+| Agent 2 Modrinth | `355d1f0762fe04391643eabcb802bc4641b1b0a8` | INTEGRATED, exact live head is an ancestor of final integration. |
+| Agent 3 CurseForge | `2ec9005591de71fffe8e504607a4ffb3145ff9c8` | INTEGRATED, exact live head is an ancestor of final integration. |
+| Agent 4 canonical modpack | `75351794926e1ba183e5615f948a53c7017084bf` | INTEGRATED, exact live head is an ancestor of final integration. |
+| Agent 5 automatic invites | `e13a4fd57e3c26121275db0b1628808e2e036a44` | INTEGRATED, exact live head is an ancestor of final integration. |
+| Agent 6 discovery | `0a72380aebbc6f227957cae733de64dc6f85638c` | INTEGRATED, exact live head is an ancestor of final integration. |
+| Agent 7 player journey | no live Agent 7 branch | RECOVERED DIRECTLY ON FINAL INTEGRATION. Missing launcher/player wiring was completed during repository recovery rather than inventing a nonexistent handoff branch. |
+| Agent 8 final acceptance | `integration/player-launcher-v1` | FINAL CANDIDATE, exact-head acceptance in progress. |
 
-Use one of:
+## Integrated product capabilities
 
-- `NOT STARTED`
-- `IN PROGRESS`
-- `BLOCKED`
-- `READY FOR INTEGRATION`
-- `INTEGRATING`
-- `DONE`
+The final integration line contains authoritative Mojang/Fabric selectors, Modrinth and CurseForge provider integrations, deterministic canonical modpack provenance and hashes, canonical world creation, backend-owned Fabric JAR inspection, managed provider staging, exact provider artifact reacquisition for runtime install/repair, automatic signed invites without ordinary-path multiaddress entry, public/unlisted/private discovery semantics, import, managed Java/Minecraft/Fabric runtime, replication, Host Readiness, stop/checkpoint/wake, migration, authority fencing, and recovery.
 
-## Required progress-file sections
+Desktop normal-path launcher wiring is active through `app.js` -> `import-flow.js` -> `catalog-selectors.js` and `launcher-controller.js`. Provider runtime acquisition is wired at `swarmcraft-runtime install/repair` before `RuntimeInstaller` verifies the completed canonical mod profile. Restricted/manual provider artifacts fail closed with actionable remediation instead of silently substituting another release.
 
-Each agent file must maintain these sections:
+## Acceptance evidence already established
 
-- **Status**
-- **Branch / exact head**
-- **Mission**
-- **Dependencies to read**
-- **Dependencies consumed**
-- **Work completed**
-- **Contracts / APIs added or changed**
-- **Files changed**
-- **Tests and evidence**
-- **Decisions / invariants**
-- **Known issues / blockers**
-- **Handoff for dependent agents**
-- **Activity log**
+Exact head `1cca925b44a51aef019f31ada77aaca88fcf4177`, whose only subsequent product-branch changes before this ledger were removal of recovery-only scaffolding, established:
 
-The activity log should be append-only. Put newest entries at the bottom and include the date, commit SHA, and a compact summary.
+- Release version guard: GREEN.
+- Network Soak: GREEN.
+- Linux workspace format, strict Clippy, and tests: GREEN.
+- Windows strict Clippy and tests: GREEN.
+- macOS strict Clippy and tests: GREEN.
+- RustSec dependency audit: GREEN.
+- Fabric server mod build and embedded Fabric API check: GREEN.
+- Fuzz smoke: GREEN.
+- Process-level acceptance: GREEN, including live join replication, Host Readiness fail-closed cases, import, storage failure injection, three-daemon recovery, and successor-death recovery.
+- Linux Desktop frontend tests, Tauri bridge validation, runtime sidecar build, and native package build: GREEN at the observed checkpoint; Apple Silicon native Desktop package: GREEN.
+- Dedicated catalog validation passed workspace format/check/strict Clippy/tests, deterministic catalog tests, and live Mojang/Fabric source validation before entering its Desktop stages.
 
-## Dependency graph
+Workspace tests also include `automatic_invite_join`, which creates an invite with no manual `--bootstrap`, joins from a second peer, runs two real daemon processes, advances canonical membership, and replicates the exact snapshot. `live_join_replication` independently exercises two real daemon processes and signed join/snapshot replication.
 
-```text
-Agent 1  Minecraft/Fabric Catalog ───────────────┐
-Agent 2  Modrinth ───────────────────────────────┤
-Agent 3  CurseForge ─────────────────────────────┤
-                                                 ├─> Agent 4 Canonical Modpack + Import ─┐
-Agent 5  Invite + Internet Bootstrap ────────────┤                                      │
-                                                 └─> Agent 6 Discovery ──────────────────┤
-                                                                                        ├─> Agent 7 Player Journey
-Agents 1,2,3,4,5,6 ─────────────────────────────────────────────────────────────────────┘
+## Final validation vehicles
 
-Agents 1–7 ─────────────────────────────────────────────────────────────────────────────> Agent 8 Integration + Acceptance
-```
+- PR #57 is validation-only and targets `integration/runtime-player-journey`, a branch pinned to `ddc1667eccf871b64e4089992d43f2bbd4a6392f`. This lets the repository's clean-machine real Minecraft/Fabric player-journey workflow run against the final head without touching `main`.
+- PR #58 remains a validation vehicle for the dedicated Agent 1 catalog/Desktop gate.
+- Neither validation PR is intended to merge into `main`.
 
-Agent 4 must consume the provider/runtime contracts from Agents 1–3 before freezing canonical modpack identity.
+## Completion rule
 
-Agent 6 must consume Agent 5's connectivity/invite advertisement contract before publishing discovery records.
-
-Agent 7 must consume Agents 1–6 before wiring the final create/join/setup/reconnect experience.
-
-Agent 8 must read every progress file and integrate only exact recorded heads that are ready for integration.
-
-## Shared safety rules
-
-- Minecraft/Fabric/runtime compatibility belongs in backend-owned contracts, not duplicated JavaScript rules.
-- Canonical world requirements must pin exact artifact identity and hashes. Never sign “latest”.
-- Provider licensing/redistribution rules must be respected. Do not peer-to-peer redistribute arbitrary Modrinth/CurseForge JARs unless the provider/project terms explicitly permit it.
-- A missing or unavailable required artifact must fail closed with a remediation path rather than silently substituting another version.
-- Discovery never grants membership. Signed canonical membership remains authoritative.
-- Connectivity/relay reachability never grants authority.
-- Runtime/mod readiness and Host Readiness remain backend decisions.
-- Host migration must preserve fencing, canonical snapshot restore, and runtime verification. Reconnection UX must not bypass authority safety.
+Do not call the milestone complete merely because code exists or unit tests pass. The final immutable candidate must finish its exact-head repository CI, Network Soak, Release Guard, dedicated catalog/Desktop validation, and clean-machine live Minecraft/Fabric journey. The final acceptance report must also reconcile the two-peer invite/join/replication and exact-provider acquisition evidence against that same source tree.

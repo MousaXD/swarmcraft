@@ -1761,6 +1761,17 @@ fn handle_request(
                 WireResponse::SleepAccepted { epoch: record.epoch, fencing_token: record.fencing_token },
             )?;
         }
+        WireRequest::DiscoveryPublic { .. }
+        | WireRequest::DiscoveryResolve { .. }
+        | WireRequest::FriendPresence { .. } => {
+            node.respond(
+                channel,
+                WireResponse::Error {
+                    code: "DISCOVERY_ENDPOINT_REQUIRED".into(),
+                    message: "discovery requests are handled by the discovery service".into(),
+                },
+            )?;
+        }
         WireRequest::Hello(_) => return Err(anyhow!("PeerHello is handled by the network authentication layer")),
     }
     Ok(())

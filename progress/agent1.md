@@ -1,68 +1,24 @@
-# Agent 1 — Minecraft + Fabric Catalog
+# Agent 1 — Minecraft + Fabric catalog
 
-## Status
+## Recovery status
 
-`NOT STARTED`
-
-## Branch / exact head
+`INTEGRATED — FORMAT-ONLY LIVE TAIL SUPERSEDED`
 
 - Branch: `agent/minecraft-fabric-catalog`
-- Exact head: `TBD`
+- Live head: `a581195bfff3fd3a050e1978910fe77288237cbc`
+- Merge base with final integration: `b7128c83b83208d7c1d8a82df915766fc7abb3ec`
+- The sole Agent 1 commit after that merge base is bot-authored `style(agent1): satisfy Desktop rustfmt`. It changes only Desktop formatting; it contains no catalog behavior.
+- The final integration branch subsequently received Rustfmt over the fully integrated Desktop tree, so that old formatting-only tail is intentionally not cherry-picked.
 
-## Mission
+## Integrated contract
 
-Own backend catalog/resolution for player-selectable Minecraft and Fabric versions. Replace guessed/free-text compatibility inputs with structured source-backed choices while keeping Runtime Installer authoritative for actual installation and verification.
+- Official Mojang version catalog.
+- Fabric Meta loader resolution constrained by selected Minecraft version.
+- Authoritative Desktop selectors; invalid/loading/out-of-order selections fail closed.
+- Canonical world creation revalidates the selected Minecraft/Fabric pair in Rust rather than trusting browser text.
 
-## Dependencies to read
+## Validation evidence
 
-- `progress/README.md`
-- No implementation-agent dependency required to start.
+On exact integration head `1cca925b44a51aef019f31ada77aaca88fcf4177`, dedicated Agent 1 validation passed workspace format, locked metadata, workspace check, strict Clippy, workspace tests, deterministic catalog tests, and live Mojang/Fabric source validation before entering Desktop sidecar/stage checks. The previous Desktop rustfmt-only failure was repaired by the repository runner at `9c7816dea8371cfab34203acbd0c8a492894e785`.
 
-## Dependencies consumed
-
-- None yet.
-
-## Work completed
-
-- None yet.
-
-## Contracts / APIs added or changed
-
-- None yet.
-
-Expected ownership includes structured backend APIs for:
-
-- supported Minecraft release/version listing from official Mojang metadata;
-- compatible Fabric Loader versions from Fabric Meta;
-- compatibility filtering between selected Minecraft and Fabric Loader;
-- Tauri/backend adapter contracts consumed by Desktop selectors;
-- source provenance and cache/error semantics.
-
-Do not move compatibility truth into JavaScript.
-
-## Files changed
-
-- None yet.
-
-## Tests and evidence
-
-- None yet.
-
-## Decisions / invariants
-
-- Mojang and Fabric official sources remain authoritative.
-- User-facing selectors must use backend-returned IDs/versions rather than inventing version rules in Desktop.
-- Runtime Installer remains responsible for artifact installation/hash verification.
-- Never resolve an unspecified value to an arbitrary “latest” after world compatibility has been signed.
-
-## Known issues / blockers
-
-- None recorded yet.
-
-## Handoff for dependent agents
-
-Agents 4 and 7 depend on this work. Before handoff, document exact JSON/Rust contracts, cache behavior, compatibility rules, error states, and the exact commit SHA that they should consume.
-
-## Activity log
-
-- 2026-08-24 — ledger created; implementation not started.
+Final acceptance is owned by Agent 8 on `integration/player-launcher-v1`; no further Agent 1 feature work is pending.

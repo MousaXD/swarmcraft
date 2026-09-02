@@ -1,79 +1,26 @@
-# Agent 7 — Player Setup + Migration UX
+# Agent 7 — Player journey
 
-## Status
+## Recovery status
 
-`NOT STARTED`
+`RECOVERED DIRECTLY ON FINAL INTEGRATION`
 
-## Branch / exact head
+No live `agent/player-setup-migration-ux` / Agent 7 branch existed when final recovery resumed. The repository therefore could not truthfully provide an exact Agent 7 source-head handoff. The missing player-facing integration was completed directly on `integration/player-launcher-v1` rather than inventing history.
 
-- Branch: `agent/player-setup-migration-ux`
-- Exact head: `TBD`
+## Recovered player journey
 
-## Mission
+- Authoritative Minecraft and Fabric selectors are active in the Desktop create/import journey.
+- Create World now gains a provider-mod selector for Modrinth and CurseForge.
+- Provider selections resolve exact dependency graphs, download through backend-managed staging, and are inspected by Rust for true Fabric mod identity.
+- Canonical Create World persists exact canonical provenance/hashes and installs the selected exact JARs into the world mod profile.
+- Legacy compatibility text/bootstrap-address controls are hidden from the ordinary player path.
+- Public-world discovery and exact world-ID resolve are exposed in Desktop while membership remains separate.
+- Backend errors are preserved as actionable player messages.
+- Runtime install/repair can reacquire permitted exact provider artifacts from the frozen signed canonical provenance; manual/restricted artifacts stop with explicit remediation.
 
-Connect the catalog/provider/modpack/connectivity/discovery contracts into the normal Desktop player journey: create, choose versions/mods, invite/join, automatically prepare permitted runtime/mod artifacts, sync the world, launch, and reconnect after host migration.
+## Wiring evidence
 
-## Dependencies to read
+`app.js` imports `import-flow.js`; `import-flow.js` imports both `catalog-selectors.js` and `launcher-controller.js`. The Tauri command table registers the launcher/provider/discovery bridge. Desktop frontend and Tauri bridge checks were green on the integrated validation head, and `launcher-controller.test.mjs` covers exact identity/provenance, missing required dependency fail-closed behavior, and actionable provider errors.
 
-- `progress/README.md`
-- `progress/agent1.md`
-- `progress/agent2.md`
-- `progress/agent3.md`
-- `progress/agent4.md`
-- `progress/agent5.md`
-- `progress/agent6.md`
+## Handoff
 
-Do not begin shared-contract integration until the required upstream files record exact ready-for-integration SHAs.
-
-## Dependencies consumed
-
-- None yet.
-
-## Work completed
-
-- None yet.
-
-## Contracts / APIs added or changed
-
-- None yet.
-
-Expected ownership includes Desktop flows for:
-
-- Minecraft version selector backed by Agent 1;
-- Fabric Loader selector backed by Agent 1;
-- Modrinth browse/select/install backed by Agent 2;
-- CurseForge browse/select/install/remediation backed by Agent 3;
-- canonical new-world modpack creation/import backed by Agent 4;
-- automatic invite readiness/connectivity backed by Agent 5;
-- friend/public discovery backed by Agent 6;
-- join setup wizard that resolves runtime, permitted mods, snapshot sync, and readiness;
-- explicit local-file remediation when provider download is unavailable;
-- post-migration endpoint observation and player reconnection UX without bypassing authority safety.
-
-## Files changed
-
-- None yet.
-
-## Tests and evidence
-
-- None yet.
-
-## Decisions / invariants
-
-- Desktop consumes backend truth; do not duplicate compatibility, authority, Host Readiness, hash, or licensing rules in JavaScript.
-- “Automatic mod setup” means automatically retrieve only artifacts the provider/project permits. Otherwise show a precise local/download remediation step and verify the resulting artifact.
-- Join must not claim playable until canonical membership, runtime/mod compatibility, snapshot synchronization, and required readiness checks are satisfied.
-- Reconnection UX follows the backend-published accepted authority endpoint. It must never select a host by frontend guesswork.
-- Existing safe Stop World, fencing, migration, and Host Readiness behavior must remain intact.
-
-## Known issues / blockers
-
-- Intentionally waits on Agents 1–6 for final integration contracts.
-
-## Handoff for dependent agents
-
-Agent 8 consumes the complete player journey. Record every upstream SHA consumed, Tauri/backend adapter changes, UI state machine, failure/remediation states, reconnect behavior, owned tests, screenshots/evidence where useful, and exact green head.
-
-## Activity log
-
-- 2026-08-24 — ledger created; waiting on upstream implementation contracts.
+There is no independent Agent 7 branch to consume. Agent 8 owns validation of the recovered journey on the final integration SHA.

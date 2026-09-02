@@ -1,9 +1,27 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod canonical_commands;
+mod canonical_world_commands;
+mod catalog_commands;
+mod curseforge;
+mod launcher_commands;
+mod modrinth_commands;
 mod runtime;
 mod runtime_commands;
 mod transfer_commands;
 
+use canonical_commands::canonicalize_modpack;
+use canonical_world_commands::create_canonical_world;
+use catalog_commands::{fabric_loader_versions, minecraft_versions, validate_fabric_selection};
+use curseforge::{
+    curseforge_download, curseforge_project, curseforge_provider_status, curseforge_resolve, curseforge_search,
+    curseforge_versions,
+};
+use launcher_commands::{
+    curseforge_resolve_project, discovery_resolve, discovery_search, inspect_mod_artifact, modrinth_resolve_project,
+    provider_staging_dir,
+};
+use modrinth_commands::{modrinth_download, modrinth_project, modrinth_resolve, modrinth_search, modrinth_versions};
 use runtime::RuntimeProcesses;
 use runtime_commands::{ensure_daemon_running, start_daemon, stop_daemon, stop_host};
 use tauri::{AppHandle, State};
@@ -96,6 +114,7 @@ async fn create_world(
     let fabric_loader = require_value(fabric_loader, "Fabric loader version")?;
     let compatibility = require_value(compatibility, "Compatibility profile")?;
     let visibility = require_value(visibility, "Visibility")?;
+    validate_fabric_selection(minecraft.clone(), fabric_loader.clone()).await.map_err(|error| error.to_string())?;
     run_cli(
         &app,
         vec![
@@ -144,11 +163,7 @@ async fn import_world(
         "--visibility".into(),
         visibility,
     ];
-    for jar in server_mods
-        .into_iter()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
+    for jar in server_mods.into_iter().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
         arguments.push("--server-mod".into());
         arguments.push(jar);
     }
@@ -178,18 +193,9 @@ async fn create_invite(
     bootstrap_addrs: Vec<String>,
 ) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
-    let mut arguments = vec![
-        "invite".into(),
-        "create".into(),
-        world,
-        "--expires-minutes".into(),
-        expires_minutes.max(1).to_string(),
-    ];
-    for address in bootstrap_addrs
-        .into_iter()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
+    let mut arguments =
+        vec!["invite".into(), "create".into(), world, "--expires-minutes".into(), expires_minutes.max(1).to_string()];
+    for address in bootstrap_addrs.into_iter().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
         arguments.push("--bootstrap".into());
         arguments.push(address);
     }
@@ -283,37 +289,22 @@ async fn export_world(app: AppHandle, world: String, destination: String) -> Res
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn recover_world(
-    app: AppHandle,
-    world: String,
-    snapshot: u64,
-    destination: String,
-) -> Result<String, String> {
+async fn recover_world(app: AppHandle, world: String, snapshot: u64, destination: String) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
     let destination = require_value(destination, "Recovery destination")?;
-    run_cli(
-        &app,
-        vec!["world".into(), "recover".into(), world, snapshot.to_string(), destination],
-    )
-    .await
+    run_cli(&app, vec!["world".into(), "recover".into(), world, snapshot.to_string(), destination]).await
 }
 
 #[tauri::command]
 async fn migration_capabilities(app: AppHandle) -> String {
     let mut supported = Vec::new();
-    if run_cli(&app, vec!["world".into(), "migration-status".into(), "--help".into()])
-        .await
-        .is_ok()
-    {
+    if run_cli(&app, vec!["world".into(), "migration-status".into(), "--help".into()]).await.is_ok() {
         supported.push("status");
     }
     if transfer_supported(&app).await {
         supported.push("transfer");
     }
-    if run_cli(&app, vec!["world".into(), "wake".into(), "--help".into()])
-        .await
-        .is_ok()
-    {
+    if run_cli(&app, vec!["world".into(), "wake".into(), "--help".into()]).await.is_ok() {
         supported.push("wake");
     }
     supported.join(",")
@@ -322,11 +313,7 @@ async fn migration_capabilities(app: AppHandle) -> String {
 #[tauri::command]
 async fn migration_status(app: AppHandle, world: String) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
-    run_cli(
-        &app,
-        vec!["world".into(), "migration-status".into(), world, "--json".into()],
-    )
-    .await
+    run_cli(&app, vec!["world".into(), "migration-status".into(), world, "--json".into()]).await
 }
 
 #[tauri::command]
@@ -365,10 +352,7 @@ async fn configure_world_runtime(
         mod_jar,
         "--accept-eula".into(),
     ];
-    if let Some(endpoint) = game_endpoint
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(endpoint) = game_endpoint.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
         arguments.push("--game-endpoint".into());
         arguments.push(endpoint);
     }
@@ -416,10 +400,6 @@ async fn runtime_launch(
     world: String,
 ) -> Result<Option<u32>, String> {
     let world = require_value(world, "World ID")?;
-    // Networking/recovery supervision and the foreground managed authority
-    // runtime are separate owned processes. The managed host enters the same
-    // Rust migration::run_authority_runtime path as Advanced hosting, which can
-    // safely establish the first solo authority generation for a new world.
     processes.ensure_daemon_running(&app, "/ip4/0.0.0.0/udp/0/quic-v1".into())?;
     let pid = processes.start_managed_host(&app, world.clone())?;
     for _ in 0..160 {
@@ -448,16 +428,8 @@ async fn runtime_launch(
 }
 
 #[tauri::command]
-async fn connectivity_diagnostics(
-    app: AppHandle,
-    processes: State<'_, RuntimeProcesses>,
-) -> Result<String, String> {
-    match run_cli(
-        &app,
-        vec!["diagnostics".into(), "connectivity".into(), "--json".into()],
-    )
-    .await
-    {
+async fn connectivity_diagnostics(app: AppHandle, processes: State<'_, RuntimeProcesses>) -> Result<String, String> {
+    match run_cli(&app, vec!["diagnostics".into(), "connectivity".into(), "--json".into()]).await {
         Ok(json) => Ok(json),
         Err(_) => processes.connectivity_diagnostics_json(),
     }
@@ -503,6 +475,9 @@ fn main() {
             initialize_node,
             node_identity,
             list_worlds,
+            minecraft_versions,
+            fabric_loader_versions,
+            validate_fabric_selection,
             create_world,
             import_world,
             join_world,
@@ -533,6 +508,25 @@ fn main() {
             runtime_verify,
             runtime_launch,
             connectivity_diagnostics,
+            canonicalize_modpack,
+            create_canonical_world,
+            modrinth_search,
+            modrinth_project,
+            modrinth_versions,
+            modrinth_resolve,
+            modrinth_resolve_project,
+            modrinth_download,
+            curseforge_provider_status,
+            curseforge_search,
+            curseforge_project,
+            curseforge_versions,
+            curseforge_resolve,
+            curseforge_resolve_project,
+            curseforge_download,
+            provider_staging_dir,
+            inspect_mod_artifact,
+            discovery_search,
+            discovery_resolve,
             ensure_daemon_running,
             start_daemon,
             stop_daemon,
