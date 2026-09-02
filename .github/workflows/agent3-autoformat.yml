@@ -33,6 +33,20 @@ jobs:
               text = text.replace(needle, replacement, 1)
           if "entry.path().file_stem()" in text:
               text = text.replace("entry.path().file_stem()", "path.file_stem()", 1)
+          epoch_old = "        let current_epoch = self.load_epoch_record(manifest.world_id).ok();\n"
+          if epoch_old in text:
+              epoch_new = "\n".join([
+                  '        let epoch_path = self.world_dir(manifest.world_id).join("metadata").join("epoch.postcard");',
+                  "        let current_epoch = if epoch_path.exists() {",
+                  "            Some(self.load_epoch_record(manifest.world_id)?)",
+                  "        } else {",
+                  "            None",
+                  "        };",
+                  "",
+              ])
+              text = text.replace(epoch_old, epoch_new, 1)
+          elif "let epoch_path = self.world_dir(manifest.world_id)" not in text:
+              raise SystemExit("integrity.rs epoch fail-closed target not found")
           integrity.write_text(text)
 
           streaming = Path("crates/swarm-storage/src/streaming.rs")
@@ -44,7 +58,37 @@ jobs:
               if needle not in text:
                   raise SystemExit("streaming.rs test module target not found")
               text = text.replace(needle, replacement, 1)
+          text = text.replace(
+              "if matches!(error, StorageError::SnapshotManifestConflict { .. }) {",
+              "if matches!(error, StorageError::SnapshotHistoryConflict { .. }) {",
+              1,
+          )
           streaming.write_text(text)
+
+          base = Path("crates/swarm-storage/src/lib.rs")
+          text = base.read_text()
+          old_load = "\n".join([
+              "    pub fn load_snapshot(&self, world: WorldId, number: u64) -> Result<SnapshotManifestV1, StorageError> {",
+              "        self.validate_canonical_snapshot_namespace(world)?;",
+              "        self.load_snapshot_file_unchecked(world, number)",
+              "    }",
+          ])
+          if old_load in text:
+              new_load = "\n".join([
+                  "    pub fn load_snapshot(&self, world: WorldId, number: u64) -> Result<SnapshotManifestV1, StorageError> {",
+                  "        let manifest = self.load_snapshot_file_unchecked(world, number)?;",
+                  "        self.validate_canonical_snapshot_namespace(world)?;",
+                  "        Ok(manifest)",
+                  "    }",
+              ])
+              text = text.replace(old_load, new_load, 1)
+          elif "let manifest = self.load_snapshot_file_unchecked(world, number)?;" not in text:
+              raise SystemExit("lib.rs direct load ordering target not found")
+          old_debris = 'name.starts_with(".atomic-") || name.starts_with(".blob-") || name.starts_with(".restore-")'
+          new_debris = old_debris + ' || name.starts_with(".deleted-")'
+          if old_debris in text and 'name.starts_with(".deleted-")' not in text:
+              text = text.replace(old_debris, new_debris, 1)
+          base.write_text(text)
 
           migration = Path("crates/swarm-cli/src/migration.rs")
           text = migration.read_text()
@@ -120,5 +164,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add --all
-          git commit -m "fix(storage): fence canonical authority publications"
+          git commit -m "fix(storage): close fail-closed durability gaps"
           git push origin HEAD:fix/agent-3-storage
