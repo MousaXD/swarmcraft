@@ -10,6 +10,7 @@ on:
       - implementation/agent1-m3-daemon-membership.py
       - implementation/agent1-m3-daemon-helpers.py
       - implementation/agent1-m3-cleanup.py
+      - implementation/agent1-m3-late-vote.py
       - .github/workflows/agent1-milestone-worker.yml
 
 permissions:
@@ -36,6 +37,7 @@ jobs:
           python3 implementation/agent1-m3-daemon-membership.py
           python3 implementation/agent1-m3-daemon-helpers.py
           python3 implementation/agent1-m3-cleanup.py
+          python3 implementation/agent1-m3-late-vote.py
 
       - name: Format Rust workspace
         run: cargo fmt --all
@@ -64,6 +66,7 @@ jobs:
           rm implementation/agent1-m3-daemon-membership.py
           rm implementation/agent1-m3-daemon-helpers.py
           rm implementation/agent1-m3-cleanup.py
+          rm implementation/agent1-m3-late-vote.py
           rm .github/workflows/agent1-milestone-worker.yml
           git add -A
           git config user.name "swarmcraft-agent-1"
