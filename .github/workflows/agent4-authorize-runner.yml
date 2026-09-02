@@ -1,0 +1,42 @@
+name: Agent 4 authorization milestone
+
+on:
+  push:
+    branches: [fix/agent-4-network]
+    paths:
+      - implementation/agent4-authorize-runner.py
+      - .github/workflows/agent4-authorize-runner.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact milestone seed
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: fix/agent-4-network
+          fetch-depth: 0
+      - name: Apply fail-closed authorization change
+        run: python implementation/agent4-authorize-runner.py
+      - name: Format
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+      - name: Compile affected crates
+        run: cargo check -p swarm-network -p swarm-cli --all-targets --locked
+      - name: Network tests
+        run: cargo test -p swarm-network --locked
+      - name: Commit validated milestone
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rm implementation/agent4-authorize-runner.py .github/workflows/agent4-authorize-runner.yml
+          git config user.name "swarmcraft-agent-4"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(network): enforce world-scoped membership authorization"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:fix/agent-4-network
