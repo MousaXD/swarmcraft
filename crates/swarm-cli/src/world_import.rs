@@ -72,12 +72,8 @@ fn import_world_inner(
     faults: ImportFaults,
 ) -> Result<ImportWorldResult> {
     validate_request(request)?;
-    validate_runtime_selection(
-        request.minecraft_version.trim(),
-        request.fabric_loader_version.trim(),
-        None,
-    )
-    .context("import compatibility is not supported by the shipped SwarmCraft Fabric adapter")?;
+    validate_runtime_selection(request.minecraft_version.trim(), request.fabric_loader_version.trim(), None)
+        .context("import compatibility is not supported by the shipped SwarmCraft Fabric adapter")?;
 
     // Minecraft's session.lock is a process-held record lock. The proof must be
     // acquired before any save bytes are consumed and held until the complete

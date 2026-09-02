@@ -221,8 +221,7 @@ fn parse_world_info(line: &str) -> Result<FabricWorldInfo, IpcTransportError> {
     let minecraft_version = decode_hex_string(fields[1])?;
     let fabric_loader_version = decode_hex_string(fields[2])?;
     let world_directory = decode_hex_string(fields[3])?;
-    let compatibility_fingerprint =
-        Hash32::from_str(fields[4]).map_err(|_| IpcTransportError::InvalidFingerprint)?;
+    let compatibility_fingerprint = Hash32::from_str(fields[4]).map_err(|_| IpcTransportError::InvalidFingerprint)?;
     let java_major = fields[5]
         .parse::<u32>()
         .map_err(|_| IpcTransportError::Malformed("Java major version is not an unsigned integer".into()))?;

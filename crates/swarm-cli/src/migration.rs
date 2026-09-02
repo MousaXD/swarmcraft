@@ -1,4 +1,7 @@
-use crate::{authority_permit::PermitWatch, host_readiness, launch_guard, server_mods};
+use crate::{
+    authority_permit::PermitWatch, host_readiness, launch_guard, runtime_process_guard::RuntimeProcessGuard,
+    server_mods,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -19,8 +22,8 @@ use swarm_core::{
 };
 use swarm_ipc::FabricBridgeListener;
 use swarm_protocol::{
-    AuthorityTransferV1, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, PeerId, SleepRecordV1,
-    SnapshotManifestV1, TransferPhase, WorldId, PROTOCOL_VERSION,
+    validate_runtime_selection, AuthorityTransferV1, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, PeerId,
+    SleepRecordV1, SnapshotManifestV1, TransferPhase, WorldId, PROTOCOL_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage};
 use tokio::{
@@ -612,6 +615,12 @@ async fn run_authority_runtime_inner(
     ensure_authority_generation(storage, &identity, &epoch)?;
     let world_config =
         storage.load_world_config(options.world).context("canonical runtime profile is not synchronized")?;
+    validate_runtime_selection(
+        &world_config.compatibility.minecraft_version,
+        &world_config.compatibility.loader_version,
+        None,
+    )
+    .context("canonical runtime profile is outside the shipped SwarmCraft Fabric adapter contract")?;
     let mod_readiness = server_mods::evaluate_world_mods(paths, options.world, &world_config.compatibility)?;
     if !mod_readiness.ready {
         let details = mod_readiness.issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>().join("; ");
@@ -631,6 +640,9 @@ async fn run_authority_runtime_inner(
         Some(latest.manifest_hash()?),
         None,
     )?;
+    // This persistent ownership record survives a hard-killed Rust supervisor.
+    // A subsequent launcher must prove the old Java PID is gone before any runtime bytes are reset.
+    let mut runtime_process = RuntimeProcessGuard::begin(paths, options.world)?;
     reset_runtime_directory(&runtime)?;
     fs::create_dir_all(runtime.join("mods"))?;
     fs::copy(&options.mod_jar, runtime.join("mods/swarmcraft-fabric.jar"))
@@ -674,6 +686,10 @@ async fn run_authority_runtime_inner(
         metadata.genesis.compatibility_fingerprint,
         &launch.environment(),
     )?;
+    if let Err(error) = runtime_process.record_java(child.id()) {
+        terminate_child(&mut child);
+        return Err(error);
+    }
 
     publish_status(
         paths,

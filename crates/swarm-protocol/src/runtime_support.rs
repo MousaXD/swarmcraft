@@ -113,13 +113,16 @@ fn parse_numeric_version(value: &str) -> Option<Vec<u64>> {
     if value.is_empty() {
         return None;
     }
-    value.split('.').map(|part| {
-        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
-            None
-        } else {
-            part.parse::<u64>().ok()
-        }
-    }).collect()
+    value
+        .split('.')
+        .map(|part| {
+            if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                None
+            } else {
+                part.parse::<u64>().ok()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

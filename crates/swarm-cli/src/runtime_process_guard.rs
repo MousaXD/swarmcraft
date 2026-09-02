@@ -63,16 +63,21 @@ fn inspect_previous_record(path: &PathBuf) -> Result<()> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error).with_context(|| format!("cannot read runtime process record {}", path.display())),
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot read runtime process record {}", path.display()))
+        }
     };
-    let record: RuntimeProcessRecord = serde_json::from_slice(&bytes)
-        .with_context(|| format!("runtime process record is malformed at {}; refusing unsafe runtime reset", path.display()))?;
+    let record: RuntimeProcessRecord = serde_json::from_slice(&bytes).with_context(|| {
+        format!("runtime process record is malformed at {}; refusing unsafe runtime reset", path.display())
+    })?;
     if record.version != RUNTIME_PROCESS_RECORD_VERSION {
         bail!("runtime process record version is unsupported; refusing unsafe runtime reset");
     }
     match record.java_pid {
         Some(pid) => {
-            if process_alive(pid).with_context(|| format!("cannot prove whether previous Java PID {pid} is still alive"))? {
+            if process_alive(pid)
+                .with_context(|| format!("cannot prove whether previous Java PID {pid} is still alive"))?
+            {
                 bail!(
                     "previous Minecraft Java process PID {pid} is still alive; refusing to reset its runtime directory"
                 );
@@ -118,7 +123,7 @@ fn atomic_write(path: &PathBuf, record: &RuntimeProcessRecord) -> Result<()> {
 fn process_alive(pid: u32) -> Result<bool> {
     const ESRCH: i32 = 3;
     const EPERM: i32 = 1;
-    unsafe extern "C" {
+    extern "C" {
         fn kill(pid: i32, signal: i32) -> i32;
     }
     if pid > i32::MAX as u32 {
@@ -142,7 +147,7 @@ fn process_alive(pid: u32) -> Result<bool> {
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const STILL_ACTIVE: u32 = 259;
     const ERROR_INVALID_PARAMETER: u32 = 87;
-    unsafe extern "system" {
+    extern "system" {
         fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> Handle;
         fn GetExitCodeProcess(process: Handle, exit_code: *mut u32) -> i32;
         fn CloseHandle(object: Handle) -> i32;
@@ -204,11 +209,7 @@ mod tests {
         let path = record_path(&paths, world());
         atomic_write(
             &path,
-            &RuntimeProcessRecord {
-                version: RUNTIME_PROCESS_RECORD_VERSION,
-                controller_pid: 1,
-                java_pid: None,
-            },
+            &RuntimeProcessRecord { version: RUNTIME_PROCESS_RECORD_VERSION, controller_pid: 1, java_pid: None },
         )
         .unwrap();
         let error = RuntimeProcessGuard::begin(&paths, world()).err().expect("ambiguous record must block");
