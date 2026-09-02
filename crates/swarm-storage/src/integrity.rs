@@ -48,19 +48,8 @@ struct SnapshotCommitIntentV1 {
 pub(crate) struct SnapshotCommitTransaction {
     _guard: WorldTransactionGuard,
     world: WorldId,
-    previous_head: Option<CanonicalSnapshotRefV1>,
     next_head: CanonicalSnapshotRefV1,
     intent_path: PathBuf,
-}
-
-impl SnapshotCommitTransaction {
-    pub(crate) fn previous_head(&self) -> Option<CanonicalSnapshotRefV1> {
-        self.previous_head
-    }
-
-    pub(crate) fn next_head(&self) -> CanonicalSnapshotRefV1 {
-        self.next_head
-    }
 }
 
 impl Storage {
@@ -79,7 +68,8 @@ impl Storage {
         let previous = current.head;
         validate_direct_extension(previous, manifest)?;
 
-        let current_epoch = self.load_epoch_record(manifest.world_id).ok();
+        let epoch_path = self.world_dir(manifest.world_id).join("metadata").join("epoch.postcard");
+        let current_epoch = if epoch_path.exists() { Some(self.load_epoch_record(manifest.world_id)?) } else { None };
         if let Some(epoch) = current_epoch.as_ref() {
             if epoch.epoch_number != manifest.epoch
                 || epoch.authority_peer_id != manifest.authority_peer_id
@@ -116,13 +106,7 @@ impl Storage {
         let intent_path = self.commit_intent_path(manifest.world_id);
         durable_atomic_write(&intent_path, &postcard::to_allocvec(&intent)?)?;
 
-        Ok(SnapshotCommitTransaction {
-            _guard: guard,
-            world: manifest.world_id,
-            previous_head: previous,
-            next_head,
-            intent_path,
-        })
+        Ok(SnapshotCommitTransaction { _guard: guard, world: manifest.world_id, next_head, intent_path })
     }
 
     pub(crate) fn finish_snapshot_commit_transaction(

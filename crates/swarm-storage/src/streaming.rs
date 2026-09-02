@@ -299,7 +299,7 @@ impl Storage {
         if let Err(error) = publish {
             // Keep the durable intent for ambiguous I/O failures. Only a known
             // pre-publication slot conflict is safe to cancel immediately.
-            if matches!(error, StorageError::SnapshotManifestConflict { .. }) {
+            if matches!(error, StorageError::SnapshotHistoryConflict { .. }) {
                 self.cancel_snapshot_commit_before_manifest(transaction)?;
             }
             return Err(error);

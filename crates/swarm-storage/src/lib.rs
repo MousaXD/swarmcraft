@@ -282,8 +282,9 @@ impl Storage {
     }
 
     pub fn load_snapshot(&self, world: WorldId, number: u64) -> Result<SnapshotManifestV1, StorageError> {
+        let manifest = self.load_snapshot_file_unchecked(world, number)?;
         self.validate_canonical_snapshot_namespace(world)?;
-        self.load_snapshot_file_unchecked(world, number)
+        Ok(manifest)
     }
 
     pub fn list_snapshots(&self, world: WorldId) -> Result<Vec<SnapshotManifestV1>, StorageError> {
@@ -331,7 +332,11 @@ impl Storage {
                 continue;
             }
             let name = entry.file_name().to_string_lossy();
-            if name.starts_with(".atomic-") || name.starts_with(".blob-") || name.starts_with(".restore-") {
+            if name.starts_with(".atomic-")
+                || name.starts_with(".blob-")
+                || name.starts_with(".restore-")
+                || name.starts_with(".deleted-")
+            {
                 debris.push(entry.path().to_path_buf());
             }
         }
