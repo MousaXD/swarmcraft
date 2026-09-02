@@ -1,0 +1,45 @@
+name: Agent 5 Milestone 1
+
+on:
+  push:
+    branches:
+      - fix/agent-5-supply-chain
+    paths:
+      - .github/workflows/agent5-milestone1.yml
+
+permissions:
+  contents: write
+
+jobs:
+  remediate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Apply Agent 5 milestone
+        run: python scripts/agent5_milestone1.py
+      - name: Format Rust
+        run: |
+          cargo fmt --all
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: Validate canonical provider contract
+        run: cargo test -p swarm-protocol --locked
+      - name: Validate Desktop provider boundary
+        run: |
+          cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+      - name: Validate launcher provider mapping
+        run: node --test apps/desktop/tests/launcher-controller.test.mjs
+      - name: Commit milestone and self-clean helpers
+        run: |
+          rm scripts/agent5_milestone1.py .github/workflows/agent5-milestone1.yml
+          git add -A
+          git config user.name "SwarmCraft Agent 5"
+          git config user.email "101021011+MousaXD@users.noreply.github.com"
+          git commit -m "fix(provider): fence staging and retrieval provenance"
+          git push origin HEAD:fix/agent-5-supply-chain
