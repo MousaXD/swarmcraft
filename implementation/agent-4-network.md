@@ -10,7 +10,7 @@ CAMPAIGN PRODUCTION BASE SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
 
 BRANCH SEED SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` (campaign ledger commit only; production tree matches the campaign base)
 
-CURRENT HEAD SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` before this start-state ledger commit
+CURRENT HEAD SHA: `8dd7d685e2295a561bc5c1958786bd77a6829815` production milestone; this ledger commit follows it
 
 INTEGRATED SHA: pending
 
@@ -61,9 +61,9 @@ Do not change canonical membership election semantics.
 - [ ] Include fresh receiver challenge/nonce and bind proof to both sides of live transport context.
 - [ ] Ensure replay of a captured valid hello over a different transport identity/connection fails.
 - [ ] Do not reuse authenticated application identity across replacement connections without fresh proof.
-- [ ] Build an exhaustive authorization matrix for every world-scoped `WireRequest`.
-- [ ] Require current, non-banned membership for WorldDescriptor, WorldStatus, HostCapability and other canonical metadata unless a narrowly scoped pre-membership protocol explicitly applies.
-- [ ] Ensure removed/banned members lose metadata access.
+- [x] Build an exhaustive authorization matrix for every world-scoped `WireRequest`.
+- [x] Require current, non-banned membership for WorldDescriptor, WorldStatus, HostCapability and other canonical metadata unless a narrowly scoped pre-membership protocol explicitly applies.
+- [x] Ensure removed/banned members lose metadata access.
 - [ ] Anchor discovery announcements to verifiable canonical world authority/authorization, not merely self-signed announcer identity.
 - [ ] Add per-peer and global connection/request admission limits, separate for unauthenticated/authenticated traffic.
 - [ ] Specify/enforce friend presence privacy policy.
@@ -79,20 +79,27 @@ Do not change canonical membership election semantics.
 - Verified the authoritative Agent 4 ledger is `implementation/agent-4-network.md`; the requested `implementation/agent-4-consensus.md` does not exist in the campaign plan.
 - Verified the branch production baseline is `b4bab08562cf0eb53763674407375b023e1d0858`; branch seed `a9736b159d9e9618a3ed8515c20e93f92c1453cb` adds only implementation ledgers.
 - Read all required audit sources and extracted the concrete trust-boundary and regression requirements for FINAL-012/013/028/029/030/040.
+- Added exhaustive `WireRequest::membership_world_id()` classification. Adding a new wire variant now requires an explicit membership decision at compile time.
+- Added one fail-closed daemon membership gate before canonical request dispatch. `JoinRequest` remains the intentional pre-membership path; discovery and Ping remain outside canonical-world authorization.
+- Hardened membership authorization so banned members are rejected and descriptor public keys must derive the authenticated peer ID.
+- Closed FINAL-013 production path for `WorldDescriptor`, `WorldStatus`, `HostCapability`, and all other canonical world requests.
 
 ## Tests run
 
 | Test | Result | Commit/SHA | Notes |
 |---|---|---|---|
 | Branch/baseline compare | PASS | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | Integration seed is exactly one documentation-only commit ahead of campaign production base. |
+| `cargo fmt --all -- --check` | PASS | `8dd7d685e2295a561bc5c1958786bd77a6829815` | GitHub Actions validation runner. |
+| `cargo check -p swarm-network -p swarm-cli --all-targets --locked` | PASS | `8dd7d685e2295a561bc5c1958786bd77a6829815` | Affected crates compile after fail-closed request gate. |
+| `cargo test -p swarm-network --locked` | PASS | `8dd7d685e2295a561bc5c1958786bd77a6829815` | Full network crate suite green. |
 
 ## Required validation before handoff
 
-- [ ] format
+- [x] format for authorization milestone
 - [ ] clippy/lint
-- [ ] network unit/integration tests
+- [x] network unit/integration tests for authorization milestone
 - [ ] captured hello replay rejection
-- [ ] world request authorization matrix
+- [ ] world request authorization matrix regression test
 - [ ] private-world confidentiality regression
 - [ ] discovery unauthorized-signer regression
 - [ ] hostile-load admission test
@@ -101,11 +108,11 @@ Do not change canonical membership election semantics.
 
 ## Blockers
 
-- Local workspace terminal connector is currently unavailable because it cannot establish this chat's extension identity. GitHub repository read/write access is available, so implementation is proceeding through repository APIs and exact-head CI will be used as the executable validation surface.
+- Local workspace terminal connector is currently unavailable because it cannot establish this chat's extension identity. GitHub repository read/write access is available; executable validation is being performed with branch-scoped, self-cleaning GitHub Actions runners.
 
 ## Remaining work
 
-All production and regression items in the implementation checklist remain to be implemented and validated.
+Handshake proof-of-possession, dedicated authorization regressions, discovery authority proof, admission/rate limiting, friend-presence privacy, invite/DNS hardening, soak/reconnect validation, clippy, and exact-head CI remain.
 
 ## Handoff
 
