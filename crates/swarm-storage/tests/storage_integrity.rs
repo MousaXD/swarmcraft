@@ -65,15 +65,7 @@ fn missing_canonical_head_target_fails_closed_without_number_reuse() {
     storage.commit_snapshot(&first).unwrap();
     let first_hash = first.manifest_hash().unwrap();
     fs::write(source.join("level.dat"), b"two").unwrap();
-    let second = snapshot(
-        &storage,
-        &source,
-        world,
-        2,
-        2,
-        Some(first_hash),
-        (authority_peer_id, authority_public_key),
-    );
+    let second = snapshot(&storage, &source, world, 2, 2, Some(first_hash), (authority_peer_id, authority_public_key));
     storage.commit_snapshot(&second).unwrap();
 
     let newest_path = storage.world_dir(world).join("snapshots").join(format!("{:020}.postcard", 2));
@@ -88,15 +80,8 @@ fn missing_canonical_head_target_fails_closed_without_number_reuse() {
         Err(StorageError::MissingCanonicalHeadTarget { snapshot_number: 2, .. })
     ));
 
-    let replacement = snapshot(
-        &storage,
-        &source,
-        world,
-        2,
-        2,
-        Some(first_hash),
-        (authority_peer_id, authority_public_key),
-    );
+    let replacement =
+        snapshot(&storage, &source, world, 2, 2, Some(first_hash), (authority_peer_id, authority_public_key));
     assert!(matches!(
         storage.commit_snapshot(&replacement),
         Err(StorageError::MissingCanonicalHeadTarget { snapshot_number: 2, .. })
@@ -140,15 +125,7 @@ fn durable_fence_rejects_same_epoch_after_fencing_token_changes() {
     let observed_head = storage.canonical_snapshot_head(world).unwrap().head;
 
     fs::write(source.join("level.dat"), b"two").unwrap();
-    let second = snapshot(
-        &storage,
-        &source,
-        world,
-        2,
-        2,
-        Some(first_hash),
-        (authority_peer_id, authority_public_key),
-    );
+    let second = snapshot(&storage, &source, world, 2, 2, Some(first_hash), (authority_peer_id, authority_public_key));
     let mut superseding = epoch.clone();
     superseding.fencing_token = 11;
     superseding.reason = "supersede stale writer".into();
