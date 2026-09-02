@@ -176,8 +176,6 @@ impl Storage {
         }
         let json = serde_json::to_vec_pretty(metadata)?;
         durable_atomic_write(&self.metadata_dir(metadata.world_id).join("world.json"), &json)?;
-        // New worlds start with an explicit durable empty head. Existing worlds
-        // without a marker are migrated exactly once when their head is first read.
         self.canonical_snapshot_head(metadata.world_id)?;
         Ok(())
     }
@@ -342,15 +340,14 @@ impl Storage {
     /// repeated-crash disk growth visible.
     pub fn storage_temp_debris(&self) -> Result<Vec<PathBuf>, StorageError> {
         let mut debris = Vec::new();
-        if !self.worlds_dir().exists() {
+        let worlds_dir = self.worlds_dir();
+        if !worlds_dir.exists() {
             return Ok(debris);
         }
-        for entry in WalkDir::new(self.worlds_dir()).follow_links(false) {
+        for entry in WalkDir::new(&worlds_dir).follow_links(false) {
             let entry = entry.map_err(|error| {
-                io_error(
-                    error.path().unwrap_or_else(|| self.worlds_dir().as_path()),
-                    std::io::Error::other(error.to_string()),
-                )
+                let error_path = error.path().map(Path::to_path_buf).unwrap_or_else(|| worlds_dir.clone());
+                io_error(error_path, std::io::Error::other(error.to_string()))
             })?;
             if !entry.file_type().is_file() {
                 continue;
@@ -362,10 +359,6 @@ impl Storage {
         }
         debris.sort();
         Ok(debris)
-    }
-
-    fn snapshot_path(&self, world: WorldId, number: u64) -> PathBuf {
-        self.snapshots_dir(world).join(format!("{number:020}.postcard"))
     }
 
     fn blob_path(&self, world: WorldId, hash: Hash32, encoding: BlobEncoding) -> PathBuf {
