@@ -173,6 +173,8 @@ fn build_seed<'a>(
         genesis,
     };
     authority.storage.create_world(&metadata).unwrap();
+    let genesis_membership = genesis_membership(&metadata, &authority.identity);
+    authority.storage.save_membership_record(&genesis_membership).unwrap();
     let mut config = WorldConfigV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
@@ -207,8 +209,6 @@ fn build_seed<'a>(
     };
     descriptor.normalize();
     authority.storage.save_world_descriptor(&descriptor).unwrap();
-    let genesis_membership = genesis_membership(&metadata, &authority.identity);
-    authority.storage.save_membership_record(&genesis_membership).unwrap();
 
     let source = source_temp.path().join("world");
     fs::create_dir_all(&source).unwrap();
@@ -267,12 +267,12 @@ fn install_seed(peer: &PeerFixture, seed: &Seed<'_>) {
     if peer.storage.load_world(seed.metadata.world_id).is_err() {
         peer.storage.create_world(seed.metadata).unwrap();
     }
-    peer.storage.save_world_config(seed.config).unwrap();
-    peer.storage.save_world_descriptor(seed.descriptor).unwrap();
     if peer.storage.load_membership_record(seed.metadata.world_id).is_err() {
         let genesis_membership = genesis_membership(seed.metadata, seed.authority);
         peer.storage.save_membership_record(&genesis_membership).unwrap();
     }
+    peer.storage.save_world_config(seed.config).unwrap();
+    peer.storage.save_world_descriptor(seed.descriptor).unwrap();
     peer.storage.save_epoch_record(seed.epoch).unwrap();
     peer.storage.save_membership_record(seed.membership).unwrap();
     if peer.storage.latest_snapshot(seed.metadata.world_id).unwrap().is_none() {
