@@ -44,6 +44,51 @@ jobs:
           path.write_text(text.replace(old, new, 1))
           PY
           python implementation/agent4-transport-admission-runner.py 2>&1 | tee implementation/agent4-transport-admission-apply.log
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("crates/swarm-network/src/admission.rs")
+          text = path.read_text()
+          old = '''    #[test]
+              fn transport_caps_bound_handshake_and_connection_state() {
+                  assert!(MAX_PENDING_INCOMING_CONNECTIONS < MAX_ESTABLISHED_CONNECTIONS);
+                  assert!(MAX_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS);
+                  assert!(MAX_APPLICATION_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS as usize);
+                  assert!(MAX_DISCOVERY_PENDING_INCOMING_CONNECTIONS < MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
+                  assert!(MAX_DISCOVERY_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
+                  assert!(MAX_ESTABLISHED_CONNECTIONS_PER_PEER >= 2);
+              }
+          '''
+          # rustfmt has not run yet, so match the unindented runner output too.
+          if old not in text:
+              old = '''    #[test]
+    fn transport_caps_bound_handshake_and_connection_state() {
+        assert!(MAX_PENDING_INCOMING_CONNECTIONS < MAX_ESTABLISHED_CONNECTIONS);
+        assert!(MAX_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS);
+        assert!(MAX_APPLICATION_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS as usize);
+        assert!(MAX_DISCOVERY_PENDING_INCOMING_CONNECTIONS < MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
+        assert!(MAX_DISCOVERY_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
+        assert!(MAX_ESTABLISHED_CONNECTIONS_PER_PEER >= 2);
+    }
+'''
+          new = '''    const _: () = {
+        assert!(MAX_PENDING_INCOMING_CONNECTIONS < MAX_ESTABLISHED_CONNECTIONS);
+        assert!(MAX_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS);
+        assert!(MAX_APPLICATION_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS as usize);
+        assert!(MAX_DISCOVERY_PENDING_INCOMING_CONNECTIONS < MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
+        assert!(MAX_DISCOVERY_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
+        assert!(MAX_ESTABLISHED_CONNECTIONS_PER_PEER >= 2);
+    };
+
+    #[test]
+    fn transport_limit_behaviours_are_constructible() {
+        let _ = primary_connection_limits();
+        let _ = discovery_connection_limits();
+    }
+'''
+          if old not in text:
+              raise SystemExit("generated transport cap test block not found")
+          path.write_text(text.replace(old, new, 1))
+          PY
 
       - name: Format
         shell: bash
