@@ -74,14 +74,19 @@ replace_once(
         assert!(application_connection_allowed(MAX_APPLICATION_CONNECTIONS, true));
     }
 
-    #[test]
-    fn transport_caps_bound_handshake_and_connection_state() {
+    const _: () = {
         assert!(MAX_PENDING_INCOMING_CONNECTIONS < MAX_ESTABLISHED_CONNECTIONS);
         assert!(MAX_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS);
         assert!(MAX_APPLICATION_CONNECTIONS <= MAX_ESTABLISHED_CONNECTIONS as usize);
         assert!(MAX_DISCOVERY_PENDING_INCOMING_CONNECTIONS < MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
         assert!(MAX_DISCOVERY_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
         assert!(MAX_ESTABLISHED_CONNECTIONS_PER_PEER >= 2);
+    };
+
+    #[test]
+    fn transport_limit_behaviours_are_constructible() {
+        let _ = primary_connection_limits();
+        let _ = discovery_connection_limits();
     }
 
     #[test]
@@ -179,8 +184,8 @@ replace_once(
 # Discovery swarm gets smaller transport budgets and the same challenge expiry.
 replace_once(
     "crates/swarm-network/src/discovery.rs",
-    "    identify,\n",
-    "    connection_limits, identify,\n",
+    "use libp2p::{\n    identify,\n    identity::Keypair,\n",
+    "use libp2p::{\n    connection_limits, identify,\n    identity::Keypair,\n",
 )
 replace_once(
     "crates/swarm-network/src/discovery.rs",
