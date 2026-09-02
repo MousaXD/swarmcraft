@@ -1625,6 +1625,7 @@ fn handle_request(
             if application_peer != config.authority_peer_id {
                 return Err(anyhow!("world config must be sent by its signed authority"));
             }
+            authorize_world_config_current_authority(storage, application_peer, &config)?;
             storage.save_world_config(&config)?;
             node.respond(channel, WireResponse::WorldConfigAccepted { sequence: config.sequence })?;
         }
@@ -2351,6 +2352,32 @@ fn validate_generation_response(
     Ok(())
 }
 
+fn authorize_world_config_current_authority(
+    storage: &Storage,
+    sender: PeerId,
+    config: &swarm_protocol::WorldConfigV1,
+) -> Result<()> {
+    if sender != config.authority_peer_id {
+        return Err(anyhow!("world config sender does not match its signed authority"));
+    }
+    if let Ok(epoch) = storage.load_epoch_record(config.world_id) {
+        if config.authority_peer_id != epoch.authority_peer_id
+            || config.authority_public_key != epoch.authority_public_key
+        {
+            return Err(anyhow!("world config is not signed by the current accepted authority"));
+        }
+    } else {
+        let membership = storage.load_membership_record(config.world_id)?;
+        verify_membership_signature(&membership)?;
+        if config.authority_peer_id != membership.authority_peer_id
+            || config.authority_public_key != membership.authority_public_key
+        {
+            return Err(anyhow!("world config is not signed by the bootstrap authority"));
+        }
+    }
+    Ok(())
+}
+
 fn authorize_manifest(storage: &Storage, sender: PeerId, manifest: &SnapshotManifestV1) -> Result<()> {
     storage.load_world(manifest.world_id)?;
     authorize_member(storage, manifest.world_id, sender)?;
@@ -2594,3 +2621,7 @@ fn unix_millis() -> Result<u64> {
 fn request_key(value: &impl Debug) -> String {
     format!("{value:?}")
 }
+
+#[cfg(test)]
+#[path = "daemon_protocol_tests.rs"]
+mod protocol_acceptance_tests;
