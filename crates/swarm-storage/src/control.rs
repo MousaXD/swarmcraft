@@ -1,15 +1,15 @@
-use crate::{Storage, StorageError};
-use std::{
-    fs::{self, OpenOptions},
-    io::Write,
-    path::{Path, PathBuf},
+use crate::{
+    transaction::{durable_atomic_write, durable_remove},
+    Storage, StorageError,
 };
+use std::{fs, path::PathBuf};
 use swarm_protocol::{AuthorityLeaseGrantV1, AuthorityTransferV1, EpochRecordV1, SleepRecordV1, WorldId};
 
 impl Storage {
     pub fn save_epoch_record(&self, record: &EpochRecordV1) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(record.world_id)?;
         let bytes = postcard::to_allocvec(record)?;
-        atomic_write(&self.control_path(record.world_id, "epoch.postcard"), &bytes)
+        durable_atomic_write(&self.control_path(record.world_id, "epoch.postcard"), &bytes)
     }
 
     pub fn load_epoch_record(&self, world: WorldId) -> Result<EpochRecordV1, StorageError> {
@@ -23,6 +23,7 @@ impl Storage {
     }
 
     pub fn reserve_recovery(&self, reservation: &AuthorityLeaseGrantV1) -> Result<bool, StorageError> {
+        let _guard = self.lock_world_transaction(reservation.world_id)?;
         if let Ok(existing) = self.load_recovery_reservation(reservation.world_id) {
             let existing_generation = (existing.epoch, existing.fencing_token);
             let requested_generation = (reservation.epoch, reservation.fencing_token);
@@ -34,13 +35,15 @@ impl Storage {
                     && existing.authority_public_key == reservation.authority_public_key);
             }
         }
-        self.save_recovery_reservation(reservation)?;
+        let bytes = postcard::to_allocvec(reservation)?;
+        durable_atomic_write(&self.control_path(reservation.world_id, "recovery-reservation.postcard"), &bytes)?;
         Ok(true)
     }
 
     pub fn save_recovery_reservation(&self, reservation: &AuthorityLeaseGrantV1) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(reservation.world_id)?;
         let bytes = postcard::to_allocvec(reservation)?;
-        atomic_write(&self.control_path(reservation.world_id, "recovery-reservation.postcard"), &bytes)
+        durable_atomic_write(&self.control_path(reservation.world_id, "recovery-reservation.postcard"), &bytes)
     }
 
     pub fn load_recovery_reservation(&self, world: WorldId) -> Result<AuthorityLeaseGrantV1, StorageError> {
@@ -54,12 +57,15 @@ impl Storage {
     }
 
     pub fn clear_recovery_reservation(&self, world: WorldId) -> Result<(), StorageError> {
-        remove_if_present(&self.control_path(world, "recovery-reservation.postcard"))
+        let _guard = self.lock_world_transaction(world)?;
+        durable_remove(&self.control_path(world, "recovery-reservation.postcard"))?;
+        Ok(())
     }
 
     pub fn save_transfer_record(&self, transfer: &AuthorityTransferV1) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(transfer.world_id)?;
         let bytes = postcard::to_allocvec(transfer)?;
-        atomic_write(&self.control_path(transfer.world_id, "transfer.postcard"), &bytes)
+        durable_atomic_write(&self.control_path(transfer.world_id, "transfer.postcard"), &bytes)
     }
 
     pub fn load_transfer_record(&self, world: WorldId) -> Result<AuthorityTransferV1, StorageError> {
@@ -73,8 +79,9 @@ impl Storage {
     }
 
     pub fn save_sleep_record(&self, record: &SleepRecordV1) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(record.world_id)?;
         let bytes = postcard::to_allocvec(record)?;
-        atomic_write(&self.control_path(record.world_id, "sleep.postcard"), &bytes)
+        durable_atomic_write(&self.control_path(record.world_id, "sleep.postcard"), &bytes)
     }
 
     pub fn load_sleep_record(&self, world: WorldId) -> Result<SleepRecordV1, StorageError> {
@@ -88,7 +95,9 @@ impl Storage {
     }
 
     pub fn clear_sleep_record(&self, world: WorldId) -> Result<(), StorageError> {
-        remove_if_present(&self.control_path(world, "sleep.postcard"))
+        let _guard = self.lock_world_transaction(world)?;
+        durable_remove(&self.control_path(world, "sleep.postcard"))?;
+        Ok(())
     }
 
     fn control_path(&self, world: WorldId, name: &str) -> PathBuf {
@@ -96,40 +105,8 @@ impl Storage {
     }
 }
 
-fn remove_if_present(path: &Path) -> Result<(), StorageError> {
-    if path.exists() {
-        fs::remove_file(path).map_err(|error| io_error(path, error))?;
-    }
-    Ok(())
-}
-
 fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
     StorageError::Io { path: path.into(), source }
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
-    let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
-    fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
-    let tmp = path.with_extension("tmp");
-    let mut file =
-        OpenOptions::new().create(true).truncate(true).write(true).open(&tmp).map_err(|error| io_error(&tmp, error))?;
-    file.write_all(bytes).map_err(|error| io_error(&tmp, error))?;
-    file.sync_all().map_err(|error| io_error(&tmp, error))?;
-    drop(file);
-    fs::rename(&tmp, path).map_err(|error| io_error(path, error))?;
-    sync_parent(parent)
-}
-
-fn sync_parent(parent: &Path) -> Result<(), StorageError> {
-    #[cfg(unix)]
-    {
-        fs::File::open(parent).and_then(|file| file.sync_all()).map_err(|error| io_error(parent, error))?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = parent;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -201,6 +178,31 @@ mod tests {
         assert!(!store.reserve_recovery(&conflicting).unwrap());
         assert_eq!(store.load_recovery_reservation(world).unwrap().authority_peer_id, first.authority_peer_id);
         assert!(store.reserve_recovery(&first).unwrap());
+    }
+
+    #[test]
+    fn concurrent_same_generation_reservations_have_one_winner() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = Storage::open(temp.path()).unwrap();
+        let b = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0x55; 32]);
+        fs::create_dir_all(a.world_dir(world).join("metadata")).unwrap();
+        let left = reservation(world, 6, 8, 12);
+        let right = reservation(world, 7, 8, 12);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let left_barrier = barrier.clone();
+        let right_barrier = barrier.clone();
+        let left_thread = std::thread::spawn(move || {
+            left_barrier.wait();
+            a.reserve_recovery(&left).unwrap()
+        });
+        let right_thread = std::thread::spawn(move || {
+            right_barrier.wait();
+            b.reserve_recovery(&right).unwrap()
+        });
+        barrier.wait();
+        let results = [left_thread.join().unwrap(), right_thread.join().unwrap()];
+        assert_eq!(results.into_iter().filter(|accepted| *accepted).count(), 1);
     }
 
     #[test]
