@@ -277,12 +277,15 @@ const scenario = String.raw`(async () => {
     const element = document.getElementById(id);
     require(element, 'Missing keyboard control #' + id);
     const hidden = [];
+    const closedDetails = [];
     for (let current = element; current; current = current.parentElement) {
       if (current.hidden) { hidden.push(current); current.hidden = false; }
+      if (current.tagName === 'DETAILS' && !current.open) { closedDetails.push(current); current.open = true; }
     }
     element.disabled = false;
     element.focus();
     require(document.activeElement === element, '#' + id + ' could not receive focus');
+    for (const details of closedDetails) details.open = false;
     for (const ancestor of hidden) ancestor.hidden = true;
   };
 
