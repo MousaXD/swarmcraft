@@ -35,11 +35,11 @@ fn spawn_publisher(
     world: WorldId,
     snapshot_number: u64,
     previous_snapshot_hash: Hash32,
-    start: Arc<Barrier>,
-    commit: Arc<Barrier>,
+    barriers: (Arc<Barrier>, Arc<Barrier>),
     published: mpsc::Sender<(SnapshotManifestV1, String)>,
 ) -> thread::JoinHandle<()> {
     let source = source.to_path_buf();
+    let (start, commit) = barriers;
     thread::spawn(move || {
         start.wait();
         let mut publication = storage
@@ -104,8 +104,7 @@ fn simultaneous_local_publishers_survive_replica_commit_gc_and_retention() {
         world,
         4,
         latest_hash,
-        start.clone(),
-        commit.clone(),
+        (start.clone(), commit.clone()),
         published_tx.clone(),
     );
     let right = spawn_publisher(
@@ -114,8 +113,7 @@ fn simultaneous_local_publishers_survive_replica_commit_gc_and_retention() {
         world,
         4,
         latest_hash,
-        start.clone(),
-        commit.clone(),
+        (start.clone(), commit.clone()),
         published_tx,
     );
 
