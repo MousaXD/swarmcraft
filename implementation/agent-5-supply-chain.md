@@ -2,13 +2,13 @@
 
 ## Status
 
-STATUS: NOT STARTED
+STATUS: IN PROGRESS
 
 BRANCH: `fix/agent-5-supply-chain`
 
 STARTING SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
 
-CURRENT HEAD SHA: pending
+CURRENT HEAD SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` (branch creation head; campaign ledger commit only on top of production baseline)
 
 INTEGRATED SHA: pending
 
@@ -64,13 +64,15 @@ Coordinate with Agent 7 when changing Tauri/provider frontend payloads.
 
 ## Work completed
 
-None yet.
+- Campaign start verified from `integration/audit-remediation-v1` plan commit `a9736b159d9e9618a3ed8515c20e93f92c1453cb`, whose parent is the required production baseline `b4bab08562cf0eb53763674407375b023e1d0858`.
+- Assigned branch `fix/agent-5-supply-chain` created from the campaign plan commit. No production dependency gate applies.
+- Read the full Agent 5 ledger plus the required final audit, Auditor 6 package/supply-chain report, and Auditor 7 security report. The audit files live on their audit branches and are not copied into the campaign branch.
 
 ## Tests run
 
 | Test | Result | Commit/SHA | Notes |
 |---|---|---|---|
-| None yet | - | - | - |
+| Git/audit start-state verification | PASS | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | Branch absent before start; created from campaign plan commit whose production parent is required baseline. |
 
 ## Required validation before handoff
 
@@ -86,7 +88,7 @@ None yet.
 
 ## Blockers
 
-None at campaign start.
+- Local terminal connector is currently unavailable due a conversation-identity guard. Repository reads/writes are being performed through the GitHub connector; exact-head CI will be used for executable validation unless local execution becomes available.
 
 ## Handoff
 
