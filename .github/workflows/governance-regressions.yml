@@ -1,0 +1,100 @@
+name: CI Governance Regressions
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  excluded-crate-fail-closed:
+    name: Excluded crates fail closed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-05
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+            crates/swarm-provider -> target
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Regression: stale Desktop manifest is rejected by locked metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest=apps/desktop/src-tauri/Cargo.toml
+          backup="$RUNNER_TEMP/desktop-Cargo.toml"
+          cp "$manifest" "$backup"
+          trap 'cp "$backup" "$manifest"' EXIT
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('apps/desktop/src-tauri/Cargo.toml')
+          text = path.read_text()
+          old = 'version = "0.5.0"'
+          new = 'version = "0.5.1"'
+          if old not in text:
+              raise SystemExit('expected Desktop package version marker not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          if cargo metadata --manifest-path "$manifest" --locked --format-version 1 --no-deps >/dev/null 2>&1; then
+            echo 'stale Desktop manifest unexpectedly passed --locked metadata' >&2
+            exit 1
+          fi
+          cp "$backup" "$manifest"
+          trap - EXIT
+          cargo metadata --manifest-path "$manifest" --locked --format-version 1 --no-deps >/dev/null
+      - name: Build and stage required Tauri sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p swarm-cli --locked
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/release/swarmcraft "apps/desktop/src-tauri/binaries/swarmcraft-$target"
+          cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
+          cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
+          cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
+      - name: Regression: failing provider test is rejected
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_file=crates/swarm-provider/tests/agent8_expected_failure.rs
+          mkdir -p "$(dirname "$test_file")"
+          cat > "$test_file" <<'RS'
+          #[test]
+          fn agent8_expected_failure() {
+              panic!("intentional CI governance regression");
+          }
+          RS
+          trap 'rm -f "$test_file"' EXIT
+          if cargo test --manifest-path crates/swarm-provider/Cargo.toml --test agent8_expected_failure; then
+            echo 'provider cargo test incorrectly accepted an intentional failing test' >&2
+            exit 1
+          fi
+          rm -f "$test_file"
+          trap - EXIT
+      - name: Regression: failing Desktop test is rejected
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_file=apps/desktop/src-tauri/tests/agent8_expected_failure.rs
+          mkdir -p "$(dirname "$test_file")"
+          cat > "$test_file" <<'RS'
+          #[test]
+          fn agent8_expected_failure() {
+              panic!("intentional CI governance regression");
+          }
+          RS
+          trap 'rm -f "$test_file"' EXIT
+          if cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --test agent8_expected_failure; then
+            echo 'Desktop cargo test incorrectly accepted an intentional failing test' >&2
+            exit 1
+          fi
+          rm -f "$test_file"
+          trap - EXIT
