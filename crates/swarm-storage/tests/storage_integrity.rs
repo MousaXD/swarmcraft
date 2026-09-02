@@ -37,9 +37,9 @@ fn snapshot(
     number: u64,
     sequence: u64,
     previous_snapshot_hash: Option<Hash32>,
-    authority_peer_id: PeerId,
-    authority_public_key: [u8; 32],
+    authority: (PeerId, [u8; 32]),
 ) -> swarm_storage::SnapshotPublication {
+    let (authority_peer_id, authority_public_key) = authority;
     let mut publication = storage
         .snapshot_directory(
             source,
@@ -61,11 +61,19 @@ fn missing_canonical_head_target_fails_closed_without_number_reuse() {
     let authority_peer_id = PeerId([2; 32]);
     let authority_public_key = [3; 32];
 
-    let first = snapshot(&storage, &source, world, 1, 1, None, authority_peer_id, authority_public_key);
+    let first = snapshot(&storage, &source, world, 1, 1, None, (authority_peer_id, authority_public_key));
     storage.commit_snapshot(&first).unwrap();
     let first_hash = first.manifest_hash().unwrap();
     fs::write(source.join("level.dat"), b"two").unwrap();
-    let second = snapshot(&storage, &source, world, 2, 2, Some(first_hash), authority_peer_id, authority_public_key);
+    let second = snapshot(
+        &storage,
+        &source,
+        world,
+        2,
+        2,
+        Some(first_hash),
+        (authority_peer_id, authority_public_key),
+    );
     storage.commit_snapshot(&second).unwrap();
 
     let newest_path = storage.world_dir(world).join("snapshots").join(format!("{:020}.postcard", 2));
@@ -80,8 +88,15 @@ fn missing_canonical_head_target_fails_closed_without_number_reuse() {
         Err(StorageError::MissingCanonicalHeadTarget { snapshot_number: 2, .. })
     ));
 
-    let replacement =
-        snapshot(&storage, &source, world, 2, 2, Some(first_hash), authority_peer_id, authority_public_key);
+    let replacement = snapshot(
+        &storage,
+        &source,
+        world,
+        2,
+        2,
+        Some(first_hash),
+        (authority_peer_id, authority_public_key),
+    );
     assert!(matches!(
         storage.commit_snapshot(&replacement),
         Err(StorageError::MissingCanonicalHeadTarget { snapshot_number: 2, .. })
@@ -114,7 +129,7 @@ fn durable_fence_rejects_same_epoch_after_fencing_token_changes() {
     };
     storage.save_epoch_record(&epoch).unwrap();
 
-    let first = snapshot(&storage, &source, world, 1, 1, None, authority_peer_id, authority_public_key);
+    let first = snapshot(&storage, &source, world, 1, 1, None, (authority_peer_id, authority_public_key));
     storage
         .commit_snapshot_fenced(
             &first,
@@ -125,7 +140,15 @@ fn durable_fence_rejects_same_epoch_after_fencing_token_changes() {
     let observed_head = storage.canonical_snapshot_head(world).unwrap().head;
 
     fs::write(source.join("level.dat"), b"two").unwrap();
-    let second = snapshot(&storage, &source, world, 2, 2, Some(first_hash), authority_peer_id, authority_public_key);
+    let second = snapshot(
+        &storage,
+        &source,
+        world,
+        2,
+        2,
+        Some(first_hash),
+        (authority_peer_id, authority_public_key),
+    );
     let mut superseding = epoch.clone();
     superseding.fencing_token = 11;
     superseding.reason = "supersede stale writer".into();
