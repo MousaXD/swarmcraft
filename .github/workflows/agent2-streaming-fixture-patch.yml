@@ -1,0 +1,137 @@
+name: Agent 2 streaming fixture patch
+
+on:
+  push:
+    branches: [fix/agent-2-protocol]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/agent-2-protocol
+          fetch-depth: 0
+      - name: Repair history-aware streaming fixtures
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("crates/swarm-storage/src/streaming.rs")
+          text = path.read_text()
+
+          helper_marker = '''    fn write_pattern(path: &Path, bytes: u64) {
+          '''
+          helper = '''    fn context_with_parent(
+              world: WorldId,
+              snapshot_number: u64,
+              sequence: u64,
+              previous_snapshot_hash: Hash32,
+          ) -> SnapshotContext {
+              let mut context = context_for(world, snapshot_number, sequence);
+              context.previous_snapshot_hash = Some(previous_snapshot_hash);
+              context
+          }
+
+          '''
+          if "fn context_with_parent(" not in text:
+              if helper_marker not in text:
+                  raise SystemExit("context helper insertion point not found")
+              text = text.replace(helper_marker, helper + helper_marker, 1)
+
+          old = '''        let storage = Storage::open(temp.path().join("store")).unwrap();
+              let world = WorldId([0xa1; 32]);
+
+              let mut first = storage.snapshot_directory_streaming(&source, context_for(world, 1, 1)).unwrap();
+              first.signature = vec![0; 64];
+          '''
+          new = '''        let storage = Storage::open(temp.path().join("store")).unwrap();
+              let world = WorldId([0xa1; 32]);
+              let parent_source = temp.path().join("parent-source");
+              fs::create_dir_all(&parent_source).unwrap();
+              fs::write(parent_source.join("level.dat"), b"canonical-parent").unwrap();
+              let mut parent = storage.snapshot_directory_streaming(&parent_source, context_for(world, 1, 1)).unwrap();
+              parent.signature = vec![0; 64];
+              storage.commit_snapshot_streaming(&parent).unwrap();
+              let parent_hash = parent.manifest_hash().unwrap();
+
+              let mut first = storage
+                  .snapshot_directory_streaming(&source, context_with_parent(world, 2, 2, parent_hash))
+                  .unwrap();
+              first.signature = vec![0; 64];
+          '''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit("first concurrent publisher fixture target not found")
+
+          old = '''        let mut second = storage.snapshot_directory_streaming(&source, context_for(world, 2, 2)).unwrap();
+              second.signature = vec![0; 64];
+          '''
+          new = '''        let mut second = storage
+                  .snapshot_directory_streaming(&source, context_with_parent(world, 2, 2, parent_hash))
+                  .unwrap();
+              second.signature = vec![0; 64];
+          '''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit("second concurrent publisher fixture target not found")
+
+          old = '''        let storage = Storage::open(temp.path().join("store")).unwrap();
+              let world = WorldId([0xa2; 32]);
+
+              let mut local = storage.snapshot_directory_streaming(&source, context_for(world, 1, 1)).unwrap();
+              local.signature = vec![0; 64];
+          '''
+          new = '''        let storage = Storage::open(temp.path().join("store")).unwrap();
+              let world = WorldId([0xa2; 32]);
+              let parent_source = temp.path().join("parent-source");
+              fs::create_dir_all(&parent_source).unwrap();
+              fs::write(parent_source.join("level.dat"), b"canonical-parent").unwrap();
+              let mut parent = storage.snapshot_directory_streaming(&parent_source, context_for(world, 1, 1)).unwrap();
+              parent.signature = vec![0; 64];
+              storage.commit_snapshot_streaming(&parent).unwrap();
+              let parent_hash = parent.manifest_hash().unwrap();
+
+              let mut local = storage
+                  .snapshot_directory_streaming(&source, context_with_parent(world, 2, 2, parent_hash))
+                  .unwrap();
+              local.signature = vec![0; 64];
+          '''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit("local publication fixture target not found")
+
+          old = '''        let mut replica = local.manifest().clone();
+              replica.snapshot_number = 2;
+              replica.sequence = 2;
+              storage.finalize_replica(&replica).unwrap();
+          '''
+          new = '''        let replica = local.manifest().clone();
+              storage.finalize_replica(&replica).unwrap();
+          '''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit("replica fixture target not found")
+
+          path.write_text(text)
+      - name: Format fixture changes
+        run: cargo fmt --all
+      - name: Commit fixture repair
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/swarm-storage/src/streaming.rs
+          if git diff --cached --quiet; then
+            echo "Fixture repair already present."
+            exit 0
+          fi
+          git commit -m "test(agent2): align streaming fixtures with direct history"
+          git push origin HEAD:fix/agent-2-protocol
