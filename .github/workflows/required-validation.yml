@@ -46,6 +46,12 @@ jobs:
     permissions:
       contents: read
 
+  governance-regressions:
+    name: CI governance regressions
+    uses: ./.github/workflows/governance-regressions.yml
+    permissions:
+      contents: read
+
   version:
     name: Release identity
     uses: ./.github/workflows/version-guard.yml
@@ -70,13 +76,14 @@ jobs:
   gate:
     name: Required validation gate
     if: ${{ always() }}
-    needs: [core, specialist, version, player-journey, network-soak]
+    needs: [core, specialist, governance-regressions, version, player-journey, network-soak]
     runs-on: ubuntu-latest
     permissions:
       contents: read
     env:
       CORE_RESULT: ${{ needs.core.result }}
       SPECIALIST_RESULT: ${{ needs.specialist.result }}
+      GOVERNANCE_RESULT: ${{ needs.governance-regressions.result }}
       VERSION_RESULT: ${{ needs.version.result }}
       PLAYER_RESULT: ${{ needs.player-journey.result }}
       SOAK_RESULT: ${{ needs.network-soak.result }}
@@ -88,6 +95,7 @@ jobs:
           set -euo pipefail
           test "$CORE_RESULT" = success
           test "$SPECIALIST_RESULT" = success
+          test "$GOVERNANCE_RESULT" = success
           test "$VERSION_RESULT" = success
           test "$PLAYER_RESULT" = success
           if [[ "$REQUIRE_SOAK" == true ]]; then
