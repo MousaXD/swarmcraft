@@ -6,6 +6,7 @@ on:
       - fix/agent-1-consensus
     paths:
       - implementation/agent1-m4-hardening.py
+      - implementation/agent1-m4-fixture-policy.py
       - crates/swarm-cli/tests/consensus_partition_safety.rs
       - .github/workflows/agent1-m4-worker.yml
 
@@ -25,8 +26,9 @@ jobs:
 
       - name: Validate and apply hardening
         run: |
-          python3 -m py_compile implementation/agent1-m4-hardening.py
+          python3 -m py_compile implementation/agent1-m4-hardening.py implementation/agent1-m4-fixture-policy.py
           python3 implementation/agent1-m4-hardening.py
+          python3 implementation/agent1-m4-fixture-policy.py
 
       - name: Format Rust workspace
         run: cargo fmt --all
@@ -57,6 +59,7 @@ jobs:
           BRANCH: fix/agent-1-consensus
         run: |
           rm implementation/agent1-m4-hardening.py
+          rm implementation/agent1-m4-fixture-policy.py
           rm .github/workflows/agent1-m4-worker.yml
           git add -A
           git config user.name "swarmcraft-agent-1"
