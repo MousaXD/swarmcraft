@@ -30,23 +30,32 @@ jobs:
           set -euo pipefail
           manifest=apps/desktop/src-tauri/Cargo.toml
           backup="$RUNNER_TEMP/desktop-Cargo.toml"
+          probe=.agent8-lock-probe
           cp "$manifest" "$backup"
-          trap 'cp "$backup" "$manifest"' EXIT
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('apps/desktop/src-tauri/Cargo.toml')
-          text = path.read_text()
-          old = 'version = "0.5.0"'
-          new = 'version = "0.5.1"'
-          if old not in text:
-              raise SystemExit('expected Desktop package version marker not found')
-          path.write_text(text.replace(old, new, 1))
-          PY
+          cleanup() {
+            cp "$backup" "$manifest"
+            rm -rf "$probe"
+          }
+          trap cleanup EXIT
+          mkdir -p "$probe/src"
+          cat > "$probe/Cargo.toml" <<'TOML'
+          [package]
+          name = "agent8-lock-probe"
+          version = "0.0.0"
+          edition = "2021"
+          publish = false
+          TOML
+          cat > "$probe/src/lib.rs" <<'RS'
+          pub fn lock_probe() {}
+          RS
+          cat >> "$manifest" <<'TOML'
+          agent8-lock-probe = { path = "../../../.agent8-lock-probe" }
+          TOML
           if cargo metadata --manifest-path "$manifest" --locked --format-version 1 --no-deps >/dev/null 2>&1; then
-            echo 'stale Desktop manifest unexpectedly passed --locked metadata' >&2
+            echo 'stale Desktop dependency graph unexpectedly passed --locked metadata' >&2
             exit 1
           fi
-          cp "$backup" "$manifest"
+          cleanup
           trap - EXIT
           cargo metadata --manifest-path "$manifest" --locked --format-version 1 --no-deps >/dev/null
       - name: Build and stage required Tauri sidecars
