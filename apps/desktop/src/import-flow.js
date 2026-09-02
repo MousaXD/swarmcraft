@@ -1,4 +1,5 @@
 import './catalog-selectors.js';
+import './provider-contract-bridge.js';
 import './launcher-controller.js';
 import './player-copy.js';
 
