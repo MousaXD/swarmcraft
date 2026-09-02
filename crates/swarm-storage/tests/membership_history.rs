@@ -5,12 +5,7 @@ use swarm_protocol::{
 use swarm_storage::{Storage, WorldMetadataV1};
 
 fn member(peer: u8) -> WorldMemberV1 {
-    WorldMemberV1 {
-        peer_id: PeerId([peer; 32]),
-        public_key: [peer; 32],
-        authority_eligible: true,
-        banned: false,
-    }
+    WorldMemberV1 { peer_id: PeerId([peer; 32]), public_key: [peer; 32], authority_eligible: true, banned: false }
 }
 
 fn fixture() -> (tempfile::TempDir, Storage, swarm_protocol::WorldId) {
