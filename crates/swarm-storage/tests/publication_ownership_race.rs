@@ -87,7 +87,8 @@ fn simultaneous_local_publishers_survive_replica_commit_gc_and_retention() {
         release.clone(),
         published_tx.clone(),
     );
-    let second = spawn_publisher(storage.clone(), &shared_source, child_context, start.clone(), release.clone(), published_tx);
+    let second =
+        spawn_publisher(storage.clone(), &shared_source, child_context, start.clone(), release.clone(), published_tx);
 
     start.wait();
     let mut locals = [published_rx.recv().unwrap(), published_rx.recv().unwrap()];
