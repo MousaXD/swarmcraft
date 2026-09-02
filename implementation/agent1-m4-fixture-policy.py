@@ -149,8 +149,3 @@ replace(
 ''',
     count=3,
 )
-replace(
-    path,
-    "    let majority = &refs[majority_start..];\n",
-    "    let mut majority = refs[majority_start..].to_vec();\n    majority.sort_by_key(|peer| peer.identity.peer_id());\n",
-)
