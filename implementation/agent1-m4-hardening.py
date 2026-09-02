@@ -69,7 +69,7 @@ new_push = '''    for metadata in storage.list_worlds()? {
                 }
             }
         }
-        if descriptor.member(application_peer).is_none_or(|member| member.banned) {
+        if descriptor.member(application_peer).map_or(true, |member| member.banned) {
             continue;
         }
         push_committed_world_payload(storage, node, transport_peer, world, outbound, true)?;
@@ -108,8 +108,16 @@ replace(
 ''',
 )
 # local_peer became response-handler dead state after checking the actual remote peer above.
-replace(daemon, "    local_peer: PeerId,\n    outbound: &mut HashMap<String, OutboundContext>,\n", "    outbound: &mut HashMap<String, OutboundContext>,\n")
-replace(daemon, "                            identity.peer_id(),\n                            &mut outbound,\n                            &mut leases,\n", "                            &mut outbound,\n                            &mut leases,\n")
+replace(
+    daemon,
+    "    response: WireResponse,\n    local_peer: PeerId,\n    outbound: &mut HashMap<String, OutboundContext>,\n",
+    "    response: WireResponse,\n    outbound: &mut HashMap<String, OutboundContext>,\n",
+)
+replace(
+    daemon,
+    "                            response,\n                            identity.peer_id(),\n                            &mut outbound,\n                            &mut leases,\n",
+    "                            response,\n                            &mut outbound,\n                            &mut leases,\n",
+)
 
 replace(
     daemon,
@@ -304,7 +312,6 @@ replace(
         self.state = SimWorldState::Active { authority: candidate };
 ''',
 )
-# Test-only hook inside the module for boundary behavior without exposing unsafe production setters.
 replace(
     sim,
     '''    fn peer(id: u8, hash: Hash32) -> SimPeer {
@@ -317,11 +324,9 @@ replace(
     fn peer(id: u8, hash: Hash32) -> SimPeer {
 ''',
 )
-# Append a focused exhaustion regression before the tests module closes.
 p = Path(sim)
 text = p.read_text()
-marker = "\n}\n"
-idx = text.rfind(marker)
+idx = text.rfind("\n}\n")
 if idx < 0:
     raise SystemExit("simulator tests closing brace not found")
 extra = r'''
