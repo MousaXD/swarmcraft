@@ -1,6 +1,4 @@
-use swarm_protocol::{
-    ArtifactRequirementV1, ArtifactSideV1, Hash32, RuntimeCompatibilityManifestV1, PROTOCOL_VERSION,
-};
+use swarm_protocol::{ArtifactRequirementV1, ArtifactSideV1, Hash32, RuntimeCompatibilityManifestV1, PROTOCOL_VERSION};
 
 fn artifact(id: &str, hash_byte: u8, provider_hint: Option<&str>) -> ArtifactRequirementV1 {
     ArtifactRequirementV1 {
@@ -27,14 +25,10 @@ fn compatibility(required_server_mods: Vec<ArtifactRequirementV1>) -> RuntimeCom
 
 #[test]
 fn canonical_runtime_permutations_have_one_fingerprint() {
-    let a = compatibility(vec![
-        artifact("zeta", 9, Some("modrinth:zeta")),
-        artifact("alpha", 1, Some("modrinth:alpha")),
-    ]);
-    let b = compatibility(vec![
-        artifact("alpha", 1, Some("modrinth:alpha")),
-        artifact("zeta", 9, Some("modrinth:zeta")),
-    ]);
+    let a =
+        compatibility(vec![artifact("zeta", 9, Some("modrinth:zeta")), artifact("alpha", 1, Some("modrinth:alpha"))]);
+    let b =
+        compatibility(vec![artifact("alpha", 1, Some("modrinth:alpha")), artifact("zeta", 9, Some("modrinth:zeta"))]);
     assert_eq!(a.fingerprint().unwrap(), b.fingerprint().unwrap());
 }
 
