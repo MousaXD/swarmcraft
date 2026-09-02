@@ -27,6 +27,8 @@ public final class SwarmCraftMod implements ModInitializer {
     public static final String MOD_ID = "swarmcraft";
     private static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration CONTROLLER_TIMEOUT = Duration.ofSeconds(8);
+    private static final Duration CONTROLLER_POLL_INTERVAL = Duration.ofMillis(250);
     private static final Duration PERMIT_START_TIMEOUT = Duration.ofSeconds(15);
     private static final Duration PERMIT_TIMEOUT = Duration.ofSeconds(6);
     private static final Duration PERMIT_POLL_INTERVAL = Duration.ofMillis(250);
@@ -64,7 +66,8 @@ public final class SwarmCraftMod implements ModInitializer {
                 permitGuard = guard;
             }
         } catch (Exception error) {
-            LOGGER.error("Unable to start SwarmCraft lifecycle bridge", error);
+            LOGGER.error("Unable to start authenticated SwarmCraft lifecycle bridge; managed runtime will fail closed", error);
+            failClosedRuntime(server, "authenticated lifecycle bridge startup failed", error);
         }
     }
 
@@ -205,6 +208,8 @@ public final class SwarmCraftMod implements ModInitializer {
         private final int port;
         private final String token;
         private final AtomicBoolean closed = new AtomicBoolean();
+        private final AtomicBoolean controllerFailureStarted = new AtomicBoolean();
+        private volatile long lastControllerHeartbeatNanos;
         private Socket socket;
         private BufferedWriter writer;
 
@@ -222,11 +227,15 @@ public final class SwarmCraftMod implements ModInitializer {
             writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8));
             send("AUTH\t" + token);
             sendWorldInfo();
+            lastControllerHeartbeatNanos = System.nanoTime();
 
             Thread reader = new Thread(this::readerLoop, "swarmcraft-ipc-reader");
             reader.setDaemon(true);
             reader.start();
-            LOGGER.info("SwarmCraft lifecycle bridge connected to local daemon");
+            Thread watchdog = new Thread(this::controllerWatchLoop, "swarmcraft-controller-lease");
+            watchdog.setDaemon(true);
+            watchdog.start();
+            LOGGER.info("SwarmCraft lifecycle bridge connected to local controller");
         }
 
         private void sendWorldInfo() throws IOException {
@@ -240,7 +249,8 @@ public final class SwarmCraftMod implements ModInitializer {
                 .orElse("unknown");
             String worldDirectory = valueOrEmpty(System.getenv("SWARMCRAFT_WORLD_DIR"));
             String compatibility = valueOrEmpty(System.getenv("SWARMCRAFT_COMPAT_FINGERPRINT"));
-            send("WORLD_INFO\t" + encode(minecraft) + "\t" + encode(loader) + "\t" + encode(worldDirectory) + "\t" + compatibility);
+            int javaMajor = Runtime.version().feature();
+            send("WORLD_INFO\t" + encode(minecraft) + "\t" + encode(loader) + "\t" + encode(worldDirectory) + "\t" + compatibility + "\t" + javaMajor);
         }
 
         private void readerLoop() {
@@ -249,17 +259,52 @@ public final class SwarmCraftMod implements ModInitializer {
                 while (!closed.get() && (line = reader.readLine()) != null) {
                     handle(line);
                 }
+                if (!closed.get()) {
+                    controllerLost("authenticated controller closed the IPC connection", null);
+                }
             } catch (IOException error) {
                 if (!closed.get()) {
-                    LOGGER.error("SwarmCraft IPC connection failed", error);
+                    controllerLost("authenticated controller IPC failed", error);
                 }
             }
+        }
+
+        private void controllerWatchLoop() {
+            while (!closed.get() && !controllerFailureStarted.get()) {
+                long now = System.nanoTime();
+                if (elapsed(lastControllerHeartbeatNanos, now).compareTo(CONTROLLER_TIMEOUT) >= 0) {
+                    controllerLost("authenticated controller heartbeat expired", null);
+                    return;
+                }
+                try {
+                    Thread.sleep(CONTROLLER_POLL_INTERVAL.toMillis());
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }
+
+        private void controllerLost(String reason, Exception cause) {
+            if (closed.get() || !controllerFailureStarted.compareAndSet(false, true)) {
+                return;
+            }
+            if (cause == null) {
+                LOGGER.error("SwarmCraft controller ownership lost: {}. Saving and stopping server.", reason);
+            } else {
+                LOGGER.error("SwarmCraft controller ownership lost: {}. Saving and stopping server.", reason, cause);
+            }
+            failClosedRuntime(server, reason, cause);
         }
 
         private void handle(String line) {
             String[] fields = line.split("\\t", -1);
             if (fields.length != 2) {
                 LOGGER.warn("Ignoring malformed SwarmCraft IPC command");
+                return;
+            }
+            lastControllerHeartbeatNanos = System.nanoTime();
+            if (fields[0].equals("CONTROLLER_HEARTBEAT")) {
                 return;
             }
             String requestId = fields[1];
@@ -282,7 +327,7 @@ public final class SwarmCraftMod implements ModInitializer {
                 try {
                     send("ERROR\t" + requestId + "\tSAVE_FAILED");
                 } catch (IOException ignored) {
-                    LOGGER.error("Unable to report save-barrier failure to SwarmCraft daemon");
+                    LOGGER.error("Unable to report save-barrier failure to SwarmCraft controller");
                 }
             }
         }
@@ -309,6 +354,22 @@ public final class SwarmCraftMod implements ModInitializer {
                 LOGGER.debug("Error while closing SwarmCraft IPC socket", error);
             }
         }
+    }
+
+    private static void failClosedRuntime(MinecraftServer server, String reason, Exception cause) {
+        server.execute(() -> {
+            try {
+                saveEverything(server);
+            } catch (Exception saveError) {
+                LOGGER.error("Unable to complete save barrier while failing closed after {}", reason, saveError);
+            }
+            try {
+                requestServerStop(server);
+            } catch (Exception stopError) {
+                LOGGER.error("Unable to stop Minecraft cleanly after {}; terminating process", reason, stopError);
+                System.exit(76);
+            }
+        });
     }
 
     private static void saveEverything(MinecraftServer server) throws Exception {
@@ -359,6 +420,10 @@ public final class SwarmCraftMod implements ModInitializer {
             method.invoke(target);
         } catch (NoSuchMethodException ignored) {
         }
+    }
+
+    private static Duration elapsed(long start, long end) {
+        return Duration.ofNanos(Math.max(0L, end - start));
     }
 
     private static String encode(String value) {

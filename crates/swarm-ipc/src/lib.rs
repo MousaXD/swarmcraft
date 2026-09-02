@@ -12,6 +12,7 @@ pub const IPC_PROTOCOL_VERSION: u16 = 1;
 pub enum IpcRequestV1 {
     Ping,
     GetWorldInfo,
+    ControllerHeartbeat,
     SaveBarrier { request_id: u64 },
     PrepareShutdown { request_id: u64 },
 }

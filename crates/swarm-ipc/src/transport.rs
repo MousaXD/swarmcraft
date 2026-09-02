@@ -4,9 +4,10 @@ use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
+    sync::Arc,
     time::Duration,
 };
-use swarm_protocol::Hash32;
+use swarm_protocol::{validate_runtime_selection, Hash32};
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -14,10 +15,13 @@ use tokio::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpListener,
     },
-    time::timeout,
+    sync::Mutex,
+    task::JoinHandle,
+    time::{sleep, timeout},
 };
 
 const MAX_CONTROL_LINE: usize = 16 * 1024;
+const CONTROLLER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct IpcLaunchConfig {
@@ -57,6 +61,7 @@ pub struct FabricWorldInfo {
     pub fabric_loader_version: String,
     pub world_directory: String,
     pub compatibility_fingerprint: Hash32,
+    pub java_major: u32,
 }
 
 #[derive(Debug, Error)]
@@ -73,6 +78,8 @@ pub enum IpcTransportError {
     Malformed(String),
     #[error("invalid compatibility fingerprint")]
     InvalidFingerprint,
+    #[error("Fabric runtime is outside the shipped adapter contract: {0}")]
+    UnsupportedRuntime(String),
     #[error("Fabric bridge request timed out")]
     Timeout,
     #[error("Fabric bridge returned {code} for request {request_id}")]
@@ -112,14 +119,26 @@ impl FabricBridgeListener {
             return Err(IpcTransportError::AuthenticationFailed);
         }
         let info = parse_world_info(&read_line_bounded(&mut reader).await?)?;
-        Ok(FabricSession { reader, writer: write, world_info: info })
+        let writer = Arc::new(Mutex::new(write));
+        let heartbeat_writer = Arc::clone(&writer);
+        let heartbeat = tokio::spawn(async move {
+            loop {
+                sleep(CONTROLLER_HEARTBEAT_INTERVAL).await;
+                let mut writer = heartbeat_writer.lock().await;
+                if writer.write_all(b"CONTROLLER_HEARTBEAT\t0\n").await.is_err() || writer.flush().await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(FabricSession { reader, writer, world_info: info, heartbeat })
     }
 }
 
 pub struct FabricSession {
     reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
+    writer: Arc<Mutex<OwnedWriteHalf>>,
     world_info: FabricWorldInfo,
+    heartbeat: JoinHandle<()>,
 }
 
 impl FabricSession {
@@ -142,8 +161,11 @@ impl FabricSession {
         request_id: u64,
         deadline: Duration,
     ) -> Result<(), IpcTransportError> {
-        self.writer.write_all(format!("{command}\t{request_id}\n").as_bytes()).await?;
-        self.writer.flush().await?;
+        {
+            let mut writer = self.writer.lock().await;
+            writer.write_all(format!("{command}\t{request_id}\n").as_bytes()).await?;
+            writer.flush().await?;
+        }
         let line =
             timeout(deadline, read_line_bounded(&mut self.reader)).await.map_err(|_| IpcTransportError::Timeout)??;
         let fields = line.split('\t').collect::<Vec<_>>();
@@ -155,6 +177,15 @@ impl FabricSession {
             return Err(IpcTransportError::UnexpectedResponse(line));
         }
         Ok(())
+    }
+}
+
+impl Drop for FabricSession {
+    fn drop(&mut self) {
+        // Dropping the authenticated controller session must close the socket,
+        // not leave a heartbeat task holding the writer open. The Fabric side
+        // treats that EOF as a fail-closed save/stop signal.
+        self.heartbeat.abort();
     }
 }
 
@@ -184,15 +215,25 @@ where
 
 fn parse_world_info(line: &str) -> Result<FabricWorldInfo, IpcTransportError> {
     let fields = line.split('\t').collect::<Vec<_>>();
-    if fields.len() != 5 || fields[0] != "WORLD_INFO" {
+    if fields.len() != 6 || fields[0] != "WORLD_INFO" {
         return Err(IpcTransportError::Malformed(line.to_owned()));
     }
-    let fingerprint = Hash32::from_str(fields[4]).map_err(|_| IpcTransportError::InvalidFingerprint)?;
+    let minecraft_version = decode_hex_string(fields[1])?;
+    let fabric_loader_version = decode_hex_string(fields[2])?;
+    let world_directory = decode_hex_string(fields[3])?;
+    let compatibility_fingerprint =
+        Hash32::from_str(fields[4]).map_err(|_| IpcTransportError::InvalidFingerprint)?;
+    let java_major = fields[5]
+        .parse::<u32>()
+        .map_err(|_| IpcTransportError::Malformed("Java major version is not an unsigned integer".into()))?;
+    validate_runtime_selection(&minecraft_version, &fabric_loader_version, Some(java_major))
+        .map_err(|error| IpcTransportError::UnsupportedRuntime(error.to_string()))?;
     Ok(FabricWorldInfo {
-        minecraft_version: decode_hex_string(fields[1])?,
-        fabric_loader_version: decode_hex_string(fields[2])?,
-        world_directory: decode_hex_string(fields[3])?,
-        compatibility_fingerprint: fingerprint,
+        minecraft_version,
+        fabric_loader_version,
+        world_directory,
+        compatibility_fingerprint,
+        java_major,
     })
 }
 
@@ -221,7 +262,7 @@ mod tests {
             write
                 .write_all(
                     format!(
-                        "WORLD_INFO\t{}\t{}\t{}\t{}\n",
+                        "WORLD_INFO\t{}\t{}\t{}\t{}\t25\n",
                         encode("26.1.2"),
                         encode("0.19.3"),
                         encode("/world"),
@@ -232,17 +273,36 @@ mod tests {
                 .await
                 .unwrap();
             write.flush().await.unwrap();
-            let mut command = String::new();
-            reader.read_line(&mut command).await.unwrap();
-            assert_eq!(command.trim(), "SAVE_BARRIER\t42");
+            loop {
+                let mut command = String::new();
+                reader.read_line(&mut command).await.unwrap();
+                if command.starts_with("CONTROLLER_HEARTBEAT\t") {
+                    continue;
+                }
+                assert_eq!(command.trim(), "SAVE_BARRIER\t42");
+                break;
+            }
             write.write_all(b"SAVE_COMPLETE\t42\n").await.unwrap();
             write.flush().await.unwrap();
         });
 
         let mut session = listener.accept(Duration::from_secs(5)).await.unwrap();
         assert_eq!(session.world_info().minecraft_version, "26.1.2");
+        assert_eq!(session.world_info().java_major, 25);
         assert_eq!(session.world_info().compatibility_fingerprint, Hash32([7; 32]));
         session.save_barrier(42, Duration::from_secs(5)).await.unwrap();
         client.await.unwrap();
+    }
+
+    #[test]
+    fn world_info_rejects_java_below_shipped_bridge_contract() {
+        let line = format!(
+            "WORLD_INFO\t{}\t{}\t{}\t{}\t21",
+            encode("26.1.2"),
+            encode("0.19.3"),
+            encode("/world"),
+            Hash32([7; 32])
+        );
+        assert!(matches!(parse_world_info(&line), Err(IpcTransportError::UnsupportedRuntime(_))));
     }
 }
