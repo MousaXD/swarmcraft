@@ -51,13 +51,13 @@ jobs:
           cat >> "$manifest" <<'TOML'
           agent8-lock-probe = { path = ".agent8-lock-probe" }
           TOML
-          if cargo metadata --manifest-path "$manifest" --locked --format-version 1 --no-deps >/dev/null 2>&1; then
+          if cargo metadata --manifest-path "$manifest" --locked --format-version 1 >/dev/null 2>&1; then
             echo 'stale Desktop dependency graph unexpectedly passed --locked metadata' >&2
             exit 1
           fi
           cleanup
           trap - EXIT
-          cargo metadata --manifest-path "$manifest" --locked --format-version 1 --no-deps >/dev/null
+          cargo metadata --manifest-path "$manifest" --locked --format-version 1 >/dev/null
       - name: Build and stage required Tauri sidecars
         shell: bash
         run: |
