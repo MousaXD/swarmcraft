@@ -32,6 +32,14 @@ new_fixture = r'validate_api_key("secret\nforwarded: value")'
 if old_fixture not in text:
     raise SystemExit("runtime newline-injection fixture anchor not found")
 text = text.replace(old_fixture, new_fixture, 1)
+old_temp = '''fn temporary_path(prefix: &str) -> PathBuf {
+'''
+new_temp = '''#[cfg(test)]
+fn temporary_path(prefix: &str) -> PathBuf {
+'''
+if old_temp not in text:
+    raise SystemExit("runtime temporary-path helper anchor not found")
+text = text.replace(old_temp, new_temp, 1)
 runtime.write_text(text)
 
 desktop = ROOT / "apps/desktop/src-tauri/src/curseforge.rs"
