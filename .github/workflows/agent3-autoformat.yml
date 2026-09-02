@@ -47,6 +47,21 @@ jobs:
               text = text.replace(epoch_old, epoch_new, 1)
           elif "let epoch_path = self.world_dir(manifest.world_id)" not in text:
               raise SystemExit("integrity.rs epoch fail-closed target not found")
+          text = text.replace("    previous_head: Option<CanonicalSnapshotRefV1>,\n", "", 1)
+          text = text.replace("            previous_head: previous,\n", "", 1)
+          unused_impl = "\n".join([
+              "impl SnapshotCommitTransaction {",
+              "    pub(crate) fn previous_head(&self) -> Option<CanonicalSnapshotRefV1> {",
+              "        self.previous_head",
+              "    }",
+              "",
+              "    pub(crate) fn next_head(&self) -> CanonicalSnapshotRefV1 {",
+              "        self.next_head",
+              "    }",
+              "}",
+              "",
+          ])
+          text = text.replace(unused_impl, "", 1)
           integrity.write_text(text)
 
           streaming = Path("crates/swarm-storage/src/streaming.rs")
