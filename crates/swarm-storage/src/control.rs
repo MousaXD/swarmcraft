@@ -8,6 +8,19 @@ use swarm_protocol::{AuthorityLeaseGrantV1, AuthorityTransferV1, EpochRecordV1, 
 impl Storage {
     pub fn save_epoch_record(&self, record: &EpochRecordV1) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(record.world_id)?;
+        if let Ok(existing) = self.load_epoch_record(record.world_id) {
+            let existing_generation = (existing.epoch_number, existing.fencing_token);
+            let requested_generation = (record.epoch_number, record.fencing_token);
+            if requested_generation < existing_generation {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+            if requested_generation == existing_generation {
+                if existing == *record {
+                    return Ok(());
+                }
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+        }
         let bytes = postcard::to_allocvec(record)?;
         durable_atomic_write(&self.control_path(record.world_id, "epoch.postcard"), &bytes)
     }
@@ -24,6 +37,19 @@ impl Storage {
 
     pub fn reserve_recovery(&self, reservation: &AuthorityLeaseGrantV1) -> Result<bool, StorageError> {
         let _guard = self.lock_world_transaction(reservation.world_id)?;
+        self.reserve_recovery_locked(reservation)
+    }
+
+    pub fn save_recovery_reservation(&self, reservation: &AuthorityLeaseGrantV1) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(reservation.world_id)?;
+        if self.reserve_recovery_locked(reservation)? {
+            Ok(())
+        } else {
+            Err(StorageError::WorldMetadataMismatch)
+        }
+    }
+
+    fn reserve_recovery_locked(&self, reservation: &AuthorityLeaseGrantV1) -> Result<bool, StorageError> {
         if let Ok(existing) = self.load_recovery_reservation(reservation.world_id) {
             let existing_generation = (existing.epoch, existing.fencing_token);
             let requested_generation = (reservation.epoch, reservation.fencing_token);
@@ -38,12 +64,6 @@ impl Storage {
         let bytes = postcard::to_allocvec(reservation)?;
         durable_atomic_write(&self.control_path(reservation.world_id, "recovery-reservation.postcard"), &bytes)?;
         Ok(true)
-    }
-
-    pub fn save_recovery_reservation(&self, reservation: &AuthorityLeaseGrantV1) -> Result<(), StorageError> {
-        let _guard = self.lock_world_transaction(reservation.world_id)?;
-        let bytes = postcard::to_allocvec(reservation)?;
-        durable_atomic_write(&self.control_path(reservation.world_id, "recovery-reservation.postcard"), &bytes)
     }
 
     pub fn load_recovery_reservation(&self, world: WorldId) -> Result<AuthorityLeaseGrantV1, StorageError> {
@@ -128,29 +148,53 @@ mod tests {
         }
     }
 
+    fn epoch_record(world: WorldId, peer: u8, epoch: u64, fencing_token: u64) -> EpochRecordV1 {
+        EpochRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            epoch_number: epoch,
+            previous_epoch_hash: None,
+            base_state_hash: Hash32([9; 32]),
+            authority_peer_id: PeerId([peer; 32]),
+            authority_public_key: [peer; 32],
+            mode: EpochMode::Quorum,
+            fencing_token,
+            reason: "test".into(),
+            signature: vec![peer; 64],
+        }
+    }
+
     #[test]
     fn epoch_record_round_trip_preserves_fencing_generation() {
         let temp = tempfile::tempdir().unwrap();
         let store = Storage::open(temp.path()).unwrap();
         let world = WorldId([3; 32]);
         fs::create_dir_all(store.world_dir(world).join("metadata")).unwrap();
-        let record = EpochRecordV1 {
-            protocol_version: PROTOCOL_VERSION,
-            world_id: world,
-            epoch_number: 4,
-            previous_epoch_hash: None,
-            base_state_hash: Hash32([9; 32]),
-            authority_peer_id: PeerId([2; 32]),
-            authority_public_key: [7; 32],
-            mode: EpochMode::Quorum,
-            fencing_token: 11,
-            reason: "test".into(),
-            signature: vec![1; 64],
-        };
+        let record = epoch_record(world, 2, 4, 11);
         store.save_epoch_record(&record).unwrap();
         let loaded = store.load_epoch_record(world).unwrap();
         assert_eq!(loaded.epoch_number, 4);
         assert_eq!(loaded.fencing_token, 11);
+    }
+
+    #[test]
+    fn epoch_record_cannot_regress_or_equivocate_same_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0x33; 32]);
+        fs::create_dir_all(store.world_dir(world).join("metadata")).unwrap();
+        let accepted = epoch_record(world, 2, 8, 12);
+        store.save_epoch_record(&accepted).unwrap();
+        store.save_epoch_record(&accepted).unwrap();
+
+        let stale = epoch_record(world, 3, 7, 11);
+        assert!(matches!(store.save_epoch_record(&stale), Err(StorageError::WorldMetadataMismatch)));
+        let conflicting = epoch_record(world, 3, 8, 12);
+        assert!(matches!(
+            store.save_epoch_record(&conflicting),
+            Err(StorageError::WorldMetadataMismatch)
+        ));
+        assert_eq!(store.load_epoch_record(world).unwrap(), accepted);
     }
 
     #[test]
@@ -178,6 +222,22 @@ mod tests {
         assert!(!store.reserve_recovery(&conflicting).unwrap());
         assert_eq!(store.load_recovery_reservation(world).unwrap().authority_peer_id, first.authority_peer_id);
         assert!(store.reserve_recovery(&first).unwrap());
+    }
+
+    #[test]
+    fn direct_reservation_save_cannot_bypass_generation_checks() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0x56; 32]);
+        fs::create_dir_all(store.world_dir(world).join("metadata")).unwrap();
+        let accepted = reservation(world, 6, 9, 13);
+        let stale = reservation(world, 7, 8, 12);
+        store.save_recovery_reservation(&accepted).unwrap();
+        assert!(matches!(
+            store.save_recovery_reservation(&stale),
+            Err(StorageError::WorldMetadataMismatch)
+        ));
+        assert_eq!(store.load_recovery_reservation(world).unwrap().authority_peer_id, accepted.authority_peer_id);
     }
 
     #[test]
