@@ -1,4 +1,7 @@
-use swarm_protocol::{Hash32, MembershipRecordV1, PeerId, WorldDescriptorV1, WorldGenesisV1, WorldMemberV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION};
+use swarm_protocol::{
+    Hash32, MembershipRecordV1, PeerId, WorldDescriptorV1, WorldGenesisV1, WorldMemberV1, PROTOCOL_VERSION,
+    STORAGE_SCHEMA_VERSION,
+};
 use swarm_storage::{Storage, WorldMetadataV1};
 
 fn member(peer: u8) -> WorldMemberV1 {
