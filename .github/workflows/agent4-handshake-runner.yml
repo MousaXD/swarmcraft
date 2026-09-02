@@ -47,6 +47,21 @@ jobs:
           path.write_text(text.replace(old, new, 1))
           PY
           python implementation/agent4-handshake-runner.py 2>&1 | tee implementation/agent4-handshake-apply.log
+          python - <<'PY' 2>&1 | tee -a implementation/agent4-handshake-apply.log
+          from pathlib import Path
+          path = Path("crates/swarm-cli/src/daemon.rs")
+          text = path.read_text()
+          old = '        WireRequest::Hello(_) => return Err(anyhow!("PeerHello is handled by the network authentication layer")),\n'
+          new = '''        WireRequest::Hello(_)
+          | WireRequest::HelloChallenge { .. }
+          | WireRequest::HelloProof(_) => {
+              return Err(anyhow!("application handshake requests are handled by the network authentication layer"));
+          }
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("daemon handshake catch-all shape changed")
+          path.write_text(text.replace(old, new, 1))
+          PY
 
       - name: Format
         shell: bash
