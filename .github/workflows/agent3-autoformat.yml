@@ -25,94 +25,76 @@ jobs:
 
           integrity = Path("crates/swarm-storage/src/integrity.rs")
           text = integrity.read_text()
-          old = '''            if entry.path().extension().and_then(|value| value.to_str()) != Some("postcard") {
-              continue;
-          }
-          let stem =
-              entry.path().file_stem().and_then(|value| value.to_str()).ok_or(StorageError::WorldMetadataMismatch)?;
-          let number = stem.parse::<u64>().map_err(|_| StorageError::WorldMetadataMismatch)?;
-          '''
-          new = '''            let path = entry.path();
-          if path.extension().and_then(|value| value.to_str()) != Some("postcard") {
-              continue;
-          }
-          let stem = path.file_stem().and_then(|value| value.to_str()).ok_or(StorageError::WorldMetadataMismatch)?;
-          let number = stem.parse::<u64>().map_err(|_| StorageError::WorldMetadataMismatch)?;
-          '''
-          if old in text:
-              text = text.replace(old, new, 1)
-              integrity.write_text(text)
-          elif 'let path = entry.path();' not in text:
-              raise SystemExit("integrity.rs compile fix target not found")
+          if "let path = entry.path();" not in text:
+              needle = '            if entry.path().extension().and_then(|value| value.to_str()) != Some("postcard") {\n'
+              replacement = '            let path = entry.path();\n            if path.extension().and_then(|value| value.to_str()) != Some("postcard") {\n'
+              if needle not in text:
+                  raise SystemExit("integrity.rs path target not found")
+              text = text.replace(needle, replacement, 1)
+          if "entry.path().file_stem()" in text:
+              text = text.replace("entry.path().file_stem()", "path.file_stem()", 1)
+          integrity.write_text(text)
 
           streaming = Path("crates/swarm-storage/src/streaming.rs")
           text = streaming.read_text()
-          old_import = '    fs::{self, File, OpenOptions},\n'
-          if old_import in text:
-              text = text.replace(old_import, '    fs::{self, File},\n', 1)
-          marker = '#[cfg(test)]\nmod tests {\n    use super::*;\n'
-          replacement = '#[cfg(test)]\nmod tests {\n    use super::*;\n    use std::fs::OpenOptions;\n'
-          if 'use std::fs::OpenOptions;' not in text:
-              if marker not in text:
+          text = text.replace('    fs::{self, File, OpenOptions},\n', '    fs::{self, File},\n', 1)
+          if "use std::fs::OpenOptions;" not in text:
+              needle = "mod tests {\n    use super::*;\n"
+              replacement = "mod tests {\n    use super::*;\n    use std::fs::OpenOptions;\n"
+              if needle not in text:
                   raise SystemExit("streaming.rs test module target not found")
-              text = text.replace(marker, replacement, 1)
+              text = text.replace(needle, replacement, 1)
           streaming.write_text(text)
 
           migration = Path("crates/swarm-cli/src/migration.rs")
           text = migration.read_text()
-          old = '''    ensure_authority_generation(storage, &identity, &epoch)?;
-          let number = storage.next_snapshot_number(options.world)?;
-          let previous_hash = Some(latest.manifest_hash()?);
-          '''
-          new = '''    ensure_authority_generation(storage, &identity, &epoch)?;
-          let expected_head = storage.canonical_snapshot_head(options.world)?.head;
-          let number = storage.next_snapshot_number(options.world)?;
-          let previous_hash = Some(latest.manifest_hash()?);
-          '''
-          if old in text:
-              text = text.replace(old, new, 1)
-          elif 'let expected_head = storage.canonical_snapshot_head(options.world)?.head;' not in text:
-              raise SystemExit("migration checkpoint head target not found")
-          old = '''    identity.sign_snapshot(&mut final_manifest)?;
-          storage.commit_snapshot(&final_manifest)?;
-          '''
-          new = '''    identity.sign_snapshot(&mut final_manifest)?;
-          storage.commit_snapshot_fenced(
-              &final_manifest,
-              swarm_storage::SnapshotCommitFence {
-                  expected_epoch: epoch.epoch_number,
-                  expected_fencing_token: epoch.fencing_token,
-                  expected_head,
-              },
-          )?;
-          '''
-          if old in text:
-              text = text.replace(old, new, 1)
-          elif 'storage.commit_snapshot_fenced(\n        &final_manifest,' not in text:
-              raise SystemExit("migration checkpoint commit target not found")
+          if "let expected_head = storage.canonical_snapshot_head(options.world)?.head;" not in text:
+              needle = "    let number = storage.next_snapshot_number(options.world)?;\n"
+              if needle not in text:
+                  raise SystemExit("migration checkpoint number target not found")
+              text = text.replace(
+                  needle,
+                  "    let expected_head = storage.canonical_snapshot_head(options.world)?.head;\n" + needle,
+                  1,
+              )
+          if "storage.commit_snapshot_fenced(\n        &final_manifest," not in text:
+              needle = "    storage.commit_snapshot(&final_manifest)?;\n"
+              if needle not in text:
+                  raise SystemExit("migration checkpoint commit target not found")
+              replacement = "\n".join([
+                  "    storage.commit_snapshot_fenced(",
+                  "        &final_manifest,",
+                  "        swarm_storage::SnapshotCommitFence {",
+                  "            expected_epoch: epoch.epoch_number,",
+                  "            expected_fencing_token: epoch.fencing_token,",
+                  "            expected_head,",
+                  "        },",
+                  "    )?;",
+                  "",
+              ])
+              text = text.replace(needle, replacement, 1)
           migration.write_text(text)
 
-          promotion_old = '''        identity.sign_snapshot(&mut promoted)?;
-          storage.commit_snapshot(&promoted)?;
-          '''
-          promotion_new = '''        identity.sign_snapshot(&mut promoted)?;
-          let promoted_expected_head = storage.canonical_snapshot_head(promoted.world_id)?.head;
-          storage.commit_snapshot_fenced(
-              &promoted,
-              swarm_storage::SnapshotCommitFence {
-                  expected_epoch: epoch.epoch_number,
-                  expected_fencing_token: epoch.fencing_token,
-                  expected_head: promoted_expected_head,
-              },
-          )?;
-          '''
           for source in [Path("crates/swarm-cli/src/migration.rs"), Path("crates/swarm-cli/src/daemon.rs")]:
               text = source.read_text()
-              if promotion_old in text:
-                  text = text.replace(promotion_old, promotion_new, 1)
+              if "let promoted_expected_head = storage.canonical_snapshot_head(promoted.world_id)?.head;" not in text:
+                  needle = "        storage.commit_snapshot(&promoted)?;\n"
+                  if needle not in text:
+                      raise SystemExit(f"{source} promotion commit target not found")
+                  replacement = "\n".join([
+                      "        let promoted_expected_head = storage.canonical_snapshot_head(promoted.world_id)?.head;",
+                      "        storage.commit_snapshot_fenced(",
+                      "            &promoted,",
+                      "            swarm_storage::SnapshotCommitFence {",
+                      "                expected_epoch: epoch.epoch_number,",
+                      "                expected_fencing_token: epoch.fencing_token,",
+                      "                expected_head: promoted_expected_head,",
+                      "            },",
+                      "        )?;",
+                      "",
+                  ])
+                  text = text.replace(needle, replacement, 1)
                   source.write_text(text)
-              elif 'let promoted_expected_head = storage.canonical_snapshot_head(promoted.world_id)?.head;' not in text:
-                  raise SystemExit(f"{source} promotion commit target not found")
           PY
       - name: Refresh root lockfile minimally
         run: cargo check -p swarm-storage
