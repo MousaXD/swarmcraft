@@ -211,8 +211,8 @@ impl RecoveryBallotV1 {
 
     pub fn generation_is_well_formed(&self) -> bool {
         self.protocol_version == PROTOCOL_VERSION
-            && self.target_epoch == self.base_epoch.saturating_add(1)
-            && self.target_fencing_token == self.base_fencing_token.saturating_add(1)
+            && self.base_epoch.checked_add(1) == Some(self.target_epoch)
+            && self.base_fencing_token.checked_add(1) == Some(self.target_fencing_token)
             && self.round > 0
     }
 }

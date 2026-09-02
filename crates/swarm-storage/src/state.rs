@@ -195,6 +195,8 @@ fn same_recovery_base(a: &RecoveryBallotV1, b: &RecoveryBallotV1) -> bool {
         && a.base_fencing_token == b.base_fencing_token
         && a.target_epoch == b.target_epoch
         && a.target_fencing_token == b.target_fencing_token
+        && a.candidate_peer_id == b.candidate_peer_id
+        && a.candidate_public_key == b.candidate_public_key
         && a.base_snapshot_hash == b.base_snapshot_hash
         && a.base_state_hash == b.base_state_hash
         && a.membership_hash == b.membership_hash
@@ -298,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_promise_survives_restart_and_blocks_stale_candidate() {
+    fn recovery_promise_survives_restart_and_preserves_the_accepted_value() {
         let temp = tempfile::tempdir().unwrap();
         let (_, world) = test_world();
         let store = Storage::open(temp.path()).unwrap();
@@ -310,11 +312,12 @@ mod tests {
         let charlie = ballot(world, 3, 2);
         assert_eq!(
             store.promise_recovery_ballot(&charlie, &vote(&charlie, 6)).unwrap(),
-            RecoveryPromiseResult::Accepted
+            RecoveryPromiseResult::Rejected { highest_round: 1 }
         );
+        let bob_round_two = ballot(world, 2, 2);
         assert_eq!(
-            store.promise_recovery_ballot(&bob, &vote(&bob, 6)).unwrap(),
-            RecoveryPromiseResult::Rejected { highest_round: 2 }
+            store.promise_recovery_ballot(&bob_round_two, &vote(&bob_round_two, 6)).unwrap(),
+            RecoveryPromiseResult::Accepted
         );
     }
 

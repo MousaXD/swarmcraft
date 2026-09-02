@@ -319,10 +319,6 @@ fn maintain_authority_leases(
             if epoch.mode == EpochMode::Recovery {
                 ensure_recovery_artifacts(storage, identity, &epoch)?;
             }
-            if member_count <= 1 {
-                clear_permit(paths, world)?;
-                continue;
-            }
             request_world_statuses(storage, node, outbound, runtime, &descriptor, identity.peer_id())?;
             request_host_capabilities(node, outbound, runtime, &descriptor, identity.peer_id())?;
             let context = LocalAuthorityContext {
@@ -412,10 +408,8 @@ fn maintain_authority_leases(
             continue;
         }
 
-        let recovery_generation = AuthorityGeneration {
-            epoch: generation.epoch.saturating_add(1),
-            fencing_token: generation.fencing_token.saturating_add(1),
-        };
+        let recovery_generation =
+            generation.checked_next().context("authority generation exhausted during crash recovery")?;
         drive_recovery_ballot(
             RecoveryAttempt {
                 storage,
@@ -472,7 +466,7 @@ fn drive_recovery_ballot(
     });
 
     if !active_is_usable {
-        let round = floor.saturating_add(1).max(1);
+        let round = floor.checked_add(1).context("recovery round counter exhausted")?.max(1);
         let mut ballot = RecoveryBallotV1 {
             protocol_version: PROTOCOL_VERSION,
             world_id: world,
@@ -640,24 +634,6 @@ fn maintain_local_authority(
         let heartbeat = runtime.permit_heartbeats.entry(world).or_default();
         *heartbeat = heartbeat.saturating_add(1);
         refresh_permit(context.paths, world, context.generation, *heartbeat)?;
-    } else if solo_mode_allowed(context.storage, world)? {
-        request_world_statuses(
-            context.storage,
-            node,
-            outbound,
-            runtime,
-            context.descriptor,
-            context.identity.peer_id(),
-        )?;
-        if context.epoch.mode != EpochMode::Solo {
-            promote_to_solo(context.storage, context.identity, context.epoch)?;
-            clear_permit(context.paths, world)?;
-            return Ok(());
-        }
-        refresh_solo_branch(context.storage, context.identity, context.epoch)?;
-        let heartbeat = runtime.permit_heartbeats.entry(world).or_default();
-        *heartbeat = heartbeat.saturating_add(1);
-        refresh_permit(context.paths, world, context.generation, *heartbeat)?;
     } else {
         clear_permit(context.paths, world)?;
         request_world_statuses(
@@ -680,54 +656,6 @@ fn solo_mode_allowed(storage: &Storage, world: WorldId) -> Result<bool> {
     };
     verify_world_config_signature(&config)?;
     Ok(config.authority_policy.allow_solo_advancement)
-}
-
-fn promote_to_solo(storage: &Storage, identity: &PeerIdentity, previous: &EpochRecordV1) -> Result<EpochRecordV1> {
-    if previous.authority_peer_id != identity.peer_id() || previous.authority_public_key != identity.public_key() {
-        return Err(anyhow!("only the accepted authority may enter solo mode"));
-    }
-    if !solo_mode_allowed(storage, previous.world_id)? {
-        return Err(anyhow!("solo advancement is disabled by the signed world configuration"));
-    }
-    let latest =
-        storage.latest_snapshot(previous.world_id)?.context("cannot enter solo mode without a canonical snapshot")?;
-    verify_snapshot_signature(&latest)?;
-    let next_epoch = previous.epoch_number.saturating_add(1);
-    let mut branch = SoloBranchV1 {
-        protocol_version: PROTOCOL_VERSION,
-        world_id: previous.world_id,
-        base_snapshot_hash: latest.manifest_hash()?,
-        base_epoch: previous.epoch_number,
-        head_snapshot_hash: latest.manifest_hash()?,
-        head_epoch: next_epoch,
-        head_sequence: latest.sequence,
-        state_hash: latest.state_root,
-        authority_peer_id: identity.peer_id(),
-        authority_public_key: identity.public_key(),
-        signature: Vec::new(),
-    };
-    sign_solo_branch(identity, &mut branch)?;
-    // Preserve ancestry before making the solo epoch current. A crash can leave an
-    // inert future branch, but never an active solo epoch with forgotten ancestry.
-    storage.save_solo_branch(&branch)?;
-
-    let mut next = EpochRecordV1 {
-        protocol_version: PROTOCOL_VERSION,
-        world_id: previous.world_id,
-        epoch_number: next_epoch,
-        previous_epoch_hash: Some(epoch_record_hash(previous)?),
-        base_state_hash: latest.state_root,
-        authority_peer_id: identity.peer_id(),
-        authority_public_key: identity.public_key(),
-        mode: EpochMode::Solo,
-        fencing_token: previous.fencing_token.saturating_add(1),
-        reason: "solo advancement permitted by signed world policy while quorum is unavailable".into(),
-        signature: Vec::new(),
-    };
-    next.signature = identity.sign(&next.signing_bytes()?);
-    storage.save_epoch_record(&next)?;
-    info!(world = %previous.world_id, epoch = next.epoch_number, "entered explicit solo mode");
-    Ok(next)
 }
 
 fn refresh_solo_branch(storage: &Storage, identity: &PeerIdentity, epoch: &EpochRecordV1) -> Result<()> {
@@ -765,16 +693,18 @@ fn promote_solo_to_quorum(
         .storage
         .latest_snapshot(context.descriptor.world_id)?
         .context("cannot restore quorum without a solo head snapshot")?;
+    let next_generation =
+        context.generation.checked_next().context("authority generation exhausted while restoring quorum")?;
     let mut next = EpochRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: context.descriptor.world_id,
-        epoch_number: context.epoch.epoch_number.saturating_add(1),
+        epoch_number: next_generation.epoch,
         previous_epoch_hash: Some(epoch_record_hash(context.epoch)?),
         base_state_hash: latest.state_root,
         authority_peer_id: context.identity.peer_id(),
         authority_public_key: context.identity.public_key(),
         mode: EpochMode::Quorum,
-        fencing_token: context.epoch.fencing_token.saturating_add(1),
+        fencing_token: next_generation.fencing_token,
         reason: "quorum restored after explicit solo history replication".into(),
         signature: Vec::new(),
     };
@@ -1002,16 +932,19 @@ fn promote_recovery_epoch(
     previous: &EpochRecordV1,
     latest: &SnapshotManifestV1,
 ) -> Result<EpochRecordV1> {
+    let next_generation = AuthorityGeneration { epoch: previous.epoch_number, fencing_token: previous.fencing_token }
+        .checked_next()
+        .context("authority generation exhausted during recovery promotion")?;
     let mut next = EpochRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: previous.world_id,
-        epoch_number: previous.epoch_number.saturating_add(1),
+        epoch_number: next_generation.epoch,
         previous_epoch_hash: Some(epoch_record_hash(previous)?),
         base_state_hash: latest.state_root,
         authority_peer_id: identity.peer_id(),
         authority_public_key: identity.public_key(),
         mode: EpochMode::Recovery,
-        fencing_token: previous.fencing_token.saturating_add(1),
+        fencing_token: next_generation.fencing_token,
         reason: "automatic crash recovery after durable quorum ballot".into(),
         signature: Vec::new(),
     };
@@ -1023,7 +956,7 @@ fn promote_recovery_epoch(
 fn ensure_recovery_artifacts(storage: &Storage, identity: &PeerIdentity, epoch: &EpochRecordV1) -> Result<()> {
     let latest = storage.latest_snapshot(epoch.world_id)?.context("recovery epoch has no base snapshot")?;
     if latest.epoch < epoch.epoch_number {
-        if latest.epoch.saturating_add(1) != epoch.epoch_number || latest.state_root != epoch.base_state_hash {
+        if latest.epoch.checked_add(1) != Some(epoch.epoch_number) || latest.state_root != epoch.base_state_hash {
             return Err(anyhow!("recovery epoch does not directly promote the latest canonical snapshot"));
         }
         let mut promoted = SnapshotManifestV1 {
@@ -1031,7 +964,7 @@ fn ensure_recovery_artifacts(storage: &Storage, identity: &PeerIdentity, epoch: 
             world_id: epoch.world_id,
             snapshot_number: storage.next_snapshot_number(epoch.world_id)?,
             epoch: epoch.epoch_number,
-            sequence: latest.sequence.saturating_add(1),
+            sequence: latest.sequence.checked_add(1).context("snapshot sequence counter exhausted")?,
             previous_snapshot_hash: Some(latest.manifest_hash()?),
             entries: latest.entries.clone(),
             state_root: latest.state_root,
@@ -1061,7 +994,7 @@ fn ensure_recovery_artifacts(storage: &Storage, identity: &PeerIdentity, epoch: 
             protocol_version: membership.protocol_version,
             world_id: epoch.world_id,
             epoch: epoch.epoch_number,
-            sequence: membership.sequence.saturating_add(1),
+            sequence: membership.sequence.checked_add(1).context("membership sequence counter exhausted")?,
             previous_membership_hash: Some(membership.record_hash()?),
             members: membership.members.clone(),
             authority_peer_id: identity.peer_id(),
@@ -1562,10 +1495,14 @@ fn handle_request(
                 ));
             }
             let current = storage.load_epoch_record(ballot.world_id)?;
+            let expected_generation =
+                AuthorityGeneration { epoch: current.epoch_number, fencing_token: current.fencing_token }
+                    .checked_next()
+                    .context("accepted authority generation is exhausted")?;
             if ballot.base_epoch != current.epoch_number
                 || ballot.base_fencing_token != current.fencing_token
-                || ballot.target_epoch != current.epoch_number.saturating_add(1)
-                || ballot.target_fencing_token != current.fencing_token.saturating_add(1)
+                || ballot.target_epoch != expected_generation.epoch
+                || ballot.target_fencing_token != expected_generation.fencing_token
             {
                 return Err(anyhow!("recovery ballot does not target the next accepted generation"));
             }
@@ -1627,8 +1564,12 @@ fn handle_request(
                     )?;
                     return Ok(());
                 }
-                if record.epoch_number != current.epoch_number.saturating_add(1)
-                    || record.fencing_token != current.fencing_token.saturating_add(1)
+                let expected_generation =
+                    AuthorityGeneration { epoch: current.epoch_number, fencing_token: current.fencing_token }
+                        .checked_next()
+                        .context("accepted authority generation is exhausted")?;
+                if record.epoch_number != expected_generation.epoch
+                    || record.fencing_token != expected_generation.fencing_token
                     || record.previous_epoch_hash != Some(epoch_record_hash(&current)?)
                 {
                     return Err(anyhow!("certified recovery epoch does not directly extend the accepted epoch"));
@@ -1669,8 +1610,12 @@ fn handle_request(
                     )?;
                     return Ok(());
                 }
-                if record.epoch_number != current.epoch_number.saturating_add(1)
-                    || record.fencing_token != current.fencing_token.saturating_add(1)
+                let expected_generation =
+                    AuthorityGeneration { epoch: current.epoch_number, fencing_token: current.fencing_token }
+                        .checked_next()
+                        .context("accepted authority generation is exhausted")?;
+                if record.epoch_number != expected_generation.epoch
+                    || record.fencing_token != expected_generation.fencing_token
                     || record.previous_epoch_hash != Some(epoch_record_hash(&current)?)
                 {
                     return Err(anyhow!("epoch and fencing token must advance exactly once from the accepted epoch"));
@@ -1993,8 +1938,17 @@ fn validate_non_recovery_epoch_transition(
         if next.authority_public_key != current.authority_public_key {
             return Err(anyhow!("same authority peer cannot change its canonical public key"));
         }
-        if next.mode == EpochMode::Solo && !solo_mode_allowed(storage, next.world_id)? {
-            return Err(anyhow!("solo advancement is disabled by the signed world configuration"));
+        if next.mode == EpochMode::Solo {
+            if !solo_mode_allowed(storage, next.world_id)? {
+                return Err(anyhow!("solo advancement is disabled by the signed world configuration"));
+            }
+            let descriptor = storage.load_world_descriptor(next.world_id)?;
+            let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
+            if member_count > 1 {
+                return Err(anyhow!(
+                    "multi-member worlds cannot enter writable solo mode without a committed clean relinquishment"
+                ));
+            }
         }
         return Ok(());
     }
