@@ -17,6 +17,75 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Apply Agent 3 source fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          integrity = Path("crates/swarm-storage/src/integrity.rs")
+          text = integrity.read_text()
+          old = '''            if entry.path().extension().and_then(|value| value.to_str()) != Some("postcard") {
+              continue;
+          }
+          let stem =
+              entry.path().file_stem().and_then(|value| value.to_str()).ok_or(StorageError::WorldMetadataMismatch)?;
+          let number = stem.parse::<u64>().map_err(|_| StorageError::WorldMetadataMismatch)?;
+          '''
+          new = '''            let path = entry.path();
+          if path.extension().and_then(|value| value.to_str()) != Some("postcard") {
+              continue;
+          }
+          let stem = path.file_stem().and_then(|value| value.to_str()).ok_or(StorageError::WorldMetadataMismatch)?;
+          let number = stem.parse::<u64>().map_err(|_| StorageError::WorldMetadataMismatch)?;
+          '''
+          if old not in text:
+              raise SystemExit("integrity.rs target not found")
+          integrity.write_text(text.replace(old, new, 1))
+
+          streaming = Path("crates/swarm-storage/src/streaming.rs")
+          text = streaming.read_text()
+          old = '    fs::{self, File, OpenOptions},\n'
+          if old not in text:
+              raise SystemExit("streaming.rs import target not found")
+          text = text.replace(old, '    fs::{self, File},\n', 1)
+          marker = '#[cfg(test)]\nmod tests {\n    use super::*;\n'
+          replacement = '#[cfg(test)]\nmod tests {\n    use super::*;\n    use std::fs::OpenOptions;\n'
+          if marker not in text:
+              raise SystemExit("streaming.rs test module target not found")
+          streaming.write_text(text.replace(marker, replacement, 1))
+
+          migration = Path("crates/swarm-cli/src/migration.rs")
+          text = migration.read_text()
+          old = '''    ensure_authority_generation(storage, &identity, &epoch)?;
+          let number = storage.next_snapshot_number(options.world)?;
+          let previous_hash = Some(latest.manifest_hash()?);
+          '''
+          new = '''    ensure_authority_generation(storage, &identity, &epoch)?;
+          let expected_head = storage.canonical_snapshot_head(options.world)?.head;
+          let number = storage.next_snapshot_number(options.world)?;
+          let previous_hash = Some(latest.manifest_hash()?);
+          '''
+          if old not in text:
+              raise SystemExit("migration checkpoint head target not found")
+          text = text.replace(old, new, 1)
+          old = '''    identity.sign_snapshot(&mut final_manifest)?;
+          storage.commit_snapshot(&final_manifest)?;
+          '''
+          new = '''    identity.sign_snapshot(&mut final_manifest)?;
+          storage.commit_snapshot_fenced(
+              &final_manifest,
+              swarm_storage::SnapshotCommitFence {
+                  expected_epoch: epoch.epoch_number,
+                  expected_fencing_token: epoch.fencing_token,
+                  expected_head,
+              },
+          )?;
+          '''
+          if old not in text:
+              raise SystemExit("migration checkpoint commit target not found")
+          migration.write_text(text.replace(old, new, 1))
+          PY
       - name: Refresh root lockfile minimally
         run: cargo check -p swarm-storage
       - name: Refresh Desktop lockfile minimally
@@ -31,15 +100,15 @@ jobs:
           status=${PIPESTATUS[0]}
           echo "CLIPPY_EXIT=$status" | tee -a implementation/agent-3-clippy.txt
           exit 0
-      - name: Commit lockfiles, formatter, and diagnostics
+      - name: Commit source, lockfiles, formatter, and diagnostics
         shell: bash
         run: |
           if [[ -z "$(git status --porcelain)" ]]; then
-            echo "lockfiles, formatter, and diagnostics unchanged"
+            echo "source, lockfiles, formatter, and diagnostics unchanged"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add --all
-          git commit -m "chore(agent3): refresh locks and validation diagnostics"
+          git commit -m "fix(storage): compile and fence authority checkpoint"
           git push origin HEAD:fix/agent-3-storage
