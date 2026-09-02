@@ -2,13 +2,15 @@
 
 ## Status
 
-STATUS: NOT STARTED
+STATUS: IN PROGRESS
 
 BRANCH: `fix/agent-1-consensus`
 
 STARTING SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
 
-CURRENT HEAD SHA: pending
+BRANCH CREATION SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` (campaign planning head; production tree remains the declared campaign baseline plus implementation ledgers)
+
+CURRENT HEAD SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` before this ledger-start commit
 
 INTEGRATED SHA: pending
 
@@ -21,16 +23,25 @@ Repair the canonical voter-set and authority-safety model so supported partition
 - FINAL-001 — divergent membership sets can form independent quorums
 - FINAL-002 — automatic Solo fallback can race majority recovery
 - FINAL-006 — higher recovery rounds are not value preserving
-- FINAL-039 — duplicate daemon/non-equivocation consensus risk where assigned by final audit
-- FINAL-045 — strict monotonic generation/counter exhaustion handling where assigned by final audit
+- FINAL-039 — strict monotonic generation/counter exhaustion handling
+- FINAL-045 — legacy consensus/test models diverge from production semantics
 
-Read `audits/FINAL-AUDIT.md` and the authority/consensus auditor report before editing.
+## Audit inputs read
+
+- `implementation/README.md` from `integration/audit-remediation-v1`
+- this ledger
+- `audits/FINAL-AUDIT.md` from `audit/final-integration-report`
+- `audits/02-authority-consensus.md` from `audit/authority-consensus`
+
+The final audit maps Agent 1 to FINAL-001, FINAL-002, FINAL-006, FINAL-039, and FINAL-045. The authority audit provides the concrete AC-01/02/03/06/07 failure scenarios and required regression classes. AC-05 duplicate-process non-equivocation is coordinated with Agent 3 storage and is not silently claimed as fully owned here.
 
 ## Dependencies
 
 Required before starting: none.
 
 This is a Wave 1 agent and starts from campaign base.
+
+Dependency heads consumed: none.
 
 Downstream dependencies:
 
@@ -66,19 +77,28 @@ Do not redesign package providers, Desktop UX, or runtime artifact installation.
 
 ## Work completed
 
-None yet.
+- Verified there was no pre-existing `fix/agent-1-consensus` branch to preserve.
+- Created `fix/agent-1-consensus` from the campaign planning head without changing the declared production baseline.
+- Read the required audit sources and extracted the exact safety invariants and reproduction scenarios before production edits.
 
 ## Current exact state
 
-What works: see existing audit positive controls.
+What works: the existing code has local epoch/fencing validation, signed recovery ballots/certificates, deterministic election ordering, lease expiry, and same-round promise checks.
 
-Incomplete: all checklist items.
+Confirmed incomplete at start:
+
+- membership records become locally active without a committed/joint configuration transition;
+- quorum calculations use the local latest membership universe;
+- multi-member automatic Solo can race majority recovery;
+- higher recovery rounds may choose a different candidate/value after an earlier certificate exists;
+- security-significant generation increments use saturating arithmetic in production paths;
+- central simulator/test helpers do not model distributed membership/authority divergence.
 
 ## Tests run
 
 | Test | Result | Commit/SHA | Notes |
 |---|---|---|---|
-| None yet | - | - | - |
+| Audit/source review only | PASS | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | No production edits yet. Local terminal connector is unavailable due caller-identity rejection, so validation will use repository/CI evidence unless that connector recovers. |
 
 ## Required validation before handoff
 
@@ -94,11 +114,11 @@ Incomplete: all checklist items.
 
 ## Blockers
 
-None at campaign start.
+No implementation blocker at start. Local checkout execution is currently unavailable because the desktop/local repository connector rejects this chat with `CALLER_IDENTITY_REQUIRED`; GitHub read/write access is available.
 
 ## Remaining work
 
-All implementation checklist items.
+All production implementation and regression-test checklist items remain.
 
 ## Handoff
 
