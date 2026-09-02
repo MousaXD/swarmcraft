@@ -24,7 +24,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - name: Regression: stale Desktop manifest is rejected by locked metadata
+      - name: Stale Desktop manifest is rejected by locked metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -60,7 +60,7 @@ jobs:
           cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
           cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
           cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
-      - name: Regression: failing provider test is rejected
+      - name: Failing provider test is rejected
         shell: bash
         run: |
           set -euo pipefail
@@ -79,7 +79,7 @@ jobs:
           fi
           rm -f "$test_file"
           trap - EXIT
-      - name: Regression: failing Desktop test is rejected
+      - name: Failing Desktop test is rejected
         shell: bash
         run: |
           set -euo pipefail
