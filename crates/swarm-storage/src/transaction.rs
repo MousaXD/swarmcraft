@@ -49,19 +49,12 @@ pub(crate) fn durable_atomic_write(path: &Path, bytes: &[u8]) -> Result<(), Stor
     {
         fs::rename(&temporary_path, path).map_err(|source| io_error(path, source))?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // Rust does not expose a single cross-platform replace-file primitive.
-        // The higher-level canonical snapshot transaction persists an intent
-        // record and validates head/manifest agreement on reopen so a Windows
-        // namespace interruption is detected fail-closed rather than treated as
-        // a successful canonical rollback. Control records are still serialized
-        // by the per-world kernel lock and their file contents are synced first.
-        match fs::remove_file(path) {
-            Ok(()) => sync_parent(parent)?,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => return Err(io_error(path, source)),
-        }
+        move_file_write_through(&temporary_path, path, true).map_err(|source| io_error(path, source))?;
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    {
         fs::rename(&temporary_path, path).map_err(|source| io_error(path, source))?;
     }
     sync_parent(parent)
@@ -86,13 +79,48 @@ pub(crate) fn durable_create_once(path: &Path, bytes: &[u8]) -> Result<bool, Sto
 
 pub(crate) fn durable_remove(path: &Path) -> Result<bool, StorageError> {
     let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
-    match fs::remove_file(path) {
-        Ok(()) => {
-            sync_parent(parent)?;
-            Ok(true)
+
+    #[cfg(unix)]
+    {
+        return match fs::remove_file(path) {
+            Ok(()) => {
+                sync_parent(parent)?;
+                Ok(true)
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(io_error(path, source)),
+        };
+    }
+
+    #[cfg(windows)]
+    {
+        if !path.exists() {
+            return Ok(false);
         }
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(io_error(path, source)),
+        let tombstone = unique_tombstone_path(parent);
+        match move_file_write_through(path, &tombstone, false) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => return Err(io_error(path, source)),
+        }
+        // Once the write-through rename succeeds the canonical name is durably
+        // gone. A crash during this best-effort cleanup can only resurrect the
+        // hidden tombstone, which is never interpreted as live control state.
+        match fs::remove_file(&tombstone) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(io_error(&tombstone, source)),
+        }
+        return Ok(true);
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
+    {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(true),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(io_error(path, source)),
+        }
     }
 }
 
@@ -117,6 +145,38 @@ pub(crate) fn create_unique_temp(
     ))
 }
 
+#[cfg(windows)]
+fn unique_tombstone_path(parent: &Path) -> PathBuf {
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!(".deleted-{}-{counter}.tmp", std::process::id()))
+}
+
+#[cfg(windows)]
+fn move_file_write_through(source: &Path, destination: &Path, replace_existing: bool) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
+    }
+
+    let source = source.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let destination = destination.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let mut flags = MOVEFILE_WRITE_THROUGH;
+    if replace_existing {
+        flags |= MOVEFILE_REPLACE_EXISTING;
+    }
+    let result = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), flags) };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn sync_parent(parent: &Path) -> Result<(), StorageError> {
     #[cfg(unix)]
     {
@@ -124,10 +184,9 @@ pub(crate) fn sync_parent(parent: &Path) -> Result<(), StorageError> {
     }
     #[cfg(not(unix))]
     {
-        // Windows namespace durability is guarded at the canonical snapshot
-        // transaction layer with an explicit durable intent/head consistency
-        // protocol. A successful rename alone is never used as proof of a
-        // canonical commit after reopen.
+        // Windows atomic replacements and logical deletions use
+        // MOVEFILE_WRITE_THROUGH above. Other non-Unix targets do not currently
+        // claim stronger directory durability than their filesystem provides.
         let _ = parent;
     }
     Ok(())
