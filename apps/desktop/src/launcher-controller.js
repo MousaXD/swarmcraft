@@ -97,49 +97,73 @@ export function canonicalPackageFromDownloaded({ provider, version, file, downlo
   };
 }
 
-function setCreateMessage(message, kind = 'info') {
-  const target = byId('createError');
+function setNotice(target, message, kind = 'info') {
   if (!target) return;
+  target.replaceChildren();
   target.textContent = message;
+  target.hidden = !message;
+  target.className = kind === 'error' ? 'form-error field-wide' : 'inline-notice field-wide';
+  target.dataset.tone = kind === 'success' ? 'safe' : kind === 'warning' ? 'warning' : kind === 'error' ? 'danger' : 'neutral';
   target.dataset.kind = kind;
+  delete target.dataset.createdWorldId;
+}
+
+function setCreateMessage(message, kind = 'info') {
+  setNotice(byId('createError'), message, kind);
 }
 
 function makeButton(label, onClick, secondary = false) {
   const button = document.createElement('button');
   button.type = 'button';
   button.textContent = label;
-  if (secondary) button.className = 'secondary';
+  button.className = `button ${secondary ? 'button-subtle' : 'button-secondary'} button-small`;
   button.addEventListener('click', onClick);
   return button;
+}
+
+function makeResultRow(textValue, action) {
+  const row = document.createElement('div');
+  row.className = 'detail-row launcher-result-row';
+  const text = document.createElement('strong');
+  text.textContent = textValue;
+  row.append(text, action);
+  return row;
 }
 
 function installModsUi() {
   const form = byId('createForm');
   const submit = form?.querySelector('button[type="submit"]');
-  if (!form || !submit || byId('launcherMods')) return;
+  const actions = submit?.closest('.form-actions');
+  if (!form || !submit || !actions || byId('launcherMods')) return;
   const section = document.createElement('section');
   section.id = 'launcherMods';
-  section.className = 'form-section';
+  section.className = 'player-section field-wide launcher-section';
   section.innerHTML = `
-    <h3>Mods</h3>
-    <p class="muted">Search official provider catalogs. SwarmCraft resolves exact compatible files and required dependencies before the world is created.</p>
-    <div class="field-grid">
-      <label>Provider
+    <div class="section-heading">
+      <div>
+        <h3>Mods</h3>
+        <p>Search official provider catalogs. SwarmCraft resolves exact compatible files and required dependencies before creating the world.</p>
+      </div>
+    </div>
+    <div class="field-grid launcher-fields">
+      <div class="field">
+        <label for="modProvider">Provider</label>
         <select id="modProvider">
           <option value="modrinth">Modrinth</option>
           <option value="curseforge">CurseForge</option>
         </select>
-      </label>
-      <label>Search mods
+      </div>
+      <div class="field">
+        <label for="modSearch">Search mods</label>
         <input id="modSearch" type="search" placeholder="e.g. Lithium" autocomplete="off" />
-      </label>
+      </div>
     </div>
-    <div class="actions"><button id="modSearchButton" type="button" class="secondary">Search</button></div>
-    <div id="modSearchStatus" class="muted" aria-live="polite"></div>
-    <div id="modSearchResults" class="stack"></div>
-    <h4>Selected mods</h4>
-    <div id="selectedMods" class="stack"><p class="muted">No third-party mods selected.</p></div>`;
-  form.insertBefore(section, submit);
+    <div class="compact-actions"><button id="modSearchButton" type="button" class="button button-secondary button-small">Search</button></div>
+    <p id="modSearchStatus" class="field-help" role="status" aria-live="polite"></p>
+    <div id="modSearchResults" class="details-grid launcher-results"></div>
+    <div class="section-heading launcher-subheading"><div><h3>Selected mods</h3></div></div>
+    <div id="selectedMods" class="details-grid launcher-results"><p class="field-help">No third-party mods selected.</p></div>`;
+  actions.before(section);
 }
 
 function installDiscoveryUi() {
@@ -147,14 +171,21 @@ function installDiscoveryUi() {
   if (!form || byId('publicWorldDiscovery')) return;
   const section = document.createElement('section');
   section.id = 'publicWorldDiscovery';
-  section.className = 'form-section';
+  section.className = 'player-section launcher-section';
   section.innerHTML = `
-    <h3>Public worlds</h3>
-    <p class="muted">Browse authenticated public announcements. Discovery never grants membership; invite-only worlds still require a signed invite.</p>
-    <div class="field-grid"><label>Search public worlds<input id="publicWorldQuery" type="search" placeholder="World name or tag" /></label></div>
-    <div class="actions"><button id="publicWorldSearch" type="button" class="secondary">Search</button></div>
-    <div id="publicWorldStatus" class="muted" aria-live="polite"></div>
-    <div id="publicWorldResults" class="stack"></div>`;
+    <div class="section-heading">
+      <div>
+        <h3>Public worlds</h3>
+        <p>Browse authenticated public announcements. Discovery never grants membership; invite-only worlds still require a signed invite.</p>
+      </div>
+    </div>
+    <div class="field field-wide launcher-fields">
+      <label for="publicWorldQuery">Search public worlds</label>
+      <input id="publicWorldQuery" type="search" placeholder="World name or tag" />
+    </div>
+    <div class="compact-actions"><button id="publicWorldSearch" type="button" class="button button-secondary button-small">Search</button></div>
+    <div id="publicWorldStatus" class="inline-notice" role="status" aria-live="polite" hidden></div>
+    <div id="publicWorldResults" class="details-grid launcher-results"></div>`;
   form.parentNode.insertBefore(section, form.nextSibling);
 }
 
@@ -170,52 +201,182 @@ function hideInternalInputs() {
   if (details) details.hidden = true;
 }
 
-async function hydrateImportCatalogs(call) {
-  const minecraftInput = byId('importMinecraft');
-  const loaderInput = byId('importLoader');
-  if (!minecraftInput || !loaderInput || minecraftInput.tagName === 'SELECT') return;
-  const minecraftSelect = document.createElement('select');
-  minecraftSelect.id = minecraftInput.id;
-  minecraftSelect.name = minecraftInput.name;
-  minecraftSelect.required = true;
-  minecraftInput.replaceWith(minecraftSelect);
-  const loaderSelect = document.createElement('select');
-  loaderSelect.id = loaderInput.id;
-  loaderSelect.name = loaderInput.name;
-  loaderSelect.required = true;
-  loaderInput.replaceWith(loaderSelect);
-  const catalog = await call('minecraft_versions');
-  const versions = catalog.versions || catalog.items || catalog;
-  for (const item of versions || []) {
-    const id = clean(item.id ?? item.version ?? item);
-    if (id) minecraftSelect.add(new Option(id, id));
+function importCatalogValues(response, field) {
+  const values = response?.[field] || response?.versions || response?.items || response;
+  if (!Array.isArray(values)) throw new Error('Official version catalog returned an invalid response.');
+  return values.map((item) => clean(item?.id ?? item?.version ?? item)).filter(Boolean);
+}
+
+function buildImportSelect(source, values, preferred = '') {
+  const select = document.createElement('select');
+  select.id = source.id;
+  select.name = source.name;
+  select.required = source.required;
+  select.className = source.className;
+  for (const value of values) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = value;
+    select.append(option);
   }
-  async function loadFabric() {
-    loaderSelect.replaceChildren(new Option('Loading compatible loaders…', ''));
-    loaderSelect.disabled = true;
-    const result = await call('fabric_loader_versions', { minecraftVersion: minecraftSelect.value });
-    const values = result.loaders || result.versions || result.items || result;
-    loaderSelect.replaceChildren();
-    for (const item of values || []) {
-      const id = clean(item.version ?? item.id ?? item);
-      if (id) loaderSelect.add(new Option(id, id));
-    }
-    loaderSelect.disabled = false;
+  select.value = values.includes(preferred) ? preferred : values[0] || '';
+  return select;
+}
+
+function ensureImportCatalogUi() {
+  const form = byId('importForm');
+  const minecraft = byId('importMinecraft');
+  const loader = byId('importLoader');
+  if (!form || !minecraft || !loader) return null;
+  let status = byId('importCatalogStatus');
+  let error = byId('importCatalogError');
+  let retry = byId('importCatalogRetry');
+  if (!status) {
+    const fieldGrid = minecraft.closest('.field-grid');
+    status = document.createElement('p');
+    status.id = 'importCatalogStatus';
+    status.className = 'field-help field-wide';
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    error = document.createElement('div');
+    error.id = 'importCatalogError';
+    error.className = 'form-error field-wide';
+    error.setAttribute('role', 'alert');
+    error.hidden = true;
+    const actions = document.createElement('div');
+    actions.className = 'compact-actions field-wide';
+    retry = document.createElement('button');
+    retry.id = 'importCatalogRetry';
+    retry.type = 'button';
+    retry.className = 'button button-secondary button-small';
+    retry.textContent = 'Retry version catalogs';
+    retry.hidden = true;
+    actions.append(retry);
+    fieldGrid?.after(status, error, actions);
   }
-  minecraftSelect.addEventListener('change', () => loadFabric().catch(() => {}));
-  if (minecraftSelect.options.length) {
-    minecraftSelect.selectedIndex = 0;
-    await loadFabric();
+  return { form, minecraft, loader, status, error, retry };
+}
+
+function setImportCatalogError(ui, message = '') {
+  ui.error.textContent = message;
+  ui.error.hidden = !message;
+  ui.retry.hidden = !message;
+}
+
+async function loadImportFabric(call, minecraftSelect, loaderSelect, ui, { refresh = false, preferred = '' } = {}) {
+  const minecraftVersion = clean(minecraftSelect.value);
+  ui.status.textContent = `Fetching compatible Fabric Loader versions for Minecraft ${minecraftVersion}…`;
+  setImportCatalogError(ui, '');
+  const result = await call('fabric_loader_versions', { minecraftVersion, refresh });
+  const values = importCatalogValues(result, 'loaders');
+  if (!values.length) throw new Error(`Fabric Meta returned no compatible loaders for Minecraft ${minecraftVersion}.`);
+  const replacement = buildImportSelect(loaderSelect, values, preferred);
+  loaderSelect.replaceWith(replacement);
+  ui.loader = replacement;
+  ui.status.textContent = 'Import version catalogs are ready.';
+  return replacement;
+}
+
+export async function hydrateImportCatalogs(call, { refresh = false } = {}) {
+  const ui = ensureImportCatalogUi();
+  if (!ui) return null;
+  const preferredMinecraft = clean(ui.minecraft.value);
+  const preferredLoader = clean(ui.loader.value);
+  ui.status.textContent = 'Fetching official Minecraft and Fabric Loader versions for import…';
+  setImportCatalogError(ui, '');
+  ui.retry.onclick = () => hydrateImportCatalogs(call, { refresh: true });
+
+  try {
+    const catalog = await call('minecraft_versions', { includeSnapshots: false, refresh });
+    const versions = importCatalogValues(catalog, 'versions');
+    if (!versions.length) throw new Error('Mojang returned no supported Minecraft releases.');
+    const minecraftSelect = buildImportSelect(ui.minecraft, versions, preferredMinecraft);
+    const minecraftVersion = clean(minecraftSelect.value);
+    const fabric = await call('fabric_loader_versions', { minecraftVersion, refresh });
+    const loaders = importCatalogValues(fabric, 'loaders');
+    if (!loaders.length) throw new Error(`Fabric Meta returned no compatible loaders for Minecraft ${minecraftVersion}.`);
+    const loaderSelect = buildImportSelect(ui.loader, loaders, preferredLoader);
+
+    ui.minecraft.replaceWith(minecraftSelect);
+    ui.loader.replaceWith(loaderSelect);
+    ui.minecraft = minecraftSelect;
+    ui.loader = loaderSelect;
+    ui.status.textContent = 'Import version catalogs are ready.';
+
+    let lastMinecraft = minecraftSelect.value;
+    minecraftSelect.addEventListener('change', async () => {
+      const requestedMinecraft = minecraftSelect.value;
+      const previousLoader = loaderSelect.value;
+      loaderSelect.disabled = true;
+      try {
+        const replacement = await loadImportFabric(call, minecraftSelect, ui.loader, ui, {
+          refresh: false,
+          preferred: previousLoader,
+        });
+        replacement.disabled = false;
+        lastMinecraft = requestedMinecraft;
+      } catch (error) {
+        minecraftSelect.value = lastMinecraft;
+        ui.loader.disabled = false;
+        ui.status.textContent = `Could not load Fabric Loader versions for Minecraft ${requestedMinecraft}. The previous compatible selection was kept.`;
+        setImportCatalogError(ui, errorText(error));
+      }
+    });
+    return ui;
+  } catch (error) {
+    ui.status.textContent = 'Official Import version catalogs are unavailable. Exact version fields remain usable; retry when the providers are reachable.';
+    setImportCatalogError(ui, errorText(error));
+    return ui;
   }
 }
 
-function install() {
+function renderCreateRepairState({ created, pendingPackages, error, retry }) {
+  const target = byId('createError');
+  if (!target) return;
+  target.replaceChildren();
+  target.hidden = false;
+  target.className = 'inline-notice field-wide';
+  target.dataset.tone = 'warning';
+  target.dataset.kind = 'warning';
+  target.dataset.createdWorldId = clean(created?.worldId);
+
+  const message = document.createElement('p');
+  message.textContent = `World ${clean(created?.worldId)} was created canonically, but local mod setup needs attention: ${errorText(error)}`;
+  const detail = document.createElement('p');
+  detail.className = 'field-help launcher-repair-detail';
+  detail.textContent = `${pendingPackages.length} local mod artifact${pendingPackages.length === 1 ? '' : 's'} still need installation. Retrying continues setup for this existing world and will not create a second world.`;
+  const actions = document.createElement('div');
+  actions.className = 'compact-actions';
+  const button = document.createElement('button');
+  button.id = 'createRepairRetry';
+  button.type = 'button';
+  button.className = 'button button-secondary button-small';
+  button.textContent = 'Retry local mod setup';
+  button.addEventListener('click', retry);
+  actions.append(button);
+  target.append(message, detail, actions);
+}
+
+function setLocalStatus(target, message, tone = 'neutral') {
+  if (!target) return;
+  target.textContent = message;
+  target.hidden = !message;
+  target.dataset.tone = tone;
+}
+
+export function install() {
   const call = invoke();
-  if (!call) return;
+  if (!call) return null;
   hideInternalInputs();
   installModsUi();
   installDiscoveryUi();
-  hydrateImportCatalogs(call).catch((error) => console.warn('Import catalog unavailable', error));
+  hydrateImportCatalogs(call).catch((error) => {
+    const ui = ensureImportCatalogUi();
+    if (ui) {
+      ui.status.textContent = 'Official Import version catalogs are unavailable. Exact version fields remain usable.';
+      setImportCatalogError(ui, errorText(error));
+    }
+  });
 
   const roots = [];
   const renderSelected = () => {
@@ -224,28 +385,25 @@ function install() {
     target.replaceChildren();
     if (!roots.length) {
       const empty = document.createElement('p');
-      empty.className = 'muted';
+      empty.className = 'field-help';
       empty.textContent = 'No third-party mods selected.';
       target.append(empty);
       return;
     }
     for (const root of roots) {
-      const row = document.createElement('div');
-      row.className = 'card-row';
-      const text = document.createElement('span');
-      text.textContent = `${root.title} · ${root.provider === 'modrinth' ? 'Modrinth' : 'CurseForge'}`;
-      row.append(
-        text,
-        makeButton(
-          'Remove',
-          () => {
-            roots.splice(roots.indexOf(root), 1);
-            renderSelected();
-          },
-          true,
+      target.append(
+        makeResultRow(
+          `${root.title} · ${root.provider === 'modrinth' ? 'Modrinth' : 'CurseForge'}`,
+          makeButton(
+            'Remove',
+            () => {
+              roots.splice(roots.indexOf(root), 1);
+              renderSelected();
+            },
+            true,
+          ),
         ),
       );
-      target.append(row);
     }
   };
 
@@ -302,12 +460,7 @@ function install() {
       for (const item of items) {
         const projectId = clean(item.project_id ?? item.projectId);
         const title = clean(item.title ?? item.name ?? item.slug ?? projectId);
-        const row = document.createElement('div');
-        row.className = 'card-row';
-        const text = document.createElement('span');
-        text.textContent = title;
-        row.append(text, makeButton('Add', () => addRoot({ provider, projectId, title })));
-        results.append(row);
+        results.append(makeResultRow(title, makeButton('Add', () => addRoot({ provider, projectId, title }))));
       }
     } catch (error) {
       status.textContent = errorText(error);
@@ -374,6 +527,20 @@ function install() {
     return packages;
   }
 
+  async function finishLocalModSetup(created, pendingPackages, submit) {
+    while (pendingPackages.length) {
+      const pkg = pendingPackages[0];
+      await call('world_mods_add', { world: created.worldId, jarPath: pkg.artifactPath });
+      pendingPackages.shift();
+    }
+    setCreateMessage(`World created with canonical fingerprint ${created.canonical?.compatibilityFingerprint || ''}.`, 'success');
+    if (submit) {
+      submit.disabled = true;
+      submit.textContent = 'World created';
+    }
+    window.setTimeout(() => window.location.reload(), 250);
+  }
+
   byId('createForm')?.addEventListener(
     'submit',
     async (event) => {
@@ -411,11 +578,22 @@ function install() {
             },
           },
         });
-        for (const pkg of unique.values()) {
-          await call('world_mods_add', { world: created.worldId, jarPath: pkg.artifactPath });
+        const pendingPackages = [...unique.values()];
+        try {
+          await finishLocalModSetup(created, pendingPackages, submit);
+        } catch (setupError) {
+          const retry = async (retryEvent) => {
+            const button = retryEvent.currentTarget;
+            button.disabled = true;
+            button.textContent = 'Retrying local setup…';
+            try {
+              await finishLocalModSetup(created, pendingPackages, submit);
+            } catch (retryError) {
+              renderCreateRepairState({ created, pendingPackages, error: retryError, retry });
+            }
+          };
+          renderCreateRepairState({ created, pendingPackages, error: setupError, retry });
         }
-        setCreateMessage(`World created with canonical fingerprint ${created.canonical?.compatibilityFingerprint || ''}.`, 'success');
-        window.setTimeout(() => window.location.reload(), 250);
       } catch (error) {
         setCreateMessage(errorText(error), 'error');
         if (submit) submit.disabled = false;
@@ -427,36 +605,37 @@ function install() {
   byId('publicWorldSearch')?.addEventListener('click', async () => {
     const status = byId('publicWorldStatus');
     const results = byId('publicWorldResults');
-    status.textContent = 'Searching authenticated public announcements…';
+    setLocalStatus(status, 'Searching authenticated public announcements…');
     results.replaceChildren();
     try {
       const report = await call('discovery_search', { query: clean(byId('publicWorldQuery').value) || null });
-      status.textContent =
+      setLocalStatus(
+        status,
         report.detail ||
-        (report.results?.length
-          ? `${report.results.length} public world${report.results.length === 1 ? '' : 's'} found.`
-          : 'No public worlds found.');
+          (report.results?.length
+            ? `${report.results.length} public world${report.results.length === 1 ? '' : 's'} found.`
+            : 'No public worlds found.'),
+      );
       for (const world of report.results || []) {
-        const row = document.createElement('div');
-        row.className = 'card-row';
-        const text = document.createElement('span');
-        text.textContent = `${world.name} · Minecraft ${world.minecraft_version} · Fabric ${world.loader_version}`;
         const action = makeButton(
           world.join_action === 'invite_required' ? 'Invite required' : 'View',
           () => {
             byId('joinWorldId').value = world.world_id;
-            status.textContent =
+            setLocalStatus(
+              status,
               world.join_action === 'invite_required'
                 ? `${world.name} is public to discover, but its authority still requires a signed invite for membership.`
-                : `${world.name} was discovered. Membership is still decided by the world authority.`;
+                : `${world.name} was discovered. Membership is still decided by the world authority.`,
+            );
           },
           true,
         );
-        row.append(text, action);
-        results.append(row);
+        results.append(
+          makeResultRow(`${world.name} · Minecraft ${world.minecraft_version} · Fabric ${world.loader_version}`, action),
+        );
       }
     } catch (error) {
-      status.textContent = errorText(error);
+      setLocalStatus(status, errorText(error), 'danger');
     }
   });
 
@@ -467,19 +646,25 @@ function install() {
       event.stopImmediatePropagation();
       const world = clean(byId('joinWorldId').value);
       if (!world) return;
-      const status = byId('publicWorldStatus') || byId('joinError');
+      const status = byId('joinWorldIdNotice');
+      setLocalStatus(status, 'Checking the signed discovery announcement…');
       try {
         const report = await call('discovery_resolve', { world });
-        status.textContent =
+        setLocalStatus(
+          status,
           report.state === 'found'
             ? `${report.world.name} is ${report.world.visibility}. Discovery verified its signed announcement; a signed invite is still required when membership policy is invite-only.`
-            : report.detail || `World resolution: ${report.state}`;
+            : report.detail || `World resolution: ${report.state}`,
+          report.state === 'found' ? 'safe' : 'warning',
+        );
       } catch (error) {
-        status.textContent = errorText(error);
+        setLocalStatus(status, errorText(error), 'danger');
       }
     },
     true,
   );
+
+  return { roots };
 }
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
