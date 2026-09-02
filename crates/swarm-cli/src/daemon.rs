@@ -129,7 +129,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
         "background-replica-v1".into(),
         "host-readiness-v1".into(),
     ])?;
-    let mut node = SwarmNode::new(transport_key, hello)?;
+    let mut node = SwarmNode::new(transport_key, hello, identity.network_signing_key())?;
     node.listen(listen.parse().context("invalid listen multiaddress")?)?;
     dial_pending_invite_bootstraps(storage, &mut node)?;
     info!(peer = %identity.peer_id(), %listen, "SwarmCraft daemon starting");
@@ -262,7 +262,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                         info!(transport = %transport_peer, "peer disconnected");
                     }
                     NetworkEvent::Connected { transport_peer } => {
-                        info!(transport = %transport_peer, "transport connected; waiting for signed PeerHello");
+                        info!(transport = %transport_peer, "transport connected; waiting for connection-bound application proof");
                     }
                     NetworkEvent::Discovered { transport_peer, address } => {
                         info!(transport = %transport_peer, %address, "peer discovered");
@@ -1775,7 +1775,9 @@ fn handle_request(
                 },
             )?;
         }
-        WireRequest::Hello(_) => return Err(anyhow!("PeerHello is handled by the network authentication layer")),
+        WireRequest::Hello(_) | WireRequest::HelloChallenge { .. } | WireRequest::HelloProof(_) => {
+            return Err(anyhow!("application handshake requests are handled by the network authentication layer"));
+        }
     }
     Ok(())
 }

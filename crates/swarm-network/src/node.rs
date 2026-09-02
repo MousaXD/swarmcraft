@@ -1,8 +1,9 @@
 use crate::{
-    verify_peer_hello, wire::WireRequest, wire::WireResponse, ConnectivityDiagnosticsV1, ConnectivityIssueKindV1,
-    ConnectivityIssueV1, NatStatusV1,
+    build_peer_hello_proof, verify_peer_hello, verify_peer_hello_proof, wire::WireRequest, wire::WireResponse,
+    ConnectivityDiagnosticsV1, ConnectivityIssueKindV1, ConnectivityIssueV1, NatStatusV1,
 };
 use anyhow::{anyhow, Context, Result};
+use ed25519_dalek::SigningKey;
 use futures::StreamExt;
 use libp2p::multiaddr::Protocol;
 use libp2p::{
@@ -14,6 +15,7 @@ use libp2p::{
     swarm::{dial_opts::DialOpts, ConnectionId, NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId as TransportPeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
+use rand_core::{OsRng, RngCore};
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -91,8 +93,11 @@ enum ConnectionPathKind {
 pub struct SwarmNode {
     swarm: Swarm<Behaviour>,
     local_hello: PeerHelloV1,
-    authenticated: HashMap<TransportPeerId, PeerId>,
+    application_signing_key: SigningKey,
+    authenticated: HashMap<TransportPeerId, (PeerId, ConnectionId)>,
+    pending_challenges: HashMap<TransportPeerId, (ConnectionId, [u8; 32])>,
     active_connections: HashMap<TransportPeerId, ConnectionId>,
+    connection_counts: HashMap<TransportPeerId, usize>,
     connection_paths: HashMap<ConnectionId, ConnectionPathKind>,
     bootstrap_peers: HashSet<TransportPeerId>,
     relay_peers: HashSet<TransportPeerId>,
@@ -101,10 +106,14 @@ pub struct SwarmNode {
 }
 
 impl SwarmNode {
-    pub fn new(transport_key: Keypair, local_hello: PeerHelloV1) -> Result<Self> {
+    pub fn new(transport_key: Keypair, local_hello: PeerHelloV1, application_signing_key: SigningKey) -> Result<Self> {
         verify_peer_hello(&local_hello).context("local peer hello must be valid before networking starts")?;
 
         let local_peer = transport_key.public().to_peer_id();
+        let self_test =
+            build_peer_hello_proof(&local_hello, &application_signing_key, [0; 32], &local_peer, &local_peer)?;
+        verify_peer_hello_proof(&self_test, [0; 32], &local_peer, &local_peer)
+            .context("application signing key must match the local PeerHello")?;
         let request_response = cbor::Behaviour::new(
             [(StreamProtocol::new(WIRE_PROTOCOL), ProtocolSupport::Full)],
             request_response::Config::default()
@@ -150,8 +159,11 @@ impl SwarmNode {
         let mut node = Self {
             swarm,
             local_hello,
+            application_signing_key,
             authenticated: HashMap::new(),
+            pending_challenges: HashMap::new(),
             active_connections: HashMap::new(),
+            connection_counts: HashMap::new(),
             connection_paths: HashMap::new(),
             bootstrap_peers: HashSet::new(),
             relay_peers: HashSet::new(),
@@ -167,7 +179,7 @@ impl SwarmNode {
     }
 
     pub fn application_peer(&self, transport_peer: &TransportPeerId) -> Option<PeerId> {
-        self.authenticated.get(transport_peer).copied()
+        self.authenticated.get(transport_peer).map(|(peer, _)| *peer)
     }
 
     pub fn connectivity_diagnostics(&self) -> ConnectivityDiagnosticsV1 {
@@ -414,49 +426,55 @@ impl SwarmNode {
                     ) {
                         self.relay_fallbacks.remove(&peer_id);
                     }
+                    self.connection_counts.insert(peer_id, num_established.get() as usize);
+                    self.authenticated.remove(&peer_id);
+                    self.pending_challenges.remove(&peer_id);
                     debug!(transport_peer = %peer_id, %connection_id, %num_established, relayed = endpoint.is_relayed(), ?path_kind, "peer connected");
 
-                    // request-response chooses a connection by peer ID, not by connection
-                    // ID. After a hard peer restart libp2p can briefly retain the dead
-                    // connection while the replacement is already established. Sending
-                    // PeerHello immediately can therefore land on the dead connection and
-                    // leave the replacement waiting forever for authentication. Make the
-                    // newest connection canonical, close the superseded connection, and
-                    // send Hello after that close is observed so request-response has only
-                    // the live route left.
+                    // request-response selects by peer ID. During replacement races,
+                    // close the superseded route before issuing a fresh receiver
+                    // challenge so proof traffic can only use the canonical connection.
                     let previous = self.active_connections.insert(peer_id, connection_id);
-                    let defer_hello = previous
+                    let defer_challenge = previous
                         .filter(|previous| *previous != connection_id && num_established.get() > 1)
                         .is_some_and(|previous| self.swarm.close_connection(previous));
-                    if !defer_hello {
-                        self.swarm
-                            .behaviour_mut()
-                            .request_response
-                            .send_request(&peer_id, WireRequest::Hello(self.local_hello.clone()));
+                    if !defer_challenge {
+                        self.issue_auth_challenge(peer_id, connection_id)?;
                     }
                     return Ok(NetworkEvent::Connected { transport_peer: peer_id });
                 }
                 SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
                     self.connection_paths.remove(&connection_id);
                     self.refresh_connectivity_paths();
-                    // A peer can have multiple libp2p connections at once, especially
-                    // during reconnects. Closing an older connection must not erase
-                    // authentication established by a newer live connection.
+                    self.connection_counts.insert(peer_id, num_established as usize);
+                    if self
+                        .authenticated
+                        .get(&peer_id)
+                        .is_some_and(|(_, authenticated_connection)| *authenticated_connection == connection_id)
+                    {
+                        self.authenticated.remove(&peer_id);
+                    }
+                    if self
+                        .pending_challenges
+                        .get(&peer_id)
+                        .is_some_and(|(challenge_connection, _)| *challenge_connection == connection_id)
+                    {
+                        self.pending_challenges.remove(&peer_id);
+                    }
                     if num_established == 0 {
                         self.active_connections.remove(&peer_id);
+                        self.connection_counts.remove(&peer_id);
                         self.authenticated.remove(&peer_id);
+                        self.pending_challenges.remove(&peer_id);
                         return Ok(NetworkEvent::Disconnected { transport_peer: peer_id });
                     }
 
-                    if self.active_connections.get(&peer_id).is_some_and(|active| *active != connection_id) {
-                        // The superseded connection is gone. Re-send the signed hello now
-                        // that request-response can route it over the replacement.
-                        self.swarm
-                            .behaviour_mut()
-                            .request_response
-                            .send_request(&peer_id, WireRequest::Hello(self.local_hello.clone()));
+                    if let Some(active) =
+                        self.active_connections.get(&peer_id).copied().filter(|active| *active != connection_id)
+                    {
+                        self.issue_auth_challenge(peer_id, active)?;
                     }
-                    debug!(transport_peer = %peer_id, %connection_id, remaining_connections = num_established, "peer connection closed; keeping authentication for remaining connection");
+                    debug!(transport_peer = %peer_id, %connection_id, remaining_connections = num_established, "peer connection closed; replacement requires fresh application proof");
                 }
                 SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                     let error_text = error.to_string();
@@ -524,59 +542,122 @@ impl SwarmNode {
                         self.swarm.behaviour_mut().kad.add_address(&peer_id, address);
                     }
                 }
-                SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(event)) => match event {
-                    request_response::Event::Message { peer, message, .. } => match message {
-                        request_response::Message::Request { request, channel, .. } => {
-                            if let Err(error) = request.validate_limits() {
-                                let response = WireResponse::Error {
-                                    code: "REQUEST_LIMIT_EXCEEDED".into(),
-                                    message: error.to_string(),
-                                };
-                                if let Err(response_error) = self.respond(channel, response) {
-                                    warn!(
-                                        transport_peer = %peer,
-                                        error = %response_error,
-                                        "failed to send request limit error; continuing network loop"
-                                    );
-                                }
-                                continue;
-                            }
-                            match request {
-                                WireRequest::Hello(hello) => match verify_peer_hello(&hello) {
-                                    Ok(()) => {
-                                        self.authenticated.insert(peer, hello.peer_id);
-                                        if let Err(response_error) = self.respond(
-                                            channel,
-                                            WireResponse::HelloAccepted { protocol_version: PROTOCOL_VERSION },
-                                        ) {
+                SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(event)) => {
+                    match event {
+                        request_response::Event::Message { peer, connection_id, message } => {
+                            match message {
+                                request_response::Message::Request { request, channel, .. } => {
+                                    if let Err(error) = request.validate_limits() {
+                                        let response = WireResponse::Error {
+                                            code: "REQUEST_LIMIT_EXCEEDED".into(),
+                                            message: error.to_string(),
+                                        };
+                                        if let Err(response_error) = self.respond(channel, response) {
                                             warn!(
                                                 transport_peer = %peer,
                                                 error = %response_error,
-                                                "peer hello response channel closed; continuing network loop"
+                                                "failed to send request limit error; continuing network loop"
                                             );
                                         }
-                                        return Ok(NetworkEvent::Authenticated {
-                                            transport_peer: peer,
-                                            application_peer: hello.peer_id,
-                                        });
+                                        continue;
                                     }
-                                    Err(error) => {
-                                        if let Err(response_error) = self.respond(
+                                    match request {
+                                WireRequest::Hello(_) => {
+                                    let _ = self.respond(
+                                        channel,
+                                        WireResponse::Error {
+                                            code: "CONNECTION_PROOF_REQUIRED".into(),
+                                            message: "reusable PeerHello is not an authentication proof; wait for a receiver challenge".into(),
+                                        },
+                                    );
+                                }
+                                WireRequest::HelloChallenge { challenge } => {
+                                    let canonical = self.active_connections.get(&peer).is_some_and(|active| *active == connection_id)
+                                        && self.connection_counts.get(&peer).copied() == Some(1);
+                                    if !canonical {
+                                        let _ = self.respond(
+                                            channel,
+                                            WireResponse::Error {
+                                                code: "AUTH_CONNECTION_RETRY".into(),
+                                                message: "authentication challenge arrived on a superseded connection".into(),
+                                            },
+                                        );
+                                        continue;
+                                    }
+                                    let local_transport = *self.swarm.local_peer_id();
+                                    let proof = build_peer_hello_proof(
+                                        &self.local_hello,
+                                        &self.application_signing_key,
+                                        challenge,
+                                        &local_transport,
+                                        &peer,
+                                    )?;
+                                    self.respond(channel, WireResponse::HelloChallengeAccepted)?;
+                                    self.swarm
+                                        .behaviour_mut()
+                                        .request_response
+                                        .send_request(&peer, WireRequest::HelloProof(Box::new(proof)));
+                                }
+                                WireRequest::HelloProof(proof) => {
+                                    let expected = self.pending_challenges.remove(&peer);
+                                    let Some((challenge_connection, expected_challenge)) = expected else {
+                                        let _ = self.respond(
                                             channel,
                                             WireResponse::Error {
                                                 code: "PEER_AUTHENTICATION_FAILED".into(),
-                                                message: error.to_string(),
+                                                message: "no live receiver challenge exists for this proof".into(),
                                             },
-                                        ) {
-                                            warn!(
-                                                transport_peer = %peer,
-                                                error = %response_error,
-                                                "peer authentication error response channel closed; continuing network loop"
+                                        );
+                                        continue;
+                                    };
+                                    if challenge_connection != connection_id
+                                        || self.active_connections.get(&peer).is_none_or(|active| *active != connection_id)
+                                        || self.connection_counts.get(&peer).copied() != Some(1)
+                                    {
+                                        let _ = self.respond(
+                                            channel,
+                                            WireResponse::Error {
+                                                code: "PEER_AUTHENTICATION_FAILED".into(),
+                                                message: "connection was replaced before proof verification".into(),
+                                            },
+                                        );
+                                        continue;
+                                    }
+                                    match verify_peer_hello_proof(
+                                        &proof,
+                                        expected_challenge,
+                                        &peer,
+                                        self.swarm.local_peer_id(),
+                                    ) {
+                                        Ok(()) => {
+                                            self.authenticated.insert(peer, (proof.hello.peer_id, connection_id));
+                                            if let Err(response_error) = self.respond(
+                                                channel,
+                                                WireResponse::HelloAccepted { protocol_version: PROTOCOL_VERSION },
+                                            ) {
+                                                warn!(
+                                                    transport_peer = %peer,
+                                                    error = %response_error,
+                                                    "peer proof response channel closed; continuing network loop"
+                                                );
+                                            }
+                                            return Ok(NetworkEvent::Authenticated {
+                                                transport_peer: peer,
+                                                application_peer: proof.hello.peer_id,
+                                            });
+                                        }
+                                        Err(error) => {
+                                            let _ = self.respond(
+                                                channel,
+                                                WireResponse::Error {
+                                                    code: "PEER_AUTHENTICATION_FAILED".into(),
+                                                    message: error.to_string(),
+                                                },
                                             );
                                         }
                                     }
-                                },
-                                request if self.authenticated.contains_key(&peer) => {
+                                }
+                                request if self.authenticated.get(&peer).is_some_and(|(_, authenticated_connection)| *authenticated_connection == connection_id) => {
                                     return Ok(NetworkEvent::InboundRequest { transport_peer: peer, request, channel });
                                 }
                                 _ => {
@@ -584,7 +665,7 @@ impl SwarmNode {
                                         channel,
                                         WireResponse::Error {
                                             code: "HANDSHAKE_REQUIRED".into(),
-                                            message: "authenticate with PeerHello before other requests".into(),
+                                            message: "complete the connection-bound application proof before other requests".into(),
                                         },
                                     ) {
                                         warn!(
@@ -595,21 +676,23 @@ impl SwarmNode {
                                     }
                                 }
                             }
+                                }
+                                request_response::Message::Response { request_id, response } => {
+                                    return Ok(NetworkEvent::Response { transport_peer: peer, request_id, response });
+                                }
+                            }
                         }
-                        request_response::Message::Response { request_id, response } => {
-                            return Ok(NetworkEvent::Response { transport_peer: peer, request_id, response });
+                        request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
+                            let error = error.to_string();
+                            self.record_issue(ConnectivityIssueKindV1::RequestFailed, Some(peer), None, error.clone());
+                            return Ok(NetworkEvent::OutboundFailure { transport_peer: peer, request_id, error });
                         }
-                    },
-                    request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
-                        let error = error.to_string();
-                        self.record_issue(ConnectivityIssueKindV1::RequestFailed, Some(peer), None, error.clone());
-                        return Ok(NetworkEvent::OutboundFailure { transport_peer: peer, request_id, error });
+                        request_response::Event::InboundFailure { peer, error, .. } => {
+                            warn!(transport_peer = %peer, %error, "inbound request failed");
+                        }
+                        request_response::Event::ResponseSent { .. } => {}
                     }
-                    request_response::Event::InboundFailure { peer, error, .. } => {
-                        warn!(transport_peer = %peer, %error, "inbound request failed");
-                    }
-                    request_response::Event::ResponseSent { .. } => {}
-                },
+                }
                 SwarmEvent::Behaviour(BehaviourEvent::RelayClient(event)) => {
                     // Relay reservation/circuit transport events are infrastructure signals.
                     // RelayConnected is derived only from an established relayed application connection.
@@ -642,6 +725,15 @@ impl SwarmNode {
                 other => debug!(event = ?other, "network event"),
             }
         }
+    }
+
+    fn issue_auth_challenge(&mut self, peer: TransportPeerId, connection_id: ConnectionId) -> Result<()> {
+        let mut challenge = [0_u8; 32];
+        OsRng.fill_bytes(&mut challenge);
+        self.authenticated.remove(&peer);
+        self.pending_challenges.insert(peer, (connection_id, challenge));
+        self.swarm.behaviour_mut().request_response.send_request(&peer, WireRequest::HelloChallenge { challenge });
+        Ok(())
     }
 
     fn refresh_connectivity_paths(&mut self) {

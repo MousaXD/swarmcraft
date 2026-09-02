@@ -11,6 +11,7 @@ anyhow.workspace = true
 ed25519-dalek.workspace = true
 futures.workspace = true
 libp2p.workspace = true
+rand_core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -19,5 +20,4 @@ tracing.workspace = true
 swarm-protocol = { path = "../swarm-protocol" }
 
 [dev-dependencies]
-rand_core.workspace = true
 tempfile.workspace = true

@@ -325,7 +325,7 @@ async fn new_sender(
     listen: &libp2p::Multiaddr,
 ) -> SwarmNode {
     let transport_key = load_or_create_transport_key(transport_key_path).unwrap();
-    let mut sender = SwarmNode::new(transport_key, signed_hello(app_key, nonce)).unwrap();
+    let mut sender = SwarmNode::new(transport_key, signed_hello(app_key, nonce), app_key.clone()).unwrap();
     sender.dial(listen.clone()).unwrap();
     sender
 }
@@ -346,7 +346,7 @@ async fn run_interrupted_transfer(total_bytes: u64, restart_every: u64, chunk_by
 
     let receiver_key = load_or_create_transport_key(&receiver_transport_path).unwrap();
     let receiver_transport = receiver_key.public().to_peer_id();
-    let mut receiver = SwarmNode::new(receiver_key, receiver_hello).unwrap();
+    let mut receiver = SwarmNode::new(receiver_key, receiver_hello, receiver_app_key.clone()).unwrap();
     receiver.listen("/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()).unwrap();
     let listen = listen_address(&mut receiver).await;
 

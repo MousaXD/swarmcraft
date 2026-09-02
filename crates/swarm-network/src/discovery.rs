@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use ed25519_dalek::SigningKey;
 use futures::StreamExt;
 use libp2p::{
     identify,
@@ -6,14 +7,17 @@ use libp2p::{
     kad::{self, store::MemoryStore},
     mdns, noise, ping,
     request_response::{self, cbor, ProtocolSupport},
-    swarm::{dial_opts::DialOpts, NetworkBehaviour, SwarmEvent},
+    swarm::{dial_opts::DialOpts, ConnectionId, NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId as TransportPeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
+use rand_core::{OsRng, RngCore};
 use std::{collections::HashMap, env, time::Duration};
 use swarm_protocol::{PeerHelloV1, PeerId, WorldId, PROTOCOL_VERSION};
 use tracing::{debug, warn};
 
-use crate::{verify_peer_hello, WireRequest, WireResponse, BOOTSTRAP_ENV};
+use crate::{
+    build_peer_hello_proof, verify_peer_hello, verify_peer_hello_proof, WireRequest, WireResponse, BOOTSTRAP_ENV,
+};
 
 pub const DISCOVERY_WIRE_PROTOCOL: &str = "/swarmcraft/discovery/1";
 const PUBLIC_DIRECTORY_KEY: &[u8] = b"swarmcraft/discovery/public/v1";
@@ -81,13 +85,21 @@ pub enum DiscoveryNetworkEvent {
 pub struct DiscoveryNode {
     swarm: Swarm<DiscoveryBehaviour>,
     local_hello: PeerHelloV1,
-    authenticated: HashMap<TransportPeerId, PeerId>,
+    application_signing_key: SigningKey,
+    authenticated: HashMap<TransportPeerId, (PeerId, ConnectionId)>,
+    pending_challenges: HashMap<TransportPeerId, (ConnectionId, [u8; 32])>,
+    active_connections: HashMap<TransportPeerId, ConnectionId>,
+    connection_counts: HashMap<TransportPeerId, usize>,
 }
 
 impl DiscoveryNode {
-    pub fn new(transport_key: Keypair, local_hello: PeerHelloV1) -> Result<Self> {
+    pub fn new(transport_key: Keypair, local_hello: PeerHelloV1, application_signing_key: SigningKey) -> Result<Self> {
         verify_peer_hello(&local_hello).context("local discovery PeerHello must be valid")?;
         let local_peer = transport_key.public().to_peer_id();
+        let self_test =
+            build_peer_hello_proof(&local_hello, &application_signing_key, [0; 32], &local_peer, &local_peer)?;
+        verify_peer_hello_proof(&self_test, [0; 32], &local_peer, &local_peer)
+            .context("application signing key must match the local discovery PeerHello")?;
         let request_response = cbor::Behaviour::new(
             [(StreamProtocol::new(DISCOVERY_WIRE_PROTOCOL), ProtocolSupport::Full)],
             request_response::Config::default()
@@ -117,7 +129,15 @@ impl DiscoveryNode {
             })?
             .build();
 
-        let mut node = Self { swarm, local_hello, authenticated: HashMap::new() };
+        let mut node = Self {
+            swarm,
+            local_hello,
+            application_signing_key,
+            authenticated: HashMap::new(),
+            pending_challenges: HashMap::new(),
+            active_connections: HashMap::new(),
+            connection_counts: HashMap::new(),
+        };
         node.configure_from_environment()?;
         Ok(node)
     }
@@ -131,7 +151,7 @@ impl DiscoveryNode {
     }
 
     pub fn application_peer(&self, transport_peer: &TransportPeerId) -> Option<PeerId> {
-        self.authenticated.get(transport_peer).copied()
+        self.authenticated.get(transport_peer).map(|(peer, _)| *peer)
     }
 
     pub fn add_peer_address(&mut self, peer: TransportPeerId, address: Multiaddr) {
@@ -242,16 +262,45 @@ impl DiscoveryNode {
         loop {
             match self.swarm.select_next_some().await {
                 SwarmEvent::NewListenAddr { address, .. } => return Ok(DiscoveryNetworkEvent::Listening { address }),
-                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                    self.swarm
-                        .behaviour_mut()
-                        .request_response
-                        .send_request(&peer_id, WireRequest::Hello(self.local_hello.clone()));
+                SwarmEvent::ConnectionEstablished { peer_id, connection_id, num_established, .. } => {
+                    self.connection_counts.insert(peer_id, num_established.get() as usize);
+                    self.authenticated.remove(&peer_id);
+                    self.pending_challenges.remove(&peer_id);
+                    let previous = self.active_connections.insert(peer_id, connection_id);
+                    let defer_challenge = previous
+                        .filter(|previous| *previous != connection_id && num_established.get() > 1)
+                        .is_some_and(|previous| self.swarm.close_connection(previous));
+                    if !defer_challenge {
+                        self.issue_auth_challenge(peer_id, connection_id)?;
+                    }
                 }
-                SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
+                SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
+                    self.connection_counts.insert(peer_id, num_established as usize);
+                    if self
+                        .authenticated
+                        .get(&peer_id)
+                        .is_some_and(|(_, authenticated_connection)| *authenticated_connection == connection_id)
+                    {
+                        self.authenticated.remove(&peer_id);
+                    }
+                    if self
+                        .pending_challenges
+                        .get(&peer_id)
+                        .is_some_and(|(challenge_connection, _)| *challenge_connection == connection_id)
+                    {
+                        self.pending_challenges.remove(&peer_id);
+                    }
                     if num_established == 0 {
-                        let application_peer = self.authenticated.remove(&peer_id);
+                        self.active_connections.remove(&peer_id);
+                        self.connection_counts.remove(&peer_id);
+                        let application_peer = self.authenticated.remove(&peer_id).map(|(peer, _)| peer);
+                        self.pending_challenges.remove(&peer_id);
                         return Ok(DiscoveryNetworkEvent::Disconnected { transport_peer: peer_id, application_peer });
+                    }
+                    if let Some(active) =
+                        self.active_connections.get(&peer_id).copied().filter(|active| *active != connection_id)
+                    {
+                        self.issue_auth_challenge(peer_id, active)?;
                     }
                 }
                 SwarmEvent::Behaviour(DiscoveryBehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
@@ -277,7 +326,7 @@ impl DiscoveryNode {
                     }
                 }
                 SwarmEvent::Behaviour(DiscoveryBehaviourEvent::RequestResponse(event)) => match event {
-                    request_response::Event::Message { peer, message, .. } => match message {
+                    request_response::Event::Message { peer, connection_id, message } => match message {
                         request_response::Message::Request { request, channel, .. } => {
                             if let Err(error) = request.validate_limits() {
                                 let _ = self.respond(
@@ -290,30 +339,107 @@ impl DiscoveryNode {
                                 continue;
                             }
                             match request {
-                                WireRequest::Hello(hello) => match verify_peer_hello(&hello) {
-                                    Ok(()) => {
-                                        self.authenticated.insert(peer, hello.peer_id);
-                                        self.respond(
+                                WireRequest::Hello(_) => {
+                                    let _ = self.respond(
+                                        channel,
+                                        WireResponse::Error {
+                                            code: "CONNECTION_PROOF_REQUIRED".into(),
+                                            message: "reusable PeerHello is not an authentication proof".into(),
+                                        },
+                                    );
+                                }
+                                WireRequest::HelloChallenge { challenge } => {
+                                    let canonical = self
+                                        .active_connections
+                                        .get(&peer)
+                                        .is_some_and(|active| *active == connection_id)
+                                        && self.connection_counts.get(&peer).copied() == Some(1);
+                                    if !canonical {
+                                        let _ = self.respond(
                                             channel,
-                                            WireResponse::HelloAccepted { protocol_version: PROTOCOL_VERSION },
-                                        )?;
-                                        return Ok(DiscoveryNetworkEvent::Authenticated {
-                                            transport_peer: peer,
-                                            application_peer: hello.peer_id,
-                                        });
+                                            WireResponse::Error {
+                                                code: "AUTH_CONNECTION_RETRY".into(),
+                                                message: "authentication challenge arrived on a superseded connection"
+                                                    .into(),
+                                            },
+                                        );
+                                        continue;
                                     }
-                                    Err(error) => {
+                                    let local_transport = *self.swarm.local_peer_id();
+                                    let proof = build_peer_hello_proof(
+                                        &self.local_hello,
+                                        &self.application_signing_key,
+                                        challenge,
+                                        &local_transport,
+                                        &peer,
+                                    )?;
+                                    self.respond(channel, WireResponse::HelloChallengeAccepted)?;
+                                    self.swarm
+                                        .behaviour_mut()
+                                        .request_response
+                                        .send_request(&peer, WireRequest::HelloProof(Box::new(proof)));
+                                }
+                                WireRequest::HelloProof(proof) => {
+                                    let Some((challenge_connection, expected_challenge)) =
+                                        self.pending_challenges.remove(&peer)
+                                    else {
                                         let _ = self.respond(
                                             channel,
                                             WireResponse::Error {
                                                 code: "PEER_AUTHENTICATION_FAILED".into(),
-                                                message: error.to_string(),
+                                                message: "no live receiver challenge exists for this proof".into(),
                                             },
                                         );
+                                        continue;
+                                    };
+                                    if challenge_connection != connection_id
+                                        || self
+                                            .active_connections
+                                            .get(&peer)
+                                            .is_none_or(|active| *active != connection_id)
+                                        || self.connection_counts.get(&peer).copied() != Some(1)
+                                    {
+                                        let _ = self.respond(
+                                            channel,
+                                            WireResponse::Error {
+                                                code: "PEER_AUTHENTICATION_FAILED".into(),
+                                                message: "connection was replaced before proof verification".into(),
+                                            },
+                                        );
+                                        continue;
                                     }
-                                },
+                                    match verify_peer_hello_proof(
+                                        &proof,
+                                        expected_challenge,
+                                        &peer,
+                                        self.swarm.local_peer_id(),
+                                    ) {
+                                        Ok(()) => {
+                                            self.authenticated.insert(peer, (proof.hello.peer_id, connection_id));
+                                            self.respond(
+                                                channel,
+                                                WireResponse::HelloAccepted { protocol_version: PROTOCOL_VERSION },
+                                            )?;
+                                            return Ok(DiscoveryNetworkEvent::Authenticated {
+                                                transport_peer: peer,
+                                                application_peer: proof.hello.peer_id,
+                                            });
+                                        }
+                                        Err(error) => {
+                                            let _ = self.respond(
+                                                channel,
+                                                WireResponse::Error {
+                                                    code: "PEER_AUTHENTICATION_FAILED".into(),
+                                                    message: error.to_string(),
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
                                 request => {
-                                    if let Some(application_peer) = self.authenticated.get(&peer).copied() {
+                                    if let Some((application_peer, _)) = self.authenticated.get(&peer).copied().filter(
+                                        |(_, authenticated_connection)| *authenticated_connection == connection_id,
+                                    ) {
                                         return Ok(DiscoveryNetworkEvent::InboundRequest {
                                             transport_peer: peer,
                                             application_peer,
@@ -325,7 +451,7 @@ impl DiscoveryNode {
                                         channel,
                                         WireResponse::Error {
                                             code: "HANDSHAKE_REQUIRED".into(),
-                                            message: "authenticate with PeerHello before discovery requests".into(),
+                                            message: "complete the connection-bound application proof before discovery requests".into(),
                                         },
                                     );
                                 }
@@ -394,6 +520,14 @@ impl DiscoveryNode {
             }
         }
     }
+    fn issue_auth_challenge(&mut self, peer: TransportPeerId, connection_id: ConnectionId) -> Result<()> {
+        let mut challenge = [0_u8; 32];
+        OsRng.fill_bytes(&mut challenge);
+        self.authenticated.remove(&peer);
+        self.pending_challenges.insert(peer, (connection_id, challenge));
+        self.swarm.behaviour_mut().request_response.send_request(&peer, WireRequest::HelloChallenge { challenge });
+        Ok(())
+    }
 }
 
 pub fn public_directory_key() -> kad::RecordKey {
@@ -440,6 +574,8 @@ fn transport_peer_from_address(address: &Multiaddr) -> Option<TransportPeerId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
+    use rand_core::OsRng;
     use swarm_protocol::{peer_id_from_public_key, PeerHelloV1};
 
     #[test]
@@ -463,6 +599,6 @@ mod tests {
             nonce: [0; 32],
             signature: vec![0; 64],
         };
-        assert!(DiscoveryNode::new(Keypair::generate_ed25519(), hello).is_err());
+        assert!(DiscoveryNode::new(Keypair::generate_ed25519(), hello, SigningKey::generate(&mut OsRng)).is_err());
     }
 }

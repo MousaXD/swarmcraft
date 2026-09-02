@@ -17,6 +17,7 @@ pub const MAX_DISCOVERY_RESULTS: usize = 64;
 pub const MAX_DISCOVERY_TAGS: usize = 16;
 pub const MAX_DISCOVERY_QUERY_BYTES: usize = 512;
 pub const MAX_DISCOVERY_ANNOUNCEMENT_BYTES: usize = 16 * 1024;
+pub const MAX_HANDSHAKE_TRANSPORT_ID_BYTES: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicaAckV1 {
@@ -68,6 +69,15 @@ pub struct BlobResumeV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerHelloProofV1 {
+    pub hello: PeerHelloV1,
+    pub challenge: [u8; 32],
+    pub claimant_transport_peer: Vec<u8>,
+    pub receiver_transport_peer: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WireRequest {
     Hello(PeerHelloV1),
     Ping { nonce: u64 },
@@ -95,6 +105,9 @@ pub enum WireRequest {
     DiscoveryPublic { filter: DiscoveryFilterV1 },
     DiscoveryResolve { world_id: WorldId },
     FriendPresence { expected_peer_id: PeerId, requester_peer_id: PeerId, nonce: [u8; 32] },
+    // Connection-bound authentication extensions are append-only.
+    HelloChallenge { challenge: [u8; 32] },
+    HelloProof(Box<PeerHelloProofV1>),
 }
 
 impl WireRequest {
@@ -111,7 +124,9 @@ impl WireRequest {
             | Self::JoinRequest(_)
             | Self::DiscoveryPublic { .. }
             | Self::DiscoveryResolve { .. }
-            | Self::FriendPresence { .. } => None,
+            | Self::FriendPresence { .. }
+            | Self::HelloChallenge { .. }
+            | Self::HelloProof(_) => None,
             Self::WorldStatus { world_id }
             | Self::WorldDescriptor { world_id }
             | Self::MissingBlobs { world_id, .. }
@@ -159,6 +174,12 @@ impl WireRequest {
                 Ok(())
             }
             Self::DiscoveryPublic { filter } => validate_discovery_filter(filter),
+            Self::HelloProof(proof)
+                if proof.claimant_transport_peer.len() > MAX_HANDSHAKE_TRANSPORT_ID_BYTES
+                    || proof.receiver_transport_peer.len() > MAX_HANDSHAKE_TRANSPORT_ID_BYTES =>
+            {
+                Err(WireLimitError::HandshakeTransportIdTooLarge)
+            }
             _ => Ok(()),
         }
     }
@@ -192,6 +213,7 @@ pub enum WireResponse {
     DiscoveryWorlds(Vec<WorldAnnouncementV1>),
     DiscoveryResolved(Option<Box<WorldAnnouncementV1>>),
     FriendPresence(Option<FriendPresenceV1>),
+    HelloChallengeAccepted,
 }
 
 impl WireResponse {
@@ -253,6 +275,8 @@ pub enum WireLimitError {
     DiscoveryFilterTooLarge(usize),
     #[error("world discovery announcement is {0} encoded bytes; maximum is {MAX_DISCOVERY_ANNOUNCEMENT_BYTES}")]
     DiscoveryAnnouncementTooLarge(usize),
+    #[error("handshake transport peer identifier exceeds {MAX_HANDSHAKE_TRANSPORT_ID_BYTES} bytes")]
+    HandshakeTransportIdTooLarge,
 }
 
 #[cfg(test)]

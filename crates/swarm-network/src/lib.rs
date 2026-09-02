@@ -25,13 +25,13 @@ pub use libp2p::PeerId as TransportPeerId;
 pub use node::{NetworkEvent, SwarmNode, BOOTSTRAP_ENV, RELAY_ENV, WIRE_PROTOCOL};
 pub use transport::{generate_transport_key, load_or_create_transport_key};
 pub use wire::{
-    BlobResumeV1, HostCapabilityV1, HostRuntimeReadinessV1, ReplicaAckV1, ServerModsReadinessV1, WireLimitError,
-    WireRequest, WireResponse, MAX_BLOB_CHUNK, MAX_DISCOVERY_ANNOUNCEMENT_BYTES, MAX_DISCOVERY_QUERY_BYTES,
-    MAX_DISCOVERY_RESULTS, MAX_DISCOVERY_TAGS, MAX_MISSING_BLOBS, MAX_RECOVERY_VOTES, MAX_WORLD_ARTIFACTS,
-    MAX_WORLD_MEMBERS,
+    BlobResumeV1, HostCapabilityV1, HostRuntimeReadinessV1, PeerHelloProofV1, ReplicaAckV1, ServerModsReadinessV1,
+    WireLimitError, WireRequest, WireResponse, MAX_BLOB_CHUNK, MAX_DISCOVERY_ANNOUNCEMENT_BYTES,
+    MAX_DISCOVERY_QUERY_BYTES, MAX_DISCOVERY_RESULTS, MAX_DISCOVERY_TAGS, MAX_MISSING_BLOBS, MAX_RECOVERY_VOTES,
+    MAX_WORLD_ARTIFACTS, MAX_WORLD_MEMBERS,
 };
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use swarm_protocol::{peer_id_from_public_key, PeerHelloV1, PROTOCOL_VERSION};
 use thiserror::Error;
 
@@ -45,6 +45,12 @@ pub enum HandshakeError {
     SignatureInvalid,
     #[error("peer hello cannot be encoded")]
     EncodingFailed,
+    #[error("connection authentication challenge does not match the live receiver challenge")]
+    ChallengeMismatch,
+    #[error("application proof is bound to a different transport connection")]
+    TransportBindingMismatch,
+    #[error("application signing key does not match the advertised peer identity")]
+    SigningKeyMismatch,
 }
 
 pub fn verify_peer_hello(hello: &PeerHelloV1) -> Result<(), HandshakeError> {
@@ -60,6 +66,76 @@ pub fn verify_peer_hello(hello: &PeerHelloV1) -> Result<(), HandshakeError> {
     key.verify(&message, &signature).map_err(|_| HandshakeError::SignatureInvalid)
 }
 
+const PEER_HELLO_PROOF_DOMAIN: &[u8] = b"swarmcraft/peer-hello-connection-proof/v1\0";
+
+fn push_len_prefixed(bytes: &mut Vec<u8>, value: &[u8]) -> Result<(), HandshakeError> {
+    let len = u32::try_from(value.len()).map_err(|_| HandshakeError::EncodingFailed)?;
+    bytes.extend_from_slice(&len.to_be_bytes());
+    bytes.extend_from_slice(value);
+    Ok(())
+}
+
+fn peer_hello_proof_signing_bytes(proof: &PeerHelloProofV1) -> Result<Vec<u8>, HandshakeError> {
+    let hello_bytes = proof.hello.signing_bytes().map_err(|_| HandshakeError::EncodingFailed)?;
+    let mut bytes = Vec::with_capacity(
+        PEER_HELLO_PROOF_DOMAIN.len()
+            + hello_bytes.len()
+            + proof.hello.signature.len()
+            + proof.claimant_transport_peer.len()
+            + proof.receiver_transport_peer.len()
+            + 64,
+    );
+    bytes.extend_from_slice(PEER_HELLO_PROOF_DOMAIN);
+    push_len_prefixed(&mut bytes, &hello_bytes)?;
+    push_len_prefixed(&mut bytes, &proof.hello.signature)?;
+    bytes.extend_from_slice(&proof.challenge);
+    push_len_prefixed(&mut bytes, &proof.claimant_transport_peer)?;
+    push_len_prefixed(&mut bytes, &proof.receiver_transport_peer)?;
+    Ok(bytes)
+}
+
+pub fn build_peer_hello_proof(
+    hello: &PeerHelloV1,
+    signing_key: &SigningKey,
+    challenge: [u8; 32],
+    claimant_transport_peer: &TransportPeerId,
+    receiver_transport_peer: &TransportPeerId,
+) -> Result<PeerHelloProofV1, HandshakeError> {
+    verify_peer_hello(hello)?;
+    if signing_key.verifying_key().to_bytes() != hello.public_key {
+        return Err(HandshakeError::SigningKeyMismatch);
+    }
+    let mut proof = PeerHelloProofV1 {
+        hello: hello.clone(),
+        challenge,
+        claimant_transport_peer: claimant_transport_peer.to_bytes(),
+        receiver_transport_peer: receiver_transport_peer.to_bytes(),
+        signature: Vec::new(),
+    };
+    proof.signature = signing_key.sign(&peer_hello_proof_signing_bytes(&proof)?).to_bytes().to_vec();
+    Ok(proof)
+}
+
+pub fn verify_peer_hello_proof(
+    proof: &PeerHelloProofV1,
+    expected_challenge: [u8; 32],
+    expected_claimant_transport_peer: &TransportPeerId,
+    local_receiver_transport_peer: &TransportPeerId,
+) -> Result<(), HandshakeError> {
+    verify_peer_hello(&proof.hello)?;
+    if proof.challenge != expected_challenge {
+        return Err(HandshakeError::ChallengeMismatch);
+    }
+    if proof.claimant_transport_peer != expected_claimant_transport_peer.to_bytes()
+        || proof.receiver_transport_peer != local_receiver_transport_peer.to_bytes()
+    {
+        return Err(HandshakeError::TransportBindingMismatch);
+    }
+    let key = VerifyingKey::from_bytes(&proof.hello.public_key).map_err(|_| HandshakeError::SignatureInvalid)?;
+    let signature = Signature::from_slice(&proof.signature).map_err(|_| HandshakeError::SignatureInvalid)?;
+    key.verify(&peer_hello_proof_signing_bytes(proof)?, &signature).map_err(|_| HandshakeError::SignatureInvalid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,7 +144,7 @@ mod tests {
     use std::time::Duration;
     use tokio::time::timeout;
 
-    fn signed_hello() -> PeerHelloV1 {
+    fn signed_hello() -> (PeerHelloV1, SigningKey) {
         let key = SigningKey::generate(&mut OsRng);
         let public_key = key.verifying_key().to_bytes();
         let mut hello = PeerHelloV1 {
@@ -80,22 +156,37 @@ mod tests {
             signature: Vec::new(),
         };
         hello.signature = key.sign(&hello.signing_bytes().unwrap()).to_bytes().to_vec();
-        hello
+        (hello, key)
     }
 
     #[test]
     fn signed_hello_authenticates_application_identity() {
-        verify_peer_hello(&signed_hello()).unwrap();
+        verify_peer_hello(&signed_hello().0).unwrap();
+    }
+
+    #[test]
+    fn captured_proof_cannot_move_to_attacker_transport() {
+        let (hello_b, key_b) = signed_hello();
+        let transport_a = generate_transport_key().public().to_peer_id();
+        let transport_b = generate_transport_key().public().to_peer_id();
+        let transport_c = generate_transport_key().public().to_peer_id();
+        let challenge = [0xA5; 32];
+        let captured = build_peer_hello_proof(&hello_b, &key_b, challenge, &transport_b, &transport_a).unwrap();
+        verify_peer_hello_proof(&captured, challenge, &transport_b, &transport_a).unwrap();
+        assert_eq!(
+            verify_peer_hello_proof(&captured, challenge, &transport_c, &transport_a),
+            Err(HandshakeError::TransportBindingMismatch)
+        );
     }
 
     #[tokio::test]
     async fn two_quic_nodes_authenticate_each_other() {
-        let hello_a = signed_hello();
-        let hello_b = signed_hello();
+        let (hello_a, key_a) = signed_hello();
+        let (hello_b, key_b) = signed_hello();
         let app_a = hello_a.peer_id;
         let app_b = hello_b.peer_id;
-        let mut node_a = SwarmNode::new(generate_transport_key(), hello_a).unwrap();
-        let mut node_b = SwarmNode::new(generate_transport_key(), hello_b).unwrap();
+        let mut node_a = SwarmNode::new(generate_transport_key(), hello_a, key_a).unwrap();
+        let mut node_b = SwarmNode::new(generate_transport_key(), hello_b, key_b).unwrap();
         node_a.listen("/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()).unwrap();
 
         let address = timeout(Duration::from_secs(10), async {

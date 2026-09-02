@@ -185,7 +185,7 @@ pub async fn serve(paths: DataPaths, listen: String) -> Result<()> {
     let hello = identity.signed_peer_hello(vec![DISCOVERY_CAPABILITY.into()])?;
     let transport_path = paths.identity_dir().join("discovery-transport.key");
     let transport_key = load_or_create_transport_key(&transport_path)?;
-    let mut node = DiscoveryNode::new(transport_key, hello)?;
+    let mut node = DiscoveryNode::new(transport_key, hello, identity.network_signing_key())?;
     node.listen(listen.parse().context("invalid discovery listen multiaddress")?)?;
     let _ = node.start_providing_friend_presence(identity.peer_id())?;
 
@@ -465,7 +465,7 @@ pub async fn search_public_worlds(
     let filter: DiscoveryFilterV1 = input.into();
     let identity = PeerIdentity::load_or_create(paths)?;
     let hello = identity.signed_peer_hello(vec![DISCOVERY_CAPABILITY.into()])?;
-    let mut node = DiscoveryNode::new(generate_transport_key(), hello)?;
+    let mut node = DiscoveryNode::new(generate_transport_key(), hello, identity.network_signing_key())?;
     node.listen("/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap())?;
     add_explicit_bootstraps(&mut node, bootstrap_addrs)?;
     let query = node.find_public_providers();
@@ -604,7 +604,7 @@ pub async fn resolve_world(
 ) -> Result<ResolveWorldReportV1> {
     let identity = PeerIdentity::load_or_create(paths)?;
     let hello = identity.signed_peer_hello(vec![DISCOVERY_CAPABILITY.into()])?;
-    let mut node = DiscoveryNode::new(generate_transport_key(), hello)?;
+    let mut node = DiscoveryNode::new(generate_transport_key(), hello, identity.network_signing_key())?;
     node.listen("/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap())?;
     add_explicit_bootstraps(&mut node, bootstrap_addrs)?;
     let query = node.find_world_providers(world);
@@ -703,7 +703,7 @@ pub async fn friend_presence(
     let requester = identity.peer_id();
     let nonce = random_nonce();
     let hello = identity.signed_peer_hello(vec![DISCOVERY_CAPABILITY.into()])?;
-    let mut node = DiscoveryNode::new(generate_transport_key(), hello)?;
+    let mut node = DiscoveryNode::new(generate_transport_key(), hello, identity.network_signing_key())?;
     node.listen("/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap())?;
     add_explicit_bootstraps(&mut node, bootstrap_addrs)?;
     let query = node.find_friend_providers(peer);
