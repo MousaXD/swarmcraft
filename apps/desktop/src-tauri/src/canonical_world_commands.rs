@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use swarm_catalog::CatalogService;
 use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
 use swarm_protocol::{
-    AuthorityPolicyV1, MembershipPolicyV1, MembershipRecordV1, WorldConfigV1, WorldDescriptorV1, WorldMemberV1,
-    WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    validate_runtime_selection, AuthorityPolicyV1, MembershipPolicyV1, MembershipRecordV1, WorldConfigV1,
+    WorldDescriptorV1, WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION,
+    STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 
@@ -37,6 +38,12 @@ pub fn create_canonical_world(
         return Err(failure("unsupported_loader", "SwarmCraft v1 currently supports the Fabric loader contract"));
     }
 
+    validate_runtime_selection(
+        request.modpack.minecraft_version.trim(),
+        request.modpack.loader_version.trim(),
+        None,
+    )
+    .map_err(|error| failure("unsupported_runtime_adapter", error.to_string()))?;
     validate_catalog_selection(&request.modpack.minecraft_version, &request.modpack.loader_version)?;
     let canonical = canonicalize_modpack(request.modpack)?;
     let visibility = parse_visibility(&request.visibility)?;
