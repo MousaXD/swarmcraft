@@ -3595,7 +3595,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "swarm-catalog"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "directories",
  "hex",
@@ -3608,7 +3608,7 @@ dependencies = [
 
 [[package]]
 name = "swarm-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "blake3",
  "directories",
@@ -3622,7 +3622,7 @@ dependencies = [
 
 [[package]]
 name = "swarm-protocol"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "blake3",
  "hex",
@@ -3633,7 +3633,7 @@ dependencies = [
 
 [[package]]
 name = "swarm-provider"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3643,7 +3643,7 @@ dependencies = [
 
 [[package]]
 name = "swarm-storage"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "blake3",
  "postcard",
@@ -3658,7 +3658,7 @@ dependencies = [
 
 [[package]]
 name = "swarmcraft-desktop"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "hex",
