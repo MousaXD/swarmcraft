@@ -1,5 +1,6 @@
 import './catalog-selectors.js';
 import './launcher-controller.js';
+import './player-copy.js';
 
 function invalid(field, message) {
   const error = new Error(message);
