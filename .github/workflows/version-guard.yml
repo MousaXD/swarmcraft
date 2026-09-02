@@ -44,3 +44,32 @@ jobs:
             echo 'version guard incorrectly accepted a mismatched tag' >&2
             exit 1
           fi
+      - name: Regression: missing production signing credentials must fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if env \
+            -u WINDOWS_CERTIFICATE_BASE64 \
+            -u WINDOWS_CERTIFICATE_PASSWORD \
+            -u APPLE_CERTIFICATE \
+            -u APPLE_CERTIFICATE_PASSWORD \
+            -u APPLE_SIGNING_IDENTITY \
+            -u APPLE_ID \
+            -u APPLE_PASSWORD \
+            -u APPLE_TEAM_ID \
+            python3 scripts/check_release_credentials.py; then
+            echo 'production credential policy incorrectly accepted missing credentials' >&2
+            exit 1
+          fi
+      - name: Regression: complete production signing credential set is accepted
+        shell: bash
+        env:
+          WINDOWS_CERTIFICATE_BASE64: test-only
+          WINDOWS_CERTIFICATE_PASSWORD: test-only
+          APPLE_CERTIFICATE: test-only
+          APPLE_CERTIFICATE_PASSWORD: test-only
+          APPLE_SIGNING_IDENTITY: test-only
+          APPLE_ID: test-only
+          APPLE_PASSWORD: test-only
+          APPLE_TEAM_ID: test-only
+        run: python3 scripts/check_release_credentials.py
