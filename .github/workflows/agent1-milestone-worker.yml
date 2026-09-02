@@ -22,6 +22,11 @@ jobs:
           ref: fix/agent-1-consensus
           fetch-depth: 0
 
+      - name: Repair staged worker typo
+        run: |
+          sed -i '77s/"""/""/' implementation/agent1-milestone1.py
+          python3 -m py_compile implementation/agent1-milestone1.py
+
       - name: Apply milestone transformations
         run: python3 implementation/agent1-milestone1.py
 
