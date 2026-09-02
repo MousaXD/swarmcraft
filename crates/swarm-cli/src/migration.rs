@@ -789,7 +789,7 @@ async fn run_authority_runtime_inner(
             world: options.world,
             snapshot_number: number,
             epoch: epoch.epoch_number,
-            sequence: latest.sequence.saturating_add(1),
+            sequence: latest.sequence.checked_add(1).context("snapshot sequence counter exhausted")?,
             previous_snapshot_hash: previous_hash,
             authority_peer_id: identity.peer_id(),
             authority_public_key: identity.public_key(),
@@ -1075,9 +1075,12 @@ pub fn activate_manual_transfer(paths: &DataPaths, storage: &Storage, world: Wor
         }
     }
     let current = storage.load_epoch_record(world)?;
+    let expected_generation = AuthorityGeneration { epoch: current.epoch_number, fencing_token: current.fencing_token }
+        .checked_next()
+        .context("accepted authority generation is exhausted")?;
     if current.authority_peer_id != committed.from_peer_id
-        || current.epoch_number.saturating_add(1) != committed.next_epoch
-        || current.fencing_token.saturating_add(1) != committed.next_fencing_token
+        || expected_generation.epoch != committed.next_epoch
+        || expected_generation.fencing_token != committed.next_fencing_token
     {
         bail!("committed transfer no longer extends the accepted authority generation");
     }
@@ -1128,13 +1131,16 @@ pub fn observe_manual_transfer_epoch(paths: &DataPaths, storage: &Storage, world
     let current = storage.load_epoch_record(world)?;
     let transfer = storage.load_transfer_record(world).context("manual epoch is missing its committed transfer")?;
     validate_transfer_record_against_epoch(storage, &transfer, &current)?;
+    let expected_generation = AuthorityGeneration { epoch: current.epoch_number, fencing_token: current.fencing_token }
+        .checked_next()
+        .context("accepted authority generation is exhausted")?;
     if transfer.phase != TransferPhase::Committed
         || transfer.from_peer_id != current.authority_peer_id
         || transfer.to_peer_id != next.authority_peer_id
         || transfer.next_epoch != next.epoch_number
         || transfer.next_fencing_token != next.fencing_token
-        || next.epoch_number != current.epoch_number.saturating_add(1)
-        || next.fencing_token != current.fencing_token.saturating_add(1)
+        || next.epoch_number != expected_generation.epoch
+        || next.fencing_token != expected_generation.fencing_token
         || next.previous_epoch_hash != Some(epoch_record_hash(&current)?)
     {
         bail!("manual epoch does not exactly extend the committed transfer");
@@ -1362,13 +1368,16 @@ fn prepare_authority_epoch(
         let mut next = EpochRecordV1 {
             protocol_version: PROTOCOL_VERSION,
             world_id: world,
-            epoch_number: previous.epoch_number.saturating_add(1),
+            epoch_number: previous.epoch_number.checked_add(1).context("authority epoch exhausted during wake")?,
             previous_epoch_hash: Some(epoch_record_hash(&previous)?),
             base_state_hash: latest.state_root,
             authority_peer_id: identity.peer_id(),
             authority_public_key: identity.public_key(),
             mode: EpochMode::Solo,
-            fencing_token: previous.fencing_token.saturating_add(1),
+            fencing_token: previous
+                .fencing_token
+                .checked_add(1)
+                .context("authority fencing token exhausted during wake")?,
             reason: "wake from durable sleep".into(),
             signature: Vec::new(),
         };
@@ -1415,7 +1424,10 @@ fn prepare_authority_epoch(
 fn ensure_authority_artifacts(storage: &Storage, identity: &PeerIdentity, epoch: &EpochRecordV1) -> Result<()> {
     let latest = storage.latest_snapshot(epoch.world_id)?.context("accepted authority epoch has no base snapshot")?;
     if latest.epoch < epoch.epoch_number {
-        if latest.epoch.saturating_add(1) != epoch.epoch_number || latest.state_root != epoch.base_state_hash {
+        if latest.epoch.checked_add(1).context("snapshot epoch counter exhausted during authority promotion")?
+            != epoch.epoch_number
+            || latest.state_root != epoch.base_state_hash
+        {
             bail!("accepted authority epoch does not directly promote the latest canonical snapshot");
         }
         let mut promoted = SnapshotManifestV1 {
@@ -1423,7 +1435,7 @@ fn ensure_authority_artifacts(storage: &Storage, identity: &PeerIdentity, epoch:
             world_id: epoch.world_id,
             snapshot_number: storage.next_snapshot_number(epoch.world_id)?,
             epoch: epoch.epoch_number,
-            sequence: latest.sequence.saturating_add(1),
+            sequence: latest.sequence.checked_add(1).context("snapshot sequence counter exhausted")?,
             previous_snapshot_hash: Some(latest.manifest_hash()?),
             entries: latest.entries.clone(),
             state_root: latest.state_root,
@@ -1453,7 +1465,7 @@ fn ensure_authority_artifacts(storage: &Storage, identity: &PeerIdentity, epoch:
                 protocol_version: membership.protocol_version,
                 world_id: epoch.world_id,
                 epoch: epoch.epoch_number,
-                sequence: membership.sequence.saturating_add(1),
+                sequence: membership.sequence.checked_add(1).context("membership sequence counter exhausted")?,
                 previous_membership_hash: Some(membership.record_hash()?),
                 members: membership.members.clone(),
                 authority_peer_id: identity.peer_id(),

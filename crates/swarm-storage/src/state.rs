@@ -101,9 +101,8 @@ impl Storage {
                 }
                 return Err(StorageError::WorldMetadataMismatch);
             }
-            if config.sequence != existing.sequence.saturating_add(1)
-                || config.previous_config_hash != Some(existing.config_hash()?)
-            {
+            let expected_sequence = next_world_config_sequence(existing.sequence)?;
+            if config.sequence != expected_sequence || config.previous_config_hash != Some(existing.config_hash()?) {
                 return Err(StorageError::WorldMetadataMismatch);
             }
         }
@@ -187,6 +186,10 @@ impl Storage {
     fn control_path_v2(&self, world: WorldId, name: &str) -> PathBuf {
         self.world_dir(world).join("metadata").join(name)
     }
+}
+
+fn next_world_config_sequence(sequence: u64) -> Result<u64, StorageError> {
+    sequence.checked_add(1).ok_or(StorageError::WorldMetadataMismatch)
 }
 
 fn same_recovery_base(a: &RecoveryBallotV1, b: &RecoveryBallotV1) -> bool {
@@ -332,6 +335,12 @@ mod tests {
         assert!(store.load_recovery_promise(world).is_ok());
         assert!(store.clear_recovery_promise_after_epoch_advance(world, 5).unwrap());
         assert!(store.load_recovery_promise(world).is_err());
+    }
+
+    #[test]
+    fn world_config_sequence_exhaustion_fails_closed() {
+        assert_eq!(next_world_config_sequence(u64::MAX - 1).unwrap(), u64::MAX);
+        assert!(next_world_config_sequence(u64::MAX).is_err());
     }
 
     #[test]
