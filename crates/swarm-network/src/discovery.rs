@@ -11,18 +11,23 @@ use libp2p::{
     tcp, yamux, Multiaddr, PeerId as TransportPeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
 use rand_core::{OsRng, RngCore};
-use std::{collections::HashMap, env, time::Duration};
+use std::{
+    collections::HashMap,
+    env,
+    time::{Duration, Instant},
+};
 use swarm_protocol::{PeerHelloV1, PeerId, WorldId, PROTOCOL_VERSION};
 use tracing::{debug, warn};
 
 use crate::{
+    admission::{application_connection_allowed, AdmissionController},
     build_peer_hello_proof, verify_peer_hello, verify_peer_hello_proof, WireRequest, WireResponse, BOOTSTRAP_ENV,
 };
 
 pub const DISCOVERY_WIRE_PROTOCOL: &str = "/swarmcraft/discovery/1";
 const PUBLIC_DIRECTORY_KEY: &[u8] = b"swarmcraft/discovery/public/v1";
 const WORLD_KEY_PREFIX: &[u8] = b"swarmcraft/discovery/world/v1\0";
-const FRIEND_KEY_PREFIX: &[u8] = b"swarmcraft/discovery/friend/v1\0";
+const FRIEND_KEY_PREFIX: &[u8] = b"swarmcraft/discovery/friend/v2\0";
 
 #[derive(NetworkBehaviour)]
 struct DiscoveryBehaviour {
@@ -90,6 +95,7 @@ pub struct DiscoveryNode {
     pending_challenges: HashMap<TransportPeerId, (ConnectionId, [u8; 32])>,
     active_connections: HashMap<TransportPeerId, ConnectionId>,
     connection_counts: HashMap<TransportPeerId, usize>,
+    admission: AdmissionController,
 }
 
 impl DiscoveryNode {
@@ -137,6 +143,7 @@ impl DiscoveryNode {
             pending_challenges: HashMap::new(),
             active_connections: HashMap::new(),
             connection_counts: HashMap::new(),
+            admission: AdmissionController::new(),
         };
         node.configure_from_environment()?;
         Ok(node)
@@ -238,12 +245,16 @@ impl DiscoveryNode {
         self.swarm.behaviour_mut().kad.stop_providing(&world_discovery_key(world));
     }
 
-    pub fn start_providing_friend_presence(&mut self, peer: PeerId) -> Result<kad::QueryId> {
+    pub fn start_providing_friend_presence(&mut self, peer: PeerId, requester: PeerId) -> Result<kad::QueryId> {
         self.swarm
             .behaviour_mut()
             .kad
-            .start_providing(friend_presence_key(peer))
+            .start_providing(friend_presence_key(peer, requester))
             .context("failed to publish friend presence provider")
+    }
+
+    pub fn stop_providing_friend_presence(&mut self, peer: PeerId, requester: PeerId) {
+        self.swarm.behaviour_mut().kad.stop_providing(&friend_presence_key(peer, requester));
     }
 
     pub fn find_public_providers(&mut self) -> kad::QueryId {
@@ -254,8 +265,8 @@ impl DiscoveryNode {
         self.swarm.behaviour_mut().kad.get_providers(world_discovery_key(world))
     }
 
-    pub fn find_friend_providers(&mut self, peer: PeerId) -> kad::QueryId {
-        self.swarm.behaviour_mut().kad.get_providers(friend_presence_key(peer))
+    pub fn find_friend_providers(&mut self, peer: PeerId, requester: PeerId) -> kad::QueryId {
+        self.swarm.behaviour_mut().kad.get_providers(friend_presence_key(peer, requester))
     }
 
     pub async fn next_event(&mut self) -> Result<DiscoveryNetworkEvent> {
@@ -263,6 +274,14 @@ impl DiscoveryNode {
             match self.swarm.select_next_some().await {
                 SwarmEvent::NewListenAddr { address, .. } => return Ok(DiscoveryNetworkEvent::Listening { address }),
                 SwarmEvent::ConnectionEstablished { peer_id, connection_id, num_established, .. } => {
+                    if !application_connection_allowed(
+                        self.active_connections.len(),
+                        self.active_connections.contains_key(&peer_id),
+                    ) {
+                        warn!(transport_peer = %peer_id, %connection_id, "discovery connection admission limit reached");
+                        let _ = self.swarm.close_connection(connection_id);
+                        continue;
+                    }
                     self.connection_counts.insert(peer_id, num_established.get() as usize);
                     self.authenticated.remove(&peer_id);
                     self.pending_challenges.remove(&peer_id);
@@ -295,6 +314,7 @@ impl DiscoveryNode {
                         self.connection_counts.remove(&peer_id);
                         let application_peer = self.authenticated.remove(&peer_id).map(|(peer, _)| peer);
                         self.pending_challenges.remove(&peer_id);
+                        self.admission.forget_peer(peer_id);
                         return Ok(DiscoveryNetworkEvent::Disconnected { transport_peer: peer_id, application_peer });
                     }
                     if let Some(active) =
@@ -328,6 +348,24 @@ impl DiscoveryNode {
                 SwarmEvent::Behaviour(DiscoveryBehaviourEvent::RequestResponse(event)) => match event {
                     request_response::Event::Message { peer, connection_id, message } => match message {
                         request_response::Message::Request { request, channel, .. } => {
+                            let authenticated_request =
+                                self.authenticated.get(&peer).is_some_and(|(_, authenticated_connection)| {
+                                    *authenticated_connection == connection_id
+                                });
+                            if !self.admission.admit_request(peer, authenticated_request, Instant::now()) {
+                                let _ = self.respond(
+                                    channel,
+                                    WireResponse::Error {
+                                        code: "RATE_LIMITED".into(),
+                                        message: if authenticated_request {
+                                            "authenticated discovery request budget exceeded".into()
+                                        } else {
+                                            "pre-authentication discovery request budget exceeded".into()
+                                        },
+                                    },
+                                );
+                                continue;
+                            }
                             if let Err(error) = request.validate_limits() {
                                 let _ = self.respond(
                                     channel,
@@ -541,10 +579,11 @@ pub fn world_discovery_key(world: WorldId) -> kad::RecordKey {
     kad::RecordKey::new(&bytes)
 }
 
-pub fn friend_presence_key(peer: PeerId) -> kad::RecordKey {
-    let mut bytes = Vec::with_capacity(FRIEND_KEY_PREFIX.len() + 32);
+pub fn friend_presence_key(peer: PeerId, requester: PeerId) -> kad::RecordKey {
+    let mut bytes = Vec::with_capacity(FRIEND_KEY_PREFIX.len() + 64);
     bytes.extend_from_slice(FRIEND_KEY_PREFIX);
     bytes.extend_from_slice(&peer.0);
+    bytes.extend_from_slice(&requester.0);
     kad::RecordKey::new(&bytes)
 }
 
@@ -582,9 +621,11 @@ mod tests {
     fn discovery_keys_separate_public_world_and_friend_namespaces() {
         let world_a = world_discovery_key(WorldId([1; 32]));
         let world_b = world_discovery_key(WorldId([2; 32]));
-        let friend = friend_presence_key(PeerId([1; 32]));
+        let friend = friend_presence_key(PeerId([1; 32]), PeerId([3; 32]));
+        let other_requester = friend_presence_key(PeerId([1; 32]), PeerId([4; 32]));
         assert_ne!(world_a, world_b);
         assert_ne!(world_a, friend);
+        assert_ne!(friend, other_requester);
         assert_ne!(world_a, public_directory_key());
     }
 

@@ -1,5 +1,8 @@
 use crate::{
-    build_peer_hello_proof, verify_peer_hello, verify_peer_hello_proof, wire::WireRequest, wire::WireResponse,
+    admission::{application_connection_allowed, AdmissionController},
+    build_peer_hello_proof, verify_peer_hello, verify_peer_hello_proof,
+    wire::WireRequest,
+    wire::WireResponse,
     ConnectivityDiagnosticsV1, ConnectivityIssueKindV1, ConnectivityIssueV1, NatStatusV1,
 };
 use anyhow::{anyhow, Context, Result};
@@ -19,7 +22,7 @@ use rand_core::{OsRng, RngCore};
 use std::{
     collections::{HashMap, HashSet},
     env,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use swarm_protocol::{PeerHelloV1, PeerId, PROTOCOL_VERSION};
 use tracing::{debug, info, warn};
@@ -103,6 +106,7 @@ pub struct SwarmNode {
     relay_peers: HashSet<TransportPeerId>,
     relay_fallbacks: HashMap<TransportPeerId, RelayFallbackPlan>,
     diagnostics: ConnectivityDiagnosticsV1,
+    admission: AdmissionController,
 }
 
 impl SwarmNode {
@@ -169,6 +173,7 @@ impl SwarmNode {
             relay_peers: HashSet::new(),
             relay_fallbacks: HashMap::new(),
             diagnostics: ConnectivityDiagnosticsV1::default(),
+            admission: AdmissionController::new(),
         };
         node.configure_from_environment()?;
         Ok(node)
@@ -418,6 +423,30 @@ impl SwarmNode {
                         self.relay_peers.contains(&peer_id),
                         endpoint.is_relayed(),
                     );
+                    let application_path = matches!(
+                        path_kind,
+                        ConnectionPathKind::DirectApplication | ConnectionPathKind::RelayedApplication
+                    );
+                    let active_application_connections = self
+                        .connection_paths
+                        .values()
+                        .filter(|path| {
+                            matches!(
+                                path,
+                                ConnectionPathKind::DirectApplication | ConnectionPathKind::RelayedApplication
+                            )
+                        })
+                        .count();
+                    if application_path
+                        && !application_connection_allowed(
+                            active_application_connections,
+                            self.active_connections.contains_key(&peer_id),
+                        )
+                    {
+                        warn!(transport_peer = %peer_id, %connection_id, "application connection admission limit reached");
+                        let _ = self.swarm.close_connection(connection_id);
+                        continue;
+                    }
                     self.connection_paths.insert(connection_id, path_kind);
                     self.refresh_connectivity_paths();
                     if matches!(
@@ -466,6 +495,7 @@ impl SwarmNode {
                         self.connection_counts.remove(&peer_id);
                         self.authenticated.remove(&peer_id);
                         self.pending_challenges.remove(&peer_id);
+                        self.admission.forget_peer(peer_id);
                         return Ok(NetworkEvent::Disconnected { transport_peer: peer_id });
                     }
 
@@ -547,6 +577,24 @@ impl SwarmNode {
                         request_response::Event::Message { peer, connection_id, message } => {
                             match message {
                                 request_response::Message::Request { request, channel, .. } => {
+                                    let authenticated_request =
+                                        self.authenticated.get(&peer).is_some_and(|(_, authenticated_connection)| {
+                                            *authenticated_connection == connection_id
+                                        });
+                                    if !self.admission.admit_request(peer, authenticated_request, Instant::now()) {
+                                        let _ = self.respond(
+                                            channel,
+                                            WireResponse::Error {
+                                                code: "RATE_LIMITED".into(),
+                                                message: if authenticated_request {
+                                                    "authenticated request budget exceeded; retry after the admission window".into()
+                                                } else {
+                                                    "pre-authentication request budget exceeded; reconnect later".into()
+                                                },
+                                            },
+                                        );
+                                        continue;
+                                    }
                                     if let Err(error) = request.validate_limits() {
                                         let response = WireResponse::Error {
                                             code: "REQUEST_LIMIT_EXCEEDED".into(),

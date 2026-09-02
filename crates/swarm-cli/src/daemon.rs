@@ -26,9 +26,9 @@ use swarm_network::{
     SwarmNode, TransportPeerId, WireRequest, WireResponse, MAX_BLOB_CHUNK,
 };
 use swarm_protocol::{
-    AuthorityLeaseGrantV1, BlobDescriptor, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, PeerId,
-    RecoveryBallotV1, RecoveryCertificateV1, RecoveryVoteV1, SnapshotManifestV1, SoloBranchV1, TransferPhase,
-    WorldDescriptorV1, WorldId, WorldStatusV1, PROTOCOL_VERSION,
+    peer_id_from_public_key, AuthorityLeaseGrantV1, BlobDescriptor, EpochMode, EpochRecordV1, Hash32,
+    MembershipRecordV1, PeerId, RecoveryBallotV1, RecoveryCertificateV1, RecoveryVoteV1, SnapshotManifestV1,
+    SoloBranchV1, TransferPhase, WorldDescriptorV1, WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{RecoveryPromiseResult, Storage};
 use tokio::time::MissedTickBehavior;
@@ -1204,7 +1204,8 @@ fn push_known_worlds(
 ) -> Result<()> {
     for metadata in storage.list_worlds()? {
         let Ok(descriptor) = storage.load_world_descriptor(metadata.world_id) else { continue };
-        if descriptor.member(application_peer).is_none() {
+        let Some(remote_member) = descriptor.member(application_peer) else { continue };
+        if remote_member.banned || peer_id_from_public_key(&remote_member.public_key) != application_peer {
             continue;
         }
         let local_is_authority =

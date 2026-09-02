@@ -177,6 +177,7 @@ struct PublishedDiscoveryState {
     provided_worlds: HashSet<WorldId>,
     public_directory: bool,
     sequences: HashMap<WorldId, u64>,
+    presence_requesters: HashSet<PeerId>,
 }
 
 pub async fn serve(paths: DataPaths, listen: String) -> Result<()> {
@@ -187,12 +188,12 @@ pub async fn serve(paths: DataPaths, listen: String) -> Result<()> {
     let transport_key = load_or_create_transport_key(&transport_path)?;
     let mut node = DiscoveryNode::new(transport_key, hello, identity.network_signing_key())?;
     node.listen(listen.parse().context("invalid discovery listen multiaddress")?)?;
-    let _ = node.start_providing_friend_presence(identity.peer_id())?;
 
     let mut published = PublishedDiscoveryState::default();
     let mut refresh = tokio::time::interval(DISCOVERY_REFRESH_INTERVAL);
     refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
     refresh_publications(&storage, &identity, &mut node, &mut published)?;
+    refresh_presence_publications(&paths, &identity, &mut node, &mut published)?;
 
     info!(peer = %identity.peer_id(), "discovery service starting");
     loop {
@@ -200,6 +201,9 @@ pub async fn serve(paths: DataPaths, listen: String) -> Result<()> {
             _ = refresh.tick() => {
                 if let Err(error) = refresh_publications(&storage, &identity, &mut node, &mut published) {
                     warn!(%error, "discovery publication refresh failed");
+                }
+                if let Err(error) = refresh_presence_publications(&paths, &identity, &mut node, &mut published) {
+                    warn!(%error, "friend presence publication refresh failed");
                 }
             }
             event = node.next_event() => {
@@ -209,6 +213,7 @@ pub async fn serve(paths: DataPaths, listen: String) -> Result<()> {
                     }
                     DiscoveryNetworkEvent::InboundRequest { application_peer, request, channel, .. } => {
                         if let Err(error) = handle_discovery_request(
+                            &paths,
                             &identity,
                             &mut node,
                             &published,
@@ -320,6 +325,7 @@ fn refresh_publications(
 }
 
 fn handle_discovery_request(
+    paths: &DataPaths,
     identity: &PeerIdentity,
     node: &mut DiscoveryNode,
     state: &PublishedDiscoveryState,
@@ -356,6 +362,10 @@ fn handle_discovery_request(
         WireRequest::FriendPresence { expected_peer_id, requester_peer_id, nonce } => {
             if application_peer != requester_peer_id {
                 bail!("presence requester does not match authenticated peer identity");
+            }
+            if !accepted_friend_peers(paths)?.contains(&requester_peer_id) {
+                node.respond(channel, WireResponse::FriendPresence(None))?;
+                return Ok(());
             }
             if expected_peer_id != identity.peer_id() {
                 node.respond(channel, WireResponse::FriendPresence(None))?;
@@ -706,7 +716,7 @@ pub async fn friend_presence(
     let mut node = DiscoveryNode::new(generate_transport_key(), hello, identity.network_signing_key())?;
     node.listen("/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap())?;
     add_explicit_bootstraps(&mut node, bootstrap_addrs)?;
-    let query = node.find_friend_providers(peer);
+    let query = node.find_friend_providers(peer, requester);
     let mut providers = HashSet::new();
     let mut requested = HashSet::new();
     let mut detail = None;
@@ -780,6 +790,31 @@ pub async fn friend_presence(
         expires_unix_ms: None,
         detail,
     }))
+}
+
+fn accepted_friend_peers(paths: &DataPaths) -> Result<HashSet<PeerId>> {
+    load_friend_store(paths)?
+        .friends
+        .into_iter()
+        .map(|friend| PeerId::from_str(&friend.peer_id).context("stored friend peer ID is invalid"))
+        .collect()
+}
+
+fn refresh_presence_publications(
+    paths: &DataPaths,
+    identity: &PeerIdentity,
+    node: &mut DiscoveryNode,
+    state: &mut PublishedDiscoveryState,
+) -> Result<()> {
+    let next = accepted_friend_peers(paths)?;
+    for requester in state.presence_requesters.difference(&next).copied().collect::<Vec<_>>() {
+        node.stop_providing_friend_presence(identity.peer_id(), requester);
+    }
+    for requester in next.difference(&state.presence_requesters).copied().collect::<Vec<_>>() {
+        let _ = node.start_providing_friend_presence(identity.peer_id(), requester)?;
+    }
+    state.presence_requesters = next;
+    Ok(())
 }
 
 fn shared_worlds(storage: &Storage, local: PeerId, friend: PeerId, friend_key: [u8; 32]) -> Result<Vec<SharedWorldV1>> {
@@ -979,6 +1014,10 @@ mod tests {
         add_friend(&paths, &a.peer_id().to_string(), &hex::encode(a.public_key()), "Alex").unwrap();
         add_friend(&paths, &b.peer_id().to_string(), &hex::encode(b.public_key()), "Alex").unwrap();
         assert_eq!(list_friends(&paths).unwrap().len(), 2);
+        let accepted = accepted_friend_peers(&paths).unwrap();
+        assert_eq!(accepted.len(), 2);
+        assert!(accepted.contains(&a.peer_id()));
+        assert!(accepted.contains(&b.peer_id()));
 
         let err = add_friend(&paths, &a.peer_id().to_string(), &hex::encode(b.public_key()), "collision").unwrap_err();
         assert!(err.to_string().contains("does not match"));
