@@ -23,6 +23,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Focused discovery membership regression
         run: cargo test -p swarm-cli --lib discovery::tests::banned_or_removed_friend_is_not_reported_as_shared_world --locked -- --exact
+      - name: Focused invite canonical-genesis regressions
+        run: cargo test -p swarm-cli --bin swarmcraft invite::tests:: --locked
       - name: Format
         run: cargo fmt --all -- --check
       - name: Workspace check
