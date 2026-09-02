@@ -46,6 +46,8 @@ pub enum StorageError {
     WorldMetadataMismatch,
     #[error("snapshot protocol version {0} is unsupported")]
     UnsupportedProtocol(u16),
+    #[error("canonical counter exhausted: {0}")]
+    CounterExhausted(&'static str),
     #[error("decode failed: {0}")]
     Decode(#[from] postcard::Error),
     #[error("metadata JSON failed: {0}")]
@@ -261,7 +263,7 @@ impl Storage {
     }
 
     pub fn next_snapshot_number(&self, world: WorldId) -> Result<u64, StorageError> {
-        Ok(self.latest_snapshot(world)?.map_or(1, |m| m.snapshot_number + 1))
+        next_snapshot_number_after(self.latest_snapshot(world)?.map(|manifest| manifest.snapshot_number))
     }
 
     fn snapshot_path(&self, world: WorldId, number: u64) -> PathBuf {
@@ -274,6 +276,13 @@ impl Storage {
             BlobEncoding::Zstd => "zst",
         };
         self.blobs_dir(world).join(format!("{}.{}", hash.to_hex(), suffix))
+    }
+}
+
+fn next_snapshot_number_after(latest: Option<u64>) -> Result<u64, StorageError> {
+    match latest {
+        None => Ok(1),
+        Some(number) => number.checked_add(1).ok_or(StorageError::CounterExhausted("snapshot number")),
     }
 }
 
@@ -357,6 +366,16 @@ mod tests {
         let blob = store.blob_path(world(), descriptor.hash, descriptor.encoding);
         fs::write(blob, b"broken").unwrap();
         assert!(matches!(store.verify_snapshot(&manifest), Err(StorageError::BlobCorrupt(_))));
+    }
+
+    #[test]
+    fn snapshot_number_fails_closed_at_counter_exhaustion() {
+        assert_eq!(next_snapshot_number_after(None).unwrap(), 1);
+        assert_eq!(next_snapshot_number_after(Some(u64::MAX - 1)).unwrap(), u64::MAX);
+        assert!(matches!(
+            next_snapshot_number_after(Some(u64::MAX)),
+            Err(StorageError::CounterExhausted("snapshot number"))
+        ));
     }
 
     #[test]
