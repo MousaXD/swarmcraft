@@ -10,7 +10,7 @@ CAMPAIGN PRODUCTION BASE SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
 
 BRANCH SEED SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` (campaign ledger commit only; production tree matches the campaign base)
 
-CURRENT HEAD SHA: `af48ed80f78beec7a2866a90ce6de35e4cfc86a8` validated production milestone; this ledger commit follows it
+CURRENT HEAD SHA: `1a5708bf70119d9da86d963cf0e9941abf76bdba` validated production milestone; this ledger commit follows it
 
 INTEGRATED SHA: pending
 
@@ -88,6 +88,8 @@ Do not change canonical membership election semantics.
 - Authentication state is now connection-specific and is cleared on disconnect/replacement. Legacy standalone `Hello` requests no longer establish authentication.
 - Added a three-transport replay regression: a proof captured on B→A is rejected when replayed from C→A.
 - Added bounded network admission shared by primary and discovery nodes: 64 active application connections, separate per-peer authenticated/pre-auth request windows, and separate global authenticated/pre-auth request budgets. Replacement connections for an already known transport are not blocked by the application cap.
+- Composed libp2p `connection_limits::Behaviour` into both primary and discovery swarms so pending and established connection floods are rejected before long-lived application state is allocated. Primary transport limits cap pending incoming/outgoing work at 32 each, established incoming at 72, total established at 96, and per-transport-peer connections at 2; discovery uses tighter 24/48/64 bounds with the same per-peer cap.
+- Added a 10-second receiver-challenge lifetime to both network stacks. Silent peers that occupy an authentication slot without proving the application key are disconnected and their pending/authentication state is cleared.
 - Added fail-closed `RATE_LIMITED` responses before application dispatch when a request budget is exceeded, while retaining wire-size validation and connection-bound authentication.
 - Changed friend presence discovery from a global `peer` rendezvous key to requester-specific `peer + accepted-friend` keys. The discovery service only advertises presence to locally accepted friends, withdraws removed-friend rendezvous entries, and returns no presence to authenticated non-friends.
 - Hardened proactive `push_known_worlds` so removed, banned, and application-ID/public-key-mismatched members cannot receive world state merely because a stale descriptor entry exists.
@@ -116,6 +118,12 @@ Do not change canonical membership election semantics.
 | `cargo clippy -p swarm-network -p swarm-cli --all-targets --locked -- -D warnings` | PASS | `af48ed80f78beec7a2866a90ce6de35e4cfc86a8` | Strict affected-crate lint gate. |
 | `cargo test -p swarm-network --locked` | PASS | `af48ed80f78beec7a2866a90ce6de35e4cfc86a8` | Full network suite including live pre-auth flood/budget-recovery regression. |
 | `cargo test -p swarm-cli --bin swarmcraft --locked` | PASS | `af48ed80f78beec7a2866a90ce6de35e4cfc86a8` | Invite reuse/lifetime and daemon authorization-matrix units green. |
+| `cargo fmt --all -- --check` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | Transport-level admission/handshake-lifetime milestone. |
+| `cargo check -p swarm-network -p swarm-cli --all-targets --locked` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | Primary/discovery connection-limit behaviours and challenge expiry compile together. |
+| `cargo clippy -p swarm-network -p swarm-cli --all-targets --locked -- -D warnings` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | Strict affected-crate lint gate after transport hardening. |
+| `cargo test -p swarm-network --locked` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | Full network suite remains green with transport limits and challenge expiry. |
+| `cargo test -p swarm-cli --bin swarmcraft --locked` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | CLI/network-facing authorization units remain green. |
+| impaired `interrupted_quic_transfer_resumes_after_lost_ack` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | 64 MiB forced-restart/lost-ACK transfer under 15ms±3ms delay, 0.5% loss and 100mbit loopback shaping. |
 
 ## Required validation before handoff
 
@@ -130,8 +138,8 @@ Do not change canonical membership election semantics.
 - [ ] discovery unauthorized-signer regression
 - [x] hostile-load admission test
 - [x] ordinary hard reconnect test remains green after admission/privacy changes
-- [ ] explicitly run impaired reconnect/transfer test and scheduled-scale soak equivalent where practical
-- [ ] exact-head CI/dedicated validation after final independent code change
+- [x] explicitly run impaired reconnect/transfer regression with delay/loss/rate shaping; scheduled multi-GiB soak remains a post-integration acceptance gate
+- [x] exact-head dedicated Agent 4 validation for all independent network/privacy code
 
 ## Blockers
 
@@ -140,7 +148,7 @@ Do not change canonical membership election semantics.
 
 ## Remaining work
 
-Strengthen transport-level connection shedding before establishment, explicitly run impaired reconnect/transfer evidence, complete exact-head validation for all independent Agent 4 work, and either consume the finalized Agent 1/2 authority proof contract for FINAL-028 or declare that item dependency-blocked with exact evidence.
+All independent Agent 4 network/privacy hardening is implemented and domain-validated. Remaining work is FINAL-028 only: consume the finalized Agent 1/2 canonical authority-proof contract for first-contact discovery, or declare the ledger dependency-blocked with exact upstream status evidence. Scheduled multi-GiB soak remains a post-integration acceptance gate rather than an unimplemented production fix.
 
 ## Handoff
 
