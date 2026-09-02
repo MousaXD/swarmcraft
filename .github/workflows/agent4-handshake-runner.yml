@@ -1,0 +1,87 @@
+name: Agent 4 handshake milestone
+
+on:
+  push:
+    branches: [fix/agent-4-network]
+    paths:
+      - implementation/agent4-handshake-runner.py
+      - .github/workflows/agent4-handshake-runner.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact milestone seed
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: fix/agent-4-network
+          fetch-depth: 0
+
+      - name: Apply connection-bound handshake change
+        shell: bash
+        run: |
+          set -o pipefail
+          python implementation/agent4-handshake-runner.py 2>&1 | tee implementation/agent4-handshake-apply.log
+
+      - name: Format
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo fmt --all 2>&1 | tee implementation/agent4-handshake-format.log
+          cargo fmt --all -- --check 2>&1 | tee -a implementation/agent4-handshake-format.log
+
+      - name: Compile affected crates
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check -p swarm-network -p swarm-cli --all-targets --locked 2>&1 | tee implementation/agent4-handshake-check.log
+
+      - name: Network tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p swarm-network --locked 2>&1 | tee implementation/agent4-handshake-tests.log
+
+      - name: Commit validated milestone
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rm implementation/agent4-handshake-runner.py .github/workflows/agent4-handshake-runner.yml
+          rm -f implementation/agent4-handshake-*.log
+          git config user.name "swarmcraft-agent-4"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(network): bind application auth to live connections"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:fix/agent-4-network
+
+      - name: Preserve failure diagnostics
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          {
+            echo "# Agent 4 handshake milestone failure"
+            echo
+            echo "Seed: ${GITHUB_SHA}"
+            for file in implementation/agent4-handshake-apply.log implementation/agent4-handshake-format.log implementation/agent4-handshake-check.log implementation/agent4-handshake-tests.log; do
+              if [ -f "$file" ]; then
+                echo
+                echo "## $file"
+                echo '```text'
+                tail -n 400 "$file"
+                echo '```'
+              fi
+            done
+          } > implementation/agent4-handshake-failure.log
+          rm -f implementation/agent4-handshake-apply.log implementation/agent4-handshake-format.log implementation/agent4-handshake-check.log implementation/agent4-handshake-tests.log
+          git config user.name "swarmcraft-agent-4"
+          git config user.email "actions@users.noreply.github.com"
+          git add implementation/agent4-handshake-failure.log
+          git commit -m "chore(agent4): preserve handshake validation failure" || exit 0
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:fix/agent-4-network
