@@ -78,7 +78,14 @@ impl Storage {
     }
 
     pub fn remove_local_membership(&self, world: WorldId) -> Result<(), StorageError> {
-        for name in ["descriptor.json", "membership.postcard", "pending-join.postcard", "pending-leave.postcard"] {
+        for name in [
+            "descriptor.json",
+            "membership.postcard",
+            "membership-promise.postcard",
+            "membership-certificate.postcard",
+            "pending-join.postcard",
+            "pending-leave.postcard",
+        ] {
             remove_protocol_file(self, world, name)?;
         }
         Ok(())
