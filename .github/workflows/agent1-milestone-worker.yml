@@ -1,0 +1,69 @@
+name: Agent 1 daemon membership integration
+
+on:
+  push:
+    branches:
+      - fix/agent-1-consensus
+    paths:
+      - implementation/agent1-m3-wire.py
+      - implementation/agent1-m3-daemon-core.py
+      - implementation/agent1-m3-daemon-membership.py
+      - implementation/agent1-m3-daemon-helpers.py
+      - .github/workflows/agent1-milestone-worker.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-validate-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact branch head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/agent-1-consensus
+          fetch-depth: 0
+
+      - name: Validate transformation scripts
+        run: python3 -m py_compile implementation/agent1-m3-*.py
+
+      - name: Apply membership integration
+        run: |
+          python3 implementation/agent1-m3-wire.py
+          python3 implementation/agent1-m3-daemon-core.py
+          python3 implementation/agent1-m3-daemon-membership.py
+          python3 implementation/agent1-m3-daemon-helpers.py
+
+      - name: Format Rust workspace
+        run: cargo fmt --all
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+
+      - name: Test consensus protocol storage and network
+        run: cargo test -p swarm-protocol -p swarm-consensus -p swarm-storage -p swarm-network
+
+      - name: Test CLI library
+        run: cargo test -p swarm-cli --lib
+
+      - name: Run live joint-membership join regression
+        run: cargo test -p swarm-cli --test live_join_replication -- --nocapture
+
+      - name: Compile all CLI integration tests
+        run: cargo test -p swarm-cli --tests --no-run
+
+      - name: Commit validated milestone
+        env:
+          BRANCH: fix/agent-1-consensus
+        run: |
+          rm implementation/agent1-m3-wire.py
+          rm implementation/agent1-m3-daemon-core.py
+          rm implementation/agent1-m3-daemon-membership.py
+          rm implementation/agent1-m3-daemon-helpers.py
+          rm .github/workflows/agent1-milestone-worker.yml
+          git add -A
+          git config user.name "swarmcraft-agent-1"
+          git config user.email "actions@users.noreply.github.com"
+          git commit -m "fix(consensus): commit membership with joint quorum"
+          git push origin "HEAD:${BRANCH}"
