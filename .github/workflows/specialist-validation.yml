@@ -47,7 +47,9 @@ jobs:
           cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
           cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
       - name: CurseForge deterministic provider tests
-        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml curseforge::tests:: --all-features --locked
+        run: >-
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+          curseforge::tests:: --all-features --locked
       - name: Validate CurseForge command registration
         shell: bash
         run: |
