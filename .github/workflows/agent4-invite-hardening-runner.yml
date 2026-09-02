@@ -1,0 +1,99 @@
+name: Agent 4 invite hardening milestone
+
+on:
+  push:
+    branches: [fix/agent-4-network]
+    paths:
+      - implementation/agent4-invite-hardening-runner.py
+      - .github/workflows/agent4-invite-hardening-runner.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout exact milestone seed
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: fix/agent-4-network
+          fetch-depth: 0
+
+      - name: Apply invite, DNS, and regression hardening
+        shell: bash
+        run: |
+          set -o pipefail
+          python implementation/agent4-invite-hardening-runner.py 2>&1 | tee implementation/agent4-invite-hardening-apply.log
+
+      - name: Format
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo fmt --all 2>&1 | tee implementation/agent4-invite-hardening-format.log
+          cargo fmt --all -- --check 2>&1 | tee -a implementation/agent4-invite-hardening-format.log
+
+      - name: Compile affected crates
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check -p swarm-network -p swarm-cli --all-targets --locked 2>&1 | tee implementation/agent4-invite-hardening-check.log
+
+      - name: Clippy affected crates
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy -p swarm-network -p swarm-cli --all-targets --locked -- -D warnings 2>&1 | tee implementation/agent4-invite-hardening-clippy.log
+
+      - name: Network tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p swarm-network --locked 2>&1 | tee implementation/agent4-invite-hardening-network-tests.log
+
+      - name: CLI unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p swarm-cli --bin swarmcraft --locked 2>&1 | tee implementation/agent4-invite-hardening-cli-tests.log
+
+      - name: Commit validated milestone
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rm implementation/agent4-invite-hardening-runner.py .github/workflows/agent4-invite-hardening-runner.yml
+          rm -f implementation/agent4-invite-hardening-*.log
+          git config user.name "swarmcraft-agent-4"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(network): harden invite bearer and DNS policy"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:fix/agent-4-network
+
+      - name: Preserve failure diagnostics
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          {
+            echo "# Agent 4 invite hardening milestone failure"
+            echo
+            echo "Seed: ${GITHUB_SHA}"
+            for file in implementation/agent4-invite-hardening-*.log; do
+              if [ -f "$file" ]; then
+                echo
+                echo "## $file"
+                echo '```text'
+                tail -n 600 "$file"
+                echo '```'
+              fi
+            done
+          } > implementation/agent4-invite-hardening-failure.md
+          rm -f implementation/agent4-invite-hardening-*.log
+          git config user.name "swarmcraft-agent-4"
+          git config user.email "actions@users.noreply.github.com"
+          git add -f implementation/agent4-invite-hardening-failure.md
+          git commit -m "chore(agent4): preserve invite hardening validation failure" || exit 0
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:fix/agent-4-network
