@@ -8,7 +8,9 @@ use swarm_protocol::{AuthorityLeaseGrantV1, AuthorityTransferV1, EpochRecordV1, 
 impl Storage {
     pub fn save_epoch_record(&self, record: &EpochRecordV1) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(record.world_id)?;
-        if let Ok(existing) = self.load_epoch_record(record.world_id) {
+        let path = self.control_path(record.world_id, "epoch.postcard");
+        if path.try_exists().map_err(|source| io_error(&path, source))? {
+            let existing = self.load_epoch_record(record.world_id)?;
             let existing_generation = (existing.epoch_number, existing.fencing_token);
             let requested_generation = (record.epoch_number, record.fencing_token);
             if requested_generation < existing_generation {
@@ -22,7 +24,7 @@ impl Storage {
             }
         }
         let bytes = postcard::to_allocvec(record)?;
-        durable_atomic_write(&self.control_path(record.world_id, "epoch.postcard"), &bytes)
+        durable_atomic_write(&path, &bytes)
     }
 
     pub fn load_epoch_record(&self, world: WorldId) -> Result<EpochRecordV1, StorageError> {
@@ -50,7 +52,9 @@ impl Storage {
     }
 
     fn reserve_recovery_locked(&self, reservation: &AuthorityLeaseGrantV1) -> Result<bool, StorageError> {
-        if let Ok(existing) = self.load_recovery_reservation(reservation.world_id) {
+        let path = self.control_path(reservation.world_id, "recovery-reservation.postcard");
+        if path.try_exists().map_err(|source| io_error(&path, source))? {
+            let existing = self.load_recovery_reservation(reservation.world_id)?;
             let existing_generation = (existing.epoch, existing.fencing_token);
             let requested_generation = (reservation.epoch, reservation.fencing_token);
             if requested_generation < existing_generation {
@@ -62,7 +66,7 @@ impl Storage {
             }
         }
         let bytes = postcard::to_allocvec(reservation)?;
-        durable_atomic_write(&self.control_path(reservation.world_id, "recovery-reservation.postcard"), &bytes)?;
+        durable_atomic_write(&path, &bytes)?;
         Ok(true)
     }
 
@@ -195,6 +199,20 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_epoch_record_cannot_be_overwritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0x34; 32]);
+        let path = store.world_dir(world).join("metadata").join("epoch.postcard");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"corrupt").unwrap();
+
+        let replacement = epoch_record(world, 2, 8, 12);
+        assert!(store.save_epoch_record(&replacement).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"corrupt");
+    }
+
+    #[test]
     fn recovery_reservation_round_trip_is_durable() {
         let temp = tempfile::tempdir().unwrap();
         let store = Storage::open(temp.path()).unwrap();
@@ -232,6 +250,20 @@ mod tests {
         store.save_recovery_reservation(&accepted).unwrap();
         assert!(matches!(store.save_recovery_reservation(&stale), Err(StorageError::WorldMetadataMismatch)));
         assert_eq!(store.load_recovery_reservation(world).unwrap().authority_peer_id, accepted.authority_peer_id);
+    }
+
+    #[test]
+    fn corrupt_recovery_reservation_cannot_be_overwritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0x57; 32]);
+        let path = store.world_dir(world).join("metadata").join("recovery-reservation.postcard");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"corrupt").unwrap();
+
+        let replacement = reservation(world, 6, 9, 13);
+        assert!(store.save_recovery_reservation(&replacement).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"corrupt");
     }
 
     #[test]
