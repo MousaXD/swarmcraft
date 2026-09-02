@@ -26,20 +26,14 @@ jobs:
 
           call = "            authorize_world_config_current_authority(storage, application_peer, &config)?;\n"
           if call not in text:
-              needle = '''            if application_peer != config.authority_peer_id {
-                  return Err(anyhow!("world config must be sent by its signed authority"));
-              }
-              storage.save_world_config(&config)?;
-          '''
-              replacement = '''            if application_peer != config.authority_peer_id {
-                  return Err(anyhow!("world config must be sent by its signed authority"));
-              }
-              authorize_world_config_current_authority(storage, application_peer, &config)?;
-              storage.save_world_config(&config)?;
-          '''
-              if needle not in text:
-                  raise SystemExit("WorldConfig handler target not found")
-              text = text.replace(needle, replacement, 1)
+              arm_start = text.index("        WireRequest::WorldConfig(config) => {")
+              arm_end = text.index("        WireRequest::SoloBranch(branch) => {", arm_start)
+              arm = text[arm_start:arm_end]
+              save = "            storage.save_world_config(&config)?;\n"
+              if save not in arm:
+                  raise SystemExit("WorldConfig save boundary not found")
+              arm = arm.replace(save, call + save, 1)
+              text = text[:arm_start] + arm + text[arm_end:]
 
           helper_name = "fn authorize_world_config_current_authority("
           if helper_name not in text:
