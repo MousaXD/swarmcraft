@@ -2,13 +2,15 @@
 
 ## Status
 
-STATUS: BLOCKED ON AGENTS 1-9
+STATUS: BLOCKED
 
 BRANCH: `integration/audit-remediation-v1`
 
 STARTING SHA: exact integration head after Agents 1-9 are integrated
 
-CURRENT HEAD SHA: pending
+CURRENT INTEGRATION HEAD AT GATE CHECK: `a9736b159d9e9618a3ed8515c20e93f92c1453cb`
+
+GATE CHECK DATE: 2026-09-02
 
 ## Mission
 
@@ -23,6 +25,25 @@ Required before starting:
 - Agents 1-9 integrated into `integration/audit-remediation-v1`
 - every Agent 1-9 ledger says `READY FOR INTEGRATION` before integration and records exact source SHA
 - integration README contains each consumed head
+
+### Dependency gate evidence at 2026-09-02
+
+The gate is not satisfied.
+
+- `integration/audit-remediation-v1` is still at `a9736b159d9e9618a3ed8515c20e93f92c1453cb`, the campaign-plan commit. No Agent 1-9 implementation head has been integrated.
+- Agent 1 branch `fix/agent-1-consensus` exists at `70333e6dcb6ec9ae8d1298ba9b4365db973c9394`; its branch ledger says `STATUS: IN PROGRESS` and all production checklist items remain.
+- Agent 2 integration ledger says `STATUS: BLOCKED ON AGENT 1`; its branch is not yet present remotely.
+- Agent 3 branch `fix/agent-3-storage` exists only at campaign base `b4bab08562cf0eb53763674407375b023e1d0858`; the integration ledger remains `NOT STARTED`.
+- Agent 4 branch `fix/agent-4-network` exists at `0f904e3dffd1381018463744dc14ded315a16bba`; it is not integrated.
+- Agent 5 branch `fix/agent-5-supply-chain` exists at `bdbe32e590531afd20d4250c4e4b2bb6d54e77db`; it is not integrated.
+- Agent 6 branch `fix/agent-6-runtime` exists at `005452cac52763e908e68400842872078bb4ffde`; it is not integrated.
+- Agent 7 has no `fix/agent-7-desktop` branch remotely; the integration ledger remains `NOT STARTED`.
+- Agent 8 branch `fix/agent-8-ci-release` exists at the campaign-plan head `a9736b159d9e9618a3ed8515c20e93f92c1453cb`; the integration ledger remains `NOT STARTED`.
+- Agent 9 integration ledger says `STATUS: BLOCKED ON AGENTS 1 + 6`; its branch is not yet present remotely.
+
+The required final-audit input was read from `audit/final-integration-report` because `audits/FINAL-AUDIT.md` is not present on the remediation integration branch. The audit explicitly assigns Final Acceptance only after Fix Agents A-I are integrated and requires the composed FINAL-037 gate on one exact fixed SHA.
+
+The local repository terminal connector also rejected this chat with `CALLER_IDENTITY_REQUIRED`. That prevents local process/runtime execution, but it is not the primary blocker: Agent 10 is contractually forbidden to begin acceptance until Agents 1-9 are integrated.
 
 ## Required acceptance journey
 
@@ -86,35 +107,43 @@ Do not treat isolated unit tests as proof of the full journey.
 
 ## Work completed
 
-None yet.
+- Read `implementation/README.md` from the live remediation integration branch.
+- Read this Agent 10 ledger.
+- Read all nine dependency ledgers from the live remediation integration branch.
+- Read the complete `audits/FINAL-AUDIT.md` from `audit/final-integration-report` and confirmed the Final Acceptance sequencing rule and FINAL-037 composed-gate requirement.
+- Verified live remote branch state and observed current worker branch heads.
+- Confirmed the Agent 10 dependency gate is closed before running any acceptance or changing production code.
+- Made no production-code changes because doing so before the dependency gate opens would violate Agent 10 ownership and would test the known-unremediated campaign baseline rather than an integrated candidate.
 
 ## Tests run
 
 | Test / Journey Step | Result | Exact SHA | Evidence |
 |---|---|---|---|
-| None yet | - | - | - |
+| Remote integration dependency gate | BLOCKED | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | Integration branch is still the campaign-plan commit; Agents 1-9 are not integrated. |
+| Agent 10 acceptance journey | NOT RUN | - | Contractually gated on Agents 1-9 integration. |
+| Mandatory adversarial regressions | NOT RUN | - | No valid integrated candidate SHA exists yet. |
 
 ## Blockers
 
-Agents 1-9 are not yet integrated.
+Primary blocker: Agents 1-9 have not been integrated into `integration/audit-remediation-v1`, so there is no valid candidate SHA on which Agent 10 may run final acceptance.
+
+Secondary execution limitation: the local repository/terminal connector rejects this chat with `CALLER_IDENTITY_REQUIRED`, so real local multi-process/Minecraft execution is unavailable in this session. This must be rechecked when the dependency gate opens, because the acceptance ledger requires real process/live runtime evidence, not only remote unit-test evidence.
 
 ## Remaining work
 
-All required journey and adversarial items.
+All required acceptance-journey and adversarial-regression items remain. Resume only after:
+
+1. Agents 1-9 each reach `READY FOR INTEGRATION` with exact validated source heads.
+2. Those exact heads are integrated into `integration/audit-remediation-v1` in dependency order.
+3. `implementation/README.md` records each consumed source head, integration commit, resulting integration head, and validation evidence.
+4. One exact resulting integration SHA is frozen for Agent 10 acceptance.
+5. Real local/process execution is available for the required Minecraft/Fabric and multi-daemon evidence.
 
 ## Handoff / final verdict
 
-After completing acceptance, update `implementation/README.md` with the exact accepted or failed integration SHA and evidence summary.
+Agent 10 cannot truthfully declare final product acceptance on the campaign-plan SHA.
 
-Then finish this ledger and your final response with exactly one of:
-
-`GOAL REACHED`
-
-or
-
-`GOAL NOT REACHED`
-
-If `GOAL REACHED`, freeze the exact candidate SHA and trigger re-audit by Auditors 0-10 plus the Final Audit Integrator against that exact SHA.
+When the dependency gate opens, run every acceptance item and mandatory adversarial regression on one exact integrated candidate SHA. If and only if all required evidence is green, update `implementation/README.md`, freeze that exact candidate SHA, and trigger re-audit by Auditors 0-10 plus the Final Audit Integrator.
 
 ## Agent final statement
 
