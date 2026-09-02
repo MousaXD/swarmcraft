@@ -7,7 +7,7 @@ use swarm_core::{
 use swarm_protocol::{
     snapshot_state_root, ArtifactSideV1, AuthorityLeaseGrantV1, AuthorityPolicyV1, AuthorityTransferV1, BlobDescriptor,
     BlobEncoding, EpochMode, EpochRecordV1, Hash32, InviteV1, JoinRequestV1, LeaveRequestV1, MembershipPolicyV1,
-    MembershipRecordV1, MembershipVoteV1, PeerId, RecoveryBallotV1, RecoveryVoteV1, RuntimeCompatibilityManifestV1,
+    MembershipRecordV1, MembershipVoteV1, RecoveryBallotV1, RecoveryVoteV1, RuntimeCompatibilityManifestV1,
     SleepRecordV1, SnapshotEntry, SnapshotManifestV1, SoloBranchV1, TransferPhase, WorldConfigV1, WorldGenesisV1,
     WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION,
 };
