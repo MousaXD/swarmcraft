@@ -5,22 +5,32 @@ use crate::{
     PackageEnvironment, ProviderFailure, ProviderFailureKind, ProviderId, ProviderResult, RateLimitSnapshot,
     ReleaseType, ResolvedModGraph,
 };
+use reqwest::{blocking::Client, redirect::Policy, Url};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde_json::Value;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io::Read,
-    path::{Path, PathBuf},
-    process::Command,
+    io::{Read, Write},
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 pub const MODRINTH_API_BASE: &str = "https://api.modrinth.com/v2";
 pub const DEFAULT_MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 pub const ABSOLUTE_MAX_ARTIFACT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const MAX_PROVIDER_METADATA_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PROVIDER_METADATA_HEADERS: usize = 128;
+const MAX_PROVIDER_METADATA_HEADER_BYTES: usize = 64 * 1024;
+const MAX_PROVIDER_METADATA_HEADER_VALUE_BYTES: usize = 16 * 1024;
+const MAX_PROVIDER_METADATA_DEPTH: usize = 32;
+const MAX_PROVIDER_METADATA_ARRAY_ITEMS: usize = 2048;
+const MAX_PROVIDER_METADATA_OBJECT_ENTRIES: usize = 512;
+const MAX_PROVIDER_METADATA_STRING_BYTES: usize = 64 * 1024;
+const MAX_PROVIDER_METADATA_NODES: usize = 50_000;
 
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
@@ -36,7 +46,9 @@ pub trait ModrinthTransport {
 
 #[derive(Debug, Clone)]
 pub struct CurlTransport {
-    user_agent: String,
+    // Kept under the historical public type name for API compatibility. HTTP is
+    // now in-process so redirect and response limits are enforceable per hop.
+    client: Client,
 }
 
 impl CurlTransport {
@@ -45,101 +57,93 @@ impl CurlTransport {
         if user_agent.trim().is_empty() {
             return Err(failure(ProviderFailureKind::InvalidRequest, "Modrinth User-Agent must identify SwarmCraft"));
         }
-        Ok(Self { user_agent })
+        let client = Client::builder()
+            .https_only(true)
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(900))
+            .redirect(Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    attempt.error("too many Modrinth redirects")
+                } else if attempt.previous().first().is_some_and(|origin| same_https_origin(origin, attempt.url())) {
+                    attempt.follow()
+                } else {
+                    attempt.error("Modrinth redirect left the original trusted origin")
+                }
+            }))
+            .user_agent(user_agent)
+            .build()
+            .map_err(|error| {
+                failure(ProviderFailureKind::Unavailable, format!("cannot initialize Modrinth HTTP client: {error}"))
+            })?;
+        Ok(Self { client })
     }
 }
 
 impl ModrinthTransport for CurlTransport {
     fn get(&self, url: &str) -> ProviderResult<HttpResponse> {
         trusted_https(url, &["api.modrinth.com"])?;
-        let headers_path = temporary_path("modrinth-headers");
-        let body_path = temporary_path("modrinth-body");
-        let output = Command::new("curl")
-            .args(["-sS", "-L", "--proto", "=https", "--connect-timeout", "15", "--max-time", "60", "-A"])
-            .arg(&self.user_agent)
-            .arg("-D")
-            .arg(&headers_path)
-            .arg("-o")
-            .arg(&body_path)
-            .arg("--write-out")
-            .arg("%{http_code}")
-            .arg(url)
-            .output()
-            .map_err(|error| {
-                failure(ProviderFailureKind::Unavailable, format!("cannot start curl for Modrinth: {error}"))
+        let mut response =
+            self.client.get(url).header("Accept", "application/json").send().map_err(|error| {
+                failure(ProviderFailureKind::Unavailable, format!("Modrinth request failed: {error}"))
             })?;
-
-        let status_text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !output.status.success() {
-            let _ = fs::remove_file(&headers_path);
-            let _ = fs::remove_file(&body_path);
-            return Err(failure(
-                ProviderFailureKind::Unavailable,
-                format!("Modrinth request failed: {}", String::from_utf8_lossy(&output.stderr).trim()),
-            ));
-        }
-        let status = status_text.parse::<u16>().map_err(|_| {
-            failure(
-                ProviderFailureKind::MalformedResponse,
-                format!("curl returned an invalid HTTP status for Modrinth: {status_text}"),
-            )
-        })?;
-        let headers = fs::read_to_string(&headers_path).map(|text| parse_headers(&text)).unwrap_or_default();
-        let body = fs::read(&body_path).map_err(|error| {
-            failure(ProviderFailureKind::Io, format!("cannot read Modrinth response body: {error}"))
-        })?;
-        let _ = fs::remove_file(&headers_path);
-        let _ = fs::remove_file(&body_path);
+        let status = response.status().as_u16();
+        let headers = bounded_headers(response.headers())?;
+        let body = read_bounded_response(&mut response, MAX_PROVIDER_METADATA_BYTES, "Modrinth metadata")?;
         Ok(HttpResponse { status, headers, body })
     }
 
     fn download(&self, url: &str, destination: &Path, max_bytes: u64) -> ProviderResult<()> {
         trusted_https(url, &["cdn.modrinth.com"])?;
-        let output = Command::new("curl")
-            .args(["-sS", "-L", "--proto", "=https", "--connect-timeout", "15", "--max-time", "900", "--max-filesize"])
-            .arg(max_bytes.to_string())
-            .arg("-A")
-            .arg(&self.user_agent)
-            .arg("-o")
-            .arg(destination)
-            .arg("--write-out")
-            .arg("%{http_code}")
-            .arg(url)
-            .output()
-            .map_err(|error| {
-                failure(ProviderFailureKind::DownloadInterrupted, format!("cannot start Modrinth download: {error}"))
+        let mut response =
+            self.client.get(url).header("Accept", "application/octet-stream").send().map_err(|error| {
+                failure(ProviderFailureKind::DownloadInterrupted, format!("Modrinth artifact download failed: {error}"))
             })?;
-
-        if !output.status.success() {
-            let _ = fs::remove_file(destination);
-            return Err(failure(
-                ProviderFailureKind::DownloadInterrupted,
-                format!("Modrinth artifact download failed: {}", String::from_utf8_lossy(&output.stderr).trim()),
-            ));
-        }
-        let status = String::from_utf8_lossy(&output.stdout).trim().parse::<u16>().map_err(|_| {
-            failure(
-                ProviderFailureKind::MalformedResponse,
-                "Modrinth artifact download returned an invalid HTTP status",
-            )
-        })?;
+        let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            let _ = fs::remove_file(destination);
             return Err(http_failure(status, &BTreeMap::new(), "Modrinth artifact"));
         }
-        let size = fs::metadata(destination)
-            .map_err(|error| {
-                failure(ProviderFailureKind::Io, format!("cannot inspect downloaded Modrinth artifact: {error}"))
-            })?
-            .len();
-        if size > max_bytes {
-            let _ = fs::remove_file(destination);
+        if response.content_length().is_some_and(|length| length > max_bytes) {
             return Err(failure(
                 ProviderFailureKind::DownloadInterrupted,
                 format!("Modrinth artifact exceeded the {max_bytes}-byte download bound"),
             ));
         }
-        Ok(())
+        let result = (|| -> ProviderResult<()> {
+            let mut output =
+                OpenOptions::new().create(true).truncate(true).write(true).open(destination).map_err(|error| {
+                    failure(ProviderFailureKind::Io, format!("cannot create Modrinth temporary artifact: {error}"))
+                })?;
+            let mut total = 0u64;
+            let mut buffer = [0u8; 64 * 1024];
+            loop {
+                let read = response.read(&mut buffer).map_err(|error| {
+                    failure(ProviderFailureKind::DownloadInterrupted, format!("Modrinth artifact read failed: {error}"))
+                })?;
+                if read == 0 {
+                    break;
+                }
+                total = total.checked_add(read as u64).ok_or_else(|| {
+                    failure(ProviderFailureKind::DownloadInterrupted, "Modrinth artifact size counter overflowed")
+                })?;
+                if total > max_bytes {
+                    return Err(failure(
+                        ProviderFailureKind::DownloadInterrupted,
+                        format!("Modrinth artifact exceeded the {max_bytes}-byte download bound"),
+                    ));
+                }
+                output.write_all(&buffer[..read]).map_err(|error| {
+                    failure(ProviderFailureKind::Io, format!("cannot write Modrinth temporary artifact: {error}"))
+                })?;
+            }
+            output.sync_all().map_err(|error| {
+                failure(ProviderFailureKind::Io, format!("cannot sync Modrinth temporary artifact: {error}"))
+            })?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(destination);
+        }
+        result
     }
 }
 
@@ -495,8 +499,18 @@ impl<T: ModrinthTransport> ModrinthClient<T> {
         if !(200..300).contains(&response.status) {
             return Err(http_failure(response.status, &response.headers, label));
         }
-        let parsed = serde_json::from_slice(&response.body).map_err(|error| {
+        validate_metadata_headers_map(&response.headers)?;
+        if response.body.len() > MAX_PROVIDER_METADATA_BYTES {
+            return Err(metadata_limit_failure(format!(
+                "{label} exceeded the {MAX_PROVIDER_METADATA_BYTES}-byte metadata response bound"
+            )));
+        }
+        let value: Value = serde_json::from_slice(&response.body).map_err(|error| {
             failure(ProviderFailureKind::MalformedResponse, format!("{label} returned malformed JSON: {error}"))
+        })?;
+        validate_metadata_value(&value)?;
+        let parsed = serde_json::from_value(value).map_err(|error| {
+            failure(ProviderFailureKind::MalformedResponse, format!("{label} returned invalid metadata: {error}"))
         })?;
         Ok((parsed, response.headers))
     }
@@ -938,28 +952,134 @@ fn http_failure(status: u16, headers: &BTreeMap<String, String>, label: &str) ->
     }
 }
 
-fn parse_headers(text: &str) -> BTreeMap<String, String> {
-    let mut headers = BTreeMap::new();
-    for line in text.lines() {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
-    }
-    headers
-}
-
 fn header_u64(headers: &BTreeMap<String, String>, name: &str) -> Option<u64> {
     headers.get(name).and_then(|value| value.trim().parse().ok())
 }
 
-fn safe_filename(filename: &str) -> ProviderResult<()> {
-    let path = Path::new(filename);
-    let file_name = path.file_name().and_then(|value| value.to_str());
-    if file_name != Some(filename) || filename.is_empty() {
-        return Err(failure(ProviderFailureKind::MalformedResponse, "Modrinth returned an unsafe artifact filename"));
+fn metadata_limit_failure(message: impl Into<String>) -> ProviderFailure {
+    failure(ProviderFailureKind::MalformedResponse, format!("response_too_large: {}", message.into()))
+}
+
+fn bounded_headers(headers: &reqwest::header::HeaderMap) -> ProviderResult<BTreeMap<String, String>> {
+    if headers.len() > MAX_PROVIDER_METADATA_HEADERS {
+        return Err(metadata_limit_failure("Modrinth returned too many response headers"));
+    }
+    let mut mapped = BTreeMap::new();
+    let mut total = 0usize;
+    for (name, value) in headers {
+        let bytes = value.as_bytes();
+        total = total.saturating_add(name.as_str().len()).saturating_add(bytes.len());
+        if bytes.len() > MAX_PROVIDER_METADATA_HEADER_VALUE_BYTES || total > MAX_PROVIDER_METADATA_HEADER_BYTES {
+            return Err(metadata_limit_failure("Modrinth response headers exceeded the metadata header budget"));
+        }
+        let value = value.to_str().map_err(|_| {
+            failure(ProviderFailureKind::MalformedResponse, "Modrinth returned a non-text metadata header")
+        })?;
+        mapped.insert(name.as_str().to_ascii_lowercase(), value.to_owned());
+    }
+    validate_metadata_headers_map(&mapped)?;
+    Ok(mapped)
+}
+
+fn validate_metadata_headers_map(headers: &BTreeMap<String, String>) -> ProviderResult<()> {
+    if headers.len() > MAX_PROVIDER_METADATA_HEADERS {
+        return Err(metadata_limit_failure("Modrinth returned too many response headers"));
+    }
+    let total = headers.iter().try_fold(0usize, |total, (name, value)| {
+        if value.len() > MAX_PROVIDER_METADATA_HEADER_VALUE_BYTES {
+            return Err(metadata_limit_failure("Modrinth metadata header value is too large"));
+        }
+        Ok(total.saturating_add(name.len()).saturating_add(value.len()))
+    })?;
+    if total > MAX_PROVIDER_METADATA_HEADER_BYTES {
+        return Err(metadata_limit_failure("Modrinth response headers exceeded the metadata header budget"));
     }
     Ok(())
+}
+
+fn read_bounded_response(
+    response: &mut reqwest::blocking::Response,
+    limit: usize,
+    label: &str,
+) -> ProviderResult<Vec<u8>> {
+    if response.content_length().is_some_and(|length| length > limit as u64) {
+        return Err(metadata_limit_failure(format!("{label} declared a body larger than {limit} bytes")));
+    }
+    let mut body = Vec::new();
+    response
+        .take(limit as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|error| failure(ProviderFailureKind::Unavailable, format!("cannot read {label}: {error}")))?;
+    if body.len() > limit {
+        return Err(metadata_limit_failure(format!("{label} exceeded the {limit}-byte response bound")));
+    }
+    Ok(body)
+}
+
+fn validate_metadata_value(value: &Value) -> ProviderResult<()> {
+    fn visit(value: &Value, depth: usize, nodes: &mut usize) -> ProviderResult<()> {
+        if depth > MAX_PROVIDER_METADATA_DEPTH {
+            return Err(metadata_limit_failure("Modrinth metadata nesting is too deep"));
+        }
+        *nodes = nodes.saturating_add(1);
+        if *nodes > MAX_PROVIDER_METADATA_NODES {
+            return Err(metadata_limit_failure("Modrinth metadata contains too many values"));
+        }
+        match value {
+            Value::String(text) if text.len() > MAX_PROVIDER_METADATA_STRING_BYTES => {
+                Err(metadata_limit_failure("Modrinth metadata string is too large"))
+            }
+            Value::Array(items) => {
+                if items.len() > MAX_PROVIDER_METADATA_ARRAY_ITEMS {
+                    return Err(metadata_limit_failure("Modrinth metadata array is too large"));
+                }
+                for item in items {
+                    visit(item, depth + 1, nodes)?;
+                }
+                Ok(())
+            }
+            Value::Object(entries) => {
+                if entries.len() > MAX_PROVIDER_METADATA_OBJECT_ENTRIES {
+                    return Err(metadata_limit_failure("Modrinth metadata object has too many fields"));
+                }
+                for (key, item) in entries {
+                    if key.len() > 256 {
+                        return Err(metadata_limit_failure("Modrinth metadata key is too large"));
+                    }
+                    visit(item, depth + 1, nodes)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+    let mut nodes = 0usize;
+    visit(value, 0, &mut nodes)
+}
+
+fn safe_filename(filename: &str) -> ProviderResult<()> {
+    let path = Path::new(filename);
+    let stem = filename.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    let windows_reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+    let portable = filename.len() > 4
+        && filename == filename.trim()
+        && filename.len() <= 255
+        && !path.is_absolute()
+        && path.components().count() == 1
+        && !filename.contains(['/', '\\', ':', '\0'])
+        && filename != "."
+        && filename != ".."
+        && !filename.ends_with(['.', ' '])
+        && !windows_reserved
+        && filename.to_ascii_lowercase().ends_with(".jar");
+    if portable {
+        Ok(())
+    } else {
+        Err(failure(ProviderFailureKind::MalformedResponse, "Modrinth returned an unsafe artifact filename"))
+    }
 }
 
 fn publish_replace(temporary: &Path, destination: &Path) -> ProviderResult<()> {
@@ -999,17 +1119,33 @@ fn require_nonempty<'a>(value: &'a str, label: &str) -> ProviderResult<&'a str> 
     }
 }
 
+fn same_https_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == "https"
+        && right.scheme() == "https"
+        && left.username().is_empty()
+        && right.username().is_empty()
+        && left.password().is_none()
+        && right.password().is_none()
+        && left.host_str().zip(right.host_str()).is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        && left.port_or_known_default() == Some(443)
+        && right.port_or_known_default() == Some(443)
+}
+
 fn trusted_https(url: &str, hosts: &[&str]) -> ProviderResult<()> {
-    let rest = url.strip_prefix("https://").ok_or_else(|| {
-        failure(ProviderFailureKind::RetrievalRestricted, "Modrinth provider requests and downloads must use HTTPS")
-    })?;
-    let host = rest.split(['/', '?', '#']).next().unwrap_or_default().split(':').next().unwrap_or_default();
-    if hosts.iter().any(|allowed| host.eq_ignore_ascii_case(allowed)) {
+    let parsed = Url::parse(url)
+        .map_err(|_| failure(ProviderFailureKind::RetrievalRestricted, "Modrinth returned an invalid provider URL"))?;
+    let host = parsed.host_str().unwrap_or_default();
+    let trusted = parsed.scheme() == "https"
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.port_or_known_default() == Some(443)
+        && hosts.iter().any(|allowed| host.eq_ignore_ascii_case(allowed));
+    if trusted {
         Ok(())
     } else {
         Err(failure(
             ProviderFailureKind::RetrievalRestricted,
-            format!("Modrinth URL host is outside the provider trust boundary: {host}"),
+            format!("Modrinth URL is outside the provider trust boundary: {url}"),
         ))
     }
 }
@@ -1036,10 +1172,6 @@ fn eq_hash(expected: &str, actual: &str) -> bool {
     expected.trim().eq_ignore_ascii_case(actual.trim())
 }
 
-fn temporary_path(prefix: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("{prefix}-{}", unique_suffix()))
-}
-
 fn unique_suffix() -> String {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
     format!("{}-{nanos}", std::process::id())
@@ -1047,4 +1179,34 @@ fn unique_suffix() -> String {
 
 fn failure(kind: ProviderFailureKind, message: impl Into<String>) -> ProviderFailure {
     ProviderFailure::new(kind, message)
+}
+
+#[cfg(test)]
+mod agent5_http_security_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn modrinth_urls_and_redirects_stay_on_exact_origins() {
+        assert!(trusted_https("https://api.modrinth.com/v2/search", &["api.modrinth.com"]).is_ok());
+        assert!(trusted_https("https://cdn.modrinth.com/data/x.jar", &["cdn.modrinth.com"]).is_ok());
+        assert!(trusted_https("https://cdn.modrinth.com@attacker.invalid/x.jar", &["cdn.modrinth.com"]).is_err());
+        assert!(trusted_https("https://127.0.0.1/x.jar", &["cdn.modrinth.com"]).is_err());
+        let api = Url::parse("https://api.modrinth.com/v2/search").unwrap();
+        let same = Url::parse("https://api.modrinth.com/v2/project/x").unwrap();
+        let other = Url::parse("https://attacker.invalid/steal").unwrap();
+        assert!(same_https_origin(&api, &same));
+        assert!(!same_https_origin(&api, &other));
+    }
+
+    #[test]
+    fn modrinth_metadata_shape_and_portable_filename_are_bounded() {
+        assert!(validate_metadata_value(&json!({"items": ["ok"]})).is_ok());
+        let huge = json!({"text": "x".repeat(MAX_PROVIDER_METADATA_STRING_BYTES + 1)});
+        assert!(validate_metadata_value(&huge).is_err());
+        for invalid in ["../evil.jar", "..\\evil.jar", "C:\\evil.jar", "\\\\server\\evil.jar", "CON.jar"] {
+            assert!(safe_filename(invalid).is_err(), "accepted {invalid}");
+        }
+        assert!(safe_filename("safe-mod.jar").is_ok());
+    }
 }

@@ -3635,6 +3635,7 @@ dependencies = [
 name = "swarm-provider"
 version = "0.4.0"
 dependencies = [
+ "reqwest 0.12.22",
  "serde",
  "serde_json",
  "sha1",

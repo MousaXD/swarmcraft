@@ -22,6 +22,15 @@ const MAX_PAGE_SIZE: u64 = 50;
 const MAX_SEARCH_INDEX: u64 = 10_000;
 const MAX_DEPENDENCY_PACKAGES: usize = 128;
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
+const MAX_METADATA_HEADERS: usize = 128;
+const MAX_METADATA_HEADER_BYTES: usize = 64 * 1024;
+const MAX_METADATA_HEADER_VALUE_BYTES: usize = 16 * 1024;
+const MAX_METADATA_DEPTH: usize = 32;
+const MAX_METADATA_ARRAY_ITEMS: usize = 2048;
+const MAX_METADATA_OBJECT_ENTRIES: usize = 512;
+const MAX_METADATA_STRING_BYTES: usize = 64 * 1024;
+const MAX_METADATA_NODES: usize = 50_000;
 
 #[derive(Debug, Clone)]
 struct ProviderError {
@@ -99,34 +108,57 @@ impl Target {
 }
 
 struct CurseForgeClient {
-    http: reqwest::Client,
+    api_http: reqwest::Client,
+    artifact_http: reqwest::Client,
     api_key: Option<String>,
 }
 
 impl CurseForgeClient {
     fn from_environment() -> Result<Self, ProviderError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(120))
+        let common = || {
+            reqwest::Client::builder()
+                .https_only(true)
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(120))
+                .user_agent(concat!("SwarmCraft/", env!("CARGO_PKG_VERSION"), " CurseForgeProvider"))
+        };
+        let api_http = common()
             .redirect(Policy::custom(|attempt| {
                 if attempt.previous().len() >= 5 {
-                    attempt.error("too many redirects")
-                } else if attempt.url().scheme() != "https" {
-                    attempt.error("CurseForge download redirected away from HTTPS")
-                } else {
+                    attempt.error("too many CurseForge API redirects")
+                } else if is_curseforge_api_url(attempt.url()) {
                     attempt.follow()
+                } else {
+                    attempt.error("authenticated CurseForge API redirect left api.curseforge.com")
                 }
             }))
-            .user_agent(concat!("SwarmCraft/", env!("CARGO_PKG_VERSION"), " CurseForgeProvider"))
             .build()
             .map_err(|error| {
                 ProviderError::new(
                     "unavailable",
                     "provider_initialization_failed",
-                    format!("Could not initialize CurseForge HTTP client: {error}"),
+                    format!("Could not initialize authenticated CurseForge HTTP client: {error}"),
                 )
             })?;
-        Ok(Self { http, api_key: normalize_api_key(env::var(API_KEY_ENV).ok()) })
+        let artifact_http = common()
+            .redirect(Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    attempt.error("too many CurseForge artifact redirects")
+                } else if is_curseforge_artifact_url(attempt.url()) {
+                    attempt.follow()
+                } else {
+                    attempt.error("CurseForge artifact redirect left the Forge CDN trust boundary")
+                }
+            }))
+            .build()
+            .map_err(|error| {
+                ProviderError::new(
+                    "unavailable",
+                    "provider_initialization_failed",
+                    format!("Could not initialize CurseForge artifact HTTP client: {error}"),
+                )
+            })?;
+        Ok(Self { api_http, artifact_http, api_key: normalize_api_key(env::var(API_KEY_ENV).ok()) })
     }
 
     fn require_api_key(&self) -> Result<&str, ProviderError> {
@@ -147,7 +179,7 @@ impl CurseForgeClient {
     ) -> Result<Value, ProviderError> {
         let key = self.require_api_key()?;
         let response = self
-            .http
+            .api_http
             .get(format!("{API_BASE}{path}"))
             .header("Accept", "application/json")
             .header("x-api-key", key)
@@ -161,7 +193,7 @@ impl CurseForgeClient {
     async fn post_json(&self, path: &str, body: Value, missing: MissingResource) -> Result<Value, ProviderError> {
         let key = self.require_api_key()?;
         let response = self
-            .http
+            .api_http
             .post(format!("{API_BASE}{path}"))
             .header("Accept", "application/json")
             .header("x-api-key", key)
@@ -230,7 +262,7 @@ impl CurseForgeClient {
         let file_id = required_u64(file, "id")?;
         let key = self.require_api_key()?;
         let response = self
-            .http
+            .api_http
             .get(format!("{API_BASE}/v1/mods/{project_id}/files/{file_id}/download-url"))
             .header("Accept", "application/json")
             .header("x-api-key", key)
@@ -249,7 +281,24 @@ impl CurseForgeClient {
 }
 
 fn normalize_api_key(raw: Option<String>) -> Option<String> {
-    raw.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+    raw.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
+}
+
+fn is_curseforge_api_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && url.host_str().is_some_and(|host| host.eq_ignore_ascii_case("api.curseforge.com"))
+}
+
+fn is_curseforge_artifact_url(url: &reqwest::Url) -> bool {
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && (host == "forgecdn.net" || host.ends_with(".forgecdn.net"))
 }
 
 fn map_request_error(error: reqwest::Error) -> ProviderError {
@@ -272,7 +321,81 @@ fn map_download_error(error: reqwest::Error) -> ProviderError {
     }
 }
 
-async fn parse_json_response(response: reqwest::Response, missing: MissingResource) -> Result<Value, ProviderError> {
+fn metadata_limit_error(message: impl Into<String>) -> ProviderError {
+    ProviderError::new("error", "response_too_large", message)
+}
+
+fn validate_metadata_headers(headers: &reqwest::header::HeaderMap) -> Result<(), ProviderError> {
+    if headers.len() > MAX_METADATA_HEADERS {
+        return Err(metadata_limit_error("CurseForge returned too many metadata response headers"));
+    }
+    let mut total = 0usize;
+    for (name, value) in headers {
+        total = total.saturating_add(name.as_str().len()).saturating_add(value.as_bytes().len());
+        if value.as_bytes().len() > MAX_METADATA_HEADER_VALUE_BYTES || total > MAX_METADATA_HEADER_BYTES {
+            return Err(metadata_limit_error("CurseForge metadata response headers exceeded their byte budget"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_metadata_value(value: &Value) -> Result<(), ProviderError> {
+    fn visit(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), ProviderError> {
+        if depth > MAX_METADATA_DEPTH {
+            return Err(metadata_limit_error("CurseForge metadata nesting is too deep"));
+        }
+        *nodes = nodes.saturating_add(1);
+        if *nodes > MAX_METADATA_NODES {
+            return Err(metadata_limit_error("CurseForge metadata contains too many values"));
+        }
+        match value {
+            Value::String(text) if text.len() > MAX_METADATA_STRING_BYTES => {
+                Err(metadata_limit_error("CurseForge metadata string is too large"))
+            }
+            Value::Array(items) => {
+                if items.len() > MAX_METADATA_ARRAY_ITEMS {
+                    return Err(metadata_limit_error("CurseForge metadata array is too large"));
+                }
+                for item in items {
+                    visit(item, depth + 1, nodes)?;
+                }
+                Ok(())
+            }
+            Value::Object(entries) => {
+                if entries.len() > MAX_METADATA_OBJECT_ENTRIES {
+                    return Err(metadata_limit_error("CurseForge metadata object has too many fields"));
+                }
+                for (key, item) in entries {
+                    if key.len() > 256 {
+                        return Err(metadata_limit_error("CurseForge metadata key is too large"));
+                    }
+                    visit(item, depth + 1, nodes)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+    let mut nodes = 0usize;
+    visit(value, 0, &mut nodes)
+}
+
+fn parse_metadata_bytes(bytes: &[u8]) -> Result<Value, ProviderError> {
+    if bytes.len() > MAX_METADATA_BYTES {
+        return Err(metadata_limit_error(format!(
+            "CurseForge metadata exceeded the {MAX_METADATA_BYTES}-byte response bound"
+        )));
+    }
+    let value = serde_json::from_slice::<Value>(bytes).map_err(|_| malformed_response())?;
+    validate_metadata_value(&value)?;
+    Ok(value)
+}
+
+async fn parse_json_response(
+    mut response: reqwest::Response,
+    missing: MissingResource,
+) -> Result<Value, ProviderError> {
+    validate_metadata_headers(response.headers())?;
     if !response.status().is_success() {
         let retry_after = response
             .headers()
@@ -281,7 +404,19 @@ async fn parse_json_response(response: reqwest::Response, missing: MissingResour
             .and_then(|value| value.parse::<u64>().ok());
         return Err(map_http_status(response.status().as_u16(), missing, retry_after));
     }
-    response.json::<Value>().await.map_err(|_| malformed_response())
+    if response.content_length().is_some_and(|length| length > MAX_METADATA_BYTES as u64) {
+        return Err(metadata_limit_error("CurseForge metadata Content-Length exceeded the response bound"));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(map_request_error)? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_METADATA_BYTES {
+            return Err(metadata_limit_error(format!(
+                "CurseForge metadata exceeded the {MAX_METADATA_BYTES}-byte response bound"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    parse_metadata_bytes(&bytes)
 }
 
 fn map_http_status(status: u16, missing: MissingResource, retry_after: Option<u64>) -> ProviderError {
@@ -313,6 +448,11 @@ fn map_http_status(status: u16, missing: MissingResource, retry_after: Option<u6
         500..=599 => {
             ProviderError::new("unavailable", "provider_unavailable", format!("CurseForge returned HTTP {status}"))
         }
+        300..=399 => ProviderError::new(
+            "error",
+            "redirect_rejected",
+            "CurseForge redirect was rejected by the provider origin policy",
+        ),
         _ => ProviderError::new("error", "provider_request_failed", format!("CurseForge returned HTTP {status}")),
     }
 }
@@ -706,11 +846,11 @@ fn validate_download_url(url: &str) -> Result<String, ProviderError> {
     let parsed = reqwest::Url::parse(url).map_err(|_| {
         ProviderError::new("download_failed", "untrusted_download_url", "CurseForge returned an invalid artifact URL")
     })?;
-    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+    if !is_curseforge_artifact_url(&parsed) {
         return Err(ProviderError::new(
             "download_failed",
             "untrusted_download_url",
-            "CurseForge automatic downloads must use provider-returned HTTPS URLs",
+            "CurseForge automatic downloads must stay on the HTTPS forgecdn.net artifact boundary",
         ));
     }
     Ok(parsed.to_string())
@@ -935,8 +1075,13 @@ async fn download_artifact(
     let Some(url) = client.download_url(file).await? else {
         return manual_artifact_required(file, project);
     };
-    let mut response =
-        client.http.get(url).header("Accept", "application/octet-stream").send().await.map_err(map_download_error)?;
+    let mut response = client
+        .artifact_http
+        .get(url)
+        .header("Accept", "application/octet-stream")
+        .send()
+        .await
+        .map_err(map_download_error)?;
     if matches!(response.status(), StatusCode::FORBIDDEN | StatusCode::NOT_FOUND) {
         return manual_artifact_required(file, project);
     }
@@ -1456,5 +1601,36 @@ mod agent5_security_tests {
             assert!(safe_jar_filename(invalid).is_err(), "accepted {invalid}");
         }
         assert!(safe_jar_filename("safe-mod_1.2.3.jar").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod agent5_http_security_tests {
+    use super::*;
+
+    #[test]
+    fn authenticated_api_and_artifact_origins_are_disjoint() {
+        let api = reqwest::Url::parse("https://api.curseforge.com/v1/mods/1").unwrap();
+        let second_origin = reqwest::Url::parse("https://attacker.invalid/steal").unwrap();
+        let forge = reqwest::Url::parse("https://edge.forgecdn.net/files/example.jar").unwrap();
+        let private = reqwest::Url::parse("https://127.0.0.1/example.jar").unwrap();
+        assert!(is_curseforge_api_url(&api));
+        assert!(!is_curseforge_api_url(&second_origin));
+        assert!(is_curseforge_artifact_url(&forge));
+        assert!(!is_curseforge_artifact_url(&second_origin));
+        assert!(!is_curseforge_artifact_url(&private));
+    }
+
+    #[test]
+    fn provider_metadata_bytes_and_shape_are_bounded() {
+        assert_eq!(parse_metadata_bytes(&vec![b' '; MAX_METADATA_BYTES + 1]).unwrap_err().code, "response_too_large");
+        let huge = json!({"text": "x".repeat(MAX_METADATA_STRING_BYTES + 1)});
+        assert_eq!(validate_metadata_value(&huge).unwrap_err().code, "response_too_large");
+    }
+
+    #[test]
+    fn api_key_control_characters_are_rejected() {
+        assert_eq!(normalize_api_key(Some("secret\nheader".into())), None);
+        assert_eq!(normalize_api_key(Some(" secret ".into())), Some("secret".into()));
     }
 }
