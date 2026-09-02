@@ -29,9 +29,11 @@ async function existingChromeDriver() {
 
 function moduleSpecifiers(source) {
   const found = new Set();
-  const staticImport = /(?:\bimport\s+(?:[^'";]*?\s+from\s*)?|\bexport\s+[^'";]*?\s+from\s*)(['"])(\.{1,2}\/[^'"]+)\1/g;
-  const dynamicImport = /\bimport\s*\(\s*(['"])(\.{1,2}\/[^'"]+)\1\s*\)/g;
-  for (const pattern of [staticImport, dynamicImport]) {
+  const patterns = [
+    /(?:\bimport\s+(?:[^'\";]*?\s+from\s*)?|\bexport\s+[^'\";]*?\s+from\s*)(['\"])(\.{1,2}\/[^'\"]+)\1/g,
+    /\bimport\s*\(\s*(['\"])(\.{1,2}\/[^'\"]+)\1\s*\)/g,
+  ];
+  for (const pattern of patterns) {
     for (const match of source.matchAll(pattern)) found.add(match[2]);
   }
   return [...found];
@@ -59,17 +61,25 @@ async function collectModuleGraph(entry = entryModule) {
 }
 
 async function instrumentedDocument() {
-  const [html, css] = await Promise.all([
+  const [html, mainCss, playerCss, runtimeCss] = await Promise.all([
     readFile(path.join(sourceRoot, 'index.html'), 'utf8'),
     readFile(path.join(sourceRoot, 'style.css'), 'utf8'),
+    readFile(path.join(sourceRoot, 'player-experience.css'), 'utf8'),
+    readFile(path.join(sourceRoot, 'runtime-wizard.css'), 'utf8'),
   ]);
   const moduleMarker = '<script type="module" src="./app.js"></script>';
   const styleMarker = '<link rel="stylesheet" href="./style.css" />';
   assert.ok(html.includes(moduleMarker), 'index.html app module marker changed; browser smoke harness must be reviewed');
   assert.ok(html.includes(styleMarker), 'index.html stylesheet marker changed; browser smoke harness must be reviewed');
-  return html
-    .replace(styleMarker, `<style data-agent7-production-style>${css}</style>`)
-    .replace(moduleMarker, '');
+
+  const preloadedStyles = [
+    `<style data-agent7-production-style>${mainCss}</style>`,
+    `<style data-agent7-player-experience-style>${playerCss}</style>`,
+    `<style data-agent7-runtime-wizard-style>${runtimeCss}</style>`,
+    '<link rel="stylesheet" data-player-experience href="data:text/css," />',
+    '<link rel="stylesheet" data-runtime-wizard-style href="data:text/css," />',
+  ].join('\n');
+  return html.replace(styleMarker, preloadedStyles).replace(moduleMarker, '');
 }
 
 async function freePort() {
@@ -98,9 +108,7 @@ async function webdriverRequest(port, pathname, { method = 'GET', body } = {}) {
 
 async function startDriver(executable) {
   const port = await freePort();
-  const child = spawn(executable, [`--port=${port}`, '--allowed-ips=127.0.0.1'], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  const child = spawn(executable, [`--port=${port}`, '--allowed-ips=127.0.0.1'], { stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
@@ -174,7 +182,7 @@ async function setViewport(port, sessionId, width, height) {
   assert.deepEqual(
     { width: metrics.innerWidth, height: metrics.innerHeight },
     { width, height },
-    `ChromeDriver could not establish the requested viewport; outer=${metrics.outerWidth}x${metrics.outerHeight}`,
+    `ChromeDriver could not establish requested viewport; outer=${metrics.outerWidth}x${metrics.outerHeight}`,
   );
 }
 
@@ -235,7 +243,7 @@ const entry = arguments[1];
     .split('"' + specifier + '"').join('"' + url + '"');
   const build = async (id) => {
     if (urls.has(id)) return urls.get(id);
-    if (building.has(id)) throw new Error('Desktop module graph contains an unsupported static import cycle at ' + id);
+    if (building.has(id)) throw new Error('Desktop module graph contains unsupported static import cycle at ' + id);
     const module = modules[id];
     if (!module) throw new Error('Missing Desktop module source for ' + id);
     building.add(id);
@@ -277,18 +285,22 @@ const scenario = String.raw`(async () => {
     require(document.activeElement === element, '#' + id + ' could not receive focus');
     for (const ancestor of hidden) ancestor.hidden = true;
   };
+
   await waitFor(() => document.getElementById('launcherMods'), 'Mods UI');
   require(document.getElementById('publicWorldDiscovery'), 'Public discovery UI did not install');
   require(document.getElementById('launcherMods').closest('#createForm'), 'Mods UI was not inserted into Create form');
-  await waitFor(() => document.getElementById('importMinecraft')?.tagName === 'SELECT' && document.getElementById('importLoader')?.tagName === 'SELECT', 'Import catalog hydration');
+  await waitFor(
+    () => document.getElementById('importMinecraft')?.tagName === 'SELECT' && document.getElementById('importLoader')?.tagName === 'SELECT',
+    'Import catalog hydration',
+  );
 
   const minecraftCalls = window.__swarmcraftCalls.filter((call) => call.command === 'minecraft_versions');
   const fabricCalls = window.__swarmcraftCalls.filter((call) => call.command === 'fabric_loader_versions');
   require(minecraftCalls.length >= 2, 'Expected Create and Import Minecraft catalog calls');
   require(minecraftCalls.every((call) => typeof call.args?.includeSnapshots === 'boolean' && typeof call.args?.refresh === 'boolean'), 'A minecraft_versions call omitted required boolean payloads');
   require(fabricCalls.every((call) => call.args?.minecraftVersion && typeof call.args?.refresh === 'boolean'), 'A fabric_loader_versions call omitted required payloads');
-  require(document.getElementById('createMinecraft').value === '26.1.2', 'Create did not select the shipped runtime Minecraft line');
-  require(document.getElementById('createLoader').value === '0.19.3', 'Create did not select the minimum shipped Fabric loader');
+  require(document.getElementById('createMinecraft').value === '26.1.2', 'Create did not select shipped runtime Minecraft line');
+  require(document.getElementById('createLoader').value === '0.19.3', 'Create did not select minimum shipped Fabric loader');
 
   document.getElementById('joinWorldId').value = 'scworld:browser-public';
   document.getElementById('joinWorldIdButton').click();
@@ -306,13 +318,16 @@ const scenario = String.raw`(async () => {
   await waitFor(() => document.getElementById('createError')?.dataset.createdWorldId === 'scworld:browser-smoke', 'post-create repair state');
 
   require(window.__swarmcraftCalls.filter((call) => call.command === 'create_canonical_world').length === 1, 'Canonical Create was not invoked exactly once');
-  require(window.__swarmcraftCalls.filter((call) => call.command === 'create_world').length === 0, 'Legacy create_world handler still owned the intended Create path');
+  require(window.__swarmcraftCalls.filter((call) => call.command === 'create_world').length === 0, 'Legacy create_world handler still owned intended Create path');
   require(document.getElementById('createWorld').disabled, 'Create submit was re-enabled after canonical world already existed');
   require(document.getElementById('createRepairRetry'), 'Local mod repair action was not offered');
   require(document.getElementById('createError').textContent.includes('was created canonically'), 'Partial-success copy did not preserve canonical creation success');
   require(document.querySelector('#sleepDialog .dialog-card > div:first-child p').textContent.includes('durable sleeping state'), 'Stop dialog did not expose durable sleeping semantics');
 
-  for (const id of ['createName', 'createVisibility', 'createMinecraft', 'createLoader', 'modProvider', 'modSearch', 'modSearchButton', 'createWorld', 'joinInvite', 'joinWorld', 'joinWorldId', 'joinWorldIdButton', 'eula', 'host', 'inviteWorld', 'transferHost', 'sleepWorld', 'leaveWorld']) focusable(id);
+  for (const id of [
+    'createName', 'createVisibility', 'createMinecraft', 'createLoader', 'modProvider', 'modSearch', 'modSearchButton', 'createWorld',
+    'joinInvite', 'joinWorld', 'joinWorldId', 'joinWorldIdButton', 'eula', 'host', 'inviteWorld', 'transferHost', 'sleepWorld', 'leaveWorld',
+  ]) focusable(id);
 
   require(window.__swarmcraftBrowserErrors.length === 0, 'Uncaught browser errors: ' + window.__swarmcraftBrowserErrors.join(' | '));
   require(document.body.scrollWidth <= innerWidth, 'Page has horizontal overflow at ' + innerWidth + 'px');
@@ -340,21 +355,25 @@ async function runViewport(port, sessionId, documentHtml, graph, width, height, 
 
   const loaded = await executeAsync(port, sessionId, moduleLoaderScript, [graph, entryModule]);
   assert.equal(loaded?.ok, true, `Desktop module graph failed to import: ${loaded?.error || JSON.stringify(loaded)}`);
-  assert.ok(loaded.value?.modules >= 2, 'Browser smoke did not load the Desktop module graph');
+  assert.ok(loaded.value?.modules >= 2, 'Browser smoke did not load Desktop module graph');
 
   const result = await executeAsync(port, sessionId, scenarioRunner, [scenario]);
-  assert.equal(result?.ok, true, `Browser scenario threw at ${width}x${height}: ${result?.error || JSON.stringify(result)}\nBrowser errors: ${(result?.browserErrors || []).join(' | ')}`);
+  assert.equal(
+    result?.ok,
+    true,
+    `Browser scenario threw at ${width}x${height}: ${result?.error || JSON.stringify(result)}\nBrowser errors: ${(result?.browserErrors || []).join(' | ')}`,
+  );
   assert.equal(result.value?.status, 'pass', `Browser smoke failed at ${width}x${height}: ${JSON.stringify(result.value)}`);
   assert.deepEqual({ width: result.value.width, height: result.value.height }, { width, height });
 
   const screenshotBase64 = await webdriverRequest(port, `/session/${sessionId}/screenshot`);
-  assert.ok(screenshotBase64, 'ChromeDriver returned an empty screenshot');
+  assert.ok(screenshotBase64, 'ChromeDriver returned empty screenshot');
   await writeFile(screenshotPath, Buffer.from(screenshotBase64, 'base64'));
 }
 
 test('current Desktop module graph initializes, owns canonical Create, and renders supported window sizes', async () => {
   const driver = await existingChromeDriver();
-  assert.ok(driver, 'ChromeDriver is required for the Agent 7 real-browser smoke gate on Linux CI');
+  assert.ok(driver, 'ChromeDriver is required for Agent 7 real-browser smoke gate on Linux CI');
   await mkdir(evidenceRoot, { recursive: true });
   const [documentHtml, graph] = await Promise.all([instrumentedDocument(), collectModuleGraph()]);
   const running = await startDriver(driver);
@@ -364,8 +383,7 @@ test('current Desktop module graph initializes, owns canonical Create, and rende
     for (const [width, height] of [[980, 760], [720, 560], [1280, 900]]) {
       const screenshot = path.join(evidenceRoot, `${width}x${height}.png`);
       await runViewport(running.port, sessionId, documentHtml, graph, width, height, screenshot);
-      const dimensions = pngDimensions(await readFile(screenshot));
-      assert.deepEqual(dimensions, { width, height });
+      assert.deepEqual(pngDimensions(await readFile(screenshot)), { width, height });
     }
   } finally {
     if (sessionId) {
