@@ -10,7 +10,7 @@ STARTING SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
 
 BRANCH CREATION SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` (campaign planning head; production baseline remains the declared `b4bab085...` tree plus implementation ledgers)
 
-CURRENT HEAD SHA: `66032d4174091051bfc0ea3fbfbc6e65e1b949e9` before this progress-ledger commit
+CURRENT HEAD SHA: `1510899c61c32ef2ddfaf009da1ff760527be843` before this progress-ledger commit
 
 INTEGRATED SHA: pending
 
@@ -36,7 +36,7 @@ Make release publication mean that the exact published SHA passed the project’
 - `audits/09-ci-release.md` from `audit/ci-release`
 - repository-wide `AGENTS.md`
 
-The final audit and Auditor 9 agree on the core failure: installer/release publication is not coupled to completed validation of the exact published SHA. Auditor 9 additionally provides the concrete action-pin, excluded-crate, tag/version, Loom, Desktop lock, signing, retention, and historical-workflow failure scenarios required below.
+The final audit and Auditor 9 agree on the core failure: installer/release publication was not coupled to completed validation of the exact published SHA. Auditor 9 additionally supplied the action-pin, excluded-crate, tag/version, Loom, Desktop lock, signing, retention, and historical-workflow failure scenarios addressed below.
 
 ## Dependencies
 
@@ -63,18 +63,18 @@ Do not hide product test failures by weakening required gates.
 - [x] Define one authoritative reusable same-SHA validation gate for release candidates.
 - [x] Make `main-latest` publication wait until every required same-SHA gate completes successfully.
 - [x] Make versioned tag release rerun or verify the full required gate for the exact tag target SHA.
-- [x] Encode and lint the release DAG so packaging/publication cannot bypass required validation; dynamic GitHub proof is still pending below.
+- [x] Encode and lint the release DAG so packaging/publication cannot bypass required validation.
 - [x] Pin every third-party GitHub Action in active workflows to immutable full commit SHA with human-readable version comments.
 - [x] Default workflow permissions to read; grant `contents: write` only to final publisher jobs that need it.
 - [x] Add direct Desktop Rust lint/tests to authoritative CI.
 - [x] Add direct provider lint/tests to authoritative CI.
-- [x] Add explicit Desktop `Cargo.lock` metadata preflights to authoritative CI and package paths; cross-platform shell cleanup remains before validation.
+- [x] Add explicit Desktop `Cargo.lock` metadata preflights to authoritative CI and package paths, using shell-neutral commands on all matrix platforms.
 - [x] Bind `vX.Y.Z` tag exactly to authoritative app version metadata.
 - [x] Validate shipped component versions/locks, including excluded `swarm-provider` and Desktop lock graph.
 - [x] Replace mutable Fabric Loom snapshot tooling with released Loom `1.17.2` and reject future snapshot coordinates in policy/version checks.
 - [x] Define production release signing/notarization policy and fail closed when required credentials are missing.
 - [x] Keep unsigned builds only on explicitly preview-grade `main-latest` channel.
-- [ ] Add/enable `main` branch protection/ruleset requiring the intended check where connector permissions allow; connector can read but not mutate rulesets, so exact manual repository-admin action must be documented.
+- [ ] Add/enable `main` branch protection/ruleset requiring the intended check where connector permissions allow. Connector can read but not mutate rulesets; exact manual repository-admin action is documented.
 - [x] Standardize artifact/evidence retention by class in active workflows.
 - [x] Migrate useful legacy Agent validation checks into current CI before archiving/removing historical workflows.
 
@@ -94,11 +94,12 @@ Do not hide product test failures by weakening required gates.
 - Added `.github/workflows/specialist-validation.yml` and migrated live catalog validation, Modrinth deterministic tests, CurseForge deterministic tests/command registration, and Desktop locked metadata from historical Agent workflows.
 - Added direct Desktop check/clippy/tests and direct provider check/clippy/tests to Core CI.
 - Added a separate Desktop RustSec audit using the committed Desktop lock graph.
+- Fixed the Desktop package matrix lockfile preflight after exact-head Actions exposed Unix `/dev/null` redirection under Windows PowerShell. The gate now invokes `cargo metadata ... --locked` directly on every platform.
 
 ### Publication control and least privilege
 
-- `main-installers.yml` now calls Required Validation with network soak before package jobs; final publication depends on validation plus every package job and is additionally limited to `refs/heads/main`.
-- `release.yml` now calls Required Validation for the exact tag target with `release_tag=${{ github.ref_name }}` and network soak before package jobs.
+- `main-installers.yml` calls Required Validation with network soak before package jobs; final publication depends on validation plus every package job and is additionally limited to `refs/heads/main`.
+- `release.yml` calls Required Validation for the exact tag target with `release_tag=${{ github.ref_name }}` and network soak before package jobs.
 - Added `scripts/check_release_credentials.py`; production tag releases fail closed unless Windows signing and complete Apple signing/notarization credentials are present.
 - Removed Windows unsigned and macOS ad-hoc fallbacks from production tag releases. The rolling `main-latest` channel remains explicitly preview-grade and documents its unsigned/ad-hoc status.
 - Active workflows default to `contents: read`; only final `publish` jobs in `main-installers.yml` and `release.yml` receive `contents: write`.
@@ -118,7 +119,8 @@ Do not hide product test failures by weakening required gates.
 ### Repository governance inspection
 
 - Live repository ruleset `21764953` (`meow`) is active and blocks deletion/non-fast-forward plus code-quality errors, but contains no required-status-check rule.
-- Direct branch-protection read is inaccessible to this GitHub integration (403), and the available connector exposes ruleset reads but no ruleset/protection mutation action. Required-check enforcement therefore cannot truthfully be claimed enabled from this environment; exact manual repository-admin instructions remain to be committed.
+- Direct branch-protection read is inaccessible to this GitHub integration (403), and the available connector exposes ruleset reads but no ruleset/protection mutation action.
+- `docs/RELEASE_GATES.md` records the exact repository-admin change required to make `Required validation gate` a protected required status rather than falsely claiming it is already enabled.
 
 ## Current exact state
 
@@ -129,20 +131,24 @@ Implemented in source/workflow policy:
 - tag/version binding;
 - direct excluded-crate tests/lints and Desktop RustSec;
 - immutable Action pins and least-privilege publication permissions;
-- locked Desktop metadata preflights;
+- locked Desktop metadata preflights, including the Windows package path;
 - released Loom build-tool coordinate;
 - production signing/notarization fail-closed policy;
 - preview-only unsigned rolling channel;
-- migrated current specialist gates and removal of obsolete historical workflow files.
+- migrated current specialist gates and removal of obsolete historical workflow files;
+- deterministic stale-lock and excluded-crate failure regressions.
 
-Still incomplete before handoff:
+Exact-head validation vehicle: draft PR #61, `fix/agent-8-ci-release` -> `integration/audit-remediation-v1`.
 
-- cross-platform cleanup of one Desktop metadata redirection in the package matrix;
-- authoritative release-governance documentation including the exact manual required-status ruleset change;
-- dynamic negative regression evidence for stale Desktop lock and failing Desktop/provider tests;
-- workflow syntax/exact-head GitHub Actions validation on this branch;
-- live proof that running/failing validation prevents publication;
-- cleanup/archival of obsolete remote branch/PR refs where safe and connector capabilities permit.
+Current exact-head run: Required Validation run `33582184553` for commit `1510899c61c32ef2ddfaf009da1ff760527be843`.
+
+Observed on that run so far:
+
+- workflow parser accepted the full reusable graph and scheduled 19 jobs;
+- `Release identity / Verify release metadata` is GREEN, including workflow policy, tag mismatch, missing signing credentials, and positive credential-set regressions;
+- Desktop Rust lock metadata succeeds in the dedicated dependency-audit path;
+- Windows Desktop package has progressed beyond workflow setup on the corrected workflow and is still running;
+- specialist, direct excluded-crate, package, Rust, Fabric, network impairment, RustSec, and live-player jobs are still running/queued.
 
 ## Tests run
 
@@ -150,37 +156,41 @@ Still incomplete before handoff:
 |---|---|---|---|
 | Required source/audit review | PASS | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | Scope and regression requirements reconciled before production edits. |
 | Branch-preservation check | PASS | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | No pre-existing Agent 8 branch was present. |
-| Action pin resolution | PASS | through `66032d4174091051bfc0ea3fbfbc6e65e1b949e9` | External action tags/channels were resolved to concrete commit objects, including annotated tags, before pinning. |
-| Repository ruleset inspection | PARTIAL | live repository state | Ruleset exists but does not require Required Validation; integration cannot mutate it. |
-| Source-level release DAG review | PASS | `66032d4174091051bfc0ea3fbfbc6e65e1b949e9` | Builders/publishers depend on exact-SHA validation; policy lint encodes this invariant. Dynamic Actions proof pending. |
+| Action pin resolution | PASS | implementation branch | External action tags/channels resolved to concrete commit objects, including annotated tags, before pinning. |
+| Repository ruleset inspection | PARTIAL | live repository state | Ruleset exists but does not require Required Validation; connector cannot mutate it. |
+| Source-level release DAG review | PASS | implementation branch | Builders/publishers depend on exact-SHA validation; policy lint encodes this invariant. |
+| Workflow parser / reusable DAG | PASS | `1510899c...`, run `33582184553` | GitHub accepted and scheduled the full Required Validation graph. |
+| Release identity + policy regressions | PASS | `1510899c...`, run `33582184553` | Mutable-action/write-permission policy, tag mismatch, and production-signing policy checks are green. |
+| Desktop Rust locked metadata audit | PASS | `1510899c...`, run `33582184553` | Dedicated Desktop RustSec job passed the locked metadata preflight before audit execution. |
+| Windows package lockfile shell portability | RUNNING | `1510899c...`, run `33582184553` | Previous exact-head run failed on `/dev/null`; corrected command is under validation. |
 
 ## Required validation before handoff
 
-- [ ] workflow syntax validation
+- [x] workflow syntax validation
 - [ ] intentionally failing required job blocks rolling publication
 - [ ] still-running required job blocks rolling publication
-- [x] mismatched tag/version negative regression encoded in version guard; exact-head execution pending
-- [ ] stale Desktop lock blocks CI/package
-- [ ] failing Desktop/provider unit test fails standard CI
-- [x] workflow policy lint implemented to reject mutable `uses:` and excess write permissions; exact-head execution pending
-- [x] production release missing-credential negative/positive regressions encoded; exact-head execution pending
-- [ ] exact-head validation on branch
+- [x] mismatched tag/version negative regression
+- [ ] stale Desktop lock blocks CI/package — regression job is encoded and awaiting exact-head result
+- [ ] failing Desktop/provider unit test fails standard CI — regression job is encoded and awaiting exact-head result
+- [x] workflow policy lint rejects mutable `uses:` and excess write permissions
+- [x] production release missing-credential negative/positive regressions
+- [ ] complete exact-head validation on branch
 
 ## Blockers
 
-No production implementation blocker. The local checkout/terminal connector rejects this chat with `CALLER_IDENTITY_REQUIRED`, so implementation uses GitHub read/write and exact-head Actions evidence.
+No known production implementation blocker at this checkpoint.
 
-Repository-admin governance limitation: the active ruleset can be inspected but this connector has no ruleset/protection mutation operation. The exact required-status configuration will be documented for a repository administrator. This is not being mislabeled as already enabled.
+The local checkout/terminal connector rejects this chat with `CALLER_IDENTITY_REQUIRED`, so implementation uses GitHub read/write plus exact-head Actions evidence.
+
+Repository-admin governance limitation: the active ruleset can be inspected but this connector has no ruleset/protection mutation operation. Required-status enforcement therefore remains an external repository-admin action and is not being mislabeled as complete.
 
 ## Remaining work
 
-1. Finish cross-platform workflow/policy consistency cleanup.
-2. Commit current release-governance/ruleset documentation.
-3. Add regression harnesses proving stale lock and excluded-crate test failures are caught without weakening real gates.
-4. Open the branch validation PR and use its exact-head Actions results to fix any syntax/runtime defects.
-5. Prove publication remains absent while/following failed selected validation.
-6. Reconcile safe obsolete remote PR/branch cleanup with available connector capabilities.
-7. Update this ledger to the final exact SHA and only then choose `READY FOR INTEGRATION`, `BLOCKED`, or `NOT COMPLETE`.
+1. Follow Required Validation run `33582184553` to completion and fix any real failing gate without weakening coverage.
+2. Capture exact-head results for the stale-lock and excluded-crate negative regressions.
+3. Capture practical evidence that publication remains gated while validation is running/failing, to the extent safely testable without publishing from `main` or creating a production tag.
+4. Reconcile safe obsolete remote PR/branch cleanup with connector capabilities.
+5. Update this ledger to the final exact SHA and only then choose `READY FOR INTEGRATION`, `BLOCKED`, or `NOT COMPLETE`.
 
 ## Handoff
 
