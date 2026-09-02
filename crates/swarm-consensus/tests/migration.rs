@@ -92,7 +92,7 @@ fn candidate_must_hold_exact_complete_snapshot() {
 fn manual_transfer_requires_target_snapshot_before_commit() {
     let from = PeerId([1; 32]);
     let to = PeerId([2; 32]);
-    let mut transfer = ManualTransferState::prepare(from, to, Hash32([9; 32]), 7, 11);
+    let mut transfer = ManualTransferState::prepare(from, to, Hash32([9; 32]), 7, 11).unwrap();
     assert_eq!(transfer.accept(to, Hash32([8; 32])), Err(TransferError::SnapshotNotReady));
     transfer.accept(to, Hash32([9; 32])).unwrap();
     let generation = transfer.commit(from).unwrap();
@@ -115,4 +115,37 @@ fn sleeping_world_wakes_only_from_latest_snapshot() {
     let generation = state.wake(PeerId([2; 32]), Hash32([7; 32])).unwrap();
     assert_eq!(generation.epoch, 4);
     assert_eq!(generation.fencing_token, 7);
+}
+
+#[test]
+fn legacy_generation_counter_exhaustion_fails_closed() {
+    let start = Instant::now();
+    let lease = LeaseTracker::new(u64::MAX, u64::MAX, Duration::from_secs(1), start);
+    let candidate =
+        TakeoverCandidate { candidate: eligible(2, u64::MAX, 1), snapshot_hash: Hash32([7; 32]), peer_votes: 2 };
+    assert_eq!(
+        evaluate_crash_takeover(
+            &lease,
+            &candidate,
+            Hash32([7; 32]),
+            start + Duration::from_secs(2),
+            TakeoverPolicy::default(),
+        ),
+        Err(LeaseError::GenerationExhausted)
+    );
+
+    assert_eq!(
+        ManualTransferState::prepare(PeerId([1; 32]), PeerId([2; 32]), Hash32([9; 32]), u64::MAX, 11),
+        Err(TransferError::GenerationExhausted)
+    );
+
+    let mut sleeping = WorldRuntimeState::Active(AuthorityGeneration {
+        authority_peer_id: PeerId([1; 32]),
+        epoch: u64::MAX,
+        fencing_token: u64::MAX,
+        base_snapshot_hash: Hash32([4; 32]),
+        mode: TakeoverMode::Quorum,
+    });
+    sleeping.sleep(Hash32([7; 32]));
+    assert_eq!(sleeping.wake(PeerId([2; 32]), Hash32([7; 32])), Err(LeaseError::GenerationExhausted));
 }

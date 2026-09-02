@@ -101,9 +101,8 @@ impl Storage {
                 }
                 return Err(StorageError::WorldMetadataMismatch);
             }
-            if config.sequence != existing.sequence.saturating_add(1)
-                || config.previous_config_hash != Some(existing.config_hash()?)
-            {
+            let expected_sequence = next_world_config_sequence(existing.sequence)?;
+            if config.sequence != expected_sequence || config.previous_config_hash != Some(existing.config_hash()?) {
                 return Err(StorageError::WorldMetadataMismatch);
             }
         }
@@ -189,12 +188,18 @@ impl Storage {
     }
 }
 
+fn next_world_config_sequence(sequence: u64) -> Result<u64, StorageError> {
+    sequence.checked_add(1).ok_or(StorageError::WorldMetadataMismatch)
+}
+
 fn same_recovery_base(a: &RecoveryBallotV1, b: &RecoveryBallotV1) -> bool {
     a.world_id == b.world_id
         && a.base_epoch == b.base_epoch
         && a.base_fencing_token == b.base_fencing_token
         && a.target_epoch == b.target_epoch
         && a.target_fencing_token == b.target_fencing_token
+        && a.candidate_peer_id == b.candidate_peer_id
+        && a.candidate_public_key == b.candidate_public_key
         && a.base_snapshot_hash == b.base_snapshot_hash
         && a.base_state_hash == b.base_state_hash
         && a.membership_hash == b.membership_hash
@@ -298,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_promise_survives_restart_and_blocks_stale_candidate() {
+    fn recovery_promise_survives_restart_and_preserves_the_accepted_value() {
         let temp = tempfile::tempdir().unwrap();
         let (_, world) = test_world();
         let store = Storage::open(temp.path()).unwrap();
@@ -310,11 +315,12 @@ mod tests {
         let charlie = ballot(world, 3, 2);
         assert_eq!(
             store.promise_recovery_ballot(&charlie, &vote(&charlie, 6)).unwrap(),
-            RecoveryPromiseResult::Accepted
+            RecoveryPromiseResult::Rejected { highest_round: 1 }
         );
+        let bob_round_two = ballot(world, 2, 2);
         assert_eq!(
-            store.promise_recovery_ballot(&bob, &vote(&bob, 6)).unwrap(),
-            RecoveryPromiseResult::Rejected { highest_round: 2 }
+            store.promise_recovery_ballot(&bob_round_two, &vote(&bob_round_two, 6)).unwrap(),
+            RecoveryPromiseResult::Accepted
         );
     }
 
@@ -329,6 +335,12 @@ mod tests {
         assert!(store.load_recovery_promise(world).is_ok());
         assert!(store.clear_recovery_promise_after_epoch_advance(world, 5).unwrap());
         assert!(store.load_recovery_promise(world).is_err());
+    }
+
+    #[test]
+    fn world_config_sequence_exhaustion_fails_closed() {
+        assert_eq!(next_world_config_sequence(u64::MAX - 1).unwrap(), u64::MAX);
+        assert!(next_world_config_sequence(u64::MAX).is_err());
     }
 
     #[test]
