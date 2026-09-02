@@ -1,6 +1,8 @@
 from pathlib import Path
 
-path = Path(__file__).resolve().parents[1] / "crates/swarm-protocol/src/canonical_modpack.rs"
+root = Path(__file__).resolve().parents[1]
+
+path = root / "crates/swarm-protocol/src/canonical_modpack.rs"
 text = path.read_text()
 block = '''    if artifact.retrieval == CanonicalRetrievalV1::ProviderDownload
         && !algorithms.keys().any(|algorithm| {
@@ -30,4 +32,15 @@ if needle not in tail:
     raise SystemExit("provider validation dependency loop not found")
 tail = tail.replace(needle, block + needle, 1)
 path.write_text(head + tail)
-print("Agent 5 milestone 1 protocol anchor corrected")
+
+# A provider JAR must also have a non-empty basename stem. `.jar` is not a useful
+# portable artifact identity even though it is technically a single path component.
+path = root / "apps/desktop/src-tauri/src/curseforge.rs"
+text = path.read_text()
+old = "    let portable = !value.is_empty()\n"
+new = "    let portable = value.len() > 4\n"
+if old not in text:
+    raise SystemExit("safe provider filename predicate not found")
+path.write_text(text.replace(old, new, 1))
+
+print("Agent 5 milestone 1 anchors corrected")
