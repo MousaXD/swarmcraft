@@ -1,0 +1,65 @@
+name: Agent 1 partition and convergence hardening
+
+on:
+  push:
+    branches:
+      - fix/agent-1-consensus
+    paths:
+      - implementation/agent1-m4-hardening.py
+      - crates/swarm-cli/tests/consensus_partition_safety.rs
+      - .github/workflows/agent1-m4-worker.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-validate-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout exact branch head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/agent-1-consensus
+          fetch-depth: 0
+
+      - name: Validate and apply hardening
+        run: |
+          python3 -m py_compile implementation/agent1-m4-hardening.py
+          python3 implementation/agent1-m4-hardening.py
+
+      - name: Format Rust workspace
+        run: cargo fmt --all
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+
+      - name: Test consensus core
+        run: cargo test -p swarm-consensus
+
+      - name: Test CLI library
+        run: cargo test -p swarm-cli --lib
+
+      - name: Test live joint membership
+        run: cargo test -p swarm-cli --test live_join_replication -- --nocapture
+
+      - name: Test membership and Solo partition safety
+        run: cargo test -p swarm-cli --test consensus_partition_safety -- --nocapture --test-threads=1
+
+      - name: Test recovery certificate crash resume
+        run: cargo test -p swarm-cli --test recovery_successor_dies -- --nocapture
+
+      - name: Compile all CLI integration tests
+        run: cargo test -p swarm-cli --tests --no-run
+
+      - name: Commit validated hardening
+        env:
+          BRANCH: fix/agent-1-consensus
+        run: |
+          rm implementation/agent1-m4-hardening.py
+          rm .github/workflows/agent1-m4-worker.yml
+          git add -A
+          git config user.name "swarmcraft-agent-1"
+          git config user.email "actions@users.noreply.github.com"
+          git commit -m "test(consensus): harden membership convergence and partitions"
+          git push origin "HEAD:${BRANCH}"
