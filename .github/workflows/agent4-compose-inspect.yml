@@ -22,10 +22,8 @@ jobs:
         run: |
           set -euo pipefail
           echo '=== proof/history identifiers ==='
-          rg -n -i 'authority.*proof|proof.*authority|history.*proof|proof.*history|membership_history|epoch_history|current_authority' crates || true
+          grep -RniE 'authority.*proof|proof.*authority|history.*proof|proof.*history|membership_history|epoch_history|current_authority' crates --include='*.rs' || true
           echo '=== transition verification/storage identifiers ==='
-          rg -n 'save_epoch_record|load_epoch_record|verify_epoch|AuthorityTransfer|RecoveryCertificate|validate_recovery_certificate|validate_membership_certificate' crates || true
+          grep -RniE 'save_epoch_record|load_epoch_record|verify_epoch|AuthorityTransfer|RecoveryCertificate|validate_recovery_certificate|validate_membership_certificate' crates --include='*.rs' || true
           echo '=== discovery acceptance call sites ==='
-          rg -n 'verify_world_announcement|AnnouncementReplayGuard|DiscoveryWorlds|DiscoveryResolved|refresh_publications' crates/swarm-cli crates/swarm-core crates/swarm-network crates/swarm-protocol || true
-          echo '=== canonical files ==='
-          find crates -type f \( -name '*.rs' -o -name '*.toml' \) | sort | grep -E 'authority|membership|recovery|history|discovery|epoch|protocol_v2' || true
+          grep -RniE 'verify_world_announcement|AnnouncementReplayGuard|DiscoveryWorlds|DiscoveryResolved|refresh_publications' crates/swarm-cli crates/swarm-core crates/swarm-network crates/swarm-protocol --include='*.rs' || true
