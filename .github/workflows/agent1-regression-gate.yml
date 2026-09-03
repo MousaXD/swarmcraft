@@ -1,0 +1,84 @@
+name: Agent 1 exact-head regression gate
+
+on:
+  push:
+    branches:
+      - fix/agent-1-consensus
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent1-exact-head-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  exact-head:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout exact event head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact event head
+        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+
+      - name: Verify Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+
+      - name: Clippy affected Rust crates
+        run: cargo clippy -p swarm-protocol -p swarm-consensus -p swarm-storage -p swarm-network -p swarm-cli --all-targets -- -D warnings
+
+      - name: Audit canonical counter arithmetic
+        shell: bash
+        run: |
+          set -euo pipefail
+          roots=(
+            crates/swarm-consensus/src
+            crates/swarm-cli/src/daemon.rs
+            crates/swarm-cli/src/migration.rs
+            crates/swarm-storage/src
+          )
+          unsafe=0
+          if grep -REnE '(epoch(_number)?|fencing(_token)?|snapshot_number|sequence)\.(saturating_add|wrapping_add|overflowing_add)\(' "${roots[@]}"; then
+            unsafe=1
+          fi
+          if grep -REnE '(epoch_number|fencing_token|snapshot_number|sequence)[[:space:]]*\+[[:space:]]*1' "${roots[@]}"; then
+            unsafe=1
+          fi
+          if [ "$unsafe" -ne 0 ]; then
+            echo "Unsafe canonical counter arithmetic detected"
+            exit 1
+          fi
+
+      - name: Test consensus core
+        run: cargo test -p swarm-consensus
+
+      - name: Test CLI library
+        run: cargo test -p swarm-cli --lib
+
+      - name: Test counter exhaustion boundaries
+        run: |
+          cargo test -p swarm-consensus authority_generation_fails_closed_at_counter_exhaustion
+          cargo test -p swarm-storage snapshot_number_fails_closed_at_counter_exhaustion
+
+      - name: Test live joint membership
+        run: cargo test -p swarm-cli --test live_join_replication -- --nocapture
+
+      - name: Test 3-peer and 5-peer partition safety plus Solo loss
+        run: cargo test -p swarm-cli --test consensus_partition_safety -- --nocapture --test-threads=1
+
+      - name: Test three-daemon recovery regression
+        run: cargo test -p swarm-cli --test three_daemon_recovery -- --nocapture
+
+      - name: Test recovery certificate crash resume
+        run: cargo test -p swarm-cli --test recovery_successor_dies -- --nocapture
+
+      - name: Compile all CLI integration tests
+        run: cargo test -p swarm-cli --tests --no-run

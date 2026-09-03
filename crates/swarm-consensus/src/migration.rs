@@ -50,6 +50,8 @@ pub enum LeaseError {
     Ineligible,
     #[error("automatic crash takeover requires the configured quorum")]
     NoQuorum,
+    #[error("authority generation counter exhausted")]
+    GenerationExhausted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,10 +106,12 @@ pub fn evaluate_crash_takeover(
     if candidate.peer_votes < policy.quorum_size {
         return Err(LeaseError::NoQuorum);
     }
+    let epoch = current_lease.epoch().checked_add(1).ok_or(LeaseError::GenerationExhausted)?;
+    let fencing_token = current_lease.fencing_token().checked_add(1).ok_or(LeaseError::GenerationExhausted)?;
     Ok(AuthorityGeneration {
         authority_peer_id: candidate.candidate.peer_id,
-        epoch: current_lease.epoch() + 1,
-        fencing_token: current_lease.fencing_token() + 1,
+        epoch,
+        fencing_token,
         base_snapshot_hash: required_snapshot_hash,
         mode: TakeoverMode::Quorum,
     })
@@ -131,6 +135,8 @@ pub enum TransferError {
     SnapshotNotReady,
     #[error("manual transfer signer is not the expected participant")]
     WrongPeer,
+    #[error("authority generation counter exhausted")]
+    GenerationExhausted,
 }
 
 impl ManualTransferState {
@@ -140,15 +146,10 @@ impl ManualTransferState {
         snapshot_hash: Hash32,
         current_epoch: u64,
         current_fencing_token: u64,
-    ) -> Self {
-        Self {
-            from_peer,
-            to_peer,
-            snapshot_hash,
-            next_epoch: current_epoch + 1,
-            next_fencing_token: current_fencing_token + 1,
-            phase: TransferPhase::Prepared,
-        }
+    ) -> Result<Self, TransferError> {
+        let next_epoch = current_epoch.checked_add(1).ok_or(TransferError::GenerationExhausted)?;
+        let next_fencing_token = current_fencing_token.checked_add(1).ok_or(TransferError::GenerationExhausted)?;
+        Ok(Self { from_peer, to_peer, snapshot_hash, next_epoch, next_fencing_token, phase: TransferPhase::Prepared })
     }
 
     pub fn accept(&mut self, accepting_peer: PeerId, target_snapshot_hash: Hash32) -> Result<(), TransferError> {
@@ -209,10 +210,12 @@ impl WorldRuntimeState {
         if candidate_snapshot_hash != *latest_snapshot_hash {
             return Err(LeaseError::SnapshotNotReady);
         }
+        let next_epoch = epoch.checked_add(1).ok_or(LeaseError::GenerationExhausted)?;
+        let next_fencing_token = fencing_token.checked_add(1).ok_or(LeaseError::GenerationExhausted)?;
         let generation = AuthorityGeneration {
             authority_peer_id: candidate,
-            epoch: *epoch + 1,
-            fencing_token: *fencing_token + 1,
+            epoch: next_epoch,
+            fencing_token: next_fencing_token,
             base_snapshot_hash: *latest_snapshot_hash,
             mode: TakeoverMode::Solo,
         };

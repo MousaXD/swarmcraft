@@ -6,6 +6,10 @@
 *.log
 *.tmp
 
+# Python-generated artifacts
+__pycache__/
+*.py[cod]
+
 # Local Tauri sidecar binaries
 apps/desktop/src-tauri/binaries/
 apps/desktop/src-tauri/gen/

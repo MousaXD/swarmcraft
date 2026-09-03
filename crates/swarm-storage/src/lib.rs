@@ -60,6 +60,8 @@ pub enum StorageError {
     SnapshotHistoryConflict { snapshot_number: u64 },
     #[error("snapshot numbering or sequence counter is exhausted")]
     SnapshotNumberExhausted,
+    #[error("canonical counter exhausted: {0}")]
+    CounterExhausted(&'static str),
     #[error(
         "snapshot authority fence mismatch for world {world}; expected epoch {expected_epoch} fencing token {expected_fencing_token}"
     )]

@@ -8,6 +8,7 @@ use swarm_protocol::{AuthorityLeaseGrantV1, AuthorityTransferV1, EpochRecordV1, 
 impl Storage {
     pub fn save_epoch_record(&self, record: &EpochRecordV1) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(record.world_id)?;
+        record.validate_semantics()?;
         let path = self.control_path(record.world_id, "epoch.postcard");
         if path.try_exists().map_err(|source| io_error(&path, source))? {
             let existing = self.load_epoch_record(record.world_id)?;
@@ -34,16 +35,19 @@ impl Storage {
         if record.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
         }
+        record.validate_semantics()?;
         Ok(record)
     }
 
     pub fn reserve_recovery(&self, reservation: &AuthorityLeaseGrantV1) -> Result<bool, StorageError> {
         let _guard = self.lock_world_transaction(reservation.world_id)?;
+        reservation.validate_semantics()?;
         self.reserve_recovery_locked(reservation)
     }
 
     pub fn save_recovery_reservation(&self, reservation: &AuthorityLeaseGrantV1) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(reservation.world_id)?;
+        reservation.validate_semantics()?;
         if self.reserve_recovery_locked(reservation)? {
             Ok(())
         } else {
@@ -77,6 +81,7 @@ impl Storage {
         if reservation.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
         }
+        reservation.validate_semantics()?;
         Ok(reservation)
     }
 
@@ -88,6 +93,7 @@ impl Storage {
 
     pub fn save_transfer_record(&self, transfer: &AuthorityTransferV1) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(transfer.world_id)?;
+        transfer.validate_semantics()?;
         let bytes = postcard::to_allocvec(transfer)?;
         durable_atomic_write(&self.control_path(transfer.world_id, "transfer.postcard"), &bytes)
     }
@@ -99,11 +105,13 @@ impl Storage {
         if record.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
         }
+        record.validate_semantics()?;
         Ok(record)
     }
 
     pub fn save_sleep_record(&self, record: &SleepRecordV1) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(record.world_id)?;
+        record.validate_semantics()?;
         let bytes = postcard::to_allocvec(record)?;
         durable_atomic_write(&self.control_path(record.world_id, "sleep.postcard"), &bytes)
     }
@@ -115,6 +123,7 @@ impl Storage {
         if record.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
         }
+        record.validate_semantics()?;
         Ok(record)
     }
 
