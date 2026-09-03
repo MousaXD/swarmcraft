@@ -131,9 +131,9 @@ Do not hide progress only in commit messages.
 | Agent | Domain | Status | Branch | Exact Head | Integrated | Notes |
 |---|---|---|---|---|---|---|
 | 1 | Consensus configuration safety | INTEGRATED | `fix/agent-1-consensus` | `67493374544d91ad7bbb36be17e9312adb5654f6` | Yes | Exact-head run `33619420045` SUCCESS; merge `a0e0dec659d0b1eb21f9be34c44730edc6ff3984` |
-| 2 | Protocol authorization/history | NOT STARTED — UNBLOCKED | `fix/agent-2-protocol` | - | No | Wave 2; branch from newest integration head |
+| 2 | Protocol authorization/history | INTEGRATED | `fix/agent-2-protocol` | `dde75ca4e9f2268bb97f42a716864c3e51f266cb` | Yes | Exact-head run `33693100794` SUCCESS; merge `6e70a0774d7e021cc57681705ccef4620265ce3d` |
 | 3 | Storage transactional integrity | NOT STARTED | `fix/agent-3-storage` | - | No | Wave 1 |
-| 4 | Network authentication/privacy | NOT STARTED | `fix/agent-4-network` | - | No | Wave 1 |
+| 4 | Network authentication/privacy | NOT STARTED | `fix/agent-4-network` | - | No | Wave 1; Agent 1 + Agent 2 authority dependencies are now integrated |
 | 5 | Package/provider security | NOT STARTED | `fix/agent-5-supply-chain` | - | No | Wave 1 |
 | 6 | Minecraft/runtime lifecycle | NOT STARTED | `fix/agent-6-runtime` | - | No | Wave 1 |
 | 7 | Desktop player journey | NOT STARTED | `fix/agent-7-desktop` | - | No | Wave 1 |
@@ -257,6 +257,18 @@ After every integration, update this README with:
 - Merge-tree proof: comparing Agent 1 ledger head `8bcbef2...` to integration commit `a0e0dec...` changes only `implementation/agent-10-final-acceptance.md`; no Agent 1 production path differs from the validated branch tree.
 - Conflicts resolved: none. The integration branch's only divergence since the common campaign-plan base was the Agent 10 dependency-gate ledger, so GitHub produced a clean two-parent merge without production conflict.
 - Deferred composed proof: Agent 3 cross-process recovery-promise/non-equivocation and production transport/restart composition remains required when Agent 3 is integrated. This is not unfinished Agent 1-owned work and does not block Agent 2 from starting from the newest integration head.
+
+#### Agent 2 — Protocol authorization and history
+
+- Integrated source production SHA: `dde75ca4e9f2268bb97f42a716864c3e51f266cb`
+- Source ledger head: `5b76d5488b47856268128713dbc77bc45566d908` (one docs-only commit after validated production SHA)
+- Integration PR: `#64`
+- Integration commit/resulting production integration head: `6e70a0774d7e021cc57681705ccef4620265ce3d`
+- Validation: Agent 2 protocol remediation run `33693100794` — SUCCESS on `dde75ca4e9f2268bb97f42a716864c3e51f266cb`; focused discovery, invite canonical-genesis, automatic invite join, format, workspace check, warnings-denied clippy, protocol/core/storage tests, daemon/CLI semantic acceptance, and full workspace tests all completed successfully.
+- Closure proof: `dde75ca4...` to `5b76d548...` changes exactly `implementation/agent-2-protocol.md`; no production, Rust, workflow, or test path changed after validation.
+- Merge-tree proof: source ledger head `5b76d548...` and integration merge `6e70a077...` both have tree `dec97e562199f692f1dcc561ff1f16949f8419c8`, so the merge introduced no tree mutation.
+- Conflicts resolved: none. Agent 2 branched from the then-current integration head `c69cb0a75c82688a91692bcd2ca47efa6827b958`, and PR #64 merged cleanly.
+- Integration implications: Agent 4 now has the integrated Agent 1 + Agent 2 authority/history semantics needed to finish authenticated discovery authority (`FINAL-028`). Agent 3 retains ownership of durable storage head/CAS, immutable slots, cross-process locking, and atomic final-commit guarantees beyond Agent 2 semantic acceptance checks.
 
 ## Final acceptance and re-audit
 
