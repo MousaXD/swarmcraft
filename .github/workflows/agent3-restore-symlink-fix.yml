@@ -1,0 +1,68 @@
+name: Agent 3 restore symlink hardening
+
+on:
+  push:
+    branches: [fix/agent-3-storage]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent3-restore-symlink-fix
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply fail-closed restore symlink preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/swarm-storage/src/streaming.rs')
+          text = path.read_text()
+
+          old = '''        ensure_restore_root(destination)?;\n        let marker = restore_marker(destination);'''
+          new = '''        ensure_restore_root(destination)?;\n        validate_existing_restore_tree(destination)?;\n        let marker = restore_marker(destination);'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit('restore preflight insertion anchor not found')
+
+          helper_anchor = '''fn clear_restore_destination(destination: &Path, marker: &Path) -> Result<(), StorageError> {'''
+          helper = '''fn validate_existing_restore_tree(destination: &Path) -> Result<(), StorageError> {\n    for entry in WalkDir::new(destination).min_depth(1).follow_links(false) {\n        let entry = entry\n            .map_err(|error| io_error(error.path().unwrap_or(destination), std::io::Error::other(error.to_string())))?;\n        if entry.file_type().is_symlink() {\n            return Err(StorageError::SymlinkUnsupported(entry.path().to_path_buf()));\n        }\n    }\n    Ok(())\n}\n\n'''
+          if helper not in text:
+              if helper_anchor not in text:
+                  raise SystemExit('restore helper anchor not found')
+              text = text.replace(helper_anchor, helper + helper_anchor, 1)
+
+          old_test = '''        // The staged-marker policy clears stale destination contents without\n        // following symlinks, then reconstructs the exact manifest tree.\n        storage.restore_snapshot_streaming(&manifest, &restore).unwrap();\n        assert_eq!(fs::read(restore.join("region/r.0.0.mca")).unwrap(), b"safe-data");\n        assert!(!outside.join("r.0.0.mca").exists());'''
+          new_test = '''        assert!(matches!(\n            storage.restore_snapshot_streaming(&manifest, &restore),\n            Err(StorageError::SymlinkUnsupported(path)) if path == restore.join("region")\n        ));\n        assert!(!outside.join("r.0.0.mca").exists());'''
+          if old_test in text:
+              text = text.replace(old_test, new_test, 1)
+          elif new_test not in text:
+              raise SystemExit('restore symlink regression anchor not found')
+
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          git diff --check
+      - name: Commit production fix if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "No production fix needed"
+            exit 0
+          fi
+          git config user.name "MousaXD"
+          git config user.email "101021011+MousaXD@users.noreply.github.com"
+          git add crates/swarm-storage/src/streaming.rs
+          git commit -m "fix(storage): reject preexisting restore symlinks"
+          git push origin HEAD:fix/agent-3-storage
