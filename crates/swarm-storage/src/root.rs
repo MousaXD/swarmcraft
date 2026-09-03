@@ -3,6 +3,7 @@ mod base;
 pub use base::*;
 
 pub mod control;
+pub mod membership;
 pub mod recovery_v2;
 pub mod replica;
 pub mod retention;
@@ -11,6 +12,7 @@ pub mod state;
 pub mod streaming;
 pub mod world;
 
+pub use membership::{DurableMembershipPromiseV1, MembershipPromiseResult};
 pub use retention::{
     ActiveReplicationLease, RetentionError, RetentionPolicy, RetentionReport, SnapshotPublicationLease,
 };

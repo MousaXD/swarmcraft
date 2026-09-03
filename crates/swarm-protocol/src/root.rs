@@ -11,6 +11,8 @@ pub use v2::*;
 mod discovery;
 pub use discovery::*;
 
+mod semantics;
+
 use serde::{Deserialize, Serialize};
 
 const JOIN_SIGN_DOMAIN: &[u8] = b"swarmcraft/join-request/v1\0";

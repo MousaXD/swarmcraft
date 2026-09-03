@@ -140,6 +140,7 @@ impl PeerIdentity {
     pub fn sign_snapshot(&self, manifest: &mut SnapshotManifestV1) -> Result<(), CoreError> {
         manifest.authority_public_key = self.public_key();
         manifest.authority_peer_id = self.peer_id();
+        manifest.validate_semantics()?;
         manifest.signature.clear();
         manifest.signature = self.sign(&manifest.signing_bytes()?);
         Ok(())
@@ -148,6 +149,7 @@ impl PeerIdentity {
     pub fn sign_membership(&self, record: &mut MembershipRecordV1) -> Result<(), CoreError> {
         record.authority_public_key = self.public_key();
         record.authority_peer_id = self.peer_id();
+        record.validate_semantics()?;
         record.signature.clear();
         record.signature = self.sign(&record.signing_bytes()?);
         Ok(())
@@ -156,6 +158,7 @@ impl PeerIdentity {
     pub fn sign_invite(&self, invite: &mut InviteV1) -> Result<(), CoreError> {
         invite.inviter_public_key = self.public_key();
         invite.inviter_peer_id = self.peer_id();
+        invite.validate_semantics()?;
         invite.signature.clear();
         invite.signature = self.sign(&invite.signing_bytes()?);
         Ok(())
@@ -164,6 +167,7 @@ impl PeerIdentity {
     pub fn sign_transfer(&self, transfer: &mut AuthorityTransferV1) -> Result<(), CoreError> {
         transfer.signer_public_key = self.public_key();
         transfer.signer_peer_id = self.peer_id();
+        transfer.validate_semantics()?;
         transfer.signature.clear();
         transfer.signature = self.sign(&transfer.signing_bytes()?);
         Ok(())
@@ -172,6 +176,7 @@ impl PeerIdentity {
     pub fn sign_lease(&self, lease: &mut AuthorityLeaseGrantV1) -> Result<(), CoreError> {
         lease.authority_public_key = self.public_key();
         lease.authority_peer_id = self.peer_id();
+        lease.validate_semantics()?;
         lease.signature.clear();
         lease.signature = self.sign(&lease.signing_bytes()?);
         Ok(())
@@ -212,6 +217,7 @@ pub fn verify_signature(
 }
 
 pub fn verify_snapshot_signature(manifest: &SnapshotManifestV1) -> Result<(), CoreError> {
+    manifest.validate_semantics()?;
     verify_signature(
         manifest.authority_peer_id,
         manifest.authority_public_key,
@@ -221,14 +227,17 @@ pub fn verify_snapshot_signature(manifest: &SnapshotManifestV1) -> Result<(), Co
 }
 
 pub fn verify_membership_signature(record: &MembershipRecordV1) -> Result<(), CoreError> {
+    record.validate_semantics()?;
     verify_signature(record.authority_peer_id, record.authority_public_key, &record.signing_bytes()?, &record.signature)
 }
 
 pub fn verify_invite_signature(invite: &InviteV1) -> Result<(), CoreError> {
+    invite.validate_semantics()?;
     verify_signature(invite.inviter_peer_id, invite.inviter_public_key, &invite.signing_bytes()?, &invite.signature)
 }
 
 pub fn verify_transfer_signature(transfer: &AuthorityTransferV1) -> Result<(), CoreError> {
+    transfer.validate_semantics()?;
     verify_signature(
         transfer.signer_peer_id,
         transfer.signer_public_key,
@@ -238,6 +247,7 @@ pub fn verify_transfer_signature(transfer: &AuthorityTransferV1) -> Result<(), C
 }
 
 pub fn verify_lease_signature(lease: &AuthorityLeaseGrantV1) -> Result<(), CoreError> {
+    lease.validate_semantics()?;
     verify_signature(lease.authority_peer_id, lease.authority_public_key, &lease.signing_bytes()?, &lease.signature)
 }
 
@@ -257,6 +267,7 @@ pub fn create_world_genesis(
         creator_public_key: identity.public_key(),
         initial_membership: vec![identity.peer_id()],
     };
+    genesis.validate_semantics()?;
     let world_id = genesis.world_id()?;
     Ok((world_id, genesis))
 }

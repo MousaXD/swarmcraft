@@ -134,13 +134,14 @@ fn initialize_two_peer_world(alice: &PeerFixture, bob: &PeerFixture, source: &Pa
     alice.storage.create_world(&metadata).unwrap();
     bob.storage.create_world(&metadata).unwrap();
 
-    let descriptor = WorldDescriptorV1 {
+    let mut descriptor = WorldDescriptorV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
         compatibility_fingerprint: genesis.compatibility_fingerprint,
         members: vec![member(&alice.identity), member(&bob.identity)],
         preferred_replication_factor: 2,
     };
+    descriptor.normalize();
     alice.storage.save_world_descriptor(&descriptor).unwrap();
     bob.storage.save_world_descriptor(&descriptor).unwrap();
 

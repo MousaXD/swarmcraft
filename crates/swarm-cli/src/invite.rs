@@ -120,6 +120,8 @@ mod tests {
 
     fn signed_invite(expires_unix_ms: u64, bootstrap_addrs: Vec<String>) -> InviteV1 {
         let identity = PeerIdentity::generate();
+        let mut initial_membership = vec![identity.peer_id(), PeerId([8; 32])];
+        initial_membership.sort();
         let genesis = WorldGenesisV1 {
             protocol_version: PROTOCOL_VERSION,
             minecraft_version: "1.21.8".into(),
@@ -127,7 +129,7 @@ mod tests {
             compatibility_fingerprint: Hash32([4; 32]),
             creation_nonce: random_nonce(),
             creator_public_key: identity.public_key(),
-            initial_membership: vec![identity.peer_id(), PeerId([8; 32])],
+            initial_membership,
         };
         let mut invite = InviteV1 {
             protocol_version: PROTOCOL_VERSION,

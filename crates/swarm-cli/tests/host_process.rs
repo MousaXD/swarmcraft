@@ -6,8 +6,8 @@ mod host;
 use std::{fs, os::unix::fs::PermissionsExt};
 use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
 use swarm_protocol::{
-    AuthorityPolicyV1, MembershipPolicyV1, RuntimeCompatibilityManifestV1, WorldConfigV1, WorldDescriptorV1,
-    WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    AuthorityPolicyV1, MembershipPolicyV1, MembershipRecordV1, RuntimeCompatibilityManifestV1, WorldConfigV1,
+    WorldDescriptorV1, WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 
@@ -44,20 +44,35 @@ async fn real_host_process_restores_launches_and_commits_mutated_world() {
             genesis: genesis.clone(),
         })
         .unwrap();
+    let member = WorldMemberV1 {
+        peer_id: identity.peer_id(),
+        public_key: identity.public_key(),
+        authority_eligible: true,
+        banned: false,
+    };
     storage
         .save_world_descriptor(&WorldDescriptorV1 {
             protocol_version: PROTOCOL_VERSION,
             world_id: world,
             compatibility_fingerprint: genesis.compatibility_fingerprint,
-            members: vec![WorldMemberV1 {
-                peer_id: identity.peer_id(),
-                public_key: identity.public_key(),
-                authority_eligible: true,
-                banned: false,
-            }],
+            members: vec![member.clone()],
             preferred_replication_factor: 1,
         })
         .unwrap();
+    let mut membership = MembershipRecordV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        epoch: 0,
+        sequence: 0,
+        previous_membership_hash: None,
+        members: vec![member],
+        authority_peer_id: identity.peer_id(),
+        authority_public_key: identity.public_key(),
+        signature: Vec::new(),
+    };
+    identity.sign_membership(&mut membership).unwrap();
+    storage.save_membership_record(&membership).unwrap();
+
     let mut config = WorldConfigV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,

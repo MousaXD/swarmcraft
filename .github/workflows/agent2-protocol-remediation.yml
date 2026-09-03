@@ -1,0 +1,46 @@
+name: Agent 2 protocol remediation validation
+
+on:
+  push:
+    branches: [fix/agent-2-protocol]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent2-protocol-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Focused discovery membership regression
+        run: cargo test -p swarm-cli --lib discovery::tests::banned_or_removed_friend_is_not_reported_as_shared_world --locked -- --exact
+      - name: Focused invite canonical-genesis regressions
+        run: |
+          cargo test -p swarm-cli --bin swarmcraft invite::tests:: --locked
+      - name: Focused automatic invite join regression
+        run: cargo test -p swarm-cli --test automatic_invite_join --locked
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Workspace check
+        run: cargo check --workspace --locked
+      - name: Workspace clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Protocol unit tests
+        run: cargo test -p swarm-protocol --locked
+      - name: Core unit tests
+        run: cargo test -p swarm-core --locked
+      - name: Storage semantic/history tests
+        run: cargo test -p swarm-storage --locked
+      - name: Daemon and CLI semantic acceptance tests
+        run: cargo test -p swarm-cli --locked
+      - name: Full workspace tests
+        run: cargo test --workspace --locked

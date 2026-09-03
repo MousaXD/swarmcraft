@@ -12,12 +12,16 @@ use thiserror::Error;
 pub enum ReplicationError {
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    Protocol(#[from] swarm_protocol::ProtocolError),
     #[error("blob offset mismatch: receiver has {expected} bytes but sender used offset {received}")]
     OffsetMismatch { expected: u64, received: u64 },
     #[error("blob encoded size mismatch: expected {expected} bytes, got {received}")]
     SizeMismatch { expected: u64, received: u64 },
     #[error("snapshot #{0} is not fully replicated")]
     Incomplete(u64),
+    #[error("snapshot #{snapshot_number} does not directly extend the accepted canonical history")]
+    HistoryConflict { snapshot_number: u64 },
 }
 
 impl Storage {
@@ -29,6 +33,15 @@ impl Storage {
             .filter(|entry| seen.insert(entry.blob.hash) && !self.has_complete_blob(manifest.world_id, &entry.blob))
             .map(|entry| entry.blob.clone())
             .collect()
+    }
+
+    /// Protocol-facing history gate for replicated manifests. Agent 2 calls
+    /// this before blob negotiation; finalization repeats the same check. Agent
+    /// 3 owns the later atomic durable-head/fencing recheck at commit time.
+    pub fn validate_replica_history(&self, manifest: &SnapshotManifestV1) -> Result<(), ReplicationError> {
+        manifest.validate_semantics()?;
+        let current = self.latest_snapshot(manifest.world_id)?;
+        validate_replica_direct_extension(current.as_ref(), manifest)
     }
 
     pub fn has_complete_blob(&self, world: WorldId, descriptor: &BlobDescriptor) -> bool {
@@ -117,12 +130,46 @@ impl Storage {
     }
 
     pub fn finalize_replica(&self, manifest: &SnapshotManifestV1) -> Result<(), ReplicationError> {
+        self.validate_replica_history(manifest)?;
         if !self.missing_blobs(manifest).is_empty() {
             return Err(ReplicationError::Incomplete(manifest.snapshot_number));
+        }
+        if self.latest_snapshot(manifest.world_id)?.as_ref() == Some(manifest) {
+            return Ok(());
         }
         self.commit_snapshot_streaming(manifest)?;
         Ok(())
     }
+}
+
+fn validate_replica_direct_extension(
+    previous: Option<&SnapshotManifestV1>,
+    manifest: &SnapshotManifestV1,
+) -> Result<(), ReplicationError> {
+    match previous {
+        None => {
+            if manifest.snapshot_number != 1 || manifest.previous_snapshot_hash.is_some() {
+                return Err(ReplicationError::HistoryConflict { snapshot_number: manifest.snapshot_number });
+            }
+        }
+        Some(previous) => {
+            if manifest == previous {
+                return Ok(());
+            }
+            let expected_number =
+                previous.snapshot_number.checked_add(1).ok_or(StorageError::CounterExhausted("snapshot number"))?;
+            let expected_sequence =
+                previous.sequence.checked_add(1).ok_or(StorageError::CounterExhausted("snapshot sequence"))?;
+            let expected_parent = previous.manifest_hash()?;
+            if manifest.snapshot_number != expected_number
+                || manifest.sequence != expected_sequence
+                || manifest.previous_snapshot_hash != Some(expected_parent)
+            {
+                return Err(ReplicationError::HistoryConflict { snapshot_number: manifest.snapshot_number });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn blob_path(storage: &Storage, world: WorldId, descriptor: &BlobDescriptor) -> PathBuf {
@@ -189,6 +236,32 @@ fn verify_decoded_blob(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use swarm_protocol::{snapshot_state_root, PeerId, SnapshotEntry, PROTOCOL_VERSION};
+
+    fn manifest(number: u64, sequence: u64, previous: Option<Hash32>, marker: u8) -> SnapshotManifestV1 {
+        let entries = vec![SnapshotEntry {
+            path: "level.dat".into(),
+            blob: BlobDescriptor {
+                hash: Hash32([marker; 32]),
+                uncompressed_size: 1,
+                encoded_size: 1,
+                encoding: BlobEncoding::Raw,
+            },
+        }];
+        SnapshotManifestV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: WorldId([1; 32]),
+            snapshot_number: number,
+            epoch: 1,
+            sequence,
+            previous_snapshot_hash: previous,
+            state_root: snapshot_state_root(&entries).unwrap(),
+            entries,
+            authority_peer_id: PeerId([2; 32]),
+            authority_public_key: [2; 32],
+            signature: vec![marker; 64],
+        }
+    }
 
     struct ExpansionProbe {
         reads: usize,
@@ -202,6 +275,41 @@ mod tests {
             buffer.fill(0);
             Ok(buffer.len())
         }
+    }
+
+    #[test]
+    fn replicated_snapshot_history_requires_exact_direct_parent() {
+        let first = manifest(1, 7, None, 1);
+        assert!(validate_replica_direct_extension(None, &first).is_ok());
+        assert!(validate_replica_direct_extension(Some(&first), &first).is_ok());
+
+        let parent = first.manifest_hash().unwrap();
+        let next = manifest(2, 8, Some(parent), 2);
+        assert!(validate_replica_direct_extension(Some(&first), &next).is_ok());
+
+        let skipped_number = manifest(3, 8, Some(parent), 3);
+        assert!(matches!(
+            validate_replica_direct_extension(Some(&first), &skipped_number),
+            Err(ReplicationError::HistoryConflict { .. })
+        ));
+
+        let skipped_sequence = manifest(2, 9, Some(parent), 4);
+        assert!(matches!(
+            validate_replica_direct_extension(Some(&first), &skipped_sequence),
+            Err(ReplicationError::HistoryConflict { .. })
+        ));
+
+        let wrong_parent = manifest(2, 8, Some(Hash32([9; 32])), 5);
+        assert!(matches!(
+            validate_replica_direct_extension(Some(&first), &wrong_parent),
+            Err(ReplicationError::HistoryConflict { .. })
+        ));
+
+        let same_sequence_conflict = manifest(2, 7, Some(parent), 6);
+        assert!(matches!(
+            validate_replica_direct_extension(Some(&first), &same_sequence_conflict),
+            Err(ReplicationError::HistoryConflict { .. })
+        ));
     }
 
     #[test]

@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use swarm_protocol::{
     AuthorityLeaseGrantV1, AuthorityTransferV1, BlobEncoding, DiscoveryFilterV1, EpochRecordV1, FriendPresenceV1,
-    Hash32, JoinRequestV1, LeaveRequestV1, MembershipRecordV1, PeerHelloV1, PeerId, RecoveryBallotV1,
-    RecoveryCertificateV1, RecoveryVoteV1, SleepRecordV1, SnapshotManifestV1, SoloBranchV1, WorldAnnouncementV1,
-    WorldConfigV1, WorldDescriptorV1, WorldId, WorldStatusV1,
+    Hash32, JoinRequestV1, LeaveRequestV1, MembershipCertificateV1, MembershipProposalV1, MembershipRecordV1,
+    MembershipVoteV1, PeerHelloV1, PeerId, RecoveryBallotV1, RecoveryCertificateV1, RecoveryVoteV1, SleepRecordV1,
+    SnapshotManifestV1, SoloBranchV1, WorldAnnouncementV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldStatusV1,
 };
 use thiserror::Error;
 
@@ -11,6 +11,7 @@ pub const MAX_BLOB_CHUNK: usize = 256 * 1024;
 pub const MAX_MISSING_BLOBS: usize = 16_384;
 pub const MAX_WORLD_MEMBERS: usize = 1_024;
 pub const MAX_RECOVERY_VOTES: usize = 1_024;
+pub const MAX_MEMBERSHIP_VOTES: usize = 1_024;
 pub const MAX_WORLD_ARTIFACTS: usize = 4_096;
 pub const MAX_PRESENTATION_TAGS: usize = 64;
 pub const MAX_DISCOVERY_RESULTS: usize = 64;
@@ -105,7 +106,9 @@ pub enum WireRequest {
     DiscoveryPublic { filter: DiscoveryFilterV1 },
     DiscoveryResolve { world_id: WorldId },
     FriendPresence { expected_peer_id: PeerId, requester_peer_id: PeerId, nonce: [u8; 32] },
-    // Connection-bound authentication extensions are append-only.
+    MembershipProposal(Box<MembershipProposalV1>),
+    MembershipCommit(Box<MembershipCertificateV1>),
+    // Connection-bound authentication extensions follow integrated membership variants.
     HelloChallenge { challenge: [u8; 32] },
     HelloProof(Box<PeerHelloProofV1>),
 }
@@ -161,6 +164,25 @@ impl WireRequest {
             Self::RecoveryEpoch { certificate, .. } if certificate.votes.len() > MAX_RECOVERY_VOTES => {
                 Err(WireLimitError::TooManyRecoveryVotes(certificate.votes.len()))
             }
+            Self::MembershipProposal(proposal)
+                if proposal.previous.members.len() > MAX_WORLD_MEMBERS
+                    || proposal.proposed.members.len() > MAX_WORLD_MEMBERS =>
+            {
+                Err(WireLimitError::TooManyMembers(
+                    proposal.previous.members.len().max(proposal.proposed.members.len()),
+                ))
+            }
+            Self::MembershipCommit(certificate)
+                if certificate.proposal.previous.members.len() > MAX_WORLD_MEMBERS
+                    || certificate.proposal.proposed.members.len() > MAX_WORLD_MEMBERS =>
+            {
+                Err(WireLimitError::TooManyMembers(
+                    certificate.proposal.previous.members.len().max(certificate.proposal.proposed.members.len()),
+                ))
+            }
+            Self::MembershipCommit(certificate) if certificate.votes.len() > MAX_MEMBERSHIP_VOTES => {
+                Err(WireLimitError::TooManyMembershipVotes(certificate.votes.len()))
+            }
             Self::WorldConfig(config) => {
                 let artifacts = config.compatibility.required_server_mods.len()
                     + config.compatibility.required_client_mods.len()
@@ -213,6 +235,8 @@ pub enum WireResponse {
     DiscoveryWorlds(Vec<WorldAnnouncementV1>),
     DiscoveryResolved(Option<Box<WorldAnnouncementV1>>),
     FriendPresence(Option<FriendPresenceV1>),
+    MembershipVote(Box<MembershipVoteV1>),
+    MembershipCommitAccepted { sequence: u64 },
     HelloChallengeAccepted,
 }
 
@@ -263,6 +287,8 @@ pub enum WireLimitError {
     TooManyMembers(usize),
     #[error("recovery certificate contains {0} votes; maximum is {MAX_RECOVERY_VOTES}")]
     TooManyRecoveryVotes(usize),
+    #[error("membership certificate contains {0} votes; maximum is {MAX_MEMBERSHIP_VOTES}")]
+    TooManyMembershipVotes(usize),
     #[error("world compatibility manifest contains {0} artifacts; maximum is {MAX_WORLD_ARTIFACTS}")]
     TooManyWorldArtifacts(usize),
     #[error("world presentation contains {0} tags; maximum is {MAX_PRESENTATION_TAGS}")]

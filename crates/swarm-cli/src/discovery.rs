@@ -1042,6 +1042,8 @@ mod tests {
         let storage = Storage::open(paths.root.clone()).unwrap();
         let local = PeerIdentity::from_secret_bytes([4; 32]);
         let friend = PeerIdentity::from_secret_bytes([5; 32]);
+        let mut initial_membership = vec![local.peer_id(), friend.peer_id()];
+        initial_membership.sort();
         let genesis = swarm_protocol::WorldGenesisV1 {
             protocol_version: PROTOCOL_VERSION,
             minecraft_version: "1.21.8".into(),
@@ -1049,7 +1051,7 @@ mod tests {
             compatibility_fingerprint: Hash32([7; 32]),
             creation_nonce: [8; 32],
             creator_public_key: local.public_key(),
-            initial_membership: vec![local.peer_id()],
+            initial_membership,
         };
         let world = genesis.world_id().unwrap();
         storage
@@ -1060,32 +1062,53 @@ mod tests {
                 genesis,
             })
             .unwrap();
-        let mut membership = MembershipRecordV1 {
+
+        let mut members = vec![
+            WorldMemberV1 {
+                peer_id: local.peer_id(),
+                public_key: local.public_key(),
+                authority_eligible: true,
+                banned: false,
+            },
+            WorldMemberV1 {
+                peer_id: friend.peer_id(),
+                public_key: friend.public_key(),
+                authority_eligible: true,
+                banned: false,
+            },
+        ];
+        members.sort_by_key(|member| member.peer_id);
+        let mut initial = MembershipRecordV1 {
             protocol_version: PROTOCOL_VERSION,
             world_id: world,
-            epoch: 1,
-            sequence: 1,
+            epoch: 0,
+            sequence: 0,
             previous_membership_hash: None,
-            members: vec![
-                WorldMemberV1 {
-                    peer_id: local.peer_id(),
-                    public_key: local.public_key(),
-                    authority_eligible: true,
-                    banned: false,
-                },
-                WorldMemberV1 {
-                    peer_id: friend.peer_id(),
-                    public_key: friend.public_key(),
-                    authority_eligible: true,
-                    banned: true,
-                },
-            ],
+            members,
             authority_peer_id: local.peer_id(),
             authority_public_key: local.public_key(),
             signature: Vec::new(),
         };
-        local.sign_membership(&mut membership).unwrap();
-        storage.save_membership_record(&membership).unwrap();
+        local.sign_membership(&mut initial).unwrap();
+        storage.save_membership_record(&initial).unwrap();
+        assert_eq!(shared_worlds(&storage, local.peer_id(), friend.peer_id(), friend.public_key()).unwrap().len(), 1);
+
+        let mut banned = initial.clone();
+        banned.sequence = 1;
+        banned.previous_membership_hash = Some(initial.record_hash().unwrap());
+        banned.members.iter_mut().find(|member| member.peer_id == friend.peer_id()).unwrap().banned = true;
+        banned.signature.clear();
+        local.sign_membership(&mut banned).unwrap();
+        storage.save_membership_record(&banned).unwrap();
+        assert!(shared_worlds(&storage, local.peer_id(), friend.peer_id(), friend.public_key()).unwrap().is_empty());
+
+        let mut removed = banned.clone();
+        removed.sequence = 2;
+        removed.previous_membership_hash = Some(banned.record_hash().unwrap());
+        removed.members.retain(|member| member.peer_id != friend.peer_id());
+        removed.signature.clear();
+        local.sign_membership(&mut removed).unwrap();
+        storage.save_membership_record(&removed).unwrap();
         assert!(shared_worlds(&storage, local.peer_id(), friend.peer_id(), friend.public_key()).unwrap().is_empty());
     }
 
