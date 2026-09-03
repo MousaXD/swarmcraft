@@ -2695,7 +2695,6 @@ mod authorization_matrix_tests {
     }
 }
 
-
 #[cfg(test)]
 #[path = "daemon_protocol_tests.rs"]
 mod protocol_acceptance_tests;
