@@ -29,7 +29,7 @@ use swarm_network::{
 use swarm_protocol::{
     peer_id_from_public_key, AuthorityLeaseGrantV1, BlobDescriptor, EpochMode, EpochRecordV1, Hash32,
     MembershipCertificateV1, MembershipProposalV1, MembershipRecordV1, MembershipVoteV1, PeerId, RecoveryBallotV1,
-    RecoveryCertificateV1, RecoveryVoteV1, SnapshotManifestV1, SoloBranchV1, TransferPhase, WorldDescriptorV1, WorldId,
+    RecoveryCertificateV1, RecoveryVoteV1, SnapshotManifestV1, TransferPhase, WorldDescriptorV1, WorldId,
     WorldStatusV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{DurableMembershipPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage};
