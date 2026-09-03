@@ -5,28 +5,28 @@ on:
     branches: [fix/agent-3-storage]
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: agent3-compose-authority-contracts
+  cancel-in-progress: false
 
 jobs:
-  probe:
+  compose:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Probe integration merge conflicts
+      - name: Merge exact authoritative Agent 1 and 2 integration head
         shell: bash
         run: |
           set -euo pipefail
+          git config user.name "MousaXD"
+          git config user.email "101021011+MousaXD@users.noreply.github.com"
           git fetch origin integration/audit-remediation-v1
-          set +e
-          git merge --no-commit --no-ff f02bb0d54cb44df67e730f01be4c903e25d670ff
-          status=$?
-          set -e
-          if [ "$status" -ne 0 ]; then
-            echo "CONFLICT_FILES_BEGIN"
-            git diff --name-only --diff-filter=U
-            echo "CONFLICT_FILES_END"
-            exit 1
-          fi
-          echo "merge is conflict-free"
+          test "$(git rev-parse origin/integration/audit-remediation-v1)" = "f02bb0d54cb44df67e730f01be4c903e25d670ff"
+          git merge --no-ff --no-edit f02bb0d54cb44df67e730f01be4c903e25d670ff
+          git merge-base --is-ancestor f02bb0d54cb44df67e730f01be4c903e25d670ff HEAD
+          git push origin HEAD:fix/agent-3-storage
+          echo "COMPOSED_SHA=$(git rev-parse HEAD)"
