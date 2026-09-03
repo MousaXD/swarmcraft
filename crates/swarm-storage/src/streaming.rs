@@ -328,6 +328,7 @@ impl Storage {
             return Err(StorageError::RestoreIncomplete(destination.to_path_buf()));
         }
         ensure_restore_root(destination)?;
+        validate_existing_restore_tree(destination)?;
         let marker = restore_marker(destination);
         durable_atomic_write(&marker, b"swarmcraft-restore-incomplete-v1\n")?;
         clear_restore_destination(destination, &marker)?;
@@ -388,6 +389,17 @@ fn validate_manifest_shape(manifest: &SnapshotManifestV1) -> Result<(), StorageE
 
 fn restore_marker(destination: &Path) -> PathBuf {
     destination.join(RESTORE_INCOMPLETE_MARKER)
+}
+
+fn validate_existing_restore_tree(destination: &Path) -> Result<(), StorageError> {
+    for entry in WalkDir::new(destination).min_depth(1).follow_links(false) {
+        let entry = entry
+            .map_err(|error| io_error(error.path().unwrap_or(destination), std::io::Error::other(error.to_string())))?;
+        if entry.file_type().is_symlink() {
+            return Err(StorageError::SymlinkUnsupported(entry.path().to_path_buf()));
+        }
+    }
+    Ok(())
 }
 
 fn clear_restore_destination(destination: &Path, marker: &Path) -> Result<(), StorageError> {
@@ -806,10 +818,10 @@ mod tests {
         let mut manifest = storage.snapshot_directory_streaming(&source, context(world)).unwrap();
         manifest.signature = vec![0; 64];
         storage.commit_snapshot_streaming(&manifest).unwrap();
-        // The staged-marker policy clears stale destination contents without
-        // following symlinks, then reconstructs the exact manifest tree.
-        storage.restore_snapshot_streaming(&manifest, &restore).unwrap();
-        assert_eq!(fs::read(restore.join("region/r.0.0.mca")).unwrap(), b"safe-data");
+        assert!(matches!(
+            storage.restore_snapshot_streaming(&manifest, &restore),
+            Err(StorageError::SymlinkUnsupported(path)) if path == restore.join("region")
+        ));
         assert!(!outside.join("r.0.0.mca").exists());
     }
 
