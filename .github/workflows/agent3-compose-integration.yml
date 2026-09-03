@@ -1,0 +1,32 @@
+name: Agent 3 compose integrated authority contracts
+
+on:
+  push:
+    branches: [fix/agent-3-storage]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Probe integration merge conflicts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin integration/audit-remediation-v1
+          set +e
+          git merge --no-commit --no-ff f02bb0d54cb44df67e730f01be4c903e25d670ff
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "CONFLICT_FILES_BEGIN"
+            git diff --name-only --diff-filter=U
+            echo "CONFLICT_FILES_END"
+            exit 1
+          fi
+          echo "merge is conflict-free"
