@@ -128,6 +128,8 @@ impl WireRequest {
             | Self::DiscoveryPublic { .. }
             | Self::DiscoveryResolve { .. }
             | Self::FriendPresence { .. }
+            | Self::MembershipProposal(_)
+            | Self::MembershipCommit(_)
             | Self::HelloChallenge { .. }
             | Self::HelloProof(_) => None,
             Self::WorldStatus { world_id }
