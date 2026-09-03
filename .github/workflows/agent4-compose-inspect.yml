@@ -19,19 +19,28 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Repair merge-only rustfmt drift
+      - name: Repair composed membership transition classification
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "SwarmCraft Agent 4"
           git config user.email "101021011+MousaXD@users.noreply.github.com"
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('crates/swarm-network/src/wire.rs')
+          text = p.read_text()
+          old = '''            | Self::FriendPresence { .. }\n            | Self::HelloChallenge { .. }\n            | Self::HelloProof(_) => None,\n'''
+          new = '''            | Self::FriendPresence { .. }\n            | Self::MembershipProposal(_)\n            | Self::MembershipCommit(_)\n            | Self::HelloChallenge { .. }\n            | Self::HelloProof(_) => None,\n'''
+          assert old in text, 'expected exhaustive authorization block not found'
+          p.write_text(text.replace(old, new, 1))
+          PY
           cargo fmt --all
           changed="$(git diff --name-only)"
-          test "$changed" = "crates/swarm-cli/src/daemon.rs"
+          test "$changed" = "crates/swarm-network/src/wire.rs"
           git diff --check
-          git diff -- crates/swarm-cli/src/daemon.rs
-          git add crates/swarm-cli/src/daemon.rs
-          git commit -m "style(agent4): format composed daemon tests"
+          git diff -- crates/swarm-network/src/wire.rs
+          git add crates/swarm-network/src/wire.rs
+          git commit -m "fix(agent4): preserve membership transition authorization"
           echo "VALIDATED_PRODUCTION_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           git push origin HEAD:fix/agent-4-network
       - name: Format
