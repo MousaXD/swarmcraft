@@ -576,6 +576,17 @@ mod tests {
         }
     }
 
+    fn context_with_parent(
+        world: WorldId,
+        snapshot_number: u64,
+        sequence: u64,
+        previous_snapshot_hash: Hash32,
+    ) -> SnapshotContext {
+        let mut context = context_for(world, snapshot_number, sequence);
+        context.previous_snapshot_hash = Some(previous_snapshot_hash);
+        context
+    }
+
     fn write_pattern(path: &Path, bytes: u64) {
         let mut file = File::create(path).unwrap();
         let mut block = vec![0u8; STREAM_BUFFER_SIZE];
@@ -662,7 +673,16 @@ mod tests {
         let storage = Storage::open(temp.path().join("store")).unwrap();
         let world = WorldId([0xa1; 32]);
 
-        let mut first = storage.snapshot_directory_streaming(&source, context_for(world, 1, 1)).unwrap();
+        let parent_source = temp.path().join("parent-source");
+        fs::create_dir_all(&parent_source).unwrap();
+        fs::write(parent_source.join("level.dat"), b"canonical-parent").unwrap();
+        let mut parent = storage.snapshot_directory_streaming(&parent_source, context_for(world, 1, 1)).unwrap();
+        parent.signature = vec![0; 64];
+        storage.commit_snapshot_streaming(&parent).unwrap();
+        let parent_hash = parent.manifest_hash().unwrap();
+
+        let mut first =
+            storage.snapshot_directory_streaming(&source, context_with_parent(world, 2, 2, parent_hash)).unwrap();
         first.signature = vec![0; 64];
         let hash = first.entries[0].blob.hash;
         assert_eq!(first.entries.len(), 2);
@@ -670,7 +690,8 @@ mod tests {
         assert_eq!(first.pinned_blobs(), 1);
         let first_id = first.publication_id().to_owned();
 
-        let mut second = storage.snapshot_directory_streaming(&source, context_for(world, 2, 2)).unwrap();
+        let mut second =
+            storage.snapshot_directory_streaming(&source, context_with_parent(world, 2, 2, parent_hash)).unwrap();
         second.signature = vec![0; 64];
         let second_id = second.publication_id().to_owned();
         assert!(second.entries.iter().all(|entry| entry.blob.hash == hash));
@@ -706,14 +727,21 @@ mod tests {
         let storage = Storage::open(temp.path().join("store")).unwrap();
         let world = WorldId([0xa2; 32]);
 
-        let mut local = storage.snapshot_directory_streaming(&source, context_for(world, 1, 1)).unwrap();
+        let parent_source = temp.path().join("parent-source");
+        fs::create_dir_all(&parent_source).unwrap();
+        fs::write(parent_source.join("level.dat"), b"canonical-parent").unwrap();
+        let mut parent = storage.snapshot_directory_streaming(&parent_source, context_for(world, 1, 1)).unwrap();
+        parent.signature = vec![0; 64];
+        storage.commit_snapshot_streaming(&parent).unwrap();
+        let parent_hash = parent.manifest_hash().unwrap();
+
+        let mut local =
+            storage.snapshot_directory_streaming(&source, context_with_parent(world, 2, 2, parent_hash)).unwrap();
         local.signature = vec![0; 64];
         let hash = local.entries[0].blob.hash;
         let publication_id = local.publication_id().to_owned();
 
-        let mut replica = local.manifest().clone();
-        replica.snapshot_number = 2;
-        replica.sequence = 2;
+        let replica = local.manifest().clone();
         storage.finalize_replica(&replica).unwrap();
         assert!(storage.snapshot_publication_has_pin(world, &publication_id, hash));
 

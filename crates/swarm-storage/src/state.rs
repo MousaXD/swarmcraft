@@ -26,8 +26,9 @@ impl Storage {
         ballot: &RecoveryBallotV1,
         vote: &RecoveryVoteV1,
     ) -> Result<RecoveryPromiseResult, StorageError> {
-        if !ballot.generation_is_well_formed()
-            || !vote.matches_ballot(ballot)?
+        ballot.validate_semantics()?;
+        vote.validate_semantics()?;
+        if !vote.matches_ballot(ballot)?
             || peer_id_from_public_key(&ballot.candidate_public_key) != ballot.candidate_peer_id
             || peer_id_from_public_key(&vote.voter_public_key) != vote.voter_peer_id
         {
@@ -61,6 +62,8 @@ impl Storage {
         let path = self.control_path_v2(world, "recovery-promise.postcard");
         let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
         let promise: DurableRecoveryPromiseV1 = postcard::from_bytes(&bytes)?;
+        promise.ballot.validate_semantics()?;
+        promise.vote.validate_semantics()?;
         if promise.ballot.world_id != world
             || promise.vote.world_id != world
             || !promise.vote.matches_ballot(&promise.ballot)?
@@ -87,26 +90,53 @@ impl Storage {
         Ok(true)
     }
 
+    /// WorldConfig authority transition rule:
+    ///
+    /// * exact canonical duplicates are idempotent and never mutate history;
+    /// * before the first accepted epoch, a new config must be signed by the
+    ///   bootstrap membership authority;
+    /// * once an epoch exists, every new config generation must be signed by
+    ///   the authority peer/key of that currently accepted epoch;
+    /// * sequence and previous hash must extend the accepted config exactly.
     pub fn save_world_config(&self, config: &WorldConfigV1) -> Result<(), StorageError> {
+        let mut config = config.clone();
+        config.normalize_canonical();
+        config.validate_semantics()?;
         if config.world_id != self.load_world(config.world_id)?.world_id {
             return Err(StorageError::WorldMetadataMismatch);
         }
+
         if let Ok(existing) = self.load_world_config(config.world_id) {
-            if config.sequence < existing.sequence {
-                return Err(StorageError::WorldMetadataMismatch);
+            if config == existing {
+                return Ok(());
             }
-            if config.sequence == existing.sequence {
-                if config.config_hash()? == existing.config_hash()? {
-                    return Ok(());
-                }
+            if config.sequence <= existing.sequence {
                 return Err(StorageError::WorldMetadataMismatch);
             }
             let expected_sequence = next_world_config_sequence(existing.sequence)?;
             if config.sequence != expected_sequence || config.previous_config_hash != Some(existing.config_hash()?) {
                 return Err(StorageError::WorldMetadataMismatch);
             }
+        } else if config.sequence != 1 || config.previous_config_hash.is_some() {
+            return Err(StorageError::WorldMetadataMismatch);
         }
-        let bytes = postcard::to_allocvec(config)?;
+
+        if let Ok(epoch) = self.load_epoch_record(config.world_id) {
+            if config.authority_peer_id != epoch.authority_peer_id
+                || config.authority_public_key != epoch.authority_public_key
+            {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+        } else {
+            let membership = self.load_membership_record(config.world_id)?;
+            if config.authority_peer_id != membership.authority_peer_id
+                || config.authority_public_key != membership.authority_public_key
+            {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+        }
+
+        let bytes = postcard::to_allocvec(&config)?;
         atomic_write(&self.control_path_v2(config.world_id, "world-config.postcard"), &bytes)
     }
 
@@ -117,10 +147,12 @@ impl Storage {
         if config.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
         }
+        config.validate_semantics()?;
         Ok(config)
     }
 
     pub fn save_solo_branch(&self, branch: &SoloBranchV1) -> Result<(), StorageError> {
+        branch.validate_semantics()?;
         let bytes = postcard::to_allocvec(branch)?;
         atomic_write(&self.control_path_v2(branch.world_id, "solo-branch.postcard"), &bytes)
     }
@@ -132,10 +164,12 @@ impl Storage {
         if branch.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
         }
+        branch.validate_semantics()?;
         Ok(branch)
     }
 
     pub fn preserve_solo_conflict(&self, branch: &SoloBranchV1) -> Result<PathBuf, StorageError> {
+        branch.validate_semantics()?;
         let hash = branch.branch_hash()?;
         let path = self
             .world_dir(branch.world_id)
@@ -162,6 +196,7 @@ impl Storage {
             let bytes = fs::read(entry.path()).map_err(|error| io_error(entry.path(), error))?;
             let branch: SoloBranchV1 = postcard::from_bytes(&bytes)?;
             if branch.world_id == world {
+                branch.validate_semantics()?;
                 branches.push(branch);
             }
         }
@@ -249,8 +284,9 @@ mod tests {
     use super::*;
     use crate::WorldMetadataV1;
     use swarm_protocol::{
-        AuthorityPolicyV1, Hash32, MembershipPolicyV1, PeerId, RuntimeCompatibilityManifestV1, WorldGenesisV1,
-        WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+        AuthorityPolicyV1, EpochMode, EpochRecordV1, Hash32, MembershipPolicyV1, MembershipRecordV1, PeerId,
+        RuntimeCompatibilityManifestV1, WorldGenesisV1, WorldMemberV1, WorldPresentationV1, WorldVisibilityV1,
+        PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
     };
 
     fn test_world() -> (WorldGenesisV1, WorldId) {
@@ -302,6 +338,57 @@ mod tests {
         }
     }
 
+    fn bootstrap_membership(world: WorldId) -> MembershipRecordV1 {
+        MembershipRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            epoch: 0,
+            sequence: 0,
+            previous_membership_hash: None,
+            members: vec![WorldMemberV1 {
+                peer_id: PeerId([6; 32]),
+                public_key: [6; 32],
+                authority_eligible: true,
+                banned: false,
+            }],
+            authority_peer_id: PeerId([6; 32]),
+            authority_public_key: [6; 32],
+            signature: Vec::new(),
+        }
+    }
+
+    fn world_config(world: WorldId, authority: u8, sequence: u64, previous: Option<Hash32>) -> WorldConfigV1 {
+        WorldConfigV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            sequence,
+            previous_config_hash: previous,
+            compatibility: RuntimeCompatibilityManifestV1 {
+                minecraft_version: "1.21.8".into(),
+                loader_id: "fabric".into(),
+                loader_version: "0.17.2".into(),
+                swarmcraft_protocol_version: PROTOCOL_VERSION,
+                fabric_adapter_version: "0.2.0".into(),
+                required_server_mods: Vec::new(),
+                required_client_mods: Vec::new(),
+                datapacks: Vec::new(),
+            },
+            visibility: WorldVisibilityV1::Private,
+            authority_policy: AuthorityPolicyV1 { allow_solo_advancement: true, preferred_replication_factor: 3 },
+            membership_policy: MembershipPolicyV1::InviteOnly,
+            presentation: WorldPresentationV1 {
+                name: "test".into(),
+                description: String::new(),
+                tags: Vec::new(),
+                icon_hash: None,
+                approximate_region: None,
+            },
+            authority_peer_id: PeerId([authority; 32]),
+            authority_public_key: [authority; 32],
+            signature: vec![authority; 64],
+        }
+    }
+
     #[test]
     fn recovery_promise_survives_restart_and_preserves_the_accepted_value() {
         let temp = tempfile::tempdir().unwrap();
@@ -344,6 +431,54 @@ mod tests {
     }
 
     #[test]
+    fn world_config_authority_tracks_the_current_accepted_epoch() {
+        let temp = tempfile::tempdir().unwrap();
+        let (genesis, world) = test_world();
+        let store = Storage::open(temp.path()).unwrap();
+        store
+            .create_world(&WorldMetadataV1 {
+                storage_schema_version: STORAGE_SCHEMA_VERSION,
+                display_name: "test".into(),
+                world_id: world,
+                genesis,
+            })
+            .unwrap();
+        store.save_membership_record(&bootstrap_membership(world)).unwrap();
+
+        let first = world_config(world, 6, 1, None);
+        store.save_world_config(&first).unwrap();
+        assert_eq!(store.load_world_config(world).unwrap(), first);
+
+        store
+            .save_epoch_record(&EpochRecordV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id: world,
+                epoch_number: 1,
+                previous_epoch_hash: None,
+                base_state_hash: Hash32([8; 32]),
+                authority_peer_id: PeerId([7; 32]),
+                authority_public_key: [7; 32],
+                mode: EpochMode::Recovery,
+                fencing_token: 1,
+                reason: "authority transition".into(),
+                signature: vec![7; 64],
+            })
+            .unwrap();
+
+        // Replaying the exact accepted value is a no-op even after authority changes.
+        store.save_world_config(&first).unwrap();
+
+        let previous = first.config_hash().unwrap();
+        let stale_authority = world_config(world, 6, 2, Some(previous));
+        assert!(store.save_world_config(&stale_authority).is_err());
+        assert_eq!(store.load_world_config(world).unwrap(), first);
+
+        let current_authority = world_config(world, 7, 2, Some(previous));
+        store.save_world_config(&current_authority).unwrap();
+        assert_eq!(store.load_world_config(world).unwrap(), current_authority);
+    }
+
+    #[test]
     fn world_config_and_background_seeding_round_trip() {
         let temp = tempfile::tempdir().unwrap();
         let (genesis, world) = test_world();
@@ -356,35 +491,8 @@ mod tests {
                 genesis,
             })
             .unwrap();
-        let config = WorldConfigV1 {
-            protocol_version: PROTOCOL_VERSION,
-            world_id: world,
-            sequence: 1,
-            previous_config_hash: None,
-            compatibility: RuntimeCompatibilityManifestV1 {
-                minecraft_version: "1.21.8".into(),
-                loader_id: "fabric".into(),
-                loader_version: "0.17.2".into(),
-                swarmcraft_protocol_version: PROTOCOL_VERSION,
-                fabric_adapter_version: "0.2.0".into(),
-                required_server_mods: Vec::new(),
-                required_client_mods: Vec::new(),
-                datapacks: Vec::new(),
-            },
-            visibility: WorldVisibilityV1::Private,
-            authority_policy: AuthorityPolicyV1 { allow_solo_advancement: true, preferred_replication_factor: 3 },
-            membership_policy: MembershipPolicyV1::InviteOnly,
-            presentation: WorldPresentationV1 {
-                name: "test".into(),
-                description: String::new(),
-                tags: Vec::new(),
-                icon_hash: None,
-                approximate_region: None,
-            },
-            authority_peer_id: PeerId([6; 32]),
-            authority_public_key: [6; 32],
-            signature: Vec::new(),
-        };
+        store.save_membership_record(&bootstrap_membership(world)).unwrap();
+        let config = world_config(world, 6, 1, None);
         store.save_world_config(&config).unwrap();
         assert_eq!(store.load_world_config(world).unwrap(), config);
         assert!(!store.background_seeding_enabled(world).unwrap());

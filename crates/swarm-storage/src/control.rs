@@ -8,6 +8,7 @@ use swarm_protocol::{AuthorityLeaseGrantV1, AuthorityTransferV1, EpochRecordV1, 
 
 impl Storage {
     pub fn save_epoch_record(&self, record: &EpochRecordV1) -> Result<(), StorageError> {
+        record.validate_semantics()?;
         let bytes = postcard::to_allocvec(record)?;
         atomic_write(&self.control_path(record.world_id, "epoch.postcard"), &bytes)
     }
@@ -19,10 +20,12 @@ impl Storage {
         if record.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
         }
+        record.validate_semantics()?;
         Ok(record)
     }
 
     pub fn reserve_recovery(&self, reservation: &AuthorityLeaseGrantV1) -> Result<bool, StorageError> {
+        reservation.validate_semantics()?;
         if let Ok(existing) = self.load_recovery_reservation(reservation.world_id) {
             let existing_generation = (existing.epoch, existing.fencing_token);
             let requested_generation = (reservation.epoch, reservation.fencing_token);
@@ -39,6 +42,7 @@ impl Storage {
     }
 
     pub fn save_recovery_reservation(&self, reservation: &AuthorityLeaseGrantV1) -> Result<(), StorageError> {
+        reservation.validate_semantics()?;
         let bytes = postcard::to_allocvec(reservation)?;
         atomic_write(&self.control_path(reservation.world_id, "recovery-reservation.postcard"), &bytes)
     }
@@ -50,6 +54,7 @@ impl Storage {
         if reservation.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
         }
+        reservation.validate_semantics()?;
         Ok(reservation)
     }
 
@@ -58,6 +63,7 @@ impl Storage {
     }
 
     pub fn save_transfer_record(&self, transfer: &AuthorityTransferV1) -> Result<(), StorageError> {
+        transfer.validate_semantics()?;
         let bytes = postcard::to_allocvec(transfer)?;
         atomic_write(&self.control_path(transfer.world_id, "transfer.postcard"), &bytes)
     }
@@ -69,10 +75,12 @@ impl Storage {
         if record.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
         }
+        record.validate_semantics()?;
         Ok(record)
     }
 
     pub fn save_sleep_record(&self, record: &SleepRecordV1) -> Result<(), StorageError> {
+        record.validate_semantics()?;
         let bytes = postcard::to_allocvec(record)?;
         atomic_write(&self.control_path(record.world_id, "sleep.postcard"), &bytes)
     }
@@ -84,6 +92,7 @@ impl Storage {
         if record.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
         }
+        record.validate_semantics()?;
         Ok(record)
     }
 
@@ -174,6 +183,29 @@ mod tests {
         let loaded = store.load_epoch_record(world).unwrap();
         assert_eq!(loaded.epoch_number, 4);
         assert_eq!(loaded.fencing_token, 11);
+    }
+
+    #[test]
+    fn unsupported_control_record_version_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([8; 32]);
+        fs::create_dir_all(store.world_dir(world).join("metadata")).unwrap();
+        let record = EpochRecordV1 {
+            protocol_version: PROTOCOL_VERSION + 1,
+            world_id: world,
+            epoch_number: 1,
+            previous_epoch_hash: None,
+            base_state_hash: Hash32([9; 32]),
+            authority_peer_id: PeerId([2; 32]),
+            authority_public_key: [2; 32],
+            mode: EpochMode::Quorum,
+            fencing_token: 1,
+            reason: "unsupported".into(),
+            signature: vec![1; 64],
+        };
+        assert!(store.save_epoch_record(&record).is_err());
+        assert!(store.load_epoch_record(world).is_err());
     }
 
     #[test]

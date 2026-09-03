@@ -115,6 +115,27 @@ fn member(peer: &PeerFixture) -> WorldMemberV1 {
     }
 }
 
+fn genesis_membership(metadata: &WorldMetadataV1, authority: &PeerIdentity) -> MembershipRecordV1 {
+    let mut membership = MembershipRecordV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: metadata.world_id,
+        epoch: 0,
+        sequence: 0,
+        previous_membership_hash: None,
+        members: vec![WorldMemberV1 {
+            peer_id: authority.peer_id(),
+            public_key: authority.public_key(),
+            authority_eligible: true,
+            banned: false,
+        }],
+        authority_peer_id: authority.peer_id(),
+        authority_public_key: authority.public_key(),
+        signature: Vec::new(),
+    };
+    authority.sign_membership(&mut membership).unwrap();
+    membership
+}
+
 fn permit(peer: &PeerFixture, world: WorldId) -> Option<(u64, u64, u64)> {
     let value = fs::read_to_string(permit_path(&peer.paths, world)).ok()?;
     let mut fields = value.split_whitespace();
@@ -152,6 +173,8 @@ fn build_seed<'a>(
         genesis,
     };
     authority.storage.create_world(&metadata).unwrap();
+    let genesis_membership = genesis_membership(&metadata, &authority.identity);
+    authority.storage.save_membership_record(&genesis_membership).unwrap();
     let mut config = WorldConfigV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
@@ -186,19 +209,6 @@ fn build_seed<'a>(
     };
     descriptor.normalize();
     authority.storage.save_world_descriptor(&descriptor).unwrap();
-    let mut membership = MembershipRecordV1 {
-        protocol_version: PROTOCOL_VERSION,
-        world_id: world,
-        epoch: 1,
-        sequence: 1,
-        previous_membership_hash: None,
-        members: descriptor.members.clone(),
-        authority_peer_id: authority.identity.peer_id(),
-        authority_public_key: authority.identity.public_key(),
-        signature: Vec::new(),
-    };
-    authority.identity.sign_membership(&mut membership).unwrap();
-    authority.storage.save_membership_record(&membership).unwrap();
 
     let source = source_temp.path().join("world");
     fs::create_dir_all(&source).unwrap();
@@ -219,14 +229,12 @@ fn build_seed<'a>(
         )
         .unwrap();
     authority.identity.sign_snapshot(&mut manifest).unwrap();
-    authority.storage.commit_snapshot(&manifest).unwrap();
-    let manifest = manifest.manifest().clone();
     let mut epoch = EpochRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
         epoch_number: 1,
         previous_epoch_hash: None,
-        base_state_hash: manifest.state_root,
+        base_state_hash: manifest.manifest().state_root,
         authority_peer_id: authority.identity.peer_id(),
         authority_public_key: authority.identity.public_key(),
         mode: EpochMode::Quorum,
@@ -236,6 +244,22 @@ fn build_seed<'a>(
     };
     epoch.signature = authority.identity.sign(&epoch.signing_bytes().unwrap());
     authority.storage.save_epoch_record(&epoch).unwrap();
+
+    let mut membership = MembershipRecordV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        epoch: 1,
+        sequence: 1,
+        previous_membership_hash: Some(genesis_membership.record_hash().unwrap()),
+        members: descriptor.members.clone(),
+        authority_peer_id: authority.identity.peer_id(),
+        authority_public_key: authority.identity.public_key(),
+        signature: Vec::new(),
+    };
+    authority.identity.sign_membership(&mut membership).unwrap();
+    authority.storage.save_membership_record(&membership).unwrap();
+    authority.storage.commit_snapshot(&manifest).unwrap();
+    let manifest = manifest.manifest().clone();
     (metadata, config, descriptor, membership, epoch, manifest)
 }
 
@@ -243,10 +267,14 @@ fn install_seed(peer: &PeerFixture, seed: &Seed<'_>) {
     if peer.storage.load_world(seed.metadata.world_id).is_err() {
         peer.storage.create_world(seed.metadata).unwrap();
     }
+    if peer.storage.load_membership_record(seed.metadata.world_id).is_err() {
+        let genesis_membership = genesis_membership(seed.metadata, seed.authority);
+        peer.storage.save_membership_record(&genesis_membership).unwrap();
+    }
     peer.storage.save_world_config(seed.config).unwrap();
     peer.storage.save_world_descriptor(seed.descriptor).unwrap();
-    peer.storage.save_membership_record(seed.membership).unwrap();
     peer.storage.save_epoch_record(seed.epoch).unwrap();
+    peer.storage.save_membership_record(seed.membership).unwrap();
     if peer.storage.latest_snapshot(seed.metadata.world_id).unwrap().is_none() {
         let mut manifest = peer
             .storage

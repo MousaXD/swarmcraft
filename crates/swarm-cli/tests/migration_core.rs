@@ -72,13 +72,14 @@ fn initialize_two_peer_world(alice: &PeerFixture, bob: &PeerFixture, source: &Pa
     alice.storage.create_world(&metadata).unwrap();
     bob.storage.create_world(&metadata).unwrap();
 
-    let descriptor = WorldDescriptorV1 {
+    let mut descriptor = WorldDescriptorV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
         compatibility_fingerprint: genesis.compatibility_fingerprint,
         members: vec![member(&alice.identity), member(&bob.identity)],
         preferred_replication_factor: 2,
     };
+    descriptor.normalize();
     alice.storage.save_world_descriptor(&descriptor).unwrap();
     bob.storage.save_world_descriptor(&descriptor).unwrap();
 
@@ -512,6 +513,8 @@ fn add_third_peer(alice: &PeerFixture, bob: &PeerFixture, carol: &PeerFixture, s
     let metadata = alice.storage.load_world(shared.world).unwrap();
     carol.storage.create_world(&metadata).unwrap();
     let config = alice.storage.load_world_config(shared.world).unwrap();
+    let current_membership = alice.storage.load_membership_record(shared.world).unwrap();
+    carol.storage.save_membership_record(&current_membership).unwrap();
     carol.storage.save_world_config(&config).unwrap();
 
     let mut descriptor = alice.storage.load_world_descriptor(shared.world).unwrap();
@@ -524,9 +527,9 @@ fn add_third_peer(alice: &PeerFixture, bob: &PeerFixture, carol: &PeerFixture, s
     let mut membership = MembershipRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: shared.world,
-        epoch: shared.epoch.epoch_number,
-        sequence: 1,
-        previous_membership_hash: None,
+        epoch: current_membership.epoch,
+        sequence: current_membership.sequence.checked_add(1).unwrap(),
+        previous_membership_hash: Some(current_membership.record_hash().unwrap()),
         members: descriptor.members.clone(),
         authority_peer_id: alice.identity.peer_id(),
         authority_public_key: alice.identity.public_key(),
