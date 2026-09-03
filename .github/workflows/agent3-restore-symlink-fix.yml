@@ -1,4 +1,4 @@
-name: Agent 3 restore symlink hardening
+name: Agent 3 storage regression closure
 
 on:
   push:
@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: agent3-restore-symlink-fix
+  group: agent3-storage-regression-closure
   cancel-in-progress: false
 
 jobs:
@@ -18,51 +18,190 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Apply fail-closed restore symlink preflight
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Add missing permanent closure regressions
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path('crates/swarm-storage/src/streaming.rs')
-          text = path.read_text()
+          integrity = Path('crates/swarm-storage/tests/storage_integrity.rs')
+          text = integrity.read_text()
+          number_test = r'''
+#[test]
+fn load_snapshot_rejects_embedded_snapshot_number_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::open(temp.path().join("store")).unwrap();
+    let world = WorldId([0x29; 32]);
+    storage.canonical_snapshot_head(world).unwrap();
+    let snapshots = storage.world_dir(world).join("snapshots");
+    fs::create_dir_all(&snapshots).unwrap();
+    let wrong = SnapshotManifestV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        snapshot_number: 2,
+        epoch: 1,
+        sequence: 1,
+        previous_snapshot_hash: None,
+        entries: Vec::new(),
+        state_root: snapshot_state_root(&[]).unwrap(),
+        authority_peer_id: PeerId([2; 32]),
+        authority_public_key: [3; 32],
+        signature: vec![0; 64],
+    };
+    fs::write(snapshots.join(format!("{:020}.postcard", 1)), postcard::to_allocvec(&wrong).unwrap()).unwrap();
+    assert!(matches!(storage.load_snapshot(world, 1), Err(StorageError::WorldMetadataMismatch)));
+}
 
-          old = '''        ensure_restore_root(destination)?;\n        let marker = restore_marker(destination);'''
-          new = '''        ensure_restore_root(destination)?;\n        validate_existing_restore_tree(destination)?;\n        let marker = restore_marker(destination);'''
+'''
+          anchor = '#[test]\nfn portable_case_aliases_are_rejected_before_blob_access() {'
+          if 'fn load_snapshot_rejects_embedded_snapshot_number_mismatch()' not in text:
+              if anchor not in text:
+                  raise SystemExit('number-mismatch insertion anchor not found')
+              text = text.replace(anchor, number_test + anchor, 1)
+
+          race_test = r'''
+#[test]
+fn stale_publication_prepared_before_fence_change_cannot_commit_after_generation_advances() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("level.dat"), b"prepared-before-fence-change").unwrap();
+    let storage = Storage::open(temp.path().join("store")).unwrap();
+    let world = WorldId([0x2a; 32]);
+    let authority_peer_id = PeerId([0x11; 32]);
+    let authority_public_key = [0x12; 32];
+    let epoch = EpochRecordV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        epoch_number: 1,
+        previous_epoch_hash: None,
+        base_state_hash: Hash32([0x13; 32]),
+        authority_peer_id,
+        authority_public_key,
+        mode: EpochMode::Quorum,
+        fencing_token: 10,
+        reason: "initial".into(),
+        signature: vec![1; 64],
+    };
+    storage.save_epoch_record(&epoch).unwrap();
+
+    let worker_storage = storage.clone();
+    let worker_source = source.clone();
+    let (prepared_tx, prepared_rx) = std::sync::mpsc::channel();
+    let (commit_tx, commit_rx) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let publication = snapshot(
+            &worker_storage,
+            &worker_source,
+            world,
+            1,
+            1,
+            None,
+            (authority_peer_id, authority_public_key),
+        );
+        prepared_tx.send(()).unwrap();
+        commit_rx.recv().unwrap();
+        worker_storage.commit_snapshot_fenced(
+            &publication,
+            SnapshotCommitFence { expected_epoch: 1, expected_fencing_token: 10, expected_head: None },
+        )
+    });
+
+    prepared_rx.recv().unwrap();
+    let mut superseding = epoch;
+    superseding.fencing_token = 11;
+    superseding.reason = "fence stale publication".into();
+    storage.save_epoch_record(&superseding).unwrap();
+    commit_tx.send(()).unwrap();
+
+    assert!(matches!(
+        worker.join().unwrap(),
+        Err(StorageError::SnapshotFenceMismatch { expected_epoch: 1, expected_fencing_token: 10, .. })
+    ));
+    assert!(storage.latest_snapshot(world).unwrap().is_none());
+}
+
+'''
+          race_anchor = '#[test]\nfn load_snapshot_rejects_embedded_namespace_mismatch() {'
+          if 'fn stale_publication_prepared_before_fence_change_cannot_commit_after_generation_advances()' not in text:
+              if race_anchor not in text:
+                  raise SystemExit('fenced-race insertion anchor not found')
+              text = text.replace(race_anchor, race_test + race_anchor, 1)
+          integrity.write_text(text)
+
+          portable = Path('crates/swarm-storage/src/portable.rs')
+          text = portable.read_text()
+          old = r'''    #[test]
+    fn rejects_cross_platform_aliases() {
+        assert!(validate_manifest_paths(&[entry("region/Foo.dat"), entry("region/foo.dat")]).is_err());
+        assert!(validate_portable_path("CON").is_err());
+        assert!(validate_portable_path("aux.txt").is_err());
+        assert!(validate_portable_path("folder/name. ").is_err());
+        assert!(validate_portable_path("folder/name.").is_err());
+        assert!(validate_portable_path("folder/é.dat").is_err());
+        assert!(validate_portable_path("region/r.0.0.mca").is_ok());
+    }'''
+          new = r'''    #[test]
+    fn rejects_cross_platform_aliases() {
+        assert!(validate_manifest_paths(&[entry("region/Foo.dat"), entry("region/foo.dat")]).is_err());
+        assert!(validate_manifest_paths(&[entry("region/same.dat"), entry("region/same.dat")]).is_err());
+        for path in [
+            "CON",
+            "aux.txt",
+            "COM1.log",
+            "LPT9",
+            "folder/name. ",
+            "folder/name.",
+            "folder/name<.dat",
+            "folder/name>.dat",
+            "folder/name:.dat",
+            "folder/name\".dat",
+            "folder/name|.dat",
+            "folder/name?.dat",
+            "folder/name*.dat",
+            "../escape.dat",
+            "folder/../escape.dat",
+            "/rooted.dat",
+            "\\rooted.dat",
+            "C:/rooted.dat",
+            "folder\\name.dat",
+            ".",
+            "folder/.",
+            "folder/é.dat",
+        ] {
+            assert!(validate_portable_path(path).is_err(), "portable alias unexpectedly accepted: {path}");
+        }
+        assert!(validate_portable_path("region/r.0.0.mca").is_ok());
+    }'''
           if old in text:
               text = text.replace(old, new, 1)
           elif new not in text:
-              raise SystemExit('restore preflight insertion anchor not found')
-
-          helper_anchor = '''fn clear_restore_destination(destination: &Path, marker: &Path) -> Result<(), StorageError> {'''
-          helper = '''fn validate_existing_restore_tree(destination: &Path) -> Result<(), StorageError> {\n    for entry in WalkDir::new(destination).min_depth(1).follow_links(false) {\n        let entry = entry\n            .map_err(|error| io_error(error.path().unwrap_or(destination), std::io::Error::other(error.to_string())))?;\n        if entry.file_type().is_symlink() {\n            return Err(StorageError::SymlinkUnsupported(entry.path().to_path_buf()));\n        }\n    }\n    Ok(())\n}\n\n'''
-          if helper not in text:
-              if helper_anchor not in text:
-                  raise SystemExit('restore helper anchor not found')
-              text = text.replace(helper_anchor, helper + helper_anchor, 1)
-
-          old_test = '''        // The staged-marker policy clears stale destination contents without\n        // following symlinks, then reconstructs the exact manifest tree.\n        storage.restore_snapshot_streaming(&manifest, &restore).unwrap();\n        assert_eq!(fs::read(restore.join("region/r.0.0.mca")).unwrap(), b"safe-data");\n        assert!(!outside.join("r.0.0.mca").exists());'''
-          new_test = '''        assert!(matches!(\n            storage.restore_snapshot_streaming(&manifest, &restore),\n            Err(StorageError::SymlinkUnsupported(path)) if path == restore.join("region")\n        ));\n        assert!(!outside.join("r.0.0.mca").exists());'''
-          if old_test in text:
-              text = text.replace(old_test, new_test, 1)
-          elif new_test not in text:
-              raise SystemExit('restore symlink regression anchor not found')
-
-          path.write_text(text)
+              raise SystemExit('portable matrix replacement anchor not found')
+          portable.write_text(text)
           PY
           cargo fmt --all
           git diff --check
-      - name: Commit production fix if needed
+      - name: Run focused new regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p swarm-storage --test storage_integrity load_snapshot_rejects_embedded_snapshot_number_mismatch --locked
+          cargo test -p swarm-storage --test storage_integrity stale_publication_prepared_before_fence_change_cannot_commit_after_generation_advances --locked
+          cargo test -p swarm-storage portable::tests::rejects_cross_platform_aliases --locked
+      - name: Commit permanent regression coverage if needed
         shell: bash
         run: |
           set -euo pipefail
           if git diff --quiet; then
-            echo "No production fix needed"
+            echo "No regression patch needed"
             exit 0
           fi
           git config user.name "MousaXD"
           git config user.email "101021011+MousaXD@users.noreply.github.com"
-          git add crates/swarm-storage/src/streaming.rs
-          git commit -m "fix(storage): reject preexisting restore symlinks"
+          git add crates/swarm-storage/tests/storage_integrity.rs crates/swarm-storage/src/portable.rs
+          git commit -m "test(storage): close fencing and path identity matrix"
           git push origin HEAD:fix/agent-3-storage
