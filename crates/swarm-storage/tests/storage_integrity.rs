@@ -142,6 +142,60 @@ fn durable_fence_rejects_same_epoch_after_fencing_token_changes() {
 }
 
 #[test]
+fn stale_publication_prepared_before_fence_change_cannot_commit_after_generation_advances() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("level.dat"), b"prepared-before-fence-change").unwrap();
+    let storage = Storage::open(temp.path().join("store")).unwrap();
+    let world = WorldId([0x2a; 32]);
+    let authority_peer_id = PeerId([0x11; 32]);
+    let authority_public_key = [0x12; 32];
+    let epoch = EpochRecordV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        epoch_number: 1,
+        previous_epoch_hash: None,
+        base_state_hash: Hash32([0x13; 32]),
+        authority_peer_id,
+        authority_public_key,
+        mode: EpochMode::Quorum,
+        fencing_token: 10,
+        reason: "initial".into(),
+        signature: vec![1; 64],
+    };
+    storage.save_epoch_record(&epoch).unwrap();
+
+    let worker_storage = storage.clone();
+    let worker_source = source.clone();
+    let (prepared_tx, prepared_rx) = std::sync::mpsc::channel();
+    let (commit_tx, commit_rx) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let publication =
+            snapshot(&worker_storage, &worker_source, world, 1, 1, None, (authority_peer_id, authority_public_key));
+        prepared_tx.send(()).unwrap();
+        commit_rx.recv().unwrap();
+        worker_storage.commit_snapshot_fenced(
+            &publication,
+            SnapshotCommitFence { expected_epoch: 1, expected_fencing_token: 10, expected_head: None },
+        )
+    });
+
+    prepared_rx.recv().unwrap();
+    let mut superseding = epoch;
+    superseding.fencing_token = 11;
+    superseding.reason = "fence stale publication".into();
+    storage.save_epoch_record(&superseding).unwrap();
+    commit_tx.send(()).unwrap();
+
+    assert!(matches!(
+        worker.join().unwrap(),
+        Err(StorageError::SnapshotFenceMismatch { expected_epoch: 1, expected_fencing_token: 10, .. })
+    ));
+    assert!(storage.latest_snapshot(world).unwrap().is_none());
+}
+
+#[test]
 fn load_snapshot_rejects_embedded_namespace_mismatch() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Storage::open(temp.path().join("store")).unwrap();
@@ -153,6 +207,31 @@ fn load_snapshot_rejects_embedded_namespace_mismatch() {
         protocol_version: PROTOCOL_VERSION,
         world_id: WorldId([0x24; 32]),
         snapshot_number: 1,
+        epoch: 1,
+        sequence: 1,
+        previous_snapshot_hash: None,
+        entries: Vec::new(),
+        state_root: snapshot_state_root(&[]).unwrap(),
+        authority_peer_id: PeerId([2; 32]),
+        authority_public_key: [3; 32],
+        signature: vec![0; 64],
+    };
+    fs::write(snapshots.join(format!("{:020}.postcard", 1)), postcard::to_allocvec(&wrong).unwrap()).unwrap();
+    assert!(matches!(storage.load_snapshot(world, 1), Err(StorageError::WorldMetadataMismatch)));
+}
+
+#[test]
+fn load_snapshot_rejects_embedded_snapshot_number_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::open(temp.path().join("store")).unwrap();
+    let world = WorldId([0x29; 32]);
+    storage.canonical_snapshot_head(world).unwrap();
+    let snapshots = storage.world_dir(world).join("snapshots");
+    fs::create_dir_all(&snapshots).unwrap();
+    let wrong = SnapshotManifestV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        snapshot_number: 2,
         epoch: 1,
         sequence: 1,
         previous_snapshot_hash: None,

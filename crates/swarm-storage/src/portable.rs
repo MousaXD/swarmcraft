@@ -99,11 +99,33 @@ mod tests {
     #[test]
     fn rejects_cross_platform_aliases() {
         assert!(validate_manifest_paths(&[entry("region/Foo.dat"), entry("region/foo.dat")]).is_err());
-        assert!(validate_portable_path("CON").is_err());
-        assert!(validate_portable_path("aux.txt").is_err());
-        assert!(validate_portable_path("folder/name. ").is_err());
-        assert!(validate_portable_path("folder/name.").is_err());
-        assert!(validate_portable_path("folder/é.dat").is_err());
+        assert!(validate_manifest_paths(&[entry("region/same.dat"), entry("region/same.dat")]).is_err());
+        for path in [
+            "CON",
+            "aux.txt",
+            "COM1.log",
+            "LPT9",
+            "folder/name. ",
+            "folder/name.",
+            "folder/name<.dat",
+            "folder/name>.dat",
+            "folder/name:.dat",
+            "folder/name\".dat",
+            "folder/name|.dat",
+            "folder/name?.dat",
+            "folder/name*.dat",
+            "../escape.dat",
+            "folder/../escape.dat",
+            "/rooted.dat",
+            "\\rooted.dat",
+            "C:/rooted.dat",
+            "folder\\name.dat",
+            ".",
+            "folder/.",
+            "folder/é.dat",
+        ] {
+            assert!(validate_portable_path(path).is_err(), "portable alias unexpectedly accepted: {path}");
+        }
         assert!(validate_portable_path("region/r.0.0.mca").is_ok());
     }
 }
