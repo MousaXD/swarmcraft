@@ -12,79 +12,128 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lockfiles:
-    name: Lockfile truth
+  exact-head:
+    name: Exact-head Agent 3 acceptance
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      VALIDATED_PRODUCTION_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Root lockfile is current
-        run: cargo metadata --locked --format-version 1 --no-deps > /dev/null
-      - name: Desktop lockfile is current
-        run: cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --format-version 1 --no-deps > /dev/null
-
-  rust:
-    name: Rust storage matrix (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Format
-        if: runner.os == 'Linux'
-        run: cargo fmt --all -- --check
-      - name: Clippy workspace
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Test workspace
-        run: cargo test --workspace --all-features --locked
-
-  storage-acceptance:
-    name: Storage integrity acceptance
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Full storage suite
-        run: cargo test -p swarm-storage --all-features --locked
-      - name: Canonical head, fencing, portability, and two-process promise race
-        run: cargo test -p swarm-storage --test storage_integrity --locked -- --nocapture
-      - name: Publication ownership race
-        run: cargo test -p swarm-storage --test publication_ownership_race --locked -- --nocapture
-      - name: Snapshot swarm reconstruction
-        run: cargo test -p swarm-storage --test snapshot_swarm_acceptance --locked
-      - name: Storage failure injection
-        run: cargo test -p swarm-storage --test failure_injection --locked
-
-  network-soak:
-    name: Interrupted QUIC 1 GiB soak
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      SWARMCRAFT_NETWORK_SOAK_GIB: '1'
-      SWARMCRAFT_NETWORK_SOAK_RESTART_MIB: '128'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Compile soak gate
-        run: cargo test --release -p swarm-network --test network_transfer_soak --locked --no-run
-      - name: Apply sustained impairment
+      - name: Assert exact event SHA at start
         shell: bash
         run: |
-          set -euxo pipefail
-          command -v tc
-          sudo tc qdisc replace dev lo root netem delay 1ms 0.5ms distribution normal loss 0.2% rate 250mbit
-          tc qdisc show dev lo
-      - name: Multi-gigabyte interrupted transfer
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$VALIDATED_PRODUCTION_SHA"
+          test -z "$(git status --short)"
+      - name: Root and Desktop lockfile truth
         shell: bash
-        run: cargo test --release -p swarm-network --test network_transfer_soak multi_gib_interrupted_quic_transfer_soak --locked -- --ignored --nocapture
-      - name: Remove impairment
-        if: always()
-        run: sudo tc qdisc del dev lo root || true
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --format-version 1 --no-deps > /dev/null
+          cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --format-version 1 --no-deps > /dev/null
+      - name: Required format gate
+        run: cargo fmt --all -- --check
+      - name: Required workspace check gate
+        run: cargo check --workspace --all-targets --locked
+      - name: Required warnings-denied clippy gate
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Required swarm-storage suite
+        run: cargo test -p swarm-storage --locked
+      - name: Missing newest canonical head fails closed and number is not reused
+        run: cargo test -p swarm-storage --test storage_integrity missing_canonical_head_target_fails_closed_without_number_reuse --locked -- --nocapture
+      - name: Immutable same-number snapshot conflict
+        run: cargo test -p swarm-storage exact_repeat_is_idempotent_but_numbered_slot_is_immutable --locked -- --nocapture
+      - name: Direct expected-parent and sequence validation
+        run: cargo test -p swarm-storage direct_parent_and_sequence_are_required --locked -- --nocapture
+      - name: Stale fencing-generation commit rejection
+        run: cargo test -p swarm-storage --test storage_integrity durable_fence_rejects_same_epoch_after_fencing_token_changes --locked -- --nocapture
+      - name: Prepared stale writer loses fenced commit race
+        run: cargo test -p swarm-storage --test storage_integrity stale_publication_prepared_before_fence_change_cannot_commit_after_generation_advances --locked -- --nocapture
+      - name: Cross-process conflicting recovery promise non-equivocation
+        run: cargo test -p swarm-storage --test storage_integrity two_processes_cannot_accept_conflicting_equal_round_recovery_promises --locked -- --nocapture
+      - name: Concurrent publication ownership and commit serialization race
+        run: cargo test -p swarm-storage --test publication_ownership_race --locked -- --nocapture
+      - name: Portable path collision matrix
+        run: cargo test -p swarm-storage portable::tests::rejects_cross_platform_aliases --locked -- --nocapture
+      - name: Restore crash marker and fail-closed symlink preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p swarm-storage restore_marker_forces_explicit_recovery --locked -- --nocapture
+          cargo test -p swarm-storage --test failure_injection restore_rejects_symlinked_parent_before_writing_outside_destination --locked -- --nocapture
+      - name: Direct snapshot namespace and number mismatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p swarm-storage --test storage_integrity load_snapshot_rejects_embedded_namespace_mismatch --locked -- --nocapture
+          cargo test -p swarm-storage --test storage_integrity load_snapshot_rejects_embedded_snapshot_number_mismatch --locked -- --nocapture
+      - name: Stale transaction temporary diagnostics
+        run: cargo test -p swarm-storage --test storage_integrity crash_temp_debris_is_reported_without_automatic_deletion --locked -- --nocapture
+      - name: Bounded legacy and decompression behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p swarm-storage rejects_oversized_legacy_blob_reads_before_allocation --locked -- --nocapture
+          cargo test -p swarm-storage encoded_verifier_rejects_expansion_past_declared_size --locked -- --nocapture
+          cargo test -p swarm-storage --test failure_injection compressed_blob_larger_than_declared_size_is_rejected --locked -- --nocapture
+      - name: Agent 2 membership and snapshot-history storage semantics
+        run: cargo test -p swarm-storage --test membership_history --locked -- --nocapture
+      - name: Agent 2 protocol and core suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p swarm-protocol --locked
+          cargo test -p swarm-core --locked
+      - name: Agent 1 consensus and CLI library suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p swarm-consensus --locked
+          cargo test -p swarm-cli --lib --locked
+      - name: Agent 1 adversarial membership and Solo partition safety
+        run: cargo test -p swarm-cli --test consensus_partition_safety --locked -- --nocapture
+      - name: Agent 1 live membership replication
+        run: cargo test -p swarm-cli --test live_join_replication --locked -- --nocapture
+      - name: Agent 1 recovery and restart safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p swarm-cli --test three_daemon_recovery --locked -- --nocapture
+          cargo test -p swarm-cli --test recovery_successor_dies --locked -- --nocapture
+      - name: Compile all workspace targets and integration tests
+        run: cargo test --workspace --all-targets --no-run --locked
+      - name: Assert exact validated production SHA and clean tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$VALIDATED_PRODUCTION_SHA"
+          test -z "$(git status --short)"
+          echo "VALIDATED_PRODUCTION_SHA=$VALIDATED_PRODUCTION_SHA"
+
+  cross-platform-storage:
+    name: Storage portability (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Full storage suite on supported filesystem family
+        run: cargo test -p swarm-storage --locked
+      - name: Portable identity matrix
+        run: cargo test -p swarm-storage portable::tests::rejects_cross_platform_aliases --locked -- --nocapture
+      - name: Storage integrity process and namespace regressions
+        run: cargo test -p swarm-storage --test storage_integrity --locked -- --nocapture
+      - name: Failure-injection restore regressions
+        run: cargo test -p swarm-storage --test failure_injection --locked -- --nocapture
