@@ -22,6 +22,8 @@ jobs:
         shell: bash
         run: |
           set -u
+          git config user.name "SwarmCraft Agent 4"
+          git config user.email "101021011+MousaXD@users.noreply.github.com"
           git fetch origin integration/audit-remediation-v1
           git config merge.conflictstyle diff3
           set +e
