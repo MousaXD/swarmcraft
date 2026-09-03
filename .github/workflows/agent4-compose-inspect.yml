@@ -1,0 +1,56 @@
+name: Agent 4 Composition Inspect
+
+on:
+  push:
+    branches:
+      - fix/agent-4-network
+    paths:
+      - .github/workflows/agent4-compose-inspect.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Inspect Agent 1/2 composition conflicts
+        shell: bash
+        run: |
+          set -u
+          git fetch origin integration/audit-remediation-v1
+          git config merge.conflictstyle diff3
+          set +e
+          git merge --no-commit --no-ff origin/integration/audit-remediation-v1
+          rc=$?
+          set -e
+          echo "MERGE_EXIT=$rc"
+          conflicts="$(git diff --name-only --diff-filter=U)"
+          echo "CONFLICT_FILES_BEGIN"
+          printf '%s\n' "$conflicts"
+          echo "CONFLICT_FILES_END"
+          if [ -n "$conflicts" ]; then
+            while IFS= read -r file; do
+              [ -n "$file" ] || continue
+              echo "===== CONFLICT $file ====="
+              python3 - "$file" <<'PY'
+          import pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          lines = p.read_text().splitlines()
+          marker = [i for i, line in enumerate(lines) if line.startswith('<<<<<<< ')]
+          for start in marker:
+              end = next((j for j in range(start, len(lines)) if lines[j].startswith('>>>>>>> ')), start)
+              lo = max(0, start - 30)
+              hi = min(len(lines), end + 31)
+              for i in range(lo, hi):
+                  print(f"{i+1:05d}: {lines[i]}")
+              print('----- END CONFLICT HUNK -----')
+          PY
+            done <<< "$conflicts"
+          fi
+          git merge --abort || true
+          exit 0
