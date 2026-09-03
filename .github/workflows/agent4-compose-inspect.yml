@@ -1,4 +1,4 @@
-name: Agent 4 Dependency Composition
+name: Agent 4 Contract Inspect
 
 on:
   push:
@@ -8,144 +8,24 @@ on:
       - .github/workflows/agent4-compose-inspect.yml
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  compose:
-    if: github.actor != 'github-actions[bot]'
+  inspect:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Merge integrated Agent 1/2 contracts and resolve owned conflicts
+      - name: Trace canonical authority and history contracts
         shell: bash
-        env:
-          INTEGRATION_SHA: f02bb0d54cb44df67e730f01be4c903e25d670ff
         run: |
           set -euo pipefail
-          git config user.name "SwarmCraft Agent 4"
-          git config user.email "101021011+MousaXD@users.noreply.github.com"
-          git fetch origin integration/audit-remediation-v1
-          test "$(git rev-parse origin/integration/audit-remediation-v1)" = "$INTEGRATION_SHA"
-          git config merge.conflictstyle diff3
-          set +e
-          git merge --no-commit --no-ff "$INTEGRATION_SHA"
-          rc=$?
-          set -e
-          test "$rc" -eq 1
-          actual="$(git diff --name-only --diff-filter=U | sort)"
-          expected="$(printf '%s\n' \
-            crates/swarm-cli/src/daemon.rs \
-            crates/swarm-network/src/lib.rs \
-            crates/swarm-network/src/wire.rs | sort)"
-          test "$actual" = "$expected"
-
-          python3 <<'PY'
-          from pathlib import Path
-
-          def resolve(path, replacements):
-              p = Path(path)
-              lines = p.read_text().splitlines(keepends=True)
-              out = []
-              i = 0
-              conflict = 0
-              while i < len(lines):
-                  if not lines[i].startswith('<<<<<<< '):
-                      out.append(lines[i])
-                      i += 1
-                      continue
-                  i += 1
-                  ours = []
-                  while i < len(lines) and not lines[i].startswith('||||||| '):
-                      ours.append(lines[i]); i += 1
-                  assert i < len(lines) and lines[i].startswith('||||||| ')
-                  i += 1
-                  base = []
-                  while i < len(lines) and not lines[i].startswith('======='):
-                      base.append(lines[i]); i += 1
-                  assert i < len(lines) and lines[i].startswith('=======')
-                  i += 1
-                  theirs = []
-                  while i < len(lines) and not lines[i].startswith('>>>>>>> '):
-                      theirs.append(lines[i]); i += 1
-                  assert i < len(lines) and lines[i].startswith('>>>>>>> ')
-                  i += 1
-                  out.extend(replacements[conflict](ours, base, theirs))
-                  conflict += 1
-              assert conflict == len(replacements), (path, conflict, len(replacements))
-              p.write_text(''.join(out))
-
-          daemon_import = '''    peer_id_from_public_key, AuthorityLeaseGrantV1, BlobDescriptor, EpochMode, EpochRecordV1, Hash32,\n    MembershipCertificateV1, MembershipProposalV1, MembershipRecordV1, MembershipVoteV1, PeerId, RecoveryBallotV1,\n    RecoveryCertificateV1, RecoveryVoteV1, SnapshotManifestV1, SoloBranchV1, TransferPhase, WorldDescriptorV1, WorldId,\n    WorldStatusV1, PROTOCOL_VERSION,\n'''.splitlines(keepends=True)
-          daemon_push = '''        let world = metadata.world_id;\n        let Ok(descriptor) = storage.load_world_descriptor(world) else { continue };\n'''.splitlines(keepends=True)
-          resolve('crates/swarm-cli/src/daemon.rs', [
-              lambda _o, _b, _t: daemon_import,
-              lambda _o, _b, _t: daemon_push,
-              lambda o, _b, t: o + ['\n'] + t,
-          ])
-          daemon = Path('crates/swarm-cli/src/daemon.rs')
-          text = daemon.read_text()
-          old = '        if descriptor.member(application_peer).is_none_or(|member| member.banned) {\n            continue;\n        }\n'
-          new = '        if authorized_descriptor_member(&descriptor, application_peer).is_err() {\n            continue;\n        }\n'
-          assert old in text
-          daemon.write_text(text.replace(old, new, 1))
-
-          lib_union = '''    BlobResumeV1, HostCapabilityV1, HostRuntimeReadinessV1, PeerHelloProofV1, ReplicaAckV1, ServerModsReadinessV1,\n    WireLimitError, WireRequest, WireResponse, MAX_BLOB_CHUNK, MAX_DISCOVERY_ANNOUNCEMENT_BYTES,\n    MAX_DISCOVERY_QUERY_BYTES, MAX_DISCOVERY_RESULTS, MAX_DISCOVERY_TAGS, MAX_MEMBERSHIP_VOTES, MAX_MISSING_BLOBS,\n    MAX_RECOVERY_VOTES, MAX_WORLD_ARTIFACTS, MAX_WORLD_MEMBERS,\n'''.splitlines(keepends=True)
-          resolve('crates/swarm-network/src/lib.rs', [lambda _o, _b, _t: lib_union])
-
-          wire_req = '''    MembershipProposal(Box<MembershipProposalV1>),\n    MembershipCommit(Box<MembershipCertificateV1>),\n    // Connection-bound authentication extensions follow integrated membership variants.\n    HelloChallenge { challenge: [u8; 32] },\n    HelloProof(Box<PeerHelloProofV1>),\n'''.splitlines(keepends=True)
-          wire_resp = '''    MembershipVote(Box<MembershipVoteV1>),\n    MembershipCommitAccepted { sequence: u64 },\n    HelloChallengeAccepted,\n'''.splitlines(keepends=True)
-          resolve('crates/swarm-network/src/wire.rs', [
-              lambda _o, _b, _t: wire_req,
-              lambda _o, _b, _t: wire_resp,
-          ])
-          PY
-
-          if grep -R -n -E '^(<<<<<<<|\|\|\|\|\|\|\||=======|>>>>>>>)' \
-            crates/swarm-cli/src/daemon.rs crates/swarm-network/src/lib.rs crates/swarm-network/src/wire.rs; then
-            echo 'unresolved conflict marker remains' >&2
-            exit 1
-          fi
-          git add crates/swarm-cli/src/daemon.rs crates/swarm-network/src/lib.rs crates/swarm-network/src/wire.rs
-          git diff --cached --check
-          git commit -m "merge(agent4): compose Agent 1/2 authority contracts"
-          merge_sha="$(git rev-parse HEAD)"
-
-          python3 - "$merge_sha" <<'PY'
-          from pathlib import Path
-          import sys
-          merge_sha = sys.argv[1]
-          p = Path('implementation/agent-4-network.md')
-          text = p.read_text()
-          text = text.replace('STATUS: BLOCKED', 'STATUS: IN PROGRESS', 1)
-
-          def replace_section(text, heading, next_heading, body):
-              start = text.index(heading)
-              end = text.index(next_heading, start)
-              return text[:start] + heading + '\n\n' + body.rstrip() + '\n\n' + text[end:]
-
-          deps = f'''Required before starting: none for independent network/privacy hardening.\n\nFINAL-028 dependency gate is now satisfied. Agent 4 consumed the authoritative integration head `f02bb0d54cb44df67e730f01be4c903e25d670ff`, which contains:\n\n- Agent 1 validated production SHA `67493374544d91ad7bbb36be17e9312adb5654f6` and integration merge `a0e0dec659d0b1eb21f9be34c44730edc6ff3984`.\n- Agent 2 validated production SHA `dde75ca4e9f2268bb97f42a716864c3e51f266cb`, exact-head run `33693100794` SUCCESS, and integration merge `6e70a0774d7e021cc57681705ccef4620265ce3d`.\n- Composed Agent 4 dependency merge: `{merge_sha}`.\n\nThe consumed contracts are canonical committed-membership/joint-consensus safety from Agent 1 plus Agent 2 current-authority, exact direct membership history, canonical semantics, and protocol-version fail-closed validation. No parallel authority model is introduced.\n\nAudit sources read before and during closure:\n\n- `audits/FINAL-AUDIT.md` from `audit/final-integration-report`\n- `audits/04-network-discovery.md` from `audit/network-discovery`\n- `audits/07-security.md` from `audit/security`'''
-          text = replace_section(text, '## Dependencies', '## Ownership boundaries', deps)
-          text = text.replace(
-              '- [ ] Anchor discovery announcements to verifiable canonical world authority/authorization, not merely self-signed announcer identity. BLOCKED on finalized Agent 1/2 canonical authority/history proof contract.',
-              '- [ ] Anchor discovery announcements to verifiable canonical world authority/authorization, not merely self-signed announcer identity. Dependency gate satisfied; FINAL-028 implementation in progress.'
-          )
-          text = text.replace(
-              '- [ ] Add malicious discovery provider claiming another world ID test. BLOCKED until the authority-proof verifier contract exists.',
-              '- [ ] Add malicious discovery provider claiming another world ID test. Dependency gate satisfied; regression implementation in progress.'
-          )
-          text = text.replace(
-              '- [ ] discovery unauthorized-signer regression — BLOCKED on canonical authority proof contract',
-              '- [ ] discovery unauthorized-signer regression — pending FINAL-028 implementation on composed Agent 1/2 contracts'
-          )
-          milestone = f'''\n### Dependency composition — Agent 1/2 canonical contracts\n\nComposition merge: `{merge_sha}`\n\n- Merged authoritative integration head `f02bb0d54cb44df67e730f01be4c903e25d670ff` into Agent 4 without discarding the independently validated network/privacy work.\n- Resolved exactly three conflict files: `crates/swarm-cli/src/daemon.rs`, `crates/swarm-network/src/lib.rs`, and `crates/swarm-network/src/wire.rs`.\n- Preserved Agent 1/2 membership proposal/commit wire ordering and committed-membership delivery before appending Agent 4 connection-bound handshake variants, avoiding a protocol-discriminant rollback.\n- Preserved Agent 2 committed-membership delivery to a newly admitted proposal member before Agent 4's current-member/public-key fencing of ordinary canonical payload pushes.\n- Preserved Agent 4 authorization-matrix tests and Agent 2 daemon protocol-acceptance tests together.\n- FINAL-028 is no longer dependency-blocked; production implementation and fresh composed validation remain.\n'''
-          text = text.replace('\n## Tests run\n', milestone + '\n## Tests run\n', 1)
-          blockers = '''No upstream dependency blocker remains. Agents 1 and 2 are integrated and their canonical contracts have been consumed.\n\nCurrent state is `IN PROGRESS` only because FINAL-028 production proof binding, malicious-discovery regressions, and fresh exact-head validation still need completion.'''
-          text = replace_section(text, '## Blockers', '## Remaining work', blockers)
-          remaining = '''1. implement authenticated discovery authority using the integrated canonical membership/authority/history contracts;\n2. add malicious self-signed provider, stale authority, removed/banned member, malformed proof, wrong-world/history and replay-after-transition regressions for browse and exact resolve;\n3. run the full fresh Agent 4 exact-head validation matrix;\n4. clean temporary composition workflow machinery and close the ledger only after green validation.'''
-          text = replace_section(text, '## Remaining work', '## Handoff', remaining)
-          p.write_text(text)
-          PY
-          git add implementation/agent-4-network.md
-          git commit -m "docs(agent4): record Agent 1/2 composition"
-          git push origin HEAD:fix/agent-4-network
+          echo '=== proof/history identifiers ==='
+          rg -n -i 'authority.*proof|proof.*authority|history.*proof|proof.*history|membership_history|epoch_history|current_authority' crates || true
+          echo '=== transition verification/storage identifiers ==='
+          rg -n 'save_epoch_record|load_epoch_record|verify_epoch|AuthorityTransfer|RecoveryCertificate|validate_recovery_certificate|validate_membership_certificate' crates || true
+          echo '=== discovery acceptance call sites ==='
+          rg -n 'verify_world_announcement|AnnouncementReplayGuard|DiscoveryWorlds|DiscoveryResolved|refresh_publications' crates/swarm-cli crates/swarm-core crates/swarm-network crates/swarm-protocol || true
+          echo '=== canonical files ==='
+          find crates -type f \( -name '*.rs' -o -name '*.toml' \) | sort | grep -E 'authority|membership|recovery|history|discovery|epoch|protocol_v2' || true
