@@ -2,17 +2,25 @@
 
 ## Status
 
-STATUS: IN PROGRESS
+STATUS: BLOCKED
 
 BRANCH: `fix/agent-4-network`
 
 CAMPAIGN PRODUCTION BASE SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
 
-BRANCH SEED SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb` (campaign ledger commit only; production tree matches the campaign base)
+BRANCH SEED SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb`
 
-CURRENT HEAD SHA: `1a5708bf70119d9da86d963cf0e9941abf76bdba` validated independent Agent 4 production head; ledger-only commits follow it
+INDEPENDENT AGENT 4 VALIDATED SHA: `1a5708bf70119d9da86d963cf0e9941abf76bdba`
 
-INTEGRATED SHA: pending
+AGENT 1/2 COMPOSITION MERGE: `6a6bd207c8ae4622ec84b9a28efb8c9e8d7045aa`
+
+EXACT VALIDATED COMPOSED PRODUCTION SHA: `7f151439418833d89fe0e4fd3c961878c0b51093`
+
+EXACT VALIDATION RUN: `33760654684` — SUCCESS
+
+POST-VALIDATION CLEANUP COMMIT: `4367e5fcd38f71b9f78a6f8fe009c188c62f9dee` removed the temporary composition workflow. Documentation-only closure commits may follow the validated production SHA.
+
+INTEGRATED SHA: pending — Agent 4 is not ready to merge because FINAL-028 remains unresolved.
 
 ## Mission
 
@@ -27,25 +35,17 @@ Repair the network trust boundary so a peer proves current possession of its app
 - FINAL-030 — friend presence privacy semantics
 - FINAL-040 — invite/DNS/address/privacy hardening assigned by final audit
 
-Read `audits/FINAL-AUDIT.md`, Auditor 4 Network/Discovery, and Auditor 7 Security before editing.
+## Dependencies consumed
 
-## Dependencies
-
-Required before starting: none for independent network/privacy hardening.
-
-FINAL-028 dependency gate is now satisfied. Agent 4 consumed the authoritative integration head `f02bb0d54cb44df67e730f01be4c903e25d670ff`, which contains:
+Agent 4 consumed authoritative integration head `f02bb0d54cb44df67e730f01be4c903e25d670ff`, containing:
 
 - Agent 1 validated production SHA `67493374544d91ad7bbb36be17e9312adb5654f6` and integration merge `a0e0dec659d0b1eb21f9be34c44730edc6ff3984`.
 - Agent 2 validated production SHA `dde75ca4e9f2268bb97f42a716864c3e51f266cb`, exact-head run `33693100794` SUCCESS, and integration merge `6e70a0774d7e021cc57681705ccef4620265ce3d`.
-- Composed Agent 4 dependency merge: `6a6bd207c8ae4622ec84b9a28efb8c9e8d7045aa`.
+- Composed Agent 4 dependency merge `6a6bd207c8ae4622ec84b9a28efb8c9e8d7045aa`.
 
-The consumed contracts are canonical committed-membership/joint-consensus safety from Agent 1 plus Agent 2 current-authority, exact direct membership history, canonical semantics, and protocol-version fail-closed validation. No parallel authority model is introduced.
+The consumed contracts are Agent 1 committed-membership/joint-consensus safety plus Agent 2 current-authority, direct membership history validation, canonical semantics, and protocol-version fail-closed behavior. No parallel discovery-only authority model was introduced.
 
-Audit sources read before and during closure:
-
-- `audits/FINAL-AUDIT.md` from `audit/final-integration-report`
-- `audits/04-network-discovery.md` from `audit/network-discovery`
-- `audits/07-security.md` from `audit/security`
+The authoritative integration branch remained unchanged at `f02bb0d54cb44df67e730f01be4c903e25d670ff` throughout Agent 4 composition and validation.
 
 ## Ownership boundaries
 
@@ -57,131 +57,182 @@ Primary ownership:
 - invite connectivity validation
 - hostile-peer tests
 
-Do not change canonical membership election semantics.
+Agent 4 must not redesign canonical membership election semantics.
 
 ## Implementation checklist
 
 - [x] Replace reusable one-message application hello authentication with connection-bound proof of possession.
-- [x] Include fresh receiver challenge/nonce and bind proof to both sides of live transport context.
-- [x] Ensure replay of a captured valid hello over a different transport identity/connection fails.
+- [x] Include a fresh receiver challenge and bind proof to both sides of live transport context.
+- [x] Reject captured proof replay on a different transport identity/connection.
 - [x] Do not reuse authenticated application identity across replacement connections without fresh proof.
-- [x] Build an exhaustive authorization matrix for every world-scoped `WireRequest`.
-- [x] Require current, non-banned membership for WorldDescriptor, WorldStatus, HostCapability and other canonical metadata unless a narrowly scoped pre-membership protocol explicitly applies.
-- [x] Ensure removed/banned members lose metadata access through inbound canonical request handling.
-- [ ] Anchor discovery announcements to verifiable canonical world authority/authorization, not merely self-signed announcer identity. Dependency gate satisfied; FINAL-028 implementation in progress.
-- [x] Add per-peer and global connection/request admission limits, separate for unauthenticated/authenticated traffic.
-- [x] Specify/enforce friend presence privacy policy: only locally accepted friends receive requester-specific presence rendezvous and responses.
-- [x] Specify invite replay/reuse semantics and test them.
-- [x] Reclassify DNS invite targets after resolution according to scope policy.
-- [x] Add captured-proof replay test proving a different transport cannot reuse a valid application proof.
-- [x] Add stranger/removed/banned/current-member authorization matrix tests.
-- [ ] Add malicious discovery provider claiming another world ID test. Dependency gate satisfied; regression implementation in progress.
-- [x] Add hostile-load/admission regression tests beyond deterministic budget/controller units.
+- [x] Build an exhaustive authorization classification for world-scoped `WireRequest` variants.
+- [x] Require current, non-banned membership for ordinary canonical metadata/data requests.
+- [x] Preserve specialized Agent 1 membership proposal/commit authorization so a pending joiner can receive the joint-consensus transition without being incorrectly subjected to the ordinary current-member gate.
+- [x] Ensure removed/banned/key-mismatched members lose canonical metadata/data access.
+- [ ] Anchor discovery announcements to a verifiable canonical world authority/current-head proof rather than merely the announcer's self-signature. **BLOCKED on missing canonical non-omittable freshness/current-head proof.**
+- [x] Add separate per-peer/global unauthenticated and authenticated admission limits.
+- [x] Enforce friend-presence privacy using requester-specific accepted-friend rendezvous.
+- [x] Specify reusable invite semantics and bounded lifetime.
+- [x] Re-resolve DNS invite targets and enforce address-scope policy on resolved answers.
+- [x] Add captured-proof replay regression.
+- [x] Add stranger/removed/banned/current-member authorization regressions.
+- [ ] Add malicious discovery provider / stale-authority / malformed-proof / wrong-history / replay-after-transition acceptance regressions. These cannot truthfully pass until the canonical proof primitive exists.
+- [x] Add hostile-load/admission regression coverage.
 - [x] Harden proactive world pushes against removed/banned/key-mismatched members.
 
 ## Work completed
 
-- Verified the authoritative Agent 4 ledger is `implementation/agent-4-network.md`; the requested `implementation/agent-4-consensus.md` does not exist in the campaign plan.
-- Verified the branch production baseline is `b4bab08562cf0eb53763674407375b023e1d0858`; branch seed `a9736b159d9e9618a3ed8515c20e93f92c1453cb` adds only implementation ledgers.
-- Read all required audit sources and extracted the concrete trust-boundary and regression requirements for FINAL-012/013/028/029/030/040.
-- Added exhaustive `WireRequest::membership_world_id()` classification. Adding a new wire variant now requires an explicit membership decision at compile time.
-- Added one fail-closed daemon membership gate before canonical request dispatch. `JoinRequest` remains the intentional pre-membership path; discovery and Ping remain outside canonical-world authorization.
-- Hardened membership authorization so banned members are rejected and descriptor public keys must derive the authenticated peer ID.
-- Closed FINAL-013 inbound production path for `WorldDescriptor`, `WorldStatus`, `HostCapability`, and all other canonical world requests.
-- Replaced reusable application hello authentication with receiver-generated connection challenges and a fresh Ed25519 application-key proof bound to the challenge, local transport peer, remote transport peer, and the exact live libp2p `ConnectionId`.
-- Authentication state is now connection-specific and is cleared on disconnect/replacement. Legacy standalone `Hello` requests no longer establish authentication.
-- Added a three-transport replay regression: a proof captured on B→A is rejected when replayed from C→A.
-- Added bounded network admission shared by primary and discovery nodes: 64 active application connections, separate per-peer authenticated/pre-auth request windows, and separate global authenticated/pre-auth request budgets. Replacement connections for an already known transport are not blocked by the application cap.
-- Composed libp2p `connection_limits::Behaviour` into both primary and discovery swarms so pending and established connection floods are rejected before long-lived application state is allocated. Primary transport limits cap pending incoming/outgoing work at 32 each, established incoming at 72, total established at 96, and per-transport-peer connections at 2; discovery uses tighter 24/48/64 bounds with the same per-peer cap.
-- Added a 10-second receiver-challenge lifetime to both network stacks. Silent peers that occupy an authentication slot without proving the application key are disconnected and their pending/authentication state is cleared.
-- Added fail-closed `RATE_LIMITED` responses before application dispatch when a request budget is exceeded, while retaining wire-size validation and connection-bound authentication.
-- Changed friend presence discovery from a global `peer` rendezvous key to requester-specific `peer + accepted-friend` keys. The discovery service only advertises presence to locally accepted friends, withdraws removed-friend rendezvous entries, and returns no presence to authenticated non-friends.
-- Hardened proactive `push_known_worlds` so removed, banned, and application-ID/public-key-mismatched members cannot receive world state merely because a stale descriptor entry exists.
-- Specified invitations as reusable bearer capabilities rather than hidden single-use tokens. Token uniqueness comes from the signed nonce; reuse remains valid until expiry while the signer remains current authority. Creation/decoding/join validation now enforce a maximum 24-hour lifetime with checked timestamp arithmetic instead of saturating effectively-unbounded expiry.
-- Added immediate pre-dial DNS re-resolution for invite DNS/DNS4/DNS6 hints and apply the same public-scope policy to every resolved answer. DNS names cannot silently rebind an Internet-looking invite hint to loopback/private/link-local scope; explicit LAN invites remain represented by literal private-IP multiaddresses.
-- Added direct authorization-matrix tests for current member, stranger/removed member, banned member, and peer/public-key mismatch, sharing the same descriptor authorization helper used by proactive synchronization.
-- Added a live pre-auth request flood regression that exhausts the unauthenticated request budget, proves bounded rejection, waits for budget recovery, then confirms a valid client can authenticate and complete useful traffic.
-- Ran a real impaired QUIC restart/resume regression after all independent hardening, using 15ms ± 3ms delay, 0.5% packet loss, 100mbit rate shaping, forced sender restart and lost-ACK recovery. It passed.
-- Deliberately did not invent a creator-only, self-signed, or TOFU discovery authority shortcut. Such a shortcut would fail the audited invariant after legitimate authority transfer and would make FINAL-028 look closed without a valid trust chain.
+### Authentication and admission
 
-### Dependency composition — Agent 1/2 canonical contracts
+- Replaced reusable application hello authentication with receiver-generated challenges and fresh Ed25519 application-key proof bound to the challenge, local transport peer, remote transport peer, and exact live libp2p connection.
+- Authentication state is connection-specific and cleared on disconnect/replacement.
+- Added a three-transport replay regression proving a proof captured on B→A cannot authenticate C→A.
+- Added bounded application and transport admission to primary and discovery swarms, including pre-auth challenge expiry and separate request budgets.
+- Added fail-closed rate-limit responses before application dispatch while preserving wire-size validation and connection-bound authentication.
+
+### World confidentiality and privacy
+
+- Added exhaustive `WireRequest::membership_world_id()` classification for ordinary canonical requests.
+- Added one fail-closed daemon current-membership gate for ordinary canonical world traffic.
+- Preserved `JoinRequest`, Agent 1 `MembershipProposal`, and Agent 1 `MembershipCommit` as intentionally specialized transition paths with their own cryptographic/consensus validation.
+- Hardened current-member checks against banned identities and peer/public-key mismatch.
+- Hardened proactive `push_known_worlds` against stale removed/banned/key-mismatched descriptor entries.
+- Changed friend presence from a global peer rendezvous key to requester-specific accepted-friend rendezvous keys and withdraws removed-friend entries.
+
+### Invite and connectivity hardening
+
+- Invitations are explicit reusable bearer capabilities until expiry, not hidden single-use tokens.
+- Invite creation/decoding/join validation enforce a maximum 24-hour lifetime with checked arithmetic.
+- DNS/DNS4/DNS6 hints are immediately re-resolved before dialing and every resolved address is reclassified by scope policy.
+- Public-looking DNS cannot silently rebind to loopback/private/link-local scope.
+- The composed Agent 1 `live_join_replication` fixture was corrected from `u64::MAX` expiry to a valid one-hour future expiry. This was a test-fixture compatibility correction; the 24-hour production security policy was not weakened.
+
+### Agent 1/2 composition repairs
 
 Composition merge: `6a6bd207c8ae4622ec84b9a28efb8c9e8d7045aa`
 
-- Merged authoritative integration head `f02bb0d54cb44df67e730f01be4c903e25d670ff` into Agent 4 without discarding the independently validated network/privacy work.
-- Resolved exactly three conflict files: `crates/swarm-cli/src/daemon.rs`, `crates/swarm-network/src/lib.rs`, and `crates/swarm-network/src/wire.rs`.
-- Preserved Agent 1/2 membership proposal/commit wire ordering and committed-membership delivery before appending Agent 4 connection-bound handshake variants, avoiding a protocol-discriminant rollback.
-- Preserved Agent 2 committed-membership delivery to a newly admitted proposal member before Agent 4's current-member/public-key fencing of ordinary canonical payload pushes.
-- Preserved Agent 4 authorization-matrix tests and Agent 2 daemon protocol-acceptance tests together.
-- FINAL-028 is no longer dependency-blocked; production implementation and fresh composed validation remain.
+Resolved three initial conflict files:
 
-## Tests run
+- `crates/swarm-cli/src/daemon.rs`
+- `crates/swarm-network/src/lib.rs`
+- `crates/swarm-network/src/wire.rs`
 
-| Test | Result | Commit/SHA | Notes |
-|---|---|---|---|
-| Branch/baseline compare | PASS | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | Integration seed is exactly one documentation-only commit ahead of campaign production base. |
-| `cargo fmt --all -- --check` | PASS | `8dd7d685e2295a561bc5c1958786bd77a6829815` | Authorization milestone GitHub Actions validation runner. |
-| `cargo check -p swarm-network -p swarm-cli --all-targets --locked` | PASS | `8dd7d685e2295a561bc5c1958786bd77a6829815` | Affected crates compile after fail-closed request gate. |
-| `cargo test -p swarm-network --locked` | PASS | `8dd7d685e2295a561bc5c1958786bd77a6829815` | Full network crate suite green. |
-| `cargo fmt --all -- --check` | PASS | `c2ac38c0a94156285fa841fdfdd382a269940a03` | Connection-bound handshake milestone. |
-| `cargo check -p swarm-network -p swarm-cli --all-targets --locked` | PASS | `c2ac38c0a94156285fa841fdfdd382a269940a03` | Handshake protocol, network node, daemon, discovery constructors and tests compile together. |
-| `cargo test -p swarm-network --locked` | PASS | `c2ac38c0a94156285fa841fdfdd382a269940a03` | Full network suite including captured-proof replay regression. |
-| `cargo fmt --all -- --check` | PASS | `8993583acefc728754292c47e5337b4fd19d03a2` | Privacy/admission milestone, Actions run `33582401255`. |
-| `cargo check -p swarm-network -p swarm-cli --all-targets --locked` | PASS | `8993583acefc728754292c47e5337b4fd19d03a2` | Admission controller, presence privacy, and proactive-push hardening compile together. |
-| `cargo test -p swarm-network --locked` | PASS | `8993583acefc728754292c47e5337b4fd19d03a2` | 39 network unit tests plus handshake/input/reconnect suites green; impaired/multi-GiB soak tests remain intentionally ignored in normal crate test. |
-| `cargo test -p swarm-cli --bin swarmcraft --locked` | PASS | `8993583acefc728754292c47e5337b4fd19d03a2` | 7 CLI unit tests green after accepted-friend presence changes. |
-| `cargo fmt --all -- --check` | PASS | `af48ed80f78beec7a2866a90ce6de35e4cfc86a8` | Invite/DNS hardening, Actions run `33583517471`. |
-| `cargo check -p swarm-network -p swarm-cli --all-targets --locked` | PASS | `af48ed80f78beec7a2866a90ce6de35e4cfc86a8` | DNS resolution policy, bounded invite lifetime, authorization matrix and flood regression compile together. |
-| `cargo clippy -p swarm-network -p swarm-cli --all-targets --locked -- -D warnings` | PASS | `af48ed80f78beec7a2866a90ce6de35e4cfc86a8` | Strict affected-crate lint gate. |
-| `cargo test -p swarm-network --locked` | PASS | `af48ed80f78beec7a2866a90ce6de35e4cfc86a8` | Full network suite including live pre-auth flood/budget-recovery regression. |
-| `cargo test -p swarm-cli --bin swarmcraft --locked` | PASS | `af48ed80f78beec7a2866a90ce6de35e4cfc86a8` | Invite reuse/lifetime and daemon authorization-matrix units green. |
-| `cargo fmt --all -- --check` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | Transport-level admission/handshake-lifetime milestone. |
-| `cargo check -p swarm-network -p swarm-cli --all-targets --locked` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | Primary/discovery connection-limit behaviours and challenge expiry compile together. |
-| `cargo clippy -p swarm-network -p swarm-cli --all-targets --locked -- -D warnings` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | Strict affected-crate lint gate after transport hardening. |
-| `cargo test -p swarm-network --locked` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | Full network suite remains green with transport limits and challenge expiry. |
-| `cargo test -p swarm-cli --bin swarmcraft --locked` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | CLI/network-facing authorization units remain green. |
-| impaired `interrupted_quic_transfer_resumes_after_lost_ack` | PASS | `1a5708bf70119d9da86d963cf0e9941abf76bdba` | 64 MiB forced-restart/lost-ACK transfer under 15ms±3ms delay, 0.5% loss and 100mbit loopback shaping. Actions run `33614422441`. |
+Preserved:
+
+- Agent 1 membership proposal/commit postcard ordering and joint-consensus transition behavior.
+- Agent 2 committed-membership delivery to newly admitted proposal members.
+- Agent 4 connection-bound handshake variants after the integrated membership wire variants.
+- Agent 4 authorization matrix plus Agent 2 protocol-acceptance tests.
+
+Fresh composed validation exposed and repaired three merge/fixture defects without changing canonical consensus semantics:
+
+1. rustfmt drift in `daemon.rs`.
+2. non-exhaustive world-authorization classification after Agent 1 added `MembershipProposal` and `MembershipCommit`; these transition messages are now explicitly outside the ordinary current-member gate and continue through their stricter dedicated validators.
+3. stale `live_join_replication` fixture using an unbounded invite lifetime, corrected to a valid bounded expiry.
+
+## FINAL-028 blocker analysis
+
+FINAL-028 is no longer blocked because Agent 1 or Agent 2 are unfinished. Their authoritative contracts are composed and validated on this branch.
+
+The remaining blocker is architectural and specific:
+
+1. Public discovery announcements are currently self-signed by the announcer.
+2. Canonical world authority evolves through Agent 1/2 membership, epoch, transfer, recovery, and related signed/certified state.
+3. The repository retains the current control heads and selected latest certificates, but it does not expose a complete, independently verifiable, non-omittable authority-transition proof that a first-contact discovery verifier can use to prove that the presented authority generation is the **current** canonical head.
+4. A stale former authority can possess valid historical signatures/certificates. If the verifier accepts a valid history prefix without a non-omittable freshness/current-head commitment, that stale authority can omit a later legitimate transition and present a cryptographically valid stale prefix.
+5. The existing discovery replay guard helps after a verifier has already observed a newer generation, but it cannot establish freshness for first contact.
+6. Creator pinning, announcer self-signature, or first-observed-key/TOFU would only hide the gap and would fail after legitimate authority transfer.
+
+Therefore Agent 4 cannot truthfully implement the required invariant — including stale-authority rejection after transition on first contact — without a canonical primitive owned by the consensus/protocol/storage trust model.
+
+### Canonical primitive required to unblock FINAL-028
+
+A follow-up must provide a canonical, bounded and verifiable authority proof with all of the following properties:
+
+- anchored to world genesis / `WorldId`;
+- proves the authority and membership transition chain using the existing Agent 1/2 rules rather than a parallel election model;
+- commits to the current accepted authority generation so later transitions cannot be omitted by a stale signer;
+- retains or derives the transition evidence needed by a first-contact verifier;
+- supports authority transfer, recovery, membership churn, removal/banning, and counter/fencing semantics;
+- has explicit bounded wire/storage limits and fail-closed versioning;
+- can be reused by discovery browse and exact resolve.
+
+Only after that primitive lands should Agent 4 bind `WorldAnnouncementV1` to it and add malicious-provider, stale-authority, removed/banned signer, malformed proof, wrong-world/history, and replay-after-transition regressions.
+
+## Exact composed validation
+
+Validated production SHA: `7f151439418833d89fe0e4fd3c961878c0b51093`
+
+GitHub Actions run: `33760654684` — SUCCESS
+
+The run passed:
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | PASS |
+| `cargo check --workspace --all-targets --locked` | PASS |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | PASS |
+| `cargo test -p swarm-network --locked` | PASS |
+| `cargo test -p swarm-protocol --locked` | PASS |
+| `cargo test -p swarm-core --locked` | PASS |
+| `cargo test -p swarm-storage --locked` | PASS |
+| `cargo test -p swarm-consensus --locked` | PASS |
+| `cargo test -p swarm-cli --lib --bins --locked` | PASS |
+| Agent 1 `consensus_partition_safety` | PASS |
+| Agent 1 `live_join_replication` | PASS |
+| Agent 1 `automatic_invite_join` | PASS |
+| Agent 1 `three_daemon_recovery` | PASS |
+| Agent 1 `recovery_successor_dies` | PASS |
+| Agent 2 `migration_core` | PASS |
+| Compile all affected integration targets with `--no-run` | PASS |
+| Impaired QUIC `interrupted_quic_transfer_resumes_after_lost_ack` under 15ms ± 3ms delay, 0.5% loss, 100mbit rate shaping | PASS |
+| Exact validated production head / clean status assertion | PASS |
+
+The ordinary network suite also includes connection-bound authentication, captured-proof replay rejection, hostile pre-auth flood recovery, and hard reconnect coverage.
 
 ## Required validation before handoff
 
-- [x] format for authorization milestone
-- [x] format for handshake milestone
-- [x] format/check/tests for privacy/admission milestone
-- [x] clippy/lint for affected crates through final independent Agent 4 head
-- [x] network unit/integration tests for authorization milestone
-- [x] captured hello/proof replay rejection
-- [x] world request authorization matrix regression test
-- [x] private-world confidentiality authorization path regression
-- [ ] discovery unauthorized-signer regression — pending FINAL-028 implementation on composed Agent 1/2 contracts
-- [x] hostile-load admission test
-- [x] ordinary hard reconnect test remains green after admission/privacy changes
-- [x] explicitly run impaired reconnect/transfer regression with delay/loss/rate shaping; scheduled multi-GiB soak remains a post-integration acceptance gate
-- [x] exact-head dedicated Agent 4 validation for all independent network/privacy code
+- [x] format
+- [x] workspace check
+- [x] strict workspace clippy with `-D warnings`
+- [x] network tests
+- [x] protocol tests
+- [x] core tests
+- [x] storage tests
+- [x] consensus tests
+- [x] CLI library/bin tests
+- [x] Agent 1 partition-safety regressions
+- [x] Agent 1 live membership regressions
+- [x] Agent 1 recovery regressions
+- [x] Agent 2 migration/history regression
+- [x] all affected integration targets compile
+- [x] impaired reconnect/lost-ACK regression
+- [x] exact composed production SHA validated
+- [ ] discovery unauthorized-signer/current-authority proof regressions — blocked on the canonical current-head proof primitive described above
 
-## Blockers
+## Cleanup
 
-No upstream dependency blocker remains. Agents 1 and 2 are integrated and their canonical contracts have been consumed.
-
-Current state is `IN PROGRESS` only because FINAL-028 production proof binding, malicious-discovery regressions, and fresh exact-head validation still need completion.
+- Temporary composition/validation workflow removed after successful validation in commit `4367e5fcd38f71b9f78a6f8fe009c188c62f9dee`.
+- No merge into `integration/audit-remediation-v1` or `main` was performed.
+- Integration head remained `f02bb0d54cb44df67e730f01be4c903e25d670ff`.
 
 ## Remaining work
 
-1. implement authenticated discovery authority using the integrated canonical membership/authority/history contracts;
-2. add malicious self-signed provider, stale authority, removed/banned member, malformed proof, wrong-world/history and replay-after-transition regressions for browse and exact resolve;
-3. run the full fresh Agent 4 exact-head validation matrix;
-4. clean temporary composition workflow machinery and close the ledger only after green validation.
+1. Add the canonical non-omittable current-authority/current-head proof primitive in the consensus/protocol/storage trust model.
+2. Re-consume that primitive on Agent 4.
+3. Bind public discovery announcements to that proof.
+4. Add malicious self-signed provider, stale former authority, removed/banned member, malformed proof, wrong-world/history, and replay-after-transition tests for public browse and exact resolve.
+5. Re-run Agent 4 exact-head validation and only then mark READY FOR INTEGRATION.
 
 ## Handoff
 
 READY FOR INTEGRATION: NO
 
-Exact validated independent production head: `1a5708bf70119d9da86d963cf0e9941abf76bdba`
+Validated composed production SHA: `7f151439418833d89fe0e4fd3c961878c0b51093`
 
-Blocker: FINAL-028 requires finalized and integrated Agent 1 + Agent 2 canonical authority/history proof semantics.
+Exact validation run: `33760654684` SUCCESS
 
-Known conflict areas after dependency integration: discovery announcement/proof records, discovery acceptance paths, and any shared canonical authority validator used by `daemon.rs`/protocol core.
-
-Post-dependency validation required: unauthorized-world discovery signer regression, public browse/exact-resolve authority-proof matrix, then full Agent 4 network/privacy gate.
+Blocker: FINAL-028 cannot be closed safely until the canonical trust model provides a first-contact-verifiable, non-omittable current authority/current-head proof across legitimate membership/authority transitions.
 
 ## Agent final statement
 
