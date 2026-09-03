@@ -1,18 +1,20 @@
 //! Crash-safe content-addressed storage and directory snapshots.
 
+use crate::transaction::durable_atomic_write;
 use serde::{Deserialize, Serialize};
-#[cfg(unix)]
-use std::fs::File;
 use std::{
-    fs::{self, OpenOptions},
-    io::Write,
+    fs::{self, File},
+    io::Read,
     path::{Path, PathBuf},
 };
 use swarm_protocol::{
-    BlobDescriptor, BlobEncoding, Hash32, PeerId, SnapshotManifestV1, WorldGenesisV1, WorldId, STORAGE_SCHEMA_VERSION,
+    BlobDescriptor, BlobEncoding, Hash32, PeerId, SnapshotManifestV1, WorldGenesisV1, WorldId, BLOB_HASH_DOMAIN,
+    STORAGE_SCHEMA_VERSION,
 };
 use thiserror::Error;
-use tracing::debug;
+use walkdir::WalkDir;
+
+pub const LEGACY_READ_BLOB_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -30,8 +32,12 @@ pub enum StorageError {
     NonUtf8Path(PathBuf),
     #[error("unsafe snapshot relative path: {0}")]
     UnsafeRelativePath(String),
+    #[error("snapshot paths collide under the portable filesystem identity policy: {0}")]
+    PortablePathCollision(String),
     #[error("blob is corrupt or incomplete: {0}")]
     BlobCorrupt(Hash32),
+    #[error("legacy blob read declares {declared} bytes, above the bounded maximum {maximum}")]
+    BlobReadTooLarge { declared: u64, maximum: u64 },
     #[error("snapshot state root mismatch")]
     StateRootMismatch,
     #[error("snapshot publication belongs to world {publication_world} but manifest targets {manifest_world}")]
@@ -40,14 +46,38 @@ pub enum StorageError {
     SnapshotPublicationMissingPin(Hash32),
     #[error("snapshot manifest does not exist: {0}")]
     SnapshotNotFound(u64),
+    #[error("canonical snapshot head record is missing for world {0}")]
+    MissingCanonicalHead(WorldId),
+    #[error("canonical snapshot head for world {world} targets missing snapshot #{snapshot_number} ({manifest_hash})")]
+    MissingCanonicalHeadTarget { world: WorldId, snapshot_number: u64, manifest_hash: Hash32 },
+    #[error("canonical snapshot head for world {world} does not match snapshot #{snapshot_number}")]
+    CanonicalHeadMismatch { world: WorldId, snapshot_number: u64 },
+    #[error("snapshot commit for world {world} snapshot #{snapshot_number} was interrupted and requires recovery")]
+    SnapshotCommitIncomplete { world: WorldId, snapshot_number: u64 },
+    #[error("uncommitted snapshot #{snapshot_number} exists above the canonical head for world {world}")]
+    UncommittedSnapshotOrphan { world: WorldId, snapshot_number: u64 },
+    #[error("snapshot #{snapshot_number} does not directly extend the canonical snapshot head")]
+    SnapshotHistoryConflict { snapshot_number: u64 },
+    #[error("snapshot numbering or sequence counter is exhausted")]
+    SnapshotNumberExhausted,
+    #[error("canonical counter exhausted: {0}")]
+    CounterExhausted(&'static str),
+    #[error(
+        "snapshot authority fence mismatch for world {world}; expected epoch {expected_epoch} fencing token {expected_fencing_token}"
+    )]
+    SnapshotFenceMismatch { world: WorldId, expected_epoch: u64, expected_fencing_token: u64 },
+    #[error(
+        "snapshot #{snapshot_number} for world {world} is immutable; existing hash {existing}, attempted hash {attempted}"
+    )]
+    SnapshotManifestConflict { world: WorldId, snapshot_number: u64, existing: Hash32, attempted: Hash32 },
+    #[error("restore destination is marked incomplete and must be discarded before retry: {0}")]
+    RestoreIncomplete(PathBuf),
     #[error("world metadata does not exist: {0}")]
     WorldNotFound(WorldId),
     #[error("world metadata is inconsistent with its directory")]
     WorldMetadataMismatch,
     #[error("snapshot protocol version {0} is unsupported")]
     UnsupportedProtocol(u16),
-    #[error("canonical counter exhausted: {0}")]
-    CounterExhausted(&'static str),
     #[error("decode failed: {0}")]
     Decode(#[from] postcard::Error),
     #[error("metadata JSON failed: {0}")]
@@ -87,7 +117,7 @@ pub struct Storage {
 impl Storage {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, StorageError> {
         let this = Self { root: root.into() };
-        fs::create_dir_all(this.worlds_dir()).map_err(|e| io_error(this.worlds_dir(), e))?;
+        fs::create_dir_all(this.worlds_dir()).map_err(|error| io_error(this.worlds_dir(), error))?;
         this.recover_abandoned_snapshot_publications()?;
         Ok(this)
     }
@@ -129,10 +159,12 @@ impl Storage {
             self.world_dir(metadata.world_id).join("logs"),
             self.world_dir(metadata.world_id).join("recovery"),
         ] {
-            fs::create_dir_all(&dir).map_err(|e| io_error(dir, e))?;
+            fs::create_dir_all(&dir).map_err(|error| io_error(dir, error))?;
         }
         let json = serde_json::to_vec_pretty(metadata)?;
-        atomic_write(&self.metadata_dir(metadata.world_id).join("world.json"), &json)
+        durable_atomic_write(&self.metadata_dir(metadata.world_id).join("world.json"), &json)?;
+        self.canonical_snapshot_head(metadata.world_id)?;
+        Ok(())
     }
 
     pub fn load_world(&self, world: WorldId) -> Result<WorldMetadataV1, StorageError> {
@@ -140,7 +172,7 @@ impl Storage {
         if !path.exists() {
             return Err(StorageError::WorldNotFound(world));
         }
-        let bytes = fs::read(&path).map_err(|e| io_error(&path, e))?;
+        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
         let metadata: WorldMetadataV1 = serde_json::from_slice(&bytes)?;
         if metadata.world_id != world || metadata.genesis.world_id()? != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -153,9 +185,9 @@ impl Storage {
         if !self.worlds_dir().exists() {
             return Ok(worlds);
         }
-        for entry in fs::read_dir(self.worlds_dir()).map_err(|e| io_error(self.worlds_dir(), e))? {
-            let entry = entry.map_err(|e| io_error(self.worlds_dir(), e))?;
-            if !entry.file_type().map_err(|e| io_error(entry.path(), e))?.is_dir() {
+        for entry in fs::read_dir(self.worlds_dir()).map_err(|error| io_error(self.worlds_dir(), error))? {
+            let entry = entry.map_err(|error| io_error(self.worlds_dir(), error))?;
+            if !entry.file_type().map_err(|error| io_error(entry.path(), error))?.is_dir() {
                 continue;
             }
             let Ok(world) = entry.file_name().to_string_lossy().parse::<WorldId>() else {
@@ -165,15 +197,16 @@ impl Storage {
                 worlds.push(metadata);
             }
         }
-        worlds.sort_by(|a, b| a.display_name.cmp(&b.display_name).then(a.world_id.cmp(&b.world_id)));
+        worlds
+            .sort_by(|left, right| left.display_name.cmp(&right.display_name).then(left.world_id.cmp(&right.world_id)));
         Ok(worlds)
     }
 
     pub fn put_blob(&self, world: WorldId, bytes: &[u8]) -> Result<BlobDescriptor, StorageError> {
         let hash = BlobDescriptor::hash_uncompressed(bytes);
         let dir = self.blobs_dir(world);
-        fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
-        let encoded = zstd::stream::encode_all(bytes, 3).map_err(|e| io_error(&dir, e))?;
+        fs::create_dir_all(&dir).map_err(|error| io_error(&dir, error))?;
+        let encoded = zstd::stream::encode_all(bytes, 3).map_err(|error| io_error(&dir, error))?;
         let descriptor = BlobDescriptor {
             hash,
             uncompressed_size: bytes.len() as u64,
@@ -182,26 +215,57 @@ impl Storage {
         };
         let path = self.blob_path(world, hash, BlobEncoding::Zstd);
         if !path.exists() {
-            atomic_write(&path, &encoded)?;
+            durable_atomic_write(&path, &encoded)?;
         }
         Ok(descriptor)
     }
 
+    /// Legacy convenience API retained for compatibility, now implemented with
+    /// the same bounded streaming semantics as the primary restore path.
     pub fn read_blob(&self, world: WorldId, descriptor: &BlobDescriptor) -> Result<Vec<u8>, StorageError> {
+        if descriptor.uncompressed_size > LEGACY_READ_BLOB_MAX_BYTES {
+            return Err(StorageError::BlobReadTooLarge {
+                declared: descriptor.uncompressed_size,
+                maximum: LEGACY_READ_BLOB_MAX_BYTES,
+            });
+        }
         let path = self.blob_path(world, descriptor.hash, descriptor.encoding);
-        let encoded = fs::read(&path).map_err(|e| io_error(&path, e))?;
-        if encoded.len() as u64 != descriptor.encoded_size {
+        let metadata = fs::metadata(&path).map_err(|error| io_error(&path, error))?;
+        if metadata.len() != descriptor.encoded_size {
             return Err(StorageError::BlobCorrupt(descriptor.hash));
         }
-        let bytes = match descriptor.encoding {
-            BlobEncoding::Raw => encoded,
-            BlobEncoding::Zstd => {
-                zstd::stream::decode_all(encoded.as_slice()).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?
-            }
+        let encoded = File::open(&path).map_err(|error| io_error(&path, error))?;
+        let mut reader: Box<dyn Read> = match descriptor.encoding {
+            BlobEncoding::Raw => Box::new(encoded),
+            BlobEncoding::Zstd => Box::new(
+                zstd::stream::read::Decoder::new(encoded).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?,
+            ),
         };
-        if bytes.len() as u64 != descriptor.uncompressed_size
-            || BlobDescriptor::hash_uncompressed(&bytes) != descriptor.hash
-        {
+        let capacity = usize::try_from(descriptor.uncompressed_size).map_err(|_| StorageError::BlobReadTooLarge {
+            declared: descriptor.uncompressed_size,
+            maximum: LEGACY_READ_BLOB_MAX_BYTES,
+        })?;
+        let mut bytes = Vec::with_capacity(capacity);
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(BLOB_HASH_DOMAIN);
+        let mut total = 0u64;
+        let mut buffer = vec![0u8; crate::streaming::STREAM_BUFFER_SIZE];
+        loop {
+            let remaining = descriptor.uncompressed_size.saturating_sub(total);
+            let read_limit = remaining.saturating_add(1).min(buffer.len() as u64) as usize;
+            let read =
+                reader.read(&mut buffer[..read_limit]).map_err(|_| StorageError::BlobCorrupt(descriptor.hash))?;
+            if read == 0 {
+                break;
+            }
+            if read as u64 > remaining {
+                return Err(StorageError::BlobCorrupt(descriptor.hash));
+            }
+            hasher.update(&buffer[..read]);
+            bytes.extend_from_slice(&buffer[..read]);
+            total += read as u64;
+        }
+        if total != descriptor.uncompressed_size || Hash32(*hasher.finalize().as_bytes()) != descriptor.hash {
             return Err(StorageError::BlobCorrupt(descriptor.hash));
         }
         Ok(bytes)
@@ -220,38 +284,20 @@ impl Storage {
     }
 
     pub fn load_snapshot(&self, world: WorldId, number: u64) -> Result<SnapshotManifestV1, StorageError> {
-        let path = self.snapshot_path(world, number);
-        if !path.exists() {
-            return Err(StorageError::SnapshotNotFound(number));
-        }
-        let bytes = fs::read(&path).map_err(|e| io_error(&path, e))?;
-        let manifest: SnapshotManifestV1 = postcard::from_bytes(&bytes)?;
+        let manifest = self.load_snapshot_file_unchecked(world, number)?;
+        self.validate_canonical_snapshot_namespace(world)?;
         Ok(manifest)
     }
 
     pub fn list_snapshots(&self, world: WorldId) -> Result<Vec<SnapshotManifestV1>, StorageError> {
-        let dir = self.snapshots_dir(world);
-        if !dir.exists() {
-            return Ok(Vec::new());
-        }
-        let mut snapshots = Vec::new();
-        for entry in fs::read_dir(&dir).map_err(|e| io_error(&dir, e))? {
-            let entry = entry.map_err(|e| io_error(&dir, e))?;
-            if entry.path().extension().and_then(|x| x.to_str()) != Some("postcard") {
-                continue;
-            }
-            let bytes = fs::read(entry.path()).map_err(|e| io_error(entry.path(), e))?;
-            let manifest: SnapshotManifestV1 = postcard::from_bytes(&bytes)?;
-            if manifest.world_id == world {
-                snapshots.push(manifest);
-            }
-        }
-        snapshots.sort_by_key(|m| m.snapshot_number);
-        Ok(snapshots)
+        self.validate_canonical_snapshot_namespace(world)?;
+        self.raw_snapshot_manifests(world)
     }
 
     pub fn latest_snapshot(&self, world: WorldId) -> Result<Option<SnapshotManifestV1>, StorageError> {
-        Ok(self.list_snapshots(world)?.pop())
+        self.validate_canonical_snapshot_namespace(world)?;
+        let head = self.canonical_snapshot_head(world)?;
+        head.head.map(|reference| self.load_snapshot_file_unchecked(world, reference.snapshot_number)).transpose()
     }
 
     pub fn verify_snapshot(&self, manifest: &SnapshotManifestV1) -> Result<(), StorageError> {
@@ -263,11 +309,41 @@ impl Storage {
     }
 
     pub fn next_snapshot_number(&self, world: WorldId) -> Result<u64, StorageError> {
-        next_snapshot_number_after(self.latest_snapshot(world)?.map(|manifest| manifest.snapshot_number))
+        let head = self.canonical_snapshot_head(world)?;
+        match head.head {
+            None => Ok(1),
+            Some(reference) => reference.snapshot_number.checked_add(1).ok_or(StorageError::SnapshotNumberExhausted),
+        }
     }
 
-    fn snapshot_path(&self, world: WorldId, number: u64) -> PathBuf {
-        self.snapshots_dir(world).join(format!("{number:020}.postcard"))
+    /// Report ignored crash debris conservatively without deleting anything that
+    /// could still belong to a live writer. Operators/tests can use this to make
+    /// repeated-crash disk growth visible.
+    pub fn storage_temp_debris(&self) -> Result<Vec<PathBuf>, StorageError> {
+        let mut debris = Vec::new();
+        let worlds_dir = self.worlds_dir();
+        if !worlds_dir.exists() {
+            return Ok(debris);
+        }
+        for entry in WalkDir::new(&worlds_dir).follow_links(false) {
+            let entry = entry.map_err(|error| {
+                let error_path = error.path().map(Path::to_path_buf).unwrap_or_else(|| worlds_dir.clone());
+                io_error(error_path, std::io::Error::other(error.to_string()))
+            })?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy();
+            if name.starts_with(".atomic-")
+                || name.starts_with(".blob-")
+                || name.starts_with(".restore-")
+                || name.starts_with(".deleted-")
+            {
+                debris.push(entry.path().to_path_buf());
+            }
+        }
+        debris.sort();
+        Ok(debris)
     }
 
     fn blob_path(&self, world: WorldId, hash: Hash32, encoding: BlobEncoding) -> PathBuf {
@@ -277,51 +353,6 @@ impl Storage {
         };
         self.blobs_dir(world).join(format!("{}.{}", hash.to_hex(), suffix))
     }
-}
-
-fn next_snapshot_number_after(latest: Option<u64>) -> Result<u64, StorageError> {
-    match latest {
-        None => Ok(1),
-        Some(number) => number.checked_add(1).ok_or(StorageError::CounterExhausted("snapshot number")),
-    }
-}
-
-#[cfg(test)]
-fn validate_portable_path(path: &str) -> Result<(), StorageError> {
-    if path.is_empty()
-        || path.starts_with('/')
-        || path.starts_with('\\')
-        || path.contains('\\')
-        || path.split('/').any(|part| part.is_empty() || part == "." || part == "..")
-        || (path.len() >= 2 && path.as_bytes()[1] == b':')
-    {
-        return Err(StorageError::UnsafeRelativePath(path.to_owned()));
-    }
-    Ok(())
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
-    let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
-    fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
-    let tmp = path.with_extension(format!("{}.tmp", path.extension().and_then(|x| x.to_str()).unwrap_or("data")));
-    debug!(path = %path.display(), bytes = bytes.len(), "atomic write");
-    let mut file =
-        OpenOptions::new().create(true).truncate(true).write(true).open(&tmp).map_err(|e| io_error(&tmp, e))?;
-    file.write_all(bytes).map_err(|e| io_error(&tmp, e))?;
-    file.sync_all().map_err(|e| io_error(&tmp, e))?;
-    drop(file);
-    fs::rename(&tmp, path).map_err(|e| io_error(path, e))?;
-    sync_parent(parent)?;
-    Ok(())
-}
-
-fn sync_parent(_parent: &Path) -> Result<(), StorageError> {
-    #[cfg(unix)]
-    {
-        let file = File::open(_parent).map_err(|e| io_error(_parent, e))?;
-        file.sync_all().map_err(|e| io_error(_parent, e))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -347,7 +378,7 @@ mod tests {
                     world: world(),
                     snapshot_number: 1,
                     epoch: 1,
-                    sequence: 0,
+                    sequence: 1,
                     previous_snapshot_hash: None,
                     authority_peer_id: PeerId([2; 32]),
                     authority_public_key: [3; 32],
@@ -369,19 +400,14 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_number_fails_closed_at_counter_exhaustion() {
-        assert_eq!(next_snapshot_number_after(None).unwrap(), 1);
-        assert_eq!(next_snapshot_number_after(Some(u64::MAX - 1)).unwrap(), u64::MAX);
-        assert!(matches!(
-            next_snapshot_number_after(Some(u64::MAX)),
-            Err(StorageError::CounterExhausted("snapshot number"))
-        ));
-    }
-
-    #[test]
-    fn rejects_traversal_paths() {
-        assert!(validate_portable_path("../secret").is_err());
-        assert!(validate_portable_path("C:/secret").is_err());
-        assert!(validate_portable_path("safe/region.mca").is_ok());
+    fn rejects_oversized_legacy_blob_reads_before_allocation() {
+        let store = Storage::open(tempfile::tempdir().unwrap().path()).unwrap();
+        let descriptor = BlobDescriptor {
+            hash: Hash32([0; 32]),
+            uncompressed_size: LEGACY_READ_BLOB_MAX_BYTES + 1,
+            encoded_size: 0,
+            encoding: BlobEncoding::Zstd,
+        };
+        assert!(matches!(store.read_blob(world(), &descriptor), Err(StorageError::BlobReadTooLarge { .. })));
     }
 }

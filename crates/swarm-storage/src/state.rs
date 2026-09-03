@@ -1,10 +1,9 @@
-use crate::{Storage, StorageError};
-use serde::{Deserialize, Serialize};
-use std::{
-    fs::{self, OpenOptions},
-    io::Write,
-    path::{Path, PathBuf},
+use crate::{
+    transaction::{durable_atomic_write, durable_remove},
+    Storage, StorageError,
 };
+use serde::{Deserialize, Serialize};
+use std::{fs, path::PathBuf};
 use swarm_protocol::{peer_id_from_public_key, RecoveryBallotV1, RecoveryVoteV1, SoloBranchV1, WorldConfigV1, WorldId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +25,7 @@ impl Storage {
         ballot: &RecoveryBallotV1,
         vote: &RecoveryVoteV1,
     ) -> Result<RecoveryPromiseResult, StorageError> {
+        let _guard = self.lock_world_transaction(ballot.world_id)?;
         ballot.validate_semantics()?;
         vote.validate_semantics()?;
         if !vote.matches_ballot(ballot)?
@@ -54,7 +54,7 @@ impl Storage {
 
         let promise = DurableRecoveryPromiseV1 { ballot: ballot.clone(), vote: vote.clone() };
         let bytes = postcard::to_allocvec(&promise)?;
-        atomic_write(&self.control_path_v2(ballot.world_id, "recovery-promise.postcard"), &bytes)?;
+        durable_atomic_write(&self.control_path_v2(ballot.world_id, "recovery-promise.postcard"), &bytes)?;
         Ok(RecoveryPromiseResult::Accepted)
     }
 
@@ -80,13 +80,14 @@ impl Storage {
         world: WorldId,
         accepted_epoch: u64,
     ) -> Result<bool, StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
         let Ok(promise) = self.load_recovery_promise(world) else {
             return Ok(false);
         };
         if accepted_epoch < promise.ballot.target_epoch {
             return Ok(false);
         }
-        remove_if_present(&self.control_path_v2(world, "recovery-promise.postcard"))?;
+        durable_remove(&self.control_path_v2(world, "recovery-promise.postcard"))?;
         Ok(true)
     }
 
@@ -99,6 +100,7 @@ impl Storage {
     ///   the authority peer/key of that currently accepted epoch;
     /// * sequence and previous hash must extend the accepted config exactly.
     pub fn save_world_config(&self, config: &WorldConfigV1) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(config.world_id)?;
         let mut config = config.clone();
         config.normalize_canonical();
         config.validate_semantics()?;
@@ -137,7 +139,7 @@ impl Storage {
         }
 
         let bytes = postcard::to_allocvec(&config)?;
-        atomic_write(&self.control_path_v2(config.world_id, "world-config.postcard"), &bytes)
+        durable_atomic_write(&self.control_path_v2(config.world_id, "world-config.postcard"), &bytes)
     }
 
     pub fn load_world_config(&self, world: WorldId) -> Result<WorldConfigV1, StorageError> {
@@ -152,9 +154,10 @@ impl Storage {
     }
 
     pub fn save_solo_branch(&self, branch: &SoloBranchV1) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(branch.world_id)?;
         branch.validate_semantics()?;
         let bytes = postcard::to_allocvec(branch)?;
-        atomic_write(&self.control_path_v2(branch.world_id, "solo-branch.postcard"), &bytes)
+        durable_atomic_write(&self.control_path_v2(branch.world_id, "solo-branch.postcard"), &bytes)
     }
 
     pub fn load_solo_branch(&self, world: WorldId) -> Result<SoloBranchV1, StorageError> {
@@ -169,6 +172,7 @@ impl Storage {
     }
 
     pub fn preserve_solo_conflict(&self, branch: &SoloBranchV1) -> Result<PathBuf, StorageError> {
+        let _guard = self.lock_world_transaction(branch.world_id)?;
         branch.validate_semantics()?;
         let hash = branch.branch_hash()?;
         let path = self
@@ -177,7 +181,7 @@ impl Storage {
             .join("solo-conflicts")
             .join(format!("{}.postcard", hash.to_hex()));
         if !path.exists() {
-            atomic_write(&path, &postcard::to_allocvec(branch)?)?;
+            durable_atomic_write(&path, &postcard::to_allocvec(branch)?)?;
         }
         Ok(path)
     }
@@ -205,8 +209,9 @@ impl Storage {
     }
 
     pub fn set_background_seeding(&self, world: WorldId, enabled: bool) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
         self.load_world(world)?;
-        atomic_write(&self.control_path_v2(world, "background-seeding"), if enabled { b"1\n" } else { b"0\n" })
+        durable_atomic_write(&self.control_path_v2(world, "background-seeding"), if enabled { b"1\n" } else { b"0\n" })
     }
 
     pub fn background_seeding_enabled(&self, world: WorldId) -> Result<bool, StorageError> {
@@ -240,43 +245,8 @@ fn same_recovery_base(a: &RecoveryBallotV1, b: &RecoveryBallotV1) -> bool {
         && a.membership_hash == b.membership_hash
 }
 
-fn remove_if_present(path: &Path) -> Result<(), StorageError> {
-    if path.exists() {
-        fs::remove_file(path).map_err(|error| io_error(path, error))?;
-        if let Some(parent) = path.parent() {
-            sync_parent(parent)?;
-        }
-    }
-    Ok(())
-}
-
 fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
     StorageError::Io { path: path.into(), source }
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
-    let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
-    fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
-    let tmp = path.with_extension("tmp");
-    let mut file =
-        OpenOptions::new().create(true).truncate(true).write(true).open(&tmp).map_err(|error| io_error(&tmp, error))?;
-    file.write_all(bytes).map_err(|error| io_error(&tmp, error))?;
-    file.sync_all().map_err(|error| io_error(&tmp, error))?;
-    drop(file);
-    fs::rename(&tmp, path).map_err(|error| io_error(path, error))?;
-    sync_parent(parent)
-}
-
-fn sync_parent(parent: &Path) -> Result<(), StorageError> {
-    #[cfg(unix)]
-    {
-        fs::File::open(parent).and_then(|file| file.sync_all()).map_err(|error| io_error(parent, error))?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = parent;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

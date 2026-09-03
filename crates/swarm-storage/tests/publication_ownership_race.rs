@@ -32,114 +32,129 @@ fn publication_has_pin(storage: &Storage, world: WorldId, publication_id: &str, 
 fn spawn_publisher(
     storage: Storage,
     source: &Path,
-    context: SnapshotContext,
-    start: Arc<Barrier>,
-    release: Arc<Barrier>,
+    world: WorldId,
+    snapshot_number: u64,
+    previous_snapshot_hash: Hash32,
+    barriers: (Arc<Barrier>, Arc<Barrier>),
     published: mpsc::Sender<(SnapshotManifestV1, String)>,
 ) -> thread::JoinHandle<()> {
     let source = source.to_path_buf();
+    let (start, commit) = barriers;
     thread::spawn(move || {
         start.wait();
         let mut publication = storage
-            .snapshot_directory_streaming(&source, context)
+            .snapshot_directory_streaming(&source, context(world, snapshot_number, Some(previous_snapshot_hash)))
             .expect("local publisher should publish complete blobs");
-        publication.signature = vec![context.snapshot_number as u8; 64];
+        // Both publishers intentionally produce the exact same immutable manifest.
+        publication.signature = vec![snapshot_number as u8; 64];
         published
             .send((publication.manifest().clone(), publication.publication_id().to_owned()))
             .expect("race coordinator should receive publication metadata");
 
-        release.wait();
-        drop(publication);
+        commit.wait();
+        storage.commit_snapshot_streaming(&publication).expect("local publication commit should succeed idempotently");
     })
 }
 
 #[test]
 fn simultaneous_local_publishers_survive_replica_commit_gc_and_retention() {
     let temp = tempfile::tempdir().unwrap();
-    let parent_source = temp.path().join("parent-source");
     let shared_source = temp.path().join("shared-source");
     let latest_source = temp.path().join("latest-source");
-    fs::create_dir_all(&parent_source).unwrap();
     fs::create_dir_all(&shared_source).unwrap();
     fs::create_dir_all(&latest_source).unwrap();
-    fs::write(parent_source.join("level.dat"), b"canonical-parent").unwrap();
     fs::write(shared_source.join("level.dat"), vec![0x5a; 2 * 1024 * 1024]).unwrap();
     fs::write(latest_source.join("level.dat"), b"newer-committed-snapshot").unwrap();
 
     let storage = Storage::open(temp.path().join("store")).unwrap();
     let world = WorldId([0x77; 32]);
 
-    let mut parent = storage.snapshot_directory_streaming(&parent_source, context(world, 1, None)).unwrap();
-    parent.signature = vec![0x61; 64];
-    storage.commit_snapshot_streaming(&parent).unwrap();
-    let parent_hash = parent.manifest_hash().unwrap();
+    // Establish a valid direct-parent chain before starting the publication race.
+    let mut first = storage
+        .snapshot_directory_streaming(&shared_source, context(world, 1, None))
+        .expect("first snapshot should publish");
+    first.signature = vec![1; 64];
+    storage.commit_snapshot_streaming(&first).unwrap();
+    let first_hash = first.manifest_hash().unwrap();
+    let shared_hash = first.entries[0].blob.hash;
 
+    let mut replica = first.manifest().clone();
+    replica.snapshot_number = 2;
+    replica.sequence = 2;
+    replica.previous_snapshot_hash = Some(first_hash);
+    replica.signature = vec![2; 64];
+    storage.finalize_replica(&replica).expect("replica manifest should commit over the shared complete blob");
+    let replica_hash = replica.manifest_hash().unwrap();
+
+    let mut latest = storage
+        .snapshot_directory_streaming(&latest_source, context(world, 3, Some(replica_hash)))
+        .expect("newer committed snapshot should publish");
+    latest.signature = vec![3; 64];
+    storage.commit_snapshot_streaming(&latest).unwrap();
+    let latest_hash = latest.manifest_hash().unwrap();
+
+    // Two live local publishers now prepare the same direct successor. Their
+    // ownership pins must remain independent until each exact-idempotent commit.
     let start = Arc::new(Barrier::new(3));
-    let release = Arc::new(Barrier::new(3));
+    let commit = Arc::new(Barrier::new(3));
     let (published_tx, published_rx) = mpsc::channel();
-    let child_context = context(world, 2, Some(parent_hash));
-
-    let first = spawn_publisher(
+    let left = spawn_publisher(
         storage.clone(),
         &shared_source,
-        child_context,
-        start.clone(),
-        release.clone(),
+        world,
+        4,
+        latest_hash,
+        (start.clone(), commit.clone()),
         published_tx.clone(),
     );
-    let second =
-        spawn_publisher(storage.clone(), &shared_source, child_context, start.clone(), release.clone(), published_tx);
+    let right = spawn_publisher(
+        storage.clone(),
+        &shared_source,
+        world,
+        4,
+        latest_hash,
+        (start.clone(), commit.clone()),
+        published_tx,
+    );
 
     start.wait();
     let mut locals = [published_rx.recv().unwrap(), published_rx.recv().unwrap()];
-    locals.sort_by(|a, b| a.1.cmp(&b.1));
-    let shared_blob = locals[0].0.entries[0].blob.clone();
-    let shared_hash = shared_blob.hash;
-    assert_eq!(shared_hash, locals[1].0.entries[0].blob.hash);
+    locals.sort_by(|left, right| left.1.cmp(&right.1));
+    assert_eq!(locals[0].0.manifest_hash().unwrap(), locals[1].0.manifest_hash().unwrap());
     assert_ne!(locals[0].1, locals[1].1);
     assert!(publication_has_pin(&storage, world, &locals[0].1, shared_hash));
     assert!(publication_has_pin(&storage, world, &locals[1].1, shared_hash));
 
-    let mut replica = locals[0].0.clone();
-    replica.signature = vec![0x63; 64];
-    storage.finalize_replica(&replica).expect("direct-child replica should commit over the shared complete blob");
-    assert!(publication_has_pin(&storage, world, &locals[0].1, shared_hash));
-    assert!(publication_has_pin(&storage, world, &locals[1].1, shared_hash));
-
-    let replica_hash = replica.manifest_hash().unwrap();
-    let mut latest = storage
-        .snapshot_directory_streaming(&latest_source, context(world, 3, Some(replica_hash)))
-        .expect("newer direct-child snapshot should publish");
-    latest.signature = vec![0x64; 64];
-    storage.commit_snapshot_streaming(&latest).unwrap();
-
-    storage
+    let during = storage
         .apply_retention(world, &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() })
         .expect("GC and retention should coexist with in-flight publication owners");
-    assert!(!storage.list_snapshots(world).unwrap().iter().any(|manifest| manifest.snapshot_number == 2));
-    assert!(
-        storage.read_blob(world, &shared_blob).is_ok(),
-        "shared blob must remain live because both stale local publication owners still pin it"
+    assert_eq!(
+        during.removed_blobs, 0,
+        "shared blob must remain live because both local publication owners pin it after older manifests are pruned"
+    );
+    assert_eq!(
+        storage.list_snapshots(world).unwrap().iter().map(|manifest| manifest.snapshot_number).collect::<Vec<_>>(),
+        vec![3]
     );
     assert!(publication_has_pin(&storage, world, &locals[0].1, shared_hash));
     assert!(publication_has_pin(&storage, world, &locals[1].1, shared_hash));
 
-    release.wait();
-    first.join().expect("first publisher thread should exit cleanly");
-    second.join().expect("second publisher thread should exit cleanly");
+    commit.wait();
+    left.join().expect("first publisher thread should complete");
+    right.join().expect("second publisher thread should complete");
+    assert!(!publication_has_pin(&storage, world, &locals[0].1, shared_hash));
+    assert!(!publication_has_pin(&storage, world, &locals[1].1, shared_hash));
 
-    storage
-        .apply_retention(world, &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() })
-        .expect("post-publication retention should reclaim abandoned stale-publication data");
-    assert!(
-        storage.read_blob(world, &shared_blob).is_err(),
-        "once both stale publishers exit, their unreferenced shared blob should be collectible"
-    );
+    let after = storage
+        .apply_retention(world, &RetentionPolicy { keep_latest: 2, protected_snapshots: BTreeSet::new() })
+        .expect("post-publication retention should complete");
+    assert_eq!(after.removed_blobs, 0, "retained local manifest must keep the shared blob live");
 
     let committed = storage.list_snapshots(world).unwrap();
-    assert_eq!(committed.len(), 1);
-    assert_eq!(committed[0].snapshot_number, 3);
-    storage
-        .verify_snapshot_streaming(&committed[0])
-        .expect("the retained canonical manifest must reference complete, uncorrupted blobs");
+    assert_eq!(committed.last().unwrap().snapshot_number, 4);
+    for manifest in committed {
+        storage
+            .verify_snapshot_streaming(&manifest)
+            .expect("no committed manifest may reference a missing or corrupt blob");
+    }
 }

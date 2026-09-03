@@ -1,13 +1,13 @@
-use crate::{Storage, StorageError};
-use std::{
-    fs::{self, OpenOptions},
-    io::Write,
-    path::{Path, PathBuf},
+use crate::{
+    transaction::{durable_atomic_write, durable_remove},
+    Storage, StorageError,
 };
+use std::{fs, path::PathBuf};
 use swarm_protocol::{JoinRequestV1, LeaveRequestV1, MembershipRecordV1, WorldDescriptorV1, WorldId};
 
 impl Storage {
     pub fn save_world_descriptor(&self, descriptor: &WorldDescriptorV1) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(descriptor.world_id)?;
         let original_member_count = descriptor.members.len();
         let mut descriptor = descriptor.clone();
         descriptor.normalize();
@@ -16,7 +16,7 @@ impl Storage {
         }
         descriptor.validate_semantics()?;
         let bytes = serde_json::to_vec_pretty(&descriptor)?;
-        atomic_write(&self.world_protocol_path(descriptor.world_id, "descriptor.json"), &bytes)
+        durable_atomic_write(&self.world_protocol_path(descriptor.world_id, "descriptor.json"), &bytes)
     }
 
     pub fn load_world_descriptor(&self, world: WorldId) -> Result<WorldDescriptorV1, StorageError> {
@@ -31,6 +31,7 @@ impl Storage {
     }
 
     pub fn save_membership_record(&self, record: &MembershipRecordV1) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(record.world_id)?;
         record.validate_semantics()?;
         let membership_path = self.world_protocol_path(record.world_id, "membership.postcard");
         if membership_path.exists() {
@@ -76,7 +77,7 @@ impl Storage {
             }
         }
         let bytes = postcard::to_allocvec(record)?;
-        atomic_write(&membership_path, &bytes)
+        durable_atomic_write(&membership_path, &bytes)
     }
 
     fn certified_membership_bootstrap(&self, record: &MembershipRecordV1) -> Result<bool, StorageError> {
@@ -114,9 +115,10 @@ impl Storage {
     }
 
     pub fn save_pending_join(&self, request: &JoinRequestV1) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(request.world_id)?;
         request.validate_semantics()?;
         let bytes = postcard::to_allocvec(request)?;
-        atomic_write(&self.world_protocol_path(request.world_id, "pending-join.postcard"), &bytes)
+        durable_atomic_write(&self.world_protocol_path(request.world_id, "pending-join.postcard"), &bytes)
     }
 
     pub fn load_pending_join(&self, world: WorldId) -> Result<JoinRequestV1, StorageError> {
@@ -131,13 +133,15 @@ impl Storage {
     }
 
     pub fn clear_pending_join(&self, world: WorldId) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
         remove_protocol_file(self, world, "pending-join.postcard")
     }
 
     pub fn save_pending_leave(&self, request: &LeaveRequestV1) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(request.world_id)?;
         request.validate_semantics()?;
         let bytes = postcard::to_allocvec(request)?;
-        atomic_write(&self.world_protocol_path(request.world_id, "pending-leave.postcard"), &bytes)
+        durable_atomic_write(&self.world_protocol_path(request.world_id, "pending-leave.postcard"), &bytes)
     }
 
     pub fn load_pending_leave(&self, world: WorldId) -> Result<LeaveRequestV1, StorageError> {
@@ -152,10 +156,12 @@ impl Storage {
     }
 
     pub fn clear_pending_leave(&self, world: WorldId) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
         remove_protocol_file(self, world, "pending-leave.postcard")
     }
 
     pub fn remove_local_membership(&self, world: WorldId) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
         for name in [
             "descriptor.json",
             "membership.postcard",
@@ -175,40 +181,11 @@ impl Storage {
 }
 
 fn remove_protocol_file(storage: &Storage, world: WorldId, name: &str) -> Result<(), StorageError> {
-    let path = storage.world_protocol_path(world, name);
-    if path.exists() {
-        fs::remove_file(&path).map_err(|error| io_error(&path, error))?;
-    }
-    Ok(())
+    durable_remove(&storage.world_protocol_path(world, name)).map(|_| ())
 }
 
 fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
     StorageError::Io { path: path.into(), source }
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
-    let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
-    fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
-    let tmp = path.with_extension("tmp");
-    let mut file =
-        OpenOptions::new().create(true).truncate(true).write(true).open(&tmp).map_err(|error| io_error(&tmp, error))?;
-    file.write_all(bytes).map_err(|error| io_error(&tmp, error))?;
-    file.sync_all().map_err(|error| io_error(&tmp, error))?;
-    drop(file);
-    fs::rename(&tmp, path).map_err(|error| io_error(path, error))?;
-    sync_parent(parent)
-}
-
-fn sync_parent(parent: &Path) -> Result<(), StorageError> {
-    #[cfg(unix)]
-    {
-        fs::File::open(parent).and_then(|file| file.sync_all()).map_err(|error| io_error(parent, error))?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = parent;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
