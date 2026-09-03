@@ -1,3 +1,4 @@
+# Exact composed-tree acceptance trigger. Production/test tree is unchanged from 3c6ca9bab5a9ee9b0d228a45a267c3fa8e2722a3.
 name: Agent 3 final storage validation
 
 on:
