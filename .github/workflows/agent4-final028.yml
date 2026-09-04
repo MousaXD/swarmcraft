@@ -1,0 +1,241 @@
+name: Agent 4 FINAL-028 Closure
+
+on:
+  push:
+    branches:
+      - fix/agent-4-network
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent4-final028-closure
+  cancel-in-progress: false
+
+jobs:
+  compose-and-linux-validate:
+    runs-on: ubuntu-latest
+    outputs:
+      production_sha: ${{ steps.production.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/agent-4-network
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "swarmcraft-agent4"
+          git config user.email "agent4@users.noreply.github.com"
+
+      - name: Fetch authoritative integration ancestor
+        run: |
+          git fetch origin integration/audit-remediation-v1
+          test "$(git rev-parse origin/integration/audit-remediation-v1)" = "c9252820a560e6ed4d30bb77227e3a494c6ce869"
+
+      - name: Compose Agent 1+2+3 integration and preserve Agent 4 daemon hardening
+        run: |
+          if ! git merge-base --is-ancestor c9252820a560e6ed4d30bb77227e3a494c6ce869 HEAD; then
+            set +e
+            git merge --no-ff --no-commit c9252820a560e6ed4d30bb77227e3a494c6ce869
+            merge_status=$?
+            set -e
+            if [ "$merge_status" -ne 0 ]; then
+              unmerged="$(git diff --name-only --diff-filter=U)"
+              test "$unmerged" = "crates/swarm-cli/src/daemon.rs"
+              git checkout --ours crates/swarm-cli/src/daemon.rs
+              git add crates/swarm-cli/src/daemon.rs
+            fi
+          fi
+
+      - name: Apply FINAL-028 production patch
+        run: python .github/agent4_final028_patch.py
+
+      - name: Record composition and design in Agent 4 ledger
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('implementation/agent-4-network.md')
+          text = p.read_text()
+          marker = '## FINAL-028 closure composition (2026-09-04)'
+          if marker not in text:
+              text += '''\n\n## FINAL-028 closure composition (2026-09-04)\n\n- Starting Agent 4 remote head verified before closure: `992e9c05d690eb2832476a9e2b2e074a8d0c97e2`.\n- Authoritative Agent 1+2+3 integration ancestor consumed: `c9252820a560e6ed4d30bb77227e3a494c6ce869`.\n- Composition conflict: `crates/swarm-cli/src/daemon.rs` only. Resolution preserves Agent 4 connection/auth/privacy hardening and reapplies Agent 3 `commit_snapshot_fenced` recovery promotion using the durable canonical expected head, epoch, and fencing token.\n- FINAL-028 design: first-contact discovery now requires a verifier-generated random nonce. The current authority supplies genesis-anchored membership transition material; every accepted record then needs a live canonical quorum to sign a challenge binding the exact announcement hash, current membership hash/sequence, pending joint-transition identity, current authority, epoch, fencing token, WorldConfig hash/sequence, and Agent 3 canonical snapshot head.\n- A DHT provider remains an untrusted locator. Current active public/unlisted members publish the exact-world provider key solely so the verifier can reach a live quorum; only the current authority publishes the announcement/public-directory record.\n- A signer reloads durable membership, pending membership promise, epoch/fence, WorldConfig, and Agent 3 canonical head before signing. Any mismatch fails closed. Reused `(verifier, nonce)` challenges are refused by signers and rejected by the verifier replay guard.\n- Joint transitions use Agent 1's old+new quorum rule. The proof cannot be certified by one voter universe alone.\n- Membership-changing transitions are anchored from genesis through Agent 1 membership certificates; certificate history is retained immutably for future discovery proofs. Same-voter authority/recovery refreshes are made current by the live quorum challenge, not by trusting an old authority signature.\n- Security argument: truncating a historical prefix no longer proves freshness. After a committed membership/authority transition, quorum intersection guarantees at least one member of any would-be old majority has durable newer state and refuses to sign the stale challenge. A stale former authority therefore cannot answer a new verifier nonce with a valid current quorum.\n- Temporary exact-head validation workflow: `.github/workflows/agent4-final028.yml`; temporary patch vehicle: `.github/agent4_final028_patch.py`. Both are removed only after the exact production SHA and cross-platform proof serialization checks succeed.\n'''
+              p.write_text(text)
+          PY
+
+      - name: Format production tree
+        run: cargo fmt --all
+
+      - name: Commit and push composed production milestone
+        run: |
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "feat(agent4): close canonical discovery freshness"
+            git push origin HEAD:fix/agent-4-network
+          fi
+
+      - name: Capture exact production SHA
+        id: production
+        run: |
+          sha="$(git rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "$sha" > /tmp/agent4-production-sha
+          git status --short
+          test -z "$(git status --short)"
+
+      - name: Workspace format
+        run: cargo fmt --all -- --check
+
+      - name: Workspace check all targets locked
+        run: cargo check --workspace --all-targets --locked
+
+      - name: Workspace strict clippy all targets locked
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Network suite
+        run: cargo test -p swarm-network --locked
+
+      - name: Protocol suite
+        run: cargo test -p swarm-protocol --locked
+
+      - name: Core suite
+        run: cargo test -p swarm-core --locked
+
+      - name: Storage suite
+        run: cargo test -p swarm-storage --locked
+
+      - name: Consensus suite
+        run: cargo test -p swarm-consensus --locked
+
+      - name: CLI library and binaries
+        run: cargo test -p swarm-cli --lib --bins --locked
+
+      - name: FINAL-028 freshness regressions
+        run: cargo test -p swarm-cli --test discovery_freshness --locked -- --nocapture
+
+      - name: Connection-bound handshake and input hardening
+        run: |
+          cargo test -p swarm-network --test peer_networking_acceptance --locked
+          cargo test -p swarm-network --test input_hardening --locked
+
+      - name: Impaired QUIC lost-ACK restart recovery
+        run: cargo test -p swarm-network --test network_transfer_soak --locked
+
+      - name: Agent 1 3-peer and 5-peer partition safety
+        run: cargo test -p swarm-cli --test consensus_partition_safety --locked
+
+      - name: Agent 1 live membership replication
+        run: cargo test -p swarm-cli --test live_join_replication --locked
+
+      - name: Automatic invite join
+        run: cargo test -p swarm-cli --test automatic_invite_join --locked
+
+      - name: Agent 1 three-daemon recovery
+        run: cargo test -p swarm-cli --test three_daemon_recovery --locked
+
+      - name: Agent 1 recovery successor crash resume
+        run: cargo test -p swarm-cli --test recovery_successor_dies --locked
+
+      - name: Agent 2 membership and direct history semantics
+        run: cargo test -p swarm-storage --test membership_history --locked
+
+      - name: Compile all CLI integration targets
+        run: cargo test -p swarm-cli --tests --no-run --locked
+
+      - name: Exact production SHA and clean worktree assertion
+        env:
+          VALIDATED_PRODUCTION_SHA: ${{ steps.production.outputs.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$VALIDATED_PRODUCTION_SHA"
+          test -z "$(git status --short)"
+
+  windows-proof-portability:
+    needs: compose-and-linux-validate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.compose-and-linux-validate.outputs.production_sha }}
+      - name: Protocol freshness serialization
+        run: cargo test -p swarm-protocol --locked discovery
+      - name: Core freshness verification
+        run: cargo test -p swarm-core --locked discovery
+      - name: Consensus joint freshness quorum
+        run: cargo test -p swarm-consensus --locked membership
+      - name: FINAL-028 regression suite
+        run: cargo test -p swarm-cli --test discovery_freshness --locked
+
+  macos-proof-portability:
+    needs: compose-and-linux-validate
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.compose-and-linux-validate.outputs.production_sha }}
+      - name: Protocol freshness serialization
+        run: cargo test -p swarm-protocol --locked discovery
+      - name: Core freshness verification
+        run: cargo test -p swarm-core --locked discovery
+      - name: Consensus joint freshness quorum
+        run: cargo test -p swarm-consensus --locked membership
+      - name: FINAL-028 regression suite
+        run: cargo test -p swarm-cli --test discovery_freshness --locked
+
+  cleanup-and-ledger:
+    needs:
+      - compose-and-linux-validate
+      - windows-proof-portability
+      - macos-proof-portability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/agent-4-network
+          fetch-depth: 0
+
+      - name: Verify validated production is current product ancestor
+        env:
+          VALIDATED_PRODUCTION_SHA: ${{ needs.compose-and-linux-validate.outputs.production_sha }}
+        run: |
+          git merge-base --is-ancestor "$VALIDATED_PRODUCTION_SHA" HEAD
+          git diff --name-only "$VALIDATED_PRODUCTION_SHA"..HEAD
+
+      - name: Close Agent 4 ledger with exact run evidence
+        env:
+          VALIDATED_PRODUCTION_SHA: ${{ needs.compose-and-linux-validate.outputs.production_sha }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          p = Path('implementation/agent-4-network.md')
+          text = p.read_text()
+          sha = os.environ['VALIDATED_PRODUCTION_SHA']
+          run_id = os.environ['GITHUB_RUN_ID']
+          text = text.replace('STATUS: BLOCKED', 'STATUS: READY FOR INTEGRATION', 1)
+          text = text.replace('READY FOR INTEGRATION: NO', 'READY FOR INTEGRATION: YES')
+          block = f'''\n\n## FINAL-028 exact-head closure evidence\n\n- Composed production milestone / exact validated production SHA: `{sha}`.\n- Exact-head closure workflow run: `{run_id}` — SUCCESS once this cleanup job is executing (all required Linux, Windows, and macOS dependencies are green).\n- Linux full composed gate: format, workspace all-targets check, strict `-D warnings` clippy, network/protocol/core/storage/consensus/CLI suites, FINAL-028 regressions, handshake/input hardening, impaired QUIC restart recovery, Agent 1 partition/live-membership/automatic-invite/recovery campaigns, Agent 2 membership history, and all CLI integration target compilation — PASS.\n- Windows proof/canonical serialization + FINAL-028 regression subset — PASS.\n- macOS proof/canonical serialization + FINAL-028 regression subset — PASS.\n- Freshness construction: verifier nonce + verifier identity + exact signed announcement hash + committed membership hash/sequence + pending joint proposal hash (if any) + current authority + epoch + fencing token + config hash/sequence + exact Agent 3 canonical snapshot head, certified by live Agent 1 quorum signatures.\n- Steady state requires a majority of current non-banned canonical voters. Pending membership requires both the old and new majorities. Duplicate, reordered, unknown, removed, banned, or key-mismatched signer collections fail closed.\n- Stale-prefix omission proof: a stale former authority can replay historical certificates but cannot manufacture signatures on the new verifier nonce. Agent 1 quorum intersection plus durable signer-side current-state checks forces any old-majority attempt to intersect a voter that knows the newer committed generation/head and refuses to sign stale fields.\n- Public browse and exact resolution no longer accept `verify_world_announcement` alone. They collect candidate records, obtain genesis-anchored membership proof material, discover exact-world voter locators, and return a card only after the live freshness quorum succeeds. Exact resolve no longer uses first-self-signed-result wins.\n- Provider identity is never used as authority. Private worlds remain excluded; unlisted worlds remain exact-resolve-only; public-directory publication remains authority-only.\n- Counter boundaries: discovery publication sequence and freshness expiry use checked arithmetic and fail closed rather than saturating/wrapping.\n- Permanent regression file: `crates/swarm-cli/tests/discovery_freshness.rs`.\n- Post-validation cleanup removes only `.github/workflows/agent4-final028.yml` and `.github/agent4_final028_patch.py`, plus this ledger update. No Rust, tests, Cargo metadata, or permanent behavior changes occur after `{sha}`.\n\n### FINAL-028 regression coverage\n\nThe permanent suite covers current quorum acceptance; unrelated attacker announcement rejection; wrong world; wrong membership hash/sequence; wrong authority epoch; wrong fencing token; wrong canonical head hash; verifier mismatch; verifier challenge reuse; removed/banned signer exclusion; exact old+new joint quorum; insufficient new quorum; stale old configuration unable to certify independently; membership-chain truncation; duplicate signer collection; non-canonical signer ordering; and cryptographic challenge binding. Browse and exact resolve both call the same `validate_fresh_discovery_candidate` acceptance gate.\n\n### Post-validation diff\n\nExpected changed files after `{sha}`: `implementation/agent-4-network.md`, deletion of `.github/workflows/agent4-final028.yml`, and deletion of `.github/agent4_final028_patch.py` only.\n\n### Remaining integration seams\n\nNo known unresolved Agent 4 product conflict. Integration must preserve the composed daemon resolution: Agent 4 network/auth/privacy behavior plus Agent 3 fenced recovery snapshot commit. Do not replace the exact-head freshness bridge with DHT-provider trust, TOFU, or replayable historical authority certificates.\n\nREADY FOR INTEGRATION: YES\n'''
+          if '## FINAL-028 exact-head closure evidence' not in text:
+              text += block
+          p.write_text(text)
+          PY
+
+      - name: Remove temporary Agent 4 closure machinery
+        run: |
+          rm .github/workflows/agent4-final028.yml
+          rm .github/agent4_final028_patch.py
+
+      - name: Prove cleanup diff is docs workflow only and push
+        env:
+          VALIDATED_PRODUCTION_SHA: ${{ needs.compose-and-linux-validate.outputs.production_sha }}
+        run: |
+          git config user.name "swarmcraft-agent4"
+          git config user.email "agent4@users.noreply.github.com"
+          git add -A
+          changed="$(git diff --cached --name-only | sort)"
+          expected="$(printf '%s\n' '.github/agent4_final028_patch.py' '.github/workflows/agent4-final028.yml' 'implementation/agent-4-network.md' | sort)"
+          test "$changed" = "$expected"
+          git commit -m "docs(agent4): close FINAL-028 exact-head validation"
+          git push origin HEAD:fix/agent-4-network
+          test -z "$(git status --short)"
+          echo "Validated production SHA: $VALIDATED_PRODUCTION_SHA"
+          echo "Final branch head: $(git rev-parse HEAD)"
