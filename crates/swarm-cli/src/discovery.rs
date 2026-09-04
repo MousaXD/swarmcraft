@@ -8,18 +8,22 @@ use std::{
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use swarm_consensus::{validate_discovery_freshness_quorum, validate_discovery_membership_proof_shape};
 use swarm_core::{
-    random_nonce, sign_friend_presence, sign_world_announcement, verify_friend_presence, verify_membership_signature,
-    verify_world_announcement, verify_world_config_signature, AnnouncementReplayGuard, DataPaths, DiscoveryRecordError,
-    PeerIdentity,
+    random_nonce, sign_discovery_freshness_vote, sign_friend_presence, sign_world_announcement,
+    verify_discovery_freshness_challenge, verify_discovery_freshness_vote, verify_discovery_membership_proof,
+    verify_friend_presence, verify_membership_signature, verify_world_announcement, verify_world_config_signature,
+    AnnouncementReplayGuard, DataPaths, DiscoveryFreshnessReplayGuard, DiscoveryRecordError, PeerIdentity,
+    DISCOVERY_FRESHNESS_MAX_LIFETIME_MS,
 };
 use swarm_network::{
     generate_transport_key, load_or_create_transport_key, DiscoveryNetworkEvent, DiscoveryNode, WireRequest,
     WireResponse, MAX_DISCOVERY_RESULTS,
 };
 use swarm_protocol::{
-    peer_id_from_public_key, DiscoveryCompatibilityV1, DiscoveryFilterV1, FriendPresenceV1, MembershipPolicyV1, PeerId,
-    WorldAnnouncementV1, WorldId, WorldVisibilityV1, PROTOCOL_VERSION,
+    peer_id_from_public_key, DiscoveryCanonicalHeadV1, DiscoveryCompatibilityV1, DiscoveryFilterV1,
+    DiscoveryFreshnessChallengeV1, DiscoveryFreshnessVoteV1, DiscoveryMembershipProofV1, FriendPresenceV1,
+    MembershipPolicyV1, PeerId, WorldAnnouncementV1, WorldId, WorldVisibilityV1, PROTOCOL_VERSION,
 };
 use swarm_storage::Storage;
 use tokio::time::{timeout, MissedTickBehavior};
@@ -31,6 +35,7 @@ pub const WORLD_ANNOUNCEMENT_TTL_MS: u64 = 5 * 60 * 1_000;
 pub const FRIEND_PRESENCE_TTL_MS: u64 = 30 * 1_000;
 const DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const DISCOVERY_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
+const DISCOVERY_FRESHNESS_TIMEOUT: Duration = Duration::from_secs(5);
 const FRIENDS_FILE_VERSION: u16 = 1;
 const MAX_FRIEND_LABEL_BYTES: usize = 96;
 
@@ -178,6 +183,7 @@ struct PublishedDiscoveryState {
     public_directory: bool,
     sequences: HashMap<WorldId, u64>,
     presence_requesters: HashSet<PeerId>,
+    signed_freshness_challenges: HashMap<(PeerId, [u8; 32]), u64>,
 }
 
 pub async fn serve(paths: DataPaths, listen: String) -> Result<()> {
@@ -214,9 +220,10 @@ pub async fn serve(paths: DataPaths, listen: String) -> Result<()> {
                     DiscoveryNetworkEvent::InboundRequest { application_peer, request, channel, .. } => {
                         if let Err(error) = handle_discovery_request(
                             &paths,
+                            &storage,
                             &identity,
                             &mut node,
-                            &published,
+                            &mut published,
                             application_peer,
                             request,
                             channel,
@@ -260,18 +267,26 @@ fn refresh_publications(
         if local_member.banned || local_member.public_key != identity.public_key() {
             continue;
         }
+        match config.visibility {
+            WorldVisibilityV1::Private => continue,
+            WorldVisibilityV1::Unlisted | WorldVisibilityV1::Public => {}
+        }
+        // The DHT provider identity is only a locator. Publishing all current
+        // active members under the exact-world key makes a live quorum
+        // discoverable without granting any provider authority.
+        next_worlds.insert(world);
+
         let Ok(epoch) = storage.load_epoch_record(world) else { continue };
         if epoch.authority_peer_id != identity.peer_id() || epoch.authority_public_key != identity.public_key() {
             continue;
         }
 
-        match config.visibility {
-            WorldVisibilityV1::Private => continue,
-            WorldVisibilityV1::Unlisted | WorldVisibilityV1::Public => {}
-        }
-
         let previous = state.sequences.get(&world).copied().unwrap_or(0);
-        let sequence = now.max(previous.saturating_add(1));
+        let sequence = if now > previous {
+            now
+        } else {
+            previous.checked_add(1).context("discovery announcement sequence exhausted")?
+        };
         state.sequences.insert(world, sequence);
         let mut announcement = WorldAnnouncementV1 {
             protocol_version: PROTOCOL_VERSION,
@@ -288,18 +303,25 @@ fn refresh_publications(
             membership_policy: config.membership_policy,
             config_sequence: config.sequence,
             config_hash: config.config_hash()?,
+            membership_sequence: membership.sequence,
+            membership_hash: membership.record_hash()?,
             authority_epoch: epoch.epoch_number,
             fencing_token: epoch.fencing_token,
+            canonical_head: storage.canonical_snapshot_head(world)?.head.map(|head| DiscoveryCanonicalHeadV1 {
+                snapshot_number: head.snapshot_number,
+                manifest_hash: head.manifest_hash,
+                epoch: head.epoch,
+                sequence: head.sequence,
+            }),
             announcement_sequence: sequence,
             issued_unix_ms: now,
-            expires_unix_ms: now.saturating_add(WORLD_ANNOUNCEMENT_TTL_MS),
+            expires_unix_ms: now.checked_add(WORLD_ANNOUNCEMENT_TTL_MS).context("discovery expiry overflow")?,
             announcer_peer_id: identity.peer_id(),
             announcer_public_key: identity.public_key(),
             signature: Vec::new(),
         };
         sign_world_announcement(identity, &mut announcement)?;
         verify_world_announcement(&announcement, now).map_err(|error| anyhow!(error))?;
-        next_worlds.insert(world);
         next_announcements.insert(world, announcement);
         if matches!(config.visibility, WorldVisibilityV1::Public) {
             any_public = true;
@@ -326,9 +348,10 @@ fn refresh_publications(
 
 fn handle_discovery_request(
     paths: &DataPaths,
+    storage: &Storage,
     identity: &PeerIdentity,
     node: &mut DiscoveryNode,
-    state: &PublishedDiscoveryState,
+    state: &mut PublishedDiscoveryState,
     application_peer: PeerId,
     request: WireRequest,
     channel: swarm_network::ResponseChannel<WireResponse>,
@@ -358,6 +381,61 @@ fn handle_discovery_request(
                 .cloned()
                 .map(Box::new);
             node.respond(channel, WireResponse::DiscoveryResolved(value))?;
+        }
+        WireRequest::DiscoveryFreshnessContext {
+            world_id,
+            announcement_hash,
+            verifier_peer_id,
+            nonce: _,
+            issued_unix_ms,
+            expires_unix_ms,
+        } => {
+            let now = unix_millis()?;
+            if application_peer != verifier_peer_id
+                || expires_unix_ms <= issued_unix_ms
+                || expires_unix_ms.saturating_sub(issued_unix_ms) > DISCOVERY_FRESHNESS_MAX_LIFETIME_MS
+                || expires_unix_ms < now
+            {
+                node.respond(channel, WireResponse::DiscoveryFreshnessContext(None))?;
+                return Ok(());
+            }
+            let Some(announcement) = state.announcements.get(&world_id) else {
+                node.respond(channel, WireResponse::DiscoveryFreshnessContext(None))?;
+                return Ok(());
+            };
+            if announcement.announcement_hash()? != announcement_hash
+                || announcement.announcer_peer_id != identity.peer_id()
+            {
+                node.respond(channel, WireResponse::DiscoveryFreshnessContext(None))?;
+                return Ok(());
+            }
+            let proof = build_discovery_membership_proof(storage, world_id)?;
+            node.respond(channel, WireResponse::DiscoveryFreshnessContext(Some(Box::new(proof))))?;
+        }
+        WireRequest::DiscoveryFreshnessVote(challenge) => {
+            let challenge = *challenge;
+            let now = unix_millis()?;
+            if application_peer != challenge.verifier_peer_id
+                || challenge.protocol_version != PROTOCOL_VERSION
+                || challenge.expires_unix_ms <= challenge.issued_unix_ms
+                || challenge.expires_unix_ms.saturating_sub(challenge.issued_unix_ms)
+                    > DISCOVERY_FRESHNESS_MAX_LIFETIME_MS
+                || challenge.expires_unix_ms < now
+            {
+                node.respond(channel, WireResponse::DiscoveryFreshnessVote(None))?;
+                return Ok(());
+            }
+            state.signed_freshness_challenges.retain(|_, expires| *expires >= now);
+            let replay_key = (challenge.verifier_peer_id, challenge.nonce);
+            if state.signed_freshness_challenges.contains_key(&replay_key)
+                || !local_state_matches_freshness_challenge(storage, identity, &challenge)?
+            {
+                node.respond(channel, WireResponse::DiscoveryFreshnessVote(None))?;
+                return Ok(());
+            }
+            state.signed_freshness_challenges.insert(replay_key, challenge.expires_unix_ms);
+            let vote = sign_discovery_freshness_vote(identity, &challenge)?;
+            node.respond(channel, WireResponse::DiscoveryFreshnessVote(Some(Box::new(vote))))?;
         }
         WireRequest::FriendPresence { expected_peer_id, requester_peer_id, nonce } => {
             if application_peer != requester_peer_id {
@@ -396,6 +474,268 @@ fn handle_discovery_request(
         }
     }
     Ok(())
+}
+
+fn build_discovery_membership_proof(storage: &Storage, world: WorldId) -> Result<DiscoveryMembershipProofV1> {
+    let metadata = storage.load_world(world)?;
+    let current = storage.load_membership_record(world)?;
+    verify_membership_signature(&current)?;
+    let certificates = storage.load_membership_certificate_chain(world)?;
+    let initial = certificates
+        .first()
+        .map(|certificate| certificate.proposal.previous.clone())
+        .unwrap_or_else(|| current.clone());
+    let pending = storage.load_membership_promise(world).ok().map(|promise| promise.proposal);
+    let proof = DiscoveryMembershipProofV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        genesis: metadata.genesis,
+        initial_membership: initial,
+        membership_certificates: certificates,
+        current_membership: current,
+        pending_membership: pending,
+    };
+    validate_discovery_membership_proof_shape(&proof).map_err(|error| anyhow!(error))?;
+    Ok(proof)
+}
+
+fn local_state_matches_freshness_challenge(
+    storage: &Storage,
+    identity: &PeerIdentity,
+    challenge: &DiscoveryFreshnessChallengeV1,
+) -> Result<bool> {
+    let world = challenge.world_id;
+    let membership = match storage.load_membership_record(world) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    verify_membership_signature(&membership)?;
+    if membership.sequence != challenge.membership_sequence || membership.record_hash()? != challenge.membership_hash {
+        return Ok(false);
+    }
+    let epoch = match storage.load_epoch_record(world) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    if epoch.authority_peer_id != challenge.authority_peer_id
+        || epoch.epoch_number != challenge.authority_epoch
+        || epoch.fencing_token != challenge.fencing_token
+    {
+        return Ok(false);
+    }
+    let config = match storage.load_world_config(world) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    verify_world_config_signature(&config)?;
+    if config.authority_peer_id != challenge.authority_peer_id
+        || config.sequence != challenge.config_sequence
+        || config.config_hash()? != challenge.config_hash
+    {
+        return Ok(false);
+    }
+    let head = storage.canonical_snapshot_head(world)?.head.map(|head| DiscoveryCanonicalHeadV1 {
+        snapshot_number: head.snapshot_number,
+        manifest_hash: head.manifest_hash,
+        epoch: head.epoch,
+        sequence: head.sequence,
+    });
+    if head != challenge.canonical_head {
+        return Ok(false);
+    }
+    let pending = storage.load_membership_promise(world).ok().map(|promise| promise.proposal);
+    let pending_hash = pending.as_ref().map(|proposal| proposal.proposal_hash()).transpose()?;
+    if pending_hash != challenge.pending_membership_proposal_hash {
+        return Ok(false);
+    }
+    let eligible = membership.members.iter().any(|member| {
+        member.peer_id == identity.peer_id() && member.public_key == identity.public_key() && !member.banned
+    }) || pending.as_ref().is_some_and(|proposal| {
+        proposal.proposed.members.iter().any(|member| {
+            member.peer_id == identity.peer_id() && member.public_key == identity.public_key() && !member.banned
+        })
+    });
+    Ok(eligible)
+}
+
+pub fn validate_fresh_discovery_candidate(
+    announcement: &WorldAnnouncementV1,
+    proof: &DiscoveryMembershipProofV1,
+    challenge: &DiscoveryFreshnessChallengeV1,
+    votes: &[DiscoveryFreshnessVoteV1],
+    verifier_peer_id: PeerId,
+    nonce: [u8; 32],
+    now_unix_ms: u64,
+    replay: &mut DiscoveryFreshnessReplayGuard,
+) -> Result<()> {
+    verify_world_announcement(announcement, now_unix_ms).map_err(|error| anyhow!(error))?;
+    verify_discovery_membership_proof(announcement, proof).map_err(|error| anyhow!(error))?;
+    validate_discovery_membership_proof_shape(proof).map_err(|error| anyhow!(error))?;
+    verify_discovery_freshness_challenge(announcement, proof, challenge, verifier_peer_id, nonce, now_unix_ms)
+        .map_err(|error| anyhow!(error))?;
+    for vote in votes {
+        verify_discovery_freshness_vote(vote, challenge).map_err(|error| anyhow!(error))?;
+    }
+    validate_discovery_freshness_quorum(proof, votes).map_err(|error| anyhow!(error))?;
+    replay.accept(challenge).map_err(|error| anyhow!(error))?;
+    Ok(())
+}
+
+async fn prove_candidate_freshness(
+    node: &mut DiscoveryNode,
+    verifier: &PeerIdentity,
+    announcement: &WorldAnnouncementV1,
+) -> Result<bool> {
+    verify_world_announcement(announcement, unix_millis()?).map_err(|error| anyhow!(error))?;
+    let query = node.find_world_providers(announcement.world_id);
+    let nonce = random_nonce();
+    let issued_unix_ms = unix_millis()?;
+    let expires_unix_ms = issued_unix_ms
+        .checked_add(DISCOVERY_FRESHNESS_MAX_LIFETIME_MS)
+        .context("freshness challenge expiry overflow")?;
+    let announcement_hash = announcement.announcement_hash()?;
+    let mut providers = HashSet::new();
+    let mut applications = HashMap::new();
+    let mut context_requested = HashSet::new();
+    let mut vote_requested = HashSet::new();
+    let mut proof: Option<DiscoveryMembershipProofV1> = None;
+    let mut challenge: Option<DiscoveryFreshnessChallengeV1> = None;
+    let mut votes = Vec::<DiscoveryFreshnessVoteV1>::new();
+    let mut replay = DiscoveryFreshnessReplayGuard::default();
+
+    let run = timeout(DISCOVERY_FRESHNESS_TIMEOUT, async {
+        loop {
+            match node.next_event().await? {
+                DiscoveryNetworkEvent::ProvidersFound { query_id, providers: found } if query_id == query => {
+                    for peer in found {
+                        if providers.insert(peer) {
+                            let _ = node.dial_peer(peer);
+                        }
+                    }
+                }
+                DiscoveryNetworkEvent::ProvidersFinished { query_id } if query_id == query && providers.is_empty() => {
+                    break;
+                }
+                DiscoveryNetworkEvent::ProvidersFailed { query_id, .. }
+                    if query_id == query && providers.is_empty() =>
+                {
+                    break;
+                }
+                DiscoveryNetworkEvent::Authenticated { transport_peer, application_peer }
+                    if providers.contains(&transport_peer) =>
+                {
+                    applications.insert(transport_peer, application_peer);
+                    if application_peer == announcement.announcer_peer_id && context_requested.insert(transport_peer) {
+                        node.send_request(
+                            &transport_peer,
+                            WireRequest::DiscoveryFreshnessContext {
+                                world_id: announcement.world_id,
+                                announcement_hash,
+                                verifier_peer_id: verifier.peer_id(),
+                                nonce,
+                                issued_unix_ms,
+                                expires_unix_ms,
+                            },
+                        )?;
+                    }
+                    if let Some(active) = &challenge {
+                        if vote_requested.insert(transport_peer) {
+                            node.send_request(
+                                &transport_peer,
+                                WireRequest::DiscoveryFreshnessVote(Box::new(active.clone())),
+                            )?;
+                        }
+                    }
+                }
+                DiscoveryNetworkEvent::Response {
+                    transport_peer,
+                    response: WireResponse::DiscoveryFreshnessContext(Some(value)),
+                    ..
+                } => {
+                    if applications.get(&transport_peer) != Some(&announcement.announcer_peer_id) {
+                        continue;
+                    }
+                    let candidate = *value;
+                    verify_discovery_membership_proof(announcement, &candidate).map_err(|error| anyhow!(error))?;
+                    validate_discovery_membership_proof_shape(&candidate).map_err(|error| anyhow!(error))?;
+                    let pending_membership_proposal_hash =
+                        candidate.pending_membership.as_ref().map(|proposal| proposal.proposal_hash()).transpose()?;
+                    let active = DiscoveryFreshnessChallengeV1 {
+                        protocol_version: PROTOCOL_VERSION,
+                        verifier_peer_id: verifier.peer_id(),
+                        nonce,
+                        world_id: announcement.world_id,
+                        announcement_hash,
+                        membership_sequence: announcement.membership_sequence,
+                        membership_hash: announcement.membership_hash,
+                        pending_membership_proposal_hash,
+                        authority_peer_id: announcement.announcer_peer_id,
+                        authority_epoch: announcement.authority_epoch,
+                        fencing_token: announcement.fencing_token,
+                        config_sequence: announcement.config_sequence,
+                        config_hash: announcement.config_hash,
+                        canonical_head: announcement.canonical_head,
+                        issued_unix_ms,
+                        expires_unix_ms,
+                    };
+                    verify_discovery_freshness_challenge(
+                        announcement,
+                        &candidate,
+                        &active,
+                        verifier.peer_id(),
+                        nonce,
+                        unix_millis()?,
+                    )
+                    .map_err(|error| anyhow!(error))?;
+                    proof = Some(candidate);
+                    challenge = Some(active.clone());
+                    for transport_peer in providers.iter().copied().collect::<Vec<_>>() {
+                        if applications.contains_key(&transport_peer) && vote_requested.insert(transport_peer) {
+                            let _ = node.send_request(
+                                &transport_peer,
+                                WireRequest::DiscoveryFreshnessVote(Box::new(active.clone())),
+                            );
+                        }
+                    }
+                }
+                DiscoveryNetworkEvent::Response {
+                    response: WireResponse::DiscoveryFreshnessVote(Some(value)), ..
+                } => {
+                    let Some(active) = &challenge else { continue };
+                    let vote = *value;
+                    if verify_discovery_freshness_vote(&vote, active).is_err() {
+                        continue;
+                    }
+                    if votes.iter().all(|existing| existing.voter_peer_id != vote.voter_peer_id) {
+                        votes.push(vote);
+                        votes.sort_by_key(|value| value.voter_peer_id);
+                    }
+                    if let Some(candidate) = &proof {
+                        if validate_discovery_freshness_quorum(candidate, &votes).is_ok() {
+                            validate_fresh_discovery_candidate(
+                                announcement,
+                                candidate,
+                                active,
+                                &votes,
+                                verifier.peer_id(),
+                                nonce,
+                                unix_millis()?,
+                                &mut replay,
+                            )?;
+                            return Ok::<bool, anyhow::Error>(true);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok::<bool, anyhow::Error>(false)
+    })
+    .await;
+    match run {
+        Ok(value) => value,
+        Err(_) => Ok(false),
+    }
 }
 
 pub fn add_friend(paths: &DataPaths, peer: &str, public_key_hex: &str, label: &str) -> Result<FriendContactV1> {
@@ -483,6 +823,7 @@ pub async fn search_public_worlds(
     let mut providers = HashSet::new();
     let mut requested = HashSet::new();
     let mut pending = HashSet::new();
+    let mut candidates = Vec::<WorldAnnouncementV1>::new();
     let mut results = HashMap::<WorldId, WorldAnnouncementV1>::new();
     let mut replay = AnnouncementReplayGuard::default();
     let mut rejected_invalid = 0usize;
@@ -534,18 +875,13 @@ pub async fn search_public_worlds(
                                 continue;
                             }
                             match verify_world_announcement(&value, unix_millis()?) {
-                                Ok(()) => match replay.accept(&value) {
-                                    Ok(()) => {
-                                        results.insert(value.world_id, value);
+                                Ok(()) => {
+                                    let hash = value.announcement_hash()?;
+                                    if candidates.iter().all(|existing| existing.announcement_hash().ok() != Some(hash))
+                                    {
+                                        candidates.push(value);
                                     }
-                                    Err(DiscoveryRecordError::Replay) => {
-                                        // Multiple providers may legitimately return the same signed record.
-                                        if !results.contains_key(&value.world_id) {
-                                            rejected_stale += 1;
-                                        }
-                                    }
-                                    Err(_) => rejected_invalid += 1,
-                                },
+                                }
                                 Err(DiscoveryRecordError::Expired) => rejected_stale += 1,
                                 Err(_) => rejected_invalid += 1,
                             }
@@ -568,6 +904,20 @@ pub async fn search_public_worlds(
 
     if let Ok(result) = run {
         result?;
+    }
+
+    for candidate in candidates {
+        match prove_candidate_freshness(&mut node, &identity, &candidate).await {
+            Ok(true) => match replay.accept(&candidate) {
+                Ok(()) => {
+                    results.insert(candidate.world_id, candidate);
+                }
+                Err(DiscoveryRecordError::Replay) => rejected_stale += 1,
+                Err(_) => rejected_invalid += 1,
+            },
+            Ok(false) => rejected_stale += 1,
+            Err(_) => rejected_invalid += 1,
+        }
     }
 
     let mut values: Vec<_> = results.into_values().collect();
@@ -620,6 +970,7 @@ pub async fn resolve_world(
     let query = node.find_world_providers(world);
     let mut providers = HashSet::new();
     let mut requested = HashSet::new();
+    let mut candidates = Vec::<WorldAnnouncementV1>::new();
     let mut result = None;
     let mut invalid = false;
     let mut stale = false;
@@ -655,8 +1006,11 @@ pub async fn resolve_world(
                     }
                     match verify_world_announcement(&value, unix_millis()?) {
                         Ok(()) => {
-                            result = Some(*value);
-                            break;
+                            let value = *value;
+                            let hash = value.announcement_hash()?;
+                            if candidates.iter().all(|existing| existing.announcement_hash().ok() != Some(hash)) {
+                                candidates.push(value);
+                            }
                         }
                         Err(DiscoveryRecordError::Expired) => stale = true,
                         Err(_) => invalid = true,
@@ -673,6 +1027,16 @@ pub async fn resolve_world(
     .await;
     if let Ok(value) = run {
         value?;
+    }
+    for candidate in candidates {
+        match prove_candidate_freshness(&mut node, &identity, &candidate).await {
+            Ok(true) => {
+                result = Some(candidate);
+                break;
+            }
+            Ok(false) => stale = true,
+            Err(_) => invalid = true,
+        }
     }
 
     let state = if result.is_some() {

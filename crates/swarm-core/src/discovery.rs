@@ -1,12 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
-use swarm_protocol::{FriendPresenceV1, PeerId, WorldAnnouncementV1, WorldId, WorldVisibilityV1, PROTOCOL_VERSION};
+use swarm_protocol::{
+    peer_id_from_public_key, DiscoveryFreshnessChallengeV1, DiscoveryFreshnessVoteV1, DiscoveryMembershipProofV1,
+    FriendPresenceV1, PeerId, WorldAnnouncementV1, WorldId, WorldVisibilityV1, PROTOCOL_VERSION,
+};
 
-use crate::{verify_signature, CoreError, PeerIdentity};
+use crate::{verify_membership_signature, verify_signature, CoreError, PeerIdentity};
 
 pub const WORLD_ANNOUNCEMENT_MAX_LIFETIME_MS: u64 = 10 * 60 * 1_000;
 pub const FRIEND_PRESENCE_MAX_LIFETIME_MS: u64 = 60 * 1_000;
 pub const DISCOVERY_CLOCK_SKEW_MS: u64 = 60 * 1_000;
+pub const DISCOVERY_FRESHNESS_MAX_LIFETIME_MS: u64 = 15 * 1_000;
+pub const MAX_DISCOVERY_MEMBERSHIP_CERTIFICATES: usize = 256;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DiscoveryRecordError {
@@ -28,6 +33,12 @@ pub enum DiscoveryRecordError {
     PresenceNonceMismatch,
     #[error("signature or cryptographic peer identity is invalid")]
     InvalidSignature,
+    #[error("discovery membership proof is malformed or not genesis anchored")]
+    InvalidMembershipProof,
+    #[error("discovery freshness challenge does not bind the advertised canonical state")]
+    FreshnessStateMismatch,
+    #[error("discovery freshness challenge has already been accepted")]
+    FreshnessReplay,
 }
 
 pub fn sign_world_announcement(
@@ -100,6 +111,156 @@ pub fn verify_friend_presence(
     .map_err(|_| DiscoveryRecordError::InvalidSignature)
 }
 
+pub fn verify_discovery_membership_proof(
+    announcement: &WorldAnnouncementV1,
+    proof: &DiscoveryMembershipProofV1,
+) -> Result<(), DiscoveryRecordError> {
+    if proof.protocol_version != PROTOCOL_VERSION || proof.world_id != announcement.world_id {
+        return Err(DiscoveryRecordError::ProtocolMismatch);
+    }
+    if proof.membership_certificates.len() > MAX_DISCOVERY_MEMBERSHIP_CERTIFICATES
+        || proof.genesis.world_id().ok() != Some(proof.world_id)
+    {
+        return Err(DiscoveryRecordError::InvalidMembershipProof);
+    }
+    let initial = &proof.initial_membership;
+    if initial.protocol_version != PROTOCOL_VERSION
+        || initial.world_id != proof.world_id
+        || initial.sequence != 0
+        || initial.previous_membership_hash.is_some()
+        || initial.authority_public_key != proof.genesis.creator_public_key
+        || initial.authority_peer_id != peer_id_from_public_key(&proof.genesis.creator_public_key)
+    {
+        return Err(DiscoveryRecordError::InvalidMembershipProof);
+    }
+    verify_membership_signature(initial).map_err(|_| DiscoveryRecordError::InvalidMembershipProof)?;
+    let genesis_members = proof.genesis.initial_membership.iter().copied().collect::<BTreeSet<_>>();
+    let initial_members = initial.members.iter().map(|member| member.peer_id).collect::<BTreeSet<_>>();
+    if genesis_members.len() != proof.genesis.initial_membership.len()
+        || initial_members.len() != initial.members.len()
+        || genesis_members != initial_members
+        || initial.members.iter().any(|member| peer_id_from_public_key(&member.public_key) != member.peer_id)
+    {
+        return Err(DiscoveryRecordError::InvalidMembershipProof);
+    }
+
+    for certificate in &proof.membership_certificates {
+        verify_membership_signature(&certificate.proposal.previous)
+            .map_err(|_| DiscoveryRecordError::InvalidMembershipProof)?;
+        verify_membership_signature(&certificate.proposal.proposed)
+            .map_err(|_| DiscoveryRecordError::InvalidMembershipProof)?;
+        let mut seen = HashSet::new();
+        for vote in &certificate.votes {
+            if !seen.insert(vote.voter_peer_id) {
+                return Err(DiscoveryRecordError::InvalidMembershipProof);
+            }
+            verify_signature(
+                vote.voter_peer_id,
+                vote.voter_public_key,
+                &vote.signing_bytes().map_err(|_| DiscoveryRecordError::InvalidMembershipProof)?,
+                &vote.signature,
+            )
+            .map_err(|_| DiscoveryRecordError::InvalidMembershipProof)?;
+        }
+    }
+    verify_membership_signature(&proof.current_membership).map_err(|_| DiscoveryRecordError::InvalidMembershipProof)?;
+    if proof.current_membership.world_id != proof.world_id
+        || proof.current_membership.sequence != announcement.membership_sequence
+        || proof.current_membership.record_hash().ok() != Some(announcement.membership_hash)
+        || proof.current_membership.authority_peer_id != announcement.announcer_peer_id
+        || proof.current_membership.authority_public_key != announcement.announcer_public_key
+        || proof.current_membership.epoch != announcement.authority_epoch
+    {
+        return Err(DiscoveryRecordError::InvalidMembershipProof);
+    }
+    Ok(())
+}
+
+pub fn sign_discovery_freshness_vote(
+    identity: &PeerIdentity,
+    challenge: &DiscoveryFreshnessChallengeV1,
+) -> Result<DiscoveryFreshnessVoteV1, CoreError> {
+    let mut vote = DiscoveryFreshnessVoteV1 {
+        challenge: challenge.clone(),
+        voter_peer_id: identity.peer_id(),
+        voter_public_key: identity.public_key(),
+        signature: Vec::new(),
+    };
+    vote.signature = identity.sign(&vote.signing_bytes()?);
+    Ok(vote)
+}
+
+pub fn verify_discovery_freshness_vote(
+    vote: &DiscoveryFreshnessVoteV1,
+    expected: &DiscoveryFreshnessChallengeV1,
+) -> Result<(), DiscoveryRecordError> {
+    if vote.challenge != *expected || peer_id_from_public_key(&vote.voter_public_key) != vote.voter_peer_id {
+        return Err(DiscoveryRecordError::FreshnessStateMismatch);
+    }
+    verify_signature(
+        vote.voter_peer_id,
+        vote.voter_public_key,
+        &vote.signing_bytes().map_err(|_| DiscoveryRecordError::InvalidSignature)?,
+        &vote.signature,
+    )
+    .map_err(|_| DiscoveryRecordError::InvalidSignature)
+}
+
+pub fn verify_discovery_freshness_challenge(
+    announcement: &WorldAnnouncementV1,
+    proof: &DiscoveryMembershipProofV1,
+    challenge: &DiscoveryFreshnessChallengeV1,
+    verifier_peer_id: PeerId,
+    nonce: [u8; 32],
+    now_unix_ms: u64,
+) -> Result<(), DiscoveryRecordError> {
+    verify_discovery_membership_proof(announcement, proof)?;
+    let pending_hash = proof
+        .pending_membership
+        .as_ref()
+        .map(|proposal| proposal.proposal_hash())
+        .transpose()
+        .map_err(|_| DiscoveryRecordError::InvalidMembershipProof)?;
+    if challenge.protocol_version != PROTOCOL_VERSION
+        || challenge.verifier_peer_id != verifier_peer_id
+        || challenge.nonce != nonce
+        || challenge.world_id != announcement.world_id
+        || challenge.announcement_hash
+            != announcement.announcement_hash().map_err(|_| DiscoveryRecordError::InvalidSignature)?
+        || challenge.membership_sequence != announcement.membership_sequence
+        || challenge.membership_hash != announcement.membership_hash
+        || challenge.pending_membership_proposal_hash != pending_hash
+        || challenge.authority_peer_id != announcement.announcer_peer_id
+        || challenge.authority_epoch != announcement.authority_epoch
+        || challenge.fencing_token != announcement.fencing_token
+        || challenge.config_sequence != announcement.config_sequence
+        || challenge.config_hash != announcement.config_hash
+        || challenge.canonical_head != announcement.canonical_head
+    {
+        return Err(DiscoveryRecordError::FreshnessStateMismatch);
+    }
+    validate_lifetime(
+        challenge.issued_unix_ms,
+        challenge.expires_unix_ms,
+        DISCOVERY_FRESHNESS_MAX_LIFETIME_MS,
+        now_unix_ms,
+    )
+}
+
+#[derive(Debug, Default)]
+pub struct DiscoveryFreshnessReplayGuard {
+    accepted: HashSet<(PeerId, [u8; 32])>,
+}
+
+impl DiscoveryFreshnessReplayGuard {
+    pub fn accept(&mut self, challenge: &DiscoveryFreshnessChallengeV1) -> Result<(), DiscoveryRecordError> {
+        if !self.accepted.insert((challenge.verifier_peer_id, challenge.nonce)) {
+            return Err(DiscoveryRecordError::FreshnessReplay);
+        }
+        Ok(())
+    }
+}
+
 fn validate_lifetime(
     issued_unix_ms: u64,
     expires_unix_ms: u64,
@@ -164,8 +325,11 @@ mod tests {
             membership_policy: MembershipPolicyV1::InviteOnly,
             config_sequence: 1,
             config_hash: Hash32([3; 32]),
+            membership_sequence: 0,
+            membership_hash: Hash32([7; 32]),
             authority_epoch: 2,
             fencing_token: 3,
+            canonical_head: None,
             announcement_sequence: 10,
             issued_unix_ms: issued,
             expires_unix_ms: expires,

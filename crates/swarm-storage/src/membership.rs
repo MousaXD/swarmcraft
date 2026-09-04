@@ -1,10 +1,9 @@
-use crate::{Storage, StorageError};
-use serde::{Deserialize, Serialize};
-use std::{
-    fs::{self, OpenOptions},
-    io::Write,
-    path::{Path, PathBuf},
+use crate::{
+    transaction::{durable_atomic_write, durable_create_once, durable_remove},
+    Storage, StorageError,
 };
+use serde::{Deserialize, Serialize};
+use std::{fs, path::PathBuf};
 use swarm_protocol::{MembershipCertificateV1, MembershipProposalV1, MembershipVoteV1, WorldId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +25,7 @@ impl Storage {
         proposal: &MembershipProposalV1,
         vote: &MembershipVoteV1,
     ) -> Result<MembershipPromiseResult, StorageError> {
+        let _guard = self.lock_world_transaction(proposal.proposed.world_id)?;
         if !proposal.validate_shape()? || !vote.matches_proposal(proposal)? {
             return Ok(MembershipPromiseResult::Rejected);
         }
@@ -36,7 +36,7 @@ impl Storage {
             return Ok(MembershipPromiseResult::Rejected);
         }
         let promise = DurableMembershipPromiseV1 { proposal: proposal.clone(), vote: vote.clone() };
-        atomic_write(
+        durable_atomic_write(
             &self.world_dir(proposal.proposed.world_id).join("metadata/membership-promise.postcard"),
             &postcard::to_allocvec(&promise)?,
         )?;
@@ -58,22 +58,63 @@ impl Storage {
         world: WorldId,
         committed_hash: swarm_protocol::Hash32,
     ) -> Result<bool, StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
         let Ok(promise) = self.load_membership_promise(world) else {
             return Ok(false);
         };
         if promise.proposal.proposed.record_hash()? != committed_hash {
             return Ok(false);
         }
-        remove_if_present(&self.world_dir(world).join("metadata/membership-promise.postcard"))?;
+        durable_remove(&self.world_dir(world).join("metadata/membership-promise.postcard"))?;
         Ok(true)
     }
 
     pub fn save_membership_certificate(&self, certificate: &MembershipCertificateV1) -> Result<(), StorageError> {
         let world = certificate.proposal.proposed.world_id;
-        atomic_write(
-            &self.world_dir(world).join("metadata/membership-certificate.postcard"),
-            &postcard::to_allocvec(certificate)?,
-        )
+        let _guard = self.lock_world_transaction(world)?;
+        let encoded = postcard::to_allocvec(certificate)?;
+        let history_path = self
+            .world_dir(world)
+            .join("metadata/membership-certificates")
+            .join(format!("{:020}.postcard", certificate.proposal.proposed.sequence));
+        if !durable_create_once(&history_path, &encoded)? {
+            let existing = fs::read(&history_path).map_err(|error| io_error(&history_path, error))?;
+            if existing != encoded {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+        }
+        durable_atomic_write(&self.world_dir(world).join("metadata/membership-certificate.postcard"), &encoded)
+    }
+
+    pub fn load_membership_certificate_chain(
+        &self,
+        world: WorldId,
+    ) -> Result<Vec<MembershipCertificateV1>, StorageError> {
+        let directory = self.world_dir(world).join("metadata/membership-certificates");
+        let mut paths = match fs::read_dir(&directory) {
+            Ok(entries) => entries
+                .map(|entry| entry.map(|value| value.path()).map_err(|error| io_error(&directory, error)))
+                .collect::<Result<Vec<_>, _>>()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(io_error(&directory, error)),
+        };
+        paths.retain(|path| path.extension().is_some_and(|value| value == "postcard"));
+        paths.sort();
+        let mut certificates = Vec::with_capacity(paths.len());
+        for path in paths {
+            let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+            let certificate: MembershipCertificateV1 = postcard::from_bytes(&bytes)?;
+            if certificate.proposal.proposed.world_id != world {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+            certificates.push(certificate);
+        }
+        if certificates.is_empty() {
+            if let Ok(latest) = self.load_membership_certificate(world) {
+                certificates.push(latest);
+            }
+        }
+        Ok(certificates)
     }
 
     pub fn load_membership_certificate(&self, world: WorldId) -> Result<MembershipCertificateV1, StorageError> {
@@ -87,43 +128,8 @@ impl Storage {
     }
 }
 
-fn remove_if_present(path: &Path) -> Result<(), StorageError> {
-    if path.exists() {
-        fs::remove_file(path).map_err(|error| io_error(path, error))?;
-        if let Some(parent) = path.parent() {
-            sync_parent(parent)?;
-        }
-    }
-    Ok(())
-}
-
 fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
     StorageError::Io { path: path.into(), source }
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
-    let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
-    fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
-    let tmp = path.with_extension("tmp");
-    let mut file =
-        OpenOptions::new().create(true).truncate(true).write(true).open(&tmp).map_err(|error| io_error(&tmp, error))?;
-    file.write_all(bytes).map_err(|error| io_error(&tmp, error))?;
-    file.sync_all().map_err(|error| io_error(&tmp, error))?;
-    drop(file);
-    fs::rename(&tmp, path).map_err(|error| io_error(path, error))?;
-    sync_parent(parent)
-}
-
-fn sync_parent(parent: &Path) -> Result<(), StorageError> {
-    #[cfg(unix)]
-    {
-        fs::File::open(parent).and_then(|file| file.sync_all()).map_err(|error| io_error(parent, error))?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = parent;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

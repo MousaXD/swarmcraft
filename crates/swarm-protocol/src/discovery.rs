@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Hash32, MembershipPolicyV1, PeerId, ProtocolError, WorldId, WorldPresentationV1, WorldVisibilityV1,
-    PROTOCOL_VERSION,
+    Hash32, MembershipCertificateV1, MembershipPolicyV1, MembershipProposalV1, MembershipRecordV1, PeerId,
+    ProtocolError, WorldGenesisV1, WorldId, WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION,
 };
 
 const WORLD_ANNOUNCEMENT_SIGN_DOMAIN: &[u8] = b"swarmcraft/world-announcement/v1\0";
+const WORLD_ANNOUNCEMENT_HASH_DOMAIN: &[u8] = b"swarmcraft/world-announcement-hash/v1\0";
+const DISCOVERY_FRESHNESS_VOTE_SIGN_DOMAIN: &[u8] = b"swarmcraft/discovery-freshness-vote/v1\0";
 const FRIEND_PRESENCE_SIGN_DOMAIN: &[u8] = b"swarmcraft/friend-presence/v1\0";
 
 /// Bounded public compatibility material. Exact artifact requirements remain in
@@ -46,9 +48,14 @@ pub struct WorldAnnouncementV1 {
     /// Sequence/hash of the canonical WorldConfigV1 projected by this record.
     pub config_sequence: u64,
     pub config_hash: Hash32,
+    /// Exact committed membership identity used by the live freshness quorum.
+    pub membership_sequence: u64,
+    pub membership_hash: Hash32,
     /// Current canonical authority generation that authorized publication.
     pub authority_epoch: u64,
     pub fencing_token: u64,
+    /// Exact durable canonical snapshot head. `None` is an explicit empty-head state.
+    pub canonical_head: Option<DiscoveryCanonicalHeadV1>,
     /// Monotonic-within-authority publication sequence used for replay rejection.
     pub announcement_sequence: u64,
     pub issued_unix_ms: u64,
@@ -71,8 +78,11 @@ impl WorldAnnouncementV1 {
             self.membership_policy,
             self.config_sequence,
             self.config_hash,
+            self.membership_sequence,
+            self.membership_hash,
             self.authority_epoch,
             self.fencing_token,
+            self.canonical_head,
             self.announcement_sequence,
             self.issued_unix_ms,
             self.expires_unix_ms,
@@ -88,6 +98,73 @@ impl WorldAnnouncementV1 {
 
     pub fn is_discoverable_visibility(&self) -> bool {
         matches!(self.visibility, WorldVisibilityV1::Public | WorldVisibilityV1::Unlisted)
+    }
+
+    pub fn announcement_hash(&self) -> Result<Hash32, ProtocolError> {
+        let encoded = postcard::to_allocvec(self)?;
+        Ok(Hash32::from_domain_bytes(WORLD_ANNOUNCEMENT_HASH_DOMAIN, &encoded))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryCanonicalHeadV1 {
+    pub snapshot_number: u64,
+    pub manifest_hash: Hash32,
+    pub epoch: u64,
+    pub sequence: u64,
+}
+
+/// First-contact membership trust material. Membership-changing transitions are
+/// anchored to genesis by Agent 1 joint certificates. Same-voter authority/epoch
+/// refreshes are authenticated by the live quorum challenge rather than by
+/// treating an old authority signature as proof of currentness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryMembershipProofV1 {
+    pub protocol_version: u16,
+    pub world_id: WorldId,
+    pub genesis: WorldGenesisV1,
+    pub initial_membership: MembershipRecordV1,
+    pub membership_certificates: Vec<MembershipCertificateV1>,
+    pub current_membership: MembershipRecordV1,
+    pub pending_membership: Option<MembershipProposalV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryFreshnessChallengeV1 {
+    pub protocol_version: u16,
+    pub verifier_peer_id: PeerId,
+    pub nonce: [u8; 32],
+    pub world_id: WorldId,
+    pub announcement_hash: Hash32,
+    pub membership_sequence: u64,
+    pub membership_hash: Hash32,
+    pub pending_membership_proposal_hash: Option<Hash32>,
+    pub authority_peer_id: PeerId,
+    pub authority_epoch: u64,
+    pub fencing_token: u64,
+    pub config_sequence: u64,
+    pub config_hash: Hash32,
+    pub canonical_head: Option<DiscoveryCanonicalHeadV1>,
+    pub issued_unix_ms: u64,
+    pub expires_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryFreshnessVoteV1 {
+    pub challenge: DiscoveryFreshnessChallengeV1,
+    pub voter_peer_id: PeerId,
+    pub voter_public_key: [u8; 32],
+    pub signature: Vec<u8>,
+}
+
+impl DiscoveryFreshnessVoteV1 {
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, ProtocolError> {
+        let unsigned = (&self.challenge, self.voter_peer_id, self.voter_public_key);
+        let encoded = postcard::to_allocvec(&unsigned)?;
+        let mut bytes = Vec::with_capacity(DISCOVERY_FRESHNESS_VOTE_SIGN_DOMAIN.len() + encoded.len());
+        bytes.extend_from_slice(DISCOVERY_FRESHNESS_VOTE_SIGN_DOMAIN);
+        bytes.extend_from_slice(&encoded);
+        Ok(bytes)
     }
 }
 
@@ -155,8 +232,16 @@ mod tests {
             membership_policy: MembershipPolicyV1::InviteOnly,
             config_sequence: 3,
             config_hash: Hash32([3; 32]),
+            membership_sequence: 3,
+            membership_hash: Hash32([7; 32]),
             authority_epoch: 4,
             fencing_token: 5,
+            canonical_head: Some(DiscoveryCanonicalHeadV1 {
+                snapshot_number: 9,
+                manifest_hash: Hash32([8; 32]),
+                epoch: 4,
+                sequence: 12,
+            }),
             announcement_sequence: 6,
             issued_unix_ms: 10,
             expires_unix_ms: 20,

@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use swarm_protocol::{MembershipCertificateV1, MembershipProposalV1, MembershipVoteV1, PeerId, WorldMemberV1};
+use swarm_protocol::{
+    DiscoveryFreshnessVoteV1, DiscoveryMembershipProofV1, MembershipCertificateV1, MembershipProposalV1,
+    MembershipVoteV1, PeerId, WorldMemberV1,
+};
 use thiserror::Error;
 
 use crate::quorum_size;
@@ -23,6 +26,12 @@ pub enum MembershipConsensusError {
     OldQuorumUnavailable { votes: usize, required: usize },
     #[error("new membership quorum unavailable: votes={votes}, required={required}")]
     NewQuorumUnavailable { votes: usize, required: usize },
+    #[error("current membership quorum unavailable: votes={votes}, required={required}")]
+    CurrentQuorumUnavailable { votes: usize, required: usize },
+    #[error("discovery membership history is malformed")]
+    MalformedHistory,
+    #[error("discovery freshness signer collection is duplicate or non-canonical")]
+    NonCanonicalSignerSet,
 }
 
 fn active_voters(members: &[WorldMemberV1]) -> Result<BTreeMap<PeerId, [u8; 32]>, MembershipConsensusError> {
@@ -98,6 +107,98 @@ pub fn validate_membership_certificate_shape(
     let new_required = quorum_size(new.len());
     if new_votes < new_required {
         return Err(MembershipConsensusError::NewQuorumUnavailable { votes: new_votes, required: new_required });
+    }
+    Ok(())
+}
+
+/// Validate the genesis-to-current voter-set proof used by first-contact
+/// discovery. Every voter-set mutation must be represented by an Agent 1 joint
+/// membership certificate. Gaps that keep the exact same voter set are allowed
+/// because authority/epoch refreshes are certified by the live freshness quorum.
+pub fn validate_discovery_membership_proof_shape(
+    proof: &DiscoveryMembershipProofV1,
+) -> Result<(), MembershipConsensusError> {
+    if proof.initial_membership.world_id != proof.world_id || proof.current_membership.world_id != proof.world_id {
+        return Err(MembershipConsensusError::MalformedHistory);
+    }
+    let mut voters = active_voters(&proof.initial_membership.members)?;
+    for certificate in &proof.membership_certificates {
+        validate_membership_certificate_shape(certificate)?;
+        let previous = active_voters(&certificate.proposal.previous.members)?;
+        if previous != voters {
+            return Err(MembershipConsensusError::MalformedHistory);
+        }
+        voters = active_voters(&certificate.proposal.proposed.members)?;
+    }
+    if active_voters(&proof.current_membership.members)? != voters {
+        return Err(MembershipConsensusError::MalformedHistory);
+    }
+    if let Some(proposal) = &proof.pending_membership {
+        validate_membership_proposal_shape(proposal)?;
+        if proposal.previous != proof.current_membership {
+            return Err(MembershipConsensusError::MalformedHistory);
+        }
+    }
+    Ok(())
+}
+
+/// Apply the exact Agent 1 majority rule to a cryptographically verified,
+/// canonical signer collection. Pending membership uses joint old+new quorum.
+pub fn validate_discovery_freshness_quorum(
+    proof: &DiscoveryMembershipProofV1,
+    votes: &[DiscoveryFreshnessVoteV1],
+) -> Result<(), MembershipConsensusError> {
+    validate_discovery_membership_proof_shape(proof)?;
+    let mut last = None;
+    let mut signers = BTreeMap::new();
+    for vote in votes {
+        if last.is_some_and(|peer| vote.voter_peer_id <= peer) {
+            return Err(MembershipConsensusError::NonCanonicalSignerSet);
+        }
+        last = Some(vote.voter_peer_id);
+        signers.insert(vote.voter_peer_id, vote.voter_public_key);
+    }
+
+    if let Some(proposal) = &proof.pending_membership {
+        let old = active_voters(&proposal.previous.members)?;
+        let new = active_voters(&proposal.proposed.members)?;
+        let mut old_votes = 0usize;
+        let mut new_votes = 0usize;
+        for (peer, key) in &signers {
+            let old_key = old.get(peer);
+            let new_key = new.get(peer);
+            if old_key.is_none() && new_key.is_none() {
+                return Err(MembershipConsensusError::UnknownVoter);
+            }
+            if old_key.is_some_and(|expected| expected != key) || new_key.is_some_and(|expected| expected != key) {
+                return Err(MembershipConsensusError::VoterKeyMismatch);
+            }
+            old_votes += usize::from(old_key.is_some());
+            new_votes += usize::from(new_key.is_some());
+        }
+        let old_required = quorum_size(old.len());
+        if old_votes < old_required {
+            return Err(MembershipConsensusError::OldQuorumUnavailable { votes: old_votes, required: old_required });
+        }
+        let new_required = quorum_size(new.len());
+        if new_votes < new_required {
+            return Err(MembershipConsensusError::NewQuorumUnavailable { votes: new_votes, required: new_required });
+        }
+        return Ok(());
+    }
+
+    let current = active_voters(&proof.current_membership.members)?;
+    let mut count = 0usize;
+    for (peer, key) in &signers {
+        let expected = current.get(peer).ok_or(MembershipConsensusError::UnknownVoter)?;
+        if expected != key {
+            return Err(MembershipConsensusError::VoterKeyMismatch);
+        }
+        count += 1;
+    }
+    let required = quorum_size(current.len());
+    if count < required {
+        return Err(MembershipConsensusError::CurrentQuorumUnavailable { votes: count, required });
     }
     Ok(())
 }

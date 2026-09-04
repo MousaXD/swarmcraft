@@ -991,7 +991,15 @@ fn ensure_recovery_artifacts(storage: &Storage, identity: &PeerIdentity, epoch: 
             signature: Vec::new(),
         };
         identity.sign_snapshot(&mut promoted)?;
-        storage.commit_snapshot(&promoted)?;
+        let promoted_expected_head = storage.canonical_snapshot_head(promoted.world_id)?.head;
+        storage.commit_snapshot_fenced(
+            &promoted,
+            swarm_storage::SnapshotCommitFence {
+                expected_epoch: epoch.epoch_number,
+                expected_fencing_token: epoch.fencing_token,
+                expected_head: promoted_expected_head,
+            },
+        )?;
     } else if latest.epoch != epoch.epoch_number
         || latest.authority_peer_id != identity.peer_id()
         || latest.authority_public_key != identity.public_key()

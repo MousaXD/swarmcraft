@@ -132,8 +132,8 @@ Do not hide progress only in commit messages.
 |---|---|---|---|---|---|---|
 | 1 | Consensus configuration safety | INTEGRATED | `fix/agent-1-consensus` | `67493374544d91ad7bbb36be17e9312adb5654f6` | Yes | Exact-head run `33619420045` SUCCESS; merge `a0e0dec659d0b1eb21f9be34c44730edc6ff3984` |
 | 2 | Protocol authorization/history | INTEGRATED | `fix/agent-2-protocol` | `dde75ca4e9f2268bb97f42a716864c3e51f266cb` | Yes | Exact-head run `33693100794` SUCCESS; merge `6e70a0774d7e021cc57681705ccef4620265ce3d` |
-| 3 | Storage transactional integrity | NOT STARTED | `fix/agent-3-storage` | - | No | Wave 1 |
-| 4 | Network authentication/privacy | NOT STARTED | `fix/agent-4-network` | - | No | Wave 1; Agent 1 + Agent 2 authority dependencies are now integrated |
+| 3 | Storage transactional integrity | INTEGRATED | `fix/agent-3-storage` | `67962dcb9c3cb2d5b9e67bb7288b2d786fc9e803` | Yes | Exact-head run `33769288028` SUCCESS; source ledger head `8ae4839f8f4039257d41a84fb82f0460f11ab903`; merge `602f6f1cfed46e457a1fccbf8d6d2df79e3f1ab5` |
+| 4 | Network authentication/privacy | BLOCKED | `fix/agent-4-network` | `7f151439418833d89fe0e4fd3c961878c0b51093` | No | Independent/composed network work green; FINAL-028 requires a first-contact-verifiable current-authority/current-head freshness primitive using integrated Agents 1+2+3 semantics |
 | 5 | Package/provider security | NOT STARTED | `fix/agent-5-supply-chain` | - | No | Wave 1 |
 | 6 | Minecraft/runtime lifecycle | NOT STARTED | `fix/agent-6-runtime` | - | No | Wave 1 |
 | 7 | Desktop player journey | NOT STARTED | `fix/agent-7-desktop` | - | No | Wave 1 |
@@ -269,6 +269,20 @@ After every integration, update this README with:
 - Merge-tree proof: source ledger head `5b76d548...` and integration merge `6e70a077...` both have tree `dec97e562199f692f1dcc561ff1f16949f8419c8`, so the merge introduced no tree mutation.
 - Conflicts resolved: none. Agent 2 branched from the then-current integration head `c69cb0a75c82688a91692bcd2ca47efa6827b958`, and PR #64 merged cleanly.
 - Integration implications: Agent 4 now has the integrated Agent 1 + Agent 2 authority/history semantics needed to finish authenticated discovery authority (`FINAL-028`). Agent 3 retains ownership of durable storage head/CAS, immutable slots, cross-process locking, and atomic final-commit guarantees beyond Agent 2 semantic acceptance checks.
+
+#### Agent 3 — Storage transactional integrity
+
+- Integrated source production SHA: `67962dcb9c3cb2d5b9e67bb7288b2d786fc9e803`
+- Source ledger head: `8ae4839f8f4039257d41a84fb82f0460f11ab903`
+- Integration PR: `#62`
+- Integration commit/resulting integration head: `602f6f1cfed46e457a1fccbf8d6d2df79e3f1ab5`
+- Composition ancestor: `f02bb0d54cb44df67e730f01be4c903e25d670ff` with Agent 1 + Agent 2 already integrated; composed milestone `3c6ca9bab5a9ee9b0d228a45a267c3fa8e2722a3`.
+- Validation: Agent 3 exact-head run `33769288028` — SUCCESS on `67962dcb9c3cb2d5b9e67bb7288b2d786fc9e803`; Ubuntu exact-head acceptance plus Windows and macOS portability jobs all succeeded, including format, workspace check, warnings-denied clippy, storage suite, rollback/non-reuse, immutable slots, fencing races, cross-process promise non-equivocation, portable-path/restore integrity, Agent 1/2 composed tests, all-target compilation, exact-SHA assertion, and clean-worktree assertion.
+- Composition validation: run `33769105882` — SUCCESS.
+- Closure proof: exactly two commits follow the validated production SHA. `f39f61a12b704a35f5b366e44ecf659920a145b0` removes four temporary Agent 3 remediation workflows; `8ae4839f...` updates only `implementation/agent-3-storage.md`. No Rust, test, Cargo metadata, permanent CI, or other product path changed after validation.
+- Merge-tree proof: source ledger head `8ae4839f...` and merge commit `602f6f1c...` both have tree `afc1a1b5fe3f9d1d3baf0896a79472011a4b39a3`, so GitHub introduced no tree mutation during integration.
+- Composition conflicts resolved before validation: `crates/swarm-storage/src/control.rs`, `lib.rs`, `root.rs`, `state.rs`, `streaming.rs`, `world.rs`, and `crates/swarm-storage/tests/publication_ownership_race.rs`. The final PR merge itself was conflict-free.
+- Integration implications: the integration branch now contains the durable canonical storage head/reference and authority-fenced commit boundary needed as the storage anchor for the future FINAL-028 freshness proof. Agent 4 remains BLOCKED because a first-contact client still needs a non-omittable freshness primitive proving current authority/current head; Agent 3 intentionally did not implement that protocol.
 
 ## Final acceptance and re-audit
 

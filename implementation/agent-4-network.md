@@ -237,3 +237,17 @@ Blocker: FINAL-028 cannot be closed safely until the canonical trust model provi
 ## Agent final statement
 
 BLOCKED
+
+
+## FINAL-028 closure composition (2026-09-04)
+
+- Starting Agent 4 remote head verified before closure: `992e9c05d690eb2832476a9e2b2e074a8d0c97e2`.
+- Authoritative Agent 1+2+3 integration ancestor consumed: `c9252820a560e6ed4d30bb77227e3a494c6ce869`.
+- Composition conflict: `crates/swarm-cli/src/daemon.rs` only. Resolution preserves Agent 4 connection/auth/privacy hardening and reapplies Agent 3 `commit_snapshot_fenced` recovery promotion using the durable canonical expected head, epoch, and fencing token.
+- FINAL-028 design: first-contact discovery now requires a verifier-generated random nonce. The current authority supplies genesis-anchored membership transition material; every accepted record then needs a live canonical quorum to sign a challenge binding the exact announcement hash, current membership hash/sequence, pending joint-transition identity, current authority, epoch, fencing token, WorldConfig hash/sequence, and Agent 3 canonical snapshot head.
+- A DHT provider remains an untrusted locator. Current active public/unlisted members publish the exact-world provider key solely so the verifier can reach a live quorum; only the current authority publishes the announcement/public-directory record.
+- A signer reloads durable membership, pending membership promise, epoch/fence, WorldConfig, and Agent 3 canonical head before signing. Any mismatch fails closed. Reused `(verifier, nonce)` challenges are refused by signers and rejected by the verifier replay guard.
+- Joint transitions use Agent 1's old+new quorum rule. The proof cannot be certified by one voter universe alone.
+- Membership-changing transitions are anchored from genesis through Agent 1 membership certificates; certificate history is retained immutably for future discovery proofs. Same-voter authority/recovery refreshes are made current by the live quorum challenge, not by trusting an old authority signature.
+- Security argument: truncating a historical prefix no longer proves freshness. After a committed membership/authority transition, quorum intersection guarantees at least one member of any would-be old majority has durable newer state and refuses to sign the stale challenge. A stale former authority therefore cannot answer a new verifier nonce with a valid current quorum.
+- Temporary exact-head validation workflow: `.github/workflows/agent4-final028.yml`; temporary patch vehicle: `.github/agent4_final028_patch.py`. Both are removed only after the exact production SHA and cross-platform proof serialization checks succeed.
