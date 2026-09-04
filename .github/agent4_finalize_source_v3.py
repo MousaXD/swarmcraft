@@ -166,8 +166,6 @@ while True:
     start = text.find(needle, search_from)
     if start < 0:
         break
-    # Do not parse the helper declaration itself. Its `<'_>` lifetime is Rust
-    # syntax, not a char literal. Only call sites are candidates for rewriting.
     if text[max(0, start - 3) : start] == "fn ":
         search_from = start + len(needle)
         continue
@@ -177,7 +175,8 @@ while True:
     args = split_top_level_args(payload)
     if len(args) == 10:
         entries = ",\n".join(
-            f"        {field}: {arg}" for field, arg in zip(FIELD_NAMES, args, strict=True)
+            f"        {field}" if arg == field else f"        {field}: {arg}"
+            for field, arg in zip(FIELD_NAMES, args, strict=True)
         )
         replacement = "announcement(AnnouncementFixture {\n" + entries + ",\n    })"
         text = text[:start] + replacement + text[end + 1 :]
