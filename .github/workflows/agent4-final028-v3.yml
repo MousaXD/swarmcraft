@@ -39,6 +39,7 @@ jobs:
           python .github/agent4_finalize_source_v7.py
           python .github/agent4_finalize_source_v8.py
           python .github/agent4_finalize_source_v9.py
+          python .github/agent4_finalize_source_v10.py
           cargo fmt --all
       - name: Prove only permanent Agent 4 source changed
         run: |
@@ -136,6 +137,7 @@ jobs:
           cargo test -p swarm-cli --test discovery_freshness --locked -- --nocapture
           cargo test -p swarm-cli --test discovery_network_freshness --locked -- --nocapture
           cargo test -p swarm-cli --test discovery_network_freshness --locked duplicate_dials_and_peer_disconnect_keep_surviving_provider_usable -- --nocapture
+          cargo test -p swarm-cli --test discovery_network_freshness --locked simultaneous_bidirectional_dials_converge_on_one_authenticated_connection -- --nocapture
           cargo test -p swarm-cli --lib --locked durable_recovery_promise_fences_stale_freshness_and_current_majority_recovers -- --nocapture
       - name: Connection handshake replay hostile input invite DNS privacy
         run: |
