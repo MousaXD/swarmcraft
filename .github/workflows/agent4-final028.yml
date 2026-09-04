@@ -1,4 +1,4 @@
-name: Agent 4 FINAL-028 Connection Lifecycle Probe
+name: Agent 4 FINAL-028 Connection Lifecycle Repair
 
 on:
   push:
@@ -16,7 +16,7 @@ env:
   INTEGRATION_ANCESTOR: c9252820a560e6ed4d30bb77227e3a494c6ce869
 
 jobs:
-  connection-lifecycle-probe:
+  hostile-network-repeat:
     if: startsWith(github.event.head_commit.message, 'ci(agent4)')
     runs-on: ubuntu-latest
     steps:
@@ -29,16 +29,23 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git merge-base --is-ancestor "$INTEGRATION_ANCESTOR" HEAD
           test -z "$(git status --short)"
-      - name: Materialize existing FINAL-028 source plus lifecycle instrumentation
+      - name: Materialize FINAL-028 plus lifecycle repair
         run: |
           python .github/agent4_finalize_source.py
           python .github/agent4_finalize_source_v2.py
           python .github/agent4_finalize_source_v3.py
           python .github/agent4_finalize_source_v4.py
           python .github/agent4_finalize_source_v5.py
-          python .github/agent4_connection_lifecycle_probe.py
+          python .github/agent4_finalize_source_v6.py
+          python .github/agent4_finalize_source_v7.py
           cargo fmt --all
-      - name: Reproduce only hostile-first network lifecycle with connection IDs
+      - name: Compile repaired hostile network target
+        run: cargo test -p swarm-cli --test discovery_network_freshness --locked --no-run
+      - name: Repeat hostile-first browse and exact-resolve five times
         env:
-          RUST_BACKTRACE: full
-        run: cargo test -p swarm-cli --test discovery_network_freshness --locked -- --nocapture
+          RUST_BACKTRACE: 1
+        run: |
+          for round in 1 2 3 4 5; do
+            echo "=== hostile network round ${round}/5 ==="
+            cargo test -p swarm-cli --test discovery_network_freshness --locked -- --nocapture
+          done
