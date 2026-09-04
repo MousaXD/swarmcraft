@@ -33,6 +33,7 @@ jobs:
         run: |
           python .github/agent4_finalize_source.py
           python .github/agent4_finalize_source_v2.py
+          python .github/agent4_finalize_source_v3.py
       - name: Format direct source
         run: cargo fmt --all
       - name: Prove only Agent 4 production and permanent regression files changed
@@ -204,3 +205,64 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --short)"
+
+  finalize-handoff:
+    needs:
+      - linux-exact-head
+      - windows-proof-portability
+      - macos-proof-portability
+    if: >-
+      startsWith(github.event.head_commit.message, 'fix(agent4)') &&
+      needs.linux-exact-head.result == 'success' &&
+      needs.windows-proof-portability.result == 'success' &&
+      needs.macos-proof-portability.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/agent-4-network
+          fetch-depth: 0
+      - name: Assert validated candidate is still branch head
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --short)"
+      - name: Reconcile Agent 4 ledger with accepted exact-head evidence
+        env:
+          VALIDATED_PRODUCTION_SHA: ${{ github.sha }}
+          VALIDATION_RUN_ID: ${{ github.run_id }}
+        run: python .github/agent4_finalize_ledger.py
+      - name: Remove temporary Agent 4 remediation machinery
+        run: |
+          git rm --ignore-unmatch \
+            .github/agent4_final028_patch.py \
+            .github/agent4_final028_repair.py \
+            .github/agent4_finalize_source.py \
+            .github/agent4_finalize_source_v2.py \
+            .github/agent4_finalize_source_v3.py \
+            .github/agent4_finalize_ledger.py \
+            .github/clippy-failure.txt \
+            .github/workflows/agent4-final028.yml
+      - name: Prove post-validation diff contains no production or permanent-test source
+        run: |
+          changed="$(git status --short | sed -E 's/^.. //' | sort)"
+          printf '%s\n' "$changed"
+          expected="$(printf '%s\n' \
+            '.github/agent4_final028_patch.py' \
+            '.github/agent4_final028_repair.py' \
+            '.github/agent4_finalize_ledger.py' \
+            '.github/agent4_finalize_source.py' \
+            '.github/agent4_finalize_source_v2.py' \
+            '.github/agent4_finalize_source_v3.py' \
+            '.github/clippy-failure.txt' \
+            '.github/workflows/agent4-final028.yml' \
+            'implementation/agent-4-network.md' | sort)"
+          test "$changed" = "$expected"
+      - name: Commit final READY handoff and cleanup
+        run: |
+          git config user.name "swarmcraft-agent4"
+          git config user.email "agent4@users.noreply.github.com"
+          git add implementation/agent-4-network.md
+          git commit -am "docs(agent4): record FINAL-028 validated handoff"
+          git push origin HEAD:fix/agent-4-network
+          test -z "$(git status --short)"
+          echo "Final branch/ledger head: $(git rev-parse HEAD)"
