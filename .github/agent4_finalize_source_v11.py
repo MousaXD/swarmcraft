@@ -37,8 +37,14 @@ replace_once(
     test,
     '''            match node.next_event().await.map_err(|error| format!("{label} discovery node failed: {error:#}"))? {
                 DiscoveryNetworkEvent::InboundRequest { channel, .. } => {
-                    node.respond(channel, WireResponse::Error { code: "TEST_OK".into(), message: label.into() })
-                        .map_err(|error| format!("{label} response failed: {error:#}"))?;
+                    node.respond(
+                        channel,
+                        WireResponse::Error {
+                            code: "TEST_OK".into(),
+                            message: label.into(),
+                        },
+                    )
+                    .map_err(|error| format!("{label} response failed: {error:#}"))?;
                 }
                 _ => {}
             }
@@ -46,8 +52,14 @@ replace_once(
     '''            if let DiscoveryNetworkEvent::InboundRequest { channel, .. } =
                 node.next_event().await.map_err(|error| format!("{label} discovery node failed: {error:#}"))?
             {
-                node.respond(channel, WireResponse::Error { code: "TEST_OK".into(), message: label.into() })
-                    .map_err(|error| format!("{label} response failed: {error:#}"))?;
+                node.respond(
+                    channel,
+                    WireResponse::Error {
+                        code: "TEST_OK".into(),
+                        message: label.into(),
+                    },
+                )
+                .map_err(|error| format!("{label} response failed: {error:#}"))?;
             }
 ''',
 )
