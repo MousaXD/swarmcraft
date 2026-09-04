@@ -251,3 +251,9 @@ BLOCKED
 - Membership-changing transitions are anchored from genesis through Agent 1 membership certificates; certificate history is retained immutably for future discovery proofs. Same-voter authority/recovery refreshes are made current by the live quorum challenge, not by trusting an old authority signature.
 - Security argument: truncating a historical prefix no longer proves freshness. After a committed membership/authority transition, quorum intersection guarantees at least one member of any would-be old majority has durable newer state and refuses to sign the stale challenge. A stale former authority therefore cannot answer a new verifier nonce with a valid current quorum.
 - Temporary exact-head validation workflow: `.github/workflows/agent4-final028.yml`; temporary patch vehicle: `.github/agent4_final028_patch.py`. Both are removed only after the exact production SHA and cross-platform proof serialization checks succeed.
+
+
+## FINAL-028 validation repair history
+
+- `33865188491` — FAIL at workspace check on composed milestone `3a8d92089133c54ff1588011442cb0c83eb31dc1`; cause was Serde tuple-arity exhaustion after adding all signed announcement freshness fields. No security field was removed. The canonical signing representation was changed to two ordered nested tuples.
+- The same repair pass also makes pending new voters advertise the exact-world locator, while keeping announcement publication restricted to current durable authority, so Agent 1 joint old+new freshness quorum is reachable in real discovery.

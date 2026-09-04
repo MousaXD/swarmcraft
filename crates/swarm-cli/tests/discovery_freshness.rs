@@ -127,11 +127,12 @@ fn fixture(
     (identities, announcement, proof, challenge)
 }
 
-fn votes(
-    ids: &[PeerIdentity],
+fn votes<'a>(
+    ids: impl IntoIterator<Item = &'a PeerIdentity>,
     challenge: &DiscoveryFreshnessChallengeV1,
 ) -> Vec<swarm_protocol::DiscoveryFreshnessVoteV1> {
-    let mut result = ids.iter().map(|id| sign_discovery_freshness_vote(id, challenge).unwrap()).collect::<Vec<_>>();
+    let mut result =
+        ids.into_iter().map(|id| sign_discovery_freshness_vote(id, challenge).unwrap()).collect::<Vec<_>>();
     result.sort_by_key(|vote| vote.voter_peer_id);
     result
 }
@@ -140,7 +141,7 @@ fn votes(
 fn current_quorum_accepts_and_replay_wrong_head_epoch_membership_world_and_verifier_fail() {
     let (ids, announcement, proof, challenge) = fixture(3);
     let verifier = challenge.verifier_peer_id;
-    let valid_votes = votes(&ids[..2], &challenge);
+    let valid_votes = votes(ids[..2].iter(), &challenge);
     let mut replay = DiscoveryFreshnessReplayGuard::default();
     validate_fresh_discovery_candidate(
         &announcement,
@@ -176,7 +177,7 @@ fn current_quorum_accepts_and_replay_wrong_head_epoch_membership_world_and_verif
             5 => bad.canonical_head.as_mut().unwrap().manifest_hash = Hash32([42; 32]),
             _ => bad.verifier_peer_id = PeerId([42; 32]),
         }
-        let bad_votes = votes(&ids[..2], &bad);
+        let bad_votes = votes(ids[..2].iter(), &bad);
         let mut guard = DiscoveryFreshnessReplayGuard::default();
         assert!(validate_fresh_discovery_candidate(
             &announcement,
@@ -204,7 +205,7 @@ fn unrelated_self_signed_attacker_and_removed_or_banned_signers_do_not_form_curr
         &announcement,
         &proof,
         &challenge,
-        &votes(&ids[..2], &challenge),
+        &votes(ids[..2].iter(), &challenge),
         challenge.verifier_peer_id,
         challenge.nonce,
         3_000,
@@ -213,14 +214,14 @@ fn unrelated_self_signed_attacker_and_removed_or_banned_signers_do_not_form_curr
     .is_err());
 
     proof.current_membership.members[1].banned = true;
-    let mut banned_votes = votes(&[ids[0].clone(), ids[1].clone()], &challenge);
+    let mut banned_votes = votes([&ids[0], &ids[1]], &challenge);
     banned_votes.sort_by_key(|vote| vote.voter_peer_id);
     assert!(validate_discovery_freshness_quorum(&proof, &banned_votes).is_err());
 }
 
 #[test]
 fn joint_transition_requires_both_old_and_new_quorums_and_stale_old_side_cannot_certify() {
-    let (mut ids, mut announcement, mut proof, _) = fixture(3);
+    let (mut ids, announcement, mut proof, _) = fixture(3);
     ids.push(PeerIdentity::from_secret_bytes([4; 32]));
     ids.push(PeerIdentity::from_secret_bytes([5; 32]));
     let previous = proof.current_membership.clone();
@@ -254,13 +255,13 @@ fn joint_transition_requires_both_old_and_new_quorums_and_stale_old_side_cannot_
         issued_unix_ms: 2_000,
         expires_unix_ms: 10_000,
     };
-    let old_only = votes(&ids[..2], &challenge);
+    let old_only = votes(ids[..2].iter(), &challenge);
     assert!(validate_discovery_freshness_quorum(&proof, &old_only).is_err());
-    let joint = votes(&[ids[0].clone(), ids[1].clone(), ids[3].clone()], &challenge);
+    let joint = votes([&ids[0], &ids[1], &ids[3]], &challenge);
     validate_discovery_freshness_quorum(&proof, &joint).unwrap();
 
     challenge.nonce = [78; 32];
-    let stale_old_partition = votes(&ids[..1], &challenge);
+    let stale_old_partition = votes(ids[..1].iter(), &challenge);
     assert!(validate_discovery_freshness_quorum(&proof, &stale_old_partition).is_err());
 }
 
@@ -298,7 +299,7 @@ fn truncated_membership_change_chain_and_noncanonical_vote_collection_fail_close
     challenge.announcement_hash = announcement.announcement_hash().unwrap();
     challenge.membership_sequence = announcement.membership_sequence;
     challenge.membership_hash = announcement.membership_hash;
-    let valid = votes(&[ids[0].clone(), ids[1].clone(), ids[3].clone()], &challenge);
+    let valid = votes([&ids[0], &ids[1], &ids[3]], &challenge);
     let mut guard = DiscoveryFreshnessReplayGuard::default();
     validate_fresh_discovery_candidate(
         &announcement,

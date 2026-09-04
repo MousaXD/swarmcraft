@@ -261,10 +261,15 @@ fn refresh_publications(
         verify_world_config_signature(&config)?;
         let Ok(membership) = storage.load_membership_record(world) else { continue };
         verify_membership_signature(&membership)?;
-        let Some(local_member) = membership.members.iter().find(|member| member.peer_id == identity.peer_id()) else {
-            continue;
-        };
-        if local_member.banned || local_member.public_key != identity.public_key() {
+        let local_is_current = membership.members.iter().any(|member| {
+            member.peer_id == identity.peer_id() && member.public_key == identity.public_key() && !member.banned
+        });
+        let local_is_pending = storage.load_membership_promise(world).ok().is_some_and(|promise| {
+            promise.proposal.proposed.members.iter().any(|member| {
+                member.peer_id == identity.peer_id() && member.public_key == identity.public_key() && !member.banned
+            })
+        });
+        if !local_is_current && !local_is_pending {
             continue;
         }
         match config.visibility {
@@ -277,7 +282,10 @@ fn refresh_publications(
         next_worlds.insert(world);
 
         let Ok(epoch) = storage.load_epoch_record(world) else { continue };
-        if epoch.authority_peer_id != identity.peer_id() || epoch.authority_public_key != identity.public_key() {
+        if !local_is_current
+            || epoch.authority_peer_id != identity.peer_id()
+            || epoch.authority_public_key != identity.public_key()
+        {
             continue;
         }
 

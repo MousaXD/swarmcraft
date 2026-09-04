@@ -70,24 +70,28 @@ impl WorldAnnouncementV1 {
         let mut presentation = self.presentation.clone();
         presentation.normalize();
         let unsigned = (
-            self.protocol_version,
-            self.world_id,
-            presentation,
-            &self.compatibility,
-            self.visibility,
-            self.membership_policy,
-            self.config_sequence,
-            self.config_hash,
-            self.membership_sequence,
-            self.membership_hash,
-            self.authority_epoch,
-            self.fencing_token,
-            self.canonical_head,
-            self.announcement_sequence,
-            self.issued_unix_ms,
-            self.expires_unix_ms,
-            self.announcer_peer_id,
-            self.announcer_public_key,
+            (
+                self.protocol_version,
+                self.world_id,
+                presentation,
+                &self.compatibility,
+                self.visibility,
+                self.membership_policy,
+                self.config_sequence,
+                self.config_hash,
+                self.membership_sequence,
+                self.membership_hash,
+                self.authority_epoch,
+                self.fencing_token,
+            ),
+            (
+                self.canonical_head,
+                self.announcement_sequence,
+                self.issued_unix_ms,
+                self.expires_unix_ms,
+                self.announcer_peer_id,
+                self.announcer_public_key,
+            ),
         );
         let encoded = postcard::to_allocvec(&unsigned)?;
         let mut bytes = Vec::with_capacity(WORLD_ANNOUNCEMENT_SIGN_DOMAIN.len() + encoded.len());
