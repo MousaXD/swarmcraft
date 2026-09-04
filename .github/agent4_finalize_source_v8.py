@@ -207,7 +207,14 @@ async fn duplicate_dials_and_peer_disconnect_keep_surviving_provider_usable() {
     assert!(client.is_authenticated(&surviving_peer));
     assert_eq!(client.established_connection_count(&surviving_peer), 1);
 
-    let request_id = client.send_request(&surviving_peer, WireRequest::DiscoveryPublic).unwrap();
+    let request_id = client
+        .send_request(
+            &surviving_peer,
+            WireRequest::DiscoveryPublic {
+                filter: swarm_protocol::DiscoveryFilterV1::default(),
+            },
+        )
+        .unwrap();
     timeout(Duration::from_secs(10), async {
         loop {
             match client.next_event().await.expect("client discovery event awaiting surviving provider response") {
