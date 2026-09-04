@@ -310,6 +310,29 @@ impl WireResponse {
                         proof.membership_certificates.len(),
                     ));
                 }
+                let member_count = proof
+                    .membership_certificates
+                    .iter()
+                    .flat_map(|certificate| {
+                        [certificate.proposal.previous.members.len(), certificate.proposal.proposed.members.len()]
+                    })
+                    .chain([proof.initial_membership.members.len(), proof.current_membership.members.len()])
+                    .chain(
+                        proof
+                            .pending_membership
+                            .iter()
+                            .flat_map(|proposal| [proposal.previous.members.len(), proposal.proposed.members.len()]),
+                    )
+                    .max()
+                    .unwrap_or(0);
+                if member_count > MAX_WORLD_MEMBERS {
+                    return Err(WireLimitError::TooManyMembers(member_count));
+                }
+                let vote_count =
+                    proof.membership_certificates.iter().map(|certificate| certificate.votes.len()).max().unwrap_or(0);
+                if vote_count > MAX_MEMBERSHIP_VOTES {
+                    return Err(WireLimitError::TooManyMembershipVotes(vote_count));
+                }
                 let bytes = serde_json::to_vec(proof.as_ref())
                     .map_err(|_| WireLimitError::DiscoveryMembershipProofTooLarge(usize::MAX))?;
                 if bytes.len() > MAX_DISCOVERY_MEMBERSHIP_PROOF_BYTES {
@@ -479,8 +502,11 @@ mod tests {
             membership_policy: MembershipPolicyV1::InviteOnly,
             config_sequence: 1,
             config_hash: Hash32([3; 32]),
+            membership_sequence: 0,
+            membership_hash: Hash32([6; 32]),
             authority_epoch: 1,
             fencing_token: 1,
+            canonical_head: None,
             announcement_sequence: 1,
             issued_unix_ms: 1,
             expires_unix_ms: 2,

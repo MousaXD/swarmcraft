@@ -118,19 +118,42 @@ pub fn validate_membership_certificate_shape(
 pub fn validate_discovery_membership_proof_shape(
     proof: &DiscoveryMembershipProofV1,
 ) -> Result<(), MembershipConsensusError> {
+    let members_are_canonical =
+        |members: &[WorldMemberV1]| members.windows(2).all(|pair| pair[0].peer_id < pair[1].peer_id);
+    if !members_are_canonical(&proof.initial_membership.members)
+        || !members_are_canonical(&proof.current_membership.members)
+        || proof.membership_certificates.iter().any(|certificate| {
+            !members_are_canonical(&certificate.proposal.previous.members)
+                || !members_are_canonical(&certificate.proposal.proposed.members)
+        })
+        || proof.pending_membership.as_ref().is_some_and(|proposal| {
+            !members_are_canonical(&proposal.previous.members) || !members_are_canonical(&proposal.proposed.members)
+        })
+    {
+        return Err(MembershipConsensusError::MalformedHistory);
+    }
     if proof.initial_membership.world_id != proof.world_id || proof.current_membership.world_id != proof.world_id {
         return Err(MembershipConsensusError::MalformedHistory);
     }
     let mut voters = active_voters(&proof.initial_membership.members)?;
+    let mut last_sequence = proof.initial_membership.sequence;
     for certificate in &proof.membership_certificates {
         validate_membership_certificate_shape(certificate)?;
+        if certificate.proposal.previous.world_id != proof.world_id
+            || certificate.proposal.proposed.world_id != proof.world_id
+            || certificate.proposal.proposed.sequence <= last_sequence
+        {
+            return Err(MembershipConsensusError::MalformedHistory);
+        }
+        last_sequence = certificate.proposal.proposed.sequence;
         let previous = active_voters(&certificate.proposal.previous.members)?;
         if previous != voters {
             return Err(MembershipConsensusError::MalformedHistory);
         }
         voters = active_voters(&certificate.proposal.proposed.members)?;
     }
-    if active_voters(&proof.current_membership.members)? != voters {
+    if proof.current_membership.sequence < last_sequence || active_voters(&proof.current_membership.members)? != voters
+    {
         return Err(MembershipConsensusError::MalformedHistory);
     }
     if let Some(proposal) = &proof.pending_membership {
@@ -149,6 +172,9 @@ pub fn validate_discovery_freshness_quorum(
     votes: &[DiscoveryFreshnessVoteV1],
 ) -> Result<(), MembershipConsensusError> {
     validate_discovery_membership_proof_shape(proof)?;
+    if votes.len() > 1_024 {
+        return Err(MembershipConsensusError::NonCanonicalSignerSet);
+    }
     let mut last = None;
     let mut signers = BTreeMap::new();
     for vote in votes {

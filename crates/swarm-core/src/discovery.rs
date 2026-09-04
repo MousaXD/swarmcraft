@@ -12,6 +12,8 @@ pub const FRIEND_PRESENCE_MAX_LIFETIME_MS: u64 = 60 * 1_000;
 pub const DISCOVERY_CLOCK_SKEW_MS: u64 = 60 * 1_000;
 pub const DISCOVERY_FRESHNESS_MAX_LIFETIME_MS: u64 = 15 * 1_000;
 pub const MAX_DISCOVERY_MEMBERSHIP_CERTIFICATES: usize = 256;
+pub const MAX_DISCOVERY_MEMBERS: usize = 1_024;
+pub const MAX_DISCOVERY_FRESHNESS_VOTES: usize = 1_024;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DiscoveryRecordError {
@@ -120,11 +122,25 @@ pub fn verify_discovery_membership_proof(
     }
     if proof.membership_certificates.len() > MAX_DISCOVERY_MEMBERSHIP_CERTIFICATES
         || proof.genesis.world_id().ok() != Some(proof.world_id)
+        || proof.genesis.validate_semantics().is_err()
+        || proof.initial_membership.members.len() > MAX_DISCOVERY_MEMBERS
+        || proof.current_membership.members.len() > MAX_DISCOVERY_MEMBERS
+        || proof.pending_membership.as_ref().is_some_and(|proposal| {
+            proposal.previous.members.len() > MAX_DISCOVERY_MEMBERS
+                || proposal.proposed.members.len() > MAX_DISCOVERY_MEMBERS
+        })
+        || proof.membership_certificates.iter().any(|certificate| {
+            certificate.proposal.previous.members.len() > MAX_DISCOVERY_MEMBERS
+                || certificate.proposal.proposed.members.len() > MAX_DISCOVERY_MEMBERS
+                || certificate.votes.len() > MAX_DISCOVERY_FRESHNESS_VOTES
+        })
     {
         return Err(DiscoveryRecordError::InvalidMembershipProof);
     }
     let initial = &proof.initial_membership;
-    if initial.protocol_version != PROTOCOL_VERSION
+    if initial.validate_semantics().is_err()
+        || proof.current_membership.validate_semantics().is_err()
+        || initial.protocol_version != PROTOCOL_VERSION
         || initial.world_id != proof.world_id
         || initial.sequence != 0
         || initial.previous_membership_hash.is_some()
@@ -144,16 +160,32 @@ pub fn verify_discovery_membership_proof(
         return Err(DiscoveryRecordError::InvalidMembershipProof);
     }
 
+    let mut last_certificate_sequence = None;
     for certificate in &proof.membership_certificates {
+        if !certificate.proposal.validate_shape().unwrap_or(false)
+            || certificate.proposal.previous.world_id != proof.world_id
+            || certificate.proposal.proposed.world_id != proof.world_id
+            || certificate.proposal.previous.validate_semantics().is_err()
+            || certificate.proposal.proposed.validate_semantics().is_err()
+            || last_certificate_sequence.is_some_and(|sequence| certificate.proposal.proposed.sequence <= sequence)
+        {
+            return Err(DiscoveryRecordError::InvalidMembershipProof);
+        }
+        last_certificate_sequence = Some(certificate.proposal.proposed.sequence);
         verify_membership_signature(&certificate.proposal.previous)
             .map_err(|_| DiscoveryRecordError::InvalidMembershipProof)?;
         verify_membership_signature(&certificate.proposal.proposed)
             .map_err(|_| DiscoveryRecordError::InvalidMembershipProof)?;
         let mut seen = HashSet::new();
+        let mut last_voter = None;
         for vote in &certificate.votes {
-            if !seen.insert(vote.voter_peer_id) {
+            if !vote.matches_proposal(&certificate.proposal).unwrap_or(false)
+                || !seen.insert(vote.voter_peer_id)
+                || last_voter.is_some_and(|peer| vote.voter_peer_id <= peer)
+            {
                 return Err(DiscoveryRecordError::InvalidMembershipProof);
             }
+            last_voter = Some(vote.voter_peer_id);
             verify_signature(
                 vote.voter_peer_id,
                 vote.voter_public_key,
@@ -165,11 +197,17 @@ pub fn verify_discovery_membership_proof(
     }
     verify_membership_signature(&proof.current_membership).map_err(|_| DiscoveryRecordError::InvalidMembershipProof)?;
     if proof.current_membership.world_id != proof.world_id
+        || last_certificate_sequence.is_some_and(|sequence| proof.current_membership.sequence < sequence)
         || proof.current_membership.sequence != announcement.membership_sequence
         || proof.current_membership.record_hash().ok() != Some(announcement.membership_hash)
         || proof.current_membership.authority_peer_id != announcement.announcer_peer_id
         || proof.current_membership.authority_public_key != announcement.announcer_public_key
         || proof.current_membership.epoch != announcement.authority_epoch
+        || !proof.current_membership.members.iter().any(|member| {
+            member.peer_id == proof.current_membership.authority_peer_id
+                && member.public_key == proof.current_membership.authority_public_key
+                && !member.banned
+        })
     {
         return Err(DiscoveryRecordError::InvalidMembershipProof);
     }

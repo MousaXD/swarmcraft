@@ -166,7 +166,7 @@ fn current_quorum_accepts_and_replay_wrong_head_epoch_membership_world_and_verif
     )
     .is_err());
 
-    for mutate in 0..7 {
+    for mutate in 0..10 {
         let mut bad = challenge.clone();
         match mutate {
             0 => bad.world_id = swarm_protocol::WorldId([42; 32]),
@@ -175,6 +175,9 @@ fn current_quorum_accepts_and_replay_wrong_head_epoch_membership_world_and_verif
             3 => bad.authority_epoch += 1,
             4 => bad.fencing_token += 1,
             5 => bad.canonical_head.as_mut().unwrap().manifest_hash = Hash32([42; 32]),
+            6 => bad.canonical_head.as_mut().unwrap().snapshot_number += 1,
+            7 => bad.canonical_head.as_mut().unwrap().sequence += 1,
+            8 => bad.canonical_head.as_mut().unwrap().epoch += 1,
             _ => bad.verifier_peer_id = PeerId([42; 32]),
         }
         let bad_votes = votes(ids[..2].iter(), &bad);
@@ -257,6 +260,8 @@ fn joint_transition_requires_both_old_and_new_quorums_and_stale_old_side_cannot_
     };
     let old_only = votes(ids[..2].iter(), &challenge);
     assert!(validate_discovery_freshness_quorum(&proof, &old_only).is_err());
+    let new_only = votes([&ids[0], &ids[3], &ids[4]], &challenge);
+    assert!(validate_discovery_freshness_quorum(&proof, &new_only).is_err());
     let joint = votes([&ids[0], &ids[1], &ids[3]], &challenge);
     validate_discovery_freshness_quorum(&proof, &joint).unwrap();
 
@@ -323,4 +328,72 @@ fn truncated_membership_change_chain_and_noncanonical_vote_collection_fail_close
     let mut reordered = valid.clone();
     reordered.reverse();
     assert!(validate_discovery_freshness_quorum(&proof, &reordered).is_err());
+}
+
+#[test]
+fn unsupported_malformed_removed_and_oversized_proofs_fail_closed() {
+    let (ids, announcement, proof, challenge) = fixture(3);
+    let valid_votes = votes(ids[..2].iter(), &challenge);
+
+    let mut unsupported = proof.clone();
+    unsupported.protocol_version = PROTOCOL_VERSION + 1;
+    let mut guard = DiscoveryFreshnessReplayGuard::default();
+    assert!(validate_fresh_discovery_candidate(
+        &announcement,
+        &unsupported,
+        &challenge,
+        &valid_votes,
+        challenge.verifier_peer_id,
+        challenge.nonce,
+        3_000,
+        &mut guard,
+    )
+    .is_err());
+
+    let mut malformed = proof.clone();
+    malformed.current_membership.members.reverse();
+    assert!(swarm_consensus::validate_discovery_membership_proof_shape(&malformed).is_err());
+
+    let mut removed = proof.clone();
+    let removed_peer = ids[1].peer_id();
+    removed.initial_membership.members.retain(|member| member.peer_id != removed_peer);
+    removed.current_membership.members.retain(|member| member.peer_id != removed_peer);
+    assert!(validate_discovery_freshness_quorum(&removed, &valid_votes).is_err());
+
+    let mut oversized = valid_votes.clone();
+    oversized.resize(1_025, valid_votes[0].clone());
+    assert!(validate_discovery_freshness_quorum(&proof, &oversized).is_err());
+}
+
+#[test]
+fn verifier_bound_proof_and_pretransition_proof_cannot_cross_contexts() {
+    let (ids, announcement, proof, challenge) = fixture(3);
+    let valid_votes = votes(ids[..2].iter(), &challenge);
+    let verifier_b = PeerIdentity::from_secret_bytes([100; 32]);
+    let mut guard = DiscoveryFreshnessReplayGuard::default();
+    assert!(validate_fresh_discovery_candidate(
+        &announcement,
+        &proof,
+        &challenge,
+        &valid_votes,
+        verifier_b.peer_id(),
+        challenge.nonce,
+        3_000,
+        &mut guard,
+    )
+    .is_err());
+
+    let mut transitioned = proof.clone();
+    transitioned.current_membership.sequence += 1;
+    assert!(validate_fresh_discovery_candidate(
+        &announcement,
+        &transitioned,
+        &challenge,
+        &valid_votes,
+        challenge.verifier_peer_id,
+        challenge.nonce,
+        3_000,
+        &mut DiscoveryFreshnessReplayGuard::default(),
+    )
+    .is_err());
 }

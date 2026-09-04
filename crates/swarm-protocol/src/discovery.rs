@@ -264,6 +264,39 @@ mod tests {
     }
 
     #[test]
+    fn freshness_vote_signing_bytes_are_deterministic_across_round_trip() {
+        let value = announcement();
+        let challenge = DiscoveryFreshnessChallengeV1 {
+            protocol_version: PROTOCOL_VERSION,
+            verifier_peer_id: PeerId([21; 32]),
+            nonce: [22; 32],
+            world_id: value.world_id,
+            announcement_hash: value.announcement_hash().unwrap(),
+            membership_sequence: value.membership_sequence,
+            membership_hash: value.membership_hash,
+            pending_membership_proposal_hash: None,
+            authority_peer_id: value.announcer_peer_id,
+            authority_epoch: value.authority_epoch,
+            fencing_token: value.fencing_token,
+            config_sequence: value.config_sequence,
+            config_hash: value.config_hash,
+            canonical_head: value.canonical_head,
+            issued_unix_ms: 100,
+            expires_unix_ms: 200,
+        };
+        let vote = DiscoveryFreshnessVoteV1 {
+            challenge,
+            voter_peer_id: PeerId([23; 32]),
+            voter_public_key: [24; 32],
+            signature: vec![25; 64],
+        };
+        let encoded = postcard::to_allocvec(&vote).unwrap();
+        let decoded: DiscoveryFreshnessVoteV1 = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(vote, decoded);
+        assert_eq!(vote.signing_bytes().unwrap(), decoded.signing_bytes().unwrap());
+    }
+
+    #[test]
     fn private_visibility_is_not_discoverable() {
         let mut value = announcement();
         value.visibility = WorldVisibilityV1::Private;

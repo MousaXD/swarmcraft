@@ -1909,7 +1909,9 @@ fn handle_request(
         }
         WireRequest::DiscoveryPublic { .. }
         | WireRequest::DiscoveryResolve { .. }
-        | WireRequest::FriendPresence { .. } => {
+        | WireRequest::FriendPresence { .. }
+        | WireRequest::DiscoveryFreshnessContext { .. }
+        | WireRequest::DiscoveryFreshnessVote(_) => {
             node.respond(
                 channel,
                 WireResponse::Error {
