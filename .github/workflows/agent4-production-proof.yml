@@ -1,0 +1,140 @@
+name: Agent 4 Production Exact-Head Proof
+
+on:
+  push:
+    branches:
+      - fix/agent-4-network
+
+permissions:
+  contents: read
+
+env:
+  PRODUCTION_SHA: 77300031751d0e3df0fc5a7c9aac1c2b2625989f
+  INTEGRATION_ANCESTOR: c9252820a560e6ed4d30bb77227e3a494c6ce869
+
+jobs:
+  linux-exact-head:
+    if: "${{ startsWith(github.event.head_commit.message, 'validation(agent4):') }}"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCTION_SHA }}
+          fetch-depth: 0
+      - name: Prove exact production SHA and clean tree at start
+        run: |
+          test "$(git rev-parse HEAD)" = "$PRODUCTION_SHA"
+          git merge-base --is-ancestor "$INTEGRATION_ANCESTOR" HEAD
+          test -z "$(git status --short)"
+      - name: Locked metadata
+        run: |
+          cargo metadata --locked --format-version 1 >/dev/null
+          (cd apps/desktop/src-tauri && cargo metadata --locked --format-version 1 >/dev/null)
+      - name: Workspace format
+        run: cargo fmt --all -- --check
+      - name: Workspace all-target check locked
+        run: cargo check --workspace --all-targets --locked
+      - name: Strict workspace clippy locked
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Network protocol core storage consensus CLI suites
+        run: |
+          cargo test -p swarm-network --locked
+          cargo test -p swarm-protocol --locked
+          cargo test -p swarm-core --locked
+          cargo test -p swarm-storage --locked
+          cargo test -p swarm-consensus --locked
+          cargo test -p swarm-cli --lib --bins --locked
+      - name: FINAL-028 verifier and discovery network freshness
+        env:
+          RUST_BACKTRACE: 1
+        run: |
+          cargo test -p swarm-cli --test discovery_freshness --locked -- --nocapture
+          cargo test -p swarm-cli --test discovery_network_freshness --locked -- --nocapture
+      - name: Connection authentication replay hostile admission invite friend privacy DNS address hardening
+        run: |
+          cargo test -p swarm-network --test peer_networking_acceptance --locked -- --nocapture
+          cargo test -p swarm-network --test input_hardening --locked -- --nocapture
+          cargo test -p swarm-network --locked invite
+          cargo test -p swarm-cli --lib --locked friend
+      - name: Agent 1 partition Solo-loss membership invite recovery
+        run: |
+          cargo test -p swarm-cli --test consensus_partition_safety --locked -- --nocapture
+          cargo test -p swarm-cli --test live_join_replication --locked -- --nocapture
+          cargo test -p swarm-cli --test automatic_invite_join --locked -- --nocapture
+          cargo test -p swarm-cli --test three_daemon_recovery --locked -- --nocapture
+          cargo test -p swarm-cli --test recovery_successor_dies --locked -- --nocapture
+      - name: Agent 2 authority history replay and migration acceptance
+        run: |
+          cargo test -p swarm-storage --test membership_history --locked -- --nocapture
+          cargo test -p swarm-core --test protocol_version_fail_closed --locked -- --nocapture
+          cargo test -p swarm-protocol --test canonical_semantics --locked -- --nocapture
+          cargo test -p swarm-cli --test migration_core --locked -- --nocapture
+      - name: Agent 3 canonical head rollback fencing promise non-equivocation
+        run: |
+          cargo test -p swarm-storage --test storage_integrity --locked -- --nocapture
+          cargo test -p swarm-storage --test publication_ownership_race --locked -- --nocapture
+          cargo test -p swarm-storage --test failure_injection --locked -- --nocapture
+      - name: Durable recovery freshness
+        run: cargo test -p swarm-cli --lib --locked durable_recovery_promise_fences_stale_freshness_and_current_majority_recovers -- --nocapture
+      - name: Impaired QUIC lost-ACK restart recovery
+        run: cargo test -p swarm-network --test network_transfer_soak --locked -- --nocapture
+      - name: Compile all workspace and CLI integration targets
+        run: |
+          cargo test --workspace --all-targets --no-run --locked
+          cargo test -p swarm-cli --tests --no-run --locked
+      - name: Prove exact production SHA and clean tree at end
+        run: |
+          test "$(git rev-parse HEAD)" = "$PRODUCTION_SHA"
+          test -z "$(git status --short)"
+
+  windows-proof-portability:
+    if: "${{ always() && needs.linux-exact-head.result == 'success' && startsWith(github.event.head_commit.message, 'validation(agent4):') }}"
+    needs: linux-exact-head
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCTION_SHA }}
+          fetch-depth: 0
+      - name: Prove exact production SHA and clean tree at start
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$PRODUCTION_SHA"
+          test -z "$(git status --short)"
+      - name: Freshness serialization signing ordering proof bounds
+        run: |
+          cargo test -p swarm-protocol --locked discovery
+          cargo test -p swarm-core --locked discovery
+          cargo test -p swarm-consensus --locked membership
+          cargo test -p swarm-cli --test discovery_freshness --locked
+          cargo test -p swarm-cli --test discovery_network_freshness --no-run --locked
+      - name: Prove exact production SHA and clean tree at end
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$PRODUCTION_SHA"
+          test -z "$(git status --short)"
+
+  macos-proof-portability:
+    if: "${{ always() && needs.linux-exact-head.result == 'success' && startsWith(github.event.head_commit.message, 'validation(agent4):') }}"
+    needs: linux-exact-head
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCTION_SHA }}
+          fetch-depth: 0
+      - name: Prove exact production SHA and clean tree at start
+        run: |
+          test "$(git rev-parse HEAD)" = "$PRODUCTION_SHA"
+          test -z "$(git status --short)"
+      - name: Freshness serialization signing ordering proof bounds
+        run: |
+          cargo test -p swarm-protocol --locked discovery
+          cargo test -p swarm-core --locked discovery
+          cargo test -p swarm-consensus --locked membership
+          cargo test -p swarm-cli --test discovery_freshness --locked
+          cargo test -p swarm-cli --test discovery_network_freshness --no-run --locked
+      - name: Prove exact production SHA and clean tree at end
+        run: |
+          test "$(git rev-parse HEAD)" = "$PRODUCTION_SHA"
+          test -z "$(git status --short)"
