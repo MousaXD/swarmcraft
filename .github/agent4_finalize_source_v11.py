@@ -70,4 +70,63 @@ replace_once(
 # deterministically. Production discovery behavior is unchanged.
 replace_once(test, "            delay_ms: 250,\n", "            delay_ms: 2_000,\n")
 
-print("Agent 4 final structural lint repairs and deterministic hostile-first fixture applied")
+# A symmetric dial can transiently expose both physical connections while the
+# asynchronously requested noncanonical close is still being delivered. The
+# invariant is convergence, not zero transient overlap: drive both swarms until
+# they each retain exactly one authenticated connection, then assert the final
+# single-connection state.
+replace_once(
+    test,
+    '''    // Drive close/replacement notifications briefly. At no point may either
+    // peer retain two request-response connections.
+    let _ = timeout(Duration::from_millis(500), async {
+        loop {
+            tokio::select! {
+                event = left.next_event() => {
+                    event.expect("left discovery event after symmetric convergence");
+                }
+                event = right.next_event() => {
+                    event.expect("right discovery event after symmetric convergence");
+                }
+            }
+            assert!(left.established_connection_count(&right_peer) <= 1);
+            assert!(right.established_connection_count(&left_peer) <= 1);
+        }
+    })
+    .await;
+
+    assert_eq!(left.established_connection_count(&right_peer), 1);
+    assert_eq!(right.established_connection_count(&left_peer), 1);
+    assert!(left.is_authenticated(&right_peer));
+    assert!(right.is_authenticated(&left_peer));
+''',
+    '''    timeout(Duration::from_secs(2), async {
+        loop {
+            if left.established_connection_count(&right_peer) == 1
+                && right.established_connection_count(&left_peer) == 1
+                && left.is_authenticated(&right_peer)
+                && right.is_authenticated(&left_peer)
+            {
+                break;
+            }
+            tokio::select! {
+                event = left.next_event() => {
+                    event.expect("left discovery event while converging symmetric dial");
+                }
+                event = right.next_event() => {
+                    event.expect("right discovery event while converging symmetric dial");
+                }
+            }
+        }
+    })
+    .await
+    .expect("symmetric discovery dials must settle to one authenticated connection per peer");
+
+    assert_eq!(left.established_connection_count(&right_peer), 1);
+    assert_eq!(right.established_connection_count(&left_peer), 1);
+    assert!(left.is_authenticated(&right_peer));
+    assert!(right.is_authenticated(&left_peer));
+''',
+)
+
+print("Agent 4 final structural lint repairs and deterministic network regressions applied")
