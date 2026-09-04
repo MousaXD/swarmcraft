@@ -225,3 +225,8 @@ if canonical_guard not in membership_text:
     membership_text = membership_text.replace(anchor, canonical_guard, 1)
 membership_path.write_text(membership_text)
 print("FINAL-028 discovery membership proof now rejects noncanonical member ordering")
+
+# The network test uses an asynchronous Kademlia provider table. Require a
+# round in which stale, malformed attacker, and current providers all actually
+# participate before judging freshness selection.
+exec(Path(".github/agent4_finalize_network_test.py").read_text())
