@@ -7,7 +7,7 @@ def replace_once(path: str, old: str, new: str) -> None:
     if old not in text:
         if new in text:
             return
-        raise SystemExit(f"missing Agent 4 clippy closure anchor in {path}: {old[:220]!r}")
+        raise SystemExit(f"missing Agent 4 closure anchor in {path}: {old[:220]!r}")
     p.write_text(text.replace(old, new, 1))
 
 
@@ -64,4 +64,22 @@ replace_once(
 ''',
 )
 
-print("Agent 4 final clippy-only structural repairs applied without semantic change")
+# Keep the adversarial fixture deterministic under slower hosted-runner
+# scheduling: the current healthy provider is intentionally delayed enough
+# that stale and malformed providers complete first. This changes only the
+# regression harness, not discovery ordering, authority, or verification.
+replace_once(
+    test,
+    '''            delay_ms: 250,
+        }, order.clone()),
+        spawn_peer(PeerPlan {
+            label: "voter",
+''',
+    '''            delay_ms: 1_500,
+        }, order.clone()),
+        spawn_peer(PeerPlan {
+            label: "voter",
+''',
+)
+
+print("Agent 4 final structural lint repairs and deterministic hostile-first fixture applied")
