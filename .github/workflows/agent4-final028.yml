@@ -36,7 +36,6 @@ jobs:
           python .github/agent4_finalize_source_v3.py
           python .github/agent4_finalize_source_v4.py
           python .github/agent4_finalize_source_v5.py
-          python .github/agent4_finalize_source_v6.py
           python .github/agent4_finalize_source_v7.py
           cargo fmt --all
       - name: Compile repaired hostile network target
