@@ -64,22 +64,10 @@ replace_once(
 ''',
 )
 
-# Keep the adversarial fixture deterministic under slower hosted-runner
-# scheduling: the current healthy provider is intentionally delayed enough
-# that stale and malformed providers complete first. This changes only the
-# regression harness, not discovery ordering, authority, or verification.
-replace_once(
-    test,
-    '''            delay_ms: 250,
-        }, order.clone()),
-        spawn_peer(PeerPlan {
-            label: "voter",
-''',
-    '''            delay_ms: 1_500,
-        }, order.clone()),
-        spawn_peer(PeerPlan {
-            label: "voter",
-''',
-)
+# Hosted runners can finish current-provider auth well ahead of hostile peers.
+# The regression intentionally delays the healthy provider's response so stale
+# and malformed candidates complete first and the security property is tested
+# deterministically. Production discovery behavior is unchanged.
+replace_once(test, "            delay_ms: 250,\n", "            delay_ms: 2_000,\n")
 
 print("Agent 4 final structural lint repairs and deterministic hostile-first fixture applied")
