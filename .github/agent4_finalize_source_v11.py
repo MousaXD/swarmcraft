@@ -32,4 +32,24 @@ replace_once(
 ''',
 )
 
-print("Agent 4 final clippy-only collapsible-if repair applied without semantic change")
+test = "crates/swarm-cli/tests/discovery_network_freshness.rs"
+replace_once(
+    test,
+    '''            match node.next_event().await.map_err(|error| format!("{label} discovery node failed: {error:#}"))? {
+                DiscoveryNetworkEvent::InboundRequest { channel, .. } => {
+                    node.respond(channel, WireResponse::Error { code: "TEST_OK".into(), message: label.into() })
+                        .map_err(|error| format!("{label} response failed: {error:#}"))?;
+                }
+                _ => {}
+            }
+''',
+    '''            if let DiscoveryNetworkEvent::InboundRequest { channel, .. } =
+                node.next_event().await.map_err(|error| format!("{label} discovery node failed: {error:#}"))?
+            {
+                node.respond(channel, WireResponse::Error { code: "TEST_OK".into(), message: label.into() })
+                    .map_err(|error| format!("{label} response failed: {error:#}"))?;
+            }
+''',
+)
+
+print("Agent 4 final clippy-only structural repairs applied without semantic change")
