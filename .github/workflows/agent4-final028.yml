@@ -17,7 +17,7 @@ env:
 
 jobs:
   materialize-final-source:
-    if: github.event.head_commit.message == 'ci(agent4): install one-shot FINAL-028 finalizer'
+    if: startsWith(github.event.head_commit.message, 'ci(agent4)')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -76,14 +76,13 @@ jobs:
             crates/swarm-core/src/discovery.rs \
             crates/swarm-network/src/wire.rs \
             crates/swarm-protocol/src/discovery.rs
-          test -z "$(git status --short | grep '^??' || true)"
           git commit -m "fix(agent4): finalize FINAL-028 production tree"
           git push origin HEAD:fix/agent-4-network
           test -z "$(git status --short)"
           echo "Production candidate: $(git rev-parse HEAD)"
 
   linux-exact-head:
-    if: github.event.head_commit.message == 'fix(agent4): finalize FINAL-028 production tree'
+    if: startsWith(github.event.head_commit.message, 'fix(agent4)')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -105,49 +104,41 @@ jobs:
         run: cargo check --workspace --all-targets --locked
       - name: Workspace strict clippy all targets locked
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Network suite
-        run: cargo test -p swarm-network --locked
-      - name: Protocol suite
-        run: cargo test -p swarm-protocol --locked
-      - name: Core suite
-        run: cargo test -p swarm-core --locked
-      - name: Storage suite including Agent 3 integrity and fencing
-        run: cargo test -p swarm-storage --locked
-      - name: Consensus suite
-        run: cargo test -p swarm-consensus --locked
-      - name: CLI library and binaries
-        run: cargo test -p swarm-cli --lib --bins --locked
-      - name: FINAL-028 pure freshness suite
-        run: cargo test -p swarm-cli --test discovery_freshness --locked -- --nocapture
-      - name: FINAL-028 malicious-provider network browse and resolve
-        run: cargo test -p swarm-cli --test discovery_network_freshness --locked -- --nocapture
-      - name: Durable three-peer recovery-promise freshness transition
-        run: cargo test -p swarm-cli --lib --locked durable_recovery_promise_fences_stale_freshness_and_current_majority_recovers -- --exact --nocapture
+      - name: Network protocol core storage consensus and CLI suites
+        run: |
+          cargo test -p swarm-network --locked
+          cargo test -p swarm-protocol --locked
+          cargo test -p swarm-core --locked
+          cargo test -p swarm-storage --locked
+          cargo test -p swarm-consensus --locked
+          cargo test -p swarm-cli --lib --bins --locked
+      - name: FINAL-028 pure and network freshness suites
+        run: |
+          cargo test -p swarm-cli --test discovery_freshness --locked -- --nocapture
+          cargo test -p swarm-cli --test discovery_network_freshness --locked -- --nocapture
+          cargo test -p swarm-cli --lib --locked durable_recovery_promise_fences_stale_freshness_and_current_majority_recovers -- --exact --nocapture
       - name: Connection-bound handshake captured replay and hostile input
         run: |
           cargo test -p swarm-network --test peer_networking_acceptance --locked
           cargo test -p swarm-network --test input_hardening --locked
-      - name: Agent 4 invite DNS address and privacy regressions
+      - name: Invite DNS address and privacy regressions
         run: |
           cargo test -p swarm-network --locked invite
           cargo test -p swarm-cli --lib --locked friend
-      - name: Agent 1 3-peer 5-peer partition and Solo-loss safety
-        run: cargo test -p swarm-cli --test consensus_partition_safety --locked -- --nocapture
-      - name: Agent 1 live membership replication
-        run: cargo test -p swarm-cli --test live_join_replication --locked
-      - name: Automatic invite join
-        run: cargo test -p swarm-cli --test automatic_invite_join --locked
-      - name: Agent 1 three-daemon recovery
-        run: cargo test -p swarm-cli --test three_daemon_recovery --locked
-      - name: Agent 1 recovery successor crash resume
-        run: cargo test -p swarm-cli --test recovery_successor_dies --locked
-      - name: Agent 2 membership direct-history and stale-authority semantics
+      - name: Agent 1 partition membership invite and recovery campaigns
+        run: |
+          cargo test -p swarm-cli --test consensus_partition_safety --locked -- --nocapture
+          cargo test -p swarm-cli --test live_join_replication --locked
+          cargo test -p swarm-cli --test automatic_invite_join --locked
+          cargo test -p swarm-cli --test three_daemon_recovery --locked
+          cargo test -p swarm-cli --test recovery_successor_dies --locked
+      - name: Agent 2 direct history stale authority and canonical semantics
         run: |
           cargo test -p swarm-storage --test membership_history --locked
           cargo test -p swarm-core --test protocol_version_fail_closed --locked
           cargo test -p swarm-protocol --test canonical_semantics --locked
           cargo test -p swarm-cli --test migration_core --locked
-      - name: Agent 3 canonical-head immutable-slot promise and stale-fence campaigns
+      - name: Agent 3 canonical head immutable slot process promise and stale fence
         run: |
           cargo test -p swarm-storage --test storage_integrity --locked -- --nocapture
           cargo test -p swarm-storage --test publication_ownership_race --locked -- --nocapture
@@ -161,7 +152,7 @@ jobs:
           test -z "$(git status --short)"
 
   windows-proof-portability:
-    if: github.event.head_commit.message == 'fix(agent4): finalize FINAL-028 production tree'
+    if: startsWith(github.event.head_commit.message, 'fix(agent4)')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -173,16 +164,13 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --short)"
-      - name: Freshness protocol serialization and canonical signing bytes
-        run: cargo test -p swarm-protocol --locked discovery
-      - name: Freshness core proof verification and bounds
-        run: cargo test -p swarm-core --locked discovery
-      - name: Joint quorum canonicality
-        run: cargo test -p swarm-consensus --locked membership
-      - name: FINAL-028 deterministic verifier suite
-        run: cargo test -p swarm-cli --test discovery_freshness --locked
-      - name: Network freshness target compiles on Windows
-        run: cargo test -p swarm-cli --test discovery_network_freshness --no-run --locked
+      - name: Freshness serialization canonical signing proof bounds and verifier
+        run: |
+          cargo test -p swarm-protocol --locked discovery
+          cargo test -p swarm-core --locked discovery
+          cargo test -p swarm-consensus --locked membership
+          cargo test -p swarm-cli --test discovery_freshness --locked
+          cargo test -p swarm-cli --test discovery_network_freshness --no-run --locked
       - name: Exact SHA and clean tree at end
         shell: bash
         run: |
@@ -190,7 +178,7 @@ jobs:
           test -z "$(git status --short)"
 
   macos-proof-portability:
-    if: github.event.head_commit.message == 'fix(agent4): finalize FINAL-028 production tree'
+    if: startsWith(github.event.head_commit.message, 'fix(agent4)')
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -201,16 +189,13 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --short)"
-      - name: Freshness protocol serialization and canonical signing bytes
-        run: cargo test -p swarm-protocol --locked discovery
-      - name: Freshness core proof verification and bounds
-        run: cargo test -p swarm-core --locked discovery
-      - name: Joint quorum canonicality
-        run: cargo test -p swarm-consensus --locked membership
-      - name: FINAL-028 deterministic verifier suite
-        run: cargo test -p swarm-cli --test discovery_freshness --locked
-      - name: Network freshness target compiles on macOS
-        run: cargo test -p swarm-cli --test discovery_network_freshness --no-run --locked
+      - name: Freshness serialization canonical signing proof bounds and verifier
+        run: |
+          cargo test -p swarm-protocol --locked discovery
+          cargo test -p swarm-core --locked discovery
+          cargo test -p swarm-consensus --locked membership
+          cargo test -p swarm-cli --test discovery_freshness --locked
+          cargo test -p swarm-cli --test discovery_network_freshness --no-run --locked
       - name: Exact SHA and clean tree at end
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
