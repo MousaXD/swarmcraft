@@ -34,6 +34,7 @@ jobs:
           python .github/agent4_finalize_source.py
           python .github/agent4_finalize_source_v2.py
           python .github/agent4_finalize_source_v3.py
+          python .github/agent4_finalize_source_v4.py
       - name: Format direct source
         run: cargo fmt --all
       - name: Prove only Agent 4 production and permanent regression files changed
@@ -47,6 +48,7 @@ jobs:
             'crates/swarm-cli/tests/discovery_network_freshness.rs' \
             'crates/swarm-consensus/src/membership.rs' \
             'crates/swarm-core/src/discovery.rs' \
+            'crates/swarm-network/src/discovery.rs' \
             'crates/swarm-network/src/wire.rs' \
             'crates/swarm-protocol/src/discovery.rs' | sort)"
           test "$changed" = "$expected"
@@ -79,6 +81,7 @@ jobs:
             crates/swarm-cli/tests/discovery_network_freshness.rs \
             crates/swarm-consensus/src/membership.rs \
             crates/swarm-core/src/discovery.rs \
+            crates/swarm-network/src/discovery.rs \
             crates/swarm-network/src/wire.rs \
             crates/swarm-protocol/src/discovery.rs
           git commit -m "fix(agent4): finalize FINAL-028 production tree"
@@ -236,9 +239,11 @@ jobs:
           git rm --ignore-unmatch \
             .github/agent4_final028_patch.py \
             .github/agent4_final028_repair.py \
+            .github/agent4_finalize_network_test.py \
             .github/agent4_finalize_source.py \
             .github/agent4_finalize_source_v2.py \
             .github/agent4_finalize_source_v3.py \
+            .github/agent4_finalize_source_v4.py \
             .github/agent4_finalize_ledger.py \
             .github/clippy-failure.txt \
             .github/workflows/agent4-final028.yml
@@ -250,9 +255,11 @@ jobs:
             '.github/agent4_final028_patch.py' \
             '.github/agent4_final028_repair.py' \
             '.github/agent4_finalize_ledger.py' \
+            '.github/agent4_finalize_network_test.py' \
             '.github/agent4_finalize_source.py' \
             '.github/agent4_finalize_source_v2.py' \
             '.github/agent4_finalize_source_v3.py' \
+            '.github/agent4_finalize_source_v4.py' \
             '.github/clippy-failure.txt' \
             '.github/workflows/agent4-final028.yml' \
             'implementation/agent-4-network.md' | sort)"
