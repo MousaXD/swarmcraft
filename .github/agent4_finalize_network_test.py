@@ -187,7 +187,9 @@ browse_start = '''    tokio::time::sleep(Duration::from_secs(3)).await;
 '''
 browse_replacement = '''    let temp = tempfile::tempdir().unwrap();
     let paths = DataPaths::from_root(temp.path());
-    let bootstraps = vec![b_address.clone(), c_address.clone(), a_address.clone(), x_address.clone()];
+    // Dial hostile/noncanonical locators first so participation and ordering are
+    // properties of the regression topology rather than transport scheduling.
+    let bootstraps = vec![a_address.clone(), x_address.clone(), b_address.clone(), c_address.clone()];
 
     // Drive Kademlia readiness from observed provider sets rather than wall-clock sleeps.
     wait_for_provider_topology(
@@ -299,4 +301,4 @@ elif cleanup_new not in text:
     raise SystemExit("missing provider task cleanup anchor")
 
 path.write_text(text)
-print("FINAL-028 network regression uses observed topology readiness and surfaces peer task lifecycle failures")
+print("FINAL-028 network regression uses observed topology readiness, hostile-first locator order, and surfaces peer task lifecycle failures")
