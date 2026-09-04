@@ -185,9 +185,43 @@ while True:
     else:
         search_from = end + 1
 
-if replacements == 0:
-    if "announcement(AnnouncementFixture {" not in text:
-        raise SystemExit("no 10-argument announcement test-helper call sites found")
+if replacements == 0 and "announcement(AnnouncementFixture {" not in text:
+    raise SystemExit("no 10-argument announcement test-helper call sites found")
 
 PATH.write_text(text)
 print(f"FINAL-028 network announcement fixture structured ({replacements} call sites rewritten)")
+
+membership_path = Path("crates/swarm-consensus/src/membership.rs")
+membership_text = membership_path.read_text()
+anchor = '''pub fn validate_discovery_membership_proof_shape(
+    proof: &DiscoveryMembershipProofV1,
+) -> Result<(), MembershipConsensusError> {
+'''
+canonical_guard = '''pub fn validate_discovery_membership_proof_shape(
+    proof: &DiscoveryMembershipProofV1,
+) -> Result<(), MembershipConsensusError> {
+    let members_are_canonical = |members: &[WorldMemberV1]| {
+        members
+            .windows(2)
+            .all(|pair| pair[0].peer_id < pair[1].peer_id)
+    };
+    if !members_are_canonical(&proof.initial_membership.members)
+        || !members_are_canonical(&proof.current_membership.members)
+        || proof.membership_certificates.iter().any(|certificate| {
+            !members_are_canonical(&certificate.proposal.previous.members)
+                || !members_are_canonical(&certificate.proposal.proposed.members)
+        })
+        || proof.pending_membership.as_ref().is_some_and(|proposal| {
+            !members_are_canonical(&proposal.previous.members)
+                || !members_are_canonical(&proposal.proposed.members)
+        })
+    {
+        return Err(MembershipConsensusError::MalformedHistory);
+    }
+'''
+if canonical_guard not in membership_text:
+    if anchor not in membership_text:
+        raise SystemExit("missing discovery membership proof validator anchor")
+    membership_text = membership_text.replace(anchor, canonical_guard, 1)
+membership_path.write_text(membership_text)
+print("FINAL-028 discovery membership proof now rejects noncanonical member ordering")
