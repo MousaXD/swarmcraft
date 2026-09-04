@@ -47,9 +47,6 @@ def matching_paren(text: str, open_index: int) -> int:
         if ch == '"':
             in_string = True
         elif ch == "'":
-            # Rust lifetimes only appear in the helper declaration, which is not
-            # transformed as a call. Test call arguments use ordinary char/string
-            # literals, so treating a quote here as a char literal is sufficient.
             in_char = True
         elif ch == "(":
             round_depth += 1
@@ -169,6 +166,11 @@ while True:
     start = text.find(needle, search_from)
     if start < 0:
         break
+    # Do not parse the helper declaration itself. Its `<'_>` lifetime is Rust
+    # syntax, not a char literal. Only call sites are candidates for rewriting.
+    if text[max(0, start - 3) : start] == "fn ":
+        search_from = start + len(needle)
+        continue
     open_index = start + len("announcement")
     end = matching_paren(text, open_index)
     payload = text[open_index + 1 : end]
@@ -185,8 +187,6 @@ while True:
         search_from = end + 1
 
 if replacements == 0:
-    # Idempotence: once all calls already use the fixture struct, no 10-argument
-    # invocation remains and the helper signature above proves the conversion.
     if "announcement(AnnouncementFixture {" not in text:
         raise SystemExit("no 10-argument announcement test-helper call sites found")
 
