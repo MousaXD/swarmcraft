@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use swarm_protocol::{
-    AuthorityLeaseGrantV1, AuthorityTransferV1, BlobEncoding, DiscoveryFilterV1, EpochRecordV1, FriendPresenceV1,
-    Hash32, JoinRequestV1, LeaveRequestV1, MembershipCertificateV1, MembershipProposalV1, MembershipRecordV1,
-    MembershipVoteV1, PeerHelloV1, PeerId, RecoveryBallotV1, RecoveryCertificateV1, RecoveryVoteV1, SleepRecordV1,
-    SnapshotManifestV1, SoloBranchV1, WorldAnnouncementV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldStatusV1,
+    AuthorityLeaseGrantV1, AuthorityTransferV1, BlobEncoding, DiscoveryFilterV1, DiscoveryFreshnessChallengeV1,
+    DiscoveryFreshnessVoteV1, DiscoveryMembershipProofV1, EpochRecordV1, FriendPresenceV1, Hash32, JoinRequestV1,
+    LeaveRequestV1, MembershipCertificateV1, MembershipProposalV1, MembershipRecordV1, MembershipVoteV1, PeerHelloV1,
+    PeerId, RecoveryBallotV1, RecoveryCertificateV1, RecoveryVoteV1, SleepRecordV1, SnapshotManifestV1, SoloBranchV1,
+    WorldAnnouncementV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldStatusV1,
 };
 use thiserror::Error;
 
@@ -18,6 +19,9 @@ pub const MAX_DISCOVERY_RESULTS: usize = 64;
 pub const MAX_DISCOVERY_TAGS: usize = 16;
 pub const MAX_DISCOVERY_QUERY_BYTES: usize = 512;
 pub const MAX_DISCOVERY_ANNOUNCEMENT_BYTES: usize = 16 * 1024;
+pub const MAX_DISCOVERY_MEMBERSHIP_PROOF_BYTES: usize = 512 * 1024;
+pub const MAX_DISCOVERY_MEMBERSHIP_CERTIFICATES: usize = 256;
+pub const MAX_HANDSHAKE_TRANSPORT_ID_BYTES: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicaAckV1 {
@@ -69,16 +73,42 @@ pub struct BlobResumeV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerHelloProofV1 {
+    pub hello: PeerHelloV1,
+    pub challenge: [u8; 32],
+    pub claimant_transport_peer: Vec<u8>,
+    pub receiver_transport_peer: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WireRequest {
     Hello(PeerHelloV1),
-    Ping { nonce: u64 },
-    WorldStatus { world_id: WorldId },
-    WorldDescriptor { world_id: WorldId },
+    Ping {
+        nonce: u64,
+    },
+    WorldStatus {
+        world_id: WorldId,
+    },
+    WorldDescriptor {
+        world_id: WorldId,
+    },
     JoinRequest(Box<JoinRequestV1>),
     LeaveRequest(Box<LeaveRequestV1>),
     SnapshotManifest(SnapshotManifestV1),
-    MissingBlobs { world_id: WorldId, snapshot_number: u64, hashes: Vec<Hash32> },
-    BlobChunk { world_id: WorldId, hash: Hash32, encoding: BlobEncoding, offset: u64, data: Vec<u8>, finished: bool },
+    MissingBlobs {
+        world_id: WorldId,
+        snapshot_number: u64,
+        hashes: Vec<Hash32>,
+    },
+    BlobChunk {
+        world_id: WorldId,
+        hash: Hash32,
+        encoding: BlobEncoding,
+        offset: u64,
+        data: Vec<u8>,
+        finished: bool,
+    },
     ReplicaAck(ReplicaAckV1),
     Membership(MembershipRecordV1),
     Epoch(EpochRecordV1),
@@ -87,20 +117,88 @@ pub enum WireRequest {
     Sleep(SleepRecordV1),
     // 0.2 extensions are appended so existing postcard enum discriminants remain stable.
     RecoveryBallot(Box<RecoveryBallotV1>),
-    RecoveryEpoch { record: EpochRecordV1, certificate: Box<RecoveryCertificateV1> },
+    RecoveryEpoch {
+        record: EpochRecordV1,
+        certificate: Box<RecoveryCertificateV1>,
+    },
     WorldConfig(Box<WorldConfigV1>),
     SoloBranch(Box<SoloBranchV1>),
     // Host readiness is appended so all earlier postcard discriminants stay stable.
-    HostCapability { world_id: WorldId },
+    HostCapability {
+        world_id: WorldId,
+    },
     // Discovery extensions are append-only for postcard compatibility.
-    DiscoveryPublic { filter: DiscoveryFilterV1 },
-    DiscoveryResolve { world_id: WorldId },
-    FriendPresence { expected_peer_id: PeerId, requester_peer_id: PeerId, nonce: [u8; 32] },
+    DiscoveryPublic {
+        filter: DiscoveryFilterV1,
+    },
+    DiscoveryResolve {
+        world_id: WorldId,
+    },
+    FriendPresence {
+        expected_peer_id: PeerId,
+        requester_peer_id: PeerId,
+        nonce: [u8; 32],
+    },
     MembershipProposal(Box<MembershipProposalV1>),
     MembershipCommit(Box<MembershipCertificateV1>),
+    // Connection-bound authentication extensions follow integrated membership variants.
+    HelloChallenge {
+        challenge: [u8; 32],
+    },
+    HelloProof(Box<PeerHelloProofV1>),
+    // FINAL-028 challenge-bound authority freshness extensions are append-only.
+    DiscoveryFreshnessContext {
+        world_id: WorldId,
+        announcement_hash: Hash32,
+        verifier_peer_id: PeerId,
+        nonce: [u8; 32],
+        issued_unix_ms: u64,
+        expires_unix_ms: u64,
+    },
+    DiscoveryFreshnessVote(Box<DiscoveryFreshnessChallengeV1>),
 }
 
 impl WireRequest {
+    /// Return the canonical world whose current membership is required before
+    /// this request may be dispatched by the replication daemon.
+    ///
+    /// This match is intentionally exhaustive. Adding a new wire request must
+    /// make an explicit authorization decision instead of silently inheriting
+    /// an unsafe default.
+    pub fn membership_world_id(&self) -> Option<WorldId> {
+        match self {
+            Self::Hello(_)
+            | Self::Ping { .. }
+            | Self::JoinRequest(_)
+            | Self::DiscoveryPublic { .. }
+            | Self::DiscoveryResolve { .. }
+            | Self::FriendPresence { .. }
+            | Self::MembershipProposal(_)
+            | Self::MembershipCommit(_)
+            | Self::HelloChallenge { .. }
+            | Self::HelloProof(_)
+            | Self::DiscoveryFreshnessContext { .. }
+            | Self::DiscoveryFreshnessVote(_) => None,
+            Self::WorldStatus { world_id }
+            | Self::WorldDescriptor { world_id }
+            | Self::MissingBlobs { world_id, .. }
+            | Self::BlobChunk { world_id, .. }
+            | Self::HostCapability { world_id } => Some(*world_id),
+            Self::LeaveRequest(request) => Some(request.world_id),
+            Self::SnapshotManifest(manifest) => Some(manifest.world_id),
+            Self::ReplicaAck(ack) => Some(ack.world_id),
+            Self::Membership(record) => Some(record.world_id),
+            Self::Epoch(record) => Some(record.world_id),
+            Self::AuthorityTransfer(transfer) => Some(transfer.world_id),
+            Self::LeaseGrant(lease) => Some(lease.world_id),
+            Self::Sleep(record) => Some(record.world_id),
+            Self::RecoveryBallot(ballot) => Some(ballot.world_id),
+            Self::RecoveryEpoch { record, .. } => Some(record.world_id),
+            Self::WorldConfig(config) => Some(config.world_id),
+            Self::SoloBranch(branch) => Some(branch.world_id),
+        }
+    }
+
     pub fn validate_limits(&self) -> Result<(), WireLimitError> {
         match self {
             Self::BlobChunk { data, .. } if data.len() > MAX_BLOB_CHUNK => {
@@ -147,6 +245,12 @@ impl WireRequest {
                 Ok(())
             }
             Self::DiscoveryPublic { filter } => validate_discovery_filter(filter),
+            Self::HelloProof(proof)
+                if proof.claimant_transport_peer.len() > MAX_HANDSHAKE_TRANSPORT_ID_BYTES
+                    || proof.receiver_transport_peer.len() > MAX_HANDSHAKE_TRANSPORT_ID_BYTES =>
+            {
+                Err(WireLimitError::HandshakeTransportIdTooLarge)
+            }
             _ => Ok(()),
         }
     }
@@ -182,6 +286,9 @@ pub enum WireResponse {
     FriendPresence(Option<FriendPresenceV1>),
     MembershipVote(Box<MembershipVoteV1>),
     MembershipCommitAccepted { sequence: u64 },
+    HelloChallengeAccepted,
+    DiscoveryFreshnessContext(Option<Box<DiscoveryMembershipProofV1>>),
+    DiscoveryFreshnessVote(Option<Box<DiscoveryFreshnessVoteV1>>),
 }
 
 impl WireResponse {
@@ -197,6 +304,42 @@ impl WireResponse {
                 Ok(())
             }
             Self::DiscoveryResolved(Some(value)) => validate_announcement_size(value),
+            Self::DiscoveryFreshnessContext(Some(proof)) => {
+                if proof.membership_certificates.len() > MAX_DISCOVERY_MEMBERSHIP_CERTIFICATES {
+                    return Err(WireLimitError::TooManyDiscoveryMembershipCertificates(
+                        proof.membership_certificates.len(),
+                    ));
+                }
+                let member_count = proof
+                    .membership_certificates
+                    .iter()
+                    .flat_map(|certificate| {
+                        [certificate.proposal.previous.members.len(), certificate.proposal.proposed.members.len()]
+                    })
+                    .chain([proof.initial_membership.members.len(), proof.current_membership.members.len()])
+                    .chain(
+                        proof
+                            .pending_membership
+                            .iter()
+                            .flat_map(|proposal| [proposal.previous.members.len(), proposal.proposed.members.len()]),
+                    )
+                    .max()
+                    .unwrap_or(0);
+                if member_count > MAX_WORLD_MEMBERS {
+                    return Err(WireLimitError::TooManyMembers(member_count));
+                }
+                let vote_count =
+                    proof.membership_certificates.iter().map(|certificate| certificate.votes.len()).max().unwrap_or(0);
+                if vote_count > MAX_MEMBERSHIP_VOTES {
+                    return Err(WireLimitError::TooManyMembershipVotes(vote_count));
+                }
+                let bytes = serde_json::to_vec(proof.as_ref())
+                    .map_err(|_| WireLimitError::DiscoveryMembershipProofTooLarge(usize::MAX))?;
+                if bytes.len() > MAX_DISCOVERY_MEMBERSHIP_PROOF_BYTES {
+                    return Err(WireLimitError::DiscoveryMembershipProofTooLarge(bytes.len()));
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -245,6 +388,14 @@ pub enum WireLimitError {
     DiscoveryFilterTooLarge(usize),
     #[error("world discovery announcement is {0} encoded bytes; maximum is {MAX_DISCOVERY_ANNOUNCEMENT_BYTES}")]
     DiscoveryAnnouncementTooLarge(usize),
+    #[error(
+        "discovery membership proof contains {0} certificates; maximum is {MAX_DISCOVERY_MEMBERSHIP_CERTIFICATES}"
+    )]
+    TooManyDiscoveryMembershipCertificates(usize),
+    #[error("discovery membership proof is {0} encoded bytes; maximum is {MAX_DISCOVERY_MEMBERSHIP_PROOF_BYTES}")]
+    DiscoveryMembershipProofTooLarge(usize),
+    #[error("handshake transport peer identifier exceeds {MAX_HANDSHAKE_TRANSPORT_ID_BYTES} bytes")]
+    HandshakeTransportIdTooLarge,
 }
 
 #[cfg(test)]
@@ -351,8 +502,11 @@ mod tests {
             membership_policy: MembershipPolicyV1::InviteOnly,
             config_sequence: 1,
             config_hash: Hash32([3; 32]),
+            membership_sequence: 0,
+            membership_hash: Hash32([6; 32]),
             authority_epoch: 1,
             fencing_token: 1,
+            canonical_head: None,
             announcement_sequence: 1,
             issued_unix_ms: 1,
             expires_unix_ms: 2,

@@ -23,13 +23,14 @@ use swarm_core::{
     verify_snapshot_signature, verify_transfer_signature, DataPaths, PeerIdentity,
 };
 use swarm_network::{
-    load_or_create_transport_key, BlobResumeV1, HostCapabilityV1, NetworkEvent, ReplicaAckV1, ResponseChannel,
-    SwarmNode, TransportPeerId, WireRequest, WireResponse, MAX_BLOB_CHUNK,
+    load_or_create_transport_key, validate_invite_dial_address, BlobResumeV1, HostCapabilityV1, NetworkEvent,
+    ReplicaAckV1, ResponseChannel, SwarmNode, TransportPeerId, WireRequest, WireResponse, MAX_BLOB_CHUNK,
 };
 use swarm_protocol::{
-    AuthorityLeaseGrantV1, BlobDescriptor, EpochMode, EpochRecordV1, Hash32, MembershipCertificateV1,
-    MembershipProposalV1, MembershipRecordV1, MembershipVoteV1, PeerId, RecoveryBallotV1, RecoveryCertificateV1,
-    RecoveryVoteV1, SnapshotManifestV1, TransferPhase, WorldDescriptorV1, WorldId, WorldStatusV1, PROTOCOL_VERSION,
+    peer_id_from_public_key, AuthorityLeaseGrantV1, BlobDescriptor, EpochMode, EpochRecordV1, Hash32,
+    MembershipCertificateV1, MembershipProposalV1, MembershipRecordV1, MembershipVoteV1, PeerId, RecoveryBallotV1,
+    RecoveryCertificateV1, RecoveryVoteV1, SnapshotManifestV1, TransferPhase, WorldDescriptorV1, WorldId,
+    WorldStatusV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{DurableMembershipPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage};
 use tokio::time::MissedTickBehavior;
@@ -134,7 +135,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
         "background-replica-v1".into(),
         "host-readiness-v1".into(),
     ])?;
-    let mut node = SwarmNode::new(transport_key, hello)?;
+    let mut node = SwarmNode::new(transport_key, hello, identity.network_signing_key())?;
     node.listen(listen.parse().context("invalid listen multiaddress")?)?;
     dial_pending_invite_bootstraps(storage, &mut node)?;
     info!(peer = %identity.peer_id(), %listen, "SwarmCraft daemon starting");
@@ -272,7 +273,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                         info!(transport = %transport_peer, "peer disconnected");
                     }
                     NetworkEvent::Connected { transport_peer } => {
-                        info!(transport = %transport_peer, "transport connected; waiting for signed PeerHello");
+                        info!(transport = %transport_peer, "transport connected; waiting for connection-bound application proof");
                     }
                     NetworkEvent::Discovered { transport_peer, address } => {
                         info!(transport = %transport_peer, %address, "peer discovered");
@@ -1119,6 +1120,10 @@ fn dial_pending_invite_bootstraps(storage: &Storage, node: &mut SwarmNode) -> Re
         for value in request.invite.bootstrap_addrs {
             match value.parse() {
                 Ok(address) => {
+                    if let Err(error) = validate_invite_dial_address(&address) {
+                        warn!(world = %metadata.world_id, %value, %error, "invite bootstrap DNS scope validation failed");
+                        continue;
+                    }
                     if let Err(error) = node.dial(address) {
                         warn!(world = %metadata.world_id, %value, %error, "invite bootstrap dial failed");
                     }
@@ -1188,7 +1193,7 @@ fn push_known_worlds(
                 }
             }
         }
-        if descriptor.member(application_peer).is_none_or(|member| member.banned) {
+        if authorized_descriptor_member(&descriptor, application_peer).is_err() {
             continue;
         }
         push_committed_world_payload(storage, node, transport_peer, world, outbound, true)?;
@@ -1253,6 +1258,9 @@ fn handle_request(
 ) -> Result<()> {
     let identity = context.identity;
     let storage = context.storage;
+    if let Some(world_id) = request.membership_world_id() {
+        authorize_member(storage, world_id, application_peer)?;
+    }
     match request {
         WireRequest::Ping { nonce } => node.respond(channel, WireResponse::Pong { nonce })?,
         WireRequest::WorldStatus { world_id } => {
@@ -1281,9 +1289,8 @@ fn handle_request(
             }
             verify_join_request_signature(&request)?;
             verify_invite_signature(&request.invite)?;
-            if request.invite.expires_unix_ms < unix_millis()? {
-                return Err(anyhow!("invite has expired"));
-            }
+            crate::invite::validate_invite_expiry(request.invite.expires_unix_ms, unix_millis()?)
+                .context("join invite lifetime is invalid")?;
             let world = request.world_id;
             let metadata = storage.load_world(world)?;
             if request.invite.genesis.world_id()? != world
@@ -1902,7 +1909,9 @@ fn handle_request(
         }
         WireRequest::DiscoveryPublic { .. }
         | WireRequest::DiscoveryResolve { .. }
-        | WireRequest::FriendPresence { .. } => {
+        | WireRequest::FriendPresence { .. }
+        | WireRequest::DiscoveryFreshnessContext { .. }
+        | WireRequest::DiscoveryFreshnessVote(_) => {
             node.respond(
                 channel,
                 WireResponse::Error {
@@ -1911,7 +1920,9 @@ fn handle_request(
                 },
             )?;
         }
-        WireRequest::Hello(_) => return Err(anyhow!("PeerHello is handled by the network authentication layer")),
+        WireRequest::Hello(_) | WireRequest::HelloChallenge { .. } | WireRequest::HelloProof(_) => {
+            return Err(anyhow!("application handshake requests are handled by the network authentication layer"));
+        }
     }
     Ok(())
 }
@@ -2562,12 +2573,23 @@ fn validate_transfer(storage: &Storage, transfer: &swarm_protocol::AuthorityTran
     Ok(())
 }
 
-fn authorize_member(storage: &Storage, world: WorldId, peer: PeerId) -> Result<()> {
-    let descriptor = storage.load_world_descriptor(world)?;
+fn authorized_descriptor_member(
+    descriptor: &WorldDescriptorV1,
+    peer: PeerId,
+) -> Result<&swarm_protocol::WorldMemberV1> {
     let member = descriptor.member(peer).context("peer is not an authorized member of this world")?;
+    if peer_id_from_public_key(&member.public_key) != peer {
+        return Err(anyhow!("world membership public key does not match peer identity"));
+    }
     if member.banned {
         return Err(anyhow!("peer is banned from this world"));
     }
+    Ok(member)
+}
+
+fn authorize_member(storage: &Storage, world: WorldId, peer: PeerId) -> Result<()> {
+    let descriptor = storage.load_world_descriptor(world)?;
+    authorized_descriptor_member(&descriptor, peer)?;
     Ok(())
 }
 
@@ -2628,6 +2650,59 @@ fn unix_millis() -> Result<u64> {
 
 fn request_key(value: &impl Debug) -> String {
     format!("{value:?}")
+}
+
+#[cfg(test)]
+mod authorization_matrix_tests {
+    use super::*;
+
+    fn member(key: [u8; 32], banned: bool) -> swarm_protocol::WorldMemberV1 {
+        swarm_protocol::WorldMemberV1 {
+            peer_id: peer_id_from_public_key(&key),
+            public_key: key,
+            authority_eligible: true,
+            banned,
+        }
+    }
+
+    fn descriptor(members: Vec<swarm_protocol::WorldMemberV1>) -> WorldDescriptorV1 {
+        WorldDescriptorV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: WorldId([9; 32]),
+            compatibility_fingerprint: Hash32([8; 32]),
+            members,
+            preferred_replication_factor: 2,
+        }
+    }
+
+    #[test]
+    fn current_member_is_authorized_but_stranger_and_removed_member_are_not() {
+        let current = member([1; 32], false);
+        let current_peer = current.peer_id;
+        let stranger_peer = peer_id_from_public_key(&[2; 32]);
+        let current_descriptor = descriptor(vec![current]);
+        assert!(authorized_descriptor_member(&current_descriptor, current_peer).is_ok());
+        assert!(authorized_descriptor_member(&current_descriptor, stranger_peer).is_err());
+
+        let removed_descriptor = descriptor(Vec::new());
+        assert!(authorized_descriptor_member(&removed_descriptor, current_peer).is_err());
+    }
+
+    #[test]
+    fn banned_and_key_mismatched_members_are_not_authorized() {
+        let banned = member([3; 32], true);
+        let banned_peer = banned.peer_id;
+        assert!(authorized_descriptor_member(&descriptor(vec![banned]), banned_peer).is_err());
+
+        let claimed_peer = peer_id_from_public_key(&[4; 32]);
+        let mismatched = swarm_protocol::WorldMemberV1 {
+            peer_id: claimed_peer,
+            public_key: [5; 32],
+            authority_eligible: true,
+            banned: false,
+        };
+        assert!(authorized_descriptor_member(&descriptor(vec![mismatched]), claimed_peer).is_err());
+    }
 }
 
 #[cfg(test)]
