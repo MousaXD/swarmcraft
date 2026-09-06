@@ -50,15 +50,67 @@ jobs:
           runtime = Path('apps/desktop/src-tauri/src/runtime.rs')
           text = runtime.read_text()
           before = '        let sensitive = lower.contains("swarmcraft_ipc_token")\n            || lower.contains("authorization:")\n            || lower.contains("authorization=")\n            || lower.contains("bearer ")\n            || lower.contains("ipc_token=")\n            || lower.contains("ipc-token=");'
-          after = '        let sensitive = [\n            "swarmcraft_ipc_token",\n            "authorization:",\n            "authorization=",\n            "bearer ",\n            "ipc_token=",\n            "ipc-token=",\n            "api_key",\n            "apikey",\n            "token",\n        ]\n        .iter()\n        .any(|marker| lower.contains(marker));'
+          after = '        let sensitive = [\n            "swarmcraft_ipc_token",\n            "authorization:",\n            "authorization=",\n            "bearer ",\n            "ipc_token=",\n            "ipc-token=",\n            "api_key",\n            "apikey",\n            "token",\n        ]\n        .into_iter()\n        .any(|marker| lower.contains(marker));'
           if text.count(before) != 1:
               raise SystemExit('expected exactly one runtime diagnostics secret predicate')
           text = text.replace(before, after, 1)
+
+          before_import = '    use super::{redact_runtime_output, sanitize_world_key, SlotState};'
+          after_import = '    use super::{\n        append_runtime_diagnostic, redact_runtime_output, sanitize_world_key, RuntimeDiagnostic,\n        SlotState, MAX_RUNTIME_DIAGNOSTIC_BYTES,\n    };\n    use std::{fs, time::{SystemTime, UNIX_EPOCH}};'
+          if text.count(before_import) != 1:
+              raise SystemExit('expected diagnostics test import block')
+          text = text.replace(before_import, after_import, 1)
+
           before_test = '            b"normal line\\nSWARMCRAFT_IPC_TOKEN=super-secret\\nAuthorization: Bearer secret\\nipc_token=secret\\n",\n        );\n        assert!(output.contains("normal line"));\n        assert!(!output.contains("super-secret"));\n        assert!(!output.contains("Bearer secret"));\n        assert!(!output.contains("ipc_token=secret"));\n        assert_eq!(output.matches("[REDACTED]").count(), 3);'
           after_test = '            b"normal line\\nSWARMCRAFT_IPC_TOKEN=super-secret\\nAuthorization: Bearer secret\\nipc_token=secret\\napi_key=also-secret\\napikey=another-secret\\ntoken=generic-secret\\n",\n        );\n        assert!(output.contains("normal line"));\n        assert!(!output.contains("super-secret"));\n        assert!(!output.contains("Bearer secret"));\n        assert!(!output.contains("ipc_token=secret"));\n        assert!(!output.contains("also-secret"));\n        assert!(!output.contains("another-secret"));\n        assert!(!output.contains("generic-secret"));\n        assert_eq!(output.matches("[REDACTED]").count(), 6);'
           if text.count(before_test) != 1:
               raise SystemExit('expected exactly one runtime diagnostics redaction test body')
-          runtime.write_text(text.replace(before_test, after_test, 1))
+          text = text.replace(before_test, after_test, 1)
+
+          closing = '\n}'
+          if not text.endswith(closing):
+              raise SystemExit('unexpected runtime.rs test module ending')
+          extra = r'''
+
+    #[test]
+    fn runtime_diagnostics_are_bounded_rotated_and_persist_across_writer_restart() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "swarmcraft-runtime-diagnostics-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let diagnostic = RuntimeDiagnostic {
+            current: root.join("world.log"),
+            rotated: root.join("world.log.1"),
+        };
+        let chunk = vec![b'x'; (MAX_RUNTIME_DIAGNOSTIC_BYTES / 2 + 4096) as usize];
+
+        append_runtime_diagnostic(&diagnostic, "stdout", &chunk).unwrap();
+        append_runtime_diagnostic(&diagnostic, "stderr", &chunk).unwrap();
+
+        assert!(diagnostic.current.is_file());
+        assert!(diagnostic.rotated.is_file());
+        assert!(fs::metadata(&diagnostic.current).unwrap().len() <= MAX_RUNTIME_DIAGNOSTIC_BYTES);
+        assert!(fs::metadata(&diagnostic.rotated).unwrap().len() <= MAX_RUNTIME_DIAGNOSTIC_BYTES);
+
+        let restarted_writer = RuntimeDiagnostic {
+            current: diagnostic.current.clone(),
+            rotated: diagnostic.rotated.clone(),
+        };
+        append_runtime_diagnostic(&restarted_writer, "process", b"available-after-restart-and-abnormal-death\n").unwrap();
+        let persisted = fs::read_to_string(&restarted_writer.current).unwrap();
+        assert!(persisted.contains("available-after-restart-and-abnormal-death"));
+        assert!(restarted_writer.rotated.is_file());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+'''
+          text = text[:-len(closing)] + extra + closing
+          runtime.write_text(text)
       - name: Desktop format
         run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
       - name: Build sidecars for Desktop compile context
