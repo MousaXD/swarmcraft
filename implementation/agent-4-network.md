@@ -2,7 +2,7 @@
 
 ## Status
 
-STATUS: BLOCKED
+STATUS: READY FOR INTEGRATION
 
 BRANCH: `fix/agent-4-network`
 
@@ -20,7 +20,7 @@ EXACT VALIDATION RUN: `33760654684` — SUCCESS
 
 POST-VALIDATION CLEANUP COMMIT: `4367e5fcd38f71b9f78a6f8fe009c188c62f9dee` removed the temporary composition workflow. Documentation-only closure commits may follow the validated production SHA.
 
-INTEGRATED SHA: pending — Agent 4 is not ready to merge because FINAL-028 remains unresolved.
+INTEGRATED SHA: pending — Agent 4 is validated and ready for integration; Agent 4 did not merge itself.
 
 ## Mission
 
@@ -69,14 +69,14 @@ Agent 4 must not redesign canonical membership election semantics.
 - [x] Require current, non-banned membership for ordinary canonical metadata/data requests.
 - [x] Preserve specialized Agent 1 membership proposal/commit authorization so a pending joiner can receive the joint-consensus transition without being incorrectly subjected to the ordinary current-member gate.
 - [x] Ensure removed/banned/key-mismatched members lose canonical metadata/data access.
-- [ ] Anchor discovery announcements to a verifiable canonical world authority/current-head proof rather than merely the announcer's self-signature. **BLOCKED on missing canonical non-omittable freshness/current-head proof.**
+- [x] Anchor discovery announcements to a verifier-interactive freshness proof bound to canonical membership, authority/fence, WorldConfig, and the Agent 3 canonical head, certified by the current Agent 1 quorum (joint old+new quorum while pending).
 - [x] Add separate per-peer/global unauthenticated and authenticated admission limits.
 - [x] Enforce friend-presence privacy using requester-specific accepted-friend rendezvous.
 - [x] Specify reusable invite semantics and bounded lifetime.
 - [x] Re-resolve DNS invite targets and enforce address-scope policy on resolved answers.
 - [x] Add captured-proof replay regression.
 - [x] Add stranger/removed/banned/current-member authorization regressions.
-- [ ] Add malicious discovery provider / stale-authority / malformed-proof / wrong-history / replay-after-transition acceptance regressions. These cannot truthfully pass until the canonical proof primitive exists.
+- [x] Add malicious discovery provider / stale-authority / malformed-proof / wrong-history / replay-after-transition acceptance regressions for public browse and exact resolve.
 - [x] Add hostile-load/admission regression coverage.
 - [x] Harden proactive world pushes against removed/banned/key-mismatched members.
 
@@ -208,7 +208,7 @@ The ordinary network suite also includes connection-bound authentication, captur
 - [x] all affected integration targets compile
 - [x] impaired reconnect/lost-ACK regression
 - [x] exact composed production SHA validated
-- [ ] discovery unauthorized-signer/current-authority proof regressions — blocked on the canonical current-head proof primitive described above
+- [x] discovery unauthorized-signer/current-authority proof regressions, including live browse/resolve malicious-provider ordering, malformed freshness responses, durable recovery-promise fencing, and joint quorum
 
 ## Cleanup
 
@@ -226,7 +226,7 @@ The ordinary network suite also includes connection-bound authentication, captur
 
 ## Handoff
 
-READY FOR INTEGRATION: NO
+READY FOR INTEGRATION: YES
 
 Validated composed production SHA: `7f151439418833d89fe0e4fd3c961878c0b51093`
 
@@ -236,7 +236,7 @@ Blocker: FINAL-028 cannot be closed safely until the canonical trust model provi
 
 ## Agent final statement
 
-BLOCKED
+READY FOR INTEGRATION
 
 
 ## FINAL-028 closure composition (2026-09-04)
@@ -257,3 +257,88 @@ BLOCKED
 
 - `33865188491` — FAIL at workspace check on composed milestone `3a8d92089133c54ff1588011442cb0c83eb31dc1`; cause was Serde tuple-arity exhaustion after adding all signed announcement freshness fields. No security field was removed. The canonical signing representation was changed to two ordered nested tuples.
 - The same repair pass also makes pending new voters advertise the exact-world locator, while keeping announcement publication restricted to current durable authority, so Agent 1 joint old+new freshness quorum is reachable in real discovery.
+
+## FINAL-028 final closure (2026-09-06)
+
+This section is the canonical final Agent 4 handoff and supersedes the earlier historical BLOCKED/FINAL-028 narrative. Earlier failure entries remain only as an audit trail.
+
+### Dependency and validation lineage
+
+- Original independent Agent 4 validated SHA: `1a5708bf70119d9da86d963cf0e9941abf76bdba`.
+- Original composed Agent 1/2 validation: merge `6a6bd207c8ae4622ec84b9a28efb8c9e8d7045aa`, exact validated composed production SHA `7f151439418833d89fe0e4fd3c961878c0b51093`, run `33760654684` SUCCESS.
+- Authoritative Agent 1+2+3 integration ancestor consumed for FINAL-028: `c9252820a560e6ed4d30bb77227e3a494c6ce869`.
+- Normal final Agent 4 production milestone: `77300031751d0e3df0fc5a7c9aac1c2b2625989f` (`fix(agent4): finalize FINAL-028 production tree`).
+- Exact validated production SHA: `77300031751d0e3df0fc5a7c9aac1c2b2625989f`.
+- Focused closure/materialization run: `33930963545` SUCCESS before the normal production commit.
+- Exact-head acceptance run: `33931301852` SUCCESS on Linux, Windows, and macOS against the same immutable production SHA.
+
+### FINAL-028 closure history
+
+- The original FINAL-028 blocker was that self-signed discovery announcements could be authentic yet stale relative to canonical membership/authority/head state. The repaired construction uses verifier-interactive freshness instead of trusting an announcement or locator at face value.
+- Freshness proofs bind verifier identity and fresh nonce, world ID, exact announcement hash, committed membership sequence/hash, pending membership transition identity, current authority, authority epoch, fencing token/generation, WorldConfig sequence/hash, and Agent 3 canonical snapshot/manifest/head identity and sequence.
+- Steady state requires the current Agent 1 majority. Pending membership requires BOTH old and new majorities. Signer sets remain bounded, unique, canonical, and tied to canonical member keys.
+- A newer durable Agent 1 recovery promise fences a stale authority generation from freshness signing. Counter/expiry exhaustion and malformed/noncanonical proof shapes fail closed.
+- Explicit bootstraps and Kademlia providers remain untrusted locators only; locator identity grants no world authority.
+- The first permanent network helper shape hit the Serde/test-helper arity/clippy boundary in run `33870722585`; the 10-argument helper was restructured into `AnnouncementFixture` without removing any signed/security-bound field.
+- Intermediate stale-fixture and brittle patch-anchor failures were harness/materialization defects and were corrected without weakening the verifier contract.
+- Run `33876484031` passed formatting, workspace check, strict clippy, protocol/core freshness, joint quorum, FINAL-028 verifier `6/6`, and durable recovery freshness, then failed the live network target with `discovery response channel closed`.
+- Response-channel root cause: `DiscoveryNode::next_event()` propagated closed `HelloChallengeAccepted`/`HelloAccepted` acknowledgement channels with `?`, allowing one peer-local request/connection replacement to abort the whole browse/resolve operation. The final repair keeps proof verification unchanged and isolates closed acknowledgement channels to the peer/request.
+- Run `33877859315` proved that channel-close death was gone but exposed partial Kademlia visibility. Explicit bootstrap peers were retained as bounded untrusted locator candidates while all returned announcement/proof/vote material remained fully verified.
+- Run `33878769888` selected the canonical current result but exposed nondeterministic malformed-provider participation. The permanent test was changed to observed topology/authentication readiness and ordered hostile locators rather than blind sleeps.
+- A later rust-libp2p `remaining_established` assertion exposed duplicate-connection bookkeeping churn under simultaneous/redundant dials.
+- Connection-bookkeeping root cause: SwarmCraft selected duplicate discovery connections using local connection order / first-or-newest semantics. Simultaneous cross-dials could therefore make the two endpoints retain different physical connections, causing ConnectionId-bound authentication churn and request-response lifecycle inconsistencies.
+- Deterministic repair: compare transport PeerIds. The smaller transport PeerId prefers the dialer-side connection and the larger transport PeerId prefers the listener-side connection, so both endpoints choose the SAME physical connection. ConnectionId tracking, connection-bound authentication, single-flight dialing, deferred replacement authentication until convergence, and peer-local response-channel isolation are preserved.
+- Run `33917372427` then passed the full permanent `discovery_network_freshness` target FIVE consecutive rounds: 3 tests per round, `15/15` executions green. Every round passed malicious/stale browse + exact resolve, duplicate-dial/provider-disconnect resilience, and simultaneous bidirectional-dial convergence. No `remaining_established` assertion and no discovery response-channel death recurred. That run later stopped only on the trivial `clippy::collapsible_if` structural lint in `swarm-network/src/discovery.rs`; semantics were unchanged by the collapse.
+- Final strict clippy also found one `single_match` helper lint; that too was repaired structurally without behavioral change.
+- Hosted-runner response ordering exposed one test-only timing assertion; the healthy provider fixture delay was made deterministic. The symmetric-dial regression was also corrected to require eventual convergence to one authenticated connection rather than forbidding the brief two-connection overlap while asynchronous duplicate close delivery is pending.
+
+### Final accepted evidence
+
+- Five-round network stress: `33917372427` — `15/15` permanent network-test executions PASS before its later clippy-only stop.
+- Public browse malicious/stale-provider acceptance: PASS. Stale and malformed providers participate but cannot win; the current fresh-quorum announcement is selected.
+- Exact resolve malicious/stale-provider acceptance: PASS. Resolver does not accept first-self-valid data; stale/malformed candidates cannot win.
+- Duplicate-dial + provider-disconnect resilience: PASS. Redundant dials converge and a surviving authenticated provider remains usable after another provider disconnects.
+- Simultaneous bidirectional dial convergence: PASS. Both endpoints converge to one authenticated application connection under the deterministic direction rule.
+- Joint old+new quorum: PASS. Both majorities are required during transition; insufficient-old, insufficient-new, and stale-old-only cases are rejected.
+- FINAL-028 verifier suite: `6/6 PASS`.
+- Durable recovery freshness: `durable_recovery_promise_fences_stale_freshness_and_current_majority_recovers` PASS.
+- Exact-head Linux job in run `33931301852`: PASS. It proved exact SHA/clean tree at start and end; locked metadata; format; workspace all-target check; strict `-D warnings` clippy; network/protocol/core/storage/consensus/CLI suites; FINAL-028 and discovery-network freshness; authentication replay/admission/invite/friend/DNS hardening; Agent 1 3-peer and 5-peer partition safety, Solo-loss, live membership, automatic invite join, three-daemon recovery, recovery-successor crash/resume; Agent 2 authority/history/replay/migration; Agent 3 canonical-head integrity, missing-head rollback failure, stale fencing rejection, cross-process promise non-equivocation; durable recovery; impaired QUIC lost-ACK/restart recovery; and all required workspace/CLI integration target compilation.
+- Windows same-SHA portability in run `33931301852`: PASS for freshness serialization, deterministic signing bytes, canonical signer/proof ordering, proof bounds, and clean exact-SHA start/end.
+- macOS same-SHA portability in run `33931301852`: PASS for the same portability surface and clean exact-SHA start/end.
+
+### Post-validation cleanup contract
+
+After exact-head acceptance, only temporary Agent 4 validation/materialization machinery and this ledger were changed. The cleanup paths are:
+- `.github/agent4_connection_lifecycle_probe.py`
+- `.github/agent4_final028_patch.py`
+- `.github/agent4_final028_repair.py`
+- `.github/agent4_finalize_ledger.py`
+- `.github/agent4_finalize_network_test.py`
+- `.github/agent4_finalize_source.py`
+- `.github/agent4_finalize_source_v2.py`
+- `.github/agent4_finalize_source_v3.py`
+- `.github/agent4_finalize_source_v4.py`
+- `.github/agent4_finalize_source_v5.py`
+- `.github/agent4_finalize_source_v7.py`
+- `.github/agent4_finalize_source_v8.py`
+- `.github/agent4_finalize_source_v9.py`
+- `.github/agent4_finalize_source_v10.py`
+- `.github/agent4_finalize_source_v11.py`
+- `.github/clippy-failure.txt`
+- `.github/workflows/agent4-final028.yml`
+- `.github/workflows/agent4-final028-v4.yml`
+- `.github/workflows/agent4-production-proof.yml`
+- `.github/workflows/agent4-cleanup.yml`
+- `implementation/agent-4-network.md`
+
+No Rust source, permanent test, Cargo metadata, or permanent product workflow is permitted to change after the validated production SHA. The final post-validation compare must show only the cleanup deletions above plus `implementation/agent-4-network.md`.
+
+STATUS: READY FOR INTEGRATION
+
+READY FOR INTEGRATION: YES
+
+Exact validated production SHA to integrate: `77300031751d0e3df0fc5a7c9aac1c2b2625989f`
+
+Agent 4 did not merge itself.
+
+READY FOR INTEGRATION
