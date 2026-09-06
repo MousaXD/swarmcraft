@@ -1,5 +1,5 @@
 use crate::{
-    transaction::{durable_atomic_write, durable_remove},
+    transaction::{durable_atomic_write, durable_create_once, durable_remove},
     Storage, StorageError,
 };
 use serde::{Deserialize, Serialize};
@@ -72,10 +72,49 @@ impl Storage {
     pub fn save_membership_certificate(&self, certificate: &MembershipCertificateV1) -> Result<(), StorageError> {
         let world = certificate.proposal.proposed.world_id;
         let _guard = self.lock_world_transaction(world)?;
-        durable_atomic_write(
-            &self.world_dir(world).join("metadata/membership-certificate.postcard"),
-            &postcard::to_allocvec(certificate)?,
-        )
+        let encoded = postcard::to_allocvec(certificate)?;
+        let history_path = self
+            .world_dir(world)
+            .join("metadata/membership-certificates")
+            .join(format!("{:020}.postcard", certificate.proposal.proposed.sequence));
+        if !durable_create_once(&history_path, &encoded)? {
+            let existing = fs::read(&history_path).map_err(|error| io_error(&history_path, error))?;
+            if existing != encoded {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+        }
+        durable_atomic_write(&self.world_dir(world).join("metadata/membership-certificate.postcard"), &encoded)
+    }
+
+    pub fn load_membership_certificate_chain(
+        &self,
+        world: WorldId,
+    ) -> Result<Vec<MembershipCertificateV1>, StorageError> {
+        let directory = self.world_dir(world).join("metadata/membership-certificates");
+        let mut paths = match fs::read_dir(&directory) {
+            Ok(entries) => entries
+                .map(|entry| entry.map(|value| value.path()).map_err(|error| io_error(&directory, error)))
+                .collect::<Result<Vec<_>, _>>()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(io_error(&directory, error)),
+        };
+        paths.retain(|path| path.extension().is_some_and(|value| value == "postcard"));
+        paths.sort();
+        let mut certificates = Vec::with_capacity(paths.len());
+        for path in paths {
+            let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+            let certificate: MembershipCertificateV1 = postcard::from_bytes(&bytes)?;
+            if certificate.proposal.proposed.world_id != world {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+            certificates.push(certificate);
+        }
+        if certificates.is_empty() {
+            if let Ok(latest) = self.load_membership_certificate(world) {
+                certificates.push(latest);
+            }
+        }
+        Ok(certificates)
     }
 
     pub fn load_membership_certificate(&self, world: WorldId) -> Result<MembershipCertificateV1, StorageError> {

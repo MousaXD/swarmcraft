@@ -185,7 +185,8 @@ fn authority_accepts_live_join_and_replicates_without_reconnect() {
         inviter_peer_id: a.identity.peer_id(),
         inviter_public_key: a.identity.public_key(),
         bootstrap_addrs: vec![a_address],
-        expires_unix_ms: u64::MAX,
+        expires_unix_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+            + 3_600_000,
         nonce: random_nonce(),
         signature: Vec::new(),
     };

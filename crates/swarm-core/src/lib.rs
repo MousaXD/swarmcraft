@@ -131,6 +131,12 @@ impl PeerIdentity {
         self.signing_key.sign(bytes).to_bytes().to_vec()
     }
 
+    /// Clone the in-process application signing key for connection-bound
+    /// network authentication. Networking never persists or serializes it.
+    pub fn network_signing_key(&self) -> SigningKey {
+        self.signing_key.clone()
+    }
+
     pub fn sign_snapshot(&self, manifest: &mut SnapshotManifestV1) -> Result<(), CoreError> {
         manifest.authority_public_key = self.public_key();
         manifest.authority_peer_id = self.peer_id();
