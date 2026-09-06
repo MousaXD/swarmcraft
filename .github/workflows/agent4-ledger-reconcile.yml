@@ -11,83 +11,30 @@ permissions:
   contents: write
 
 jobs:
-  reconcile-ledger-only:
+  reconcile:
     runs-on: ubuntu-24.04
     env:
-      VALIDATED_PRODUCTION_SHA: 77300031751d0e3df0fc5a7c9aac1c2b2625989f
+      CLEANUP_HEAD: fd9a3deccd22ef27880a92f50d9c8a0dacc6f74f
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: Reconcile obsolete historical wording
-        shell: bash
+      - name: Apply ledger reconciliation
         run: |
           set -euo pipefail
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path('implementation/agent-4-network.md')
-          text = path.read_text()
-
-          old = '''## Remaining work
-
-1. Add the canonical non-omittable current-authority/current-head proof primitive in the consensus/protocol/storage trust model.
-2. Re-consume that primitive on Agent 4.
-3. Bind public discovery announcements to that proof.
-4. Add malicious self-signed provider, stale former authority, removed/banned member, malformed proof, wrong-world/history, and replay-after-transition tests for public browse and exact resolve.
-5. Re-run Agent 4 exact-head validation and only then mark READY FOR INTEGRATION.
-'''
-          new = '''## Historical FINAL-028 remaining work — RESOLVED
-
-The items below were open at the earlier composed-validation stage and are retained only as audit lineage. The canonical final closure later in this ledger resolves all of them:
-
-1. Canonical current-authority/current-head freshness primitive — RESOLVED by verifier-interactive FINAL-028 freshness proof.
-2. Agent 4 consumption of that primitive — RESOLVED in the final production milestone.
-3. Public discovery binding — RESOLVED for browse and exact resolve.
-4. Malicious/stale/malformed/wrong-history/replay acceptance regressions — RESOLVED and passing.
-5. Exact-head revalidation — RESOLVED by run `33931301852` on Linux, Windows, and macOS.
-'''
-          if old not in text:
-              raise SystemExit('historical remaining-work block not found')
-          text = text.replace(old, new, 1)
-
-          text = text.replace(
-              'Validated composed production SHA: `7f151439418833d89fe0e4fd3c961878c0b51093`',
-              'Historical composed production SHA: `7f151439418833d89fe0e4fd3c961878c0b51093`',
-              1,
-          )
-          text = text.replace(
-              'Exact validation run: `33760654684` SUCCESS',
-              'Historical composed validation run: `33760654684` SUCCESS',
-              1,
-          )
-          text = text.replace(
-              'Blocker: FINAL-028 cannot be closed safely until the canonical trust model provides a first-contact-verifiable, non-omittable current authority/current-head proof across legitimate membership/authority transitions.',
-              'Historical blocker at that stage: FINAL-028 lacked a first-contact-verifiable current authority/current-head proof. This blocker is RESOLVED by the canonical final closure below.',
-              1,
-          )
-          text = text.replace(
-              '- Integration head remained `f02bb0d54cb44df67e730f01be4c903e25d670ff`.',
-              '- At that earlier composed-validation stage, integration head remained `f02bb0d54cb44df67e730f01be4c903e25d670ff`; the later FINAL-028 closure consumed authoritative Agent 1+2+3 ancestor `c9252820a560e6ed4d30bb77227e3a494c6ce869`.',
-              1,
-          )
-
-          path.write_text(text)
-          PY
+          python .github/agent4_reconcile_ledger.py
+          rm -f .github/agent4_reconcile_ledger.py
           rm -f .github/workflows/agent4-ledger-reconcile.yml
 
-      - name: Prove ledger-only follow-up
-        shell: bash
+      - name: Prove net follow-up is ledger only
         run: |
           set -euo pipefail
-          changed="$(git diff --name-only | sort)"
-          test "$changed" = 'implementation/agent-4-network.md'
+          test "$(git diff --name-only "$CLEANUP_HEAD" | sort)" = 'implementation/agent-4-network.md'
           git diff --check
 
-      - name: Commit final reconciled ledger
-        shell: bash
+      - name: Commit reconciled ledger
         run: |
           set -euo pipefail
           git config user.name 'swarmcraft-agent4'
