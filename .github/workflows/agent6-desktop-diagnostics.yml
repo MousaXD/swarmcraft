@@ -29,13 +29,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - name: Wire runtime diagnostics command
+      - name: Materialize diagnostics wiring and clippy repair
         shell: python
         run: |
           from pathlib import Path
 
-          path = Path('apps/desktop/src-tauri/src/main.rs')
-          text = path.read_text()
+          main = Path('apps/desktop/src-tauri/src/main.rs')
+          text = main.read_text()
           replacements = [
               (
                   'use runtime_commands::{ensure_daemon_running, start_daemon, stop_daemon, stop_host};',
@@ -51,9 +51,54 @@ jobs:
               if count != 1:
                   raise SystemExit(f'expected exactly one Desktop replacement, found {count}: {before!r}')
               text = text.replace(before, after, 1)
-          path.write_text(text)
-      - name: Format Desktop
-        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
+          main.write_text(text)
+
+          runtime = Path('apps/desktop/src-tauri/src/runtime.rs')
+          text = runtime.read_text()
+          before = '''        let sensitive = lower.contains("swarmcraft_ipc_token")
+            || lower.contains("authorization:")
+            || lower.contains("authorization=")
+            || lower.contains("bearer ")
+            || lower.contains("ipc_token=")
+            || lower.contains("ipc-token=");'''
+          after = '''        let sensitive = [
+            "swarmcraft_ipc_token",
+            "authorization:",
+            "authorization=",
+            "bearer ",
+            "ipc_token=",
+            "ipc-token=",
+            "api_key",
+            "apikey",
+            "token",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker));'''
+          if text.count(before) != 1:
+              raise SystemExit('expected exactly one runtime diagnostics secret predicate')
+          text = text.replace(before, after, 1)
+          before_test = '''            b"normal line\\nSWARMCRAFT_IPC_TOKEN=super-secret\\nAuthorization: Bearer secret\\nipc_token=secret\\n",
+        );
+        assert!(output.contains("normal line"));
+        assert!(!output.contains("super-secret"));
+        assert!(!output.contains("Bearer secret"));
+        assert!(!output.contains("ipc_token=secret"));
+        assert_eq!(output.matches("[REDACTED]").count(), 3);'''
+          after_test = '''            b"normal line\\nSWARMCRAFT_IPC_TOKEN=super-secret\\nAuthorization: Bearer secret\\nipc_token=secret\\napi_key=also-secret\\napikey=another-secret\\ntoken=generic-secret\\n",
+        );
+        assert!(output.contains("normal line"));
+        assert!(!output.contains("super-secret"));
+        assert!(!output.contains("Bearer secret"));
+        assert!(!output.contains("ipc_token=secret"));
+        assert!(!output.contains("also-secret"));
+        assert!(!output.contains("another-secret"));
+        assert!(!output.contains("generic-secret"));
+        assert_eq!(output.matches("[REDACTED]").count(), 6);'''
+          if text.count(before_test) != 1:
+              raise SystemExit('expected exactly one runtime diagnostics redaction test body')
+          runtime.write_text(text.replace(before_test, after_test, 1))
+      - name: Desktop format
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
       - name: Build sidecars for Desktop compile context
         run: |
           cargo build -p swarm-cli --locked
@@ -63,22 +108,19 @@ jobs:
           cp target/debug/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
           cp target/debug/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
           cp target/debug/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
-      - name: Refresh and inspect Desktop lockfile
-        run: |
-          cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
-          echo '--- Desktop Cargo.lock delta ---'
-          git diff -- apps/desktop/src-tauri/Cargo.lock || true
-      - name: Desktop check with refreshed lock
+      - name: Refresh Desktop lockfile
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: Desktop check
         run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
-      - name: Desktop tests
-        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
-      - name: Desktop clippy
+      - name: Desktop diagnostics tests
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked runtime_diagnostics -- --nocapture
+      - name: Desktop strict clippy
         run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
-      - name: Commit validated diagnostics wiring
+      - name: Commit validated diagnostics production milestone
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add apps/desktop/src-tauri/Cargo.lock apps/desktop/src-tauri/src/runtime.rs apps/desktop/src-tauri/src/runtime_commands.rs apps/desktop/src-tauri/src/main.rs
           git diff --cached --check
-          git commit -m "fix(desktop): retain runtime diagnostics with references"
+          git commit -m "fix(desktop): finalize bounded runtime diagnostics"
           git push origin HEAD:fix/agent-6-runtime
