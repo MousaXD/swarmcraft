@@ -297,6 +297,64 @@ if old_block not in text:
     raise SystemExit('node admission block anchor missing')
 node.write_text(text.replace(old_block, new_block, 1))
 
+discovery = Path('crates/swarm-network/src/discovery.rs')
+text = discovery.read_text()
+old_import = '''        application_connection_allowed, auth_challenge_expired, discovery_connection_limits, AdmissionController,
+        AUTH_CHALLENGE_TIMEOUT,
+'''
+new_import = '''        application_connection_allowed, auth_challenge_expired, discovery_connection_limits, AdmissionController,
+        RequestClass, AUTH_CHALLENGE_TIMEOUT,
+'''
+if old_import not in text:
+    raise SystemExit('discovery admission import anchor missing')
+text = text.replace(old_import, new_import, 1)
+old_block = '''                            let authenticated_request =
+                                self.authenticated.get(&peer).is_some_and(|(_, authenticated_connection)| {
+                                    *authenticated_connection == connection_id
+                                });
+                            if !self.admission.admit_request(peer, authenticated_request, Instant::now()) {
+                                let _ = self.respond(
+                                    channel,
+                                    WireResponse::Error {
+                                        code: "RATE_LIMITED".into(),
+                                        message: if authenticated_request {
+                                            "authenticated discovery request budget exceeded".into()
+                                        } else {
+                                            "pre-authentication discovery request budget exceeded".into()
+                                        },
+                                    },
+                                );
+                                continue;
+                            }
+'''
+new_block = '''                            let authenticated_request =
+                                self.authenticated.get(&peer).is_some_and(|(_, authenticated_connection)| {
+                                    *authenticated_connection == connection_id
+                                });
+                            let request_class = if authenticated_request {
+                                RequestClass::AuthenticatedControl
+                            } else {
+                                RequestClass::Unauthenticated
+                            };
+                            if !self.admission.admit_request(peer, request_class, Instant::now()) {
+                                let _ = self.respond(
+                                    channel,
+                                    WireResponse::Error {
+                                        code: "RATE_LIMITED".into(),
+                                        message: if authenticated_request {
+                                            "authenticated discovery request budget exceeded".into()
+                                        } else {
+                                            "pre-authentication discovery request budget exceeded".into()
+                                        },
+                                    },
+                                );
+                                continue;
+                            }
+'''
+if old_block not in text:
+    raise SystemExit('discovery admission block anchor missing')
+discovery.write_text(text.replace(old_block, new_block, 1))
+
 soak = Path('crates/swarm-network/tests/network_transfer_soak.rs')
 text = soak.read_text()
 old_response = '''                        NetworkEvent::OutboundFailure { request_id: observed, error, .. } if observed == request_id => {
