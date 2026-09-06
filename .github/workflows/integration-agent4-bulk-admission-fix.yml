@@ -57,6 +57,7 @@ jobs:
             '.github/integration_agent4_bulk_admission_fix.py' \
             '.github/workflows/integration-agent4-bulk-admission-fix.yml' \
             'crates/swarm-network/src/admission.rs' \
+            'crates/swarm-network/src/discovery.rs' \
             'crates/swarm-network/src/node.rs' \
             'crates/swarm-network/tests/network_transfer_soak.rs' | sort)"
           test "$changed" = "$expected"
