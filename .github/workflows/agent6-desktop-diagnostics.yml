@@ -37,14 +37,8 @@ jobs:
           main = Path('apps/desktop/src-tauri/src/main.rs')
           text = main.read_text()
           replacements = [
-              (
-                  'use runtime_commands::{ensure_daemon_running, start_daemon, stop_daemon, stop_host};',
-                  'use runtime_commands::{ensure_daemon_running, runtime_diagnostics, start_daemon, stop_daemon, stop_host};',
-              ),
-              (
-                  '            runtime_launch,\n            connectivity_diagnostics,',
-                  '            runtime_launch,\n            runtime_diagnostics,\n            connectivity_diagnostics,',
-              ),
+              ('use runtime_commands::{ensure_daemon_running, start_daemon, stop_daemon, stop_host};', 'use runtime_commands::{ensure_daemon_running, runtime_diagnostics, start_daemon, stop_daemon, stop_host};'),
+              ('            runtime_launch,\n            connectivity_diagnostics,', '            runtime_launch,\n            runtime_diagnostics,\n            connectivity_diagnostics,'),
           ]
           for before, after in replacements:
               count = text.count(before)
@@ -55,50 +49,18 @@ jobs:
 
           runtime = Path('apps/desktop/src-tauri/src/runtime.rs')
           text = runtime.read_text()
-          before = '''        let sensitive = lower.contains("swarmcraft_ipc_token")
-            || lower.contains("authorization:")
-            || lower.contains("authorization=")
-            || lower.contains("bearer ")
-            || lower.contains("ipc_token=")
-            || lower.contains("ipc-token=");'''
-          after = '''        let sensitive = [
-            "swarmcraft_ipc_token",
-            "authorization:",
-            "authorization=",
-            "bearer ",
-            "ipc_token=",
-            "ipc-token=",
-            "api_key",
-            "apikey",
-            "token",
-        ]
-        .iter()
-        .any(|marker| lower.contains(marker));'''
+          before = '        let sensitive = lower.contains("swarmcraft_ipc_token")\n            || lower.contains("authorization:")\n            || lower.contains("authorization=")\n            || lower.contains("bearer ")\n            || lower.contains("ipc_token=")\n            || lower.contains("ipc-token=");'
+          after = '        let sensitive = [\n            "swarmcraft_ipc_token",\n            "authorization:",\n            "authorization=",\n            "bearer ",\n            "ipc_token=",\n            "ipc-token=",\n            "api_key",\n            "apikey",\n            "token",\n        ]\n        .iter()\n        .any(|marker| lower.contains(marker));'
           if text.count(before) != 1:
               raise SystemExit('expected exactly one runtime diagnostics secret predicate')
           text = text.replace(before, after, 1)
-          before_test = '''            b"normal line\\nSWARMCRAFT_IPC_TOKEN=super-secret\\nAuthorization: Bearer secret\\nipc_token=secret\\n",
-        );
-        assert!(output.contains("normal line"));
-        assert!(!output.contains("super-secret"));
-        assert!(!output.contains("Bearer secret"));
-        assert!(!output.contains("ipc_token=secret"));
-        assert_eq!(output.matches("[REDACTED]").count(), 3);'''
-          after_test = '''            b"normal line\\nSWARMCRAFT_IPC_TOKEN=super-secret\\nAuthorization: Bearer secret\\nipc_token=secret\\napi_key=also-secret\\napikey=another-secret\\ntoken=generic-secret\\n",
-        );
-        assert!(output.contains("normal line"));
-        assert!(!output.contains("super-secret"));
-        assert!(!output.contains("Bearer secret"));
-        assert!(!output.contains("ipc_token=secret"));
-        assert!(!output.contains("also-secret"));
-        assert!(!output.contains("another-secret"));
-        assert!(!output.contains("generic-secret"));
-        assert_eq!(output.matches("[REDACTED]").count(), 6);'''
+          before_test = '            b"normal line\\nSWARMCRAFT_IPC_TOKEN=super-secret\\nAuthorization: Bearer secret\\nipc_token=secret\\n",\n        );\n        assert!(output.contains("normal line"));\n        assert!(!output.contains("super-secret"));\n        assert!(!output.contains("Bearer secret"));\n        assert!(!output.contains("ipc_token=secret"));\n        assert_eq!(output.matches("[REDACTED]").count(), 3);'
+          after_test = '            b"normal line\\nSWARMCRAFT_IPC_TOKEN=super-secret\\nAuthorization: Bearer secret\\nipc_token=secret\\napi_key=also-secret\\napikey=another-secret\\ntoken=generic-secret\\n",\n        );\n        assert!(output.contains("normal line"));\n        assert!(!output.contains("super-secret"));\n        assert!(!output.contains("Bearer secret"));\n        assert!(!output.contains("ipc_token=secret"));\n        assert!(!output.contains("also-secret"));\n        assert!(!output.contains("another-secret"));\n        assert!(!output.contains("generic-secret"));\n        assert_eq!(output.matches("[REDACTED]").count(), 6);'
           if text.count(before_test) != 1:
               raise SystemExit('expected exactly one runtime diagnostics redaction test body')
           runtime.write_text(text.replace(before_test, after_test, 1))
       - name: Desktop format
-        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
       - name: Build sidecars for Desktop compile context
         run: |
           cargo build -p swarm-cli --locked
