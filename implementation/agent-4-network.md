@@ -214,25 +214,27 @@ The ordinary network suite also includes connection-bound authentication, captur
 
 - Temporary composition/validation workflow removed after successful validation in commit `4367e5fcd38f71b9f78a6f8fe009c188c62f9dee`.
 - No merge into `integration/audit-remediation-v1` or `main` was performed.
-- Integration head remained `f02bb0d54cb44df67e730f01be4c903e25d670ff`.
+- At that earlier composed-validation stage, integration head remained `f02bb0d54cb44df67e730f01be4c903e25d670ff`; the later FINAL-028 closure consumed authoritative Agent 1+2+3 ancestor `c9252820a560e6ed4d30bb77227e3a494c6ce869`.
 
-## Remaining work
+## Historical FINAL-028 remaining work — RESOLVED
 
-1. Add the canonical non-omittable current-authority/current-head proof primitive in the consensus/protocol/storage trust model.
-2. Re-consume that primitive on Agent 4.
-3. Bind public discovery announcements to that proof.
-4. Add malicious self-signed provider, stale former authority, removed/banned member, malformed proof, wrong-world/history, and replay-after-transition tests for public browse and exact resolve.
-5. Re-run Agent 4 exact-head validation and only then mark READY FOR INTEGRATION.
+The items below were open at the earlier composed-validation stage and are retained only as audit lineage. The canonical final closure later in this ledger resolves all of them:
+
+1. Canonical current-authority/current-head freshness primitive — RESOLVED by verifier-interactive FINAL-028 freshness proof.
+2. Agent 4 consumption of that primitive — RESOLVED in the final production milestone.
+3. Public discovery binding — RESOLVED for browse and exact resolve.
+4. Malicious/stale/malformed/wrong-history/replay acceptance regressions — RESOLVED and passing.
+5. Exact-head revalidation — RESOLVED by run `33931301852` on Linux, Windows, and macOS.
 
 ## Handoff
 
 READY FOR INTEGRATION: YES
 
-Validated composed production SHA: `7f151439418833d89fe0e4fd3c961878c0b51093`
+Historical composed production SHA: `7f151439418833d89fe0e4fd3c961878c0b51093`
 
-Exact validation run: `33760654684` SUCCESS
+Historical composed validation run: `33760654684` SUCCESS
 
-Blocker: FINAL-028 cannot be closed safely until the canonical trust model provides a first-contact-verifiable, non-omittable current authority/current-head proof across legitimate membership/authority transitions.
+Historical blocker at that stage: FINAL-028 lacked a first-contact-verifiable current authority/current-head proof. This blocker is RESOLVED by the canonical final closure below.
 
 ## Agent final statement
 
