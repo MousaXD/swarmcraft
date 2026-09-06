@@ -226,6 +226,13 @@ async fn send_chunk(
                             assert_eq!(*committed_offset, next_offset);
                             break;
                         }
+                        NetworkEvent::Response {
+                            request_id: observed,
+                            response: WireResponse::Error { code, message },
+                            ..
+                        } if observed == request_id => {
+                            panic!("blob chunk rejected: {code}: {message}");
+                        }
                         NetworkEvent::OutboundFailure { request_id: observed, error, .. } if observed == request_id => {
                             panic!("blob chunk failed: {error}");
                         }

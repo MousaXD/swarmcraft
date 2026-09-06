@@ -22,7 +22,7 @@ use tracing::{debug, warn};
 use crate::{
     admission::{
         application_connection_allowed, auth_challenge_expired, discovery_connection_limits, AdmissionController,
-        AUTH_CHALLENGE_TIMEOUT,
+        RequestClass, AUTH_CHALLENGE_TIMEOUT,
     },
     build_peer_hello_proof, verify_peer_hello, verify_peer_hello_proof, WireRequest, WireResponse, BOOTSTRAP_ENV,
 };
@@ -539,7 +539,12 @@ impl DiscoveryNode {
                                 self.authenticated.get(&peer).is_some_and(|(_, authenticated_connection)| {
                                     *authenticated_connection == connection_id
                                 });
-                            if !self.admission.admit_request(peer, authenticated_request, Instant::now()) {
+                            let request_class = if authenticated_request {
+                                RequestClass::AuthenticatedControl
+                            } else {
+                                RequestClass::Unauthenticated
+                            };
+                            if !self.admission.admit_request(peer, request_class, Instant::now()) {
                                 let _ = self.respond(
                                     channel,
                                     WireResponse::Error {

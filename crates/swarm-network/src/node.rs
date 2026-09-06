@@ -1,7 +1,7 @@
 use crate::{
     admission::{
         application_connection_allowed, auth_challenge_expired, primary_connection_limits, AdmissionController,
-        AUTH_CHALLENGE_TIMEOUT,
+        RequestClass, AUTH_CHALLENGE_TIMEOUT,
     },
     build_peer_hello_proof, verify_peer_hello, verify_peer_hello_proof,
     wire::WireRequest,
@@ -592,15 +592,28 @@ impl SwarmNode {
                                         self.authenticated.get(&peer).is_some_and(|(_, authenticated_connection)| {
                                             *authenticated_connection == connection_id
                                         });
-                                    if !self.admission.admit_request(peer, authenticated_request, Instant::now()) {
+                                    let request_class = if !authenticated_request {
+                                        RequestClass::Unauthenticated
+                                    } else if matches!(&request, WireRequest::BlobChunk { .. }) {
+                                        RequestClass::AuthenticatedBulk
+                                    } else {
+                                        RequestClass::AuthenticatedControl
+                                    };
+                                    if !self.admission.admit_request(peer, request_class, Instant::now()) {
                                         let _ = self.respond(
                                             channel,
                                             WireResponse::Error {
                                                 code: "RATE_LIMITED".into(),
-                                                message: if authenticated_request {
-                                                    "authenticated request budget exceeded; retry after the admission window".into()
-                                                } else {
-                                                    "pre-authentication request budget exceeded; reconnect later".into()
+                                                message: match request_class {
+                                                    RequestClass::Unauthenticated => {
+                                                        "pre-authentication request budget exceeded; reconnect later".into()
+                                                    }
+                                                    RequestClass::AuthenticatedControl => {
+                                                        "authenticated control request budget exceeded; retry after the admission window".into()
+                                                    }
+                                                    RequestClass::AuthenticatedBulk => {
+                                                        "authenticated bulk-transfer request budget exceeded; retry after the admission window".into()
+                                                    }
                                                 },
                                             },
                                         );

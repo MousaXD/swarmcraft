@@ -18,8 +18,17 @@ pub(crate) const AUTH_CHALLENGE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const REQUEST_WINDOW: Duration = Duration::from_secs(10);
 pub(crate) const MAX_UNAUTHENTICATED_REQUESTS_PER_PEER: u32 = 8;
 pub(crate) const MAX_AUTHENTICATED_REQUESTS_PER_PEER: u32 = 128;
+pub(crate) const MAX_AUTHENTICATED_BULK_REQUESTS_PER_PEER: u32 = 8_192;
 pub(crate) const MAX_GLOBAL_UNAUTHENTICATED_REQUESTS: u32 = 256;
-pub(crate) const MAX_GLOBAL_AUTHENTICATED_REQUESTS: u32 = 4096;
+pub(crate) const MAX_GLOBAL_AUTHENTICATED_REQUESTS: u32 = 4_096;
+pub(crate) const MAX_GLOBAL_AUTHENTICATED_BULK_REQUESTS: u32 = 32_768;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequestClass {
+    Unauthenticated,
+    AuthenticatedControl,
+    AuthenticatedBulk,
+}
 
 #[derive(Debug, Clone)]
 struct WindowCounter {
@@ -48,12 +57,17 @@ impl WindowCounter {
 #[derive(Debug, Clone)]
 struct PeerBudget {
     unauthenticated: WindowCounter,
-    authenticated: WindowCounter,
+    authenticated_control: WindowCounter,
+    authenticated_bulk: WindowCounter,
 }
 
 impl PeerBudget {
     fn new(now: Instant) -> Self {
-        Self { unauthenticated: WindowCounter::new(now), authenticated: WindowCounter::new(now) }
+        Self {
+            unauthenticated: WindowCounter::new(now),
+            authenticated_control: WindowCounter::new(now),
+            authenticated_bulk: WindowCounter::new(now),
+        }
     }
 }
 
@@ -61,7 +75,8 @@ impl PeerBudget {
 pub(crate) struct AdmissionController {
     peers: HashMap<TransportPeerId, PeerBudget>,
     global_unauthenticated: WindowCounter,
-    global_authenticated: WindowCounter,
+    global_authenticated_control: WindowCounter,
+    global_authenticated_bulk: WindowCounter,
 }
 
 impl AdmissionController {
@@ -70,24 +85,37 @@ impl AdmissionController {
         Self {
             peers: HashMap::new(),
             global_unauthenticated: WindowCounter::new(now),
-            global_authenticated: WindowCounter::new(now),
+            global_authenticated_control: WindowCounter::new(now),
+            global_authenticated_bulk: WindowCounter::new(now),
         }
     }
 
-    pub(crate) fn admit_request(&mut self, peer: TransportPeerId, authenticated: bool, now: Instant) -> bool {
+    pub(crate) fn admit_request(&mut self, peer: TransportPeerId, class: RequestClass, now: Instant) -> bool {
         let peer_budget = self.peers.entry(peer).or_insert_with(|| PeerBudget::new(now));
-        let peer_allowed = if authenticated {
-            peer_budget.authenticated.admit(now, MAX_AUTHENTICATED_REQUESTS_PER_PEER)
-        } else {
-            peer_budget.unauthenticated.admit(now, MAX_UNAUTHENTICATED_REQUESTS_PER_PEER)
+        let peer_allowed = match class {
+            RequestClass::Unauthenticated => {
+                peer_budget.unauthenticated.admit(now, MAX_UNAUTHENTICATED_REQUESTS_PER_PEER)
+            }
+            RequestClass::AuthenticatedControl => {
+                peer_budget.authenticated_control.admit(now, MAX_AUTHENTICATED_REQUESTS_PER_PEER)
+            }
+            RequestClass::AuthenticatedBulk => {
+                peer_budget.authenticated_bulk.admit(now, MAX_AUTHENTICATED_BULK_REQUESTS_PER_PEER)
+            }
         };
         if !peer_allowed {
             return false;
         }
-        if authenticated {
-            self.global_authenticated.admit(now, MAX_GLOBAL_AUTHENTICATED_REQUESTS)
-        } else {
-            self.global_unauthenticated.admit(now, MAX_GLOBAL_UNAUTHENTICATED_REQUESTS)
+        match class {
+            RequestClass::Unauthenticated => {
+                self.global_unauthenticated.admit(now, MAX_GLOBAL_UNAUTHENTICATED_REQUESTS)
+            }
+            RequestClass::AuthenticatedControl => {
+                self.global_authenticated_control.admit(now, MAX_GLOBAL_AUTHENTICATED_REQUESTS)
+            }
+            RequestClass::AuthenticatedBulk => {
+                self.global_authenticated_bulk.admit(now, MAX_GLOBAL_AUTHENTICATED_BULK_REQUESTS)
+            }
         }
     }
 
@@ -132,15 +160,28 @@ mod tests {
     }
 
     #[test]
-    fn unauthenticated_and_authenticated_budgets_are_separate() {
+    fn unauthenticated_control_and_bulk_budgets_are_separate() {
         let now = Instant::now();
         let peer = peer();
         let mut admission = AdmissionController::new();
         for _ in 0..MAX_UNAUTHENTICATED_REQUESTS_PER_PEER {
-            assert!(admission.admit_request(peer, false, now));
+            assert!(admission.admit_request(peer, RequestClass::Unauthenticated, now));
         }
-        assert!(!admission.admit_request(peer, false, now));
-        assert!(admission.admit_request(peer, true, now));
+        assert!(!admission.admit_request(peer, RequestClass::Unauthenticated, now));
+        assert!(admission.admit_request(peer, RequestClass::AuthenticatedControl, now));
+        assert!(admission.admit_request(peer, RequestClass::AuthenticatedBulk, now));
+    }
+
+    #[test]
+    fn authenticated_bulk_budget_is_bounded_without_consuming_control_budget() {
+        let now = Instant::now();
+        let peer = peer();
+        let mut admission = AdmissionController::new();
+        for _ in 0..MAX_AUTHENTICATED_BULK_REQUESTS_PER_PEER {
+            assert!(admission.admit_request(peer, RequestClass::AuthenticatedBulk, now));
+        }
+        assert!(!admission.admit_request(peer, RequestClass::AuthenticatedBulk, now));
+        assert!(admission.admit_request(peer, RequestClass::AuthenticatedControl, now));
     }
 
     #[test]
@@ -149,9 +190,9 @@ mod tests {
         let peer = peer();
         let mut admission = AdmissionController::new();
         for _ in 0..MAX_UNAUTHENTICATED_REQUESTS_PER_PEER {
-            assert!(admission.admit_request(peer, false, now));
+            assert!(admission.admit_request(peer, RequestClass::Unauthenticated, now));
         }
-        assert!(admission.admit_request(peer, false, now + REQUEST_WINDOW));
+        assert!(admission.admit_request(peer, RequestClass::Unauthenticated, now + REQUEST_WINDOW));
     }
 
     #[test]
@@ -168,6 +209,8 @@ mod tests {
         assert!(MAX_DISCOVERY_PENDING_INCOMING_CONNECTIONS < MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
         assert!(MAX_DISCOVERY_ESTABLISHED_INCOMING_CONNECTIONS <= MAX_DISCOVERY_ESTABLISHED_CONNECTIONS);
         assert!(MAX_ESTABLISHED_CONNECTIONS_PER_PEER >= 2);
+        assert!(MAX_AUTHENTICATED_BULK_REQUESTS_PER_PEER > MAX_AUTHENTICATED_REQUESTS_PER_PEER);
+        assert!(MAX_GLOBAL_AUTHENTICATED_BULK_REQUESTS >= MAX_AUTHENTICATED_BULK_REQUESTS_PER_PEER);
     };
 
     #[test]
