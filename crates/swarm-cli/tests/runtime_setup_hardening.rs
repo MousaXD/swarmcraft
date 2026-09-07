@@ -177,7 +177,7 @@ with socket.create_connection((host, port), timeout=5) as connection:
         + encoded(world)
         + "\t"
         + fingerprint
-        + "\n"
+        + "\t25\n"
     )
     writer.flush()
     time.sleep(0.35)
