@@ -1771,8 +1771,16 @@ fn clear_transfer_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
     remove_if_present(&transfer_intent_path(paths, world))
 }
 
-fn clear_wake_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
+pub fn world_wake_requested(paths: &DataPaths, world: WorldId) -> bool {
+    wake_intent_path(paths, world).is_file()
+}
+
+pub fn clear_world_wake_request(paths: &DataPaths, world: WorldId) -> Result<()> {
     remove_if_present(&wake_intent_path(paths, world))
+}
+
+fn clear_wake_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
+    clear_world_wake_request(paths, world)
 }
 
 fn remove_if_present(path: &Path) -> Result<()> {
