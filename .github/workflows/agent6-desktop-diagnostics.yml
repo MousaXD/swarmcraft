@@ -3,20 +3,23 @@ name: Agent 6 Desktop Diagnostics Validation
 on:
   push:
     branches: [fix/agent-6-runtime]
-    paths: [.github/workflows/agent6-desktop-diagnostics.yml]
+    paths:
+      - .github/workflows/agent6-desktop-diagnostics.yml
+      - apps/desktop/src-tauri/src/runtime.rs
+      - apps/desktop/src-tauri/src/runtime_commands.rs
+      - apps/desktop/src-tauri/src/main.rs
+      - apps/desktop/src-tauri/Cargo.toml
+      - apps/desktop/src-tauri/Cargo.lock
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  patch-and-validate:
-    if: github.actor != 'github-actions[bot]'
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix/agent-6-runtime
-          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -29,39 +32,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - name: Materialize diagnostics wiring and clippy repair
-        shell: python
-        run: |
-          from pathlib import Path
-
-          main = Path('apps/desktop/src-tauri/src/main.rs')
-          text = main.read_text()
-          replacements = [
-              ('use runtime_commands::{ensure_daemon_running, start_daemon, stop_daemon, stop_host};', 'use runtime_commands::{ensure_daemon_running, runtime_diagnostics, start_daemon, stop_daemon, stop_host};'),
-              ('            runtime_launch,\n            connectivity_diagnostics,', '            runtime_launch,\n            runtime_diagnostics,\n            connectivity_diagnostics,'),
-          ]
-          for before, after in replacements:
-              count = text.count(before)
-              if count != 1:
-                  raise SystemExit(f'expected exactly one Desktop replacement, found {count}: {before!r}')
-              text = text.replace(before, after, 1)
-          main.write_text(text)
-
-          runtime = Path('apps/desktop/src-tauri/src/runtime.rs')
-          text = runtime.read_text()
-          before = '        let sensitive = lower.contains("swarmcraft_ipc_token")\n            || lower.contains("authorization:")\n            || lower.contains("authorization=")\n            || lower.contains("bearer ")\n            || lower.contains("ipc_token=")\n            || lower.contains("ipc-token=");'
-          after = '        let sensitive = [\n            "swarmcraft_ipc_token",\n            "authorization:",\n            "authorization=",\n            "bearer ",\n            "ipc_token=",\n            "ipc-token=",\n            "api_key",\n            "apikey",\n            "token",\n        ]\n        .into_iter()\n        .any(|marker| lower.contains(marker));'
-          if text.count(before) != 1:
-              raise SystemExit('expected exactly one runtime diagnostics secret predicate')
-          text = text.replace(before, after, 1)
-
-          before_test = '            b"normal line\\nSWARMCRAFT_IPC_TOKEN=super-secret\\nAuthorization: Bearer secret\\nipc_token=secret\\n",\n        );\n        assert!(output.contains("normal line"));\n        assert!(!output.contains("super-secret"));\n        assert!(!output.contains("Bearer secret"));\n        assert!(!output.contains("ipc_token=secret"));\n        assert_eq!(output.matches("[REDACTED]").count(), 3);'
-          after_test = '            b"normal line\\nSWARMCRAFT_IPC_TOKEN=super-secret\\nAuthorization: Bearer secret\\nipc_token=secret\\napi_key=also-secret\\napikey=another-secret\\ntoken=generic-secret\\n",\n        );\n        assert!(output.contains("normal line"));\n        assert!(!output.contains("super-secret"));\n        assert!(!output.contains("Bearer secret"));\n        assert!(!output.contains("ipc_token=secret"));\n        assert!(!output.contains("also-secret"));\n        assert!(!output.contains("another-secret"));\n        assert!(!output.contains("generic-secret"));\n        assert_eq!(output.matches("[REDACTED]").count(), 6);'
-          if text.count(before_test) != 1:
-              raise SystemExit('expected exactly one runtime diagnostics redaction test body')
-          runtime.write_text(text.replace(before_test, after_test, 1))
+      - name: Verify exact checked-out SHA
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Workspace format
+        run: cargo fmt --all -- --check
       - name: Desktop format
-        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
       - name: Build sidecars for Desktop compile context
         run: |
           cargo build -p swarm-cli --locked
@@ -71,19 +47,11 @@ jobs:
           cp target/debug/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
           cp target/debug/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
           cp target/debug/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
-      - name: Refresh Desktop lockfile
-        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
-      - name: Desktop check
+      - name: Desktop locked check
         run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
       - name: Desktop diagnostics tests
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked runtime_diagnostics -- --nocapture
       - name: Desktop strict clippy
         run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
-      - name: Commit validated diagnostics production milestone
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add apps/desktop/src-tauri/Cargo.lock apps/desktop/src-tauri/src/runtime.rs apps/desktop/src-tauri/src/runtime_commands.rs apps/desktop/src-tauri/src/main.rs
-          git diff --cached --check
-          git commit -m "fix(desktop): finalize bounded runtime diagnostics"
-          git push origin HEAD:fix/agent-6-runtime
+      - name: Verify clean source tree
+        run: git diff --exit-code
