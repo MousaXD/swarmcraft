@@ -324,7 +324,7 @@ fn acquire_source_quiescence(source: &Path) -> Result<MinecraftSourceQuiescence>
         .write(true)
         .open(&lock_path)
         .with_context(|| format!("cannot open Minecraft session.lock at {}", lock_path.display()))?;
-    try_minecraft_session_lock(&file).with_context(|| {
+    try_minecraft_session_lock(&file, false).with_context(|| {
         format!(
             "Minecraft world is currently open or its session lock cannot be acquired; stop Minecraft before importing {}",
             source.display()
@@ -334,7 +334,7 @@ fn acquire_source_quiescence(source: &Path) -> Result<MinecraftSourceQuiescence>
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn try_minecraft_session_lock(file: &fs::File) -> std::io::Result<()> {
+fn try_minecraft_session_lock(file: &fs::File, exclusive: bool) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
 
     #[repr(C)]
@@ -348,12 +348,13 @@ fn try_minecraft_session_lock(file: &fs::File) -> std::io::Result<()> {
 
     const F_SETLK: i32 = 6;
     const F_RDLCK: i16 = 0;
+    const F_WRLCK: i16 = 1;
     const SEEK_SET: i16 = 0;
     extern "C" {
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     }
 
-    let mut lock = Flock { l_type: F_RDLCK, l_whence: SEEK_SET, l_start: 0, l_len: 0, l_pid: 0 };
+    let mut lock = Flock { l_type: if exclusive { F_WRLCK } else { F_RDLCK }, l_whence: SEEK_SET, l_start: 0, l_len: 0, l_pid: 0 };
     let result = unsafe { fcntl(file.as_raw_fd(), F_SETLK, &mut lock) };
     if result == -1 {
         Err(std::io::Error::last_os_error())
@@ -363,7 +364,7 @@ fn try_minecraft_session_lock(file: &fs::File) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn try_minecraft_session_lock(file: &fs::File) -> std::io::Result<()> {
+fn try_minecraft_session_lock(file: &fs::File, exclusive: bool) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
 
     #[repr(C)]
@@ -377,12 +378,13 @@ fn try_minecraft_session_lock(file: &fs::File) -> std::io::Result<()> {
 
     const F_SETLK: i32 = 8;
     const F_RDLCK: i16 = 1;
+    const F_WRLCK: i16 = 3;
     const SEEK_SET: i16 = 0;
     extern "C" {
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     }
 
-    let mut lock = Flock { l_start: 0, l_len: 0, l_pid: 0, l_type: F_RDLCK, l_whence: SEEK_SET };
+    let mut lock = Flock { l_start: 0, l_len: 0, l_pid: 0, l_type: if exclusive { F_WRLCK } else { F_RDLCK }, l_whence: SEEK_SET };
     let result = unsafe { fcntl(file.as_raw_fd(), F_SETLK, &mut lock) };
     if result == -1 {
         Err(std::io::Error::last_os_error())
@@ -392,12 +394,17 @@ fn try_minecraft_session_lock(file: &fs::File) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
-fn try_minecraft_session_lock(file: &fs::File) -> std::io::Result<()> {
-    file.try_lock_shared()
+fn try_minecraft_session_lock(file: &fs::File, exclusive: bool) -> std::io::Result<()> {
+    if exclusive {
+        file.try_lock_exclusive()?;
+    } else {
+        file.try_lock_shared()?;
+    }
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
-fn try_minecraft_session_lock(_file: &fs::File) -> std::io::Result<()> {
+fn try_minecraft_session_lock(_file: &fs::File, _exclusive: bool) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "Minecraft-compatible session locking is not implemented on this platform",
@@ -593,7 +600,7 @@ mod tests {
         let ready = PathBuf::from(std::env::var(LOCK_HELPER_READY_ENV).unwrap());
         let release = PathBuf::from(std::env::var(LOCK_HELPER_RELEASE_ENV).unwrap());
         let file = OpenOptions::new().read(true).write(true).open(lock_path).unwrap();
-        try_minecraft_session_lock(&file).unwrap();
+        try_minecraft_session_lock(&file, true).unwrap();
         fs::write(&ready, b"locked\n").unwrap();
         while !release.exists() {
             thread::sleep(Duration::from_millis(10));
