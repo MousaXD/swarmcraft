@@ -31,7 +31,7 @@ mod agent5_staging_symlink_tests {
 
         let error = resolve_provider_staging_session(&session)
             .expect_err("symlinked provider staging session must fail closed");
-        assert_eq!(error, "invalid provider staging session");
+        assert_eq!(error, "Provider staging session is not a private directory");
 
         std::fs::remove_file(&session_path).expect("remove staging-session symlink");
         std::fs::remove_dir_all(&target).expect("remove symlink target");
