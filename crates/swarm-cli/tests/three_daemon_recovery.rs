@@ -424,7 +424,7 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     assert_eq!(winner_latest.epoch, 2);
     assert_eq!(winner_latest.previous_snapshot_hash, Some(manifest.manifest_hash().unwrap()));
 
-    let mut restarted_a = spawn_daemon(&a, &[b_addr, c_addr]);
+    let mut restarted_a = spawn_daemon(&a, &[b_addr.clone(), c_addr.clone()]);
     wait_until("stale A accepting recovery epoch and promoted snapshot", Duration::from_secs(30), || {
         let Ok(a_epoch) = a.storage.load_epoch_record(world) else { return false };
         let Ok(Some(a_latest)) = a.storage.latest_snapshot(world) else { return false };
