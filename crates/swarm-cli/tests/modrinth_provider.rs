@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use swarm_cli::package_provider::{
-    modrinth::{HttpResponse, ModrinthClient, ModrinthTransport},
+    modrinth::{HttpResponse, ModrinthClient, ModrinthTransport, MAX_PROVIDER_METADATA_BYTES},
     DependencyKind, ModArtifactLocator, ModDownloadRequest, ModEnvironment, ModResolveRequest, ModSearchQuery,
     ModVersionFilter, PackageEnvironment, ProviderFailure, ProviderFailureKind, ProviderId, ReleaseType,
 };
@@ -437,4 +437,13 @@ fn optional_live_provider_validation() {
         })
         .unwrap();
     assert!(result.limit > 0);
+}
+
+#[test]
+fn oversized_provider_metadata_fails_before_json_deserialization() {
+    let transport = FixtureTransport::default();
+    transport.raw(200, BTreeMap::new(), vec![b' '; MAX_PROVIDER_METADATA_BYTES + 1]);
+    let error = client(transport).project("P1").unwrap_err();
+    assert_eq!(error.kind, ProviderFailureKind::MalformedResponse);
+    assert!(error.message.contains("response_too_large"));
 }

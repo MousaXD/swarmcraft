@@ -3373,6 +3373,7 @@ dependencies = [
  "fs2",
  "hex",
  "postcard",
+ "reqwest",
  "serde",
  "serde_json",
  "sha1",

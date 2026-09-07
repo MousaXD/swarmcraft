@@ -1,13 +1,13 @@
 use anyhow::{anyhow, bail, Context, Result};
+use reqwest::{blocking::Client, redirect::Policy, Url};
 use serde_json::{json, Value};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 use std::{
     env,
-    fs::{self, File},
-    io::Read,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
     path::{Path, PathBuf},
-    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 use swarm_core::DataPaths;
@@ -25,6 +25,15 @@ use crate::{
 const MAX_PROVIDER_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 const CURSEFORGE_API_BASE: &str = "https://api.curseforge.com";
 const CURSEFORGE_API_KEY_ENV: &str = "SWARMCRAFT_CURSEFORGE_API_KEY";
+const MAX_PROVIDER_METADATA_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PROVIDER_METADATA_HEADERS: usize = 128;
+const MAX_PROVIDER_METADATA_HEADER_BYTES: usize = 64 * 1024;
+const MAX_PROVIDER_METADATA_HEADER_VALUE_BYTES: usize = 16 * 1024;
+const MAX_PROVIDER_METADATA_DEPTH: usize = 32;
+const MAX_PROVIDER_METADATA_ARRAY_ITEMS: usize = 2048;
+const MAX_PROVIDER_METADATA_OBJECT_ENTRIES: usize = 512;
+const MAX_PROVIDER_METADATA_STRING_BYTES: usize = 64 * 1024;
+const MAX_PROVIDER_METADATA_NODES: usize = 50_000;
 
 /// Acquire only the exact missing server-side artifacts encoded into the signed
 /// compatibility manifest. Provider metadata is a retrieval locator; the final
@@ -160,6 +169,7 @@ fn acquire_curseforge(artifact: &CanonicalProviderArtifactV1, staging: &Path) ->
                 "CurseForge runtime acquisition requires the machine-local {CURSEFORGE_API_KEY_ENV} environment variable"
             )
         })?;
+    validate_api_key(&api_key)?;
 
     let (status, value) = curseforge_json(
         "POST",
@@ -189,12 +199,10 @@ fn acquire_curseforge(artifact: &CanonicalProviderArtifactV1, staging: &Path) ->
             artifact.file_name
         );
     };
-    if !download_url.starts_with("https://") || download_url.chars().any(char::is_whitespace) {
-        bail!("CurseForge returned an untrusted non-HTTPS artifact URL");
-    }
+    validate_curseforge_artifact_url(&download_url)?;
 
     let destination = staging.join(&artifact.file_name);
-    let status = curl_download(&download_url, &destination)?;
+    let status = download_curseforge_artifact(&download_url, &destination)?;
     if matches!(status, 403 | 404) {
         let _ = fs::remove_file(&destination);
         bail!(
@@ -246,6 +254,7 @@ fn validate_curseforge_file(
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow!("CurseForge file response omitted fileName"))?;
+    safe_filename(file_name)?;
     if file_name != artifact.file_name {
         bail!(
             "CurseForge exact artifact filename changed: canonical source requires {}, provider returned {file_name}",
@@ -333,47 +342,184 @@ fn verify_canonical_hashes(path: &Path, hashes: &[CanonicalProviderHashV1]) -> R
     Ok(())
 }
 
+fn validate_api_key(api_key: &str) -> Result<()> {
+    if api_key.is_empty() || api_key.chars().any(char::is_control) {
+        bail!("{CURSEFORGE_API_KEY_ENV} contains invalid control characters");
+    }
+    Ok(())
+}
+
+fn is_curseforge_api_url(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && url.host_str().is_some_and(|host| host.eq_ignore_ascii_case("api.curseforge.com"))
+}
+
+fn is_curseforge_artifact_url(url: &Url) -> bool {
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && (host == "forgecdn.net" || host.ends_with(".forgecdn.net"))
+}
+
+fn validate_curseforge_api_url(url: &str) -> Result<Url> {
+    let parsed = Url::parse(url).context("CurseForge API URL is invalid")?;
+    if !is_curseforge_api_url(&parsed) {
+        bail!("CurseForge authenticated API URL left the exact api.curseforge.com origin");
+    }
+    Ok(parsed)
+}
+
+fn validate_curseforge_artifact_url(url: &str) -> Result<Url> {
+    let parsed = Url::parse(url).context("CurseForge artifact URL is invalid")?;
+    if !is_curseforge_artifact_url(&parsed) {
+        bail!("CurseForge artifact URL left the HTTPS forgecdn.net trust boundary");
+    }
+    Ok(parsed)
+}
+
+fn curseforge_api_client() -> Result<Client> {
+    Client::builder()
+        .https_only(true)
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(120))
+        .redirect(Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("too many CurseForge API redirects")
+            } else if is_curseforge_api_url(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error("authenticated CurseForge API redirect left api.curseforge.com")
+            }
+        }))
+        .user_agent(concat!("SwarmCraft/", env!("CARGO_PKG_VERSION"), " RuntimeCurseForge"))
+        .build()
+        .context("cannot initialize authenticated CurseForge HTTP client")
+}
+
+fn curseforge_artifact_client() -> Result<Client> {
+    Client::builder()
+        .https_only(true)
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(900))
+        .redirect(Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("too many CurseForge artifact redirects")
+            } else if is_curseforge_artifact_url(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error("CurseForge artifact redirect left the Forge CDN trust boundary")
+            }
+        }))
+        .user_agent(concat!("SwarmCraft/", env!("CARGO_PKG_VERSION"), " RuntimeCurseForge"))
+        .build()
+        .context("cannot initialize CurseForge artifact HTTP client")
+}
+
+fn validate_metadata_headers(headers: &reqwest::header::HeaderMap) -> Result<()> {
+    if headers.len() > MAX_PROVIDER_METADATA_HEADERS {
+        bail!("response_too_large: CurseForge returned too many metadata headers");
+    }
+    let mut total = 0usize;
+    for (name, value) in headers {
+        total = total.saturating_add(name.as_str().len()).saturating_add(value.as_bytes().len());
+        if value.as_bytes().len() > MAX_PROVIDER_METADATA_HEADER_VALUE_BYTES
+            || total > MAX_PROVIDER_METADATA_HEADER_BYTES
+        {
+            bail!("response_too_large: CurseForge metadata headers exceeded their byte budget");
+        }
+    }
+    Ok(())
+}
+
+fn validate_metadata_value(value: &Value) -> Result<()> {
+    fn visit(value: &Value, depth: usize, nodes: &mut usize) -> Result<()> {
+        if depth > MAX_PROVIDER_METADATA_DEPTH {
+            bail!("response_too_large: CurseForge metadata nesting is too deep");
+        }
+        *nodes = nodes.saturating_add(1);
+        if *nodes > MAX_PROVIDER_METADATA_NODES {
+            bail!("response_too_large: CurseForge metadata contains too many values");
+        }
+        match value {
+            Value::String(text) if text.len() > MAX_PROVIDER_METADATA_STRING_BYTES => {
+                bail!("response_too_large: CurseForge metadata string is too large")
+            }
+            Value::Array(items) => {
+                if items.len() > MAX_PROVIDER_METADATA_ARRAY_ITEMS {
+                    bail!("response_too_large: CurseForge metadata array is too large");
+                }
+                for item in items {
+                    visit(item, depth + 1, nodes)?;
+                }
+            }
+            Value::Object(entries) => {
+                if entries.len() > MAX_PROVIDER_METADATA_OBJECT_ENTRIES {
+                    bail!("response_too_large: CurseForge metadata object has too many fields");
+                }
+                for (key, item) in entries {
+                    if key.len() > 256 {
+                        bail!("response_too_large: CurseForge metadata key is too large");
+                    }
+                    visit(item, depth + 1, nodes)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut nodes = 0usize;
+    visit(value, 0, &mut nodes)
+}
+
+fn read_curseforge_metadata(response: reqwest::blocking::Response) -> Result<Value> {
+    validate_metadata_headers(response.headers())?;
+    if response.content_length().is_some_and(|length| length > MAX_PROVIDER_METADATA_BYTES as u64) {
+        bail!("response_too_large: CurseForge metadata Content-Length exceeded the response bound");
+    }
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_PROVIDER_METADATA_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .context("cannot read CurseForge metadata response")?;
+    if bytes.len() > MAX_PROVIDER_METADATA_BYTES {
+        bail!("response_too_large: CurseForge metadata exceeded the response byte bound");
+    }
+    if bytes.is_empty() {
+        return Ok(Value::Null);
+    }
+    let value: Value = serde_json::from_slice(&bytes).context("CurseForge returned malformed JSON")?;
+    validate_metadata_value(&value)?;
+    Ok(value)
+}
+
 fn curseforge_json(method: &str, url: &str, api_key: &str, body: Option<Value>) -> Result<(u16, Value)> {
-    let output_path = temporary_path("curseforge-json");
-    let mut command = Command::new("curl");
-    command.args([
-        "-sS",
-        "-L",
-        "--proto",
-        "=https",
-        "--connect-timeout",
-        "15",
-        "--max-time",
-        "120",
-        "-H",
-        "Accept: application/json",
-    ]);
-    command.arg("-H").arg(format!("x-api-key: {api_key}"));
-    if method == "POST" {
-        command.args(["-X", "POST", "-H", "Content-Type: application/json"]);
-        command.arg("--data").arg(serde_json::to_string(&body.unwrap_or(Value::Null))?);
-    }
-    let output = command
-        .arg("-o")
-        .arg(&output_path)
-        .arg("--write-out")
-        .arg("%{http_code}")
-        .arg(url)
-        .output()
-        .with_context(|| format!("cannot start curl for CurseForge {method} request"))?;
-    let body_bytes = fs::read(&output_path).unwrap_or_default();
-    let _ = fs::remove_file(&output_path);
-    if !output.status.success() {
-        bail!("CurseForge request failed: {}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    let status = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u16>()
-        .context("curl returned an invalid CurseForge HTTP status")?;
-    let value = if body_bytes.is_empty() {
-        Value::Null
+    validate_api_key(api_key)?;
+    let url = validate_curseforge_api_url(url)?;
+    let client = curseforge_api_client()?;
+    let request = match method {
+        "GET" => client.get(url),
+        "POST" => {
+            let body = serde_json::to_string(&body.unwrap_or(Value::Null))?;
+            client.post(url).header("Content-Type", "application/json").body(body)
+        }
+        _ => bail!("unsupported CurseForge runtime HTTP method: {method}"),
+    };
+    let response = request
+        .header("Accept", "application/json")
+        .header("x-api-key", api_key)
+        .send()
+        .with_context(|| format!("CurseForge {method} request failed"))?;
+    let status = response.status().as_u16();
+    let value = if (200..300).contains(&status) {
+        read_curseforge_metadata(response)?
     } else {
-        serde_json::from_slice(&body_bytes).context("CurseForge returned malformed JSON")?
+        validate_metadata_headers(response.headers())?;
+        Value::Null
     };
     Ok((status, value))
 }
@@ -389,39 +535,75 @@ fn ensure_curseforge_status(status: u16, operation: &str) -> Result<()> {
     }
 }
 
-fn curl_download(url: &str, destination: &Path) -> Result<u16> {
-    let output = Command::new("curl")
-        .args(["-sS", "-L", "--proto", "=https", "--connect-timeout", "15", "--max-time", "900", "--max-filesize"])
-        .arg(MAX_PROVIDER_ARTIFACT_BYTES.to_string())
-        .arg("-o")
-        .arg(destination)
-        .arg("--write-out")
-        .arg("%{http_code}")
-        .arg(url)
-        .output()
-        .context("cannot start curl for CurseForge artifact download")?;
-    if !output.status.success() {
-        let _ = fs::remove_file(destination);
-        bail!("CurseForge artifact download failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+fn download_curseforge_artifact(url: &str, destination: &Path) -> Result<u16> {
+    let url = validate_curseforge_artifact_url(url)?;
+    let client = curseforge_artifact_client()?;
+    let mut response = client
+        .get(url)
+        .header("Accept", "application/octet-stream")
+        .send()
+        .context("CurseForge artifact download failed")?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Ok(status);
     }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u16>()
-        .context("curl returned an invalid CurseForge artifact HTTP status")
+    if response.content_length().is_some_and(|length| length > MAX_PROVIDER_ARTIFACT_BYTES) {
+        bail!("CurseForge artifact exceeded the provider download byte bound");
+    }
+    let result = (|| -> Result<()> {
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(destination)
+            .with_context(|| format!("cannot create provider artifact {}", destination.display()))?;
+        let mut total = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = response.read(&mut buffer).context("CurseForge artifact stream failed")?;
+            if read == 0 {
+                break;
+            }
+            total = total.checked_add(read as u64).ok_or_else(|| anyhow!("CurseForge artifact size overflow"))?;
+            if total > MAX_PROVIDER_ARTIFACT_BYTES {
+                bail!("CurseForge artifact exceeded the provider download byte bound");
+            }
+            output.write_all(&buffer[..read]).context("cannot write CurseForge provider artifact")?;
+        }
+        output.sync_all().context("cannot sync CurseForge provider artifact")?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(destination);
+    }
+    result?;
+    Ok(status)
 }
 
 fn safe_filename(value: &str) -> Result<()> {
     let path = Path::new(value);
-    if value.trim().is_empty()
-        || path.is_absolute()
-        || path.components().count() != 1
-        || !value.to_ascii_lowercase().ends_with(".jar")
-    {
-        bail!("provider artifact filename is not a safe JAR basename: {value}");
+    let stem = value.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    let windows_reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+    let portable = value.len() > 4
+        && value == value.trim()
+        && value.len() <= 255
+        && !path.is_absolute()
+        && path.components().count() == 1
+        && !value.contains(['/', '\\', ':', '\0'])
+        && value != "."
+        && value != ".."
+        && !value.ends_with(['.', ' '])
+        && !windows_reserved
+        && value.to_ascii_lowercase().ends_with(".jar");
+    if !portable {
+        bail!("provider artifact filename is not a safe portable JAR basename: {value}");
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn temporary_path(prefix: &str) -> PathBuf {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     env::temp_dir().join(format!("swarmcraft-{prefix}-{}-{nonce}", std::process::id()))
@@ -523,5 +705,36 @@ mod tests {
         let error = verify_canonical_hashes(&path, &hashes).unwrap_err().to_string();
         assert!(error.contains("MD5-only"));
         let _ = fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod agent5_runtime_http_security_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn curseforge_runtime_origins_reject_second_origin_and_private_targets() {
+        assert!(validate_curseforge_api_url("https://api.curseforge.com/v1/mods/files").is_ok());
+        assert!(validate_curseforge_api_url("https://attacker.invalid/steal").is_err());
+        assert!(validate_curseforge_artifact_url("https://mediafilez.forgecdn.net/files/example.jar").is_ok());
+        assert!(validate_curseforge_artifact_url("https://127.0.0.1/example.jar").is_err());
+        assert!(validate_curseforge_artifact_url("https://api.curseforge.com/example.jar").is_err());
+    }
+
+    #[test]
+    fn runtime_metadata_and_filename_limits_fail_closed() {
+        let huge = json!({"text": "x".repeat(MAX_PROVIDER_METADATA_STRING_BYTES + 1)});
+        assert!(validate_metadata_value(&huge).unwrap_err().to_string().contains("response_too_large"));
+        for invalid in ["../evil.jar", "..\\evil.jar", "C:\\evil.jar", "\\\\server\\evil.jar", "NUL.jar"] {
+            assert!(safe_filename(invalid).is_err(), "accepted {invalid}");
+        }
+        assert!(safe_filename("safe-runtime.jar").is_ok());
+    }
+
+    #[test]
+    fn runtime_api_key_rejects_header_injection() {
+        assert!(validate_api_key("secret").is_ok());
+        assert!(validate_api_key("secret\nforwarded: value").is_err());
     }
 }
