@@ -1,4 +1,7 @@
-use crate::{authority_permit::PermitWatch, host_readiness, launch_guard, server_mods};
+use crate::{
+    authority_permit::PermitWatch, host_readiness, launch_guard, runtime_process_guard::RuntimeProcessGuard,
+    server_mods,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -19,8 +22,8 @@ use swarm_core::{
 };
 use swarm_ipc::FabricBridgeListener;
 use swarm_protocol::{
-    AuthorityTransferV1, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, PeerId, SleepRecordV1,
-    SnapshotManifestV1, TransferPhase, WorldId, PROTOCOL_VERSION,
+    validate_runtime_selection, AuthorityTransferV1, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, PeerId,
+    SleepRecordV1, SnapshotManifestV1, TransferPhase, WorldId, PROTOCOL_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage};
 use tokio::{
@@ -473,7 +476,11 @@ async fn wait_until_launch_safe(
 
 fn infer_trigger(storage: &Storage, epoch: &EpochRecordV1, local_peer: PeerId) -> MigrationTrigger {
     if epoch.mode == EpochMode::Recovery {
-        return MigrationTrigger::AutomaticRecovery;
+        return if epoch.reason == "quorum wake from exact durable sleep boundary" {
+            MigrationTrigger::WorldWake
+        } else {
+            MigrationTrigger::AutomaticRecovery
+        };
     }
     if storage
         .load_transfer_record(epoch.world_id)
@@ -612,6 +619,12 @@ async fn run_authority_runtime_inner(
     ensure_authority_generation(storage, &identity, &epoch)?;
     let world_config =
         storage.load_world_config(options.world).context("canonical runtime profile is not synchronized")?;
+    validate_runtime_selection(
+        &world_config.compatibility.minecraft_version,
+        &world_config.compatibility.loader_version,
+        None,
+    )
+    .context("canonical runtime profile is outside the shipped SwarmCraft Fabric adapter contract")?;
     let mod_readiness = server_mods::evaluate_world_mods(paths, options.world, &world_config.compatibility)?;
     if !mod_readiness.ready {
         let details = mod_readiness.issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>().join("; ");
@@ -631,6 +644,9 @@ async fn run_authority_runtime_inner(
         Some(latest.manifest_hash()?),
         None,
     )?;
+    // This persistent ownership record survives a hard-killed Rust supervisor.
+    // A subsequent launcher must prove the old Java PID is gone before any runtime bytes are reset.
+    let mut runtime_process = RuntimeProcessGuard::begin(paths, options.world)?;
     reset_runtime_directory(&runtime)?;
     fs::create_dir_all(runtime.join("mods"))?;
     fs::copy(&options.mod_jar, runtime.join("mods/swarmcraft-fabric.jar"))
@@ -674,6 +690,10 @@ async fn run_authority_runtime_inner(
         metadata.genesis.compatibility_fingerprint,
         &launch.environment(),
     )?;
+    if let Err(error) = runtime_process.record_java(child.id()) {
+        terminate_child(&mut child);
+        return Err(error);
+    }
 
     publish_status(
         paths,
@@ -781,6 +801,7 @@ async fn run_authority_runtime_inner(
         None,
     )?;
     ensure_authority_generation(storage, &identity, &epoch)?;
+    let expected_head = storage.canonical_snapshot_head(options.world)?.head;
     let number = storage.next_snapshot_number(options.world)?;
     let previous_hash = Some(latest.manifest_hash()?);
     let mut final_manifest = storage.snapshot_directory(
@@ -789,7 +810,7 @@ async fn run_authority_runtime_inner(
             world: options.world,
             snapshot_number: number,
             epoch: epoch.epoch_number,
-            sequence: latest.sequence.saturating_add(1),
+            sequence: latest.sequence.checked_add(1).context("snapshot sequence counter exhausted")?,
             previous_snapshot_hash: previous_hash,
             authority_peer_id: identity.peer_id(),
             authority_public_key: identity.public_key(),
@@ -797,7 +818,14 @@ async fn run_authority_runtime_inner(
     )?;
     ensure_authority_generation(storage, &identity, &epoch)?;
     identity.sign_snapshot(&mut final_manifest)?;
-    storage.commit_snapshot(&final_manifest)?;
+    storage.commit_snapshot_fenced(
+        &final_manifest,
+        swarm_storage::SnapshotCommitFence {
+            expected_epoch: epoch.epoch_number,
+            expected_fencing_token: epoch.fencing_token,
+            expected_head,
+        },
+    )?;
 
     match disposition {
         RuntimeDisposition::Transfer(target) => {
@@ -1075,9 +1103,12 @@ pub fn activate_manual_transfer(paths: &DataPaths, storage: &Storage, world: Wor
         }
     }
     let current = storage.load_epoch_record(world)?;
+    let expected_generation = AuthorityGeneration { epoch: current.epoch_number, fencing_token: current.fencing_token }
+        .checked_next()
+        .context("accepted authority generation is exhausted")?;
     if current.authority_peer_id != committed.from_peer_id
-        || current.epoch_number.saturating_add(1) != committed.next_epoch
-        || current.fencing_token.saturating_add(1) != committed.next_fencing_token
+        || expected_generation.epoch != committed.next_epoch
+        || expected_generation.fencing_token != committed.next_fencing_token
     {
         bail!("committed transfer no longer extends the accepted authority generation");
     }
@@ -1128,13 +1159,16 @@ pub fn observe_manual_transfer_epoch(paths: &DataPaths, storage: &Storage, world
     let current = storage.load_epoch_record(world)?;
     let transfer = storage.load_transfer_record(world).context("manual epoch is missing its committed transfer")?;
     validate_transfer_record_against_epoch(storage, &transfer, &current)?;
+    let expected_generation = AuthorityGeneration { epoch: current.epoch_number, fencing_token: current.fencing_token }
+        .checked_next()
+        .context("accepted authority generation is exhausted")?;
     if transfer.phase != TransferPhase::Committed
         || transfer.from_peer_id != current.authority_peer_id
         || transfer.to_peer_id != next.authority_peer_id
         || transfer.next_epoch != next.epoch_number
         || transfer.next_fencing_token != next.fencing_token
-        || next.epoch_number != current.epoch_number.saturating_add(1)
-        || next.fencing_token != current.fencing_token.saturating_add(1)
+        || next.epoch_number != expected_generation.epoch
+        || next.fencing_token != expected_generation.fencing_token
         || next.previous_epoch_hash != Some(epoch_record_hash(&current)?)
     {
         bail!("manual epoch does not exactly extend the committed transfer");
@@ -1362,13 +1396,16 @@ fn prepare_authority_epoch(
         let mut next = EpochRecordV1 {
             protocol_version: PROTOCOL_VERSION,
             world_id: world,
-            epoch_number: previous.epoch_number.saturating_add(1),
+            epoch_number: previous.epoch_number.checked_add(1).context("authority epoch exhausted during wake")?,
             previous_epoch_hash: Some(epoch_record_hash(&previous)?),
             base_state_hash: latest.state_root,
             authority_peer_id: identity.peer_id(),
             authority_public_key: identity.public_key(),
             mode: EpochMode::Solo,
-            fencing_token: previous.fencing_token.saturating_add(1),
+            fencing_token: previous
+                .fencing_token
+                .checked_add(1)
+                .context("authority fencing token exhausted during wake")?,
             reason: "wake from durable sleep".into(),
             signature: Vec::new(),
         };
@@ -1415,7 +1452,10 @@ fn prepare_authority_epoch(
 fn ensure_authority_artifacts(storage: &Storage, identity: &PeerIdentity, epoch: &EpochRecordV1) -> Result<()> {
     let latest = storage.latest_snapshot(epoch.world_id)?.context("accepted authority epoch has no base snapshot")?;
     if latest.epoch < epoch.epoch_number {
-        if latest.epoch.saturating_add(1) != epoch.epoch_number || latest.state_root != epoch.base_state_hash {
+        if latest.epoch.checked_add(1).context("snapshot epoch counter exhausted during authority promotion")?
+            != epoch.epoch_number
+            || latest.state_root != epoch.base_state_hash
+        {
             bail!("accepted authority epoch does not directly promote the latest canonical snapshot");
         }
         let mut promoted = SnapshotManifestV1 {
@@ -1423,7 +1463,7 @@ fn ensure_authority_artifacts(storage: &Storage, identity: &PeerIdentity, epoch:
             world_id: epoch.world_id,
             snapshot_number: storage.next_snapshot_number(epoch.world_id)?,
             epoch: epoch.epoch_number,
-            sequence: latest.sequence.saturating_add(1),
+            sequence: latest.sequence.checked_add(1).context("snapshot sequence counter exhausted")?,
             previous_snapshot_hash: Some(latest.manifest_hash()?),
             entries: latest.entries.clone(),
             state_root: latest.state_root,
@@ -1432,7 +1472,15 @@ fn ensure_authority_artifacts(storage: &Storage, identity: &PeerIdentity, epoch:
             signature: Vec::new(),
         };
         identity.sign_snapshot(&mut promoted)?;
-        storage.commit_snapshot(&promoted)?;
+        let promoted_expected_head = storage.canonical_snapshot_head(promoted.world_id)?.head;
+        storage.commit_snapshot_fenced(
+            &promoted,
+            swarm_storage::SnapshotCommitFence {
+                expected_epoch: epoch.epoch_number,
+                expected_fencing_token: epoch.fencing_token,
+                expected_head: promoted_expected_head,
+            },
+        )?;
     } else if latest.epoch != epoch.epoch_number
         || latest.authority_peer_id != identity.peer_id()
         || latest.authority_public_key != identity.public_key()
@@ -1453,7 +1501,7 @@ fn ensure_authority_artifacts(storage: &Storage, identity: &PeerIdentity, epoch:
                 protocol_version: membership.protocol_version,
                 world_id: epoch.world_id,
                 epoch: epoch.epoch_number,
-                sequence: membership.sequence.saturating_add(1),
+                sequence: membership.sequence.checked_add(1).context("membership sequence counter exhausted")?,
                 previous_membership_hash: Some(membership.record_hash()?),
                 members: membership.members.clone(),
                 authority_peer_id: identity.peer_id(),
@@ -1727,8 +1775,16 @@ fn clear_transfer_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
     remove_if_present(&transfer_intent_path(paths, world))
 }
 
-fn clear_wake_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
+pub fn world_wake_requested(paths: &DataPaths, world: WorldId) -> bool {
+    wake_intent_path(paths, world).is_file()
+}
+
+pub fn clear_world_wake_request(paths: &DataPaths, world: WorldId) -> Result<()> {
     remove_if_present(&wake_intent_path(paths, world))
+}
+
+fn clear_wake_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
+    clear_world_wake_request(paths, world)
 }
 
 fn remove_if_present(path: &Path) -> Result<()> {

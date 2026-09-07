@@ -11,17 +11,18 @@ use std::{
 };
 use swarm_cli::{
     authority_permit::permit_path,
+    host_readiness,
     migration::{
-        load_migration_status, prepare_manual_transfer, save_runtime_config, MigrationPhase, MigrationTrigger,
-        RuntimeLaunchConfig,
+        load_migration_status, prepare_manual_transfer, request_world_wake, save_runtime_config, MigrationPhase,
+        MigrationTrigger, RuntimeLaunchConfig,
     },
 };
 use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
 use swarm_network::load_or_create_transport_key;
 use swarm_protocol::{
     AuthorityPolicyV1, EpochMode, EpochRecordV1, MembershipPolicyV1, MembershipRecordV1,
-    RuntimeCompatibilityManifestV1, SnapshotManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1,
-    WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    RuntimeCompatibilityManifestV1, SleepRecordV1, SnapshotManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId,
+    WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 use tempfile::TempDir;
@@ -120,10 +121,17 @@ fn member(identity: &PeerIdentity) -> WorldMemberV1 {
 
 fn install_canonical_replica(peer: &PeerFixture, seed: &CanonicalReplicaSeed<'_>) {
     peer.storage.create_world(seed.metadata).unwrap();
-    peer.storage.save_world_config(seed.config).unwrap();
     peer.storage.save_world_descriptor(seed.descriptor).unwrap();
     peer.storage.save_membership_record(seed.membership).unwrap();
+    peer.storage.save_world_config(seed.config).unwrap();
     peer.storage.save_epoch_record(seed.epoch).unwrap();
+    let mut promoted_membership = seed.membership.clone();
+    promoted_membership.epoch = seed.epoch.epoch_number;
+    promoted_membership.sequence = seed.membership.sequence.checked_add(1).unwrap();
+    promoted_membership.previous_membership_hash = Some(seed.membership.record_hash().unwrap());
+    promoted_membership.signature.clear();
+    seed.authority.sign_membership(&mut promoted_membership).unwrap();
+    peer.storage.save_membership_record(&promoted_membership).unwrap();
     let mut local = peer
         .storage
         .snapshot_directory(
@@ -162,18 +170,16 @@ fn configure_mock_runtime(peer: &PeerFixture, world: WorldId, endpoint: &str) {
     write_mock_java(&java);
     fs::write(&server, b"mock").unwrap();
     fs::write(&fabric, b"mock").unwrap();
-    save_runtime_config(
-        &peer.paths,
-        world,
-        &RuntimeLaunchConfig {
-            java,
-            server_jar: server,
-            mod_jar: fabric,
-            accept_eula: true,
-            game_endpoint: Some(endpoint.into()),
-        },
-    )
-    .unwrap();
+    let config = RuntimeLaunchConfig {
+        java,
+        server_jar: server,
+        mod_jar: fabric,
+        accept_eula: true,
+        game_endpoint: Some(endpoint.into()),
+    };
+    save_runtime_config(&peer.paths, world, &config).unwrap();
+    let fingerprint = peer.storage.load_world_descriptor(world).unwrap().compatibility_fingerprint;
+    host_readiness::record_runtime_verified(&peer.paths, world, &config, fingerprint).unwrap();
 }
 
 fn runtime_ready(peer: &PeerFixture, world: WorldId, endpoint: &str, trigger: MigrationTrigger) -> bool {
@@ -194,6 +200,11 @@ fn write_mock_java(path: &Path) {
 import os
 import pathlib
 import socket
+import sys
+
+if "-version" in sys.argv:
+    print('openjdk version "25.0.1"', file=sys.stderr)
+    raise SystemExit(0)
 
 host = os.environ["SWARMCRAFT_IPC_HOST"]
 port = int(os.environ["SWARMCRAFT_IPC_PORT"])
@@ -208,7 +219,7 @@ def encoded(value):
 with socket.create_connection((host, port), timeout=5) as connection:
     writer = connection.makefile("w", encoding="utf-8", newline="\n")
     writer.write("AUTH\t" + token + "\n")
-    writer.write("WORLD_INFO\t" + encoded("26.1.2") + "\t" + encoded("0.19.3") + "\t" + encoded(world) + "\t" + fingerprint + "\n")
+    writer.write("WORLD_INFO\t" + encoded("26.1.2") + "\t" + encoded("0.19.3") + "\t" + encoded(world) + "\t" + fingerprint + "\t25\n")
     writer.flush()
     reader = connection.makefile("r", encoding="utf-8")
     while reader.readline():
@@ -291,8 +302,8 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     let mut membership = MembershipRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
-        epoch: 1,
-        sequence: 1,
+        epoch: 0,
+        sequence: 0,
         previous_membership_hash: None,
         members: descriptor.members.clone(),
         authority_peer_id: a.identity.peer_id(),
@@ -352,7 +363,8 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     }
 
     configure_mock_runtime(&a, world, "alice.test:25565");
-    configure_mock_runtime(&b, world, "bob.test:25565");
+    // Bob is a current storage voter but deliberately has no runnable host
+    // capability. Carol must be elected even though Bob has the lower peer ID.
     configure_mock_runtime(&c, world, "carol.test:25565");
 
     let a_addr = transport_address(&a);
@@ -375,7 +387,7 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
 
     daemon_a.stop();
 
-    let expected_successor = [b.identity.peer_id(), c.identity.peer_id()].into_iter().min().unwrap();
+    let expected_successor = c.identity.peer_id();
     wait_until("B and C accepting one Recovery epoch", Duration::from_secs(30), || {
         let b_epoch = b.storage.load_epoch_record(world).ok();
         let c_epoch = c.storage.load_epoch_record(world).ok();
@@ -389,15 +401,11 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
         })
     });
 
-    let (winner, loser, winner_endpoint) = if b.identity.peer_id() == expected_successor {
-        (&b, &c, "bob.test:25565")
-    } else {
-        (&c, &b, "carol.test:25565")
-    };
+    let (winner, loser, winner_endpoint) = (&c, &b, "carol.test:25565");
     assert_eq!(
         winner.identity.peer_id(),
-        b.identity.peer_id(),
-        "Bob should be the deterministic successor in this fixture"
+        c.identity.peer_id(),
+        "the host-ready candidate must win over lower-ID storage-only Bob"
     );
     wait_until("successor live authority permit", Duration::from_secs(20), || {
         permit_generation(winner, world)
@@ -416,7 +424,7 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     assert_eq!(winner_latest.epoch, 2);
     assert_eq!(winner_latest.previous_snapshot_hash, Some(manifest.manifest_hash().unwrap()));
 
-    let mut restarted_a = spawn_daemon(&a, &[b_addr, c_addr]);
+    let mut restarted_a = spawn_daemon(&a, &[b_addr.clone(), c_addr.clone()]);
     wait_until("stale A accepting recovery epoch and promoted snapshot", Duration::from_secs(30), || {
         let Ok(a_epoch) = a.storage.load_epoch_record(world) else { return false };
         let Ok(Some(a_latest)) = a.storage.latest_snapshot(world) else { return false };
@@ -443,4 +451,57 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     ];
     assert_eq!(hashes[0], hashes[1]);
     assert_eq!(hashes[1], hashes[2]);
+
+    // Prove an all-hosts-stopped world can resume only through the same durable
+    // quorum machinery, anchored to the exact signed sleep boundary.
+    drop(restarted_a);
+    drop(_daemon_b);
+    drop(_daemon_c);
+    let accepted = c.storage.load_epoch_record(world).unwrap();
+    let exact_sleep_hash = winner_latest.manifest_hash().unwrap();
+    let mut sleep_record = SleepRecordV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        latest_snapshot_hash: exact_sleep_hash,
+        epoch: accepted.epoch_number,
+        fencing_token: accepted.fencing_token,
+        authority_peer_id: c.identity.peer_id(),
+        authority_public_key: c.identity.public_key(),
+        signature: Vec::new(),
+    };
+    c.identity.sign_sleep_record(&mut sleep_record).unwrap();
+    for peer in [&a, &b, &c] {
+        peer.storage.save_sleep_record(&sleep_record).unwrap();
+    }
+    request_world_wake(&c.paths, &c.storage, world).unwrap();
+
+    let _wake_voter = spawn_daemon(&b, &[]);
+    thread::sleep(Duration::from_secs(1));
+    let _wake_authority = spawn_daemon(&c, std::slice::from_ref(&b_addr));
+
+    wait_until("sleep-record-bound quorum wake generation", Duration::from_secs(30), || {
+        [&b, &c].into_iter().all(|peer| {
+            peer.storage.load_epoch_record(world).is_ok_and(|record| {
+                record.epoch_number == 3
+                    && record.fencing_token == 3
+                    && record.mode == EpochMode::Recovery
+                    && record.authority_peer_id == c.identity.peer_id()
+                    && record.reason == "quorum wake from exact durable sleep boundary"
+            })
+        })
+    });
+    wait_until("single woken authority permit", Duration::from_secs(20), || {
+        permit_generation(&c, world)
+            .is_some_and(|(epoch, fencing, heartbeat)| epoch == 3 && fencing == 3 && heartbeat >= 2)
+    });
+    assert!(permit_generation(&b, world).is_none());
+    wait_until("woken authority runtime ready", Duration::from_secs(30), || {
+        runtime_ready(&c, world, "carol.test:25565", MigrationTrigger::WorldWake)
+    });
+    assert!(b.storage.load_sleep_record(world).is_err());
+    assert!(c.storage.load_sleep_record(world).is_err());
+    let woken_latest = c.storage.latest_snapshot(world).unwrap().unwrap();
+    assert_eq!(woken_latest.epoch, 3);
+    assert_eq!(woken_latest.previous_snapshot_hash, Some(exact_sleep_hash));
+    assert_eq!(woken_latest.state_root, winner_latest.state_root);
 }

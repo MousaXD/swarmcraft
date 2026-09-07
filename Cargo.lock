@@ -3373,6 +3373,7 @@ dependencies = [
  "fs2",
  "hex",
  "postcard",
+ "reqwest",
  "serde",
  "serde_json",
  "sha1",
@@ -3459,6 +3460,7 @@ name = "swarm-storage"
 version = "0.5.0"
 dependencies = [
  "blake3",
+ "fs2",
  "postcard",
  "serde",
  "serde_json",

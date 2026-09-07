@@ -13,9 +13,9 @@ use swarm_cli::migration::{
 use swarm_cli::runtime_installer::RuntimeInstaller;
 use swarm_core::{create_world_genesis_with_fingerprint, DataPaths, PeerIdentity};
 use swarm_protocol::{
-    AuthorityPolicyV1, EpochMode, EpochRecordV1, MembershipPolicyV1, RuntimeCompatibilityManifestV1, WorldConfigV1,
-    WorldDescriptorV1, WorldId, WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION,
-    STORAGE_SCHEMA_VERSION,
+    AuthorityPolicyV1, EpochMode, EpochRecordV1, MembershipPolicyV1, MembershipRecordV1,
+    RuntimeCompatibilityManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1, WorldPresentationV1,
+    WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 
@@ -54,20 +54,35 @@ fn fixture(root: PathBuf) -> RuntimeFixture {
             genesis: genesis.clone(),
         })
         .unwrap();
+    let member = WorldMemberV1 {
+        peer_id: identity.peer_id(),
+        public_key: identity.public_key(),
+        authority_eligible: true,
+        banned: false,
+    };
     storage
         .save_world_descriptor(&WorldDescriptorV1 {
             protocol_version: PROTOCOL_VERSION,
             world_id: world,
             compatibility_fingerprint: genesis.compatibility_fingerprint,
-            members: vec![WorldMemberV1 {
-                peer_id: identity.peer_id(),
-                public_key: identity.public_key(),
-                authority_eligible: true,
-                banned: false,
-            }],
+            members: vec![member.clone()],
             preferred_replication_factor: 1,
         })
         .unwrap();
+    let mut membership = MembershipRecordV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        epoch: 0,
+        sequence: 0,
+        previous_membership_hash: None,
+        members: vec![member],
+        authority_peer_id: identity.peer_id(),
+        authority_public_key: identity.public_key(),
+        signature: Vec::new(),
+    };
+    identity.sign_membership(&mut membership).unwrap();
+    storage.save_membership_record(&membership).unwrap();
+
     let mut world_config = WorldConfigV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
@@ -177,7 +192,7 @@ with socket.create_connection((host, port), timeout=5) as connection:
         + encoded(world)
         + "\t"
         + fingerprint
-        + "\n"
+        + "\t25\n"
     )
     writer.flush()
     time.sleep(0.35)
@@ -312,7 +327,10 @@ async fn incompatible_fabric_handshake_is_rejected_before_ready_and_world_stays_
     .await
     .unwrap_err();
 
-    assert!(error.to_string().contains("Fabric reported Minecraft"));
+    assert!(
+        error.to_string().contains("Fabric runtime is outside the shipped adapter contract"),
+        "unsupported bridge runtime must be rejected before readiness: {error}"
+    );
     assert_eq!(canonical_hash(&fixture), fixture.baseline_hash);
     fixture.storage.verify_snapshot(&fixture.storage.latest_snapshot(fixture.world).unwrap().unwrap()).unwrap();
 

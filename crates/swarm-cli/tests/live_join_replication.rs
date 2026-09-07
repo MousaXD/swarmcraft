@@ -117,8 +117,8 @@ fn authority_accepts_live_join_and_replicates_without_reconnect() {
     let mut membership = MembershipRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
-        epoch: 1,
-        sequence: 1,
+        epoch: 0,
+        sequence: 0,
         previous_membership_hash: None,
         members: descriptor.members.clone(),
         authority_peer_id: a.identity.peer_id(),
@@ -159,13 +159,21 @@ fn authority_accepts_live_join_and_replicates_without_reconnect() {
         base_state_hash: manifest.state_root,
         authority_peer_id: a.identity.peer_id(),
         authority_public_key: a.identity.public_key(),
-        mode: EpochMode::Solo,
+        mode: EpochMode::Quorum,
         fencing_token: 1,
-        reason: "live join acceptance seed".into(),
+        reason: "live join quorum-of-one seed".into(),
         signature: Vec::new(),
     };
     epoch.signature = a.identity.sign(&epoch.signing_bytes().unwrap());
     a.storage.save_epoch_record(&epoch).unwrap();
+
+    let mut promoted_membership = membership.clone();
+    promoted_membership.epoch = 1;
+    promoted_membership.sequence = 1;
+    promoted_membership.previous_membership_hash = Some(membership.record_hash().unwrap());
+    promoted_membership.signature.clear();
+    a.identity.sign_membership(&mut promoted_membership).unwrap();
+    a.storage.save_membership_record(&promoted_membership).unwrap();
 
     b.storage.create_world(&metadata).unwrap();
     b.storage.save_world_descriptor(&descriptor).unwrap();
@@ -177,7 +185,8 @@ fn authority_accepts_live_join_and_replicates_without_reconnect() {
         inviter_peer_id: a.identity.peer_id(),
         inviter_public_key: a.identity.public_key(),
         bootstrap_addrs: vec![a_address],
-        expires_unix_ms: u64::MAX,
+        expires_unix_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+            + 3_600_000,
         nonce: random_nonce(),
         signature: Vec::new(),
     };

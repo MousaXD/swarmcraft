@@ -136,7 +136,11 @@ function createJourneyOverview(hero) {
   return overview;
 }
 
-function installAdvancedWorldControls(selectionContent) {
+function installAdvancedWorldControls(
+  selectionContent,
+  transfer = byId('transferHost'),
+  transferAvailability = byId('transferAvailability'),
+) {
   let details = byId('advancedWorldTools');
   if (details) return details;
 
@@ -158,8 +162,6 @@ function installAdvancedWorldControls(selectionContent) {
   actions.innerHTML = '<div><h3>Hosting and maintenance</h3><p>Use these when you want to move the host, manage replicas, or inspect technical state.</p></div>';
   const actionButtons = document.createElement('div');
   actionButtons.className = 'compact-actions';
-  const transfer = byId('transferHost');
-  const transferAvailability = byId('transferAvailability');
   if (transfer) actionButtons.append(transfer);
   actions.append(actionButtons);
   if (transferAvailability) actions.append(transferAvailability);
@@ -190,6 +192,8 @@ function installPrimaryWorldLayout() {
   const heroActions = hero.querySelector('.hero-actions');
   const invite = byId('inviteWorld');
   const play = byId('playWorld');
+  const transfer = byId('transferHost');
+  const transferAvailability = byId('transferAvailability');
   if (heroActions && play && invite) {
     heroActions.replaceChildren(play, invite);
   }
@@ -203,7 +207,7 @@ function installPrimaryWorldLayout() {
   const notice = byId('worldNotice');
   if (notice && hostReadiness) hostReadiness.after(notice);
 
-  installAdvancedWorldControls(selectionContent);
+  installAdvancedWorldControls(selectionContent, transfer, transferAvailability);
   return true;
 }
 

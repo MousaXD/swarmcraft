@@ -182,6 +182,22 @@ fn canonicalize_package(request: CanonicalizePackageRequest) -> Result<Canonical
                 parse_retrieval(request.retrieval.as_deref().unwrap_or("provider_download")).map_err(|message| {
                     CanonicalizationFailure::for_artifact("invalid_retrieval_state", &request.artifact_id, message)
                 })?;
+            if retrieval == CanonicalRetrievalV1::ProviderDownload
+                && !hashes.iter().any(|hash| {
+                    matches!(
+                        hash.algorithm,
+                        CanonicalHashAlgorithmV1::Sha512
+                            | CanonicalHashAlgorithmV1::Sha256
+                            | CanonicalHashAlgorithmV1::Sha1
+                    )
+                })
+            {
+                return Err(CanonicalizationFailure::for_artifact(
+                    "provider_download_requires_strong_hash",
+                    &request.artifact_id,
+                    "automatic provider reacquisition requires SHA-1, SHA-256, or SHA-512 provenance; MD5-only artifacts must be recorded as manual_required",
+                ));
+            }
             let dependencies =
                 request.dependencies.into_iter().map(canonicalize_dependency).collect::<Result<Vec<_>, _>>()?;
             CanonicalArtifactSourceV1::Provider {

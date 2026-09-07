@@ -92,8 +92,8 @@ async fn hard_reconnect_preserves_transport_identity_and_authenticated_requests(
     let transport_a = transport_a_key.public().to_peer_id();
     let transport_b = transport_b_key.public().to_peer_id();
 
-    let mut node_a = SwarmNode::new(transport_a_key, hello_a.clone()).unwrap();
-    let mut node_b = SwarmNode::new(transport_b_key, hello_b.clone()).unwrap();
+    let mut node_a = SwarmNode::new(transport_a_key, hello_a.clone(), app_key_a.clone()).unwrap();
+    let mut node_b = SwarmNode::new(transport_b_key, hello_b.clone(), app_key_b.clone()).unwrap();
     node_a.listen("/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()).unwrap();
 
     let listen_address = timeout(Duration::from_secs(10), async {
@@ -116,7 +116,7 @@ async fn hard_reconnect_preserves_transport_identity_and_authenticated_requests(
 
     let replacement_key = load_or_create_transport_key(&transport_b_path).unwrap();
     assert_eq!(replacement_key.public().to_peer_id(), transport_b);
-    let mut replacement_b = SwarmNode::new(replacement_key, signed_hello(&app_key_b, 3)).unwrap();
+    let mut replacement_b = SwarmNode::new(replacement_key, signed_hello(&app_key_b, 3), app_key_b.clone()).unwrap();
     replacement_b.dial(listen_address).unwrap();
 
     wait_for_authentication(&mut node_a, &mut replacement_b, app_a, app_b).await;
@@ -128,7 +128,7 @@ async fn hard_reconnect_preserves_transport_identity_and_authenticated_requests(
 async fn invalid_bootstrap_address_is_rejected_and_diagnosed() {
     let app_key = SigningKey::generate(&mut OsRng);
     let hello = signed_hello(&app_key, 9);
-    let mut node = SwarmNode::new(generate_transport_key(), hello).unwrap();
+    let mut node = SwarmNode::new(generate_transport_key(), hello, app_key.clone()).unwrap();
     let invalid_bootstrap = "/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap();
 
     let error = node.add_bootstrap_address(invalid_bootstrap).unwrap_err();

@@ -18,54 +18,64 @@ pub fn create_world_genesis_with_fingerprint(
         creator_public_key: identity.public_key(),
         initial_membership: vec![identity.peer_id()],
     };
+    genesis.validate_semantics()?;
     Ok((genesis.world_id()?, genesis))
 }
 
 pub fn sign_recovery_ballot(identity: &PeerIdentity, ballot: &mut RecoveryBallotV1) -> Result<(), CoreError> {
     ballot.candidate_peer_id = identity.peer_id();
     ballot.candidate_public_key = identity.public_key();
+    ballot.validate_semantics()?;
     ballot.signature.clear();
     ballot.signature = identity.sign(&ballot.signing_bytes()?);
     Ok(())
 }
 
 pub fn verify_recovery_ballot_signature(ballot: &RecoveryBallotV1) -> Result<(), CoreError> {
+    ballot.validate_semantics()?;
     verify_signature(ballot.candidate_peer_id, ballot.candidate_public_key, &ballot.signing_bytes()?, &ballot.signature)
 }
 
 pub fn sign_recovery_vote(identity: &PeerIdentity, vote: &mut RecoveryVoteV1) -> Result<(), CoreError> {
     vote.voter_peer_id = identity.peer_id();
     vote.voter_public_key = identity.public_key();
+    vote.validate_semantics()?;
     vote.signature.clear();
     vote.signature = identity.sign(&vote.signing_bytes()?);
     Ok(())
 }
 
 pub fn verify_recovery_vote_signature(vote: &RecoveryVoteV1) -> Result<(), CoreError> {
+    vote.validate_semantics()?;
     verify_signature(vote.voter_peer_id, vote.voter_public_key, &vote.signing_bytes()?, &vote.signature)
 }
 
 pub fn sign_world_config(identity: &PeerIdentity, config: &mut WorldConfigV1) -> Result<(), CoreError> {
+    config.normalize_canonical();
     config.authority_peer_id = identity.peer_id();
     config.authority_public_key = identity.public_key();
+    config.validate_semantics()?;
     config.signature.clear();
     config.signature = identity.sign(&config.signing_bytes()?);
     Ok(())
 }
 
 pub fn verify_world_config_signature(config: &WorldConfigV1) -> Result<(), CoreError> {
+    config.validate_semantics()?;
     verify_signature(config.authority_peer_id, config.authority_public_key, &config.signing_bytes()?, &config.signature)
 }
 
 pub fn sign_solo_branch(identity: &PeerIdentity, branch: &mut SoloBranchV1) -> Result<(), CoreError> {
     branch.authority_peer_id = identity.peer_id();
     branch.authority_public_key = identity.public_key();
+    branch.validate_semantics()?;
     branch.signature.clear();
     branch.signature = identity.sign(&branch.signing_bytes()?);
     Ok(())
 }
 
 pub fn verify_solo_branch_signature(branch: &SoloBranchV1) -> Result<(), CoreError> {
+    branch.validate_semantics()?;
     verify_signature(branch.authority_peer_id, branch.authority_public_key, &branch.signing_bytes()?, &branch.signature)
 }
 

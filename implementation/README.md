@@ -130,10 +130,10 @@ Do not hide progress only in commit messages.
 
 | Agent | Domain | Status | Branch | Exact Head | Integrated | Notes |
 |---|---|---|---|---|---|---|
-| 1 | Consensus configuration safety | NOT STARTED | `fix/agent-1-consensus` | - | No | Wave 1 |
-| 2 | Protocol authorization/history | BLOCKED ON AGENT 1 | `fix/agent-2-protocol` | - | No | Wave 2 |
-| 3 | Storage transactional integrity | NOT STARTED | `fix/agent-3-storage` | - | No | Wave 1 |
-| 4 | Network authentication/privacy | NOT STARTED | `fix/agent-4-network` | - | No | Wave 1 |
+| 1 | Consensus configuration safety | INTEGRATED | `fix/agent-1-consensus` | `67493374544d91ad7bbb36be17e9312adb5654f6` | Yes | Exact-head run `33619420045` SUCCESS; merge `a0e0dec659d0b1eb21f9be34c44730edc6ff3984` |
+| 2 | Protocol authorization/history | INTEGRATED | `fix/agent-2-protocol` | `dde75ca4e9f2268bb97f42a716864c3e51f266cb` | Yes | Exact-head run `33693100794` SUCCESS; merge `6e70a0774d7e021cc57681705ccef4620265ce3d` |
+| 3 | Storage transactional integrity | INTEGRATED | `fix/agent-3-storage` | `67962dcb9c3cb2d5b9e67bb7288b2d786fc9e803` | Yes | Exact-head run `33769288028` SUCCESS; source ledger head `8ae4839f8f4039257d41a84fb82f0460f11ab903`; merge `602f6f1cfed46e457a1fccbf8d6d2df79e3f1ab5` |
+| 4 | Network authentication/privacy | INTEGRATED | `fix/agent-4-network` | `77300031751d0e3df0fc5a7c9aac1c2b2625989f` | Yes | Exact-head run `33931301852` SUCCESS on Linux/Windows/macOS; source ledger head `839b737c19e88923d5779ce20afb4cb400dd5b9b`; merge `aac089a72c68f72000a8610d2288721317cf0ae4` |
 | 5 | Package/provider security | NOT STARTED | `fix/agent-5-supply-chain` | - | No | Wave 1 |
 | 6 | Minecraft/runtime lifecycle | NOT STARTED | `fix/agent-6-runtime` | - | No | Wave 1 |
 | 7 | Desktop player journey | NOT STARTED | `fix/agent-7-desktop` | - | No | Wave 1 |
@@ -244,6 +244,59 @@ After every integration, update this README with:
 - resulting integration head SHA
 - validation run/results
 - conflicts resolved
+
+### Integration history
+
+#### Agent 1 — Consensus configuration safety
+
+- Integrated source production SHA: `67493374544d91ad7bbb36be17e9312adb5654f6`
+- Source ledger head: `8bcbef2bb24478c5a9938872643c7103ba8a4573` (docs-only after validated production SHA)
+- Integration PR: `#63`
+- Integration commit/resulting production integration head: `a0e0dec659d0b1eb21f9be34c44730edc6ff3984`
+- Validation: Agent 1 exact-head regression run `33619420045` — SUCCESS on `67493374544d91ad7bbb36be17e9312adb5654f6`
+- Merge-tree proof: comparing Agent 1 ledger head `8bcbef2...` to integration commit `a0e0dec...` changes only `implementation/agent-10-final-acceptance.md`; no Agent 1 production path differs from the validated branch tree.
+- Conflicts resolved: none. The integration branch's only divergence since the common campaign-plan base was the Agent 10 dependency-gate ledger, so GitHub produced a clean two-parent merge without production conflict.
+- Deferred composed proof: Agent 3 cross-process recovery-promise/non-equivocation and production transport/restart composition remains required when Agent 3 is integrated. This is not unfinished Agent 1-owned work and does not block Agent 2 from starting from the newest integration head.
+
+#### Agent 2 — Protocol authorization and history
+
+- Integrated source production SHA: `dde75ca4e9f2268bb97f42a716864c3e51f266cb`
+- Source ledger head: `5b76d5488b47856268128713dbc77bc45566d908` (one docs-only commit after validated production SHA)
+- Integration PR: `#64`
+- Integration commit/resulting production integration head: `6e70a0774d7e021cc57681705ccef4620265ce3d`
+- Validation: Agent 2 protocol remediation run `33693100794` — SUCCESS on `dde75ca4e9f2268bb97f42a716864c3e51f266cb`; focused discovery, invite canonical-genesis, automatic invite join, format, workspace check, warnings-denied clippy, protocol/core/storage tests, daemon/CLI semantic acceptance, and full workspace tests all completed successfully.
+- Closure proof: `dde75ca4...` to `5b76d548...` changes exactly `implementation/agent-2-protocol.md`; no production, Rust, workflow, or test path changed after validation.
+- Merge-tree proof: source ledger head `5b76d548...` and integration merge `6e70a077...` both have tree `dec97e562199f692f1dcc561ff1f16949f8419c8`, so the merge introduced no tree mutation.
+- Conflicts resolved: none. Agent 2 branched from the then-current integration head `c69cb0a75c82688a91692bcd2ca47efa6827b958`, and PR #64 merged cleanly.
+- Integration implications: Agent 4 now has the integrated Agent 1 + Agent 2 authority/history semantics needed to finish authenticated discovery authority (`FINAL-028`). Agent 3 retains ownership of durable storage head/CAS, immutable slots, cross-process locking, and atomic final-commit guarantees beyond Agent 2 semantic acceptance checks.
+
+#### Agent 3 — Storage transactional integrity
+
+- Integrated source production SHA: `67962dcb9c3cb2d5b9e67bb7288b2d786fc9e803`
+- Source ledger head: `8ae4839f8f4039257d41a84fb82f0460f11ab903`
+- Integration PR: `#62`
+- Integration commit/resulting integration head: `602f6f1cfed46e457a1fccbf8d6d2df79e3f1ab5`
+- Composition ancestor: `f02bb0d54cb44df67e730f01be4c903e25d670ff` with Agent 1 + Agent 2 already integrated; composed milestone `3c6ca9bab5a9ee9b0d228a45a267c3fa8e2722a3`.
+- Validation: Agent 3 exact-head run `33769288028` — SUCCESS on `67962dcb9c3cb2d5b9e67bb7288b2d786fc9e803`; Ubuntu exact-head acceptance plus Windows and macOS portability jobs all succeeded, including format, workspace check, warnings-denied clippy, storage suite, rollback/non-reuse, immutable slots, fencing races, cross-process promise non-equivocation, portable-path/restore integrity, Agent 1/2 composed tests, all-target compilation, exact-SHA assertion, and clean-worktree assertion.
+- Composition validation: run `33769105882` — SUCCESS.
+- Closure proof: exactly two commits follow the validated production SHA. `f39f61a12b704a35f5b366e44ecf659920a145b0` removes four temporary Agent 3 remediation workflows; `8ae4839f...` updates only `implementation/agent-3-storage.md`. No Rust, test, Cargo metadata, permanent CI, or other product path changed after validation.
+- Merge-tree proof: source ledger head `8ae4839f...` and merge commit `602f6f1c...` both have tree `afc1a1b5fe3f9d1d3baf0896a79472011a4b39a3`, so GitHub introduced no tree mutation during integration.
+- Composition conflicts resolved before validation: `crates/swarm-storage/src/control.rs`, `lib.rs`, `root.rs`, `state.rs`, `streaming.rs`, `world.rs`, and `crates/swarm-storage/tests/publication_ownership_race.rs`. The final PR merge itself was conflict-free.
+- Integration implications: the integration branch now contains the durable canonical storage head/reference and authority-fenced commit boundary needed as the storage anchor for the future FINAL-028 freshness proof. Agent 4 remains BLOCKED because a first-contact client still needs a non-omittable freshness primitive proving current authority/current head; Agent 3 intentionally did not implement that protocol.
+
+#### Agent 4 — Network authentication and privacy
+
+- Integrated source production SHA: `77300031751d0e3df0fc5a7c9aac1c2b2625989f`
+- Source ledger head: `839b737c19e88923d5779ce20afb4cb400dd5b9b`
+- Integration PR: `#69`
+- Integration commit/resulting integration head: `aac089a72c68f72000a8610d2288721317cf0ae4`
+- Composition ancestor: `c9252820a560e6ed4d30bb77227e3a494c6ce869` with Agents 1 + 2 + 3 already integrated.
+- Validation: Agent 4 exact-head acceptance run `33931301852` — SUCCESS. Linux passed exact-SHA/clean-tree assertions, locked metadata, format, all-target workspace check, strict `-D warnings` clippy, network/protocol/core/storage/consensus/CLI suites, FINAL-028 verifier and live discovery freshness, connection authentication/replay/admission/invite/friend/DNS hardening, Agents 1/2/3 composed regressions, durable recovery freshness, impaired QUIC recovery, and integration-target compilation. Windows and macOS portability jobs passed against the same immutable production SHA.
+- Stress evidence: run `33917372427` passed the permanent discovery network target five consecutive rounds, `15/15` executions green, including malicious/stale browse + exact resolve, duplicate-dial/provider-disconnect resilience, and simultaneous bidirectional-dial convergence; that run later stopped only on a structural clippy lint repaired without semantic change before final acceptance.
+- Closure proof: comparing validated production SHA `773000317...` to source ledger head `839b737c...` shows only temporary Agent 4 validation/materializer/helper removals plus `implementation/agent-4-network.md`; no Rust source, permanent tests, Cargo metadata, or permanent product workflow changed after validation.
+- Merge-tree proof: source ledger head `839b737c...` and merge commit `aac089a7...` both have tree `ca37f6034b3e0cc01515fd60471df06c9cffca66`, so GitHub introduced no tree mutation during integration. Merge parents are exactly prior integration head `c9252820...` and Agent 4 source head `839b737c...`.
+- Conflicts resolved: none in PR #69. Agent 4 resolved its historical composition conflict in `crates/swarm-cli/src/daemon.rs` before exact-head validation.
+- Integration implications: FINAL-028 is closed on the integrated tree. Discovery locators remain untrusted, while first-contact authority/head freshness is verifier-interactive and bound to current/joint quorum, durable recovery fencing, WorldConfig, and Agent 3 canonical head state.
 
 ## Final acceptance and re-audit
 
