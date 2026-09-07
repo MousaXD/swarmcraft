@@ -4,7 +4,6 @@ use std::{
     fs,
     net::UdpSocket,
     os::unix::fs::PermissionsExt,
-    path::Path,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
