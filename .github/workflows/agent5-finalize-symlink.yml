@@ -56,3 +56,5 @@ jobs:
           git config user.email "101021011+MousaXD@users.noreply.github.com"
           git commit -m "test(provider): prove symlink staging fence"
           git push origin HEAD:fix/agent-5-supply-chain
+
+# retrigger after correcting expected symlink rejection text
