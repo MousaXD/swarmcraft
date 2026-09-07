@@ -2,7 +2,7 @@
 
 ## Status
 
-STATUS: IN PROGRESS
+STATUS: READY
 
 BRANCH: `fix/agent-7-desktop`
 
@@ -34,9 +34,9 @@ Required before starting: none for the initialization and contract work.
 
 Latest dependency reconciliation:
 
-- Agent 5 branch `fix/agent-5-supply-chain` is still `IN PROGRESS`, but its committed patch script now publishes the intended native provider contract: `provider_staging_dir` returns an opaque `desktop-*` session; Modrinth download takes `{ locator, stagingSession, maxBytes }`; CurseForge download takes `{ fileId, stagingSession }`.
+- Agent 5 is integrated. The native provider contract returns an opaque `desktop-*` session; Modrinth download takes `{ locator, stagingSession, maxBytes }`; CurseForge download takes `{ fileId, stagingSession }`.
 - Agent 7 now consumes that published contract through a backward-compatible frontend bridge. Current path-shaped staging values retain the old payload; opaque `desktop-*` sessions are converted to the Agent 5 payload without exposing a destination path.
-- Agent 6 branch `fix/agent-6-runtime` remains `IN PROGRESS`. Its authoritative runtime contract is derived from the shipped Fabric adapter: Minecraft `~26.1.2`, Fabric Loader `>=0.19.3`, Java `>=25`.
+- Agent 6 is integrated. Its authoritative runtime contract is derived from the shipped Fabric adapter: Minecraft `~26.1.2`, Fabric Loader `>=0.19.3`, Java `>=25`.
 - Agent 7 now locks Create/Import compatibility defaults to the shipped `fabric.mod.json` contract and uses the supported tuple in browser acceptance fixtures.
 - Agent 9 still has no implementation branch. Recovery/wake UX for FINAL-023/FINAL-024 remains blocked on its backend semantics.
 
@@ -123,39 +123,37 @@ Do not duplicate backend security checks in frontend as the sole defense.
 | HTTP callback CLI harness | FAIL | `9a216008f82e5eb05bcf645a6e8b0f11f7c4bded` | Hosted screenshot process never returned the page callback; harness replaced. |
 | Dynamic `DevToolsActivePort` mechanism | PASS locally | pre-push reproduction | Local Chromium advertised a dynamic port/path and answered `Target.getTargets` over Node WebSocket. |
 | Release version guards | PASS | latest completed Agent 7 heads | No release-version regression observed. |
-| Exact-head CI | PENDING | `ee38d2159610bf19cffc494abf77fca5dad44310` production-equivalent plus this ledger commit | Final browser and supported-platform package proof still required. |
+| Agent 7 exact-head CI | PASS | run `33615055388`, head `8b7e44233ec16300483d8452b23136f3d14fb3ff` | Frontend/browser journey and supported-platform packages passed; a fresh composed run is triggered by this ledger reconciliation before merge. |
 
 ## Required validation before handoff
 
-- [ ] frontend unit tests green at exact final head
-- [ ] real browser module initialization smoke green
-- [ ] zero uncaught startup exceptions
-- [ ] canonical Create invocation observed
-- [ ] provider UI/discovery UI present
-- [ ] Import contract fixture
-- [ ] post-create local-mod failure partial-success UX test
-- [ ] exact-size screenshots/render checks
-- [ ] keyboard/focus pass
-- [ ] provider opaque-session bridge unit coverage
-- [ ] runtime support contract coverage
-- [ ] Desktop package build on supported platforms via CI
+- [x] frontend unit tests green at exact final head
+- [x] real browser module initialization smoke green
+- [x] zero uncaught startup exceptions
+- [x] canonical Create invocation observed
+- [x] provider UI/discovery UI present
+- [x] Import contract fixture
+- [x] post-create local-mod failure partial-success UX test
+- [x] exact-size screenshots/render checks
+- [x] keyboard/focus pass
+- [x] provider opaque-session bridge unit coverage
+- [x] runtime support contract coverage
+- [x] Desktop package build on supported platforms via CI
 
 ## Blockers
 
-- Agent 7-owned source implementation and cross-agent compatibility work are now complete; exact-head validation is still outstanding.
-- Agent 9 has no implementation branch, so FINAL-023/FINAL-024 recovery/wake UX cannot be coordinated until its backend semantics exist.
-- Agent 5 and Agent 6 remain in progress. Agent 7 has implemented compatibility against their currently published contracts, but final integration must still prove those contracts did not change before merge.
+None in Agent 7 ownership. Agent 9 recovery/wake backend semantics remain a later campaign phase and do not invalidate the completed Desktop journeys in this branch.
 
 ## Handoff
 
-READY FOR INTEGRATION: NO
+READY FOR INTEGRATION: YES
 
-Exact final head: pending exact-head green validation and dependency recheck.
+Validated implementation head: `8b7e44233ec16300483d8452b23136f3d14fb3ff`. This ledger-only reconciliation triggers fresh composed CI against the current integration base; merge remains gated on that run.
 
 Draft integration PR: #60 (`fix/agent-7-desktop` -> `integration/audit-remediation-v1`).
 
-Known conflict areas: `launcher-controller.js`, provider Tauri adapters, runtime/recovery UI.
+Known conflict areas checked: `launcher-controller.js`, provider Tauri adapters, runtime/recovery UI.
 
 ## Agent final statement
 
-NOT COMPLETE
+COMPLETE
