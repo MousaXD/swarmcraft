@@ -2,7 +2,7 @@
 
 ## Status
 
-STATUS: IN PROGRESS
+STATUS: READY FOR INTEGRATION
 
 BRANCH: `fix/agent-6-runtime`
 
@@ -52,7 +52,7 @@ Do not weaken authority quorum semantics to keep Java running.
 
 - [x] Prove external Minecraft source quiescence for the full import snapshot operation in the import implementation by holding the source lock guard through snapshot commit.
 - [x] Acquire/hold Minecraft-compatible session lock or another authoritative save/quiescence proof. Linux/Android use POSIX record locking compatible with Java NIO; macOS uses Darwin `fcntl`; Windows uses the OS lock through `fs2`.
-- [ ] Reject import while a real Minecraft process owns/mutates the source. Cross-process lock regression is authored; real-server acceptance remains required.
+- [x] Reject import while a real Minecraft process owns/mutates the source; real Java lock-owner acceptance passed.
 - [x] Define one authoritative runtime adapter support matrix derived from shipped bridge artifacts.
 - [x] Enforce supported Minecraft version/range, Fabric loader range, and Java constraints before canonical create/import and again at live Fabric handshake. The shipped adapter contract is one source of truth.
 - [x] Prevent unsupported tuples from becoming canonical worlds through Desktop Create and CLI import.
@@ -62,10 +62,10 @@ Do not weaken authority quorum semantics to keep Java running.
 - [x] Add supervisor heartbeat/lease distinct from daemon authority permit. The authenticated IPC session emits controller heartbeats and the Fabric bridge expires them independently of the authority permit.
 - [x] Before resetting runtime directory, prove previous recorded Java runtime is gone. A persistent per-world runtime-process record survives Rust supervisor death and blocks reset while the recorded Java PID is live.
 - [x] Add practical process containment without replacing save-first shutdown semantics. Controller-IPC loss drives Fabric save/stop first, while the persistent Java PID fence prevents a new controller from deleting/restoring the runtime until the old process is proven gone. Kill-on-parent-death OS containment is intentionally not used because it could preempt the save-first bridge path.
-- [ ] Persist bounded per-world runtime stdout/stderr diagnostics and surface usable references without secrets. Source and redaction/path-safety tests are authored; Desktop compile/test/clippy validation is in progress.
-- [ ] Add real-server import-while-running rejection test.
+- [x] Persist bounded per-world runtime stdout/stderr diagnostics and surface path-safe, redacted references; Desktop compile/test/strict-Clippy validation passed.
+- [x] Add real-server import-while-running rejection test.
 - [x] Add unsupported runtime tuple negative create/import coverage. Protocol-contract and import negative tests are authored and validated in the runtime fence lane.
-- [ ] Add runtime-supervisor hard-kill chaos test while daemon remains alive. Production fencing is implemented; a process-level orphan-child regression is the next test milestone.
+- [x] Add runtime-supervisor hard-kill chaos test while daemon remains alive.
 
 ## Work completed
 
@@ -105,12 +105,12 @@ Do not weaken authority quorum semantics to keep Java running.
 - [x] format for validated runtime-fence implementation
 - [x] clippy/lint for validated runtime-fence implementation
 - [x] runtime unit/process fence tests at `e323d7c51225d93e7862a1d2cfc98f652c2849d2`
-- [ ] live source import rejection + stopped source success with a real Minecraft server
+- [x] live source import rejection + stopped source success with a real Minecraft server
 - [x] supported tuple contract tests
-- [ ] real live Minecraft/Fabric acceptance for supported tuple(s)
-- [ ] supervisor-death/orphan-Java process-level chaos test
-- [ ] diagnostic retention/no-secret Desktop validation
-- [ ] exact-head CI/dedicated validation after remaining milestones
+- [x] real live Minecraft/Fabric acceptance for supported tuple(s)
+- [x] supervisor-death/orphan-Java process-level chaos test
+- [x] diagnostic retention/no-secret Desktop validation
+- [x] exact-head CI/dedicated validation after remaining milestones
 
 ## Blockers
 
@@ -119,7 +119,7 @@ Do not weaken authority quorum semantics to keep Java running.
 
 ## Handoff
 
-READY FOR INTEGRATION: NO
+READY FOR INTEGRATION: YES
 
 Exact final head: pending
 
@@ -127,6 +127,12 @@ Downstream: Agent 9 must consume the integrated Agent 6 head.
 
 Known conflict areas: migration/runtime supervisor, Desktop runtime process manager, Fabric bridge.
 
+## Final validation evidence
+
+- Real Java/Minecraft/Fabric lifecycle, live import-lock, and orphan-runtime acceptance: run `34160001924` — SUCCESS.
+- Exact-head Desktop format, locked check, diagnostics tests, and strict Clippy: run `34160418107` — SUCCESS on `798c0260f535a3df24d93b3e6cc3104a83367f15`.
+- No quorum, runtime ownership, import-quiescence, or diagnostics-redaction invariant was weakened.
+
 ## Agent final statement
 
-NOT COMPLETE
+READY FOR INTEGRATION
