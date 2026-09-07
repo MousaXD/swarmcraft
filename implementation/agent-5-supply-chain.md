@@ -2,15 +2,27 @@
 
 ## Status
 
-STATUS: IN PROGRESS
+STATUS: READY FOR INTEGRATION
+
+READY FOR INTEGRATION: YES
 
 BRANCH: `fix/agent-5-supply-chain`
 
-STARTING SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
+LIVE STARTING HEAD FOR CLOSURE: `a6267844d04499debcca5290d46f49ef4357cc5e`
 
-CURRENT IMPLEMENTATION SHA: `640e35783549f12de3997606a8a396b077eaaca1` (Milestone 1 production head; this ledger-only progress commit advances the branch ref without changing production behavior)
+CURRENT AUTHORITATIVE INTEGRATION TIP: `39decc9e5eef7d2b28a0e103686aa79ebb744017`
 
-INTEGRATED SHA: pending
+MERGE BASE WITH CURRENT INTEGRATION: `a9736b159d9e9618a3ed8515c20e93f92c1453cb`
+
+FINAL PRODUCTION / PERMANENT-TEST SHA: `51cd18cb5c937838ae7b4bcc2cb67f6027b1d6d6`
+
+EXACT-HEAD VALIDATION SHA: `191df6eaa69a6b38e2202e6a2e3ef061417b345d`
+
+EXACT-HEAD VALIDATION RUN: `34070673328` — SUCCESS
+
+POST-VALIDATION HELPER CLEANUP SHA: `61e44078f32912fdc899aa7cba07036114a80df1`
+
+INTEGRATED SHA: pending — Agent 5 must not merge itself.
 
 ## Mission
 
@@ -18,100 +30,186 @@ Make provider-controlled input incapable of escaping filesystem staging, leaking
 
 ## Findings owned
 
-- FINAL-003 — CurseForge provider filename traversal / staging escape
-- FINAL-017 — CurseForge API credential redirect/handling weakness
-- FINAL-018 — MD5-only/provider-download reproducibility mismatch
-- FINAL-019 — unbounded provider metadata responses
-- FINAL-034 — provider redirect/host trust boundary hardening
+- FINAL-003 — CLOSED: portable provider filename and staging containment hardening, opaque sessions, and symlink fencing are implemented and permanently tested.
+- FINAL-017 — CLOSED: authenticated CurseForge API traffic is isolated from artifact traffic and credentials are exact-origin fenced and absent from subprocess/artifact paths.
+- FINAL-018 — CLOSED: automatic `ProviderDownload` requires SHA-1/SHA-256/SHA-512; MD5-only CurseForge provenance remains `ManualRequired`.
+- FINAL-019 — CLOSED: provider metadata bodies, headers, strings, depth, arrays, objects, URLs/IDs/filenames and relevant cardinalities are bounded before/around parsing.
+- FINAL-034 — CLOSED: authenticated API redirect and artifact-host redirect trust boundaries are explicit and regression tested.
 
-Read `audits/FINAL-AUDIT.md`, Auditor 6 Package/Supply Chain, and Auditor 7 Security before editing.
+## Reconciled implementation checklist
 
-## Dependencies
-
-Required before starting: none.
-
-## Ownership boundaries
-
-Primary ownership:
-
-- `crates/swarm-provider`
-- Modrinth provider implementation
-- Desktop CurseForge provider/Tauri commands
-- `crates/swarm-cli/src/provider_runtime.rs`
-- launcher provider staging commands/UI contract as required for safe native boundary
-
-Coordinate with Agent 7 when changing Tauri/provider frontend payloads.
-
-## Implementation checklist
+The previous ledger was stale at closure start. The live `a6267844...` branch already contained the later provider-security implementation validated by run `33614873216`; the unchecked items below were therefore audited against current source rather than reimplemented blindly.
 
 - [x] Stop accepting arbitrary provider download destination paths from the frontend.
 - [x] Make backend construct provider staging paths from server-owned root plus opaque provider identity/session.
 - [x] Validate provider filename as exactly one safe normal path component.
-- [x] Reject absolute paths, prefixes, separators, `.`/`..`, UNC/drive forms and cross-platform separator tricks.
-- [x] Verify containment under provider staging root by deriving every publication path exclusively from a validated opaque session plus validated provider identity/file components; staging sessions reject symlink roots.
-- [ ] Separate authenticated CurseForge API client from artifact download client.
-- [ ] Disable cross-origin redirects for authenticated API requests or allow only exact approved origin.
-- [ ] Ensure `SWARMCRAFT_CURSEFORGE_API_KEY` is not passed in child argv and cannot reach another origin.
-- [x] Make canonical `ProviderDownload` rules consistent with runtime reacquisition for MD5-only CurseForge files.
-- [x] Enforce the strong-hash/manual-required policy: automatic `ProviderDownload` requires SHA-1/SHA-256/SHA-512; MD5-only provenance is `ManualRequired`.
-- [ ] Bound provider API response bytes before JSON parsing for Modrinth and CurseForge.
-- [ ] Bound relevant header/cardinality/string metadata.
-- [ ] Define redirect host allowlists for provider API and artifact downloads.
-- [x] Add traversal fixture matrix across Unix/Windows path forms.
-- [ ] Add two-origin HTTPS redirect credential-leak tests/policy regression coverage.
-- [ ] Add oversized metadata response tests.
-- [x] Add MD5-only canonicalization/reacquisition contract test.
+- [x] Reject absolute paths, prefixes, separators, `.`/`..`, UNC/drive forms, Windows backslash tricks, reserved device names, trailing-dot/space forms, and cross-platform separator tricks.
+- [x] Derive publication paths only from validated opaque sessions plus validated provider/file components.
+- [x] Reject malformed staging-session tokens and symlinked staging-session roots.
+- [x] Separate the authenticated CurseForge API client from the artifact-download client.
+- [x] Fence authenticated API redirects to the exact approved CurseForge API origin.
+- [x] Prevent `SWARMCRAFT_CURSEFORGE_API_KEY` from entering child-process argv.
+- [x] Prevent the CurseForge API key from being attached to artifact-download requests.
+- [x] Keep the API credential out of frontend payload contracts and provider logging paths.
+- [x] Define explicit CurseForge artifact host/origin acceptance for `forgecdn.net` and approved subdomains and reject unrelated/private/unapproved hosts.
+- [x] Bound Modrinth response bodies before JSON parsing.
+- [x] Bound CurseForge response bodies before JSON parsing.
+- [x] Bound relevant headers, JSON depth, string length, array/object cardinality, URLs, filenames and IDs.
+- [x] Keep canonical provider reacquisition semantics aligned with runtime behavior.
+- [x] Require SHA-1/SHA-256/SHA-512 proof for automatic `ProviderDownload`.
+- [x] Keep MD5-only CurseForge files `ManualRequired`.
+- [x] Preserve server-owned staging and portable filename protections.
 
-## Work completed
+## Milestones and validation history
 
-- Campaign start verified from `integration/audit-remediation-v1` plan commit `a9736b159d9e9618a3ed8515c20e93f92c1453cb`, whose parent is the required production baseline `b4bab08562cf0eb53763674407375b023e1d0858`.
-- Assigned branch `fix/agent-5-supply-chain` created from the campaign plan commit. No production dependency gate applies.
-- Read the full Agent 5 ledger plus the required final audit, Auditor 6 package/supply-chain report, and Auditor 7 security report. The audit files live on their audit branches and are not copied into the campaign branch.
-- Milestone 1 committed at `640e35783549f12de3997606a8a396b077eaaca1`:
-  - `provider_staging_dir` now returns an opaque session token rather than exposing a filesystem path to the webview.
-  - Desktop Modrinth and CurseForge commands derive destinations server-side from the validated staging session and provider identities.
-  - Modrinth path components and CurseForge JAR filenames reject portable traversal/prefix/separator/device-name forms, including Windows drive/UNC/backslash cases on non-Windows test hosts.
-  - staging-session resolution rejects malformed tokens and symlink session roots.
-  - launcher frontend sends opaque staging sessions, never native destination paths.
-  - canonical provider provenance now rejects `ProviderDownload` without SHA-1/SHA-256/SHA-512 proof; MD5-only CurseForge artifacts are recorded as `manual_required`.
-  - Desktop canonicalization independently enforces the same strong-hash rule.
-- Remaining implementation is limited to authenticated CurseForge HTTP isolation, redirect trust boundaries, metadata resource limits, their regression tests, and final lint/exact-head validation.
+### Milestone 1
 
-## Tests run
+Production SHA: `640e35783549f12de3997606a8a396b077eaaca1`
 
-| Test | Result | Commit/SHA | Notes |
-|---|---|---|---|
-| Git/audit start-state verification | PASS | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | Branch created from campaign plan commit whose production parent is required baseline. |
-| Agent 5 Milestone 1 workflow | PASS | run `33582718560`, source commit `640e35783549f12de3997606a8a396b077eaaca1` | Protocol tests green; validation-only Tauri sidecars staged; Desktop check/tests green; launcher-controller Node tests green; workflow committed source and self-cleaned helpers. |
-| `cargo test -p swarm-protocol --locked` | PASS | run `33582718560` | Includes `md5_only_provider_download_is_not_a_valid_reacquisition_contract`. |
-| Desktop `cargo check` + `cargo test --locked` | PASS | run `33582718560` | Includes hostile provider filename traversal matrix, staging-session fencing, Modrinth identity path-component test, and existing provider tests. |
-| `node --test apps/desktop/tests/launcher-controller.test.mjs` | PASS | run `33582718560` | Includes MD5-only CurseForge mapping to `manual_required` and provider canonical mapping tests. |
+Validation run: `33582718560` — SUCCESS
 
-## Required validation before handoff
+Implemented and proved:
 
-- [x] format for Milestone 1 touched Rust
-- [ ] clippy/lint for provider/Desktop Rust
-- [ ] complete Modrinth deterministic provider suite after HTTP/metadata hardening
-- [x] Desktop provider tests for Milestone 1
-- [x] traversal matrix
-- [ ] cross-origin secret redirect policy fixture
-- [ ] metadata size-bound tests
-- [x] MD5/manual/provider-download consistency tests
-- [ ] canonical provider provenance round-trip / clean-peer reacquisition contract validation
-- [ ] exact-head dedicated provider validation
+- backend-owned opaque provider staging sessions;
+- frontend no longer chooses arbitrary native download destinations;
+- portable traversal/prefix/separator/device-name rejection;
+- staging symlink-root rejection in production logic;
+- server-side Modrinth/CurseForge destination construction;
+- strong-hash requirement;
+- MD5-only CurseForge provenance canonicalizes to `ManualRequired`;
+- provider contract and launcher tests.
 
-## Blockers
+### Provider HTTP / metadata completion already present at closure start
 
-- No product blocker. Local terminal connector remains unavailable due a conversation-identity guard, so executable validation is being performed on GitHub Actions runners. This does not currently prevent implementation or test execution.
+Production SHA after run: `a6267844d04499debcca5290d46f49ef4357cc5e`
+
+Validation run: `33614873216` — SUCCESS
+
+This later milestone, which the stale ledger had not reconciled, already implemented:
+
+- separate authenticated CurseForge API and artifact clients;
+- exact-origin API redirect policy;
+- explicit artifact-host policy;
+- in-process provider HTTP without credential-bearing `curl`/child argv;
+- bounded provider response bodies and metadata shapes;
+- header/string/cardinality limits;
+- Modrinth and Desktop provider compilation/tests and strict clippy.
+
+The successful run included `swarm-cli` check, provider-runtime tests, Modrinth deterministic tests, strict CLI clippy, Desktop check/tests, strict Desktop clippy, and static secret/subprocess/implicit-redirect proofs.
+
+### Permanent redirect / reacquisition regressions
+
+Permanent-test milestone: `8e004c269b5ff88f96df4fac6b3aaf9a76a63c21`
+
+Validation run: `34068137515` — SUCCESS
+
+Added permanent coverage for:
+
+- real local two-origin redirect behavior: the authenticated origin receives the API key and a cross-origin redirect is rejected before the attacker origin receives a request;
+- production HTTPS CurseForge API-origin validation rejects attacker origins;
+- artifact redirect policy: approved redirect target accepted, unapproved target rejected, and artifact requests carry no API key;
+- CurseForge oversized body rejection before JSON parsing;
+- CurseForge header/array/object cardinality limits and existing string-size limits;
+- Modrinth oversized response rejection before JSON parsing;
+- API-key absence from provider child-process paths and artifact-request paths;
+- MD5-only `ProviderDownload` rejection with valid `ManualRequired` fallback;
+- strong-hash canonical provider provenance surviving runtime-compatibility round trip for a clean peer.
+
+### Permanent filesystem symlink regression
+
+Final production/permanent-test SHA: `51cd18cb5c937838ae7b4bcc2cb67f6027b1d6d6`
+
+Validation run: `34070434020` — SUCCESS
+
+Added a real Unix filesystem regression which creates an opaque provider staging session, replaces the private session directory with a symlink, and proves `resolve_provider_staging_session` fails closed with `Provider staging session is not a private directory`.
+
+An earlier attempt, run `34068478902`, failed only because the test expected a different error string; production already rejected the symlink correctly. The expectation was corrected and the permanent regression passed without changing production behavior.
+
+## Permanent regression coverage
+
+- [x] two-origin credential redirect rejection and attacker non-receipt
+- [x] API credential present only on authenticated API request
+- [x] API credential absent from artifact requests
+- [x] API-key child-process argv absence regression
+- [x] approved artifact redirect accepted
+- [x] unapproved artifact redirect rejected before target receives a request
+- [x] oversized Modrinth metadata rejected before JSON parsing
+- [x] oversized CurseForge metadata rejected before JSON parsing
+- [x] metadata string/cardinality/header bounds
+- [x] Unix traversal forms
+- [x] Windows drive/backslash/UNC traversal forms
+- [x] reserved device/trailing-dot/trailing-space filename forms
+- [x] opaque staging-session fencing
+- [x] real symlink staging-session rejection
+- [x] MD5-only provider file remains manual-required
+- [x] strong-hash canonical provider clean-peer round trip
+
+## Final exact-head acceptance
+
+Validation SHA: `191df6eaa69a6b38e2202e6a2e3ef061417b345d`
+
+Run: `34070673328` — SUCCESS
+
+The validation SHA differs from final production SHA `51cd18cb...` only by the temporary read-only acceptance workflow. GitHub compare showed exactly one changed file between those SHAs: `.github/workflows/agent5-exact-head-acceptance.yml`.
+
+The acceptance workflow had `contents: read`, did not rewrite source, did not commit, and verified the exact remote SHA plus a clean tree at both start and end.
+
+Passed acceptance commands/checks:
+
+- [x] `cargo fmt --all -- --check`
+- [x] Desktop `cargo fmt ... -- --check`
+- [x] `cargo check --workspace --locked`
+- [x] `cargo check -p swarm-cli --locked`
+- [x] `cargo clippy -p swarm-cli --all-targets --locked -- -D warnings`
+- [x] `cargo test -p swarm-cli --lib --locked provider_runtime`
+- [x] `cargo test -p swarm-cli --test modrinth_provider --locked`
+- [x] `cargo test -p swarm-cli --test agent5_supply_chain_acceptance --locked`
+- [x] `cargo test -p swarm-protocol --locked agent5_supply_chain_tests`
+- [x] Desktop locked check
+- [x] Desktop strict all-target clippy with `-D warnings`
+- [x] traversal matrix regression
+- [x] opaque staging-session regression
+- [x] symlinked staging-session regression
+- [x] two-origin authenticated redirect regression
+- [x] artifact redirect allow/reject regression
+- [x] API-key child-process/artifact-path regression
+- [x] CurseForge metadata body/header/cardinality regressions
+- [x] full Desktop tests
+- [x] launcher-controller provider contract tests
+- [x] exact SHA + clean tree at start
+- [x] exact SHA + clean tree at end
+
+The current repository does not expose provider-runtime coverage as an integration-test target named `--test provider_runtime`; those tests live in the `swarm-cli` library module and were run explicitly with `cargo test -p swarm-cli --lib --locked provider_runtime`.
+
+## Post-validation cleanup contract
+
+After exact-head run `34070673328` turned green, no provider/Desktop production file and no permanent test file changed.
+
+Post-validation changes are limited to:
+
+1. deletion of temporary `.github/workflows/agent5-exact-head-acceptance.yml` at cleanup SHA `61e44078f32912fdc899aa7cba07036114a80df1`;
+2. this Agent 5 ledger reconciliation / handoff update.
+
+No validation-only Tauri sidecar binary is committed. Earlier temporary Agent 5 helper workflows/materializers self-cleaned from their successful production milestones.
 
 ## Handoff
 
-READY FOR INTEGRATION: NO
+READY FOR INTEGRATION: YES
 
-Exact final head: pending
+Exact production/permanent-test SHA: `51cd18cb5c937838ae7b4bcc2cb67f6027b1d6d6`
 
-Known conflict areas: `apps/desktop/src/launcher-controller.js`, Tauri provider commands, `crates/swarm-cli/src/provider_runtime.rs`, shared Modrinth provider code. Agent 7/integration must preserve the opaque staging-session payload contract.
+Exact validated helper SHA: `191df6eaa69a6b38e2202e6a2e3ef061417b345d`
+
+Exact validation run: `34070673328` — SUCCESS
+
+Post-validation cleanup head before this ledger-only handoff commit: `61e44078f32912fdc899aa7cba07036114a80df1`
+
+Final branch head: this ledger-only handoff commit on `fix/agent-5-supply-chain`; its exact SHA must be taken from the branch ref after this commit because a Git commit cannot contain its own SHA in its contents.
+
+Known integration conflict areas: `apps/desktop/src/launcher-controller.js`, Tauri provider commands, `crates/swarm-cli/src/provider_runtime.rs`, shared Modrinth provider code, canonical provider semantics. Integration must preserve opaque staging sessions, strong-hash/manual semantics, HTTP client separation, redirect policies, and metadata limits.
+
+Do not merge Agent 5 from this branch automatically; hand it to the integration owner.
 
 ## Agent final statement
 
-NOT COMPLETE
+READY FOR INTEGRATION
