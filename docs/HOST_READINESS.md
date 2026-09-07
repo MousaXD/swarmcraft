@@ -117,3 +117,12 @@ replica present
 ```
 
 A shutdown banner may translate the final backend state into player language, but JavaScript must not recompute or relax the safety calculation.
+
+
+## Supported recovery and wake topology
+
+Storage voters and host candidates are separate roles. Every non-banned member holding the exact verified canonical head may contribute to quorum, but automatic authority candidacy additionally requires a fresh authenticated `HostCapabilityV1` with the exact compatibility fingerprint, `runtime=ready`, `server_mods=ready`, and `conflict_free=true`.
+
+The supported automatic crash topology is three or more voters with a surviving majority. A two-voter world with one crashed peer has only one surviving vote and remains fail-closed; the player must restore the other voter or use an explicit safe transfer before shutdown. Quorum is never reduced to make a two-player crash appear available.
+
+A durably sleeping multi-member world is different: after all hosts restart, an eligible host may request wake while a quorum of exact replicas is online. The recovery ballot is accepted only when each voter holds the same signed sleep record, accepted epoch/fencing token, membership hash, snapshot hash, and state hash. The deterministic host-ready candidate advances epoch and fencing exactly once, clears the sleep boundary only after the certificate and epoch are durable, restores the exact snapshot, and then launches one authority runtime. Same-round durable promises reject competing candidates, while old-generation permits remain fenced.

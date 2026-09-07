@@ -3,11 +3,16 @@
 use std::{
     fs,
     net::UdpSocket,
+    os::unix::fs::PermissionsExt,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
-use swarm_cli::authority_permit::permit_path;
+use swarm_cli::{
+    authority_permit::permit_path,
+    host_readiness,
+    migration::{save_runtime_config, RuntimeLaunchConfig},
+};
 use swarm_consensus::membership_vote_for;
 use swarm_core::{create_world_genesis_with_fingerprint, random_nonce, sign_world_config, DataPaths, PeerIdentity};
 use swarm_network::load_or_create_transport_key;
@@ -142,6 +147,55 @@ fn permit(peer: &PeerFixture, world: WorldId) -> Option<(u64, u64, u64)> {
     Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
 }
 
+fn configure_host_capability(peer: &PeerFixture, world: WorldId) {
+    let directory = peer.paths.root.join("partition-runtime-fixture");
+    fs::create_dir_all(&directory).unwrap();
+    let java = directory.join("mock-java");
+    let server = directory.join("server.jar");
+    let fabric = directory.join("swarmcraft-fabric.jar");
+    fs::write(
+        &java,
+        r#"#!/usr/bin/env python3
+import os
+import socket
+import sys
+
+if "-version" in sys.argv:
+    print('openjdk version "25.0.1"', file=sys.stderr)
+    raise SystemExit(0)
+
+host = os.environ["SWARMCRAFT_IPC_HOST"]
+port = int(os.environ["SWARMCRAFT_IPC_PORT"])
+token = os.environ["SWARMCRAFT_IPC_TOKEN"]
+world = os.environ["SWARMCRAFT_WORLD_DIR"]
+fingerprint = os.environ["SWARMCRAFT_COMPAT_FINGERPRINT"]
+
+def encoded(value):
+    return value.encode("utf-8").hex()
+
+with socket.create_connection((host, port), timeout=5) as connection:
+    writer = connection.makefile("w", encoding="utf-8", newline="\n")
+    writer.write("AUTH\t" + token + "\n")
+    writer.write("WORLD_INFO\t" + encoded("26.1.2") + "\t" + encoded("0.19.3") + "\t" + encoded(world) + "\t" + fingerprint + "\t25\n")
+    writer.flush()
+    reader = connection.makefile("r", encoding="utf-8")
+    while reader.readline():
+        pass
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&java).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&java, permissions).unwrap();
+    fs::write(&server, b"mock").unwrap();
+    fs::write(&fabric, b"mock").unwrap();
+    let config =
+        RuntimeLaunchConfig { java, server_jar: server, mod_jar: fabric, accept_eula: true, game_endpoint: None };
+    save_runtime_config(&peer.paths, world, &config).unwrap();
+    let fingerprint = peer.storage.load_world_descriptor(world).unwrap().compatibility_fingerprint;
+    host_readiness::record_runtime_verified(&peer.paths, world, &config, fingerprint).unwrap();
+}
+
 fn build_seed<'a>(
     authority: &'a PeerFixture,
     members: &[&PeerFixture],
@@ -259,6 +313,7 @@ fn build_seed<'a>(
     authority.identity.sign_membership(&mut membership).unwrap();
     authority.storage.save_membership_record(&membership).unwrap();
     authority.storage.commit_snapshot(&manifest).unwrap();
+    configure_host_capability(authority, world);
     let manifest = manifest.manifest().clone();
     (metadata, config, descriptor, membership, epoch, manifest)
 }
@@ -295,6 +350,7 @@ fn install_seed(peer: &PeerFixture, seed: &Seed<'_>) {
         assert_eq!(manifest.manifest_hash().unwrap(), seed.manifest.manifest_hash().unwrap());
         peer.storage.commit_snapshot(&manifest).unwrap();
     }
+    configure_host_capability(peer, seed.metadata.world_id);
 }
 
 fn pending_join(new_peer: &PeerFixture, authority: &PeerFixture, metadata: &WorldMetadataV1) {

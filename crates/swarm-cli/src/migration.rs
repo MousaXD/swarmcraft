@@ -476,7 +476,11 @@ async fn wait_until_launch_safe(
 
 fn infer_trigger(storage: &Storage, epoch: &EpochRecordV1, local_peer: PeerId) -> MigrationTrigger {
     if epoch.mode == EpochMode::Recovery {
-        return MigrationTrigger::AutomaticRecovery;
+        return if epoch.reason == "quorum wake from exact durable sleep boundary" {
+            MigrationTrigger::WorldWake
+        } else {
+            MigrationTrigger::AutomaticRecovery
+        };
     }
     if storage
         .load_transfer_record(epoch.world_id)
@@ -1771,8 +1775,16 @@ fn clear_transfer_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
     remove_if_present(&transfer_intent_path(paths, world))
 }
 
-fn clear_wake_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
+pub fn world_wake_requested(paths: &DataPaths, world: WorldId) -> bool {
+    wake_intent_path(paths, world).is_file()
+}
+
+pub fn clear_world_wake_request(paths: &DataPaths, world: WorldId) -> Result<()> {
     remove_if_present(&wake_intent_path(paths, world))
+}
+
+fn clear_wake_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
+    clear_world_wake_request(paths, world)
 }
 
 fn remove_if_present(path: &Path) -> Result<()> {

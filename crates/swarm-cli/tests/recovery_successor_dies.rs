@@ -3,16 +3,22 @@
 use std::{
     fs,
     net::UdpSocket,
+    os::unix::fs::PermissionsExt,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
-use swarm_cli::authority_permit::permit_path;
-use swarm_core::{create_world_genesis, DataPaths, PeerIdentity};
+use swarm_cli::{
+    authority_permit::permit_path,
+    host_readiness,
+    migration::{save_runtime_config, RuntimeLaunchConfig},
+};
+use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
 use swarm_network::load_or_create_transport_key;
 use swarm_protocol::{
-    EpochMode, EpochRecordV1, MembershipRecordV1, SnapshotManifestV1, WorldDescriptorV1, WorldId, WorldMemberV1,
-    PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    AuthorityPolicyV1, EpochMode, EpochRecordV1, MembershipPolicyV1, MembershipRecordV1,
+    RuntimeCompatibilityManifestV1, SnapshotManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1,
+    WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 use tempfile::TempDir;
@@ -31,6 +37,7 @@ struct PeerFixture {
 
 struct CanonicalReplicaSeed<'a> {
     metadata: &'a WorldMetadataV1,
+    config: &'a WorldConfigV1,
     descriptor: &'a WorldDescriptorV1,
     membership: &'a MembershipRecordV1,
     epoch: &'a EpochRecordV1,
@@ -147,8 +154,9 @@ fn member(identity: &PeerIdentity) -> WorldMemberV1 {
 
 fn install_canonical_replica(peer: &PeerFixture, seed: &CanonicalReplicaSeed<'_>) {
     peer.storage.create_world(seed.metadata).unwrap();
-    peer.storage.save_world_descriptor(seed.descriptor).unwrap();
     peer.storage.save_membership_record(seed.membership).unwrap();
+    peer.storage.save_world_config(seed.config).unwrap();
+    peer.storage.save_world_descriptor(seed.descriptor).unwrap();
     peer.storage.save_epoch_record(seed.epoch).unwrap();
     let mut promoted_membership = seed.membership.clone();
     promoted_membership.epoch = seed.epoch.epoch_number;
@@ -175,6 +183,56 @@ fn install_canonical_replica(peer: &PeerFixture, seed: &CanonicalReplicaSeed<'_>
     seed.authority.sign_snapshot(&mut local).unwrap();
     assert_eq!(local.manifest_hash().unwrap(), seed.manifest.manifest_hash().unwrap());
     peer.storage.commit_snapshot(&local).unwrap();
+    configure_host_capability(peer, seed.metadata.world_id);
+}
+
+fn configure_host_capability(peer: &PeerFixture, world: WorldId) {
+    let directory = peer.paths.root.join("recovery-runtime-fixture");
+    fs::create_dir_all(&directory).unwrap();
+    let java = directory.join("mock-java");
+    let server = directory.join("server.jar");
+    let fabric = directory.join("swarmcraft-fabric.jar");
+    fs::write(
+        &java,
+        r#"#!/usr/bin/env python3
+import os
+import socket
+import sys
+
+if "-version" in sys.argv:
+    print('openjdk version "25.0.1"', file=sys.stderr)
+    raise SystemExit(0)
+
+host = os.environ["SWARMCRAFT_IPC_HOST"]
+port = int(os.environ["SWARMCRAFT_IPC_PORT"])
+token = os.environ["SWARMCRAFT_IPC_TOKEN"]
+world = os.environ["SWARMCRAFT_WORLD_DIR"]
+fingerprint = os.environ["SWARMCRAFT_COMPAT_FINGERPRINT"]
+
+def encoded(value):
+    return value.encode("utf-8").hex()
+
+with socket.create_connection((host, port), timeout=5) as connection:
+    writer = connection.makefile("w", encoding="utf-8", newline="\n")
+    writer.write("AUTH\t" + token + "\n")
+    writer.write("WORLD_INFO\t" + encoded("26.1.2") + "\t" + encoded("0.19.3") + "\t" + encoded(world) + "\t" + fingerprint + "\t25\n")
+    writer.flush()
+    reader = connection.makefile("r", encoding="utf-8")
+    while reader.readline():
+        pass
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&java).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&java, permissions).unwrap();
+    fs::write(&server, b"mock").unwrap();
+    fs::write(&fabric, b"mock").unwrap();
+    let config =
+        RuntimeLaunchConfig { java, server_jar: server, mod_jar: fabric, accept_eula: true, game_endpoint: None };
+    save_runtime_config(&peer.paths, world, &config).unwrap();
+    let fingerprint = peer.storage.load_world_descriptor(world).unwrap().compatibility_fingerprint;
+    host_readiness::record_runtime_verified(&peer.paths, world, &config, fingerprint).unwrap();
 }
 
 fn permit_generation(peer: &PeerFixture, world: WorldId) -> Option<(u64, u64, u64)> {
@@ -192,9 +250,24 @@ fn formed_recovery_certificate_locks_value_until_certified_candidate_resumes() {
     let e = peer_fixture();
     let peers = [&a, &b, &c, &d, &e];
 
-    let (world, genesis) =
-        create_world_genesis(&a.identity, "26.1.2".into(), "0.19.3".into(), b"five-daemon-recovery-successor-dies")
-            .unwrap();
+    let compatibility = RuntimeCompatibilityManifestV1 {
+        minecraft_version: "26.1.2".into(),
+        loader_id: "fabric".into(),
+        loader_version: "0.19.3".into(),
+        swarmcraft_protocol_version: PROTOCOL_VERSION,
+        fabric_adapter_version: env!("CARGO_PKG_VERSION").into(),
+        required_server_mods: Vec::new(),
+        required_client_mods: Vec::new(),
+        datapacks: Vec::new(),
+    };
+    let fingerprint = compatibility.fingerprint().unwrap();
+    let (world, genesis) = create_world_genesis_with_fingerprint(
+        &a.identity,
+        compatibility.minecraft_version.clone(),
+        compatibility.loader_version.clone(),
+        fingerprint,
+    )
+    .unwrap();
     let metadata = WorldMetadataV1 {
         storage_schema_version: STORAGE_SCHEMA_VERSION,
         display_name: "five-daemon-recovery-successor-dies".into(),
@@ -209,6 +282,27 @@ fn formed_recovery_certificate_locks_value_until_certified_candidate_resumes() {
         preferred_replication_factor: 5,
     };
     descriptor.normalize();
+    let mut config = WorldConfigV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        sequence: 1,
+        previous_config_hash: None,
+        compatibility,
+        visibility: WorldVisibilityV1::Private,
+        authority_policy: AuthorityPolicyV1 { allow_solo_advancement: false, preferred_replication_factor: 5 },
+        membership_policy: MembershipPolicyV1::InviteOnly,
+        presentation: WorldPresentationV1 {
+            name: "five-daemon-recovery-successor-dies".into(),
+            description: String::new(),
+            tags: Vec::new(),
+            icon_hash: None,
+            approximate_region: None,
+        },
+        authority_peer_id: a.identity.peer_id(),
+        authority_public_key: a.identity.public_key(),
+        signature: Vec::new(),
+    };
+    sign_world_config(&a.identity, &mut config).unwrap();
     let mut membership = MembershipRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
@@ -258,6 +352,7 @@ fn formed_recovery_certificate_locks_value_until_certified_candidate_resumes() {
     epoch.signature = a.identity.sign(&epoch.signing_bytes().unwrap());
     let seed = CanonicalReplicaSeed {
         metadata: &metadata,
+        config: &config,
         descriptor: &descriptor,
         membership: &membership,
         epoch: &epoch,
