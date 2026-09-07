@@ -7,6 +7,8 @@ use std::{
 use swarm_cli::{
     authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
     host_readiness::{self, PeerReadinessObservation},
+    launch_guard,
+    migration::{clear_world_wake_request, world_wake_requested},
 };
 use swarm_consensus::{
     elect_authority, has_quorum, membership_vote_for, reconcile_solo_history, validate_membership_certificate_shape,
@@ -23,14 +25,15 @@ use swarm_core::{
     verify_snapshot_signature, verify_transfer_signature, DataPaths, PeerIdentity,
 };
 use swarm_network::{
-    load_or_create_transport_key, validate_invite_dial_address, BlobResumeV1, HostCapabilityV1, NetworkEvent,
-    ReplicaAckV1, ResponseChannel, SwarmNode, TransportPeerId, WireRequest, WireResponse, MAX_BLOB_CHUNK,
+    load_or_create_transport_key, validate_invite_dial_address, BlobResumeV1, HostCapabilityV1,
+    HostRuntimeReadinessV1, NetworkEvent, ReplicaAckV1, ResponseChannel, ServerModsReadinessV1, SwarmNode,
+    TransportPeerId, WireRequest, WireResponse, MAX_BLOB_CHUNK,
 };
 use swarm_protocol::{
     peer_id_from_public_key, AuthorityLeaseGrantV1, BlobDescriptor, EpochMode, EpochRecordV1, Hash32,
     MembershipCertificateV1, MembershipProposalV1, MembershipRecordV1, MembershipVoteV1, PeerId, RecoveryBallotV1,
-    RecoveryCertificateV1, RecoveryVoteV1, SnapshotManifestV1, TransferPhase, WorldDescriptorV1, WorldId,
-    WorldStatusV1, PROTOCOL_VERSION,
+    RecoveryCertificateV1, RecoveryVoteV1, SleepRecordV1, SnapshotManifestV1, TransferPhase, WorldDescriptorV1,
+    WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{DurableMembershipPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage};
 use tokio::time::MissedTickBehavior;
@@ -300,7 +303,17 @@ fn maintain_authority_leases(
         if let Err(error) = publish_host_readiness_snapshot(paths, storage, identity, runtime, world, now) {
             warn!(%world, %error, "host-readiness snapshot could not be published");
         }
-        if storage.load_sleep_record(world).is_ok() {
+        let sleep_record = match launch_guard::load_sleep_record_fail_closed(storage, world) {
+            Ok(record) => record,
+            Err(error) => {
+                warn!(%world, %error, "corrupt or unreadable sleep boundary blocks authority recovery");
+                clear_permit(paths, world)?;
+                clear_runtime_world(runtime, world);
+                continue;
+            }
+        };
+        let wake_requested = sleep_record.is_some() && world_wake_requested(paths, world);
+        if sleep_record.is_some() && !wake_requested {
             clear_permit(paths, world)?;
             clear_runtime_world(runtime, world);
             continue;
@@ -333,7 +346,10 @@ fn maintain_authority_leases(
         let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
         runtime.recovery_not_before.entry(world).or_insert(now + recovery_initial_delay);
 
-        if epoch.authority_peer_id == identity.peer_id() && epoch.authority_public_key == identity.public_key() {
+        if !wake_requested
+            && epoch.authority_peer_id == identity.peer_id()
+            && epoch.authority_public_key == identity.public_key()
+        {
             if epoch.mode == EpochMode::Recovery {
                 ensure_recovery_artifacts(storage, identity, &epoch)?;
             }
@@ -360,10 +376,10 @@ fn maintain_authority_leases(
 
         request_world_statuses(storage, node, outbound, runtime, &descriptor, identity.peer_id())?;
         request_host_capabilities(node, outbound, runtime, &descriptor, identity.peer_id())?;
-        if runtime.authenticated_peers.values().any(|peer| *peer == epoch.authority_peer_id) {
+        if !wake_requested && runtime.authenticated_peers.values().any(|peer| *peer == epoch.authority_peer_id) {
             continue;
         }
-        if !recovery_window_open(runtime, world, generation, now) {
+        if !wake_requested && !recovery_window_open(runtime, world, generation, now) {
             continue;
         }
 
@@ -373,16 +389,26 @@ fn maintain_authority_leases(
         storage.verify_snapshot(&latest)?;
         verify_snapshot_signature(&latest)?;
         let latest_hash = latest.manifest_hash()?;
+        if let Some(record) = &sleep_record {
+            validate_sleep_recovery_base(record, &epoch, &latest)?;
+        }
         let mut visible_peers = vec![identity.peer_id()];
-        let mut candidates = vec![AuthorityCandidate {
-            peer_id: identity.peer_id(),
-            accepted_epoch: epoch.epoch_number,
-            canonical_sequence: latest.sequence,
-            snapshot_complete: true,
-            compatible: true,
-            authority_eligible: true,
-            banned: false,
-        }];
+        let mut candidates = Vec::new();
+        let local_capability = host_readiness::local_host_capability(paths, storage, world, false)?;
+        if local_capability
+            .as_ref()
+            .is_some_and(|capability| host_capability_ready(capability, world, descriptor.compatibility_fingerprint))
+        {
+            candidates.push(AuthorityCandidate {
+                peer_id: identity.peer_id(),
+                accepted_epoch: epoch.epoch_number,
+                canonical_sequence: latest.sequence,
+                snapshot_complete: true,
+                compatible: true,
+                authority_eligible: true,
+                banned: false,
+            });
+        }
 
         for member in descriptor.members.iter().filter(|member| member.peer_id != identity.peer_id() && !member.banned)
         {
@@ -406,7 +432,16 @@ fn maintain_authority_leases(
                 continue;
             }
             visible_peers.push(member.peer_id);
-            if member.authority_eligible && status.authority_eligible {
+            if member.authority_eligible
+                && status.authority_eligible
+                && observed_host_candidate_ready(
+                    runtime,
+                    world,
+                    member.peer_id,
+                    descriptor.compatibility_fingerprint,
+                    now,
+                )
+            {
                 candidates.push(AuthorityCandidate {
                     peer_id: member.peer_id,
                     accepted_epoch: status.epoch,
@@ -430,6 +465,7 @@ fn maintain_authority_leases(
             generation.checked_next().context("authority generation exhausted during crash recovery")?;
         drive_recovery_ballot(
             RecoveryAttempt {
+                paths,
                 storage,
                 identity,
                 descriptor: &descriptor,
@@ -437,6 +473,7 @@ fn maintain_authority_leases(
                 latest: &latest,
                 visible_peers: &visible_peers,
                 recovery_generation,
+                wake: wake_requested,
             },
             node,
             outbound,
@@ -447,6 +484,7 @@ fn maintain_authority_leases(
 }
 
 struct RecoveryAttempt<'a> {
+    paths: &'a DataPaths,
     storage: &'a Storage,
     identity: &'a PeerIdentity,
     descriptor: &'a WorldDescriptorV1,
@@ -454,6 +492,7 @@ struct RecoveryAttempt<'a> {
     latest: &'a SnapshotManifestV1,
     visible_peers: &'a [PeerId],
     recovery_generation: AuthorityGeneration,
+    wake: bool,
 }
 
 fn drive_recovery_ballot(
@@ -462,8 +501,17 @@ fn drive_recovery_ballot(
     outbound: &mut HashMap<String, OutboundContext>,
     runtime: &mut LeaseRuntime,
 ) -> Result<()> {
-    let RecoveryAttempt { storage, identity, descriptor, previous, latest, visible_peers, recovery_generation } =
-        attempt;
+    let RecoveryAttempt {
+        paths,
+        storage,
+        identity,
+        descriptor,
+        previous,
+        latest,
+        visible_peers,
+        recovery_generation,
+        wake,
+    } = attempt;
     let world = descriptor.world_id;
     let base_snapshot_hash = latest.manifest_hash()?;
     let membership = storage.load_membership_record(world)?;
@@ -571,7 +619,11 @@ fn drive_recovery_ballot(
             std::thread::sleep(Duration::from_millis(delay_ms));
         }
     }
-    let next = promote_recovery_epoch(storage, identity, previous, latest)?;
+    let next = promote_recovery_epoch(storage, identity, previous, latest, wake)?;
+    if wake {
+        storage.clear_sleep_record(world)?;
+        clear_world_wake_request(paths, world)?;
+    }
     let _ = storage.clear_recovery_promise_after_epoch_advance(world, next.epoch_number)?;
     runtime.lease_acks.retain(|(ack_world, _), _| *ack_world != world);
     runtime.epoch_acks.retain(|(ack_world, _), _| *ack_world != world);
@@ -593,7 +645,11 @@ fn drive_recovery_ballot(
             OutboundContext::Epoch { world, peer: *application_peer, generation: recovery_generation },
         );
     }
-    info!(world = %world, epoch = next.epoch_number, round = ballot.round, peer = %identity.peer_id(), "authority recovered with durable quorum ballot");
+    if wake {
+        info!(world = %world, epoch = next.epoch_number, round = ballot.round, peer = %identity.peer_id(), "sleeping world woke with a durable quorum ballot");
+    } else {
+        info!(world = %world, epoch = next.epoch_number, round = ballot.round, peer = %identity.peer_id(), "authority recovered with durable quorum ballot");
+    }
     Ok(())
 }
 
@@ -868,6 +924,51 @@ fn request_host_capabilities(
     Ok(())
 }
 
+fn host_capability_ready(
+    capability: &HostCapabilityV1,
+    world: WorldId,
+    compatibility_fingerprint: Hash32,
+) -> bool {
+    capability.world_id == world
+        && capability.compatibility_fingerprint == compatibility_fingerprint
+        && capability.runtime == HostRuntimeReadinessV1::Ready
+        && capability.server_mods == ServerModsReadinessV1::Ready
+        && capability.conflict_free
+}
+
+fn observed_host_candidate_ready(
+    runtime: &LeaseRuntime,
+    world: WorldId,
+    peer: PeerId,
+    compatibility_fingerprint: Hash32,
+    now: Instant,
+) -> bool {
+    runtime.authenticated_peers.values().any(|authenticated| *authenticated == peer)
+        && runtime
+            .peer_capability
+            .get(&(world, peer))
+            .filter(|observed| now.saturating_duration_since(observed.observed_at) <= STATUS_FRESHNESS)
+            .is_some_and(|observed| host_capability_ready(&observed.capability, world, compatibility_fingerprint))
+}
+
+fn validate_sleep_recovery_base(
+    record: &SleepRecordV1,
+    epoch: &EpochRecordV1,
+    latest: &SnapshotManifestV1,
+) -> Result<()> {
+    verify_sleep_record_signature(record)?;
+    if record.world_id != epoch.world_id
+        || record.epoch != epoch.epoch_number
+        || record.fencing_token != epoch.fencing_token
+        || record.authority_peer_id != epoch.authority_peer_id
+        || record.authority_public_key != epoch.authority_public_key
+        || record.latest_snapshot_hash != latest.manifest_hash()?
+    {
+        return Err(anyhow!("sleep boundary does not match the accepted generation and exact canonical snapshot"));
+    }
+    Ok(())
+}
+
 fn peer_readiness_observations(
     descriptor: &WorldDescriptorV1,
     local_peer: PeerId,
@@ -949,6 +1050,7 @@ fn promote_recovery_epoch(
     identity: &PeerIdentity,
     previous: &EpochRecordV1,
     latest: &SnapshotManifestV1,
+    wake: bool,
 ) -> Result<EpochRecordV1> {
     let next_generation = AuthorityGeneration { epoch: previous.epoch_number, fencing_token: previous.fencing_token }
         .checked_next()
@@ -963,7 +1065,11 @@ fn promote_recovery_epoch(
         authority_public_key: identity.public_key(),
         mode: EpochMode::Recovery,
         fencing_token: next_generation.fencing_token,
-        reason: "automatic crash recovery after durable quorum ballot".into(),
+        reason: if wake {
+            "quorum wake from exact durable sleep boundary".into()
+        } else {
+            "automatic crash recovery after durable quorum ballot".into()
+        },
         signature: Vec::new(),
     };
     next.signature = identity.sign(&next.signing_bytes()?);
@@ -1702,17 +1808,50 @@ fn handle_request(
             {
                 return Err(anyhow!("recovery ballot does not target the next accepted generation"));
             }
-            if state.leases.authenticated_peers.values().any(|peer| *peer == current.authority_peer_id) {
+            let latest =
+                storage.latest_snapshot(ballot.world_id)?.context("recovery ballot has no canonical base snapshot")?;
+            storage.verify_snapshot(&latest)?;
+            verify_snapshot_signature(&latest)?;
+            if latest.manifest_hash()? != ballot.base_snapshot_hash || latest.state_root != ballot.base_state_hash {
+                return Err(anyhow!("recovery ballot canonical base does not match the latest verified snapshot"));
+            }
+            let wake = match launch_guard::load_sleep_record_fail_closed(storage, ballot.world_id)? {
+                Some(record) => {
+                    validate_sleep_recovery_base(&record, &current, &latest)?;
+                    true
+                }
+                None => false,
+            };
+            if !wake && state.leases.authenticated_peers.values().any(|peer| *peer == current.authority_peer_id) {
                 return Err(anyhow!("cannot vote for recovery while the accepted authority is connected"));
             }
             let generation = AuthorityGeneration { epoch: current.epoch_number, fencing_token: current.fencing_token };
-            if !recovery_window_open(state.leases, ballot.world_id, generation, state.now) {
+            if !wake && !recovery_window_open(state.leases, ballot.world_id, generation, state.now) {
                 return Err(anyhow!("cannot vote for recovery before the accepted authority lease expires"));
             }
-            let latest =
-                storage.latest_snapshot(ballot.world_id)?.context("recovery ballot has no canonical base snapshot")?;
-            if latest.manifest_hash()? != ballot.base_snapshot_hash || latest.state_root != ballot.base_state_hash {
-                return Err(anyhow!("recovery ballot canonical base does not match the latest verified snapshot"));
+            let observed_status = state
+                .leases
+                .peer_status
+                .get(&(ballot.world_id, ballot.candidate_peer_id))
+                .filter(|observed| state.now.saturating_duration_since(observed.observed_at) <= STATUS_FRESHNESS)
+                .context("recovery candidate is missing fresh authenticated canonical status")?;
+            if observed_status.status.world_id != ballot.world_id
+                || observed_status.status.epoch != ballot.base_epoch
+                || observed_status.status.sequence != latest.sequence
+                || observed_status.status.latest_snapshot != Some(ballot.base_snapshot_hash)
+                || observed_status.status.state_hash != Some(ballot.base_state_hash)
+                || observed_status.status.compatibility_fingerprint != descriptor.compatibility_fingerprint
+            {
+                return Err(anyhow!("recovery candidate status does not match the exact canonical base"));
+            }
+            if !observed_host_candidate_ready(
+                state.leases,
+                ballot.world_id,
+                ballot.candidate_peer_id,
+                descriptor.compatibility_fingerprint,
+                state.now,
+            ) {
+                return Err(anyhow!("recovery candidate lacks fresh runtime, mod, and conflict-free host capability"));
             }
             let membership = storage.load_membership_record(ballot.world_id)?;
             verify_membership_signature(&membership)?;
@@ -1754,6 +1893,8 @@ fn handle_request(
             if let Ok(current) = storage.load_epoch_record(record.world_id) {
                 if record == current {
                     storage.save_recovery_certificate(&certificate)?;
+                    storage.clear_sleep_record(record.world_id)?;
+                    clear_world_wake_request(context.paths, record.world_id)?;
                     let _ = storage.clear_recovery_promise_after_epoch_advance(record.world_id, record.epoch_number)?;
                     node.respond(
                         channel,
@@ -1787,6 +1928,7 @@ fn handle_request(
             storage.save_recovery_certificate(&certificate)?;
             storage.save_epoch_record(&record)?;
             storage.clear_sleep_record(record.world_id)?;
+            clear_world_wake_request(context.paths, record.world_id)?;
             let _ = storage.clear_recovery_promise_after_epoch_advance(record.world_id, record.epoch_number)?;
             state.leases.inbound_leases.remove(&record.world_id);
             node.respond(
