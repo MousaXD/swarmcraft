@@ -354,13 +354,8 @@ fn try_minecraft_session_lock(file: &fs::File, exclusive: bool) -> std::io::Resu
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     }
 
-    let mut lock = Flock {
-        l_type: if exclusive { F_WRLCK } else { F_RDLCK },
-        l_whence: SEEK_SET,
-        l_start: 0,
-        l_len: 0,
-        l_pid: 0,
-    };
+    let mut lock =
+        Flock { l_type: if exclusive { F_WRLCK } else { F_RDLCK }, l_whence: SEEK_SET, l_start: 0, l_len: 0, l_pid: 0 };
     let result = unsafe { fcntl(file.as_raw_fd(), F_SETLK, &mut lock) };
     if result == -1 {
         Err(std::io::Error::last_os_error())
@@ -390,13 +385,8 @@ fn try_minecraft_session_lock(file: &fs::File, exclusive: bool) -> std::io::Resu
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     }
 
-    let mut lock = Flock {
-        l_start: 0,
-        l_len: 0,
-        l_pid: 0,
-        l_type: if exclusive { F_WRLCK } else { F_RDLCK },
-        l_whence: SEEK_SET,
-    };
+    let mut lock =
+        Flock { l_start: 0, l_len: 0, l_pid: 0, l_type: if exclusive { F_WRLCK } else { F_RDLCK }, l_whence: SEEK_SET };
     let result = unsafe { fcntl(file.as_raw_fd(), F_SETLK, &mut lock) };
     if result == -1 {
         Err(std::io::Error::last_os_error())
