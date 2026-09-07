@@ -189,13 +189,8 @@ with socket.create_connection((host, port), timeout=5) as connection:
     fs::set_permissions(&java, permissions).unwrap();
     fs::write(&server, b"mock").unwrap();
     fs::write(&fabric, b"mock").unwrap();
-    let config = RuntimeLaunchConfig {
-        java,
-        server_jar: server,
-        mod_jar: fabric,
-        accept_eula: true,
-        game_endpoint: None,
-    };
+    let config =
+        RuntimeLaunchConfig { java, server_jar: server, mod_jar: fabric, accept_eula: true, game_endpoint: None };
     save_runtime_config(&peer.paths, world, &config).unwrap();
     let fingerprint = peer.storage.load_world_descriptor(world).unwrap().compatibility_fingerprint;
     host_readiness::record_runtime_verified(&peer.paths, world, &config, fingerprint).unwrap();
