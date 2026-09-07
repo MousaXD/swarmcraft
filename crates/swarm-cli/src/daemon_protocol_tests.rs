@@ -182,3 +182,80 @@ fn daemon_rejects_wrong_parent_and_same_sequence_snapshot_conflicts() {
     fixture.authority.sign_snapshot(&mut same_sequence_conflict).unwrap();
     assert!(authorize_manifest(&fixture.storage, fixture.authority.peer_id(), &same_sequence_conflict).is_err());
 }
+
+
+#[test]
+fn recovery_candidate_requires_runtime_mod_and_conflict_readiness() {
+    let fixture = fixture();
+    let fingerprint = fixture.compatibility.fingerprint().unwrap();
+    let mut capability = HostCapabilityV1 {
+        world_id: fixture.world,
+        compatibility_fingerprint: fingerprint,
+        runtime: HostRuntimeReadinessV1::Ready,
+        server_mods: ServerModsReadinessV1::Ready,
+        conflict_free: true,
+        recovery_quorum_without_authority: true,
+    };
+    assert!(host_capability_ready(&capability, fixture.world, fingerprint));
+
+    capability.runtime = HostRuntimeReadinessV1::Unverified;
+    assert!(!host_capability_ready(&capability, fixture.world, fingerprint));
+    capability.runtime = HostRuntimeReadinessV1::Ready;
+    capability.server_mods = ServerModsReadinessV1::Missing;
+    assert!(!host_capability_ready(&capability, fixture.world, fingerprint));
+    capability.server_mods = ServerModsReadinessV1::Ready;
+    capability.conflict_free = false;
+    assert!(!host_capability_ready(&capability, fixture.world, fingerprint));
+    capability.conflict_free = true;
+    capability.compatibility_fingerprint = Hash32([91; 32]);
+    assert!(!host_capability_ready(&capability, fixture.world, fingerprint));
+}
+
+#[test]
+fn quorum_wake_is_bound_to_the_signed_sleep_generation_and_exact_snapshot() {
+    let fixture = fixture();
+    let source = fixture._temp.path().join("sleep-source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("level.dat"), b"sleep-boundary").unwrap();
+    let mut latest = fixture
+        .storage
+        .snapshot_directory(
+            &source,
+            SnapshotContext {
+                world: fixture.world,
+                snapshot_number: 1,
+                epoch: 0,
+                sequence: 1,
+                previous_snapshot_hash: None,
+                authority_peer_id: fixture.authority.peer_id(),
+                authority_public_key: fixture.authority.public_key(),
+            },
+        )
+        .unwrap();
+    fixture.authority.sign_snapshot(&mut latest).unwrap();
+    fixture.storage.commit_snapshot(&latest).unwrap();
+    let epoch = fixture.storage.load_epoch_record(fixture.world).unwrap();
+    let mut sleep = SleepRecordV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: fixture.world,
+        latest_snapshot_hash: latest.manifest_hash().unwrap(),
+        epoch: epoch.epoch_number,
+        fencing_token: epoch.fencing_token,
+        authority_peer_id: fixture.authority.peer_id(),
+        authority_public_key: fixture.authority.public_key(),
+        signature: Vec::new(),
+    };
+    fixture.authority.sign_sleep_record(&mut sleep).unwrap();
+
+    assert!(validate_sleep_recovery_base(&sleep, &epoch, &latest).is_ok());
+
+    let mut stale_generation = sleep.clone();
+    stale_generation.fencing_token = stale_generation.fencing_token.saturating_add(1);
+    fixture.authority.sign_sleep_record(&mut stale_generation).unwrap();
+    assert!(validate_sleep_recovery_base(&stale_generation, &epoch, &latest).is_err());
+
+    let mut wrong_snapshot = sleep;
+    wrong_snapshot.latest_snapshot_hash = Hash32([92; 32]);
+    fixture.authority.sign_sleep_record(&mut wrong_snapshot).unwrap();
+    assert!(validate_sleep_recovery_base(&wrong_snapshot, &epoch, &latest).is_err());
+}
