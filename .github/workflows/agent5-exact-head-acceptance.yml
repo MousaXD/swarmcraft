@@ -1,0 +1,96 @@
+name: Agent 5 Exact Head Acceptance
+
+on:
+  push:
+    branches:
+      - fix/agent-5-supply-chain
+    paths:
+      - .github/workflows/agent5-exact-head-acceptance.yml
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact clean start
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin fix/agent-5-supply-chain
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/fix/agent-5-supply-chain)"
+          test -z "$(git status --porcelain)"
+          echo "VALIDATION_SHA=$(git rev-parse HEAD)"
+
+      - name: Install Desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Format checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+
+      - name: Stage validation-only Tauri sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          for name in swarmcraft swarmcraft-host swarmcraft-runtime swarmcraft-import; do
+            cp /bin/true "apps/desktop/src-tauri/binaries/${name}-${target}"
+          done
+
+      - name: Workspace and CLI provider acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --workspace --locked
+          cargo check -p swarm-cli --locked
+          cargo clippy -p swarm-cli --all-targets --locked -- -D warnings
+          cargo test -p swarm-cli --lib --locked provider_runtime
+          cargo test -p swarm-cli --test modrinth_provider --locked
+          cargo test -p swarm-cli --test agent5_supply_chain_acceptance --locked
+          cargo test -p swarm-protocol --locked agent5_supply_chain_tests
+
+      - name: Desktop provider acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+          cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked provider_filename_traversal_matrix_fails_closed
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked staging_session_is_opaque_and_path_free
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked symlinked_staging_session_is_rejected
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked authenticated_two_origin_redirect_never_reaches_attacker
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked artifact_redirect_policy_accepts_approved_origin_and_rejects_unapproved_origin_without_api_key
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked curseforge_metadata_bounds_precede_json_parse_and_cover_headers_and_cardinality
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked api_key_has_no_child_process_or_artifact_request_path
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked provider_metadata_bytes_and_shape_are_bounded
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+
+      - name: Launcher provider contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test apps/desktop/tests/launcher-controller.test.mjs
+
+      - name: Verify exact clean end
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf apps/desktop/src-tauri/binaries
+          git fetch origin fix/agent-5-supply-chain
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/fix/agent-5-supply-chain)"
+          test -z "$(git status --porcelain)"
+          echo "VALIDATION_SHA=$(git rev-parse HEAD)"
