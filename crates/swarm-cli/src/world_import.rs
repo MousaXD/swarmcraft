@@ -75,10 +75,10 @@ fn import_world_inner(
     validate_runtime_selection(request.minecraft_version.trim(), request.fabric_loader_version.trim(), None)
         .context("import compatibility is not supported by the shipped SwarmCraft Fabric adapter")?;
 
-    // Minecraft's session.lock is a process-held record lock. The proof must be
-    // acquired before any save bytes are consumed and held until the complete
-    // source snapshot has been hashed and committed, otherwise a running game
-    // can race the copy and produce a validly signed but semantically torn save.
+    // Minecraft's session.lock is an exclusive process-held record lock. Hold a
+    // shared lock while reading: it conflicts with a running game's exclusive
+    // lock while still allowing this process to snapshot the lock file on
+    // Windows. The proof spans the complete hashed and committed snapshot.
     let _source_quiescence = acquire_source_quiescence(&request.source)?;
 
     let identity = PeerIdentity::load_or_create(paths)?;
@@ -347,13 +347,13 @@ fn try_minecraft_session_lock(file: &fs::File) -> std::io::Result<()> {
     }
 
     const F_SETLK: i32 = 6;
-    const F_WRLCK: i16 = 1;
+    const F_RDLCK: i16 = 0;
     const SEEK_SET: i16 = 0;
     extern "C" {
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     }
 
-    let mut lock = Flock { l_type: F_WRLCK, l_whence: SEEK_SET, l_start: 0, l_len: 0, l_pid: 0 };
+    let mut lock = Flock { l_type: F_RDLCK, l_whence: SEEK_SET, l_start: 0, l_len: 0, l_pid: 0 };
     let result = unsafe { fcntl(file.as_raw_fd(), F_SETLK, &mut lock) };
     if result == -1 {
         Err(std::io::Error::last_os_error())
@@ -376,13 +376,13 @@ fn try_minecraft_session_lock(file: &fs::File) -> std::io::Result<()> {
     }
 
     const F_SETLK: i32 = 8;
-    const F_WRLCK: i16 = 3;
+    const F_RDLCK: i16 = 1;
     const SEEK_SET: i16 = 0;
     extern "C" {
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     }
 
-    let mut lock = Flock { l_start: 0, l_len: 0, l_pid: 0, l_type: F_WRLCK, l_whence: SEEK_SET };
+    let mut lock = Flock { l_start: 0, l_len: 0, l_pid: 0, l_type: F_RDLCK, l_whence: SEEK_SET };
     let result = unsafe { fcntl(file.as_raw_fd(), F_SETLK, &mut lock) };
     if result == -1 {
         Err(std::io::Error::last_os_error())
@@ -393,7 +393,7 @@ fn try_minecraft_session_lock(file: &fs::File) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn try_minecraft_session_lock(file: &fs::File) -> std::io::Result<()> {
-    file.try_lock_exclusive()
+    file.try_lock_shared()
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
