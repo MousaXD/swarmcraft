@@ -312,7 +312,10 @@ async fn incompatible_fabric_handshake_is_rejected_before_ready_and_world_stays_
     .await
     .unwrap_err();
 
-    assert!(error.to_string().contains("Fabric reported Minecraft"));
+    assert!(
+        error.to_string().contains("Fabric runtime is outside the shipped adapter contract"),
+        "unsupported bridge runtime must be rejected before readiness: {error}"
+    );
     assert_eq!(canonical_hash(&fixture), fixture.baseline_hash);
     fixture.storage.verify_snapshot(&fixture.storage.latest_snapshot(fixture.world).unwrap().unwrap()).unwrap();
 
