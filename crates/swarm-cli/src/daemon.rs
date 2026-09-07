@@ -25,9 +25,9 @@ use swarm_core::{
     verify_snapshot_signature, verify_transfer_signature, DataPaths, PeerIdentity,
 };
 use swarm_network::{
-    load_or_create_transport_key, validate_invite_dial_address, BlobResumeV1, HostCapabilityV1,
-    HostRuntimeReadinessV1, NetworkEvent, ReplicaAckV1, ResponseChannel, ServerModsReadinessV1, SwarmNode,
-    TransportPeerId, WireRequest, WireResponse, MAX_BLOB_CHUNK,
+    load_or_create_transport_key, validate_invite_dial_address, BlobResumeV1, HostCapabilityV1, HostRuntimeReadinessV1,
+    NetworkEvent, ReplicaAckV1, ResponseChannel, ServerModsReadinessV1, SwarmNode, TransportPeerId, WireRequest,
+    WireResponse, MAX_BLOB_CHUNK,
 };
 use swarm_protocol::{
     peer_id_from_public_key, AuthorityLeaseGrantV1, BlobDescriptor, EpochMode, EpochRecordV1, Hash32,
@@ -924,11 +924,7 @@ fn request_host_capabilities(
     Ok(())
 }
 
-fn host_capability_ready(
-    capability: &HostCapabilityV1,
-    world: WorldId,
-    compatibility_fingerprint: Hash32,
-) -> bool {
+fn host_capability_ready(capability: &HostCapabilityV1, world: WorldId, compatibility_fingerprint: Hash32) -> bool {
     capability.world_id == world
         && capability.compatibility_fingerprint == compatibility_fingerprint
         && capability.runtime == HostRuntimeReadinessV1::Ready
