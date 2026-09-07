@@ -1,10 +1,20 @@
 name: Release version guard
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Optional production release tag that must equal v<application-version>.
+        required: false
+        type: string
+        default: ''
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional release tag to validate.
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -14,6 +24,54 @@ jobs:
     name: Verify release metadata
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Verify application and protocol versions
-        run: python3 scripts/check_release_version.py
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Enforce workflow supply-chain and publication DAG policy
+        run: python3 scripts/check_workflow_policy.py
+      - name: Verify application, shipped packages, locks, and protocol versions
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$RELEASE_TAG" ]]; then
+            python3 scripts/check_release_version.py --tag "$RELEASE_TAG"
+          else
+            python3 scripts/check_release_version.py
+          fi
+      - name: Mismatched release tag must fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 scripts/check_release_version.py --tag v999.999.999; then
+            echo 'version guard incorrectly accepted a mismatched tag' >&2
+            exit 1
+          fi
+      - name: Missing production signing credentials must fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if env \
+            -u WINDOWS_CERTIFICATE_BASE64 \
+            -u WINDOWS_CERTIFICATE_PASSWORD \
+            -u APPLE_CERTIFICATE \
+            -u APPLE_CERTIFICATE_PASSWORD \
+            -u APPLE_SIGNING_IDENTITY \
+            -u APPLE_ID \
+            -u APPLE_PASSWORD \
+            -u APPLE_TEAM_ID \
+            python3 scripts/check_release_credentials.py; then
+            echo 'production credential policy incorrectly accepted missing credentials' >&2
+            exit 1
+          fi
+      - name: Complete production signing credential set is accepted
+        shell: bash
+        env:
+          WINDOWS_CERTIFICATE_BASE64: test-only
+          WINDOWS_CERTIFICATE_PASSWORD: test-only
+          APPLE_CERTIFICATE: test-only
+          APPLE_CERTIFICATE_PASSWORD: test-only
+          APPLE_SIGNING_IDENTITY: test-only
+          APPLE_ID: test-only
+          APPLE_PASSWORD: test-only
+          APPLE_TEAM_ID: test-only
+        run: python3 scripts/check_release_credentials.py
