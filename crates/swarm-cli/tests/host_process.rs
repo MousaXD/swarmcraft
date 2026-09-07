@@ -123,7 +123,7 @@ def encoded(value):
 with socket.create_connection((host, port), timeout=5) as connection:
     writer = connection.makefile("w", encoding="utf-8", newline="\n")
     writer.write("AUTH\t" + token + "\n")
-    writer.write("WORLD_INFO\t" + encoded("26.1.2") + "\t" + encoded("0.19.3") + "\t" + encoded(world) + "\t" + fingerprint + "\n")
+    writer.write("WORLD_INFO\t" + encoded("26.1.2") + "\t" + encoded("0.19.3") + "\t" + encoded(world) + "\t" + fingerprint + "\t25\n")
     writer.flush()
     time.sleep(0.5)
 "#,
