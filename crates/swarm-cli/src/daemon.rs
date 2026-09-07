@@ -315,7 +315,11 @@ fn maintain_authority_leases(
         let wake_requested = sleep_record.is_some() && world_wake_requested(paths, world);
         if sleep_record.is_some() && !wake_requested {
             clear_permit(paths, world)?;
-            clear_runtime_world(runtime, world);
+            clear_sleeping_world(runtime, world);
+            if let Ok(descriptor) = storage.load_world_descriptor(world) {
+                request_world_statuses(storage, node, outbound, runtime, &descriptor, identity.peer_id())?;
+                request_host_capabilities(node, outbound, runtime, &descriptor, identity.peer_id())?;
+            }
             continue;
         }
         if let Ok(promise) = storage.load_membership_promise(world) {
@@ -1133,6 +1137,19 @@ fn ensure_recovery_artifacts(storage: &Storage, identity: &PeerIdentity, epoch: 
         storage.save_membership_record(&promoted)?;
     }
     Ok(())
+}
+
+fn clear_sleeping_world(runtime: &mut LeaseRuntime, world: WorldId) {
+    runtime.lease_acks.retain(|(ack_world, _), _| *ack_world != world);
+    runtime.recovery_ballots.remove(&world);
+    runtime.recovery_votes.retain(|(vote_world, _), _| *vote_world != world);
+    runtime.membership_votes.retain(|(vote_world, _), _| *vote_world != world);
+    runtime.recovery_round_floor.remove(&world);
+    runtime.epoch_acks.retain(|(ack_world, _), _| *ack_world != world);
+    runtime.permit_heartbeats.remove(&world);
+    runtime.inbound_leases.remove(&world);
+    runtime.recovery_not_before.remove(&world);
+    runtime.recovery_replication_sent.retain(|(replica_world, _)| *replica_world != world);
 }
 
 fn clear_runtime_world(runtime: &mut LeaseRuntime, world: WorldId) {
