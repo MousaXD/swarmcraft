@@ -121,14 +121,7 @@ impl RuntimeProcesses {
             .map(|pair| pair[1].clone())
             .ok_or_else(|| "Authority host arguments are missing --world for diagnostics ownership".to_owned())?;
         let diagnostic = runtime_diagnostic(app, &world)?;
-        spawn(
-            app,
-            "swarmcraft-host",
-            arguments,
-            &self.host,
-            "Authority host",
-            Some(diagnostic),
-        )
+        spawn(app, "swarmcraft-host", arguments, &self.host, "Authority host", Some(diagnostic))
     }
 
     pub fn start_managed_host(&self, app: &AppHandle, world: String) -> Result<u32, String> {
@@ -239,10 +232,7 @@ fn runtime_diagnostic(app: &AppHandle, world: &str) -> Result<RuntimeDiagnostic,
         .join("runtime-diagnostics");
     fs::create_dir_all(&root)
         .map_err(|error| format!("cannot create runtime diagnostics directory {}: {error}", root.display()))?;
-    Ok(RuntimeDiagnostic {
-        current: root.join(format!("{key}.log")),
-        rotated: root.join(format!("{key}.log.1")),
-    })
+    Ok(RuntimeDiagnostic { current: root.join(format!("{key}.log")), rotated: root.join(format!("{key}.log.1")) })
 }
 
 fn sanitize_world_key(world: &str) -> Result<String, String> {
@@ -272,8 +262,7 @@ fn append_runtime_diagnostic(diagnostic: &RuntimeDiagnostic, stream: &str, bytes
     file.write_all(entry.as_bytes())
         .map_err(|error| format!("cannot append runtime diagnostics {}: {error}", diagnostic.current.display()))?;
     if !entry.ends_with('\n') {
-        file.write_all(b"\n")
-            .map_err(|error| format!("cannot terminate runtime diagnostics line: {error}"))?;
+        file.write_all(b"\n").map_err(|error| format!("cannot terminate runtime diagnostics line: {error}"))?;
     }
     Ok(())
 }
