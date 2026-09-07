@@ -183,7 +183,6 @@ fn daemon_rejects_wrong_parent_and_same_sequence_snapshot_conflicts() {
     assert!(authorize_manifest(&fixture.storage, fixture.authority.peer_id(), &same_sequence_conflict).is_err());
 }
 
-
 #[test]
 fn recovery_candidate_requires_runtime_mod_and_conflict_readiness() {
     let fixture = fixture();
