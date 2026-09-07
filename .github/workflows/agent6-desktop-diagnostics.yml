@@ -10,6 +10,8 @@ on:
       - apps/desktop/src-tauri/src/main.rs
       - apps/desktop/src-tauri/Cargo.toml
       - apps/desktop/src-tauri/Cargo.lock
+      - crates/swarm-cli/tests/agent6_real_import.rs
+      - crates/swarm-cli/tests/agent6_runtime_lifecycle.rs
   workflow_dispatch:
 
 permissions:
