@@ -452,7 +452,7 @@ fn release_minecraft_session_lock(file: &fs::File) {
 
 #[cfg(windows)]
 fn release_minecraft_session_lock(file: &fs::File) {
-    let _ = file.unlock();
+    let _ = FileExt::unlock(file);
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
