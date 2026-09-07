@@ -1,0 +1,46 @@
+name: Agent 6 Real Runtime Acceptance
+
+on:
+  push:
+    branches: [fix/agent-6-runtime]
+    paths:
+      - .github/workflows/agent6-real-runtime.yml
+      - crates/swarm-cli/tests/agent6_real_import.rs
+      - scripts/agent6-real-runtime-acceptance.sh
+
+permissions:
+  contents: read
+
+jobs:
+  real-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/agent-6-runtime
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+      - uses: Swatinem/rust-cache@v2
+      - name: Prove Java major
+        run: |
+          java -version
+          test "$(java -XshowSettings:properties -version 2>&1 | awk -F= '/java.specification.version/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')" -ge 25
+      - name: Build SwarmCraft runtimes
+        run: cargo build -p swarm-cli --locked
+      - name: Build shipped Fabric bridge
+        working-directory: minecraft/fabric
+        run: gradle build --stacktrace
+      - name: Real Java Minecraft session.lock import acceptance
+        run: cargo test -p swarm-cli --test agent6_real_import --locked -- --ignored --nocapture
+      - name: Real Minecraft Fabric lifecycle and hard-death chaos
+        env:
+          RUST_BACKTRACE: '1'
+        run: bash scripts/agent6-real-runtime-acceptance.sh
