@@ -476,7 +476,11 @@ async fn wait_until_launch_safe(
 
 fn infer_trigger(storage: &Storage, epoch: &EpochRecordV1, local_peer: PeerId) -> MigrationTrigger {
     if epoch.mode == EpochMode::Recovery {
-        return MigrationTrigger::AutomaticRecovery;
+        return if epoch.reason == "quorum wake from exact durable sleep boundary" {
+            MigrationTrigger::WorldWake
+        } else {
+            MigrationTrigger::AutomaticRecovery
+        };
     }
     if storage
         .load_transfer_record(epoch.world_id)
