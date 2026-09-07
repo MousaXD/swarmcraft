@@ -98,7 +98,8 @@ fn java_nio_minecraft_lock_rejects_live_import_then_clean_stop_imports() {
     assert!(String::from_utf8_lossy(&live_bytes).starts_with("live-generation-"));
 
     let paths = DataPaths::from_root(temp.path().join("swarmcraft-data"));
-    let error = import_world(&paths, &request(source.clone())).expect_err("live Minecraft-compatible lock must reject import");
+    let error =
+        import_world(&paths, &request(source.clone())).expect_err("live Minecraft-compatible lock must reject import");
     let message = error.to_string();
     assert!(message.contains("currently open") || message.contains("session lock"), "unexpected rejection: {message}");
 
@@ -112,11 +113,7 @@ fn java_nio_minecraft_lock_rejects_live_import_then_clean_stop_imports() {
 
     fs::write(&release, b"release\n").unwrap();
     let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "Java lock owner failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "Java lock owner failed: {}", String::from_utf8_lossy(&output.stderr));
 
     let stopped_bytes = fs::read(&region).unwrap();
     let result = import_world(&paths, &request(source)).expect("stopped source must import successfully");
