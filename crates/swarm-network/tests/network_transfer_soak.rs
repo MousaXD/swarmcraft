@@ -12,6 +12,35 @@ use tokio::time::timeout;
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
 const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(11);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkSendResult {
+    Accepted,
+    RateLimited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TransferStats {
+    restarts: u64,
+    rate_limits: u64,
+}
+
+async fn wait_for_rate_limit_window(sender: &mut SwarmNode, receiver: &mut SwarmNode) {
+    let delay = tokio::time::sleep(RATE_LIMIT_BACKOFF);
+    tokio::pin!(delay);
+    loop {
+        tokio::select! {
+            _ = &mut delay => break,
+            event = sender.next_event() => {
+                let _ = event.expect("sender network loop should remain live during rate-limit backoff");
+            }
+            event = receiver.next_event() => {
+                let _ = event.expect("receiver network loop should remain live during rate-limit backoff");
+            }
+        }
+    }
+}
 
 fn signed_hello(key: &SigningKey, nonce: u8) -> PeerHelloV1 {
     let public_key = key.verifying_key().to_bytes();
@@ -59,20 +88,21 @@ async fn wait_for_authentication(
     receiver_app: PeerId,
     sender_app: PeerId,
 ) {
-    let mut receiver_saw_sender = false;
-    let mut sender_saw_receiver = false;
+    let sender_transport = sender.local_transport_peer_id();
+    let receiver_transport = receiver.local_transport_peer_id();
     timeout(EVENT_TIMEOUT, async {
-        while !(receiver_saw_sender && sender_saw_receiver) {
+        loop {
+            if receiver.application_peer(&sender_transport) == Some(sender_app)
+                && sender.application_peer(&receiver_transport) == Some(receiver_app)
+            {
+                break;
+            }
             tokio::select! {
                 event = receiver.next_event() => {
-                    if let NetworkEvent::Authenticated { application_peer, .. } = event.unwrap() {
-                        receiver_saw_sender |= application_peer == sender_app;
-                    }
+                    let _ = event.unwrap();
                 }
                 event = sender.next_event() => {
-                    if let NetworkEvent::Authenticated { application_peer, .. } = event.unwrap() {
-                        sender_saw_receiver |= application_peer == receiver_app;
-                    }
+                    let _ = event.unwrap();
                 }
             }
         }
@@ -157,7 +187,7 @@ async fn send_chunk(
     committed_offset: &mut u64,
     total_bytes: u64,
     len: usize,
-) {
+) -> ChunkSendResult {
     let offset = *committed_offset;
     let data = synthetic_chunk(offset, len);
     let next_offset = offset + len as u64;
@@ -224,7 +254,23 @@ async fn send_chunk(
                             assert_eq!(hash, transfer.hash);
                             assert_eq!(acknowledged, next_offset);
                             assert_eq!(*committed_offset, next_offset);
-                            break;
+                            break ChunkSendResult::Accepted;
+                        }
+                        NetworkEvent::Response {
+                            request_id: observed,
+                            response: WireResponse::Error { code, message },
+                            ..
+                        } if observed == request_id && code == "RATE_LIMITED" => {
+                            assert_eq!(*committed_offset, offset, "rate-limited chunks must not be committed");
+                            eprintln!("blob chunk rate limited at offset {offset}: {message}");
+                            break ChunkSendResult::RateLimited;
+                        }
+                        NetworkEvent::Response {
+                            request_id: observed,
+                            response: WireResponse::Error { code, message },
+                            ..
+                        } if observed == request_id => {
+                            panic!("blob chunk rejected: {code}: {message}");
                         }
                         NetworkEvent::OutboundFailure { request_id: observed, error, .. } if observed == request_id => {
                             panic!("blob chunk failed: {error}");
@@ -236,7 +282,7 @@ async fn send_chunk(
         }
     })
     .await
-    .expect("blob chunk should be acknowledged");
+    .expect("blob chunk should be acknowledged or rate limited")
 }
 
 async fn send_chunk_then_lose_ack(
@@ -247,11 +293,11 @@ async fn send_chunk_then_lose_ack(
     committed_offset: &mut u64,
     total_bytes: u64,
     len: usize,
-) {
+) -> ChunkSendResult {
     let offset = *committed_offset;
     let data = synthetic_chunk(offset, len);
     let next_offset = offset + len as u64;
-    sender
+    let request_id = sender
         .send_request(
             &receiver_transport,
             WireRequest::BlobChunk {
@@ -265,7 +311,7 @@ async fn send_chunk_then_lose_ack(
         )
         .unwrap();
 
-    timeout(EVENT_TIMEOUT, async {
+    let result = timeout(EVENT_TIMEOUT, async {
         loop {
             tokio::select! {
                 event = receiver.next_event() => {
@@ -299,23 +345,45 @@ async fn send_chunk_then_lose_ack(
                                 },
                             )
                             .unwrap();
-                        break;
+                        break ChunkSendResult::Accepted;
                     }
                 }
                 event = sender.next_event() => {
-                    if let NetworkEvent::OutboundFailure { error, .. } = event.unwrap() {
-                        panic!("blob chunk failed before receiver committed it: {error}");
+                    match event.unwrap() {
+                        NetworkEvent::Response {
+                            request_id: observed,
+                            response: WireResponse::Error { code, message },
+                            ..
+                        } if observed == request_id && code == "RATE_LIMITED" => {
+                            assert_eq!(*committed_offset, offset, "rate-limited chunks must not be committed");
+                            eprintln!("pre-disconnect blob chunk rate limited at offset {offset}: {message}");
+                            break ChunkSendResult::RateLimited;
+                        }
+                        NetworkEvent::Response {
+                            request_id: observed,
+                            response: WireResponse::Error { code, message },
+                            ..
+                        } if observed == request_id => {
+                            panic!("pre-disconnect blob chunk rejected: {code}: {message}");
+                        }
+                        NetworkEvent::OutboundFailure { request_id: observed, error, .. } if observed == request_id => {
+                            panic!("blob chunk failed before receiver committed it: {error}");
+                        }
+                        _ => {}
                     }
                 }
             }
         }
     })
     .await
-    .expect("receiver should commit the pre-disconnect chunk");
+    .expect("receiver should commit or rate limit the pre-disconnect chunk");
 
     // Deliberately do not poll the sender for the response. The sender is dropped by
     // the caller, so the receiver has committed data whose acknowledgement is lost.
-    assert_eq!(*committed_offset, next_offset);
+    if result == ChunkSendResult::Accepted {
+        assert_eq!(*committed_offset, next_offset);
+    }
+    result
 }
 
 async fn new_sender(
@@ -330,7 +398,31 @@ async fn new_sender(
     sender
 }
 
-async fn run_interrupted_transfer(total_bytes: u64, restart_every: u64, chunk_bytes: usize) {
+struct SenderReconnectContext<'a> {
+    transport_key_path: &'a Path,
+    app_key: &'a SigningKey,
+    transport_peer: TransportPeerId,
+    listen: &'a libp2p::Multiaddr,
+    receiver_app: PeerId,
+    sender_app: PeerId,
+}
+
+async fn reconnect_sender_after_rate_limit(
+    mut sender: SwarmNode,
+    receiver: &mut SwarmNode,
+    context: &SenderReconnectContext<'_>,
+    nonce: u8,
+) -> SwarmNode {
+    wait_for_rate_limit_window(&mut sender, receiver).await;
+    drop(sender);
+
+    let mut sender = new_sender(context.transport_key_path, context.app_key, nonce, context.listen).await;
+    assert_eq!(sender.local_transport_peer_id(), context.transport_peer);
+    wait_for_authentication(receiver, &mut sender, context.receiver_app, context.sender_app).await;
+    sender
+}
+
+async fn run_interrupted_transfer(total_bytes: u64, restart_every: u64, chunk_bytes: usize) -> TransferStats {
     assert!(total_bytes > restart_every);
     assert!(restart_every >= chunk_bytes as u64);
     assert!((1..=MAX_BLOB_CHUNK).contains(&chunk_bytes));
@@ -353,12 +445,21 @@ async fn run_interrupted_transfer(total_bytes: u64, restart_every: u64, chunk_by
     let transfer = TransferIdentity { world: WorldId([0x53; 32]), hash: Hash32([0xA7; 32]) };
     let mut sender = new_sender(&sender_transport_path, &sender_app_key, 3, &listen).await;
     let sender_transport = sender.local_transport_peer_id();
+    let reconnect_context = SenderReconnectContext {
+        transport_key_path: &sender_transport_path,
+        app_key: &sender_app_key,
+        transport_peer: sender_transport,
+        listen: &listen,
+        receiver_app,
+        sender_app,
+    };
     wait_for_authentication(&mut receiver, &mut sender, receiver_app, sender_app).await;
     assert_eq!(receiver.application_peer(&sender_transport), Some(sender_app));
 
     let mut committed_offset = 0_u64;
     let mut next_restart = restart_every;
     let mut restarts = 0_u64;
+    let mut rate_limits = 0_u64;
 
     while committed_offset < total_bytes {
         let segment_end = next_restart.min(total_bytes);
@@ -368,7 +469,7 @@ async fn run_interrupted_transfer(total_bytes: u64, restart_every: u64, chunk_by
             let at_forced_disconnect = committed_offset + len as u64 == segment_end && segment_end < total_bytes;
 
             if at_forced_disconnect {
-                send_chunk_then_lose_ack(
+                if send_chunk_then_lose_ack(
                     &mut sender,
                     &mut receiver,
                     receiver_transport,
@@ -377,7 +478,19 @@ async fn run_interrupted_transfer(total_bytes: u64, restart_every: u64, chunk_by
                     total_bytes,
                     len,
                 )
-                .await;
+                .await
+                    == ChunkSendResult::RateLimited
+                {
+                    rate_limits += 1;
+                    sender = reconnect_sender_after_rate_limit(
+                        sender,
+                        &mut receiver,
+                        &reconnect_context,
+                        0x80_u8.wrapping_add(rate_limits as u8),
+                    )
+                    .await;
+                    continue;
+                }
                 drop(sender);
                 restarts += 1;
 
@@ -399,7 +512,7 @@ async fn run_interrupted_transfer(total_bytes: u64, restart_every: u64, chunk_by
                 break;
             }
 
-            send_chunk(
+            if send_chunk(
                 &mut sender,
                 &mut receiver,
                 receiver_transport,
@@ -408,21 +521,34 @@ async fn run_interrupted_transfer(total_bytes: u64, restart_every: u64, chunk_by
                 total_bytes,
                 len,
             )
-            .await;
+            .await
+                == ChunkSendResult::RateLimited
+            {
+                rate_limits += 1;
+                sender = reconnect_sender_after_rate_limit(
+                    sender,
+                    &mut receiver,
+                    &reconnect_context,
+                    0x80_u8.wrapping_add(rate_limits as u8),
+                )
+                .await;
+            }
         }
     }
 
     assert_eq!(committed_offset, total_bytes);
     assert!(restarts >= 1);
     println!(
-        "network transfer soak complete: bytes={total_bytes} chunk_bytes={chunk_bytes} restarts={restarts} transport_peer={sender_transport}"
+        "network transfer soak complete: bytes={total_bytes} chunk_bytes={chunk_bytes} restarts={restarts} rate_limits={rate_limits} transport_peer={sender_transport}"
     );
+    TransferStats { restarts, rate_limits }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "run explicitly in the impaired-network CI gate"]
 async fn interrupted_quic_transfer_resumes_after_lost_ack() {
-    run_interrupted_transfer(64 * MIB, 16 * MIB, MAX_BLOB_CHUNK).await;
+    let stats = run_interrupted_transfer(40 * MIB, 36 * MIB, MAX_BLOB_CHUNK).await;
+    assert!(stats.rate_limits >= 1, "the regression must exercise authenticated admission backoff");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

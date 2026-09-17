@@ -2,7 +2,7 @@
 
 ## Status
 
-STATUS: BLOCKED
+STATUS: IN PROGRESS
 
 BRANCH: `fix/agent-8-ci-release`
 
@@ -10,9 +10,11 @@ STARTING SHA: `b4bab08562cf0eb53763674407375b023e1d0858`
 
 BRANCH CREATION SHA: `a9736b159d9e9618a3ed8515c20e93f92c1453cb`
 
-LATEST INTEGRATION BASE CONSUMED: `f6ff3d4659fd69cef63e03d3cbf573c0490d6826`
+LATEST INTEGRATION BASE CONSUMED: `efde7ecb996ead8d414378e7876354b731e4a963`
 
-BASE RECONCILIATION MERGE: `eee08d8e545bb963e9091572a69a2966a84da82a`
+BASE RECONCILIATION MERGE: `43b3361019bd5f3174f27282b4087df95fd43462`
+
+CURRENT CONTINUATION HEAD BEFORE RATE-LIMIT FIX: `59061532ad64410043e127df7553e71dca9714d2`
 
 IMPLEMENTATION SOURCE HEAD: `6ca930e8177d9104246b40f506b5abef485c7386`
 
@@ -41,6 +43,46 @@ Make release publication mean that the exact published SHA passed the project’
 Agent 8 had no implementation dependency gate.
 
 The remediation base advanced during the work only through Agent 10 ledger changes. `integration/audit-remediation-v1` at `f6ff3d4659fd69cef63e03d3cbf573c0490d6826` was reconciled into Agent 8 at merge commit `eee08d8e545bb963e9091572a69a2966a84da82a`; no Agent 8 production/workflow changes were overwritten.
+
+The branch later consumed the completed remediation integration through Agent 9. `integration/audit-remediation-v1` at `efde7ecb996ead8d414378e7876354b731e4a963` was reconciled at merge commit `43b3361019bd5f3174f27282b4087df95fd43462`, followed by cleanup commit `22525d9b27dfa1c96802526925f6294ae58d06cb` and Desktop lockfile restoration commit `59061532ad64410043e127df7553e71dca9714d2`.
+
+## 2026-09-17 continuation
+
+### Current exact-head evidence before this fix
+
+- Required Validation run `34170353439` on PR head `59061532ad64410043e127df7553e71dca9714d2`: **SUCCESS**. The terminal `Required validation gate` passed, including direct Desktop/provider gates, governance regressions, platform CI, package builds, dependency audits, specialist validation, and the live player journey.
+- Main Desktop Installers run `34170353502` on the same PR head: **FAILURE**. Every observed release-path component other than the soak-enabled network validation passed. The single release-blocking failure was `Exact-SHA required validation / Network soak / Interrupted QUIC multi-GiB soak`.
+- Archived soak evidence from that run records a 2 GiB transfer with 256 MiB forced restarts. The test timed out after 30 seconds waiting for a blob-chunk acknowledgement.
+
+### Release-path regression discovered after integration reconciliation
+
+The network admission hardening consumed from Agent 4 limits an authenticated peer to 128 requests per 10-second admission window and returns `WireResponse::Error { code: "RATE_LIMITED", ... }` when that budget is exceeded. The large-transfer soak and the real daemon replication sender both treated blob streaming as an effectively unbounded burst. The soak ignored the `RATE_LIMITED` response and waited until its acknowledgement timeout; the daemon could similarly overrun the admission budget during real snapshot replication.
+
+The continuation fix therefore:
+
+- makes the soak harness recognize `RATE_LIMITED`, retain the exact uncommitted offset, wait beyond the admission window, and retry without corrupting resume semantics;
+- changes daemon replication from an eager all-chunks burst to one acknowledged chunk in flight per `(transport peer, world)`;
+- retains exact pending blob/offset state across rate limiting;
+- retries the same chunk after an 11-second bounded backoff, which is deliberately longer than the network layer's 10-second authenticated request window;
+- clears pending replication state on disconnect/outbound failure and validates acknowledgement hash/offset/snapshot identity before advancing.
+
+### Local validation for the continuation fix
+
+- `cargo fmt --all -- --check` — PASS after formatting.
+- `git diff --check` — PASS.
+- `cargo test -p swarm-network --test network_transfer_soak interrupted_quic_transfer_resumes_after_lost_ack --locked -- --ignored --nocapture` — PASS; 40 MiB transfer hit the authenticated request limit once at 32 MiB, backed off, re-established the connection-bound proof, completed one forced lost-ack sender restart, and preserved the exact resume offset.
+- `cargo test -p swarm-cli --lib --locked` — PASS, 61/61.
+- `cargo clippy -p swarm-network --test network_transfer_soak -p swarm-cli --lib --locked -- -D warnings` — PASS.
+- `cargo test -p swarm-cli --test live_join_replication --locked` — PASS.
+- `cargo test -p swarm-cli --test host_process --locked` — PASS.
+- `python3 scripts/check_workflow_policy.py` — PASS, 10 workflow files accepted.
+- `python3 scripts/check_release_version.py` — PASS, application metadata `0.5.0`, wire protocol `1`.
+
+### Administrative blocker re-check
+
+- `ci/discovery-fixture-trigger` is now absent from the remote after `git fetch --prune`; FINAL-046's final stale-ref blocker is resolved.
+- Live ruleset `21764953` (`meow`) still contains only deletion, non-fast-forward, and code-quality rules. It still does not require `Required validation gate`.
+- A separate required-status ruleset is still needed for `refs/heads/main` and `refs/heads/integration/audit-remediation-v1`. This execution environment did not permit the repository-ruleset mutation operation, so FINAL-038 remains blocked on repository administration after code validation finishes.
 
 ## Implementation completed
 
@@ -177,8 +219,14 @@ Observed Main Desktop Installers runs remained held at the reusable validation d
 | Complete production credential set accepted | PASS | release identity job in `33583427402` |
 | Failed validation blocks rolling publication | PASS | `33582275682` |
 | Unresolved validation blocks publication | PASS | observed reusable dependency DAG |
-| Required status rule installed in repository | BLOCKED | live ruleset `21764953` lacks required-status rule |
-| Final stale validation ref deleted | BLOCKED | `ci/discovery-fixture-trigger` still exists |
+| Required status rule installed in repository | BLOCKED | live ruleset `21764953` still lacks required-status rule as of 2026-09-17 |
+| Final stale validation ref deleted | PASS | `ci/discovery-fixture-trigger` absent after remote prune on 2026-09-17 |
+| Reconciled-head Required Validation | PASS | run `34170353439` at PR head `59061532ad64410043e127df7553e71dca9714d2` |
+| Reconciled-head release path with soak | FAIL | run `34170353502`; only multi-GiB soak failed |
+| Rate-limit-aware lost-ack transfer regression | PASS | local 64 MiB interrupted transfer on 2026-09-17 |
+| Reconciled daemon library tests | PASS | local `swarm-cli --lib`, 61/61 on 2026-09-17 |
+| Live join replication after rate-limit fix | PASS | local `live_join_replication` on 2026-09-17 |
+| Host process lifecycle after rate-limit fix | PASS | local `host_process` on 2026-09-17 |
 
 ## Remaining blockers
 
@@ -188,43 +236,37 @@ FINAL-038 cannot be truthfully closed from this execution environment.
 
 Live ruleset `21764953` (`meow`) remains active with deletion, non-fast-forward, and code-quality rules only. It still does **not** contain a required-status-check rule for `Required validation gate`.
 
-The connected GitHub capability exposes ruleset and branch-protection reads only; no ruleset/protection mutation operation is available. The local execution environment has no GitHub credential/token that could be used to perform the administrative API write independently.
+The repository is now reachable through an authenticated GitHub CLI session, but this execution environment did not permit the repository-ruleset mutation operation. The live ruleset read therefore remains authoritative: required-status enforcement is still absent.
 
 Required repository-admin action is documented in `docs/RELEASE_GATES.md`: require the exact terminal status `Required validation gate` on the protected integration/main path.
 
-### BLOCKER 2 — final obsolete remote ref cleanup
+### RESOLVED — final obsolete remote ref cleanup
 
-FINAL-046 has one safe stale remote ref remaining:
-
-`ci/discovery-fixture-trigger` -> `fc52e288730bcdd98eabef3a0eaaf73c7ff92e1c`
-
-It is a strict ancestor of `agent/discovery`, which is three commits ahead with no divergence, so deletion is safe. The connected GitHub capability exposes ref creation/update but no ref deletion operation, and the local environment has no authenticated GitHub token.
-
-Required repository-admin action: delete `refs/heads/ci/discovery-fixture-trigger`.
+FINAL-046's final stale ref is no longer present. A 2026-09-17 remote prune and `ls-remote` confirmed that `ci/discovery-fixture-trigger` is absent while `agent/discovery` remains at `0a72380aebbc6f227957cae733de64dc6f85638c`.
 
 ## Remaining work
 
-No known Agent 8 production/workflow defect remains. All executable validation requirements owned by Agent 8 are green.
+The reconciled branch exposed one release-path defect after the old ledger was written: large snapshot replication could exceed the authenticated request budget and ignore `RATE_LIMITED`. The continuation fix is implemented locally and has passed targeted validation, but exact-head GitHub validation still needs to run on the committed fix.
 
 To unblock handoff:
 
-1. Add repository required-status enforcement for exact status `Required validation gate`.
-2. Delete `ci/discovery-fixture-trigger`.
-3. Re-read live repository state.
-4. If both administrative changes are confirmed and no new code/workflow drift occurred, change this ledger to `READY FOR INTEGRATION` and record the exact handoff head.
+1. Commit and push the rate-limit-aware replication/soak fix with this ledger update.
+2. Require exact-head Required Validation and the soak-enabled Main Desktop Installers release path to pass on the new commit.
+3. Add repository required-status enforcement for exact status `Required validation gate` on `main` and `integration/audit-remediation-v1`.
+4. Re-read live repository state and record the exact validated handoff head.
 
 ## Handoff
 
 READY FOR INTEGRATION: NO
 
-Validated implementation tree: PR head `1ef2ab283c45bb3f7d39dc45422e14891eb30aba`, PR merge candidate `a691c41dc4cbcf73a7837fd87c6d6aa37c7772a6`.
+Latest reconciled tree before the continuation fix: PR head `59061532ad64410043e127df7553e71dca9714d2`.
 
-Required Validation: `33583427402` — SUCCESS.
+Required Validation on reconciled head: `34170353439` — SUCCESS.
 
-Release-path validation + multi-GiB soak + package build: `33583427535` — SUCCESS.
+Release-path validation on reconciled head: `34170353502` — FAILURE only in the multi-GiB network soak; continuation fix pending exact-head CI.
 
 Known conflict areas: active workflow files and release/version policy scripts. Integration must preserve the aggregate `Required validation gate` contract and the release DAG dependency on it.
 
 ## Agent final statement
 
-BLOCKED
+IN PROGRESS
