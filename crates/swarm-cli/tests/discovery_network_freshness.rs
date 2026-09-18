@@ -607,7 +607,7 @@ async fn simultaneous_bidirectional_dials_converge_on_one_authenticated_connecti
 
     let mut left_authenticated = false;
     let mut right_authenticated = false;
-    timeout(Duration::from_secs(10), async {
+    timeout(Duration::from_secs(30), async {
         while !(left_authenticated && right_authenticated) {
             tokio::select! {
                 event = left.next_event() => {

@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::Debug,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -42,10 +42,15 @@ use tracing::{info, warn};
 const AUTHORITY_LEASE_DURATION_MS: u64 = 5_000;
 const RECOVERY_SETTLE_DELAY: Duration = Duration::from_secs(2);
 const STATUS_FRESHNESS: Duration = Duration::from_secs(3);
+// The network layer intentionally returns RATE_LIMITED after the authenticated
+// request budget is exhausted. Back off beyond that admission window instead
+// of dropping replication data or busy-looping against the secured transport.
+const REPLICATION_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(11);
 
 #[derive(Debug, Clone)]
 enum OutboundContext {
     Manifest { world: WorldId, snapshot_number: u64 },
+    BlobChunk { world: WorldId, snapshot_number: u64, hash: Hash32, next_offset: u64, finished: bool },
     Lease { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
     RecoveryBallot { world: WorldId, peer: PeerId, ballot_hash: Hash32 },
     MembershipProposal { world: WorldId, peer: PeerId, proposal_hash: Hash32 },
@@ -79,6 +84,14 @@ struct ObservedCapability {
     observed_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct ReplicationState {
+    snapshot_number: u64,
+    pending: VecDeque<BlobResumeV1>,
+    in_flight: bool,
+    retry_at: Option<Instant>,
+}
+
 #[derive(Debug, Default)]
 struct LeaseRuntime {
     authenticated_peers: HashMap<TransportPeerId, PeerId>,
@@ -94,6 +107,7 @@ struct LeaseRuntime {
     peer_capability: HashMap<(WorldId, PeerId), ObservedCapability>,
     recovery_not_before: HashMap<WorldId, Instant>,
     recovery_replication_sent: HashSet<(WorldId, PeerId)>,
+    replications: HashMap<(TransportPeerId, WorldId), ReplicationState>,
 }
 
 struct HandlerContext<'a> {
@@ -152,6 +166,13 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
     loop {
         tokio::select! {
             _ = lease_tick.tick() => {
+                retry_due_replication(
+                    storage,
+                    &mut node,
+                    &mut outbound,
+                    &mut leases,
+                    Instant::now(),
+                )?;
                 maintain_authority_leases(
                     paths,
                     storage,
@@ -260,6 +281,9 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                                     leases.peer_capability.remove(&(world, peer));
                                 }
                                 OutboundContext::Manifest { .. } => {}
+                                OutboundContext::BlobChunk { world, .. } => {
+                                    leases.replications.remove(&(transport_peer, world));
+                                }
                             }
                         }
                         warn!(transport = %transport_peer, %error, "outbound peer request failed; replication will renegotiate after reconnect");
@@ -273,6 +297,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                             leases.peer_status.retain(|(_, peer), _| *peer != application_peer);
                             leases.peer_capability.retain(|(_, peer), _| *peer != application_peer);
                         }
+                        leases.replications.retain(|(peer, _), _| *peer != transport_peer);
                         info!(transport = %transport_peer, "peer disconnected");
                     }
                     NetworkEvent::Connected { transport_peer } => {
@@ -2101,31 +2126,88 @@ fn handle_response(
                 return Err(anyhow!("manifest response snapshot number mismatch"));
             }
             let manifest = storage.load_snapshot(world, snapshot_number)?;
-            for resume in missing {
+            for resume in &missing {
                 let descriptor = find_descriptor(&manifest, resume.hash)
                     .context("peer requested blob not referenced by manifest")?;
-                let mut offset = resume.offset;
-                loop {
-                    let (data, finished) =
-                        storage.read_encoded_blob_chunk(world, descriptor, offset, MAX_BLOB_CHUNK)?;
-                    let chunk_len = data.len() as u64;
-                    node.send_request(
-                        transport_peer,
-                        WireRequest::BlobChunk {
-                            world_id: world,
-                            hash: descriptor.hash,
-                            encoding: descriptor.encoding,
-                            offset,
-                            data,
-                            finished,
-                        },
-                    )?;
-                    if finished {
-                        break;
-                    }
-                    offset = offset.saturating_add(chunk_len);
+                if resume.offset > descriptor.encoded_size {
+                    return Err(anyhow!("peer requested blob resume offset beyond encoded size"));
                 }
             }
+
+            let key = (*transport_peer, world);
+            if missing.is_empty() {
+                runtime.replications.remove(&key);
+            } else {
+                runtime.replications.insert(
+                    key,
+                    ReplicationState { snapshot_number, pending: missing.into(), in_flight: false, retry_at: None },
+                );
+                send_next_replication_chunk(storage, node, transport_peer, world, outbound, runtime, now)?;
+            }
+        }
+        (
+            Some(OutboundContext::BlobChunk { world, snapshot_number, hash, next_offset, finished }),
+            WireResponse::BlobChunkAccepted { hash: accepted_hash, next_offset: accepted_offset },
+        ) => {
+            let key = (*transport_peer, world);
+            if accepted_hash != hash || accepted_offset != next_offset {
+                runtime.replications.remove(&key);
+                return Err(anyhow!("blob chunk acknowledgement does not match the in-flight chunk"));
+            }
+
+            let Some(replication) = runtime.replications.get_mut(&key) else {
+                return Ok(());
+            };
+            if replication.snapshot_number != snapshot_number {
+                runtime.replications.remove(&key);
+                return Err(anyhow!("blob chunk acknowledgement references a superseded snapshot"));
+            }
+            let Some(resume) = replication.pending.front_mut() else {
+                runtime.replications.remove(&key);
+                return Err(anyhow!("blob chunk acknowledgement arrived without pending replication state"));
+            };
+            if resume.hash != hash || accepted_offset <= resume.offset {
+                runtime.replications.remove(&key);
+                return Err(anyhow!("blob chunk acknowledgement does not advance the negotiated blob"));
+            }
+
+            replication.in_flight = false;
+            replication.retry_at = None;
+            if finished {
+                replication.pending.pop_front();
+            } else {
+                resume.offset = accepted_offset;
+            }
+            send_next_replication_chunk(storage, node, transport_peer, world, outbound, runtime, now)?;
+        }
+        (Some(OutboundContext::BlobChunk { world, snapshot_number, .. }), WireResponse::Error { code, message })
+            if code == "RATE_LIMITED" =>
+        {
+            let key = (*transport_peer, world);
+            if let Some(replication) =
+                runtime.replications.get_mut(&key).filter(|replication| replication.snapshot_number == snapshot_number)
+            {
+                replication.in_flight = false;
+                replication.retry_at = Some(now + REPLICATION_RATE_LIMIT_BACKOFF);
+                warn!(
+                    transport = %transport_peer,
+                    %world,
+                    snapshot = snapshot_number,
+                    %message,
+                    "replication rate limited; retaining exact chunk for bounded retry"
+                );
+            }
+        }
+        (Some(OutboundContext::BlobChunk { world, snapshot_number, .. }), WireResponse::Error { code, message }) => {
+            runtime.replications.remove(&(*transport_peer, world));
+            warn!(
+                transport = %transport_peer,
+                %world,
+                snapshot = snapshot_number,
+                %code,
+                %message,
+                "replication chunk rejected; transfer will renegotiate on the next manifest push"
+            );
         }
         (
             Some(OutboundContext::Lease { world, peer, generation }),
@@ -2792,6 +2874,91 @@ fn world_status(storage: &Storage, world: WorldId, local_peer: PeerId) -> Result
         compatibility_fingerprint: metadata.genesis.compatibility_fingerprint,
         authority_eligible: eligible,
     }))
+}
+
+fn send_next_replication_chunk(
+    storage: &Storage,
+    node: &mut SwarmNode,
+    transport_peer: &TransportPeerId,
+    world: WorldId,
+    outbound: &mut HashMap<String, OutboundContext>,
+    runtime: &mut LeaseRuntime,
+    now: Instant,
+) -> Result<()> {
+    let key = (*transport_peer, world);
+    loop {
+        let Some(replication) = runtime.replications.get(&key) else {
+            return Ok(());
+        };
+        if replication.in_flight || replication.retry_at.is_some_and(|retry_at| retry_at > now) {
+            return Ok(());
+        }
+        let snapshot_number = replication.snapshot_number;
+        let Some(resume) = replication.pending.front().cloned() else {
+            runtime.replications.remove(&key);
+            return Ok(());
+        };
+
+        let manifest = storage.load_snapshot(world, snapshot_number)?;
+        let descriptor = find_descriptor(&manifest, resume.hash)
+            .context("pending replication blob is not referenced by its snapshot manifest")?;
+        if resume.offset > descriptor.encoded_size {
+            runtime.replications.remove(&key);
+            return Err(anyhow!("pending replication offset exceeds the encoded blob size"));
+        }
+        if resume.offset == descriptor.encoded_size {
+            runtime.replications.get_mut(&key).expect("replication state exists").pending.pop_front();
+            continue;
+        }
+
+        let (data, finished) = storage.read_encoded_blob_chunk(world, descriptor, resume.offset, MAX_BLOB_CHUNK)?;
+        let next_offset = resume.offset.checked_add(data.len() as u64).context("blob replication offset overflow")?;
+        let request_id = node.send_request(
+            transport_peer,
+            WireRequest::BlobChunk {
+                world_id: world,
+                hash: descriptor.hash,
+                encoding: descriptor.encoding,
+                offset: resume.offset,
+                data,
+                finished,
+            },
+        )?;
+        outbound.insert(
+            request_key(&request_id),
+            OutboundContext::BlobChunk { world, snapshot_number, hash: descriptor.hash, next_offset, finished },
+        );
+        let replication = runtime.replications.get_mut(&key).expect("replication state exists");
+        replication.in_flight = true;
+        replication.retry_at = None;
+        return Ok(());
+    }
+}
+
+fn retry_due_replication(
+    storage: &Storage,
+    node: &mut SwarmNode,
+    outbound: &mut HashMap<String, OutboundContext>,
+    runtime: &mut LeaseRuntime,
+    now: Instant,
+) -> Result<()> {
+    let due = runtime
+        .replications
+        .iter()
+        .filter(|(_, replication)| {
+            !replication.in_flight && replication.retry_at.is_some_and(|retry_at| retry_at <= now)
+        })
+        .map(|((peer, world), _)| (*peer, *world))
+        .collect::<Vec<_>>();
+
+    for (peer, world) in due {
+        if runtime.authenticated_peers.contains_key(&peer) {
+            send_next_replication_chunk(storage, node, &peer, world, outbound, runtime, now)?;
+        } else {
+            runtime.replications.remove(&(peer, world));
+        }
+    }
+    Ok(())
 }
 
 fn find_descriptor(manifest: &SnapshotManifestV1, hash: Hash32) -> Option<&BlobDescriptor> {
