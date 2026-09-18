@@ -97,17 +97,12 @@ Historical audit reports and Git commits remain durable evidence. Branch-specifi
 
 ## Repository ruleset requirement
 
-The repository currently has active ruleset `21764953` (`meow`) with deletion, non-fast-forward, and code-quality rules. Live inspection on 2026-09-02 showed that it **does not yet require a status check**. The connected GitHub integration can read rulesets but cannot mutate branch protection/rulesets, so this repository-admin action remains external and must not be described as already enabled.
+Repository governance is enforced by two active repository rulesets, both with an empty bypass-actor list:
 
-A repository administrator must edit/create the ruleset targeting `refs/heads/main` and configure all of the following:
+- ruleset `23573424` (`Agent 8 required validation gate`) targets `refs/heads/main` and `refs/heads/integration/audit-remediation-v1`. It requires the exact status context `Required validation gate` and enables strict required-status policy, so the tested commit must be up to date with its target before merge;
+- ruleset `23678402` (`Agent 8 main PR safety`) targets `refs/heads/main`. It requires changes to arrive through a pull request, prevents deletion and non-fast-forward updates, preserves code-quality enforcement, and permits the repository's enabled merge, squash, and rebase strategies. It deliberately requires zero approving reviews because the release-governance contract requires a PR path, not an invented reviewer-count policy.
 
-1. Require a pull request before update/merge.
-2. Require the status produced by workflow `Required Validation`, terminal job `Required validation gate` (select the exact context shown by GitHub after its first successful run).
-3. Require the branch to be up to date with its target before merge when that option is available for the selected required check.
-4. Preserve the existing deletion and non-fast-forward protections.
-5. Do not add a bypass actor that can publish ordinary application changes around the required gate.
-
-Until that repository setting is applied, the workflow DAG still prevents release workflows from publishing without their own exact-SHA validation, but GitHub itself does not yet prevent an administrator from updating `main` without the intended PR status.
+Live effective-rules inspection on 2026-09-18 confirms that `main` receives both the PR/safety rules and the strict `Required validation gate`, while `integration/audit-remediation-v1` receives the same strict required-status check. There is no configured ruleset bypass actor for either protected path.
 
 ## Evidence lifecycle and cleanup
 

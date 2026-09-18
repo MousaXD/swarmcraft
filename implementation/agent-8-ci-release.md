@@ -2,7 +2,7 @@
 
 ## Status
 
-STATUS: IN PROGRESS
+STATUS: READY FOR INTEGRATION
 
 BRANCH: `fix/agent-8-ci-release`
 
@@ -15,6 +15,8 @@ LATEST INTEGRATION BASE CONSUMED: `efde7ecb996ead8d414378e7876354b731e4a963`
 BASE RECONCILIATION MERGE: `43b3361019bd5f3174f27282b4087df95fd43462`
 
 CURRENT CONTINUATION HEAD BEFORE RATE-LIMIT FIX: `59061532ad64410043e127df7553e71dca9714d2`
+
+FINAL VALIDATED IMPLEMENTATION HEAD: `056ad969f103077bf211d3a841a24592c8ac39f9`
 
 IMPLEMENTATION SOURCE HEAD: `6ca930e8177d9104246b40f506b5abef485c7386`
 
@@ -114,8 +116,17 @@ Local validation of the split gate is green: the admission test hit `RATE_LIMITE
 ### Administrative blocker re-check
 
 - `ci/discovery-fixture-trigger` is now absent from the remote after `git fetch --prune`; FINAL-046's final stale-ref blocker is resolved.
-- Live ruleset `21764953` (`meow`) still contains only deletion, non-fast-forward, and code-quality rules. It still does not require `Required validation gate`.
-- A separate required-status ruleset is still needed for `refs/heads/main` and `refs/heads/integration/audit-remediation-v1`. This execution environment did not permit the repository-ruleset mutation operation, so FINAL-038 remains blocked on repository administration after code validation finishes.
+- Active ruleset `23573424` (`Agent 8 required validation gate`) targets `refs/heads/main` and `refs/heads/integration/audit-remediation-v1`, requires exact context `Required validation gate`, enables strict required-status policy, and has no bypass actors.
+- Active ruleset `23678402` (`Agent 8 main PR safety`) targets `refs/heads/main`, requires updates through a pull request, prevents deletion/non-fast-forward updates, preserves code-quality enforcement, permits the repository's enabled merge/squash/rebase strategies, and has no bypass actors.
+- Live effective-rules inspection confirms both rulesets apply to `main`, while the strict required-status rule applies to `integration/audit-remediation-v1`. FINAL-038's repository-governance blocker is resolved.
+
+### Exact-head validation of `056ad969f103077bf211d3a841a24592c8ac39f9`
+
+- Required Validation run `35385219601`: **SUCCESS**. Terminal `Required validation gate` job `105733914467` completed successfully on the exact branch head.
+- The split `Core CI / Network impairment (QUIC resume)` job passed both independent invariants: authenticated request-budget backoff before netem and interrupted/lost-ack resume under WAN-like netem.
+- Main Desktop Installers run `35385219686`: nested soak-enabled `Required validation gate` job `105735909243` completed successfully on the same SHA.
+- The 2 GiB `Interrupted QUIC multi-GiB soak` job `105731013122` completed successfully and uploaded its soak evidence.
+- Main Desktop Installers run `35385219686` completed **SUCCESS** on the exact implementation head. Linux `.deb` job `105735944164`, Windows `.exe` job `105735944218`, macOS arm64 `.dmg` job `105735944228`, and macOS x86_64 `.dmg` job `105735944283` all completed successfully.
 
 ## Implementation completed
 
@@ -252,7 +263,8 @@ Observed Main Desktop Installers runs remained held at the reusable validation d
 | Complete production credential set accepted | PASS | release identity job in `33583427402` |
 | Failed validation blocks rolling publication | PASS | `33582275682` |
 | Unresolved validation blocks publication | PASS | observed reusable dependency DAG |
-| Required status rule installed in repository | BLOCKED | live ruleset `21764953` still lacks required-status rule as of 2026-09-18; authenticated repository access is admin-capable, so this will be applied after the next exact-head gate is green |
+| Required status rule installed in repository | PASS | ruleset `23573424` requires strict `Required validation gate` on `main` and `integration/audit-remediation-v1`; no bypass actors |
+| Main PR/safety governance | PASS | ruleset `23678402` requires PR updates on `main`, plus deletion/non-fast-forward/code-quality protection; no bypass actors |
 | Final stale validation ref deleted | PASS | `ci/discovery-fixture-trigger` absent after remote prune on 2026-09-17 |
 | Reconciled-head Required Validation | PASS | run `34170353439` at PR head `59061532ad64410043e127df7553e71dca9714d2` |
 | Reconciled-head release path with soak | FAIL | run `34170353502`; only multi-GiB soak failed |
@@ -260,6 +272,14 @@ Observed Main Desktop Installers runs remained held at the reusable validation d
 | First rate-limit fix Required Validation | FAIL | run `35218481209`: deterministic impairment assertion, new rustls advisory, and one same-SHA macOS timing flake; follow-up fixes implemented locally |
 | Second follow-up RustSec + macOS gates | PASS | run `35384614518`: root audit, Desktop audit, and macOS workspace job all green at `8a84a26a23f058f2a1e7ef754030bb8070be4f59` |
 | Second follow-up network impairment | FAIL | job `105728481447` completed the impaired transfer with `rate_limits=0`; split invariant gate implemented locally |
+| Final split network invariant gate | PASS | Required Validation run `35385219601` at `056ad969f103077bf211d3a841a24592c8ac39f9` |
+| Final Required validation gate | PASS | job `105733914467` in run `35385219601` |
+| Final soak-enabled Required validation gate | PASS | job `105735909243` in run `35385219686` |
+| Final 2 GiB release soak | PASS | job `105731013122` in run `35385219686` |
+| Final Linux `.deb` package | PASS | job `105735944164` in run `35385219686` |
+| Final Windows `.exe` package | PASS | job `105735944218` in run `35385219686` |
+| Final macOS arm64 `.dmg` package | PASS | job `105735944228` in run `35385219686` |
+| Final macOS x86_64 `.dmg` package | PASS | job `105735944283` in run `35385219686` |
 | Rate-limit-aware lost-ack transfer regression | PASS | local 8 MiB/32 KiB interrupted transfer; rate limit hit at 4 MiB and exact resume completed on 2026-09-18 |
 | Root RustSec after RUSTSEC-2026-0285 | PASS | local audit with `rustls 0.23.45`, zero vulnerabilities on 2026-09-18 |
 | Desktop RustSec after RUSTSEC-2026-0285 | PASS | local audit with `rustls 0.23.45`, zero vulnerabilities on 2026-09-18 |
@@ -270,15 +290,7 @@ Observed Main Desktop Installers runs remained held at the reusable validation d
 
 ## Remaining blockers
 
-### BLOCKER 1 — repository required-status enforcement
-
-FINAL-038 cannot be truthfully closed from this execution environment.
-
-Live ruleset `21764953` (`meow`) remains active with deletion, non-fast-forward, and code-quality rules only. It still does **not** contain a required-status-check rule for `Required validation gate`.
-
-The repository is reachable through an authenticated GitHub CLI session with repository administration permission. Required-status enforcement is still absent at this ledger revision; it will be applied only after the next exact-head Required Validation and release-path runs are green so the protected status refers to a currently validated head.
-
-Required repository-admin action is documented in `docs/RELEASE_GATES.md`: require the exact terminal status `Required validation gate` on the protected integration/main path.
+No owned implementation, validation, release-path, or repository-governance blocker remains.
 
 ### RESOLVED — final obsolete remote ref cleanup
 
@@ -286,27 +298,26 @@ FINAL-046's final stale ref is no longer present. A 2026-09-17 remote prune and 
 
 ## Remaining work
 
-The reconciled branch exposed one release-path defect after the old ledger was written: large snapshot replication could exceed the authenticated request budget and ignore `RATE_LIMITED`. Commit `8200ccfba48f5ec3c0c8672b9b6151f3d184aa43` fixed that primary blocker and passed the 2 GiB release soak. `8a84a26a23f058f2a1e7ef754030bb8070be4f59` closed the new RustSec advisory and macOS timing failure; the remaining network-test coupling is now split into independent admission-backoff and impaired-resume gates and is pending exact-head CI.
+The reconciled branch exposed one release-path defect after the old ledger was written: large snapshot replication could exceed the authenticated request budget and ignore `RATE_LIMITED`. Commit `8200ccfba48f5ec3c0c8672b9b6151f3d184aa43` fixed that primary blocker. `8a84a26a23f058f2a1e7ef754030bb8070be4f59` closed the new RustSec advisory and macOS timing failure. `056ad969f103077bf211d3a841a24592c8ac39f9` split admission-backoff and impaired-resume invariants, and exact-head Required Validation plus the 2 GiB release soak are green.
 
-To unblock handoff:
-
-1. Commit and push the split network invariant gate with this ledger update.
-2. Require exact-head Required Validation and the soak-enabled Main Desktop Installers release path to pass on the new commit.
-3. Add repository required-status enforcement for exact status `Required validation gate` on the protected release/integration path.
-4. Re-read live repository state and record the exact validated handoff head.
+No implementation work remains for Agent 8. The integration coordinator should consume the validated implementation head and this final ledger/documentation closure without rewriting the release-gate contracts.
 
 ## Handoff
 
-READY FOR INTEGRATION: NO
+READY FOR INTEGRATION: YES
 
-Latest pushed continuation head before the split-gate commit: `8a84a26a23f058f2a1e7ef754030bb8070be4f59`.
+Latest validated implementation head: `056ad969f103077bf211d3a841a24592c8ac39f9`.
 
-Required Validation on second continuation head: `35384614518` — network impairment job FAILURE after a successful transfer because rate limiting did not occur under netem; split-gate fix pending exact-head CI.
+Required Validation on final implementation head: `35385219601` — SUCCESS.
 
-Release-path validation on first continuation head: `35218481394` — overall FAILURE because nested Required Validation failed, but the release-blocking 2 GiB network soak itself is SUCCESS.
+Main Desktop Installers release-path validation on the final implementation head: `35385219686` — SUCCESS, including soak-enabled Required Validation, 2 GiB interrupted QUIC soak, and Linux/Windows/macOS release package builders.
+
+Repository governance: ruleset `23573424` strictly requires `Required validation gate` on `main` and `integration/audit-remediation-v1`; ruleset `23678402` requires the PR/safety path on `main`; both have no bypass actors.
+
+The final closure commit after `056ad969f103077bf211d3a841a24592c8ac39f9` changes only this ledger and release-governance documentation. No production code, test logic, workflow logic, dependency graph, or package configuration changes after the validated implementation head.
 
 Known conflict areas: active workflow files and release/version policy scripts. Integration must preserve the aggregate `Required validation gate` contract and the release DAG dependency on it.
 
 ## Agent final statement
 
-IN PROGRESS
+READY FOR INTEGRATION
