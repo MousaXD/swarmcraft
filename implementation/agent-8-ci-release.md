@@ -78,6 +78,26 @@ The continuation fix therefore:
 - `python3 scripts/check_workflow_policy.py` — PASS, 10 workflow files accepted.
 - `python3 scripts/check_release_version.py` — PASS, application metadata `0.5.0`, wire protocol `1`.
 
+### Exact-head validation of `8200ccfba48f5ec3c0c8672b9b6151f3d184aa43`
+
+The first pushed continuation head proved the primary release blocker was fixed but exposed three independent follow-up gates:
+
+- Main Desktop Installers run `35218481394`: the 2 GiB `Interrupted QUIC multi-GiB soak` **PASSED** at job `105192554819`, proving the original release-path timeout was fixed. The overall run still failed because the nested Required Validation inherited non-soak failures below.
+- Required Validation run `35218481209`: `Network impairment (QUIC resume)` completed the 40 MiB transfer successfully under netem but failed only because its assertion expected at least one rate-limit event; impairment slowed 256 KiB requests enough that no 10-second admission window was exhausted. The regression is now configured as 8 MiB with 32 KiB chunks so it deterministically crosses 128 authenticated requests before the forced restart while remaining fast under impairment.
+- Root and Desktop RustSec jobs failed on newly published `RUSTSEC-2026-0285` against `rustls 0.23.43`. The advisory was published 2026-09-14 and marks `rustls >= 0.23.45` patched. Both committed lock graphs are now advanced to `0.23.45`; local `cargo audit` reports zero vulnerabilities for both graphs.
+- The standalone macOS workspace test run timed out in `simultaneous_bidirectional_dials_converge_on_one_authenticated_connection`, while the same-SHA macOS job in the nested release validation passed. The symmetric-dial convergence timeout is increased from 10 to 30 seconds to remove runner-load timing sensitivity without weakening the one-connection/authentication assertions.
+
+### Local validation after exact-head follow-up fixes
+
+- `cargo test -p swarm-network --test network_transfer_soak interrupted_quic_transfer_resumes_after_lost_ack --locked -- --ignored --nocapture` — PASS; 8 MiB/32 KiB regression hit `RATE_LIMITED` at 4 MiB, performed the bounded backoff, completed one forced lost-ack restart, and finished with one rate-limit event.
+- `cargo test -p swarm-cli --test discovery_network_freshness simultaneous_bidirectional_dials_converge_on_one_authenticated_connection --locked -- --nocapture` — PASS in three consecutive local runs.
+- `cargo clippy -p swarm-network --test network_transfer_soak -p swarm-cli --test discovery_network_freshness -p swarm-cli --lib --locked -- -D warnings` — PASS.
+- `cargo audit --file Cargo.lock` — PASS with zero vulnerabilities; informational unmaintained warnings remain allowed by the existing audit policy.
+- `cargo audit --file apps/desktop/src-tauri/Cargo.lock` — PASS with zero vulnerabilities; existing informational/unmaintained/unsound warnings remain allowed by policy.
+- `cargo check --workspace --all-features --locked` — PASS.
+- Direct local Desktop `cargo check` is not authoritative in this nested Git worktree because Cargo discovers the outer checkout workspace; exact-head GitHub Desktop gates remain the authority and will re-run after the follow-up commit.
+- The local environment requires an interactive sudo password for `tc`, so exact netem reproduction is delegated to the pushed `Network impairment (QUIC resume)` job.
+
 ### Administrative blocker re-check
 
 - `ci/discovery-fixture-trigger` is now absent from the remote after `git fetch --prune`; FINAL-046's final stale-ref blocker is resolved.
@@ -219,11 +239,16 @@ Observed Main Desktop Installers runs remained held at the reusable validation d
 | Complete production credential set accepted | PASS | release identity job in `33583427402` |
 | Failed validation blocks rolling publication | PASS | `33582275682` |
 | Unresolved validation blocks publication | PASS | observed reusable dependency DAG |
-| Required status rule installed in repository | BLOCKED | live ruleset `21764953` still lacks required-status rule as of 2026-09-17 |
+| Required status rule installed in repository | BLOCKED | live ruleset `21764953` still lacks required-status rule as of 2026-09-18; authenticated repository access is admin-capable, so this will be applied after the next exact-head gate is green |
 | Final stale validation ref deleted | PASS | `ci/discovery-fixture-trigger` absent after remote prune on 2026-09-17 |
 | Reconciled-head Required Validation | PASS | run `34170353439` at PR head `59061532ad64410043e127df7553e71dca9714d2` |
 | Reconciled-head release path with soak | FAIL | run `34170353502`; only multi-GiB soak failed |
-| Rate-limit-aware lost-ack transfer regression | PASS | local 64 MiB interrupted transfer on 2026-09-17 |
+| First rate-limit fix release-path multi-GiB soak | PASS | job `105192554819` in run `35218481394` at `8200ccfba48f5ec3c0c8672b9b6151f3d184aa43` |
+| First rate-limit fix Required Validation | FAIL | run `35218481209`: deterministic impairment assertion, new rustls advisory, and one same-SHA macOS timing flake; follow-up fixes implemented locally |
+| Rate-limit-aware lost-ack transfer regression | PASS | local 8 MiB/32 KiB interrupted transfer; rate limit hit at 4 MiB and exact resume completed on 2026-09-18 |
+| Root RustSec after RUSTSEC-2026-0285 | PASS | local audit with `rustls 0.23.45`, zero vulnerabilities on 2026-09-18 |
+| Desktop RustSec after RUSTSEC-2026-0285 | PASS | local audit with `rustls 0.23.45`, zero vulnerabilities on 2026-09-18 |
+| Symmetric discovery dial stability | PASS | three consecutive local targeted runs after 30-second convergence bound on 2026-09-18 |
 | Reconciled daemon library tests | PASS | local `swarm-cli --lib`, 61/61 on 2026-09-17 |
 | Live join replication after rate-limit fix | PASS | local `live_join_replication` on 2026-09-17 |
 | Host process lifecycle after rate-limit fix | PASS | local `host_process` on 2026-09-17 |
@@ -236,7 +261,7 @@ FINAL-038 cannot be truthfully closed from this execution environment.
 
 Live ruleset `21764953` (`meow`) remains active with deletion, non-fast-forward, and code-quality rules only. It still does **not** contain a required-status-check rule for `Required validation gate`.
 
-The repository is now reachable through an authenticated GitHub CLI session, but this execution environment did not permit the repository-ruleset mutation operation. The live ruleset read therefore remains authoritative: required-status enforcement is still absent.
+The repository is reachable through an authenticated GitHub CLI session with repository administration permission. Required-status enforcement is still absent at this ledger revision; it will be applied only after the next exact-head Required Validation and release-path runs are green so the protected status refers to a currently validated head.
 
 Required repository-admin action is documented in `docs/RELEASE_GATES.md`: require the exact terminal status `Required validation gate` on the protected integration/main path.
 
@@ -246,24 +271,24 @@ FINAL-046's final stale ref is no longer present. A 2026-09-17 remote prune and 
 
 ## Remaining work
 
-The reconciled branch exposed one release-path defect after the old ledger was written: large snapshot replication could exceed the authenticated request budget and ignore `RATE_LIMITED`. The continuation fix is implemented locally and has passed targeted validation, but exact-head GitHub validation still needs to run on the committed fix.
+The reconciled branch exposed one release-path defect after the old ledger was written: large snapshot replication could exceed the authenticated request budget and ignore `RATE_LIMITED`. Commit `8200ccfba48f5ec3c0c8672b9b6151f3d184aa43` fixed that primary blocker and passed the 2 GiB release soak. Follow-up exact-head failures are now addressed locally: deterministic impairment coverage, `rustls 0.23.45` in both lock graphs, and a less brittle macOS discovery convergence bound.
 
 To unblock handoff:
 
-1. Commit and push the rate-limit-aware replication/soak fix with this ledger update.
+1. Commit and push the exact-head follow-up fixes with this ledger update.
 2. Require exact-head Required Validation and the soak-enabled Main Desktop Installers release path to pass on the new commit.
-3. Add repository required-status enforcement for exact status `Required validation gate` on `main` and `integration/audit-remediation-v1`.
+3. Add repository required-status enforcement for exact status `Required validation gate` on the protected release/integration path.
 4. Re-read live repository state and record the exact validated handoff head.
 
 ## Handoff
 
 READY FOR INTEGRATION: NO
 
-Latest reconciled tree before the continuation fix: PR head `59061532ad64410043e127df7553e71dca9714d2`.
+Latest pushed continuation head: `8200ccfba48f5ec3c0c8672b9b6151f3d184aa43`.
 
-Required Validation on reconciled head: `34170353439` — SUCCESS.
+Required Validation on first continuation head: `35218481209` — FAILURE; follow-up causes are documented above and fixed locally.
 
-Release-path validation on reconciled head: `34170353502` — FAILURE only in the multi-GiB network soak; continuation fix pending exact-head CI.
+Release-path validation on first continuation head: `35218481394` — overall FAILURE because nested Required Validation failed, but the release-blocking 2 GiB network soak itself is SUCCESS.
 
 Known conflict areas: active workflow files and release/version policy scripts. Integration must preserve the aggregate `Required validation gate` contract and the release DAG dependency on it.
 
