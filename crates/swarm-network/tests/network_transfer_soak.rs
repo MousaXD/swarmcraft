@@ -546,9 +546,15 @@ async fn run_interrupted_transfer(total_bytes: u64, restart_every: u64, chunk_by
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "run explicitly in the impaired-network CI gate"]
-async fn interrupted_quic_transfer_resumes_after_lost_ack() {
+async fn authenticated_request_budget_backoff_preserves_transfer_offset() {
     let stats = run_interrupted_transfer(8 * MIB, 6 * MIB, 32 * 1024).await;
     assert!(stats.rate_limits >= 1, "the regression must exercise authenticated admission backoff");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "run explicitly in the impaired-network CI gate"]
+async fn interrupted_quic_transfer_resumes_after_lost_ack() {
+    run_interrupted_transfer(8 * MIB, 4 * MIB, MAX_BLOB_CHUNK).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

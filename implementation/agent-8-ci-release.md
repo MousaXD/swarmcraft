@@ -83,7 +83,7 @@ The continuation fix therefore:
 The first pushed continuation head proved the primary release blocker was fixed but exposed three independent follow-up gates:
 
 - Main Desktop Installers run `35218481394`: the 2 GiB `Interrupted QUIC multi-GiB soak` **PASSED** at job `105192554819`, proving the original release-path timeout was fixed. The overall run still failed because the nested Required Validation inherited non-soak failures below.
-- Required Validation run `35218481209`: `Network impairment (QUIC resume)` completed the 40 MiB transfer successfully under netem but failed only because its assertion expected at least one rate-limit event; impairment slowed 256 KiB requests enough that no 10-second admission window was exhausted. The regression is now configured as 8 MiB with 32 KiB chunks so it deterministically crosses 128 authenticated requests before the forced restart while remaining fast under impairment.
+- Required Validation run `35218481209`: `Network impairment (QUIC resume)` completed the 40 MiB transfer successfully under netem but failed only because its assertion expected at least one rate-limit event; impairment slowed 256 KiB requests enough that no 10-second admission window was exhausted. The first follow-up reduced chunk size so the admission path was deterministic without impairment.
 - Root and Desktop RustSec jobs failed on newly published `RUSTSEC-2026-0285` against `rustls 0.23.43`. The advisory was published 2026-09-14 and marks `rustls >= 0.23.45` patched. Both committed lock graphs are now advanced to `0.23.45`; local `cargo audit` reports zero vulnerabilities for both graphs.
 - The standalone macOS workspace test run timed out in `simultaneous_bidirectional_dials_converge_on_one_authenticated_connection`, while the same-SHA macOS job in the nested release validation passed. The symmetric-dial convergence timeout is increased from 10 to 30 seconds to remove runner-load timing sensitivity without weakening the one-connection/authentication assertions.
 
@@ -97,6 +97,19 @@ The first pushed continuation head proved the primary release blocker was fixed 
 - `cargo check --workspace --all-features --locked` — PASS.
 - Direct local Desktop `cargo check` is not authoritative in this nested Git worktree because Cargo discovers the outer checkout workspace; exact-head GitHub Desktop gates remain the authority and will re-run after the follow-up commit.
 - The local environment requires an interactive sudo password for `tc`, so exact netem reproduction is delegated to the pushed `Network impairment (QUIC resume)` job.
+
+### Exact-head validation of `8a84a26a23f058f2a1e7ef754030bb8070be4f59`
+
+The second pushed continuation head closed the security and macOS failures: root RustSec, Desktop RustSec, and the standalone macOS workspace job all passed. The only observed failing component in Required Validation run `35384614518` was `Core CI / Network impairment (QUIC resume)`.
+
+That job completed the full 8 MiB interrupted transfer under the configured 12 ms / 0.5% loss / 100 Mbit netem profile with one forced restart and correct resume semantics, but recorded `rate_limits=0`. The failure was solely the assertion that the same impaired transfer must also exceed the authenticated request budget. With impairment enabled, request latency can legitimately refresh the 10-second admission window before 128 requests accumulate.
+
+The network gate is therefore split by invariant instead of making one timing profile prove incompatible conditions:
+
+- before netem, `authenticated_request_budget_backoff_preserves_transfer_offset` uses 32 KiB chunks to exceed the authenticated request budget, requires at least one `RATE_LIMITED` response, backs off beyond the admission window, and preserves the exact transfer offset;
+- after netem is installed, `interrupted_quic_transfer_resumes_after_lost_ack` uses 256 KiB chunks and proves interrupted QUIC/lost-ack resume without requiring rate limiting to occur.
+
+Local validation of the split gate is green: the admission test hit `RATE_LIMITED` at 4 MiB and completed with `rate_limits=1`; the independent lost-ack test completed 8 MiB with one forced restart; strict clippy, workflow policy, release-version policy, format, and diff checks all pass.
 
 ### Administrative blocker re-check
 
@@ -245,6 +258,8 @@ Observed Main Desktop Installers runs remained held at the reusable validation d
 | Reconciled-head release path with soak | FAIL | run `34170353502`; only multi-GiB soak failed |
 | First rate-limit fix release-path multi-GiB soak | PASS | job `105192554819` in run `35218481394` at `8200ccfba48f5ec3c0c8672b9b6151f3d184aa43` |
 | First rate-limit fix Required Validation | FAIL | run `35218481209`: deterministic impairment assertion, new rustls advisory, and one same-SHA macOS timing flake; follow-up fixes implemented locally |
+| Second follow-up RustSec + macOS gates | PASS | run `35384614518`: root audit, Desktop audit, and macOS workspace job all green at `8a84a26a23f058f2a1e7ef754030bb8070be4f59` |
+| Second follow-up network impairment | FAIL | job `105728481447` completed the impaired transfer with `rate_limits=0`; split invariant gate implemented locally |
 | Rate-limit-aware lost-ack transfer regression | PASS | local 8 MiB/32 KiB interrupted transfer; rate limit hit at 4 MiB and exact resume completed on 2026-09-18 |
 | Root RustSec after RUSTSEC-2026-0285 | PASS | local audit with `rustls 0.23.45`, zero vulnerabilities on 2026-09-18 |
 | Desktop RustSec after RUSTSEC-2026-0285 | PASS | local audit with `rustls 0.23.45`, zero vulnerabilities on 2026-09-18 |
@@ -271,11 +286,11 @@ FINAL-046's final stale ref is no longer present. A 2026-09-17 remote prune and 
 
 ## Remaining work
 
-The reconciled branch exposed one release-path defect after the old ledger was written: large snapshot replication could exceed the authenticated request budget and ignore `RATE_LIMITED`. Commit `8200ccfba48f5ec3c0c8672b9b6151f3d184aa43` fixed that primary blocker and passed the 2 GiB release soak. Follow-up exact-head failures are now addressed locally: deterministic impairment coverage, `rustls 0.23.45` in both lock graphs, and a less brittle macOS discovery convergence bound.
+The reconciled branch exposed one release-path defect after the old ledger was written: large snapshot replication could exceed the authenticated request budget and ignore `RATE_LIMITED`. Commit `8200ccfba48f5ec3c0c8672b9b6151f3d184aa43` fixed that primary blocker and passed the 2 GiB release soak. `8a84a26a23f058f2a1e7ef754030bb8070be4f59` closed the new RustSec advisory and macOS timing failure; the remaining network-test coupling is now split into independent admission-backoff and impaired-resume gates and is pending exact-head CI.
 
 To unblock handoff:
 
-1. Commit and push the exact-head follow-up fixes with this ledger update.
+1. Commit and push the split network invariant gate with this ledger update.
 2. Require exact-head Required Validation and the soak-enabled Main Desktop Installers release path to pass on the new commit.
 3. Add repository required-status enforcement for exact status `Required validation gate` on the protected release/integration path.
 4. Re-read live repository state and record the exact validated handoff head.
@@ -284,9 +299,9 @@ To unblock handoff:
 
 READY FOR INTEGRATION: NO
 
-Latest pushed continuation head: `8200ccfba48f5ec3c0c8672b9b6151f3d184aa43`.
+Latest pushed continuation head before the split-gate commit: `8a84a26a23f058f2a1e7ef754030bb8070be4f59`.
 
-Required Validation on first continuation head: `35218481209` — FAILURE; follow-up causes are documented above and fixed locally.
+Required Validation on second continuation head: `35384614518` — network impairment job FAILURE after a successful transfer because rate limiting did not occur under netem; split-gate fix pending exact-head CI.
 
 Release-path validation on first continuation head: `35218481394` — overall FAILURE because nested Required Validation failed, but the release-blocking 2 GiB network soak itself is SUCCESS.
 
