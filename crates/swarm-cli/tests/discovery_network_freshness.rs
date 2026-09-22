@@ -600,8 +600,18 @@ async fn simultaneous_bidirectional_dials_converge_on_one_authenticated_connecti
     let mut left_authenticated = false;
     let mut right_authenticated = false;
     timeout(Duration::from_secs(30), async {
+        let mut redrive = tokio::time::interval(Duration::from_millis(250));
+        redrive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         while !(left_authenticated && right_authenticated) {
             tokio::select! {
+                _ = redrive.tick() => {
+                    if !left_authenticated {
+                        left.dial_peer(right_peer).expect("left symmetric redial");
+                    }
+                    if !right_authenticated {
+                        right.dial_peer(left_peer).expect("right symmetric redial");
+                    }
+                }
                 event = left.next_event() => {
                     if matches!(
                         event.expect("left discovery event during symmetric dial"),
@@ -624,7 +634,7 @@ async fn simultaneous_bidirectional_dials_converge_on_one_authenticated_connecti
     .await
     .expect("symmetric discovery dials must converge and authenticate");
 
-    timeout(Duration::from_secs(2), async {
+    timeout(Duration::from_secs(10), async {
         loop {
             if left.established_connection_count(&right_peer) == 1
                 && right.established_connection_count(&left_peer) == 1

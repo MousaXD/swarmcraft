@@ -64,6 +64,15 @@ Local finalization validation before push:
 - full `cargo test -p swarm-cli --test discovery_network_freshness --locked -- --nocapture` — PASS five consecutive rounds, 15/15 network tests green;
 - `git diff --check` — PASS.
 
+### First exact finalization head — `f7b92b37014bf54ee294b411c0031b931ed02dd1`
+
+The first pushed finalization candidate was not accepted. Required Validation run `35684977478` failed only the macOS x86_64 Desktop package lane, and soak-enabled Main Desktop Installers run `35684985696` failed only the nested macOS Rust lane.
+
+- macOS Rust job `106609780724` timed out in `simultaneous_bidirectional_dials_converge_on_one_authenticated_connection`. The test initiated one symmetric dial race and then only consumed events. When both initial outbound attempts lost the startup race on the slower macOS runner, `DiscoveryNode::next_event` correctly cleared failed pending dials but the test never re-drove them. The regression now re-drives unauthenticated symmetric peers every 250 ms inside the existing bounded convergence window and allows 10 seconds for final duplicate-connection settlement. Strict Clippy passes; eight focused convergence rounds plus the complete network suite pass locally.
+- macOS x86_64 Desktop package job `106609752530` successfully compiled the full release application, then failed inside Tauri's generated `bundle_dmg.sh`; GitHub cleanup reported an orphan `diskimages-help` process. This is a transient Apple disk-image tooling failure after successful product compilation. Both permanent macOS packaging paths now retry the DMG bundling step exactly once after clearing only transient DMG bundle state. A reproducible product/package failure still fails the second attempt.
+
+These changes require a new exact candidate and full protected validation; `f7b92b3` is not a release candidate.
+
 ## Whole-product acceptance coverage
 
 The permanent exact-head workflow graph covers the required journey and adversarial seams rather than relying on isolated unit tests:

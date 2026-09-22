@@ -163,7 +163,17 @@ jobs:
           cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
       - name: Build unsigned preview macOS installer
         working-directory: apps/desktop
-        run: cargo tauri build --bundles dmg --ci --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
+        shell: bash
+        run: |
+          set -euo pipefail
+          config='{"bundle":{"macOS":{"signingIdentity":"-"}}}'
+          if cargo tauri build --bundles dmg --ci --config "$config"; then
+            exit 0
+          fi
+          echo "First macOS DMG attempt failed; clearing transient bundle state and retrying once."
+          rm -rf src-tauri/target/release/bundle/dmg
+          sleep 5
+          cargo tauri build --bundles dmg --ci --config "$config"
       - name: Stage macOS artifact
         shell: bash
         run: |
