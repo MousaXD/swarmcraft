@@ -139,7 +139,7 @@ Do not hide progress only in commit messages.
 | 7 | Desktop player journey | INTEGRATED | `fix/agent-7-desktop` | `8b7e44233ec16300483d8452b23136f3d14fb3ff` | Yes | Exact-head run `33615055388` SUCCESS; PR #60 source closure `5a9018d017bebf1607e5e37cbda412182e4b897c`; merge `7babf3b941f84cbdba1a0ffd3ac0a20628358051` |
 | 8 | CI/release governance | INTEGRATED | `fix/agent-8-ci-release` | `056ad969f103077bf211d3a841a24592c8ac39f9` | Yes | Final closure head `5a1f1b64f736730cf9a3d8cb9817fe867e39c089`; Required Validation `35389503306` SUCCESS; Main Desktop Installers `35389503449` SUCCESS; merge `51a79f2e60d8274f9c96a9c0a23d7409fc0adc19` |
 | 9 | Recovery/wake completion | INTEGRATED | `fix/agent-9-recovery-wake` | `4ba278223a752fa2eb3de60cb714d6fd5687d886` | Yes | Full CI `34168755678` SUCCESS; release guard `34168755680` SUCCESS; PR #73 source closure `e556e9e6924e9912551e309ea6e17f5c12069b06`; merge `efde7ecb996ead8d414378e7876354b731e4a963` |
-| 10 | Final acceptance | IN PROGRESS | `finalize/audit-remediation-v1` | `51a79f2e60d8274f9c96a9c0a23d7409fc0adc19` frozen integration candidate | No | Final integrated acceptance exposed one nondeterministic discovery-locator regression; deterministic finalization fix authored and pending exact-head validation. |
+| 10 | Final acceptance | GOAL REACHED | `finalize/audit-remediation-v1` | `924d1cf017bd452301825cb01dda61db48cbde0a` | No | Required Validation `35687932043` SUCCESS; Main Desktop Installers `35687932560` SUCCESS including 2 GiB soak and Linux/Windows/macOS packages; PR #75 promotion pending documentation-only closure revalidation. |
 
 ## Agent allocation
 
@@ -348,6 +348,10 @@ After every integration, update this README with:
 - Frozen composed integration candidate after Agent 8: `51a79f2e60d8274f9c96a9c0a23d7409fc0adc19`.
 - Latest `main` history (`783611c` add accidental test file, `fa38b3e` remove it) has zero net tree delta and was reconciled into the finalization branch at merge `9fba988` so the final protected PR remains up to date without discarding legitimate history.
 - Frozen-candidate Required Validation exposed a nondeterministic FINAL-028 network-regression harness/explicit-locator warmup weakness. The finalization branch now re-drives unauthenticated explicit discovery locators within the existing bounded warmup and removes scheduler-order assertions that duplicated deterministic cryptographic freshness tests. Strict Clippy is green and the complete `discovery_network_freshness` suite passed five consecutive local rounds before final exact-head CI.
+- Final accepted product/release SHA: `924d1cf017bd452301825cb01dda61db48cbde0a`.
+- Required Validation `35687932043` — SUCCESS; terminal `Required validation gate` job `106619948499` — SUCCESS.
+- Main Desktop Installers `35687932560` — SUCCESS; nested required gate `106622088095`, 2 GiB soak `106618785920`, Linux `.deb` `106622150696`, Windows `.exe` `106622150659`, macOS arm64 `.dmg` `106622150664`, and macOS x86_64 `.dmg` `106622150708` all succeeded.
+- Agent 10 final verdict: `GOAL REACHED`. The next commit is ledger/documentation closure only; protected promotion to integration and `main` remains subject to the repository required-status rules.
 
 ## Final acceptance and re-audit
 

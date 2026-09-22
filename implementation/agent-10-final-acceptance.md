@@ -2,7 +2,7 @@
 
 ## Status
 
-STATUS: IN PROGRESS
+STATUS: GOAL REACHED
 
 BRANCH: `finalize/audit-remediation-v1`
 
@@ -10,7 +10,7 @@ BASE INTEGRATION SHA: `51a79f2e60d8274f9c96a9c0a23d7409fc0adc19`
 
 MAIN-HISTORY RECONCILIATION MERGE: `9fba9883b6aa548e60fd7145a2d630d230e4346f`
 
-FINAL CANDIDATE SHA: pending this finalization commit
+FINAL VALIDATED PRODUCT/RELEASE SHA: `924d1cf017bd452301825cb01dda61db48cbde0a`
 
 ACCEPTANCE REFRESH DATE: 2026-09-22
 
@@ -73,6 +73,22 @@ The first pushed finalization candidate was not accepted. Required Validation ru
 
 These changes require a new exact candidate and full protected validation; `f7b92b3` is not a release candidate.
 
+### Final exact candidate — `924d1cf017bd452301825cb01dda61db48cbde0a`
+
+The follow-up candidate closed both macOS acceptance failures and passed the complete release-blocking graph.
+
+- Required Validation run `35687932043`: **SUCCESS**. Terminal `Required validation gate` job `106619948499` succeeded with no failed or unfinished required job.
+- Main Desktop Installers run `35687932560`: **SUCCESS**.
+- Nested soak-enabled `Required validation gate` job `106622088095`: **SUCCESS**.
+- 2 GiB interrupted QUIC soak job `106618785920`: **SUCCESS**, including evidence upload.
+- Linux `.deb` job `106622150696`: **SUCCESS**.
+- Windows `.exe` job `106622150659`: **SUCCESS**.
+- macOS arm64 `.dmg` job `106622150664`: **SUCCESS**.
+- macOS x86_64 `.dmg` job `106622150708`: **SUCCESS**.
+- PR #75 was `MERGEABLE` with a clean required-status result on this exact product/release SHA.
+
+This is the accepted product/release candidate. The ledger closure commit that records this evidence changes documentation only; it does not change Rust code, tests, workflow logic, dependency graphs, package configuration or release artifacts after `924d1cf`.
+
 ## Whole-product acceptance coverage
 
 The permanent exact-head workflow graph covers the required journey and adversarial seams rather than relying on isolated unit tests:
@@ -122,26 +138,18 @@ Agent 8 closed the governance gap before integration:
 - release publication consumes exact-SHA required validation rather than rebuilding an unrelated mutable ref;
 - the soak-enabled Main Desktop Installers workflow is the release-path proof for large interrupted transfer plus platform packages.
 
-## Final gate still required
+## Final gate result
 
-Before changing this ledger to `GOAL REACHED`, the literal finalization head must have:
+`924d1cf017bd452301825cb01dda61db48cbde0a` satisfies the whole-product acceptance gate: aggregate Required Validation and the soak-enabled Main Desktop Installers release path are both terminal SUCCESS on the same exact SHA, with no failed required or release-path job.
 
-- aggregate `Required validation gate` — SUCCESS;
-- soak-enabled `Main Desktop Installers` — SUCCESS;
-- no failed required job on that exact SHA;
-- clean source tree and exact remote head identity.
+The remaining repository operation is protected promotion, not unfinished product acceptance: revalidate this documentation-only ledger closure under the required status rule, merge PR #75 into `integration/audit-remediation-v1`, then pass the protected integration-to-`main` required check before merging to `main` and verify post-merge `main` CI.
 
-After that exact head is merged into `integration/audit-remediation-v1`, the protected integration-to-`main` PR must itself pass the required validation policy before merge. Post-merge `main` CI must then be checked for a clean terminal result.
+## Remaining repository promotion work
 
-## Remaining work
-
-1. Commit and push this finalization tree.
-2. Run exact-head Required Validation and Main Desktop Installers.
-3. If both are green, record their exact run IDs and change this ledger to `GOAL REACHED` in the final documentation-only closure commit.
-4. Revalidate that closure commit under the required gate.
-5. Merge the finalization PR into `integration/audit-remediation-v1`.
-6. Open the protected integration-to-`main` PR, pass its required checks, merge, and verify post-merge `main` CI.
+1. Revalidate this documentation-only closure commit under `Required validation gate`.
+2. Merge PR #75 into `integration/audit-remediation-v1`.
+3. Open the protected integration-to-`main` PR, pass its required check, merge, and verify post-merge `main` CI.
 
 ## Agent final statement
 
-GOAL NOT REACHED
+GOAL REACHED
