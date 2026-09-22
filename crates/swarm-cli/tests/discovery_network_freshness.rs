@@ -368,7 +368,7 @@ async fn malicious_and_stale_providers_cannot_win_browse_or_exact_resolve() {
                 context: Some(current_proof.clone()),
                 vote_state: Some((current_announcement.clone(), current_proof.clone())),
                 malformed_context: false,
-                delay_ms: 2_000,
+                delay_ms: 0,
             },
             order.clone(),
             lifecycle.clone(),
