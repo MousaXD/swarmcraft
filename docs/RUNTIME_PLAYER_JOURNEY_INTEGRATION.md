@@ -1,6 +1,6 @@
 # Runtime Player Journey Integration
 
-This document records the integrated 0.4.0 player-journey contract that is being prepared for `main`.
+This document records the integrated 0.5.0 player-journey contract being prepared for `main`.
 
 ## Normal player path
 
@@ -11,6 +11,8 @@ Runtime verification and required server-mod verification are separate fail-clos
 ## Shared launch, migration and stop
 
 Managed launch, automatic authority recovery, manual transfer and supported wake paths share Rust runtime/migration orchestration rather than maintaining independent JavaScript launch logic.
+
+Multi-member wake is a supported path when a surviving canonical quorum exists. Wake intent is bound to the signed durable sleep generation and exact sleeping snapshot, then uses the durable recovery ballot/certificate path to establish one new fenced authority generation. If quorum is unavailable, wake remains fail-closed.
 
 **Stop World** reports success only after the Fabric save/shutdown barrier, Minecraft process exit, final signed canonical snapshot, durable signed sleep record and sleeping migration state.
 
@@ -46,7 +48,6 @@ Normal CI covers Rust fmt/clippy/tests, storage/network/process acceptance, impo
 ## Intentional YELLOW gates
 
 - Two-voter crash failover remains `BlockedByQuorum`.
-- Multi-member wake remains fail-closed until a sleep-bound quorum wake protocol exists.
 - Seamless client reconnection and representative real-world NAT certification remain future validation/product work.
 
 None of these limitations justify weakening quorum, fencing, signed history or runtime verification.

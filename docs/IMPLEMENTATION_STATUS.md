@@ -1,8 +1,8 @@
-# SwarmCraft 0.4.0 Implementation Status
+# SwarmCraft 0.5.0 Implementation Status
 
 This document is the current source of truth for what the repository **actually implements** versus what remains roadmap or product-vision work.
 
-Application version and wire protocol version are separate concepts. SwarmCraft 0.4.0 still uses protocol version 1 unless a protocol-breaking change explicitly requires otherwise.
+Application version and wire protocol version are separate concepts. SwarmCraft 0.5.0 still uses protocol version 1 unless a protocol-breaking change explicitly requires otherwise.
 
 ## Executive summary
 
@@ -29,7 +29,7 @@ The repository implements the difficult control-plane and runtime foundations:
 
 Safe authority recovery is now connected to automatic successor Minecraft runtime orchestration. The largest visible migration gap is **seamless client redirection/reconnection after the successor is running**, not successor runtime startup itself.
 
-Two safety limitations are intentional: a two-voter world cannot automatically recover after one voter disappears because the survivor lacks majority quorum, and sleeping multi-member worlds remain fail-closed until a dedicated sleep-bound quorum wake protocol exists.
+One important safety limitation is intentional: a two-voter world cannot automatically recover after one voter disappears because the survivor lacks majority quorum. Multi-member wake is supported only when a surviving canonical quorum can prove the exact durable sleep boundary; it never falls back to first-click or one-of-two authority.
 
 ---
 
@@ -97,6 +97,7 @@ Two safety limitations are intentional: a two-voter world cannot automatically r
 - Stale returning peers cannot continue writing with an old authority generation.
 - Three-daemon hard-kill recovery is a permanent process-level acceptance gate.
 - Two-member crash recovery intentionally returns `BlockedByQuorum` when one of two voters disappears; no one-of-two recovery shortcut exists.
+- Sleeping multi-member worlds can wake through a quorum-backed recovery generation bound to the signed sleep record and exact sleeping snapshot; stale sleep generations and wrong snapshots fail closed.
 
 ### Solo history
 
@@ -261,9 +262,9 @@ Still incomplete:
 
 ### World sleep/wake
 
-Durable signed sleep records and safe single-member wake semantics exist.
+Durable signed sleep records support both safe single-member wake and quorum-backed multi-member wake.
 
-For more than one non-banned member, wake intentionally remains blocked because a dedicated quorum-backed transition bound to the sleep record/canonical snapshot does not yet exist. SwarmCraft does not substitute first-click-wins or ordinary crash recovery for that missing protocol.
+For a multi-member world, wake intent is bound to the signed sleep generation and exact sleeping snapshot. A candidate must remain authority-eligible and collect the normal canonical majority through the durable recovery ballot/certificate machinery before a new fenced generation is promoted. The process-level three-daemon recovery acceptance test proves that the selected woken authority obtains the only live permit, restores the exact sleeping lineage, launches the configured runtime path, and clears durable sleep state. If a surviving quorum is unavailable, wake remains fail-closed.
 
 ### Snapshot swarm breadth
 
@@ -289,9 +290,7 @@ Technical-preview friction remains around:
 
 - explicit EULA acceptance, which is intentionally required;
 - locally supplying arbitrary third-party server-mod JARs when a world requires them;
-- the not-yet-wired manual authority-transfer Desktop flow;
 - seamless client reconnection after migration;
-- safe multi-member wake;
 - public/friend discovery and broader first-run polish.
 
 ---
@@ -299,7 +298,6 @@ Technical-preview friction remains around:
 ## Not implemented yet
 
 - Seamless automatic Minecraft client reconnection/redirection after authority migration.
-- Safe sleep-bound quorum wake election for multi-member worlds.
 - Central or federated public-world search/lobby services.
 - Friends/social discovery.
 - Automatic third-party mod redistribution.
@@ -326,11 +324,11 @@ The roadmap is intentionally aspirational and phases have not landed in a perfec
 | 3 — Minecraft save integration | Complete for preview | Fabric IPC, restore, save/shutdown barrier and final snapshot flow are implemented and tested. |
 | 4 — Manual host migration | Mostly complete | Signed transfer stages and the Desktop transfer wizard (role detection, peer filtering, readiness-guided targets) exist; real-device acceptance and player reconnection polish remain. |
 | 5 — Automatic host migration | Runtime path complete for preview, client UX partial | Recovery/election/fencing plus successor runtime startup are real; seamless player reconnect remains. |
-| 6 — World sleep/wake | Safe solo path + fail-closed multi-member | Durable sleep semantics exist; multi-member quorum wake protocol remains intentionally unavailable. |
+| 6 — World sleep/wake | Complete for preview | Durable signed sleep plus sleep-record-bound quorum wake are implemented; unavailable quorum remains fail-closed. |
 | 7 — Solo mode | Complete for preview | Explicit solo history, reconciliation and divergence preservation are implemented/tested. |
 | 8 — Better replication | Partial | Background replicas, resume and source fallback exist; incremental/journal/erasure-code work remains. |
 | 9 — NAT/public usability | Partial | Protocol support and diagnostics exist; representative field certification does not. |
-| 10 — UX | Advanced preview | Managed runtime, import, readiness and migration status UI exist; reconnect, lobby and multi-member wake polish remain. |
+| 10 — UX | Advanced preview | Managed runtime, import, readiness, transfer and wake status UI exist; reconnect, lobby and broader first-run polish remain. |
 | 11 — Production hardening | Partial/strong preview | CI, fuzz smoke, failure injection and process recovery are strong; longer campaigns, signing and field validation remain. |
 | 12 — Distributed simulation | Not implemented | Deliberately future research. |
 
@@ -349,7 +347,7 @@ The crash-recovery demo must use a topology that can genuinely retain majority q
 7. stale Alice later returns and synchronizes without being able to overwrite canonical history;
 8. the world can later sleep and a supported peer can restore it without the original creator.
 
-The repository now proves the storage/replication, recovery/fencing and successor-runtime portions of that sequence and separately proves the real clean-machine Minecraft setup/launch/stop/restart path. Seamless client reconnection in step 6 and safe multi-member wake remain the major product/protocol gaps.
+The repository now proves the storage/replication, recovery/fencing, successor-runtime and sleep-record-bound quorum-wake portions of that sequence and separately proves the real clean-machine Minecraft setup/launch/stop/restart path. Seamless client reconnection in step 6 remains the major player-continuity gap.
 
 An Alice/Bob-only crash test is **not** a valid positive automatic-failover target: after Alice disappears, Bob alone is one of two voters and must remain `BlockedByQuorum`.
 
@@ -369,6 +367,7 @@ Safe claims:
 - managed Java/Minecraft/Fabric setup with explicit EULA acceptance is implemented;
 - deterministic server-mod readiness and existing-world import are implemented;
 - safe stop/sleep and corrupt-sleep fail-closed behavior are implemented;
+- sleep-record-bound quorum wake for multi-member worlds is implemented for supported surviving-quorum topologies;
 - solo-history conflict preservation is implemented;
 - Fabric save/lifecycle integration is implemented;
 - a Tauri desktop technical preview and cross-platform installers exist.

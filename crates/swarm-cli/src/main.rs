@@ -123,7 +123,7 @@ enum WorldCommand {
     },
     /// Request a safe stop. Success is reported only after the Fabric save barrier, final checkpoint and durable sleep record complete.
     Stop { world: String },
-    /// Request a safe wake of a sleeping world. Multi-member worlds remain blocked until a quorum transition exists.
+    /// Request a safe wake of a sleeping world. Multi-member wake requires a sleep-bound surviving quorum transition.
     Wake { world: String },
     /// Request a final checkpoint and prepare a manual authority transfer.
     TransferPrepare { world: String, to: String },
