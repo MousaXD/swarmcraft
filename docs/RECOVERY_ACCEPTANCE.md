@@ -145,14 +145,17 @@ Clean sleep is intentionally different from crash recovery.
 2. Commit the final verified signed snapshot.
 3. Persist the signed sleep record.
 4. Take every peer offline.
-5. Bring back one eligible peer holding the exact sleeping snapshot.
-6. Wake logic must reject a stale replica whose latest snapshot does not match the sleeping state.
-7. A valid wake advances epoch/fencing monotonically and clears durable sleep state as appropriate.
+5. For a single-member world, bring back the eligible member holding the exact sleeping snapshot and use the direct safe wake path.
+6. For a multi-member world, bring back a surviving canonical majority holding the exact sleeping snapshot and request wake on an eligible candidate.
+7. Wake logic must reject a stale replica, stale sleep generation or wrong snapshot.
+8. Multi-member wake must collect a valid durable recovery certificate bound to the signed sleep boundary before advancing authority.
+9. A valid wake advances epoch/fencing monotonically, produces only one live authority permit, restores/starts the configured runtime path and clears durable sleep state as appropriate.
 
 Expected result:
 
-- no crash-recovery ballot is required merely because everyone was intentionally offline;
-- wake starts from the exact durable sleeping checkpoint.
+- wake starts from the exact durable sleeping checkpoint;
+- single-member wake does not invent unnecessary quorum;
+- multi-member wake cannot become first-click-wins and remains blocked when surviving quorum is unavailable.
 
 ---
 
@@ -192,7 +195,7 @@ Expected result:
 
 ## Product-level host migration scenario
 
-This is the **remaining MVP integration target**, not yet a fully automated permanent acceptance gate.
+The control-plane and successor-runtime parts of this scenario are permanent process-level acceptance gates. Seamless client continuity remains product work.
 
 The desired end-to-end scenario is:
 
@@ -205,7 +208,7 @@ The desired end-to-end scenario is:
 7. Gameplay continues from the accepted safe checkpoint.
 8. Alice later returns as a stale peer and synchronizes without regaining old authority.
 
-Until steps 5 and 6 are automatic and repeatedly tested, documentation must say **automatic authority recovery is implemented** rather than **seamless Minecraft host migration is complete**.
+Steps 4 and 5 are implemented and process-tested. Step 6, seamless player redirection/reconnection, is not yet complete, so documentation must say **automatic authority recovery and successor runtime startup are implemented** rather than **seamless Minecraft host migration is complete**.
 
 ---
 

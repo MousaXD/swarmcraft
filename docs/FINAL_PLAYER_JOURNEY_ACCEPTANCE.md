@@ -31,7 +31,7 @@ No gate is promoted by weakening authority fencing, quorum, runtime verification
 | Existing-world import normal Desktop flow | GREEN once exact-head CI passes | Desktop now exposes `Import existing world` alongside Create/Join, validates exact compatibility metadata and explicit server-mod requirements, shows busy/errors honestly, forwards only the Rust/Tauri import contract, refreshes Worlds, and selects the returned `world_id` after success. |
 | Corrupt/unreadable sleep state | GREEN once exact-head CI passes | Every authority-start classification uses the shared fail-closed sleep loader. Only true `NotFound` means awake; present records are signature-verified; corrupt/unreadable records block direct launch, standby and migration/runtime startup. |
 | Alice/Bob two-voter crash failover | YELLOW | A two-voter world needs quorum 2. Bob alone after Alice disappears cannot safely elect himself. `BlockedByQuorum` is intentional. |
-| Multi-member wake | YELLOW | No sleep-bound quorum wake election protocol exists yet. Multi-member wake remains explicitly fail-closed. |
+| Multi-member wake | GREEN once exact-head CI passes | Agent 9 added sleep-record-bound quorum wake. A supported surviving majority certifies one new fenced recovery generation from the exact signed sleep snapshot; unavailable quorum, stale generations and wrong snapshots remain fail-closed. |
 
 ## Clean-machine E2E
 
@@ -180,23 +180,13 @@ The frontend never adds EULA acceptance or Java/runtime fields to the import pay
 
 ## Multi-member wake safety analysis
 
-### Current fail-closed behavior
+A sleeping world has a signed sleep record bound to the final canonical snapshot, epoch, fencing token and authority. `request_world_wake` validates that sleep record, exact latest snapshot and local eligibility before recording wake intent.
 
-A sleeping world has a signed sleep record bound to the final canonical snapshot, epoch, fencing token and authority. `request_world_wake` validates that sleep record and local eligibility before recording wake intent.
+For more than one non-banned member, direct launch still fails closed. The daemon instead binds recovery to the signed sleep generation and requires the normal canonical surviving majority to produce a durable recovery certificate for one next fenced authority generation. Candidate readiness includes current runtime/mod/conflict state, so wake cannot elect a host that would immediately violate Host Readiness.
 
-For more than one non-banned member, supervision refuses to launch and publishes a blocked state explaining that a quorum-backed authority transition is required. Sleeping worlds are intentionally excluded from ordinary daemon lease/recovery processing.
+The permanent three-daemon recovery test proves the positive path: after all hosts stop with the same signed sleep boundary, a surviving quorum establishes epoch/fencing `3/3`, only the selected candidate obtains a live authority permit, the migration runtime reports `WorldWake` ready, durable sleep records are cleared, and the next canonical snapshot directly descends from the sleeping snapshot hash.
 
-Direct host, managed launch, standby and shared authority preparation now all treat sleep state through fail-closed classification. A valid sleeping single-member world may use existing solo wake semantics; a valid sleeping multi-member world remains blocked; a corrupt/unreadable sleep record is never interpreted as awake.
-
-That prevents first-click-wins wake and does not reuse crash recovery as an unsafe substitute.
-
-### Missing protocol needed for GREEN
-
-Safe multi-member wake needs a consensus transition explicitly bound to the durable sleep record/snapshot. It must define quorum/ballot rules, deterministic simultaneous-wake resolution, selected host capability/readiness, a new fenced authority generation, stale pre-sleep authority rejection, failure/retry semantics, unavailable-quorum behavior, and canonical-lineage proof.
-
-Ordinary crash recovery cannot simply be reused unchanged because sleeping worlds do not participate in its lease-loss path, and sleep is not itself an authority-loss election.
-
-Therefore multi-member wake remains **YELLOW and fail-closed**. Solo/single-member wake continues to use the existing safe solo semantics.
+The fail-closed cases remain part of the contract: corrupt sleep state, stale sleep generation, wrong snapshot, ineligible candidate or unavailable surviving quorum cannot become first-click-wins wake. Single-member worlds continue to use the simpler safe direct wake semantics.
 
 ## Package/platform matrix
 
@@ -226,10 +216,9 @@ The new final exact-head CI and live run IDs are recorded in PR #37 and the fina
 ## Remaining intentional YELLOW gates
 
 1. **Alice/Bob two-voter crash failover:** Bob alone cannot form majority quorum after Alice disappears. Keep `BlockedByQuorum`; do not add a one-of-two recovery shortcut.
-2. **Multi-member wake:** no sleep-bound quorum wake election exists yet. Keep the world fail-closed; do not restore solo-wake behavior for multi-member worlds.
 
-These are protocol limitations, not permission to weaken fencing or quorum. Positive automatic crash recovery remains covered by the three-member topology, and explicit authority transfer while the source authority is still present remains a separate supported operation.
+This is a quorum limitation, not permission to weaken fencing or majority intersection. Positive automatic crash recovery and sleep-record-bound multi-member wake remain covered by the three-member topology, and explicit authority transfer while the source authority is still present remains a separate supported operation.
 
 ## Merge-readiness rule
 
-PR #37 is merge-ready into `integration/runtime-player-journey` only when the literal final branch head has both exact-head CI and exact-head Player journey live acceptance green. The two intentional YELLOW gates above remain documented and must not be relabeled GREEN.
+The final remediation candidate is merge-ready only when the literal branch head has the aggregate `Required validation gate` green and the soak-enabled release path succeeds. The two-voter crash limitation above remains intentional and must not be relabeled as automatic failover.

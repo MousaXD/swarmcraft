@@ -134,12 +134,12 @@ Do not hide progress only in commit messages.
 | 2 | Protocol authorization/history | INTEGRATED | `fix/agent-2-protocol` | `dde75ca4e9f2268bb97f42a716864c3e51f266cb` | Yes | Exact-head run `33693100794` SUCCESS; merge `6e70a0774d7e021cc57681705ccef4620265ce3d` |
 | 3 | Storage transactional integrity | INTEGRATED | `fix/agent-3-storage` | `67962dcb9c3cb2d5b9e67bb7288b2d786fc9e803` | Yes | Exact-head run `33769288028` SUCCESS; source ledger head `8ae4839f8f4039257d41a84fb82f0460f11ab903`; merge `602f6f1cfed46e457a1fccbf8d6d2df79e3f1ab5` |
 | 4 | Network authentication/privacy | INTEGRATED | `fix/agent-4-network` | `77300031751d0e3df0fc5a7c9aac1c2b2625989f` | Yes | Exact-head run `33931301852` SUCCESS on Linux/Windows/macOS; source ledger head `839b737c19e88923d5779ce20afb4cb400dd5b9b`; merge `aac089a72c68f72000a8610d2288721317cf0ae4` |
-| 5 | Package/provider security | NOT STARTED | `fix/agent-5-supply-chain` | - | No | Wave 1 |
-| 6 | Minecraft/runtime lifecycle | NOT STARTED | `fix/agent-6-runtime` | - | No | Wave 1 |
-| 7 | Desktop player journey | NOT STARTED | `fix/agent-7-desktop` | - | No | Wave 1 |
-| 8 | CI/release governance | NOT STARTED | `fix/agent-8-ci-release` | - | No | Wave 1 |
-| 9 | Recovery/wake completion | BLOCKED ON AGENTS 1 + 6 | `fix/agent-9-recovery-wake` | - | No | Wave 2 |
-| 10 | Final acceptance | BLOCKED | `integration/audit-remediation-v1` | - | No | After 1-9 integration |
+| 5 | Package/provider security | INTEGRATED | `fix/agent-5-supply-chain` | `51cd18cb5c937838ae7b4bcc2cb67f6027b1d6d6` | Yes | Validation run `34070673328` SUCCESS; PR #70 source closure `71aad5aab69c48e0eda6407068437a82d57ee907`; merge `264b74b0e62d2d5201deb91b2069372c90c754ac` |
+| 6 | Minecraft/runtime lifecycle | INTEGRATED | `fix/agent-6-runtime` | `e323d7c51225d93e7862a1d2cfc98f652c2849d2` | Yes | Runtime acceptance `34160001924` SUCCESS; Desktop exact-head run `34160418107` SUCCESS; PR #71 merge `ca6556fc89c29147930f7f17832e1f89c30cae77`; assertion follow-up PR #72 merge `5911dce8eb13d71ad52d670129c4ddb955137e20` |
+| 7 | Desktop player journey | INTEGRATED | `fix/agent-7-desktop` | `8b7e44233ec16300483d8452b23136f3d14fb3ff` | Yes | Exact-head run `33615055388` SUCCESS; PR #60 source closure `5a9018d017bebf1607e5e37cbda412182e4b897c`; merge `7babf3b941f84cbdba1a0ffd3ac0a20628358051` |
+| 8 | CI/release governance | INTEGRATED | `fix/agent-8-ci-release` | `056ad969f103077bf211d3a841a24592c8ac39f9` | Yes | Final closure head `5a1f1b64f736730cf9a3d8cb9817fe867e39c089`; Required Validation `35389503306` SUCCESS; Main Desktop Installers `35389503449` SUCCESS; merge `51a79f2e60d8274f9c96a9c0a23d7409fc0adc19` |
+| 9 | Recovery/wake completion | INTEGRATED | `fix/agent-9-recovery-wake` | `4ba278223a752fa2eb3de60cb714d6fd5687d886` | Yes | Full CI `34168755678` SUCCESS; release guard `34168755680` SUCCESS; PR #73 source closure `e556e9e6924e9912551e309ea6e17f5c12069b06`; merge `efde7ecb996ead8d414378e7876354b731e4a963` |
+| 10 | Final acceptance | GOAL REACHED | `finalize/audit-remediation-v1` | `924d1cf017bd452301825cb01dda61db48cbde0a` | No | Required Validation `35687932043` SUCCESS; Main Desktop Installers `35687932560` SUCCESS including 2 GiB soak and Linux/Windows/macOS packages; PR #75 promotion pending documentation-only closure revalidation. |
 
 ## Agent allocation
 
@@ -297,6 +297,61 @@ After every integration, update this README with:
 - Merge-tree proof: source ledger head `839b737c...` and merge commit `aac089a7...` both have tree `ca37f6034b3e0cc01515fd60471df06c9cffca66`, so GitHub introduced no tree mutation during integration. Merge parents are exactly prior integration head `c9252820...` and Agent 4 source head `839b737c...`.
 - Conflicts resolved: none in PR #69. Agent 4 resolved its historical composition conflict in `crates/swarm-cli/src/daemon.rs` before exact-head validation.
 - Integration implications: FINAL-028 is closed on the integrated tree. Discovery locators remain untrusted, while first-contact authority/head freshness is verifier-interactive and bound to current/joint quorum, durable recovery fencing, WorldConfig, and Agent 3 canonical head state.
+
+#### Agent 5 — Package/provider security
+
+- Validated implementation SHA: `51cd18cb5c937838ae7b4bcc2cb67f6027b1d6d6`.
+- Final source closure: `71aad5aab69c48e0eda6407068437a82d57ee907`.
+- Integration PR: `#70`.
+- Integration commit/resulting head: `264b74b0e62d2d5201deb91b2069372c90c754ac`.
+- Validation: run `34070673328` — SUCCESS, covering server-owned provider staging, traversal rejection, credential/origin policy, exact provider identity/hash handling, bounded metadata and redirect/host restrictions.
+- Conflicts resolved: none at integration; Agent 5 consumed the already-integrated authority/storage/network contracts rather than redefining them.
+
+#### Agent 6 — Minecraft/runtime lifecycle
+
+- Validated implementation SHA: `e323d7c51225d93e7862a1d2cfc98f652c2849d2`.
+- Integration PR: `#71`; merge `ca6556fc89c29147930f7f17832e1f89c30cae77`.
+- Assertion follow-up PR: `#72`; source `359a28f323fb0110875434ad28f2542ec0428792`; merge `5911dce8eb13d71ad52d670129c4ddb955137e20`.
+- Validation: real Java/Minecraft/Fabric lifecycle, live import-lock and orphan-runtime run `34160001924` — SUCCESS. Exact-head Desktop format/locked check/diagnostics/strict-Clippy run `34160418107` — SUCCESS on the reconciled Agent 6 validation head.
+- Integration result: import quiescence, authoritative runtime adapter support, controller/supervisor liveness fencing, orphan-Java protection and retained diagnostics are present on the composed tree.
+
+#### Agent 7 — Desktop player journey
+
+- Validated implementation SHA: `8b7e44233ec16300483d8452b23136f3d14fb3ff`.
+- Final source closure: `5a9018d017bebf1607e5e37cbda412182e4b897c`.
+- Integration PR: `#60`.
+- Integration commit/resulting head: `7babf3b941f84cbdba1a0ffd3ac0a20628358051`.
+- Validation: exact-head CI run `33615055388` — SUCCESS, including Desktop initialization, provider/import/create/join/runtime/migration contracts, render/keyboard coverage and supported-platform packaging.
+- Integration result: the normal player-facing Create/Import/Join/Play/Transfer/Stop/Leave journey is wired to the Rust/Tauri contracts rather than duplicating authority/runtime semantics in JavaScript.
+
+#### Agent 9 — Recovery/wake completion
+
+- Validated implementation SHA: `4ba278223a752fa2eb3de60cb714d6fd5687d886`.
+- Final source closure: `e556e9e6924e9912551e309ea6e17f5c12069b06`.
+- Integration PR: `#73`.
+- Integration commit/resulting head: `efde7ecb996ead8d414378e7876354b731e4a963`.
+- Validation: full CI run `34168755678` — SUCCESS; release guard `34168755680` — SUCCESS.
+- Process acceptance: three-daemon authority failure recovers through a surviving quorum to one host-ready successor, fences stale authority, then proves sleep-record-bound quorum wake through a new fenced generation with exact snapshot continuity. Two-voter crash recovery intentionally remains `BlockedByQuorum`.
+
+#### Agent 8 — CI/release governance
+
+- Final validated implementation SHA: `056ad969f103077bf211d3a841a24592c8ac39f9`.
+- Final source closure: `5a1f1b64f736730cf9a3d8cb9817fe867e39c089`.
+- Integration PR: `#61`.
+- Integration commit/resulting integration head: `51a79f2e60d8274f9c96a9c0a23d7409fc0adc19`.
+- Validation: Required Validation `35389503306` — SUCCESS; soak-enabled Main Desktop Installers `35389503449` — SUCCESS, including the 2 GiB interrupted QUIC soak and Linux/Windows/macOS release packages.
+- Repository governance: active ruleset `23573424` strictly requires `Required validation gate` on `main` and `integration/audit-remediation-v1`; active ruleset `23678402` requires the PR/safety path on `main`; neither has a bypass actor.
+
+#### Final integration reconciliation
+
+- All Agent 1–9 implementation heads are now ancestors of `integration/audit-remediation-v1`.
+- Frozen composed integration candidate after Agent 8: `51a79f2e60d8274f9c96a9c0a23d7409fc0adc19`.
+- Latest `main` history (`783611c` add accidental test file, `fa38b3e` remove it) has zero net tree delta and was reconciled into the finalization branch at merge `9fba988` so the final protected PR remains up to date without discarding legitimate history.
+- Frozen-candidate Required Validation exposed a nondeterministic FINAL-028 network-regression harness/explicit-locator warmup weakness. The finalization branch now re-drives unauthenticated explicit discovery locators within the existing bounded warmup and removes scheduler-order assertions that duplicated deterministic cryptographic freshness tests. Strict Clippy is green and the complete `discovery_network_freshness` suite passed five consecutive local rounds before final exact-head CI.
+- Final accepted product/release SHA: `924d1cf017bd452301825cb01dda61db48cbde0a`.
+- Required Validation `35687932043` — SUCCESS; terminal `Required validation gate` job `106619948499` — SUCCESS.
+- Main Desktop Installers `35687932560` — SUCCESS; nested required gate `106622088095`, 2 GiB soak `106618785920`, Linux `.deb` `106622150696`, Windows `.exe` `106622150659`, macOS arm64 `.dmg` `106622150664`, and macOS x86_64 `.dmg` `106622150708` all succeeded.
+- Agent 10 final verdict: `GOAL REACHED`. The next commit is ledger/documentation closure only; protected promotion to integration and `main` remains subject to the repository required-status rules.
 
 ## Final acceptance and re-audit
 
