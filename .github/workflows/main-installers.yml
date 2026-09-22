@@ -106,9 +106,21 @@ jobs:
           Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"
           Copy-Item target/release/swarmcraft-runtime.exe "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target.exe"
           Copy-Item target/release/swarmcraft-import.exe "apps/desktop/src-tauri/binaries/swarmcraft-import-$target.exe"
-      - name: Build Windows installer
+      - name: Build Windows installer with bounded tool-download retry
         working-directory: apps/desktop
-        run: cargo tauri build --bundles nsis --ci
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if cargo tauri build --bundles nsis --ci; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Windows installer build failed after $attempt attempts."
+              exit 1
+            fi
+            echo "Windows installer attempt $attempt failed; retrying transient NSIS/tool download."
+            sleep $((attempt * 5))
+          done
       - name: Stage Windows artifact
         shell: pwsh
         run: |

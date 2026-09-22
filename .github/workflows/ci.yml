@@ -245,10 +245,26 @@ jobs:
           Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"
           Copy-Item target/release/swarmcraft-runtime.exe "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target.exe"
           Copy-Item target/release/swarmcraft-import.exe "apps/desktop/src-tauri/binaries/swarmcraft-import-$target.exe"
-      - name: Build native desktop package
-        if: runner.os != 'macOS'
+      - name: Build native Linux package
+        if: runner.os == 'Linux'
         working-directory: apps/desktop
         run: cargo tauri build --bundles ${{ matrix.bundle }} --ci
+      - name: Build native Windows package with bounded tool-download retry
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if cargo tauri build --bundles "${{ matrix.bundle }}" --ci; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Windows package build failed after $attempt attempts."
+              exit 1
+            fi
+            echo "Windows package attempt $attempt failed; retrying transient bundler/tool download."
+            sleep $((attempt * 5))
+          done
       - name: Build native macOS app bundle
         if: runner.os == 'macOS'
         working-directory: apps/desktop
