@@ -161,19 +161,26 @@ jobs:
           cp target/release/swarmcraft-host "apps/desktop/src-tauri/binaries/swarmcraft-host-$target"
           cp target/release/swarmcraft-runtime "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target"
           cp target/release/swarmcraft-import "apps/desktop/src-tauri/binaries/swarmcraft-import-$target"
-      - name: Build unsigned preview macOS installer
+      - name: Build unsigned preview macOS app bundle
         working-directory: apps/desktop
         shell: bash
         run: |
           set -euo pipefail
           config='{"bundle":{"macOS":{"signingIdentity":"-"}}}'
-          if cargo tauri build --bundles dmg --ci --config "$config"; then
-            exit 0
-          fi
-          echo "First macOS DMG attempt failed; clearing transient bundle state and retrying once."
-          rm -rf src-tauri/target/release/bundle/dmg
-          sleep 5
-          cargo tauri build --bundles dmg --ci --config "$config"
+          cargo tauri build --bundles app --ci --config "$config"
+      - name: Create and verify macOS disk image
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="apps/desktop/src-tauri/target/release/bundle/macos/SwarmCraft.app"
+          out_dir="apps/desktop/src-tauri/target/release/bundle/dmg"
+          dmg="$out_dir/SwarmCraft_0.5.0_${{ matrix.arch }}.dmg"
+          test -d "$app"
+          rm -rf "$out_dir"
+          mkdir -p "$out_dir"
+          hdiutil create -volname SwarmCraft -srcfolder "$app" -ov -format UDZO "$dmg"
+          hdiutil verify "$dmg"
+          test -s "$dmg"
       - name: Stage macOS artifact
         shell: bash
         run: |

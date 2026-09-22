@@ -249,19 +249,28 @@ jobs:
         if: runner.os != 'macOS'
         working-directory: apps/desktop
         run: cargo tauri build --bundles ${{ matrix.bundle }} --ci
-      - name: Build native macOS package with one transient DMG retry
+      - name: Build native macOS app bundle
         if: runner.os == 'macOS'
         working-directory: apps/desktop
         shell: bash
         run: |
           set -euo pipefail
-          if cargo tauri build --bundles "${{ matrix.bundle }}" --ci; then
-            exit 0
-          fi
-          echo "First macOS bundle attempt failed; clearing transient DMG state and retrying once."
-          rm -rf src-tauri/target/release/bundle/dmg
-          sleep 5
-          cargo tauri build --bundles "${{ matrix.bundle }}" --ci
+          cargo tauri build --bundles app --ci
+      - name: Create deterministic macOS DMG
+        if: runner.os == 'macOS'
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="src-tauri/target/release/bundle/macos/SwarmCraft.app"
+          out_dir="src-tauri/target/release/bundle/dmg"
+          dmg="$out_dir/SwarmCraft_0.5.0_${{ matrix.label }}.dmg"
+          test -d "$app"
+          rm -rf "$out_dir"
+          mkdir -p "$out_dir"
+          hdiutil create -volname SwarmCraft -srcfolder "$app" -ov -format UDZO "$dmg"
+          hdiutil verify "$dmg"
+          test -s "$dmg"
       - name: Upload native packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
