@@ -1,5 +1,5 @@
 use crate::{
-    transaction::{durable_atomic_write, durable_remove, read_canonical_file},
+    transaction::{canonical_file_exists, durable_atomic_write, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
 use std::path::PathBuf;
@@ -34,7 +34,7 @@ impl Storage {
         let _guard = self.lock_world_transaction(record.world_id)?;
         record.validate_semantics()?;
         let membership_path = self.world_protocol_path(record.world_id, "membership.postcard");
-        if membership_path.exists() {
+        if canonical_file_exists(&membership_path)? {
             let current = self.load_membership_record(record.world_id)?;
             if record == &current {
                 return Ok(());
@@ -93,7 +93,9 @@ impl Storage {
     fn certified_membership_bootstrap(&self, record: &MembershipRecordV1) -> Result<bool, StorageError> {
         let certificate_path = self.world_protocol_path(record.world_id, "membership-certificate.postcard");
         let pending_join_path = self.world_protocol_path(record.world_id, "pending-join.postcard");
-        if !certificate_path.exists() || !pending_join_path.exists() {
+        let certificate_present = canonical_file_exists(&certificate_path)?;
+        let pending_join_present = canonical_file_exists(&pending_join_path)?;
+        if !certificate_present || !pending_join_present {
             return Ok(false);
         }
 
@@ -292,6 +294,25 @@ mod tests {
         assert!(store.save_membership_record(&next).is_err());
         assert_eq!(fs::read(&epoch_path).unwrap(), corrupted);
         assert_eq!(store.load_membership_record(world).unwrap(), initial);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_membership_record_cannot_be_reinitialized() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = create_test_world(&store);
+        let path = store.world_dir(world).join("metadata/membership.postcard");
+        let missing = path.with_extension("missing");
+        symlink(&missing, &path).unwrap();
+
+        assert!(matches!(
+            store.save_membership_record(&membership(world, 1, 0, 0, None)),
+            Err(StorageError::SymlinkUnsupported(actual)) if actual == path
+        ));
+        assert_eq!(fs::read_link(&path).unwrap(), missing);
     }
 
     #[test]

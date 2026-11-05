@@ -1,5 +1,5 @@
 use crate::{
-    transaction::{durable_atomic_write, durable_remove, read_canonical_file},
+    transaction::{canonical_file_exists, durable_atomic_write, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
 use std::path::PathBuf;
@@ -10,7 +10,7 @@ impl Storage {
         let _guard = self.lock_world_transaction(record.world_id)?;
         record.validate_semantics()?;
         let path = self.control_path(record.world_id, "epoch.postcard");
-        if path.try_exists().map_err(|source| io_error(&path, source))? {
+        if canonical_file_exists(&path)? {
             let existing = self.load_epoch_record(record.world_id)?;
             let existing_generation = (existing.epoch_number, existing.fencing_token);
             let requested_generation = (record.epoch_number, record.fencing_token);
@@ -57,7 +57,7 @@ impl Storage {
 
     fn reserve_recovery_locked(&self, reservation: &AuthorityLeaseGrantV1) -> Result<bool, StorageError> {
         let path = self.control_path(reservation.world_id, "recovery-reservation.postcard");
-        if path.try_exists().map_err(|source| io_error(&path, source))? {
+        if canonical_file_exists(&path)? {
             let existing = self.load_recovery_reservation(reservation.world_id)?;
             let existing_generation = (existing.epoch, existing.fencing_token);
             let requested_generation = (reservation.epoch, reservation.fencing_token);
@@ -138,10 +138,6 @@ impl Storage {
     }
 }
 
-fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
-    StorageError::Io { path: path.into(), source }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +202,46 @@ mod tests {
         let conflicting = epoch_record(world, 3, 8, 12);
         assert!(matches!(store.save_epoch_record(&conflicting), Err(StorageError::WorldMetadataMismatch)));
         assert_eq!(store.load_epoch_record(world).unwrap(), accepted);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_epoch_record_cannot_be_reinitialized() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0x35; 32]);
+        let path = store.world_dir(world).join("metadata/epoch.postcard");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let missing = path.with_extension("missing");
+        symlink(&missing, &path).unwrap();
+
+        assert!(matches!(
+            store.save_epoch_record(&epoch_record(world, 2, 8, 12)),
+            Err(StorageError::SymlinkUnsupported(actual)) if actual == path
+        ));
+        assert_eq!(fs::read_link(&path).unwrap(), missing);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_recovery_reservation_cannot_be_reinitialized() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0x36; 32]);
+        let path = store.world_dir(world).join("metadata/recovery-reservation.postcard");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let missing = path.with_extension("missing");
+        symlink(&missing, &path).unwrap();
+
+        assert!(matches!(
+            store.reserve_recovery(&reservation(world, 2, 8, 12)),
+            Err(StorageError::SymlinkUnsupported(actual)) if actual == path
+        ));
+        assert_eq!(fs::read_link(&path).unwrap(), missing);
     }
 
     #[test]
