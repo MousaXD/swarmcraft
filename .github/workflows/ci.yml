@@ -245,9 +245,48 @@ jobs:
           Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"
           Copy-Item target/release/swarmcraft-runtime.exe "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target.exe"
           Copy-Item target/release/swarmcraft-import.exe "apps/desktop/src-tauri/binaries/swarmcraft-import-$target.exe"
-      - name: Build native desktop package
+      - name: Build native Linux package
+        if: runner.os == 'Linux'
         working-directory: apps/desktop
         run: cargo tauri build --bundles ${{ matrix.bundle }} --ci
+      - name: Build native Windows package with bounded tool-download retry
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if cargo tauri build --bundles "${{ matrix.bundle }}" --ci; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Windows package build failed after $attempt attempts."
+              exit 1
+            fi
+            echo "Windows package attempt $attempt failed; retrying transient bundler/tool download."
+            sleep $((attempt * 5))
+          done
+      - name: Build native macOS app bundle
+        if: runner.os == 'macOS'
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo tauri build --bundles app --ci
+      - name: Create deterministic macOS DMG
+        if: runner.os == 'macOS'
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="src-tauri/target/release/bundle/macos/SwarmCraft.app"
+          out_dir="src-tauri/target/release/bundle/dmg"
+          dmg="$out_dir/SwarmCraft_0.5.0_${{ matrix.label }}.dmg"
+          test -d "$app"
+          rm -rf "$out_dir"
+          mkdir -p "$out_dir"
+          hdiutil create -volname SwarmCraft -srcfolder "$app" -ov -format UDZO "$dmg"
+          hdiutil verify "$dmg"
+          test -s "$dmg"
       - name: Upload native packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

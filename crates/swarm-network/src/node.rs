@@ -651,7 +651,16 @@ impl SwarmNode {
                                         &local_transport,
                                         &peer,
                                     )?;
-                                    self.respond(channel, WireResponse::HelloChallengeAccepted)?;
+                                    if let Err(response_error) =
+                                        self.respond(channel, WireResponse::HelloChallengeAccepted)
+                                    {
+                                        warn!(
+                                            transport_peer = %peer,
+                                            error = %response_error,
+                                            "peer challenge response channel closed; continuing network loop"
+                                        );
+                                        continue;
+                                    }
                                     self.swarm
                                         .behaviour_mut()
                                         .request_response

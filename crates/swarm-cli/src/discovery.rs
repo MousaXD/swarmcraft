@@ -1372,11 +1372,24 @@ async fn warm_explicit_locators(node: &mut DiscoveryNode, peers: &[TransportPeer
             if expected.iter().all(|peer| node.application_peer(peer).is_some()) {
                 return Ok::<(), anyhow::Error>(());
             }
-            match node.next_event().await? {
-                DiscoveryNetworkEvent::Disconnected { transport_peer, .. } if expected.contains(&transport_peer) => {
-                    let _ = node.dial_peer(transport_peer);
+            // `DiscoveryNode::next_event` consumes raw outbound dial errors
+            // internally. If an explicit locator's first dial loses a race
+            // during startup, waiting only for a surfaced network event can
+            // therefore strand that locator until this whole warmup times out.
+            // Periodically re-drive every unauthenticated explicit peer. The
+            // node suppresses duplicate pending dials, and the outer timeout
+            // keeps unreachable locators non-fatal and bounded.
+            for peer in expected.iter().copied() {
+                if node.application_peer(&peer).is_none() {
+                    let _ = node.dial_peer(peer);
                 }
-                _ => {}
+            }
+            if let Ok(event) = timeout(Duration::from_millis(250), node.next_event()).await {
+                if let DiscoveryNetworkEvent::Disconnected { transport_peer, .. } = event? {
+                    if expected.contains(&transport_peer) {
+                        let _ = node.dial_peer(transport_peer);
+                    }
+                }
             }
         }
     })

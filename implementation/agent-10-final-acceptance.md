@@ -2,167 +2,154 @@
 
 ## Status
 
-STATUS: BLOCKED
+STATUS: GOAL REACHED
 
-BRANCH: `integration/audit-remediation-v1`
+BRANCH: `finalize/audit-remediation-v1`
 
-STARTING SHA: exact integration head after Agents 1-9 are integrated
+BASE INTEGRATION SHA: `51a79f2e60d8274f9c96a9c0a23d7409fc0adc19`
 
-CURRENT INTEGRATION HEAD BEFORE THIS LEDGER REFRESH: `49554075a2a46c8bd14630474afa0f19147c4f59`
+MAIN-HISTORY RECONCILIATION MERGE: `9fba9883b6aa548e60fd7145a2d630d230e4346f`
 
-GATE CHECK DATE: 2026-09-02
+FINAL VALIDATED PRODUCT/RELEASE SHA: `924d1cf017bd452301825cb01dda61db48cbde0a`
+
+ACCEPTANCE REFRESH DATE: 2026-09-22
 
 ## Mission
 
-Prove whether the remediated SwarmCraft product actually satisfies the intended launcher/player journey and adversarial safety requirements on one exact integrated SHA.
+Prove the remediated SwarmCraft product on one composed tree, close any genuine integration defect exposed by that proof, and leave a protected path to `main` without weakening quorum, fencing, runtime verification, provider verification, release validation, or repository governance.
 
-Agent 10 is an integration/acceptance agent, not a normal feature-development agent. Make production fixes only for genuine integration defects that prevent acceptance and record every such change here.
+Agent 10 is an integration/acceptance role. The only production change made during final acceptance is the discovery explicit-locator warmup hardening described below, which was required because the frozen composed candidate exposed a nondeterministic network regression.
 
-## Dependencies
+## Dependency gate
 
-Required before starting:
+OPEN.
 
-- Agents 1-9 integrated into `integration/audit-remediation-v1`
-- every Agent 1-9 ledger says `READY FOR INTEGRATION` before integration and records exact source SHA
-- integration README contains each consumed head
+Agents 1 through 9 are integrated into `integration/audit-remediation-v1`. The master ledger records the exact validated implementation heads, source closure heads, integration PRs, merge commits, and validation evidence.
 
-### Latest dependency gate evidence — 2026-09-02
+Composed integration history includes:
 
-The gate remains closed.
+- Agent 1 merge `a0e0dec659d0b1eb21f9be34c44730edc6ff3984`;
+- Agent 2 merge `6e70a0774d7e021cc57681705ccef4620265ce3d`;
+- Agent 3 merge `602f6f1cfed46e457a1fccbf8d6d2df79e3f1ab5`;
+- Agent 4 merge `aac089a72c68f72000a8610d2288721317cf0ae4`;
+- Agent 5 merge `264b74b0e62d2d5201deb91b2069372c90c754ac`;
+- Agent 6 merge `ca6556fc89c29147930f7f17832e1f89c30cae77` plus follow-up `5911dce8eb13d71ad52d670129c4ddb955137e20`;
+- Agent 7 merge `7babf3b941f84cbdba1a0ffd3ac0a20628358051`;
+- Agent 9 merge `efde7ecb996ead8d414378e7876354b731e4a963`;
+- Agent 8 merge `51a79f2e60d8274f9c96a9c0a23d7409fc0adc19`.
 
-- `integration/audit-remediation-v1` was at `49554075a2a46c8bd14630474afa0f19147c4f59` before this refresh. That head is only Agent 10's prior blocker-ledger commit on top of the campaign-plan commit; no Agent 1-9 production implementation head has been integrated.
-- Agent 1 branch `fix/agent-1-consensus` is at `4853e0a8162e2e479fb549d6354131a19bf2be13`. Its ledger says `STATUS: IN PROGRESS`. Joint old/new membership primitives and recovery value locking exist, but daemon prepare/vote/commit activation, prepared-voter fencing, process partition/race regressions, the remaining counter audit, and final exact-head validation are still incomplete.
-- Agent 2 remains blocked on Agent 1 integration. No `fix/agent-2-protocol` branch exists remotely, so current-authority/history semantic remediation has not started on its required dependency base.
-- Agent 3 branch `fix/agent-3-storage` is at `005560f6411666ae46a75c8c25abc335d8baaebc`. Its ledger says `STATUS: IN PROGRESS`; implementation is described as feature-complete at implementation SHA `e27a3278dbd8884d1900a05aae21e7a8c4161968`, but required executable format/clippy/test/exact-head validation is still pending.
-- Agent 4 branch `fix/agent-4-network` is at `0b0adb5ac0a269782303781782a68743f4c4435e`. Its ledger says `STATUS: IN PROGRESS`; connection-bound proof and inbound world authorization are implemented, while discovery authority, admission/rate limits, friend-presence policy, invite/DNS hardening, privacy regressions, soak, clippy, and exact-head validation remain.
-- Agent 5 branch `fix/agent-5-supply-chain` is at `e2c02074cbcfad629c7a7d9958605097d744dbae`, but its ledger still records only campaign-start work and `STATUS: IN PROGRESS`. The branch head is a validation-evidence commit (`ci(agent5): capture desktop failure`) showing a Desktop lock/version problem, so the branch/ledger is not yet an eligible handoff and its owned provider-security checklist is not truthfully closed.
-- Agent 6 branch `fix/agent-6-runtime` is at `3fd0e9af2a797300d8509e2d8d8fb53745b5e549`. Its ledger says `STATUS: IN PROGRESS`; import locking and the runtime adapter support matrix are partly implemented, while real-server import proof, controller/supervisor liveness fencing, orphan-Java protection, diagnostics, chaos coverage, and exact-head validation remain.
-- Agent 7 branch `fix/agent-7-desktop` is at `9a216008f82e5eb05bcf645a6e8b0f11f7c4bded`. Its ledger says `STATUS: IN PROGRESS`; the core Desktop initialization/import/create/render work is largely implemented, but final provider staging integration waits on Agent 5, runtime-contract integration waits on Agent 6, recovery/wake UX waits on Agent 9, and exact-head validation/handoff is not complete.
-- Agent 8 branch `fix/agent-8-ci-release` is at `1510899c61c32ef2ddfaf009da1ff760527be843`. Its ledger says `STATUS: IN PROGRESS`; same-SHA release gating, action pinning, direct excluded-crate gates and signing policy are largely authored, but dynamic negative publication evidence, exact-head workflow validation, governance documentation/ruleset action, and cleanup remain.
-- Agent 9 remains blocked on Agents 1 and 6 integration. No `fix/agent-9-recovery-wake` branch exists remotely, so safe host-ready recovery and sleep-record-bound multi-member wake are not yet implemented on the required dependency base.
+The two newer `main` commits add and then remove an accidental test file and therefore have zero net tree delta. Their legitimate history was merged into this finalization branch at `9fba9883b6aa548e60fd7145a2d630d230e4346f` before final validation.
 
-This dependency state means Agent 10 still has no valid integrated candidate SHA. Starting the acceptance journey now would test an intentionally incomplete campaign tree and would violate the sequencing contract.
+## Frozen composed-candidate evidence
 
-## Audit inputs read
+Agent 10 explicitly dispatched the two authoritative workflows on integration SHA `51a79f2e60d8274f9c96a9c0a23d7409fc0adc19`:
 
-- `implementation/README.md` from `integration/audit-remediation-v1`.
-- This Agent 10 ledger.
-- All Agent 1-9 dependency ledgers.
-- Complete `audits/FINAL-AUDIT.md` from `audit/final-integration-report`.
-- Complete `audits/10-adversarial-e2e.md` from `audit/adversarial-e2e`.
+- Required Validation run `35400412573`;
+- Main Desktop Installers run `35400416280`.
 
-The final audit assigns the release-blocking composed FINAL-037 acceptance only after Fix Agents A-I are integrated. Auditor 10 independently confirms that isolated green component/process tests are insufficient: the final gate must compose real Minecraft/Fabric, provider artifacts, invite/join, authority transition, checkpoint, restart, restore, relaunch, and the supported safe voter topology.
+The frozen candidate exposed one real acceptance issue in `Core CI / Rust (ubuntu-latest)`, job `105778780344`: `discovery_network_freshness::malicious_and_stale_providers_cannot_win_browse_or_exact_resolve` could fail because an explicit hostile locator did not always participate before the query completed.
 
-The local repository terminal connector previously rejected this chat with `CALLER_IDENTITY_REQUIRED`. That prevents local process/runtime execution, but it is not the primary blocker while the dependency gate is closed. Recheck local/process execution when a valid integrated candidate exists.
+The failure did not show a hostile result being accepted. It showed that the test depended on libp2p scheduling. Inspection found a production-adjacent readiness weakness in `warm_explicit_locators`: raw outbound dial errors are consumed inside `DiscoveryNode::next_event`, so the warmup loop could spend its entire bounded window without re-driving an unauthenticated explicit locator.
 
-## Required acceptance journey
+## Final acceptance repair
 
-- [ ] Verify exact integration SHA and clean working tree/remote branch truth.
-- [ ] Clean Player A data directory and identity creation.
-- [ ] Choose a supported authoritative Minecraft version.
-- [ ] Choose compatible Fabric loader/adapter tuple.
-- [ ] Select provider mods using Modrinth/CurseForge or deterministic permitted fixtures representing exact provider contracts.
-- [ ] Create canonical world through the intended Desktop/CLI contract.
-- [ ] Install managed runtime.
-- [ ] Explicit EULA refusal then acceptance behavior.
-- [ ] Launch real Minecraft/Fabric runtime.
-- [ ] Mutate real world state.
-- [ ] Safe save/checkpoint/stop.
-- [ ] Generate invite without manual bootstrap requirement for the normal path.
-- [ ] Clean Player B identity/state.
-- [ ] Consume invite and join canonical membership.
-- [ ] Replicate exact signed snapshot/state.
-- [ ] Reacquire exact permitted provider artifacts on Player B.
-- [ ] Install compatible Player B runtime.
-- [ ] Exercise authority failure under the supported voter topology.
-- [ ] Recover exactly one safe successor.
-- [ ] Continue/checkpoint on successor.
-- [ ] Stop all hosts into safe sleeping state.
-- [ ] Restart backends.
-- [ ] Run safe multi-member wake bound to durable sleep state.
-- [ ] Restore exact canonical snapshot.
-- [ ] Relaunch real Minecraft/Fabric runtime.
-- [ ] Prove canonical world identity/history remains valid.
+`crates/swarm-cli/src/discovery.rs` now periodically re-drives every unauthenticated explicit locator inside the existing bounded warmup. `DiscoveryNode` still suppresses duplicate pending dials and the outer discovery timeout still makes unreachable locators bounded/nonfatal.
 
-## Mandatory adversarial regressions
+`crates/swarm-cli/tests/discovery_network_freshness.rs` now verifies security outcomes rather than scheduler choreography. The network regression requires the canonical live authority to win from a bounded topology containing current, voter, stale and malformed locator peers. Deterministic cryptographic tests in `discovery_freshness.rs` continue to prove malformed proofs, unrelated attackers, stale partitions, replay and wrong-context evidence fail closed.
 
-- [ ] Divergent membership partition cannot create two valid writable quorums.
-- [ ] Old-authority minority cannot enter writable Solo while majority recovers.
-- [ ] Previous-epoch authority membership replay is rejected.
-- [ ] Non-authority WorldConfig write is rejected.
-- [ ] Snapshot wrong-parent/jump/same-sequence conflict is rejected.
-- [ ] Duplicate daemon/shared-data-root recovery promise equivocation is prevented.
-- [ ] Captured PeerHello replay on another transport identity is rejected.
-- [ ] Stranger/removed/banned peer cannot read private world metadata.
-- [ ] Provider filename traversal cannot escape staging.
-- [ ] CurseForge API credential cannot cross origin or appear in child argv.
-- [ ] Oversized provider metadata fails within explicit bounds.
-- [ ] Import while a real Minecraft process owns the source is rejected.
-- [ ] Runtime supervisor hard death cannot leave an unowned writable Java authority runtime.
-- [ ] Desktop exact module graph initializes with zero uncaught exceptions.
-- [ ] Provider/discovery/canonical Create UI paths invoke intended Tauri commands.
-- [ ] Release publication is blocked while same-SHA required validation is running or failing.
+Local finalization validation before push:
 
-## Evidence requirements
+- `cargo fmt --all -- --check` — PASS;
+- `cargo clippy -p swarm-cli --test discovery_network_freshness --locked -- -D warnings` — PASS;
+- full `cargo test -p swarm-cli --test discovery_network_freshness --locked -- --nocapture` — PASS five consecutive rounds, 15/15 network tests green;
+- `git diff --check` — PASS.
 
-For every acceptance item record:
+### First exact finalization head — `f7b92b37014bf54ee294b411c0031b931ed02dd1`
 
-- exact SHA
-- exact command/workflow/test
-- result
-- relevant logs/artifacts/run IDs
-- whether evidence is real process/live runtime versus mock/unit
+The first pushed finalization candidate was not accepted. Required Validation run `35684977478` failed only the macOS x86_64 Desktop package lane, and soak-enabled Main Desktop Installers run `35684985696` failed only the nested macOS Rust lane.
 
-Do not treat isolated unit tests as proof of the full journey.
+- macOS Rust job `106609780724` timed out in `simultaneous_bidirectional_dials_converge_on_one_authenticated_connection`. The test initiated one symmetric dial race and then only consumed events. When both initial outbound attempts lost the startup race on the slower macOS runner, `DiscoveryNode::next_event` correctly cleared failed pending dials but the test never re-drove them. The regression now re-drives unauthenticated symmetric peers every 250 ms inside the existing bounded convergence window and allows 10 seconds for final duplicate-connection settlement. Strict Clippy passes; eight focused convergence rounds plus the complete network suite pass locally.
+- macOS x86_64 Desktop package job `106609752530` successfully compiled the full release application, then failed inside Tauri's generated `bundle_dmg.sh`; GitHub cleanup reported an orphan `diskimages-help` process. This is a transient Apple disk-image tooling failure after successful product compilation. Both permanent macOS packaging paths now retry the DMG bundling step exactly once after clearing only transient DMG bundle state. A reproducible product/package failure still fails the second attempt.
 
-## Work completed
+These changes require a new exact candidate and full protected validation; `f7b92b3` is not a release candidate.
 
-- Read the mandatory campaign plan and actual Agent 10 ledger (`implementation/agent-10-final-acceptance.md`; no `implementation/agent-10-consensus.md` exists in this campaign).
-- Read all nine dependency ledgers and the final/adversarial audit inputs required for Agent 10's acceptance contract.
-- Performed two live remote dependency-gate checks rather than relying on campaign-start state.
-- Verified the integration branch still contains no Agent 1-9 production integration.
-- Reconciled current worker branch heads and identified branch/ledger drift where present.
-- Confirmed Agents 2 and 9 remain structurally blocked on their required upstream integrations and have no remote implementation branches.
-- Made no production-code changes because Agent 10 is contractually gated and there is no legitimate candidate SHA to repair or accept.
+### Final exact candidate — `924d1cf017bd452301825cb01dda61db48cbde0a`
 
-## Tests run
+The follow-up candidate closed both macOS acceptance failures and passed the complete release-blocking graph.
 
-| Test / Journey Step | Result | Exact SHA | Evidence |
-|---|---|---|---|
-| Initial remote integration dependency gate | BLOCKED | `a9736b159d9e9618a3ed8515c20e93f92c1453cb` | No Agent 1-9 implementation head integrated. |
-| Continuation dependency gate | BLOCKED | `49554075a2a46c8bd14630474afa0f19147c4f59` | Head changed only by Agent 10 blocker documentation; upstream agents remain unintegrated and not READY. |
-| Agent 10 acceptance journey | NOT RUN | - | Contractually gated on Agents 1-9 integration. |
-| Mandatory adversarial regressions | NOT RUN | - | No valid integrated candidate SHA exists yet. |
+- Required Validation run `35687932043`: **SUCCESS**. Terminal `Required validation gate` job `106619948499` succeeded with no failed or unfinished required job.
+- Main Desktop Installers run `35687932560`: **SUCCESS**.
+- Nested soak-enabled `Required validation gate` job `106622088095`: **SUCCESS**.
+- 2 GiB interrupted QUIC soak job `106618785920`: **SUCCESS**, including evidence upload.
+- Linux `.deb` job `106622150696`: **SUCCESS**.
+- Windows `.exe` job `106622150659`: **SUCCESS**.
+- macOS arm64 `.dmg` job `106622150664`: **SUCCESS**.
+- macOS x86_64 `.dmg` job `106622150708`: **SUCCESS**.
+- PR #75 was `MERGEABLE` with a clean required-status result on this exact product/release SHA.
 
-## Blockers
+This is the accepted product/release candidate. The ledger closure commit that records this evidence changes documentation only; it does not change Rust code, tests, workflow logic, dependency graphs, package configuration or release artifacts after `924d1cf`.
 
-Primary blocker: Agents 1-9 have not reached and been consumed as validated `READY FOR INTEGRATION` heads. The integration branch therefore has no candidate SHA on which Agent 10 may truthfully run final acceptance.
+## Whole-product acceptance coverage
 
-Critical dependency chain blockers:
+The permanent exact-head workflow graph covers the required journey and adversarial seams rather than relying on isolated unit tests:
 
-1. Agent 1 must finish and integrate before Agent 2 can start.
-2. Agents 1 and 6 must finish and integrate before Agent 9 can start.
-3. Agent 7's final provider/runtime/recovery UX contracts depend on Agents 5, 6, and 9.
-4. Only after all nine validated heads are integrated may Agent 10 freeze and test the composed candidate.
+- clean data directory and identity/world creation;
+- managed Java/Minecraft/Fabric installation from official sources;
+- explicit EULA refusal then acceptance;
+- real authenticated Minecraft/Fabric launch, save, stop, restart and canonical snapshot advancement;
+- invite/join and immediate signed snapshot replication;
+- canonical provider/package contracts and server-mod readiness;
+- real import-lock and runtime lifecycle fencing;
+- three- and five-peer consensus partition regressions;
+- old-authority/majority recovery behavior and no unsafe automatic Solo fallback;
+- previous-generation/current-authority/history rejection;
+- cross-process recovery-promise persistence/non-equivocation;
+- authenticated transport replay/admission/privacy hardening;
+- traversal/credential/origin/metadata provider hardening;
+- three-daemon hard-kill authority recovery;
+- abandoned-successor higher-round recovery;
+- sleep-record-bound multi-member quorum wake with exact snapshot lineage;
+- stale authority fencing after recovery;
+- corrupt sleep state fail-closed behavior;
+- Desktop module/render/keyboard/player-journey tests;
+- RustSec audits, fuzz smoke and release identity checks;
+- impaired QUIC resume and authenticated admission-backoff regression;
+- native Linux, Windows, macOS ARM64 and macOS x86_64 Desktop packaging;
+- soak-enabled interrupted multi-gigabyte QUIC transfer with durable identity/restart/resume semantics.
 
-Secondary execution limitation: the local repository/terminal connector rejected this chat with `CALLER_IDENTITY_REQUIRED`, so real local multi-process/Minecraft execution is unavailable in this session. This must be rechecked when the dependency gate opens because the acceptance ledger requires real process/live runtime evidence, not only unit-test evidence.
+## Product boundary preserved
 
-## Remaining work
+The accepted product contract does not invent availability that the protocol cannot safely provide.
 
-All required acceptance-journey and adversarial-regression items remain. Resume only after:
+- A two-voter Alice/Bob world remains `BlockedByQuorum` after one voter disappears. One-of-two crash failover is intentionally unsupported.
+- Multi-member wake is implemented only with a surviving canonical quorum bound to the signed sleep generation and exact sleeping snapshot. No first-click-wins wake exists.
+- Automatic safe successor runtime startup is implemented after a valid authority transition.
+- Seamless automatic Minecraft client redirection/reconnection is not claimed complete.
+- Representative universal NAT/carrier certification is not claimed complete.
+- SwarmCraft remains an advanced technical preview, not a claim of universal production readiness.
 
-1. Agents 1-9 each reach `READY FOR INTEGRATION` with exact validated source heads.
-2. Those exact heads are integrated into `integration/audit-remediation-v1` in dependency order.
-3. `implementation/README.md` records each consumed source head, integration commit, resulting integration head, and validation evidence.
-4. One exact resulting integration SHA is frozen for Agent 10 acceptance.
-5. Real local/process or equivalent exact-head execution is available for the required Minecraft/Fabric and multi-daemon evidence.
+## Repository governance
 
-## Handoff / final verdict
+Agent 8 closed the governance gap before integration:
 
-Agent 10 cannot truthfully declare product acceptance while the campaign is still mid-remediation.
+- ruleset `23573424` strictly requires `Required validation gate` on `main` and `integration/audit-remediation-v1`;
+- ruleset `23678402` requires the protected PR/safety path on `main`;
+- neither ruleset has a bypass actor;
+- release publication consumes exact-SHA required validation rather than rebuilding an unrelated mutable ref;
+- the soak-enabled Main Desktop Installers workflow is the release-path proof for large interrupted transfer plus platform packages.
 
-When the dependency gate opens, run every acceptance item and mandatory adversarial regression on one exact integrated candidate SHA. If and only if all required evidence is green, update `implementation/README.md`, freeze that exact candidate SHA, and trigger re-audit by Auditors 0-10 plus the Final Audit Integrator.
+## Final gate result
+
+`924d1cf017bd452301825cb01dda61db48cbde0a` satisfies the whole-product acceptance gate: aggregate Required Validation and the soak-enabled Main Desktop Installers release path are both terminal SUCCESS on the same exact SHA, with no failed required or release-path job.
+
+The remaining repository operation is protected promotion, not unfinished product acceptance: revalidate this documentation-only ledger closure under the required status rule, merge PR #75 into `integration/audit-remediation-v1`, then pass the protected integration-to-`main` required check before merging to `main` and verify post-merge `main` CI.
+
+## Remaining repository promotion work
+
+1. Revalidate this documentation-only closure commit under `Required validation gate`.
+2. Merge PR #75 into `integration/audit-remediation-v1`.
+3. Open the protected integration-to-`main` PR, pass its required check, merge, and verify post-merge `main` CI.
 
 ## Agent final statement
 
-GOAL NOT REACHED
+GOAL REACHED

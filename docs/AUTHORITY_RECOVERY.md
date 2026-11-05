@@ -228,21 +228,20 @@ Solo mode is a separate, explicitly signed world-policy path and is not a generi
 
 A graceful world shutdown produces a signed durable sleep record after the final verified snapshot is committed.
 
-Wake is therefore not treated as an unclean missing-authority election. An eligible peer that holds the exact sleeping snapshot can advance the world through the wake logic with monotonically increasing epoch/fencing state.
+Wake is therefore not treated as an ordinary unclean missing-authority election. A single-member world can use the safe direct wake path. A multi-member world records explicit wake intent, verifies the signed sleep generation and exact sleeping snapshot, and then requires the canonical surviving majority to certify one new recovery generation before any live authority permit is issued.
 
-The current host/runtime supports this durable sleep/wake foundation.
+The three-daemon process acceptance gate proves this sleep-record-bound quorum wake path through a new fenced generation, a single live authority permit, runtime readiness, sleep-record clearing, and exact snapshot-lineage continuation. A multi-member world without surviving quorum remains safely blocked.
 
 ---
 
 ## Product boundary
 
-The control-plane recovery described here is implemented and process-tested.
+The control-plane recovery and successor-runtime orchestration described here are implemented and process-tested.
 
 The complete player experience is **not yet seamless**.
 
 Current missing integration work includes:
 
-- automatically launching the correct Minecraft runtime immediately when this peer becomes the accepted recovery authority;
 - automatically directing/reconnecting players to that successor runtime;
 - repeated full Minecraft gameplay handoff testing across real networks.
 
