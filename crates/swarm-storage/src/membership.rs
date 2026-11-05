@@ -187,6 +187,27 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn dangling_membership_promise_cannot_be_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([8; 32]);
+        let path = store.world_dir(world).join("metadata/membership-promise.postcard");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let missing = path.with_extension("missing");
+        symlink(&missing, &path).unwrap();
+
+        let attempt = proposal(world, 2);
+        assert!(matches!(
+            store.promise_membership_proposal(&attempt, &vote(&attempt)),
+            Err(StorageError::SymlinkUnsupported(actual)) if actual == path
+        ));
+        assert_eq!(fs::read_link(&path).unwrap(), missing);
+    }
+
     #[test]
     fn corrupt_membership_promise_cannot_be_overwritten() {
         let temp = tempfile::tempdir().unwrap();
