@@ -29,7 +29,14 @@ impl Storage {
         if !proposal.validate_shape()? || !vote.matches_proposal(proposal)? {
             return Ok(MembershipPromiseResult::Rejected);
         }
-        if let Ok(existing) = self.load_membership_promise(proposal.proposed.world_id) {
+        // A durable promise cannot be discarded simply because its on-disk
+        // representation is corrupt or unreadable. Only NotFound is absence.
+        let existing = match self.load_membership_promise(proposal.proposed.world_id) {
+            Ok(promise) => Some(promise),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(existing) = existing.as_ref() {
             if existing.proposal.proposal_hash()? == proposal.proposal_hash()? {
                 return Ok(MembershipPromiseResult::Idempotent);
             }
@@ -178,6 +185,26 @@ mod tests {
             voter_public_key: [1; 32],
             signature: vec![3],
         }
+    }
+
+    #[test]
+    fn corrupt_membership_promise_cannot_be_overwritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([8; 32]);
+        let first = proposal(world, 2);
+        assert_eq!(
+            store.promise_membership_proposal(&first, &vote(&first)).unwrap(),
+            MembershipPromiseResult::Accepted
+        );
+
+        let path = store.world_dir(world).join("metadata/membership-promise.postcard");
+        let corrupted = b"invalid durable membership promise";
+        fs::write(&path, corrupted).unwrap();
+
+        let competing = proposal(world, 3);
+        assert!(store.promise_membership_proposal(&competing, &vote(&competing)).is_err());
+        assert_eq!(fs::read(&path).unwrap(), corrupted);
     }
 
     #[test]
