@@ -399,6 +399,27 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn dangling_recovery_promise_is_not_missing_state() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let (_, world) = test_world();
+        let store = Storage::open(temp.path()).unwrap();
+        let path = store.control_path_v2(world, "recovery-promise.postcard");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let target = path.with_extension("nonexistent");
+        symlink(&target, &path).unwrap();
+
+        let proposed = ballot(world, 2, 1);
+        assert!(matches!(
+            store.promise_recovery_ballot(&proposed, &vote(&proposed, 6)),
+            Err(StorageError::SymlinkUnsupported(actual)) if actual == path
+        ));
+        assert_eq!(fs::read_link(&path).unwrap(), target);
+    }
+
     #[test]
     fn corrupt_recovery_promise_cannot_be_overwritten_by_a_new_ballot() {
         let temp = tempfile::tempdir().unwrap();
