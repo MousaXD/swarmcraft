@@ -1,5 +1,5 @@
 use crate::{
-    transaction::{durable_atomic_write, durable_remove},
+    transaction::{durable_atomic_write, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
 use serde::{Deserialize, Serialize};
@@ -68,7 +68,7 @@ impl Storage {
 
     pub fn load_recovery_promise(&self, world: WorldId) -> Result<DurableRecoveryPromiseV1, StorageError> {
         let path = self.control_path_v2(world, "recovery-promise.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let promise: DurableRecoveryPromiseV1 = postcard::from_bytes(&bytes)?;
         promise.ballot.validate_semantics()?;
         promise.vote.validate_semantics()?;
@@ -162,7 +162,7 @@ impl Storage {
 
     pub fn load_world_config(&self, world: WorldId) -> Result<WorldConfigV1, StorageError> {
         let path = self.control_path_v2(world, "world-config.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let config: WorldConfigV1 = postcard::from_bytes(&bytes)?;
         if config.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -180,7 +180,7 @@ impl Storage {
 
     pub fn load_solo_branch(&self, world: WorldId) -> Result<SoloBranchV1, StorageError> {
         let path = self.control_path_v2(world, "solo-branch.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let branch: SoloBranchV1 = postcard::from_bytes(&bytes)?;
         if branch.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -237,7 +237,7 @@ impl Storage {
         if !path.exists() {
             return Ok(false);
         }
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         Ok(bytes == b"1\n")
     }
 
