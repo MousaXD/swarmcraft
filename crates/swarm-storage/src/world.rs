@@ -47,7 +47,12 @@ impl Storage {
             {
                 return Err(StorageError::WorldMetadataMismatch);
             }
-            if let Ok(epoch) = self.load_epoch_record(record.world_id) {
+            let accepted_epoch = match self.load_epoch_record(record.world_id) {
+                Ok(epoch) => Some(epoch),
+                Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(epoch) = accepted_epoch.as_ref() {
                 if record.epoch != epoch.epoch_number
                     || record.authority_peer_id != epoch.authority_peer_id
                     || record.authority_public_key != epoch.authority_public_key
@@ -65,7 +70,12 @@ impl Storage {
             if !certified_bootstrap && (record.sequence != 0 || record.previous_membership_hash.is_some()) {
                 return Err(StorageError::WorldMetadataMismatch);
             }
-            if let Ok(epoch) = self.load_epoch_record(record.world_id) {
+            let accepted_epoch = match self.load_epoch_record(record.world_id) {
+                Ok(epoch) => Some(epoch),
+                Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(epoch) = accepted_epoch.as_ref() {
                 if record.epoch != epoch.epoch_number
                     || record.authority_peer_id != epoch.authority_peer_id
                     || record.authority_public_key != epoch.authority_public_key
@@ -268,6 +278,23 @@ mod tests {
         store.save_world_descriptor(&descriptor).unwrap();
         let loaded = store.load_world_descriptor(world).unwrap();
         assert_eq!(loaded.members[0].peer_id, PeerId([2; 32]));
+    }
+
+    #[test]
+    fn corrupt_epoch_cannot_be_skipped_when_extending_membership() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = create_test_world(&store);
+        let initial = membership(world, 1, 0, 0, None);
+        store.save_membership_record(&initial).unwrap();
+        let epoch_path = store.world_dir(world).join("metadata/epoch.postcard");
+        let corrupted = b"corrupted accepted authority";
+        fs::write(&epoch_path, corrupted).unwrap();
+
+        let next = membership(world, 1, 0, 1, Some(initial.record_hash().unwrap()));
+        assert!(store.save_membership_record(&next).is_err());
+        assert_eq!(fs::read(&epoch_path).unwrap(), corrupted);
+        assert_eq!(store.load_membership_record(world).unwrap(), initial);
     }
 
     #[test]
