@@ -130,6 +130,19 @@ fn config(fixture: &Fixture, signer: &PeerIdentity) -> WorldConfigV1 {
 }
 
 #[test]
+fn corrupt_membership_prepare_blocks_authority_and_recovery_transitions() {
+    let fixture = fixture();
+    assert!(ensure_no_membership_prepare(&fixture.storage, fixture.world).is_ok());
+
+    let path = fixture.storage.world_dir(fixture.world).join("metadata/membership-promise.postcard");
+    let corrupted = b"invalid membership prepare";
+    std::fs::write(&path, corrupted).unwrap();
+
+    assert!(ensure_no_membership_prepare(&fixture.storage, fixture.world).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), corrupted);
+}
+
+#[test]
 fn daemon_rejects_valid_non_authority_world_config() {
     let fixture = fixture();
     let malicious = config(&fixture, &fixture.member);
