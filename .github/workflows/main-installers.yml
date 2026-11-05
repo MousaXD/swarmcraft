@@ -190,7 +190,24 @@ jobs:
           test -d "$app"
           rm -rf "$out_dir"
           mkdir -p "$out_dir"
-          hdiutil create -volname SwarmCraft -srcfolder "$app" -ov -format UDZO "$dmg"
+          # macOS DiskImages can transiently report "Resource busy" on shared
+          # runners after a successful app build. Retry only this specific error.
+          attempt_log="$(mktemp)"
+          trap 'rm -f "$attempt_log"' EXIT
+          for attempt in 1 2 3; do
+            if hdiutil create -volname SwarmCraft -srcfolder "$app" -ov -format UDZO "$dmg" >"$attempt_log" 2>&1; then
+              cat "$attempt_log"
+              break
+            fi
+            cat "$attempt_log" >&2
+            if ! grep -qi 'Resource busy' "$attempt_log" || [ "$attempt" -eq 3 ]; then
+              echo "Disk image creation failed on attempt $attempt; aborting." >&2
+              exit 1
+            fi
+            rm -f "$dmg"
+            echo "DiskImages resource busy; retrying in $((attempt * 5)) seconds."
+            sleep "$((attempt * 5))"
+          done
           hdiutil verify "$dmg"
           test -s "$dmg"
       - name: Stage macOS artifact
