@@ -116,8 +116,13 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
 
-        if let Ok(existing) = self.load_world_config(config.world_id) {
-            if config == existing {
+        let existing = match self.load_world_config(config.world_id) {
+            Ok(config) => Some(config),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(existing) = existing.as_ref() {
+            if config == *existing {
                 return Ok(());
             }
             if config.sequence <= existing.sequence {
@@ -131,7 +136,12 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
 
-        if let Ok(epoch) = self.load_epoch_record(config.world_id) {
+        let accepted_epoch = match self.load_epoch_record(config.world_id) {
+            Ok(epoch) => Some(epoch),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(epoch) = accepted_epoch.as_ref() {
             if config.authority_peer_id != epoch.authority_peer_id
                 || config.authority_public_key != epoch.authority_public_key
             {
@@ -474,6 +484,54 @@ mod tests {
         let current_authority = world_config(world, 7, 2, Some(previous));
         store.save_world_config(&current_authority).unwrap();
         assert_eq!(store.load_world_config(world).unwrap(), current_authority);
+    }
+
+    #[test]
+    fn corrupt_world_config_cannot_be_reinitialized_from_sequence_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let (genesis, world) = test_world();
+        let store = Storage::open(temp.path()).unwrap();
+        store
+            .create_world(&WorldMetadataV1 {
+                storage_schema_version: STORAGE_SCHEMA_VERSION,
+                display_name: "test".into(),
+                world_id: world,
+                genesis,
+            })
+            .unwrap();
+        store.save_membership_record(&bootstrap_membership(world)).unwrap();
+        let initial = world_config(world, 6, 1, None);
+        store.save_world_config(&initial).unwrap();
+        let path = store.control_path_v2(world, "world-config.postcard");
+        let corrupted = b"invalid signed world configuration";
+        fs::write(&path, corrupted).unwrap();
+
+        assert!(store.save_world_config(&initial).is_err());
+        assert_eq!(fs::read(&path).unwrap(), corrupted);
+    }
+
+    #[test]
+    fn corrupt_epoch_cannot_fall_back_to_bootstrap_world_config_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let (genesis, world) = test_world();
+        let store = Storage::open(temp.path()).unwrap();
+        store
+            .create_world(&WorldMetadataV1 {
+                storage_schema_version: STORAGE_SCHEMA_VERSION,
+                display_name: "test".into(),
+                world_id: world,
+                genesis,
+            })
+            .unwrap();
+        store.save_membership_record(&bootstrap_membership(world)).unwrap();
+        let epoch_path = store.world_dir(world).join("metadata/epoch.postcard");
+        let corrupted = b"invalid accepted epoch";
+        fs::write(&epoch_path, corrupted).unwrap();
+
+        let attempted = world_config(world, 6, 1, None);
+        assert!(store.save_world_config(&attempted).is_err());
+        assert_eq!(fs::read(&epoch_path).unwrap(), corrupted);
+        assert!(store.load_world_config(world).is_err());
     }
 
     #[test]
