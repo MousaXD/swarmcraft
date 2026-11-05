@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -154,6 +154,10 @@ pub enum InviteConnectivityError {
     InvalidAddress(String),
     #[error("invite connection hint is not remotely usable: {0}")]
     UnusableAddress(String),
+    #[error("invite DNS target {host} could not be resolved: {detail}")]
+    DnsResolutionFailed { host: String, detail: String },
+    #[error("invite DNS target {host} resolved to disallowed address {address}")]
+    DnsResolvedToDisallowedScope { host: String, address: String },
     #[error("connectivity diagnostics snapshot is unavailable: {0}")]
     SnapshotUnavailable(String),
     #[error("connectivity diagnostics snapshot is too large ({actual} bytes; maximum {maximum})")]
@@ -196,6 +200,80 @@ pub fn validate_invite_addresses(addresses: &[String]) -> Result<Vec<String>, In
         }
     }
     Ok(canonical)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DnsFamily {
+    Any,
+    V4,
+    V6,
+}
+
+/// Re-resolve mutable DNS invite targets immediately before dialing and apply a
+/// strict public-scope policy to every returned address. Private/LAN invites must
+/// use literal private IP multiaddresses, whose local-only semantics are explicit
+/// in the signed token instead of being hidden behind DNS rebinding.
+pub fn validate_invite_dial_address(address: &Multiaddr) -> Result<(), InviteConnectivityError> {
+    let mut dns_targets = Vec::<(String, DnsFamily)>::new();
+    let mut transport_port = None;
+    for protocol in address.iter() {
+        match protocol {
+            Protocol::Dns(name) => dns_targets.push((name.as_ref().to_owned(), DnsFamily::Any)),
+            Protocol::Dns4(name) => dns_targets.push((name.as_ref().to_owned(), DnsFamily::V4)),
+            Protocol::Dns6(name) => dns_targets.push((name.as_ref().to_owned(), DnsFamily::V6)),
+            Protocol::Tcp(port) | Protocol::Udp(port) if transport_port.is_none() => transport_port = Some(port),
+            _ => {}
+        }
+    }
+    if dns_targets.is_empty() {
+        return Ok(());
+    }
+    let port = transport_port.ok_or_else(|| InviteConnectivityError::UnusableAddress(address.to_string()))?;
+    for (host, family) in dns_targets {
+        let resolved = (host.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|error| InviteConnectivityError::DnsResolutionFailed {
+                host: host.clone(),
+                detail: error.to_string(),
+            })?
+            .map(|socket| socket.ip())
+            .filter(|ip| {
+                matches!(
+                    (family, ip),
+                    (DnsFamily::Any, _) | (DnsFamily::V4, IpAddr::V4(_)) | (DnsFamily::V6, IpAddr::V6(_))
+                )
+            })
+            .collect::<Vec<_>>();
+        validate_resolved_dns_target(&host, resolved)?;
+    }
+    Ok(())
+}
+
+fn validate_resolved_dns_target(
+    host: &str,
+    addresses: impl IntoIterator<Item = IpAddr>,
+) -> Result<(), InviteConnectivityError> {
+    let mut saw_address = false;
+    for address in addresses {
+        saw_address = true;
+        let public = match address {
+            IpAddr::V4(ip) => matches!(ipv4_scope(ip), Ok(IpScope::Public)),
+            IpAddr::V6(ip) => matches!(ipv6_scope(ip), Ok(IpScope::Public)),
+        };
+        if !public {
+            return Err(InviteConnectivityError::DnsResolvedToDisallowedScope {
+                host: host.to_owned(),
+                address: address.to_string(),
+            });
+        }
+    }
+    if !saw_address {
+        return Err(InviteConnectivityError::DnsResolutionFailed {
+            host: host.to_owned(),
+            detail: "resolver returned no addresses for the requested family".into(),
+        });
+    }
+    Ok(())
 }
 
 pub fn invite_connectivity_from_snapshot(path: &Path) -> Result<InviteConnectivityV1, InviteConnectivityError> {
@@ -506,6 +584,27 @@ mod tests {
         assert!(matches!(
             validate_invite_addresses(&["/ip4/1.1.1.1/tcp/4001/p2p-circuit".into()]),
             Err(InviteConnectivityError::UnusableAddress(_))
+        ));
+    }
+
+    #[test]
+    fn dns_rebinding_to_loopback_or_private_scope_is_rejected() {
+        assert!(matches!(
+            validate_resolved_dns_target("loopback.example", [IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+            Err(InviteConnectivityError::DnsResolvedToDisallowedScope { .. })
+        ));
+        assert!(matches!(
+            validate_resolved_dns_target("private.example", [IpAddr::V4(Ipv4Addr::new(10, 20, 30, 40))]),
+            Err(InviteConnectivityError::DnsResolvedToDisallowedScope { .. })
+        ));
+        assert!(validate_resolved_dns_target("public.example", [IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))]).is_ok());
+    }
+
+    #[test]
+    fn dns_family_with_no_resolved_answers_fails_closed() {
+        assert!(matches!(
+            validate_resolved_dns_target("empty.example", std::iter::empty()),
+            Err(InviteConnectivityError::DnsResolutionFailed { .. })
         ));
     }
 

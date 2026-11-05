@@ -28,6 +28,16 @@ pub fn stop_daemon(processes: State<'_, RuntimeProcesses>) -> Result<(), String>
     processes.stop_daemon()
 }
 
+#[tauri::command]
+pub fn runtime_diagnostics(
+    app: AppHandle,
+    processes: State<'_, RuntimeProcesses>,
+    world: String,
+) -> Result<String, String> {
+    let world = required(world, "World ID")?;
+    processes.runtime_diagnostics_reference(&app, &world)
+}
+
 async fn run_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, String> {
     use tauri_plugin_shell::ShellExt;
     let output = app

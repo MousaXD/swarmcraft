@@ -5,6 +5,7 @@ impl PeerIdentity {
     pub fn sign_join_request(&self, request: &mut JoinRequestV1) -> Result<(), CoreError> {
         request.joining_member.peer_id = self.peer_id();
         request.joining_member.public_key = self.public_key();
+        request.validate_semantics()?;
         request.signature.clear();
         request.signature = self.sign(&request.signing_bytes()?);
         Ok(())
@@ -13,6 +14,7 @@ impl PeerIdentity {
     pub fn sign_leave_request(&self, request: &mut LeaveRequestV1) -> Result<(), CoreError> {
         request.leaving_peer_id = self.peer_id();
         request.leaving_public_key = self.public_key();
+        request.validate_semantics()?;
         request.signature.clear();
         request.signature = self.sign(&request.signing_bytes()?);
         Ok(())
@@ -21,6 +23,7 @@ impl PeerIdentity {
     pub fn sign_sleep_record(&self, record: &mut SleepRecordV1) -> Result<(), CoreError> {
         record.authority_peer_id = self.peer_id();
         record.authority_public_key = self.public_key();
+        record.validate_semantics()?;
         record.signature.clear();
         record.signature = self.sign(&record.signing_bytes()?);
         Ok(())
@@ -28,9 +31,7 @@ impl PeerIdentity {
 }
 
 pub fn verify_join_request_signature(request: &JoinRequestV1) -> Result<(), CoreError> {
-    if !request.validate_shape() {
-        return Err(CoreError::SignatureInvalid);
-    }
+    request.validate_semantics()?;
     verify_signature(
         request.joining_member.peer_id,
         request.joining_member.public_key,
@@ -40,13 +41,12 @@ pub fn verify_join_request_signature(request: &JoinRequestV1) -> Result<(), Core
 }
 
 pub fn verify_leave_request_signature(request: &LeaveRequestV1) -> Result<(), CoreError> {
-    if !request.validate_shape() {
-        return Err(CoreError::SignatureInvalid);
-    }
+    request.validate_semantics()?;
     verify_signature(request.leaving_peer_id, request.leaving_public_key, &request.signing_bytes()?, &request.signature)
 }
 
 pub fn verify_sleep_record_signature(record: &SleepRecordV1) -> Result<(), CoreError> {
+    record.validate_semantics()?;
     verify_signature(record.authority_peer_id, record.authority_public_key, &record.signing_bytes()?, &record.signature)
 }
 

@@ -444,6 +444,19 @@ fn validate_provider_artifact(artifact: &CanonicalProviderArtifactV1) -> Result<
             }
         }
     }
+    if artifact.retrieval == CanonicalRetrievalV1::ProviderDownload
+        && !algorithms.keys().any(|algorithm| {
+            matches!(
+                algorithm,
+                CanonicalHashAlgorithmV1::Sha512 | CanonicalHashAlgorithmV1::Sha256 | CanonicalHashAlgorithmV1::Sha1
+            )
+        })
+    {
+        return Err(CanonicalModpackError::InvalidProviderHash(format!(
+            "{} is marked provider_download but has only MD5/unsupported reacquisition proof",
+            artifact.identity.display_key()
+        )));
+    }
     for dependency in &artifact.dependencies {
         validate_exact_identifier("dependency project ID", &dependency.target.project_id)?;
         validate_exact_identifier("dependency version/file ID", &dependency.target.version_id)?;
@@ -620,5 +633,33 @@ mod tests {
             runtime_artifact_hash(b"jar-bytes"),
             Hash32::from_domain_bytes(b"swarmcraft/runtime-artifact/v1\0", b"jar-bytes")
         );
+    }
+}
+
+#[cfg(test)]
+mod agent5_supply_chain_tests {
+    use super::*;
+
+    #[test]
+    fn md5_only_provider_download_is_not_a_valid_reacquisition_contract() {
+        let artifact = CanonicalProviderArtifactV1 {
+            identity: CanonicalPackageIdentityV1 {
+                provider: CanonicalProviderV1::CurseForge,
+                project_id: "1".into(),
+                version_id: "2".into(),
+            },
+            file_name: "safe.jar".into(),
+            file_size: Some(1),
+            hashes: vec![CanonicalProviderHashV1 {
+                algorithm: CanonicalHashAlgorithmV1::Md5,
+                digest_hex: "ab".repeat(16),
+            }],
+            retrieval: CanonicalRetrievalV1::ProviderDownload,
+            dependencies: vec![],
+        };
+        assert!(matches!(validate_provider_artifact(&artifact), Err(CanonicalModpackError::InvalidProviderHash(_))));
+        let mut manual = artifact;
+        manual.retrieval = CanonicalRetrievalV1::ManualRequired;
+        assert!(validate_provider_artifact(&manual).is_ok());
     }
 }

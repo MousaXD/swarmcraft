@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-use super::{Hash32, PeerId, ProtocolError, WorldId, PROTOCOL_VERSION};
+use super::{Hash32, MembershipRecordV1, PeerId, ProtocolError, WorldId, PROTOCOL_VERSION};
 
 const COMPATIBILITY_MANIFEST_DOMAIN: &[u8] = b"swarmcraft/compatibility-manifest/v1\0";
 const WORLD_CONFIG_SIGN_DOMAIN: &[u8] = b"swarmcraft/world-config-sign/v1\0";
 const WORLD_CONFIG_HASH_DOMAIN: &[u8] = b"swarmcraft/world-config/v1\0";
+const MEMBERSHIP_PROPOSAL_HASH_DOMAIN: &[u8] = b"swarmcraft/membership-proposal/v1\0";
+const MEMBERSHIP_VOTE_SIGN_DOMAIN: &[u8] = b"swarmcraft/membership-vote-sign/v1\0";
 const RECOVERY_BALLOT_SIGN_DOMAIN: &[u8] = b"swarmcraft/recovery-ballot-sign/v1\0";
 const RECOVERY_BALLOT_HASH_DOMAIN: &[u8] = b"swarmcraft/recovery-ballot/v1\0";
 const RECOVERY_VOTE_SIGN_DOMAIN: &[u8] = b"swarmcraft/recovery-vote-sign/v1\0";
@@ -27,7 +29,7 @@ pub struct ArtifactRequirementV1 {
     /// Hash of the exact artifact bytes expected by the world configuration.
     pub artifact_hash: Hash32,
     pub side: ArtifactSideV1,
-    /// Optional non-canonical discovery hint such as a Modrinth project ID.
+    /// Optional canonical provider/source hint. When present it is signed and participates in compatibility identity.
     pub provider_hint: Option<String>,
 }
 
@@ -51,6 +53,7 @@ impl RuntimeCompatibilityManifestV1 {
     }
 
     pub fn fingerprint(&self) -> Result<Hash32, ProtocolError> {
+        self.validate_semantics()?;
         let mut normalized = self.clone();
         normalized.normalize();
         let bytes = postcard::to_allocvec(&normalized)?;
@@ -65,12 +68,14 @@ fn normalize_artifacts(values: &mut Vec<ArtifactRequirementV1>) {
             .then(a.version.cmp(&b.version))
             .then(a.artifact_hash.0.cmp(&b.artifact_hash.0))
             .then(a.side.cmp(&b.side))
+            .then(a.provider_hint.cmp(&b.provider_hint))
     });
     values.dedup_by(|a, b| {
         a.artifact_id == b.artifact_id
             && a.version == b.version
             && a.artifact_hash == b.artifact_hash
             && a.side == b.side
+            && a.provider_hint == b.provider_hint
     });
 }
 
@@ -166,6 +171,76 @@ impl WorldConfigV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipProposalV1 {
+    pub previous: MembershipRecordV1,
+    pub proposed: MembershipRecordV1,
+}
+
+impl MembershipProposalV1 {
+    pub fn validate_shape(&self) -> Result<bool, ProtocolError> {
+        Ok(self.previous.protocol_version == PROTOCOL_VERSION
+            && self.proposed.protocol_version == PROTOCOL_VERSION
+            && self.previous.world_id == self.proposed.world_id
+            && self.previous.epoch == self.proposed.epoch
+            && self.previous.sequence.checked_add(1) == Some(self.proposed.sequence)
+            && self.proposed.previous_membership_hash == Some(self.previous.record_hash()?)
+            && self.previous.authority_peer_id == self.proposed.authority_peer_id
+            && self.previous.authority_public_key == self.proposed.authority_public_key
+            && !self.proposed.members.is_empty())
+    }
+
+    pub fn proposal_hash(&self) -> Result<Hash32, ProtocolError> {
+        let bytes = postcard::to_allocvec(&(self.previous.record_hash()?, self.proposed.record_hash()?))?;
+        Ok(Hash32::from_domain_bytes(MEMBERSHIP_PROPOSAL_HASH_DOMAIN, &bytes))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipVoteV1 {
+    pub protocol_version: u16,
+    pub world_id: WorldId,
+    pub previous_membership_hash: Hash32,
+    pub proposed_membership_hash: Hash32,
+    pub proposed_sequence: u64,
+    pub voter_peer_id: PeerId,
+    pub voter_public_key: [u8; 32],
+    pub signature: Vec<u8>,
+}
+
+impl MembershipVoteV1 {
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, ProtocolError> {
+        let unsigned = (
+            self.protocol_version,
+            self.world_id,
+            self.previous_membership_hash,
+            self.proposed_membership_hash,
+            self.proposed_sequence,
+            self.voter_peer_id,
+            self.voter_public_key,
+        );
+        let encoded = postcard::to_allocvec(&unsigned)?;
+        let mut bytes = Vec::with_capacity(MEMBERSHIP_VOTE_SIGN_DOMAIN.len() + encoded.len());
+        bytes.extend_from_slice(MEMBERSHIP_VOTE_SIGN_DOMAIN);
+        bytes.extend_from_slice(&encoded);
+        Ok(bytes)
+    }
+
+    pub fn matches_proposal(&self, proposal: &MembershipProposalV1) -> Result<bool, ProtocolError> {
+        Ok(self.protocol_version == PROTOCOL_VERSION
+            && self.world_id == proposal.proposed.world_id
+            && self.previous_membership_hash == proposal.previous.record_hash()?
+            && self.proposed_membership_hash == proposal.proposed.record_hash()?
+            && self.proposed_sequence == proposal.proposed.sequence)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipCertificateV1 {
+    pub proposal: MembershipProposalV1,
+    pub votes: Vec<MembershipVoteV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryBallotV1 {
     pub protocol_version: u16,
     pub world_id: WorldId,
@@ -211,8 +286,8 @@ impl RecoveryBallotV1 {
 
     pub fn generation_is_well_formed(&self) -> bool {
         self.protocol_version == PROTOCOL_VERSION
-            && self.target_epoch == self.base_epoch.saturating_add(1)
-            && self.target_fencing_token == self.base_fencing_token.saturating_add(1)
+            && self.base_epoch.checked_add(1) == Some(self.target_epoch)
+            && self.base_fencing_token.checked_add(1) == Some(self.target_fencing_token)
             && self.round > 0
     }
 }

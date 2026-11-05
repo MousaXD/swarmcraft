@@ -1,15 +1,17 @@
 use crate::server_mods;
 use anyhow::{bail, Context, Result};
+#[cfg(windows)]
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs,
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
 };
 use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
 use swarm_protocol::{
-    AuthorityPolicyV1, MembershipPolicyV1, MembershipRecordV1, RuntimeCompatibilityManifestV1, WorldConfigV1,
-    WorldDescriptorV1, WorldId, WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION,
-    STORAGE_SCHEMA_VERSION,
+    validate_runtime_selection, AuthorityPolicyV1, MembershipPolicyV1, MembershipRecordV1,
+    RuntimeCompatibilityManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1, WorldPresentationV1,
+    WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 
@@ -44,6 +46,16 @@ struct ImportFaults {
     before_publication: bool,
 }
 
+struct MinecraftSourceQuiescence {
+    file: fs::File,
+}
+
+impl Drop for MinecraftSourceQuiescence {
+    fn drop(&mut self) {
+        release_minecraft_session_lock(&self.file);
+    }
+}
+
 /// Import Minecraft world DATA into SwarmCraft without importing machine-local
 /// runtime binaries or EULA state.
 ///
@@ -60,6 +72,15 @@ fn import_world_inner(
     faults: ImportFaults,
 ) -> Result<ImportWorldResult> {
     validate_request(request)?;
+    validate_runtime_selection(request.minecraft_version.trim(), request.fabric_loader_version.trim(), None)
+        .context("import compatibility is not supported by the shipped SwarmCraft Fabric adapter")?;
+
+    // Minecraft's session.lock is an exclusive process-held record lock. Hold a
+    // shared lock while reading: it conflicts with a running game's exclusive
+    // lock while still allowing this process to snapshot the lock file on
+    // Windows. The proof spans the complete hashed and committed snapshot.
+    let _source_quiescence = acquire_source_quiescence(&request.source)?;
+
     let identity = PeerIdentity::load_or_create(paths)?;
     let required_server_mods = server_mods::requirements_from_jars(&request.server_mod_jars)?;
     let compatibility = RuntimeCompatibilityManifestV1 {
@@ -179,8 +200,8 @@ fn stage_and_publish(
     sign_world_config(identity, &mut world_config)?;
     staged.save_world_config(&world_config)?;
 
-    // snapshot_directory streams the source into staged content-addressed blobs.
-    // It never needs to mutate or relocate the Minecraft save itself.
+    // `_source_quiescence` in import_world_inner remains alive throughout this
+    // call, so snapshot_directory cannot race a live Minecraft writer.
     let mut snapshot = staged.snapshot_directory(
         &request.source,
         SnapshotContext {
@@ -287,6 +308,165 @@ fn validate_request(request: &ImportWorldRequest) -> Result<()> {
     Ok(())
 }
 
+fn acquire_source_quiescence(source: &Path) -> Result<MinecraftSourceQuiescence> {
+    let lock_path = source.join("session.lock");
+    let metadata = fs::symlink_metadata(&lock_path).with_context(|| {
+        format!(
+            "Minecraft world import requires an existing session.lock so source quiescence can be proven: {}",
+            lock_path.display()
+        )
+    })?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        bail!("Minecraft session.lock must be a regular file: {}", lock_path.display());
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("cannot open Minecraft session.lock at {}", lock_path.display()))?;
+    try_minecraft_session_lock(&file, false).with_context(|| {
+        format!(
+            "Minecraft world is currently open or its session lock cannot be acquired; stop Minecraft before importing {}",
+            source.display()
+        )
+    })?;
+    Ok(MinecraftSourceQuiescence { file })
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn try_minecraft_session_lock(file: &fs::File, exclusive: bool) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    #[repr(C)]
+    struct Flock {
+        l_type: i16,
+        l_whence: i16,
+        l_start: i64,
+        l_len: i64,
+        l_pid: i32,
+    }
+
+    const F_SETLK: i32 = 6;
+    const F_RDLCK: i16 = 0;
+    const F_WRLCK: i16 = 1;
+    const SEEK_SET: i16 = 0;
+    extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+
+    let mut lock =
+        Flock { l_type: if exclusive { F_WRLCK } else { F_RDLCK }, l_whence: SEEK_SET, l_start: 0, l_len: 0, l_pid: 0 };
+    let result = unsafe { fcntl(file.as_raw_fd(), F_SETLK, &mut lock) };
+    if result == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn try_minecraft_session_lock(file: &fs::File, exclusive: bool) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    #[repr(C)]
+    struct Flock {
+        l_start: i64,
+        l_len: i64,
+        l_pid: i32,
+        l_type: i16,
+        l_whence: i16,
+    }
+
+    const F_SETLK: i32 = 8;
+    const F_RDLCK: i16 = 1;
+    const F_WRLCK: i16 = 3;
+    const SEEK_SET: i16 = 0;
+    extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+
+    let mut lock =
+        Flock { l_start: 0, l_len: 0, l_pid: 0, l_type: if exclusive { F_WRLCK } else { F_RDLCK }, l_whence: SEEK_SET };
+    let result = unsafe { fcntl(file.as_raw_fd(), F_SETLK, &mut lock) };
+    if result == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn try_minecraft_session_lock(file: &fs::File, exclusive: bool) -> std::io::Result<()> {
+    if exclusive {
+        FileExt::try_lock_exclusive(file)?;
+    } else {
+        FileExt::try_lock_shared(file)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
+fn try_minecraft_session_lock(_file: &fs::File, _exclusive: bool) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Minecraft-compatible session locking is not implemented on this platform",
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn release_minecraft_session_lock(file: &fs::File) {
+    use std::os::fd::AsRawFd;
+
+    #[repr(C)]
+    struct Flock {
+        l_type: i16,
+        l_whence: i16,
+        l_start: i64,
+        l_len: i64,
+        l_pid: i32,
+    }
+
+    const F_SETLK: i32 = 6;
+    const F_UNLCK: i16 = 2;
+    const SEEK_SET: i16 = 0;
+    extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+    let mut lock = Flock { l_type: F_UNLCK, l_whence: SEEK_SET, l_start: 0, l_len: 0, l_pid: 0 };
+    let _ = unsafe { fcntl(file.as_raw_fd(), F_SETLK, &mut lock) };
+}
+
+#[cfg(target_os = "macos")]
+fn release_minecraft_session_lock(file: &fs::File) {
+    use std::os::fd::AsRawFd;
+
+    #[repr(C)]
+    struct Flock {
+        l_start: i64,
+        l_len: i64,
+        l_pid: i32,
+        l_type: i16,
+        l_whence: i16,
+    }
+
+    const F_SETLK: i32 = 8;
+    const F_UNLCK: i16 = 2;
+    const SEEK_SET: i16 = 0;
+    extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+    let mut lock = Flock { l_start: 0, l_len: 0, l_pid: 0, l_type: F_UNLCK, l_whence: SEEK_SET };
+    let _ = unsafe { fcntl(file.as_raw_fd(), F_SETLK, &mut lock) };
+}
+
+#[cfg(windows)]
+fn release_minecraft_session_lock(file: &fs::File) {
+    let _ = FileExt::unlock(file);
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
+fn release_minecraft_session_lock(_file: &fs::File) {}
+
 fn local_member(identity: &PeerIdentity) -> WorldMemberV1 {
     WorldMemberV1 {
         peer_id: identity.peer_id(),
@@ -314,13 +494,18 @@ fn sync_directory(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{migration, runtime_installer::RuntimeInstaller};
-    use std::str::FromStr;
+    use std::{process::Command, str::FromStr, thread, time::Duration};
+
+    const LOCK_HELPER_PATH_ENV: &str = "SWARMCRAFT_TEST_IMPORT_LOCK_PATH";
+    const LOCK_HELPER_READY_ENV: &str = "SWARMCRAFT_TEST_IMPORT_LOCK_READY";
+    const LOCK_HELPER_RELEASE_ENV: &str = "SWARMCRAFT_TEST_IMPORT_LOCK_RELEASE";
 
     fn source_world(root: &Path) -> PathBuf {
         let source = root.join("source-world");
         fs::create_dir_all(source.join("region")).unwrap();
         fs::write(source.join("level.dat"), b"existing-level-data\n").unwrap();
         fs::write(source.join("region/r.0.0.mca"), b"existing-region-data\n").unwrap();
+        fs::write(source.join("session.lock"), b"swarmcraft-import-test\n").unwrap();
         source
     }
 
@@ -356,7 +541,7 @@ mod tests {
         reopened.verify_snapshot(&latest).unwrap();
         swarm_core::verify_snapshot_signature(&latest).unwrap();
         assert_eq!(latest.snapshot_number, 1);
-        assert_eq!(latest.entries.len(), 2);
+        assert_eq!(latest.entries.len(), 3);
 
         let restored = temp.path().join("restored");
         reopened.restore_snapshot(&latest, &restored).unwrap();
@@ -387,6 +572,18 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_bridge_tuple_is_rejected_before_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let source = source_world(temp.path());
+        let mut unsupported = request(source);
+        unsupported.minecraft_version = "26.2".into();
+        let error = import_world(&paths, &unsupported).unwrap_err();
+        assert!(error.to_string().contains("shipped SwarmCraft Fabric adapter"));
+        assert!(Storage::open(paths.root.clone()).unwrap().list_worlds().unwrap().is_empty());
+    }
+
+    #[test]
     fn import_requires_explicit_server_mod_compatibility_statement() {
         let temp = tempfile::tempdir().unwrap();
         let paths = DataPaths::from_root(temp.path().join("data"));
@@ -395,6 +592,57 @@ mod tests {
         ambiguous.confirm_no_server_mods = false;
         let error = import_world(&paths, &ambiguous).unwrap_err();
         assert!(error.to_string().contains("server-mod compatibility is unknown"));
+    }
+
+    #[test]
+    fn minecraft_session_lock_helper_process() {
+        let Ok(lock_path) = std::env::var(LOCK_HELPER_PATH_ENV) else {
+            return;
+        };
+        let ready = PathBuf::from(std::env::var(LOCK_HELPER_READY_ENV).unwrap());
+        let release = PathBuf::from(std::env::var(LOCK_HELPER_RELEASE_ENV).unwrap());
+        let file = OpenOptions::new().read(true).write(true).open(lock_path).unwrap();
+        try_minecraft_session_lock(&file, true).unwrap();
+        fs::write(&ready, b"locked\n").unwrap();
+        while !release.exists() {
+            thread::sleep(Duration::from_millis(10));
+        }
+        release_minecraft_session_lock(&file);
+    }
+
+    #[test]
+    fn import_refuses_source_while_minecraft_session_lock_is_held() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let source = source_world(temp.path());
+        let ready = temp.path().join("lock-ready");
+        let release = temp.path().join("lock-release");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("minecraft_session_lock_helper_process")
+            .arg("--nocapture")
+            .env(LOCK_HELPER_PATH_ENV, source.join("session.lock"))
+            .env(LOCK_HELPER_READY_ENV, &ready)
+            .env(LOCK_HELPER_RELEASE_ENV, &release)
+            .spawn()
+            .unwrap();
+
+        for _ in 0..500 {
+            if ready.exists() {
+                break;
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("session-lock helper exited before acquiring the lock: {status}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "session-lock helper never acquired the lock");
+
+        let error = import_world(&paths, &request(source.clone())).unwrap_err();
+        assert!(error.to_string().contains("currently open") || error.to_string().contains("session lock"));
+
+        fs::write(&release, b"release\n").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(import_world(&paths, &request(source)).is_ok());
     }
 
     #[test]

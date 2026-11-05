@@ -9,7 +9,7 @@ use tokio::time::{timeout_at, Instant};
 const PROBE_TARGET_ENV: &str = "SWARMCRAFT_PROBE_TARGET";
 const PROBE_SECONDS_ENV: &str = "SWARMCRAFT_PROBE_SECONDS";
 
-fn signed_probe_hello() -> PeerHelloV1 {
+fn signed_probe_hello() -> (PeerHelloV1, SigningKey) {
     let key = SigningKey::generate(&mut OsRng);
     let public_key = key.verifying_key().to_bytes();
     let mut hello = PeerHelloV1 {
@@ -21,12 +21,13 @@ fn signed_probe_hello() -> PeerHelloV1 {
         signature: Vec::new(),
     };
     hello.signature = key.sign(&hello.signing_bytes().expect("probe hello should encode")).to_bytes().to_vec();
-    hello
+    (hello, key)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut node = SwarmNode::new(generate_transport_key(), signed_probe_hello())?;
+    let (hello, signing_key) = signed_probe_hello();
+    let mut node = SwarmNode::new(generate_transport_key(), hello, signing_key)?;
     node.listen("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
 
     if let Err(error) = node.listen("/ip6/::/udp/0/quic-v1".parse()?) {

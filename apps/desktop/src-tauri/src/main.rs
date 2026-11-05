@@ -23,7 +23,7 @@ use launcher_commands::{
 };
 use modrinth_commands::{modrinth_download, modrinth_project, modrinth_resolve, modrinth_search, modrinth_versions};
 use runtime::RuntimeProcesses;
-use runtime_commands::{ensure_daemon_running, start_daemon, stop_daemon, stop_host};
+use runtime_commands::{ensure_daemon_running, runtime_diagnostics, start_daemon, stop_daemon, stop_host};
 use tauri::{AppHandle, State};
 use tauri_plugin_shell::ShellExt;
 use transfer_commands::{manual_transfer_step, transfer_supported};
@@ -507,6 +507,7 @@ fn main() {
             runtime_repair,
             runtime_verify,
             runtime_launch,
+            runtime_diagnostics,
             connectivity_diagnostics,
             canonicalize_modpack,
             create_canonical_world,

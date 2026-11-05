@@ -5,11 +5,16 @@ pub use base::*;
 mod canonical_modpack;
 pub use canonical_modpack::*;
 
+mod runtime_support;
+pub use runtime_support::*;
+
 mod v2;
 pub use v2::*;
 
 mod discovery;
 pub use discovery::*;
+
+mod semantics;
 
 use serde::{Deserialize, Serialize};
 

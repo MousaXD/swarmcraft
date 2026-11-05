@@ -73,6 +73,23 @@ pub struct AuthorityGeneration {
     pub fencing_token: u64,
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum GenerationError {
+    #[error("authority epoch exhausted at u64::MAX")]
+    EpochExhausted,
+    #[error("authority fencing token exhausted at u64::MAX")]
+    FencingTokenExhausted,
+}
+
+impl AuthorityGeneration {
+    /// Return the unique next authority generation, failing closed on counter exhaustion.
+    pub fn checked_next(self) -> Result<Self, GenerationError> {
+        let epoch = self.epoch.checked_add(1).ok_or(GenerationError::EpochExhausted)?;
+        let fencing_token = self.fencing_token.checked_add(1).ok_or(GenerationError::FencingTokenExhausted)?;
+        Ok(Self { epoch, fencing_token })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservedLease {
     pub generation: AuthorityGeneration,
@@ -226,6 +243,17 @@ mod tests {
     }
 
     #[test]
+    fn authority_generation_fails_closed_at_counter_exhaustion() {
+        let max = AuthorityGeneration { epoch: u64::MAX - 1, fencing_token: u64::MAX - 1 }.checked_next().unwrap();
+        assert_eq!(max, AuthorityGeneration { epoch: u64::MAX, fencing_token: u64::MAX });
+        assert_eq!(max.checked_next(), Err(GenerationError::EpochExhausted));
+        assert_eq!(
+            AuthorityGeneration { epoch: 7, fencing_token: u64::MAX }.checked_next(),
+            Err(GenerationError::FencingTokenExhausted)
+        );
+    }
+
+    #[test]
     fn lease_uses_monotonic_deadline_and_rejects_stale_generation() {
         let mut tracker = LeaseTracker::default();
         let generation = AuthorityGeneration { epoch: 4, fencing_token: 9 };
@@ -352,8 +380,8 @@ mod tests {
                             .find(|(_, candidate)| candidate.peer_id == winner)
                             .map(|(index, _)| *index)
                             .unwrap();
-                        self.generation.epoch = self.generation.epoch.saturating_add(1);
-                        self.generation.fencing_token = self.generation.fencing_token.saturating_add(1);
+                        self.generation =
+                            self.generation.checked_next().expect("chaos simulation exhausted authority generation");
                         for peer in &mut self.peers {
                             peer.candidate.accepted_epoch = self.generation.epoch;
                         }

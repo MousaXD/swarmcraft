@@ -57,7 +57,7 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum InviteCommand {
-    /// Create an expiring signed invitation for an existing world.
+    /// Create a reusable bearer invitation, valid until expiry while this peer remains current authority.
     Create {
         world: String,
         #[arg(long, default_value_t = 60)]
@@ -123,7 +123,7 @@ enum WorldCommand {
     },
     /// Request a safe stop. Success is reported only after the Fabric save barrier, final checkpoint and durable sleep record complete.
     Stop { world: String },
-    /// Request a safe wake of a sleeping world. Multi-member worlds remain blocked until a quorum transition exists.
+    /// Request a safe wake of a sleeping world. Multi-member wake requires a sleep-bound surviving quorum transition.
     Wake { world: String },
     /// Request a final checkpoint and prepare a manual authority transfer.
     TransferPrepare { world: String, to: String },
@@ -781,7 +781,7 @@ fn handle_invite(command: InviteCommand, paths: &DataPaths, storage: &Storage) -
                 bail!("only the current authority may create join invitations");
             }
             let bootstrap_addrs = invite::resolve_bootstrap_addrs(paths, bootstrap_addrs)?;
-            let lifetime_ms = expires_minutes.saturating_mul(60_000);
+            let expires_unix_ms = invite::expiry_from_minutes(invite::unix_time_ms()?, expires_minutes)?;
             let mut invite = InviteV1 {
                 protocol_version: PROTOCOL_VERSION,
                 world_id: world,
@@ -790,7 +790,7 @@ fn handle_invite(command: InviteCommand, paths: &DataPaths, storage: &Storage) -
                 inviter_peer_id: identity.peer_id(),
                 inviter_public_key: identity.public_key(),
                 bootstrap_addrs,
-                expires_unix_ms: invite::unix_time_ms()?.saturating_add(lifetime_ms),
+                expires_unix_ms,
                 nonce: random_nonce(),
                 signature: Vec::new(),
             };

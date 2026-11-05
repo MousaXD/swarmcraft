@@ -1,6 +1,6 @@
 //! Deterministic failure simulation for authority safety invariants.
 
-use crate::FencingState;
+use crate::{AuthorityGeneration, FencingState};
 use std::collections::{BTreeMap, BTreeSet};
 use swarm_protocol::{Hash32, PeerId};
 use thiserror::Error;
@@ -43,6 +43,8 @@ pub enum SimError {
     RecoveryNotReady,
     #[error("stale authority generation")]
     StaleGeneration,
+    #[error("authority generation counter exhausted")]
+    GenerationExhausted,
 }
 
 #[derive(Debug, Clone)]
@@ -221,10 +223,11 @@ impl FailureSimulator {
             return Err(SimError::NoQuorum);
         }
         if !recovery.epoch_committed {
-            self.epoch = self.epoch.saturating_add(1);
-            self.fencing
-                .advance(self.fencing.accepted_token().saturating_add(1))
-                .expect("simulator only increments fencing tokens");
+            let next = AuthorityGeneration { epoch: self.epoch, fencing_token: self.fencing.accepted_token() }
+                .checked_next()
+                .map_err(|_| SimError::GenerationExhausted)?;
+            self.epoch = next.epoch;
+            self.fencing.advance(next.fencing_token).map_err(|_| SimError::GenerationExhausted)?;
             recovery.epoch_committed = true;
             recovery.epoch_acks.insert(recovery.candidate);
             self.state = SimWorldState::Recovering { candidate: recovery.candidate };
@@ -294,10 +297,11 @@ impl FailureSimulator {
         {
             return Err(SimError::InvalidReplica);
         }
-        self.epoch = self.epoch.saturating_add(1);
-        self.fencing
-            .advance(self.fencing.accepted_token().saturating_add(1))
-            .expect("simulator only increments fencing tokens");
+        let next = AuthorityGeneration { epoch: self.epoch, fencing_token: self.fencing.accepted_token() }
+            .checked_next()
+            .map_err(|_| SimError::GenerationExhausted)?;
+        self.epoch = next.epoch;
+        self.fencing.advance(next.fencing_token).map_err(|_| SimError::GenerationExhausted)?;
         self.state = SimWorldState::Active { authority: candidate };
         self.lease_expires_ms = now_ms.saturating_add(self.lease_duration_ms);
         Ok(())
@@ -350,6 +354,11 @@ impl FailureSimulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn force_generation(sim: &mut FailureSimulator, generation: AuthorityGeneration) {
+        sim.epoch = generation.epoch;
+        sim.fencing = FencingState::new(generation.fencing_token);
+    }
 
     fn peer(id: u8, hash: Hash32) -> SimPeer {
         SimPeer {
@@ -467,5 +476,18 @@ mod tests {
         sim.wake(PeerId([2; 32]), 50_000).unwrap();
         assert_eq!(sim.authority(), Some(PeerId([2; 32])));
         assert_eq!(sim.epoch(), 2);
+    }
+
+    #[test]
+    fn recovery_generation_exhaustion_fails_closed_in_legacy_simulator() {
+        let hash = Hash32([0x44; 32]);
+        let mut sim = FailureSimulator::new(peer(1, hash), [peer(2, hash), peer(3, hash)], 1_000);
+        force_generation(&mut sim, AuthorityGeneration { epoch: u64::MAX, fencing_token: u64::MAX });
+        sim.set_online(PeerId([1; 32]), false).unwrap();
+        sim.begin_recovery(PeerId([2; 32]), 1_000, 2).unwrap();
+        sim.acknowledge_reservation(PeerId([3; 32])).unwrap();
+        assert_eq!(sim.commit_recovery_epoch(), Err(SimError::GenerationExhausted));
+        assert_eq!(sim.epoch(), u64::MAX);
+        assert_eq!(sim.fencing_token(), u64::MAX);
     }
 }

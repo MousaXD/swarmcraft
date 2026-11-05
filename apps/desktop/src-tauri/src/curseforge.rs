@@ -11,6 +11,8 @@ use std::{
 };
 use tokio::io::AsyncWriteExt;
 
+use super::launcher_commands::resolve_provider_staging_session;
+
 const API_BASE: &str = "https://api.curseforge.com";
 const API_KEY_ENV: &str = "SWARMCRAFT_CURSEFORGE_API_KEY";
 const MINECRAFT_GAME_ID: u64 = 432;
@@ -20,6 +22,15 @@ const MAX_PAGE_SIZE: u64 = 50;
 const MAX_SEARCH_INDEX: u64 = 10_000;
 const MAX_DEPENDENCY_PACKAGES: usize = 128;
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
+const MAX_METADATA_HEADERS: usize = 128;
+const MAX_METADATA_HEADER_BYTES: usize = 64 * 1024;
+const MAX_METADATA_HEADER_VALUE_BYTES: usize = 16 * 1024;
+const MAX_METADATA_DEPTH: usize = 32;
+const MAX_METADATA_ARRAY_ITEMS: usize = 2048;
+const MAX_METADATA_OBJECT_ENTRIES: usize = 512;
+const MAX_METADATA_STRING_BYTES: usize = 64 * 1024;
+const MAX_METADATA_NODES: usize = 50_000;
 
 #[derive(Debug, Clone)]
 struct ProviderError {
@@ -97,34 +108,57 @@ impl Target {
 }
 
 struct CurseForgeClient {
-    http: reqwest::Client,
+    api_http: reqwest::Client,
+    artifact_http: reqwest::Client,
     api_key: Option<String>,
 }
 
 impl CurseForgeClient {
     fn from_environment() -> Result<Self, ProviderError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(120))
+        let common = || {
+            reqwest::Client::builder()
+                .https_only(true)
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(120))
+                .user_agent(concat!("SwarmCraft/", env!("CARGO_PKG_VERSION"), " CurseForgeProvider"))
+        };
+        let api_http = common()
             .redirect(Policy::custom(|attempt| {
                 if attempt.previous().len() >= 5 {
-                    attempt.error("too many redirects")
-                } else if attempt.url().scheme() != "https" {
-                    attempt.error("CurseForge download redirected away from HTTPS")
-                } else {
+                    attempt.error("too many CurseForge API redirects")
+                } else if is_curseforge_api_url(attempt.url()) {
                     attempt.follow()
+                } else {
+                    attempt.error("authenticated CurseForge API redirect left api.curseforge.com")
                 }
             }))
-            .user_agent(concat!("SwarmCraft/", env!("CARGO_PKG_VERSION"), " CurseForgeProvider"))
             .build()
             .map_err(|error| {
                 ProviderError::new(
                     "unavailable",
                     "provider_initialization_failed",
-                    format!("Could not initialize CurseForge HTTP client: {error}"),
+                    format!("Could not initialize authenticated CurseForge HTTP client: {error}"),
                 )
             })?;
-        Ok(Self { http, api_key: normalize_api_key(env::var(API_KEY_ENV).ok()) })
+        let artifact_http = common()
+            .redirect(Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    attempt.error("too many CurseForge artifact redirects")
+                } else if is_curseforge_artifact_url(attempt.url()) {
+                    attempt.follow()
+                } else {
+                    attempt.error("CurseForge artifact redirect left the Forge CDN trust boundary")
+                }
+            }))
+            .build()
+            .map_err(|error| {
+                ProviderError::new(
+                    "unavailable",
+                    "provider_initialization_failed",
+                    format!("Could not initialize CurseForge artifact HTTP client: {error}"),
+                )
+            })?;
+        Ok(Self { api_http, artifact_http, api_key: normalize_api_key(env::var(API_KEY_ENV).ok()) })
     }
 
     fn require_api_key(&self) -> Result<&str, ProviderError> {
@@ -145,7 +179,7 @@ impl CurseForgeClient {
     ) -> Result<Value, ProviderError> {
         let key = self.require_api_key()?;
         let response = self
-            .http
+            .api_http
             .get(format!("{API_BASE}{path}"))
             .header("Accept", "application/json")
             .header("x-api-key", key)
@@ -159,7 +193,7 @@ impl CurseForgeClient {
     async fn post_json(&self, path: &str, body: Value, missing: MissingResource) -> Result<Value, ProviderError> {
         let key = self.require_api_key()?;
         let response = self
-            .http
+            .api_http
             .post(format!("{API_BASE}{path}"))
             .header("Accept", "application/json")
             .header("x-api-key", key)
@@ -228,7 +262,7 @@ impl CurseForgeClient {
         let file_id = required_u64(file, "id")?;
         let key = self.require_api_key()?;
         let response = self
-            .http
+            .api_http
             .get(format!("{API_BASE}/v1/mods/{project_id}/files/{file_id}/download-url"))
             .header("Accept", "application/json")
             .header("x-api-key", key)
@@ -247,7 +281,24 @@ impl CurseForgeClient {
 }
 
 fn normalize_api_key(raw: Option<String>) -> Option<String> {
-    raw.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+    raw.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
+}
+
+fn is_curseforge_api_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && url.host_str().is_some_and(|host| host.eq_ignore_ascii_case("api.curseforge.com"))
+}
+
+fn is_curseforge_artifact_url(url: &reqwest::Url) -> bool {
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && (host == "forgecdn.net" || host.ends_with(".forgecdn.net"))
 }
 
 fn map_request_error(error: reqwest::Error) -> ProviderError {
@@ -270,7 +321,81 @@ fn map_download_error(error: reqwest::Error) -> ProviderError {
     }
 }
 
-async fn parse_json_response(response: reqwest::Response, missing: MissingResource) -> Result<Value, ProviderError> {
+fn metadata_limit_error(message: impl Into<String>) -> ProviderError {
+    ProviderError::new("error", "response_too_large", message)
+}
+
+fn validate_metadata_headers(headers: &reqwest::header::HeaderMap) -> Result<(), ProviderError> {
+    if headers.len() > MAX_METADATA_HEADERS {
+        return Err(metadata_limit_error("CurseForge returned too many metadata response headers"));
+    }
+    let mut total = 0usize;
+    for (name, value) in headers {
+        total = total.saturating_add(name.as_str().len()).saturating_add(value.as_bytes().len());
+        if value.as_bytes().len() > MAX_METADATA_HEADER_VALUE_BYTES || total > MAX_METADATA_HEADER_BYTES {
+            return Err(metadata_limit_error("CurseForge metadata response headers exceeded their byte budget"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_metadata_value(value: &Value) -> Result<(), ProviderError> {
+    fn visit(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), ProviderError> {
+        if depth > MAX_METADATA_DEPTH {
+            return Err(metadata_limit_error("CurseForge metadata nesting is too deep"));
+        }
+        *nodes = nodes.saturating_add(1);
+        if *nodes > MAX_METADATA_NODES {
+            return Err(metadata_limit_error("CurseForge metadata contains too many values"));
+        }
+        match value {
+            Value::String(text) if text.len() > MAX_METADATA_STRING_BYTES => {
+                Err(metadata_limit_error("CurseForge metadata string is too large"))
+            }
+            Value::Array(items) => {
+                if items.len() > MAX_METADATA_ARRAY_ITEMS {
+                    return Err(metadata_limit_error("CurseForge metadata array is too large"));
+                }
+                for item in items {
+                    visit(item, depth + 1, nodes)?;
+                }
+                Ok(())
+            }
+            Value::Object(entries) => {
+                if entries.len() > MAX_METADATA_OBJECT_ENTRIES {
+                    return Err(metadata_limit_error("CurseForge metadata object has too many fields"));
+                }
+                for (key, item) in entries {
+                    if key.len() > 256 {
+                        return Err(metadata_limit_error("CurseForge metadata key is too large"));
+                    }
+                    visit(item, depth + 1, nodes)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+    let mut nodes = 0usize;
+    visit(value, 0, &mut nodes)
+}
+
+fn parse_metadata_bytes(bytes: &[u8]) -> Result<Value, ProviderError> {
+    if bytes.len() > MAX_METADATA_BYTES {
+        return Err(metadata_limit_error(format!(
+            "CurseForge metadata exceeded the {MAX_METADATA_BYTES}-byte response bound"
+        )));
+    }
+    let value = serde_json::from_slice::<Value>(bytes).map_err(|_| malformed_response())?;
+    validate_metadata_value(&value)?;
+    Ok(value)
+}
+
+async fn parse_json_response(
+    mut response: reqwest::Response,
+    missing: MissingResource,
+) -> Result<Value, ProviderError> {
+    validate_metadata_headers(response.headers())?;
     if !response.status().is_success() {
         let retry_after = response
             .headers()
@@ -279,7 +404,19 @@ async fn parse_json_response(response: reqwest::Response, missing: MissingResour
             .and_then(|value| value.parse::<u64>().ok());
         return Err(map_http_status(response.status().as_u16(), missing, retry_after));
     }
-    response.json::<Value>().await.map_err(|_| malformed_response())
+    if response.content_length().is_some_and(|length| length > MAX_METADATA_BYTES as u64) {
+        return Err(metadata_limit_error("CurseForge metadata Content-Length exceeded the response bound"));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(map_request_error)? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_METADATA_BYTES {
+            return Err(metadata_limit_error(format!(
+                "CurseForge metadata exceeded the {MAX_METADATA_BYTES}-byte response bound"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    parse_metadata_bytes(&bytes)
 }
 
 fn map_http_status(status: u16, missing: MissingResource, retry_after: Option<u64>) -> ProviderError {
@@ -311,6 +448,11 @@ fn map_http_status(status: u16, missing: MissingResource, retry_after: Option<u6
         500..=599 => {
             ProviderError::new("unavailable", "provider_unavailable", format!("CurseForge returned HTTP {status}"))
         }
+        300..=399 => ProviderError::new(
+            "error",
+            "redirect_rejected",
+            "CurseForge redirect was rejected by the provider origin policy",
+        ),
         _ => ProviderError::new("error", "provider_request_failed", format!("CurseForge returned HTTP {status}")),
     }
 }
@@ -425,6 +567,7 @@ fn map_file(file: &Value, environment: &str) -> Result<Value, ProviderError> {
     let project_id = required_u64(file, "modId")?;
     let display_name = required_string(file, "displayName")?;
     let file_name = required_string(file, "fileName")?;
+    safe_jar_filename(file_name)?;
     let release = release_type(file.get("releaseType").and_then(Value::as_u64).unwrap_or_default());
     let file_size = file.get("fileLength").and_then(Value::as_u64).unwrap_or_default();
     let minecraft_versions = minecraft_versions(file);
@@ -670,15 +813,44 @@ async fn resolve_dependency_graph(
     }))
 }
 
+fn safe_jar_filename(value: &str) -> Result<(), ProviderError> {
+    let path = Path::new(value);
+    let stem = value.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    let windows_reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+    let portable = value.len() > 4
+        && value == value.trim()
+        && value.len() <= 255
+        && !path.is_absolute()
+        && path.components().count() == 1
+        && !value.contains(['/', '\\', ':', '\0'])
+        && value != "."
+        && value != ".."
+        && !value.ends_with(['.', ' '])
+        && !windows_reserved
+        && value.to_ascii_lowercase().ends_with(".jar");
+    if portable {
+        Ok(())
+    } else {
+        Err(ProviderError::new(
+            "download_failed",
+            "unsafe_artifact_filename",
+            format!("CurseForge returned an unsafe JAR filename: {value}"),
+        ))
+    }
+}
+
 fn validate_download_url(url: &str) -> Result<String, ProviderError> {
     let parsed = reqwest::Url::parse(url).map_err(|_| {
         ProviderError::new("download_failed", "untrusted_download_url", "CurseForge returned an invalid artifact URL")
     })?;
-    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+    if !is_curseforge_artifact_url(&parsed) {
         return Err(ProviderError::new(
             "download_failed",
             "untrusted_download_url",
-            "CurseForge automatic downloads must use provider-returned HTTPS URLs",
+            "CurseForge automatic downloads must stay on the HTTPS forgecdn.net artifact boundary",
         ));
     }
     Ok(parsed.to_string())
@@ -688,6 +860,7 @@ fn manual_artifact_required(file: &Value, project: &Value) -> Result<Value, Prov
     let project_id = required_u64(file, "modId")?;
     let file_id = required_u64(file, "id")?;
     let file_name = required_string(file, "fileName")?;
+    safe_jar_filename(file_name)?;
     let display_name = required_string(file, "displayName")?;
     let website_url = project.get("links").and_then(|links| links.get("websiteUrl")).cloned().unwrap_or(Value::Null);
     let project_name = nonempty_string(project.get("name")).map(ToOwned::to_owned);
@@ -889,25 +1062,7 @@ async fn download_artifact(
 ) -> Result<Value, ProviderError> {
     let file_id = required_u64(file, "id")?;
     let file_name = required_string(file, "fileName")?;
-    if !file_name.to_ascii_lowercase().ends_with(".jar") {
-        return Err(ProviderError::new(
-            "download_failed",
-            "unsupported_artifact_type",
-            "SwarmCraft will not automatically execute or install non-JAR CurseForge artifacts",
-        ));
-    }
-    if destination
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| !extension.eq_ignore_ascii_case("jar"))
-        .unwrap_or(true)
-    {
-        return Err(ProviderError::new(
-            "download_failed",
-            "invalid_destination",
-            "CurseForge mod artifacts must be published to a .jar destination",
-        ));
-    }
+    safe_jar_filename(file_name)?;
     if tokio::fs::try_exists(&destination).await.unwrap_or(false) {
         return Err(ProviderError::new(
             "download_failed",
@@ -920,8 +1075,13 @@ async fn download_artifact(
     let Some(url) = client.download_url(file).await? else {
         return manual_artifact_required(file, project);
     };
-    let mut response =
-        client.http.get(url).header("Accept", "application/octet-stream").send().await.map_err(map_download_error)?;
+    let mut response = client
+        .artifact_http
+        .get(url)
+        .header("Accept", "application/octet-stream")
+        .send()
+        .await
+        .map_err(map_download_error)?;
     if matches!(response.status(), StatusCode::FORBIDDEN | StatusCode::NOT_FOUND) {
         return manual_artifact_required(file, project);
     }
@@ -1167,21 +1327,19 @@ pub async fn curseforge_resolve(file_id: u64, minecraft: String, loader: String,
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn curseforge_download(file_id: u64, destination: String) -> Value {
+pub async fn curseforge_download(file_id: u64, staging_session: String) -> Value {
     match async {
-        let destination = destination.trim();
-        if destination.is_empty() {
-            return Err(ProviderError::new(
-                "invalid_request",
-                "destination_required",
-                "Artifact destination is required",
-            ));
-        }
+        let staging = resolve_provider_staging_session(&staging_session)
+            .map_err(|message| ProviderError::new("invalid_request", "invalid_staging_session", message))?;
         let client = CurseForgeClient::from_environment()?;
         let file = client.fetch_file(file_id).await?;
         let project_id = required_u64(&file, "modId")?;
+        let file_name = required_string(&file, "fileName")?;
+        safe_jar_filename(file_name)?;
         let project = client.fetch_project(project_id).await?;
-        download_artifact(&client, &file, &project, PathBuf::from(destination)).await
+        let destination =
+            staging.join("curseforge").join(project_id.to_string()).join(file_id.to_string()).join(file_name);
+        download_artifact(&client, &file, &project, destination).await
     }
     .await
     {
@@ -1417,5 +1575,260 @@ mod tests {
         latest_high["id"] = json!(21);
         let selected = select_best_file(vec![latest_low, older, latest_high]).unwrap();
         assert_eq!(selected["id"], 21);
+    }
+}
+
+#[cfg(test)]
+mod agent5_security_tests {
+    use super::*;
+
+    #[test]
+    fn provider_filename_traversal_matrix_fails_closed() {
+        for invalid in [
+            "../evil.jar",
+            "..\\evil.jar",
+            "/tmp/evil.jar",
+            "C:\\tmp\\evil.jar",
+            "\\\\server\\share\\evil.jar",
+            ".jar",
+            "CON.jar",
+            "NUL.jar",
+            "evil.jar.",
+            "evil.jar ",
+            "dir/evil.jar",
+            "dir\\evil.jar",
+        ] {
+            assert!(safe_jar_filename(invalid).is_err(), "accepted {invalid}");
+        }
+        assert!(safe_jar_filename("safe-mod_1.2.3.jar").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod agent5_http_security_tests {
+    use super::*;
+
+    #[test]
+    fn authenticated_api_and_artifact_origins_are_disjoint() {
+        let api = reqwest::Url::parse("https://api.curseforge.com/v1/mods/1").unwrap();
+        let second_origin = reqwest::Url::parse("https://attacker.invalid/steal").unwrap();
+        let forge = reqwest::Url::parse("https://edge.forgecdn.net/files/example.jar").unwrap();
+        let private = reqwest::Url::parse("https://127.0.0.1/example.jar").unwrap();
+        assert!(is_curseforge_api_url(&api));
+        assert!(!is_curseforge_api_url(&second_origin));
+        assert!(is_curseforge_artifact_url(&forge));
+        assert!(!is_curseforge_artifact_url(&second_origin));
+        assert!(!is_curseforge_artifact_url(&private));
+    }
+
+    #[test]
+    fn provider_metadata_bytes_and_shape_are_bounded() {
+        assert_eq!(parse_metadata_bytes(&vec![b' '; MAX_METADATA_BYTES + 1]).unwrap_err().code, "response_too_large");
+        let huge = json!({"text": "x".repeat(MAX_METADATA_STRING_BYTES + 1)});
+        assert_eq!(validate_metadata_value(&huge).unwrap_err().code, "response_too_large");
+    }
+
+    #[test]
+    fn api_key_control_characters_are_rejected() {
+        assert_eq!(normalize_api_key(Some("secret\nheader".into())), None);
+        assert_eq!(normalize_api_key(Some(" secret ".into())), Some("secret".into()));
+    }
+}
+
+#[cfg(test)]
+mod agent5_final_acceptance_tests {
+    use super::*;
+    use reqwest::redirect::Policy;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{Arc, Mutex},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    type Capture = Arc<Mutex<Option<String>>>;
+
+    fn spawn_http_once(response: String) -> (String, Capture, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let capture = Arc::new(Mutex::new(None));
+        let capture_thread = Arc::clone(&capture);
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                        let mut buffer = [0u8; 16 * 1024];
+                        let read = stream.read(&mut buffer).unwrap_or(0);
+                        *capture_thread.lock().unwrap() = Some(String::from_utf8_lossy(&buffer[..read]).into_owned());
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.flush();
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (format!("http://{address}"), capture, handle)
+    }
+
+    fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
+        left.scheme() == right.scheme()
+            && left.host_str() == right.host_str()
+            && left.port_or_known_default() == right.port_or_known_default()
+    }
+
+    fn exact_origin_policy(origin: reqwest::Url) -> Policy {
+        Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("too many test redirects")
+            } else if same_origin(&origin, attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error("cross-origin redirect rejected")
+            }
+        })
+    }
+
+    fn approved_origins_policy(origins: Vec<reqwest::Url>) -> Policy {
+        Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("too many test redirects")
+            } else if origins.iter().any(|origin| same_origin(origin, attempt.url())) {
+                attempt.follow()
+            } else {
+                attempt.error("artifact redirect left approved origins")
+            }
+        })
+    }
+
+    fn redirect(location: &str) -> String {
+        format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    }
+
+    fn ok() -> String {
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_owned()
+    }
+
+    #[test]
+    fn authenticated_two_origin_redirect_never_reaches_attacker() {
+        tauri::async_runtime::block_on(async {
+            let (attacker, attacker_capture, attacker_thread) = spawn_http_once(ok());
+            let (api, api_capture, api_thread) = spawn_http_once(redirect(&format!("{attacker}/steal")));
+            let origin = reqwest::Url::parse(&api).unwrap();
+            let client = reqwest::Client::builder()
+                .redirect(exact_origin_policy(origin))
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap();
+            let error =
+                client.get(format!("{api}/v1/mods")).header("x-api-key", "agent5-secret").send().await.unwrap_err();
+            assert!(error.is_redirect());
+            api_thread.join().unwrap();
+            attacker_thread.join().unwrap();
+            let first = api_capture.lock().unwrap().clone().unwrap().to_ascii_lowercase();
+            assert!(first.contains("x-api-key: agent5-secret"));
+            assert!(attacker_capture.lock().unwrap().is_none(), "credential-bearing redirect reached attacker origin");
+
+            let public_api = reqwest::Url::parse("https://api.curseforge.com/v1/mods/1").unwrap();
+            let attacker_url = reqwest::Url::parse("https://attacker.invalid/steal").unwrap();
+            assert!(is_curseforge_api_url(&public_api));
+            assert!(!is_curseforge_api_url(&attacker_url));
+        });
+    }
+
+    #[test]
+    fn artifact_redirect_policy_accepts_approved_origin_and_rejects_unapproved_origin_without_api_key() {
+        tauri::async_runtime::block_on(async {
+            let (approved, approved_capture, approved_thread) = spawn_http_once(ok());
+            let (source, source_capture, source_thread) =
+                spawn_http_once(redirect(&format!("{approved}/artifact.jar")));
+            let source_origin = reqwest::Url::parse(&source).unwrap();
+            let approved_origin = reqwest::Url::parse(&approved).unwrap();
+            let client = reqwest::Client::builder()
+                .redirect(approved_origins_policy(vec![source_origin, approved_origin]))
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap();
+            let response = client.get(format!("{source}/artifact.jar")).send().await.unwrap();
+            assert!(response.status().is_success());
+            source_thread.join().unwrap();
+            approved_thread.join().unwrap();
+            for captured in [source_capture, approved_capture] {
+                let request = captured.lock().unwrap().clone().unwrap().to_ascii_lowercase();
+                assert!(!request.contains("x-api-key"), "artifact request carried API credential");
+            }
+
+            let (unapproved, unapproved_capture, unapproved_thread) = spawn_http_once(ok());
+            let (source, _source_capture, source_thread) =
+                spawn_http_once(redirect(&format!("{unapproved}/artifact.jar")));
+            let source_origin = reqwest::Url::parse(&source).unwrap();
+            let client = reqwest::Client::builder()
+                .redirect(approved_origins_policy(vec![source_origin]))
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap();
+            let error = client.get(format!("{source}/artifact.jar")).send().await.unwrap_err();
+            assert!(error.is_redirect());
+            source_thread.join().unwrap();
+            unapproved_thread.join().unwrap();
+            assert!(unapproved_capture.lock().unwrap().is_none());
+
+            assert!(is_curseforge_artifact_url(
+                &reqwest::Url::parse("https://mediafilez.forgecdn.net/files/1/2/example.jar").unwrap()
+            ));
+            assert!(!is_curseforge_artifact_url(
+                &reqwest::Url::parse("https://evilforgecdn.net/files/example.jar").unwrap()
+            ));
+        });
+    }
+
+    #[test]
+    fn curseforge_metadata_bounds_precede_json_parse_and_cover_headers_and_cardinality() {
+        let oversized_invalid_json = vec![b'{'; MAX_METADATA_BYTES + 1];
+        assert_eq!(parse_metadata_bytes(&oversized_invalid_json).unwrap_err().code, "response_too_large");
+
+        let too_many = Value::Array(vec![Value::Null; MAX_METADATA_ARRAY_ITEMS + 1]);
+        assert_eq!(validate_metadata_value(&too_many).unwrap_err().code, "response_too_large");
+
+        let mut object = serde_json::Map::new();
+        for index in 0..=MAX_METADATA_OBJECT_ENTRIES {
+            object.insert(format!("field-{index}"), Value::Null);
+        }
+        assert_eq!(validate_metadata_value(&Value::Object(object)).unwrap_err().code, "response_too_large");
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        for index in 0..=MAX_METADATA_HEADERS {
+            let name = reqwest::header::HeaderName::from_bytes(format!("x-agent5-{index}").as_bytes()).unwrap();
+            headers.insert(name, reqwest::header::HeaderValue::from_static("x"));
+        }
+        assert_eq!(validate_metadata_headers(&headers).unwrap_err().code, "response_too_large");
+    }
+
+    #[test]
+    fn api_key_has_no_child_process_or_artifact_request_path() {
+        let desktop = include_str!("curseforge.rs");
+        let runtime = include_str!("../../../../crates/swarm-cli/src/provider_runtime.rs");
+        let command_new = ["Command", "::new("].concat();
+        let process_command = ["std::process", "::Command"].concat();
+        for source in [desktop, runtime] {
+            assert!(!source.contains(&command_new), "provider credential path must not spawn child processes");
+            assert!(!source.contains(&process_command), "provider credential path must stay in-process");
+        }
+        let desktop_artifact =
+            desktop.split("async fn download_artifact").nth(1).unwrap().split("#[tauri::command]").next().unwrap();
+        assert!(!desktop_artifact.contains("x-api-key"));
+        let runtime_artifact =
+            runtime.split("fn download_curseforge_artifact").nth(1).unwrap().split("fn safe_filename").next().unwrap();
+        assert!(!runtime_artifact.contains("x-api-key"));
     }
 }

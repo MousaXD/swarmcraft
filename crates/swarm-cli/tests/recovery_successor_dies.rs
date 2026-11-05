@@ -3,16 +3,22 @@
 use std::{
     fs,
     net::UdpSocket,
+    os::unix::fs::PermissionsExt,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
-use swarm_cli::authority_permit::permit_path;
-use swarm_core::{create_world_genesis, DataPaths, PeerIdentity};
+use swarm_cli::{
+    authority_permit::permit_path,
+    host_readiness,
+    migration::{save_runtime_config, RuntimeLaunchConfig},
+};
+use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
 use swarm_network::load_or_create_transport_key;
 use swarm_protocol::{
-    EpochMode, EpochRecordV1, MembershipRecordV1, SnapshotManifestV1, WorldDescriptorV1, WorldId, WorldMemberV1,
-    PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    AuthorityPolicyV1, EpochMode, EpochRecordV1, MembershipPolicyV1, MembershipRecordV1,
+    RuntimeCompatibilityManifestV1, SnapshotManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1,
+    WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 use tempfile::TempDir;
@@ -31,6 +37,7 @@ struct PeerFixture {
 
 struct CanonicalReplicaSeed<'a> {
     metadata: &'a WorldMetadataV1,
+    config: &'a WorldConfigV1,
     descriptor: &'a WorldDescriptorV1,
     membership: &'a MembershipRecordV1,
     epoch: &'a EpochRecordV1,
@@ -147,9 +154,17 @@ fn member(identity: &PeerIdentity) -> WorldMemberV1 {
 
 fn install_canonical_replica(peer: &PeerFixture, seed: &CanonicalReplicaSeed<'_>) {
     peer.storage.create_world(seed.metadata).unwrap();
-    peer.storage.save_world_descriptor(seed.descriptor).unwrap();
     peer.storage.save_membership_record(seed.membership).unwrap();
+    peer.storage.save_world_config(seed.config).unwrap();
+    peer.storage.save_world_descriptor(seed.descriptor).unwrap();
     peer.storage.save_epoch_record(seed.epoch).unwrap();
+    let mut promoted_membership = seed.membership.clone();
+    promoted_membership.epoch = seed.epoch.epoch_number;
+    promoted_membership.sequence = seed.membership.sequence.checked_add(1).unwrap();
+    promoted_membership.previous_membership_hash = Some(seed.membership.record_hash().unwrap());
+    promoted_membership.signature.clear();
+    seed.authority.sign_membership(&mut promoted_membership).unwrap();
+    peer.storage.save_membership_record(&promoted_membership).unwrap();
     let mut local = peer
         .storage
         .snapshot_directory(
@@ -168,6 +183,56 @@ fn install_canonical_replica(peer: &PeerFixture, seed: &CanonicalReplicaSeed<'_>
     seed.authority.sign_snapshot(&mut local).unwrap();
     assert_eq!(local.manifest_hash().unwrap(), seed.manifest.manifest_hash().unwrap());
     peer.storage.commit_snapshot(&local).unwrap();
+    configure_host_capability(peer, seed.metadata.world_id);
+}
+
+fn configure_host_capability(peer: &PeerFixture, world: WorldId) {
+    let directory = peer.paths.root.join("recovery-runtime-fixture");
+    fs::create_dir_all(&directory).unwrap();
+    let java = directory.join("mock-java");
+    let server = directory.join("server.jar");
+    let fabric = directory.join("swarmcraft-fabric.jar");
+    fs::write(
+        &java,
+        r#"#!/usr/bin/env python3
+import os
+import socket
+import sys
+
+if "-version" in sys.argv:
+    print('openjdk version "25.0.1"', file=sys.stderr)
+    raise SystemExit(0)
+
+host = os.environ["SWARMCRAFT_IPC_HOST"]
+port = int(os.environ["SWARMCRAFT_IPC_PORT"])
+token = os.environ["SWARMCRAFT_IPC_TOKEN"]
+world = os.environ["SWARMCRAFT_WORLD_DIR"]
+fingerprint = os.environ["SWARMCRAFT_COMPAT_FINGERPRINT"]
+
+def encoded(value):
+    return value.encode("utf-8").hex()
+
+with socket.create_connection((host, port), timeout=5) as connection:
+    writer = connection.makefile("w", encoding="utf-8", newline="\n")
+    writer.write("AUTH\t" + token + "\n")
+    writer.write("WORLD_INFO\t" + encoded("26.1.2") + "\t" + encoded("0.19.3") + "\t" + encoded(world) + "\t" + fingerprint + "\t25\n")
+    writer.flush()
+    reader = connection.makefile("r", encoding="utf-8")
+    while reader.readline():
+        pass
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&java).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&java, permissions).unwrap();
+    fs::write(&server, b"mock").unwrap();
+    fs::write(&fabric, b"mock").unwrap();
+    let config =
+        RuntimeLaunchConfig { java, server_jar: server, mod_jar: fabric, accept_eula: true, game_endpoint: None };
+    save_runtime_config(&peer.paths, world, &config).unwrap();
+    let fingerprint = peer.storage.load_world_descriptor(world).unwrap().compatibility_fingerprint;
+    host_readiness::record_runtime_verified(&peer.paths, world, &config, fingerprint).unwrap();
 }
 
 fn permit_generation(peer: &PeerFixture, world: WorldId) -> Option<(u64, u64, u64)> {
@@ -177,7 +242,7 @@ fn permit_generation(peer: &PeerFixture, world: WorldId) -> Option<(u64, u64, u6
 }
 
 #[test]
-fn newer_successor_recovers_after_first_successor_dies_with_durable_votes() {
+fn formed_recovery_certificate_locks_value_until_certified_candidate_resumes() {
     let a = peer_fixture();
     let b = peer_fixture();
     let c = peer_fixture();
@@ -185,9 +250,24 @@ fn newer_successor_recovers_after_first_successor_dies_with_durable_votes() {
     let e = peer_fixture();
     let peers = [&a, &b, &c, &d, &e];
 
-    let (world, genesis) =
-        create_world_genesis(&a.identity, "26.1.2".into(), "0.19.3".into(), b"five-daemon-recovery-successor-dies")
-            .unwrap();
+    let compatibility = RuntimeCompatibilityManifestV1 {
+        minecraft_version: "26.1.2".into(),
+        loader_id: "fabric".into(),
+        loader_version: "0.19.3".into(),
+        swarmcraft_protocol_version: PROTOCOL_VERSION,
+        fabric_adapter_version: env!("CARGO_PKG_VERSION").into(),
+        required_server_mods: Vec::new(),
+        required_client_mods: Vec::new(),
+        datapacks: Vec::new(),
+    };
+    let fingerprint = compatibility.fingerprint().unwrap();
+    let (world, genesis) = create_world_genesis_with_fingerprint(
+        &a.identity,
+        compatibility.minecraft_version.clone(),
+        compatibility.loader_version.clone(),
+        fingerprint,
+    )
+    .unwrap();
     let metadata = WorldMetadataV1 {
         storage_schema_version: STORAGE_SCHEMA_VERSION,
         display_name: "five-daemon-recovery-successor-dies".into(),
@@ -202,11 +282,32 @@ fn newer_successor_recovers_after_first_successor_dies_with_durable_votes() {
         preferred_replication_factor: 5,
     };
     descriptor.normalize();
+    let mut config = WorldConfigV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        sequence: 1,
+        previous_config_hash: None,
+        compatibility,
+        visibility: WorldVisibilityV1::Private,
+        authority_policy: AuthorityPolicyV1 { allow_solo_advancement: false, preferred_replication_factor: 5 },
+        membership_policy: MembershipPolicyV1::InviteOnly,
+        presentation: WorldPresentationV1 {
+            name: "five-daemon-recovery-successor-dies".into(),
+            description: String::new(),
+            tags: Vec::new(),
+            icon_hash: None,
+            approximate_region: None,
+        },
+        authority_peer_id: a.identity.peer_id(),
+        authority_public_key: a.identity.public_key(),
+        signature: Vec::new(),
+    };
+    sign_world_config(&a.identity, &mut config).unwrap();
     let mut membership = MembershipRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
-        epoch: 1,
-        sequence: 1,
+        epoch: 0,
+        sequence: 0,
         previous_membership_hash: None,
         members: descriptor.members.clone(),
         authority_peer_id: a.identity.peer_id(),
@@ -251,6 +352,7 @@ fn newer_successor_recovers_after_first_successor_dies_with_durable_votes() {
     epoch.signature = a.identity.sign(&epoch.signing_bytes().unwrap());
     let seed = CanonicalReplicaSeed {
         metadata: &metadata,
+        config: &config,
         descriptor: &descriptor,
         membership: &membership,
         epoch: &epoch,
@@ -300,55 +402,73 @@ fn newer_successor_recovers_after_first_successor_dies_with_durable_votes() {
         .filter(|(index, _)| *index != first_index)
         .map(|(_, peer)| *peer)
         .collect::<Vec<_>>();
-    let second_successor_id = remaining.iter().map(|peer| peer.identity.peer_id()).min().unwrap();
 
-    wait_until("newer recovery round completing after first successor dies", Duration::from_secs(60), || {
+    // The round-one certificate is already a chosen value for target generation 2.
+    // While that certified candidate is down, a later proposer may raise the round,
+    // but it must not switch the candidate and commit a conflicting same-generation
+    // Recovery epoch. Safety deliberately wins over same-generation failover here.
+    thread::sleep(Duration::from_secs(20));
+    for peer in &remaining {
+        let record = peer.storage.load_epoch_record(world).unwrap();
+        assert_eq!(record.epoch_number, 1);
+        assert_eq!(record.fencing_token, 1);
+        assert_eq!(record.authority_peer_id, a.identity.peer_id());
+        assert!(permit_generation(peer, world).is_none());
+        if let Ok(certificate) = peer.storage.load_recovery_certificate(world) {
+            assert_eq!(certificate.ballot.candidate_peer_id, first_successor_id);
+        }
+    }
+
+    // Resume the candidate that actually owns the chosen certificate. Its durable
+    // certificate must be sufficient to finish the exact value it previously won,
+    // and every live voter must converge on that one Recovery epoch.
+    let remaining_addrs = remaining.iter().map(|peer| transport_address(peer)).collect::<Vec<_>>();
+    let mut restarted_first = spawn_daemon(first_successor, &remaining_addrs, false);
+    wait_until_with_daemon(
+        "certified first successor resuming chosen recovery value",
+        Duration::from_secs(40),
+        &mut restarted_first,
+        || {
+            first_successor.storage.load_epoch_record(world).is_ok_and(|record| {
+                record.epoch_number == 2
+                    && record.fencing_token == 2
+                    && record.mode == EpochMode::Recovery
+                    && record.authority_peer_id == first_successor_id
+            })
+        },
+    );
+    wait_until("remaining voters adopting the chosen recovery value", Duration::from_secs(40), || {
         remaining.iter().all(|peer| {
             peer.storage.load_epoch_record(world).is_ok_and(|record| {
                 record.epoch_number == 2
                     && record.fencing_token == 2
                     && record.mode == EpochMode::Recovery
-                    && record.authority_peer_id == second_successor_id
+                    && record.authority_peer_id == first_successor_id
             })
         })
     });
-
-    let second_successor = *remaining.iter().find(|peer| peer.identity.peer_id() == second_successor_id).unwrap();
-    let certificate = second_successor.storage.load_recovery_certificate(world).unwrap();
-    assert!(certificate.ballot.round >= 2);
-    assert_eq!(certificate.ballot.candidate_peer_id, second_successor_id);
-    wait_until("second successor live permit", Duration::from_secs(30), || {
-        permit_generation(second_successor, world)
+    wait_until("resumed certified successor live permit", Duration::from_secs(30), || {
+        permit_generation(first_successor, world)
             .is_some_and(|(epoch, fencing, heartbeat)| epoch == 2 && fencing == 2 && heartbeat >= 2)
     });
+    for peer in &remaining {
+        assert!(permit_generation(peer, world).is_none());
+    }
 
-    let authority_addr = transport_address(second_successor);
+    let authority_addr = transport_address(first_successor);
     let authority_bootstrap = vec![authority_addr];
-    let mut restarted_first = spawn_daemon(first_successor, &authority_bootstrap, false);
-    wait_until_with_daemon(
-        "stale first successor adopting newer certified recovery",
-        Duration::from_secs(40),
-        &mut restarted_first,
-        || {
-            first_successor.storage.load_epoch_record(world).is_ok_and(|record| {
-                record.epoch_number == 2 && record.fencing_token == 2 && record.authority_peer_id == second_successor_id
-            })
-        },
-    );
-    assert!(permit_generation(first_successor, world).is_none());
-    restarted_first.stop();
-
     let mut restarted_a = spawn_daemon(&a, &authority_bootstrap, false);
     wait_until_with_daemon(
-        "original stale authority adopting accepted recovery",
+        "original stale authority adopting the chosen recovery value",
         Duration::from_secs(40),
         &mut restarted_a,
         || {
             a.storage.load_epoch_record(world).is_ok_and(|record| {
-                record.epoch_number == 2 && record.fencing_token == 2 && record.authority_peer_id == second_successor_id
+                record.epoch_number == 2 && record.fencing_token == 2 && record.authority_peer_id == first_successor_id
             })
         },
     );
     assert!(permit_generation(&a, world).is_none());
     restarted_a.stop();
+    restarted_first.stop();
 }

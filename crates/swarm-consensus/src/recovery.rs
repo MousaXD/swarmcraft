@@ -21,6 +21,8 @@ pub enum RecoveryBallotError {
     ConflictingSameRound { round: u64 },
     #[error("new recovery round changed its canonical base")]
     CanonicalBaseChanged,
+    #[error("new recovery round changed the previously accepted candidate value")]
+    AcceptedValueChanged,
 }
 
 /// Apply the Paxos-style promise rule used for crash-recovery ballots.
@@ -50,6 +52,11 @@ pub fn evaluate_recovery_ballot(
     }
     if !same_canonical_base(existing, proposed) {
         return Err(RecoveryBallotError::CanonicalBaseChanged);
+    }
+    if existing.candidate_peer_id != proposed.candidate_peer_id
+        || existing.candidate_public_key != proposed.candidate_public_key
+    {
+        return Err(RecoveryBallotError::AcceptedValueChanged);
     }
     Ok(RecoveryBallotDecision::Accept)
 }
@@ -144,10 +151,12 @@ mod tests {
     }
 
     #[test]
-    fn successor_can_supersede_abandoned_candidate_with_higher_round() {
+    fn higher_round_preserves_the_previously_accepted_candidate_value() {
         let bob = ballot(2, 1);
         let charlie = ballot(3, 2);
-        assert_eq!(evaluate_recovery_ballot(Some(&bob), &charlie), Ok(RecoveryBallotDecision::Accept));
+        assert_eq!(evaluate_recovery_ballot(Some(&bob), &charlie), Err(RecoveryBallotError::AcceptedValueChanged));
+        let bob_round_two = ballot(2, 2);
+        assert_eq!(evaluate_recovery_ballot(Some(&bob), &bob_round_two), Ok(RecoveryBallotDecision::Accept));
     }
 
     #[test]
@@ -201,10 +210,12 @@ mod tests {
             assert!(evaluate_recovery_ballot(promises[index].as_ref(), &bob).is_ok());
             promises[index] = Some(bob.clone());
         }
-        for index in [1usize, 2] {
-            assert!(evaluate_recovery_ballot(promises[index].as_ref(), &charlie).is_ok());
-            promises[index] = Some(charlie.clone());
-        }
-        assert!(evaluate_recovery_ballot(promises[1].as_ref(), &bob).is_err());
+        assert_eq!(
+            evaluate_recovery_ballot(promises[1].as_ref(), &charlie),
+            Err(RecoveryBallotError::AcceptedValueChanged)
+        );
+        assert!(evaluate_recovery_ballot(promises[2].as_ref(), &charlie).is_ok());
+        promises[2] = Some(charlie.clone());
+        assert!(evaluate_recovery_ballot(promises[1].as_ref(), &bob).is_ok());
     }
 }
