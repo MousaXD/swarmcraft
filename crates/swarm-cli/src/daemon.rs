@@ -35,7 +35,7 @@ use swarm_protocol::{
     RecoveryCertificateV1, RecoveryVoteV1, SleepRecordV1, SnapshotManifestV1, TransferPhase, WorldDescriptorV1,
     WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
-use swarm_storage::{DurableMembershipPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage};
+use swarm_storage::{DurableMembershipPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage, StorageError};
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
@@ -347,10 +347,19 @@ fn maintain_authority_leases(
             }
             continue;
         }
-        if let Ok(promise) = storage.load_membership_promise(world) {
+        let membership_promise = match load_optional_membership_promise(storage, world) {
+            Ok(promise) => promise,
+            Err(error) => {
+                warn!(%world, %error, "corrupt or unreadable membership prepare blocks authority");
+                clear_permit(paths, world)?;
+                runtime.permit_heartbeats.remove(&world);
+                continue;
+            }
+        };
+        if let Some(promise) = membership_promise.as_ref() {
             clear_permit(paths, world)?;
             runtime.permit_heartbeats.remove(&world);
-            maintain_membership_transition(storage, identity, node, outbound, runtime, &promise)?;
+            maintain_membership_transition(storage, identity, node, outbound, runtime, promise)?;
             continue;
         }
 
@@ -1475,7 +1484,7 @@ fn handle_request(
                 )?;
                 return Ok(());
             }
-            if let Ok(promise) = storage.load_membership_promise(world) {
+            if let Some(promise) = load_optional_membership_promise(storage, world)? {
                 let proposed_member = promise
                     .proposal
                     .proposed
@@ -1567,7 +1576,7 @@ fn handle_request(
             if leaving.banned || leaving.public_key != request.leaving_public_key {
                 return Err(anyhow!("leaving peer key does not match current membership"));
             }
-            if let Ok(promise) = storage.load_membership_promise(request.world_id) {
+            if let Some(promise) = load_optional_membership_promise(storage, request.world_id)? {
                 let absent =
                     promise.proposal.proposed.members.iter().all(|member| member.peer_id != request.leaving_peer_id);
                 if promise.proposal.previous.record_hash()? == current.record_hash()? && absent {
@@ -2269,7 +2278,7 @@ fn handle_response(
         ) => {
             let vote = *vote;
             verify_membership_vote_signature(&vote)?;
-            let Ok(promise) = storage.load_membership_promise(world) else {
+            let Some(promise) = load_optional_membership_promise(storage, world)? else {
                 // A certificate may have committed and cleared the durable prepare
                 // while this response was in flight. Late votes are then stale, not fatal.
                 return Ok(());
@@ -2337,8 +2346,19 @@ fn verify_membership_vote_signature(vote: &MembershipVoteV1) -> Result<()> {
     Ok(())
 }
 
+fn load_optional_membership_promise(
+    storage: &Storage,
+    world: WorldId,
+) -> Result<Option<DurableMembershipPromiseV1>> {
+    match storage.load_membership_promise(world) {
+        Ok(promise) => Ok(Some(promise)),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn ensure_no_membership_prepare(storage: &Storage, world: WorldId) -> Result<()> {
-    if storage.load_membership_promise(world).is_ok() {
+    if load_optional_membership_promise(storage, world)?.is_some() {
         return Err(anyhow!("authority/recovery transition is fenced by a durable membership prepare"));
     }
     Ok(())
@@ -2416,7 +2436,7 @@ fn validate_membership_certificate_for_local(
     } else {
         validate_membership_proposal_for_local(storage, identity, proposal)?;
     }
-    if let Ok(promise) = storage.load_membership_promise(world) {
+    if let Some(promise) = load_optional_membership_promise(storage, world)? {
         if promise.proposal.proposal_hash()? != proposal.proposal_hash()? {
             return Err(anyhow!("membership certificate conflicts with this peer's durable prepare"));
         }
