@@ -2346,10 +2346,7 @@ fn verify_membership_vote_signature(vote: &MembershipVoteV1) -> Result<()> {
     Ok(())
 }
 
-fn load_optional_membership_promise(
-    storage: &Storage,
-    world: WorldId,
-) -> Result<Option<DurableMembershipPromiseV1>> {
+fn load_optional_membership_promise(storage: &Storage, world: WorldId) -> Result<Option<DurableMembershipPromiseV1>> {
     match storage.load_membership_promise(world) {
         Ok(promise) => Ok(Some(promise)),
         Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
