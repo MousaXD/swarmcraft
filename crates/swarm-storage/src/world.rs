@@ -2,6 +2,7 @@ use crate::{
     transaction::{durable_atomic_write, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
+use std::path::PathBuf;
 use swarm_protocol::{JoinRequestV1, LeaveRequestV1, MembershipRecordV1, WorldDescriptorV1, WorldId};
 
 impl Storage {
@@ -196,8 +197,8 @@ fn remove_protocol_file(storage: &Storage, world: WorldId, name: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use crate::WorldMetadataV1;
+    use std::fs;
     use swarm_protocol::{
         EpochMode, EpochRecordV1, Hash32, PeerId, WorldGenesisV1, WorldMemberV1, PROTOCOL_VERSION,
         STORAGE_SCHEMA_VERSION,
