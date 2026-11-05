@@ -1,8 +1,8 @@
 use crate::{
-    transaction::{durable_atomic_write, durable_remove},
+    transaction::{canonical_file_exists, durable_atomic_write, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 use swarm_protocol::{JoinRequestV1, LeaveRequestV1, MembershipRecordV1, WorldDescriptorV1, WorldId};
 
 impl Storage {
@@ -21,7 +21,7 @@ impl Storage {
 
     pub fn load_world_descriptor(&self, world: WorldId) -> Result<WorldDescriptorV1, StorageError> {
         let path = self.world_protocol_path(world, "descriptor.json");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let descriptor: WorldDescriptorV1 = serde_json::from_slice(&bytes)?;
         if descriptor.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -34,7 +34,7 @@ impl Storage {
         let _guard = self.lock_world_transaction(record.world_id)?;
         record.validate_semantics()?;
         let membership_path = self.world_protocol_path(record.world_id, "membership.postcard");
-        if membership_path.exists() {
+        if canonical_file_exists(&membership_path)? {
             let current = self.load_membership_record(record.world_id)?;
             if record == &current {
                 return Ok(());
@@ -47,7 +47,12 @@ impl Storage {
             {
                 return Err(StorageError::WorldMetadataMismatch);
             }
-            if let Ok(epoch) = self.load_epoch_record(record.world_id) {
+            let accepted_epoch = match self.load_epoch_record(record.world_id) {
+                Ok(epoch) => Some(epoch),
+                Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(epoch) = accepted_epoch.as_ref() {
                 if record.epoch != epoch.epoch_number
                     || record.authority_peer_id != epoch.authority_peer_id
                     || record.authority_public_key != epoch.authority_public_key
@@ -65,7 +70,12 @@ impl Storage {
             if !certified_bootstrap && (record.sequence != 0 || record.previous_membership_hash.is_some()) {
                 return Err(StorageError::WorldMetadataMismatch);
             }
-            if let Ok(epoch) = self.load_epoch_record(record.world_id) {
+            let accepted_epoch = match self.load_epoch_record(record.world_id) {
+                Ok(epoch) => Some(epoch),
+                Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(epoch) = accepted_epoch.as_ref() {
                 if record.epoch != epoch.epoch_number
                     || record.authority_peer_id != epoch.authority_peer_id
                     || record.authority_public_key != epoch.authority_public_key
@@ -83,7 +93,9 @@ impl Storage {
     fn certified_membership_bootstrap(&self, record: &MembershipRecordV1) -> Result<bool, StorageError> {
         let certificate_path = self.world_protocol_path(record.world_id, "membership-certificate.postcard");
         let pending_join_path = self.world_protocol_path(record.world_id, "pending-join.postcard");
-        if !certificate_path.exists() || !pending_join_path.exists() {
+        let certificate_present = canonical_file_exists(&certificate_path)?;
+        let pending_join_present = canonical_file_exists(&pending_join_path)?;
+        if !certificate_present || !pending_join_present {
             return Ok(false);
         }
 
@@ -105,7 +117,7 @@ impl Storage {
 
     pub fn load_membership_record(&self, world: WorldId) -> Result<MembershipRecordV1, StorageError> {
         let path = self.world_protocol_path(world, "membership.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let record: MembershipRecordV1 = postcard::from_bytes(&bytes)?;
         if record.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -123,7 +135,7 @@ impl Storage {
 
     pub fn load_pending_join(&self, world: WorldId) -> Result<JoinRequestV1, StorageError> {
         let path = self.world_protocol_path(world, "pending-join.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let request: JoinRequestV1 = postcard::from_bytes(&bytes)?;
         if request.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -146,7 +158,7 @@ impl Storage {
 
     pub fn load_pending_leave(&self, world: WorldId) -> Result<LeaveRequestV1, StorageError> {
         let path = self.world_protocol_path(world, "pending-leave.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let request: LeaveRequestV1 = postcard::from_bytes(&bytes)?;
         if request.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -184,14 +196,11 @@ fn remove_protocol_file(storage: &Storage, world: WorldId, name: &str) -> Result
     durable_remove(&storage.world_protocol_path(world, name)).map(|_| ())
 }
 
-fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
-    StorageError::Io { path: path.into(), source }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::WorldMetadataV1;
+    use std::fs;
     use swarm_protocol::{
         EpochMode, EpochRecordV1, Hash32, PeerId, WorldGenesisV1, WorldMemberV1, PROTOCOL_VERSION,
         STORAGE_SCHEMA_VERSION,
@@ -268,6 +277,42 @@ mod tests {
         store.save_world_descriptor(&descriptor).unwrap();
         let loaded = store.load_world_descriptor(world).unwrap();
         assert_eq!(loaded.members[0].peer_id, PeerId([2; 32]));
+    }
+
+    #[test]
+    fn corrupt_epoch_cannot_be_skipped_when_extending_membership() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = create_test_world(&store);
+        let initial = membership(world, 1, 0, 0, None);
+        store.save_membership_record(&initial).unwrap();
+        let epoch_path = store.world_dir(world).join("metadata/epoch.postcard");
+        let corrupted = b"corrupted accepted authority";
+        fs::write(&epoch_path, corrupted).unwrap();
+
+        let next = membership(world, 1, 0, 1, Some(initial.record_hash().unwrap()));
+        assert!(store.save_membership_record(&next).is_err());
+        assert_eq!(fs::read(&epoch_path).unwrap(), corrupted);
+        assert_eq!(store.load_membership_record(world).unwrap(), initial);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_membership_record_cannot_be_reinitialized() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = create_test_world(&store);
+        let path = store.world_dir(world).join("metadata/membership.postcard");
+        let missing = path.with_extension("missing");
+        symlink(&missing, &path).unwrap();
+
+        assert!(matches!(
+            store.save_membership_record(&membership(world, 1, 0, 0, None)),
+            Err(StorageError::SymlinkUnsupported(actual)) if actual == path
+        ));
+        assert_eq!(fs::read_link(&path).unwrap(), missing);
     }
 
     #[test]
