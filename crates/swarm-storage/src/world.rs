@@ -1,8 +1,8 @@
 use crate::{
-    transaction::{durable_atomic_write, durable_remove},
+    transaction::{durable_atomic_write, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 use swarm_protocol::{JoinRequestV1, LeaveRequestV1, MembershipRecordV1, WorldDescriptorV1, WorldId};
 
 impl Storage {
@@ -21,7 +21,7 @@ impl Storage {
 
     pub fn load_world_descriptor(&self, world: WorldId) -> Result<WorldDescriptorV1, StorageError> {
         let path = self.world_protocol_path(world, "descriptor.json");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let descriptor: WorldDescriptorV1 = serde_json::from_slice(&bytes)?;
         if descriptor.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -115,7 +115,7 @@ impl Storage {
 
     pub fn load_membership_record(&self, world: WorldId) -> Result<MembershipRecordV1, StorageError> {
         let path = self.world_protocol_path(world, "membership.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let record: MembershipRecordV1 = postcard::from_bytes(&bytes)?;
         if record.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -133,7 +133,7 @@ impl Storage {
 
     pub fn load_pending_join(&self, world: WorldId) -> Result<JoinRequestV1, StorageError> {
         let path = self.world_protocol_path(world, "pending-join.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let request: JoinRequestV1 = postcard::from_bytes(&bytes)?;
         if request.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -156,7 +156,7 @@ impl Storage {
 
     pub fn load_pending_leave(&self, world: WorldId) -> Result<LeaveRequestV1, StorageError> {
         let path = self.world_protocol_path(world, "pending-leave.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let request: LeaveRequestV1 = postcard::from_bytes(&bytes)?;
         if request.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -201,6 +201,7 @@ fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use crate::WorldMetadataV1;
     use swarm_protocol::{
         EpochMode, EpochRecordV1, Hash32, PeerId, WorldGenesisV1, WorldMemberV1, PROTOCOL_VERSION,
