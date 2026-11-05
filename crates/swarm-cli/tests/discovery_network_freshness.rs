@@ -501,12 +501,31 @@ async fn duplicate_dials_and_peer_disconnect_keep_surviving_provider_usable() {
         client.dial_peer(surviving_peer).unwrap();
     }
 
+    // Initial concurrent dials can both lose a startup race on slower
+    // runners. DiscoveryNode consumes low-level dial failures internally, so
+    // a test that only waits for surfaced events can strand a disconnected
+    // provider. Re-drive unauthenticated peers within the existing bounded
+    // authentication window, preserving the strict two-provider assertion.
     timeout(Duration::from_secs(10), async {
+        let mut redrive = tokio::time::interval(Duration::from_millis(250));
+        redrive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             if client.is_authenticated(&closing_peer) && client.is_authenticated(&surviving_peer) {
                 break;
             }
-            client.next_event().await.expect("client discovery event while authenticating providers");
+            tokio::select! {
+                _ = redrive.tick() => {
+                    if !client.is_authenticated(&closing_peer) {
+                        client.dial_peer(closing_peer).expect("redial closing provider");
+                    }
+                    if !client.is_authenticated(&surviving_peer) {
+                        client.dial_peer(surviving_peer).expect("redial surviving provider");
+                    }
+                }
+                event = client.next_event() => {
+                    event.expect("client discovery event while authenticating providers");
+                }
+            }
         }
     })
     .await
