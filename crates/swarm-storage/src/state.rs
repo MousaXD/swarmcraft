@@ -37,7 +37,15 @@ impl Storage {
             });
         }
 
-        if let Ok(existing) = self.load_recovery_promise(ballot.world_id) {
+        // A missing promise is the only safe bootstrap case. A present but
+        // corrupt/unreadable promise may contain a higher-round durable vote;
+        // replacing it would discard the recovery fencing guarantee.
+        let existing = match self.load_recovery_promise(ballot.world_id) {
+            Ok(promise) => Some(promise),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(existing) = existing.as_ref() {
             if ballot.round < existing.ballot.round {
                 return Ok(RecoveryPromiseResult::Rejected { highest_round: existing.ballot.round });
             }
@@ -379,6 +387,26 @@ mod tests {
             store.promise_recovery_ballot(&bob_round_two, &vote(&bob_round_two, 6)).unwrap(),
             RecoveryPromiseResult::Accepted
         );
+    }
+
+    #[test]
+    fn corrupt_recovery_promise_cannot_be_overwritten_by_a_new_ballot() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, world) = test_world();
+        let store = Storage::open(temp.path()).unwrap();
+        let original = ballot(world, 2, 1);
+        assert_eq!(
+            store.promise_recovery_ballot(&original, &vote(&original, 6)).unwrap(),
+            RecoveryPromiseResult::Accepted
+        );
+
+        let promise_path = store.control_path_v2(world, "recovery-promise.postcard");
+        let corrupted = b"invalid durable recovery promise";
+        fs::write(&promise_path, corrupted).unwrap();
+
+        let competing = ballot(world, 3, 2);
+        assert!(store.promise_recovery_ballot(&competing, &vote(&competing, 6)).is_err());
+        assert_eq!(fs::read(&promise_path).unwrap(), corrupted);
     }
 
     #[test]
