@@ -41,9 +41,7 @@ impl Storage {
 /// symbolic link, directory, or filesystem error to masquerade as absence.
 pub(crate) fn canonical_file_exists(path: &Path) -> Result<bool, StorageError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            Err(StorageError::SymlinkUnsupported(path.to_path_buf()))
-        }
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StorageError::SymlinkUnsupported(path.to_path_buf())),
         Ok(metadata) if metadata.is_file() => Ok(true),
         Ok(_) => Err(StorageError::WorldMetadataMismatch),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
