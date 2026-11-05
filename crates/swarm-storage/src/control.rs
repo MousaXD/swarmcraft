@@ -1,8 +1,8 @@
 use crate::{
-    transaction::{durable_atomic_write, durable_remove},
+    transaction::{durable_atomic_write, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 use swarm_protocol::{AuthorityLeaseGrantV1, AuthorityTransferV1, EpochRecordV1, SleepRecordV1, WorldId};
 
 impl Storage {
@@ -30,7 +30,7 @@ impl Storage {
 
     pub fn load_epoch_record(&self, world: WorldId) -> Result<EpochRecordV1, StorageError> {
         let path = self.control_path(world, "epoch.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let record: EpochRecordV1 = postcard::from_bytes(&bytes)?;
         if record.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -76,7 +76,7 @@ impl Storage {
 
     pub fn load_recovery_reservation(&self, world: WorldId) -> Result<AuthorityLeaseGrantV1, StorageError> {
         let path = self.control_path(world, "recovery-reservation.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let reservation: AuthorityLeaseGrantV1 = postcard::from_bytes(&bytes)?;
         if reservation.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -100,7 +100,7 @@ impl Storage {
 
     pub fn load_transfer_record(&self, world: WorldId) -> Result<AuthorityTransferV1, StorageError> {
         let path = self.control_path(world, "transfer.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let record: AuthorityTransferV1 = postcard::from_bytes(&bytes)?;
         if record.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -118,7 +118,7 @@ impl Storage {
 
     pub fn load_sleep_record(&self, world: WorldId) -> Result<SleepRecordV1, StorageError> {
         let path = self.control_path(world, "sleep.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let record: SleepRecordV1 = postcard::from_bytes(&bytes)?;
         if record.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -145,6 +145,7 @@ fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use swarm_protocol::{EpochMode, Hash32, PeerId, PROTOCOL_VERSION};
 
     fn reservation(world: WorldId, peer: u8, epoch: u64, fencing_token: u64) -> AuthorityLeaseGrantV1 {
