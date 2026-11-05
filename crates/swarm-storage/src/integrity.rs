@@ -72,11 +72,8 @@ impl Storage {
         validate_direct_extension(previous, manifest)?;
 
         let epoch_path = self.world_dir(manifest.world_id).join("metadata").join("epoch.postcard");
-        let current_epoch = if path_exists_checked(&epoch_path)? {
-            Some(self.load_epoch_record(manifest.world_id)?)
-        } else {
-            None
-        };
+        let current_epoch =
+            if path_exists_checked(&epoch_path)? { Some(self.load_epoch_record(manifest.world_id)?) } else { None };
         if let Some(epoch) = current_epoch.as_ref() {
             if epoch.epoch_number != manifest.epoch
                 || epoch.authority_peer_id != manifest.authority_peer_id
