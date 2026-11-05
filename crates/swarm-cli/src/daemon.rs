@@ -35,7 +35,9 @@ use swarm_protocol::{
     RecoveryCertificateV1, RecoveryVoteV1, SleepRecordV1, SnapshotManifestV1, TransferPhase, WorldDescriptorV1,
     WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
-use swarm_storage::{DurableMembershipPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage, StorageError};
+use swarm_storage::{
+    DurableMembershipPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage, StorageError,
+};
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
