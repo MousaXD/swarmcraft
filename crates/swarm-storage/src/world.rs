@@ -2,7 +2,6 @@ use crate::{
     transaction::{durable_atomic_write, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
-use std::path::PathBuf;
 use swarm_protocol::{JoinRequestV1, LeaveRequestV1, MembershipRecordV1, WorldDescriptorV1, WorldId};
 
 impl Storage {
@@ -192,10 +191,6 @@ impl Storage {
 
 fn remove_protocol_file(storage: &Storage, world: WorldId, name: &str) -> Result<(), StorageError> {
     durable_remove(&storage.world_protocol_path(world, name)).map(|_| ())
-}
-
-fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
-    StorageError::Io { path: path.into(), source }
 }
 
 #[cfg(test)]
