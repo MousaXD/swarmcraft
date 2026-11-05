@@ -1,5 +1,5 @@
 use crate::{
-    transaction::{durable_atomic_write, durable_create_once, durable_remove},
+    transaction::{durable_atomic_write, durable_create_once, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
 use serde::{Deserialize, Serialize};
@@ -52,7 +52,7 @@ impl Storage {
 
     pub fn load_membership_promise(&self, world: WorldId) -> Result<DurableMembershipPromiseV1, StorageError> {
         let path = self.world_dir(world).join("metadata/membership-promise.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let promise: DurableMembershipPromiseV1 = postcard::from_bytes(&bytes)?;
         if promise.proposal.proposed.world_id != world || !promise.vote.matches_proposal(&promise.proposal)? {
             return Err(StorageError::WorldMetadataMismatch);
@@ -109,7 +109,7 @@ impl Storage {
         paths.sort();
         let mut certificates = Vec::with_capacity(paths.len());
         for path in paths {
-            let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+            let bytes = read_canonical_file(&path)?;
             let certificate: MembershipCertificateV1 = postcard::from_bytes(&bytes)?;
             if certificate.proposal.proposed.world_id != world {
                 return Err(StorageError::WorldMetadataMismatch);
@@ -126,7 +126,7 @@ impl Storage {
 
     pub fn load_membership_certificate(&self, world: WorldId) -> Result<MembershipCertificateV1, StorageError> {
         let path = self.world_dir(world).join("metadata/membership-certificate.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let certificate: MembershipCertificateV1 = postcard::from_bytes(&bytes)?;
         if certificate.proposal.proposed.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
