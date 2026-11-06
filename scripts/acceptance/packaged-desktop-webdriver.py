@@ -160,7 +160,11 @@ return {
   compatibilityChosen: !!byId('createCompatibility')?.value,
   catalogErrorVisible: !!byId('createCatalogError') && !byId('createCatalogError').hidden,
   catalogRetryVisible: !!byId('createCatalogRetry') && !byId('createCatalogRetry').hidden,
-  createErrorVisible: !!byId('createError') && !byId('createError').hidden,
+  createNoticeKind: byId('createError')?.dataset?.kind || byId('createError')?.dataset?.tone || '',
+  createErrorVisible: !!byId('createError') && !byId('createError').hidden
+    && (byId('createError').dataset?.kind === 'error' || byId('createError').dataset?.tone === 'danger'),
+  createRepairVisible: !!byId('createError') && !byId('createError').hidden
+    && byId('createError').dataset?.kind === 'warning',
   scriptFiles: performance.getEntriesByType('resource').filter(item => item.name.includes('.js')).map(item => {
     try { return new URL(item.name).pathname.split('/').pop(); } catch { return 'unknown-script'; }
   }).slice(-24),
@@ -235,7 +239,8 @@ def await_world(app: Application, name: str, artifacts: Path):
     while time.monotonic() < deadline:
         last = state(app)
         (artifacts / "last-state.json").write_text(json.dumps(last, indent=2))
-        if last.get("startup") == "failed" or last.get("worldError") or last.get("createErrorVisible"):
+        if (last.get("startup") == "failed" or last.get("worldError")
+                or last.get("createErrorVisible") or last.get("createRepairVisible")):
             app.screenshot("world-create-failed.png")
             raise AssertionError(f"Real GUI world creation/list command failed: {last}")
         if any(world["name"] == name for world in last.get("worlds", [])) and last["worldBusy"] == "false":
