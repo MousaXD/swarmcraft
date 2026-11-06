@@ -111,9 +111,19 @@
   window.addEventListener('unhandledrejection', () => {
     fail('javascript', 'An application operation failed unexpectedly. Retry or check diagnostics.');
   });
+  // Start this timer *before* the ES module graph is evaluated. A blocked
+  // module can prevent DOMContentLoaded from firing at all, so waiting for
+  // that event would recreate the original infinite Loading / Checking state.
+  watchdog = setTimeout(
+    () => fail('module-load', 'The desktop JavaScript module did not initialize. Check the installation and retry.'),
+    12000,
+  );
+  const moduleScript = document.querySelector('script[type="module"][src$="app.js"]');
+  moduleScript?.addEventListener('error', () => {
+    fail('module-load', 'The desktop JavaScript module or one of its dependencies could not be loaded.');
+  });
   document.addEventListener('DOMContentLoaded', () => {
-    if (!complete && !failed && !watchdog) {
-      watchdog = setTimeout(() => fail('module-load', 'Desktop JavaScript did not initialize. Check the installation and retry.'), 12000);
-    }
+    // Keep the early timer active until app.js calls begin(), or until the
+    // explicit ready/failure transition stops it.
   }, { once: true });
 })();
