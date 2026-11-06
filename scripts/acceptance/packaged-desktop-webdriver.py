@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -148,6 +149,9 @@ return {
   })),
   error: !!byId('startupFailure') && !byId('startupFailure').hidden,
   worldError: !!byId('worldLoadError') && !byId('worldLoadError').hidden,
+  scriptFiles: performance.getEntriesByType('resource').filter(item => item.name.includes('.js')).map(item => {
+    try { return new URL(item.name).pathname.split('/').pop(); } catch { return 'unknown-script'; }
+  }).slice(-24),
   errors: (window.__swarmcraftStartup?.errors || []).map(item => ({kind: item.kind, phase: item.phase})),
 };
 """
@@ -241,12 +245,16 @@ def main():
     try:
         run(args.binary.resolve(), args.artifacts)
     except Exception as error:
-        # The state/screenshot collection above retains redacted observable
-        # evidence. Never print arbitrary CLI stderr/identity/invite material.
+        # Capture only a bounded, sanitized failure classification, never the
+        # complete stdout, invitation, identity or arbitrary JavaScript stack.
+        message = str(error)
+        if re.search(r"bearer|private.?key|password|secret|invite.?token|authorization", message, re.I):
+            message = "Sensitive diagnostic details suppressed"
+        message = re.sub(r"/home/runner/[^ ]+", "<runner-path>", message)[:500]
         (args.artifacts / "failure.txt").write_text(
-            f"{type(error).__name__}: packaged GUI acceptance did not complete\n"
+            f"{type(error).__name__}: {message}\n"
         )
-        print(f"FAIL: packaged GUI acceptance: {type(error).__name__}", file=sys.stderr)
+        print(f"FAIL: packaged GUI acceptance: {type(error).__name__}: {message}", file=sys.stderr)
         raise SystemExit(1) from None
 
 
