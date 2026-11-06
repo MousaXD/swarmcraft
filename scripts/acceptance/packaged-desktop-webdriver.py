@@ -135,6 +135,9 @@ const rows = [...document.querySelectorAll('#worldCards .world-row')];
 return {
   documentReady: document.readyState,
   bridge: typeof window.__TAURI__?.core?.invoke === 'function',
+  bridgeWrapped: window.__TAURI__?.core?.invoke?.__swarmcraftProviderContractBridge === true,
+  bridgeWritable: Object.getOwnPropertyDescriptor(window.__TAURI__?.core || {}, 'invoke')?.writable ?? null,
+  playerExperienceObserver: document.documentElement.dataset.playerExperienceObserver === 'true',
   startup: document.documentElement.dataset.swarmcraftStartup || 'not-run',
   phase: document.documentElement.dataset.swarmcraftStartupPhase || '',
   status: value('status'),
