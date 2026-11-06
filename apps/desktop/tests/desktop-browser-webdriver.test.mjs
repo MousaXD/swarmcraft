@@ -68,9 +68,13 @@ async function instrumentedDocument() {
     readFile(path.join(sourceRoot, 'runtime-wizard.css'), 'utf8'),
   ]);
   const moduleMarker = '<script type="module" src="./app.js"></script>';
+  // This Chrome fixture injects its own module/bridge and intentionally does
+  // not load the packaged-app bootstrap watchdog. Native CI covers that path.
+  const bootstrapMarker = '<script src="./bootstrap.js" defer></script>';
   const styleMarker = '<link rel="stylesheet" href="./style.css" />';
   assert.ok(html.includes(moduleMarker), 'index.html app module marker changed; browser smoke harness must be reviewed');
   assert.ok(html.includes(styleMarker), 'index.html stylesheet marker changed; browser smoke harness must be reviewed');
+  assert.ok(html.includes(bootstrapMarker), 'index.html bootstrap marker changed; browser fixture must be reviewed');
 
   const preloadedStyles = [
     `<style data-agent7-production-style>${mainCss}</style>`,
@@ -79,7 +83,7 @@ async function instrumentedDocument() {
     '<link rel="stylesheet" data-player-experience href="data:text/css," />',
     '<link rel="stylesheet" data-runtime-wizard-style href="data:text/css," />',
   ].join('\n');
-  return html.replace(styleMarker, preloadedStyles).replace(moduleMarker, '');
+  return html.replace(styleMarker, preloadedStyles).replace(moduleMarker, '').replace(bootstrapMarker, '');
 }
 
 async function freePort() {
