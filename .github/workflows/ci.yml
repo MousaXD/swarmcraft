@@ -304,6 +304,8 @@ jobs:
       contents: read
     env:
       WEBKIT_DISABLE_DMABUF_RENDERER: '1'
+      WEBKIT_DISABLE_COMPOSITING_MODE: '1'
+      LIBGL_ALWAYS_SOFTWARE: '1'
       GDK_BACKEND: x11
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
