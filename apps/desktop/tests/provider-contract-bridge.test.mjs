@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { adaptProviderInvocation, installProviderContractBridge } from '../src/provider-contract-bridge.js';
+import { adaptProviderInvocation, installProviderContractBridge, providerContractInvoke } from '../src/provider-contract-bridge.js';
 
 test('opaque Modrinth staging sessions use the Agent 5 native payload without exposing a destination path', () => {
   const adapted = adaptProviderInvocation('modrinth_download', {
@@ -85,4 +85,35 @@ test('bridge rewrites only recognized opaque-session provider download calls', a
     command: 'minecraft_versions',
     args: { includeSnapshots: false, refresh: false },
   });
+});
+
+test('packaged Tauri read-only invoke cannot be monkey-patched; explicit wrapper preserves provider arguments', async () => {
+  const calls = [];
+  const core = {};
+  const original = (command, args) => {
+    calls.push({ command, args });
+    return Promise.resolve('installed native call');
+  };
+  Object.defineProperty(core, 'invoke', { value: original, writable: false, configurable: false });
+  Object.freeze(core);
+  const target = { __TAURI__: { core } };
+  assert.doesNotThrow(() => installProviderContractBridge(target));
+  assert.equal(installProviderContractBridge(target), false);
+  assert.equal(core.invoke, original);
+  const call = providerContractInvoke(core);
+  assert.equal(await call('modrinth_download', {
+    request: {
+      locator: { project_id: 'lithium', version_id: '1' },
+      destination_dir: 'desktop-abc-123/modrinth/lithium/1',
+    },
+  }), 'installed native call');
+  assert.deepEqual(calls, [{
+    command: 'modrinth_download',
+    args: {
+      locator: { project_id: 'lithium', version_id: '1' },
+      stagingSession: 'desktop-abc-123',
+      maxBytes: null,
+    },
+  }]);
+  assert.equal(providerContractInvoke({}), null);
 });
