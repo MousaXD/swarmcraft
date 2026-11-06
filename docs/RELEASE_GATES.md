@@ -122,3 +122,24 @@ Old audit reports, exact commit SHAs, and relevant workflow-run IDs remain histo
 A green Required Validation result is strong automated release evidence, not universal deployment certification. It does not by itself certify every residential NAT/CGNAT/mobile/IPv6 network, every disk-failure mode, or infinite-duration hostile-peer behavior. Those broader claims require dedicated field/soak evidence and must remain accurately scoped.
 
 See `docs/NETWORK_VALIDATION.md`, `docs/FINAL_PLAYER_JOURNEY_ACCEPTANCE.md`, and `docs/IMPLEMENTATION_STATUS.md` for the corresponding product-level evidence and limitations.
+
+## Mandatory packaged desktop acceptance
+
+The reusable Core CI graph now includes `desktop-packaged-smoke`, which
+depends on the Linux desktop package produced for the **same workflow run and
+commit**. Since `Required validation gate` requires the whole Core CI
+reusable workflow to succeed, a real desktop startup regression blocks merge
+and publication; passing a compilation or the mocked Chrome test alone cannot
+satisfy the gate.
+
+This job extracts the candidate Debian package, launches the actual
+Tauri/WebKitGTK window with all four packaged sidecars, verifies first-boot
+identity and world-list completion, creates a world through the actual GUI,
+restarts the app, and checks persistent identity and world selection. It
+also removes the required CLI sidecar and asserts the identical acceptance
+fails with an observable startup error. Screenshots, sanitized state
+snapshots, WebDriver logs and package SHA-256 are retained as CI artifacts.
+
+This gate is **Linux GUI/runtime coverage**, not Windows or macOS packaged
+GUI acceptance. Existing Windows/macOS package jobs provide construction
+coverage only; the full platform test matrix remains a tracked limitation.
