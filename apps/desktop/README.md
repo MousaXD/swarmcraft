@@ -132,3 +132,41 @@ cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
 Normal CI runs the full JavaScript test glob and packages the Desktop application on Linux, Windows, macOS ARM64 and macOS x86_64 with the four required sidecars staged.
 
 Visual changes should be inspected at the configured default `980x760` window and minimum `720x560` window. The Tauri global bridge must remain enabled with `app.withGlobalTauri: true` because the frontend consumes `window.__TAURI__.core.invoke`.
+
+## Startup contract and native acceptance
+
+The HTML starts in **Starting…**, never **Ready**. A classic `bootstrap.js`
+runs before ES modules so a failed import, synchronous JavaScript exception or
+missing native bridge cannot leave `Loading…` / `Checking…` skeletons
+indefinitely. The module marks each startup phase and reports `ready` only
+after device initialization, identity verification, and a real world-list
+command. Local-only operation is explicitly marked degraded if the networking
+service could not start. A bounded watchdog shows a retry action on failure.
+
+The real Linux packaged-app acceptance is
+`scripts/acceptance/packaged-desktop-webdriver.py`. It uses `tauri-driver`
+and the native WebKitGTK WebDriver, **not Chrome or an injected Tauri mock**.
+Required CI extracts the exact same-run Debian package, verifies the four
+sidecars are executable, starts the installed GUI under Xvfb with an isolated
+`SWARMCRAFT_DATA_DIR`, creates a world using WebDriver input, closes the
+Tauri session, relaunches it, and checks the world and node identity persist.
+A second run removes the installed CLI sidecar and proves the normal
+acceptance fails while the GUI reports an actionable startup error.
+
+To reproduce on Linux, install `webkit2gtk-driver`, `xvfb` and
+`tauri-driver 2.1.0`, build a Debian package with the four sidecars, extract
+it with `dpkg-deb -x`, then run:
+
+```sh
+export SWARMCRAFT_DATA_DIR="$(mktemp -d)"
+xvfb-run -a python3 scripts/acceptance/packaged-desktop-webdriver.py \
+  --binary /absolute/path/to/extracted/usr/bin/swarmcraft-desktop \
+  --artifacts /tmp/swarmcraft-desktop-e2e
+```
+
+This is a **Linux native-WebKitGTK GUI** gate. Windows and macOS packages
+remain built but are not yet exercised through a real packaged GUI in this
+gate; neither platform should be described as E2E-certified. In particular,
+macOS's native WKWebView lacks a direct `tauri-driver` counterpart. These
+tests also do not certify WAN connectivity, full Minecraft hosting or
+multi-device horizontal scaling.
