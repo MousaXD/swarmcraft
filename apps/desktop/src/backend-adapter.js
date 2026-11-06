@@ -1,4 +1,5 @@
 import { registerRuntimeWizard } from './runtime-wizard.js';
+import { adaptProviderInvocation } from './provider-contract-bridge.js';
 import { registerTransferWizard } from './transfer-wizard.js';
 
 const unavailable = (feature) => {
@@ -414,7 +415,8 @@ export function createBackendAdapter(invoke) {
     if (typeof invoke !== 'function') {
       throw new Error('Tauri runtime is unavailable. Open this interface from the SwarmCraft desktop application.');
     }
-    return invoke(command, payload);
+    const adapted = adaptProviderInvocation(command, payload);
+    return invoke(adapted.command, adapted.args);
   };
 
   const callOptional = async (command, payload, feature) => {

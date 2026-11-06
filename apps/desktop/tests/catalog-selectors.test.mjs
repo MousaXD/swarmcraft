@@ -105,3 +105,45 @@ test('Create World bootstraps real selectors and thin Tauri catalog commands', a
   assert.match(main, /fabric_loader_versions/);
   assert.match(main, /validate_fabric_selection/);
 });
+
+test('newer official releases remain visible but cannot become default for an older shipped Fabric adapter', () => {
+  const versions = normalizeMinecraftCatalog({
+    versions: [
+      { id: '26.3', type: 'release', release_time: '2026-10-01T00:00:00Z', supported: true, adapter_supported: false },
+      { id: '26.1.2', type: 'release', release_time: '2026-01-01T00:00:00Z', supported: true, adapter_supported: true },
+    ],
+  });
+  assert.equal(versions.length, 2, 'official version data must remain visible');
+  assert.equal(versions[0].adapterSupported, false, 'newer version is not compatible with this build');
+  assert.equal(chooseMinecraftVersion(versions), '26.1.2');
+  assert.equal(chooseMinecraftVersion(versions, '26.3'), '26.1.2', 'incompatible preference must never override adapter');
+  const state = new CatalogSelectionState();
+  state.setMinecraftCatalog(versions);
+  state.setFabricCatalog('26.1.2', normalizeFabricCatalog({
+    versions: [{ version: '0.20.1', stable: true, minecraft_version: '26.1.2', adapter_supported: true }],
+  }, '26.1.2'));
+  assert.equal(state.ready, true);
+  state.changeMinecraft('26.3');
+  state.setFabricCatalog('26.3', normalizeFabricCatalog({
+    versions: [{ version: '0.20.1', stable: true, minecraft_version: '26.3', adapter_supported: false }],
+  }, '26.3'));
+  assert.equal(state.ready, false, 'incompatible release and loader cannot re-enable Create');
+});
+
+test('Fabric Loader defaults honor the installed adapter minimum rather than blindly using stable', () => {
+  const versions = normalizeFabricCatalog({
+    versions: [
+      { version: '0.19.2', stable: true, minecraft_version: '26.1.2', adapter_supported: false },
+      { version: '0.20.1', stable: true, minecraft_version: '26.1.2', adapter_supported: true },
+    ],
+  }, '26.1.2');
+  assert.equal(versions.length, 2);
+  assert.equal(chooseFabricLoader(versions, '0.19.2'), '0.20.1');
+  assert.equal(chooseFabricLoader(versions), '0.20.1');
+  assert.throws(
+    () => normalizeMinecraftCatalog({ versions: [
+      { id: '26.1.2', type: 'release', release_time: '2026-01-01Z', supported: true, adapter_supported: 'yes' },
+    ] }),
+    /compatibility flag/,
+  );
+});
