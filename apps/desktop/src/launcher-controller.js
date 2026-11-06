@@ -1,4 +1,5 @@
-const invoke = () => window.__TAURI__?.core?.invoke;
+import { providerContractInvoke } from './provider-contract-bridge.js';
+const invoke = () => providerContractInvoke(window.__TAURI__?.core);
 const byId = (id) => document.getElementById(id);
 const clean = (value) => String(value ?? '').trim();
 
