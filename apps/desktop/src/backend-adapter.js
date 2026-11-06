@@ -415,7 +415,8 @@ export function createBackendAdapter(invoke) {
     if (typeof invoke !== 'function') {
       throw new Error('Tauri runtime is unavailable. Open this interface from the SwarmCraft desktop application.');
     }
-    return invoke(command, payload);
+    const adapted = adaptProviderInvocation(command, payload);
+    return invoke(adapted.command, adapted.args);
   };
 
   const callOptional = async (command, payload, feature) => {
