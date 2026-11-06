@@ -295,6 +295,95 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  desktop-packaged-smoke:
+    name: Real installed desktop GUI smoke (Linux/WebKitGTK)
+    needs: desktop
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      WEBKIT_DISABLE_DMABUF_RENDERER: '1'
+      GDK_BACKEND: x11
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-05
+      - name: Install actual WebKitGTK WebDriver and headless window server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y webkit2gtk-driver xvfb libwebkit2gtk-4.1-0 libayatana-appindicator3-1
+          command -v WebKitWebDriver
+      - name: Install Tauri WebDriver bridge
+        run: cargo install tauri-driver --version 2.1.0 --locked
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: swarmcraft-desktop-linux
+          path: ${{ runner.temp }}/swarmcraft-linux-package
+      - name: Extract exact-run Debian installer and verify bundled executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="$(find "${{ runner.temp }}/swarmcraft-linux-package" -name '*.deb' -type f -print -quit)"
+          test -n "$deb"
+          mkdir -p "${{ runner.temp }}/installed-swarmcraft" "${{ runner.temp }}/desktop-evidence"
+          sha256sum "$deb" > "${{ runner.temp }}/desktop-evidence/package.sha256"
+          dpkg-deb -x "$deb" "${{ runner.temp }}/installed-swarmcraft"
+          app="${{ runner.temp }}/installed-swarmcraft/usr/bin/swarmcraft-desktop"
+          test -x "$app"
+          for sidecar in swarmcraft swarmcraft-host swarmcraft-runtime swarmcraft-import; do
+            path="${{ runner.temp }}/installed-swarmcraft/usr/bin/$sidecar"
+            test -x "$path" || { echo "Missing installed sidecar: $sidecar" >&2; exit 1; }
+            timeout 15s "$path" --version >/dev/null
+          done
+          echo "binary=$app" >> "$GITHUB_ENV"
+          echo "commit=$GITHUB_SHA" > "${{ runner.temp }}/desktop-evidence/commit.txt"
+      - name: Real packaged GUI first launch, world creation and restart persistence
+        shell: bash
+        env:
+          SWARMCRAFT_DATA_DIR: ${{ runner.temp }}/desktop-positive-data
+          HOME: ${{ runner.temp }}/desktop-home
+          XDG_DATA_HOME: ${{ runner.temp }}/desktop-xdg
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME" "$XDG_DATA_HOME"
+          xvfb-run -a -s '-screen 0 1280x1024x24' timeout 240s python3 scripts/acceptance/packaged-desktop-webdriver.py \
+            --binary "$binary" --artifacts "${{ runner.temp }}/desktop-evidence/positive"
+      - name: Negative control - missing CLI sidecar must fail the same acceptance
+        shell: bash
+        env:
+          SWARMCRAFT_DATA_DIR: ${{ runner.temp }}/desktop-negative-data
+          HOME: ${{ runner.temp }}/desktop-home-negative
+          XDG_DATA_HOME: ${{ runner.temp }}/desktop-xdg-negative
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME" "$XDG_DATA_HOME"
+          sidecar="${{ runner.temp }}/installed-swarmcraft/usr/bin/swarmcraft"
+          mv "$sidecar" "$sidecar.disabled"
+          trap 'mv "$sidecar.disabled" "$sidecar"' EXIT
+          if xvfb-run -a -s '-screen 0 1280x1024x24' timeout 120s python3 scripts/acceptance/packaged-desktop-webdriver.py \
+            --binary "$binary" --artifacts "${{ runner.temp }}/desktop-evidence/negative-control"; then
+            echo 'BROKEN: acceptance gate succeeded with a missing required installed sidecar' >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import os
+          state = json.loads((Path(os.environ['RUNNER_TEMP']) / 'desktop-evidence/negative-control/last-state.json').read_text())
+          assert state['startup'] == 'failed' and state['error'], (
+              'Negative control failed for an unrelated reason instead of observing the packaged startup error'
+          )
+          print('PASS: missing installed sidecar produced a visible failed startup and failed the normal acceptance')
+          PY
+      - name: Upload desktop GUI diagnostics and screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: real-packaged-desktop-smoke-${{ github.sha }}
+          path: ${{ runner.temp }}/desktop-evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
   fabric:
     name: Fabric server mod
     runs-on: ubuntu-latest
