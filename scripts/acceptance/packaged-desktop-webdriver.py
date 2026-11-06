@@ -152,6 +152,15 @@ return {
   })),
   error: !!byId('startupFailure') && !byId('startupFailure').hidden,
   worldError: !!byId('worldLoadError') && !byId('worldLoadError').hidden,
+  createPanelVisible: !!byId('createPanel') && !byId('createPanel').hidden,
+  createButtonDisabled: byId('createWorld')?.disabled === true,
+  createNamePopulated: !!byId('createName')?.value?.trim(),
+  minecraftChosen: !!byId('createMinecraft')?.value,
+  fabricChosen: !!byId('createLoader')?.value,
+  compatibilityChosen: !!byId('createCompatibility')?.value,
+  catalogErrorVisible: !!byId('createCatalogError') && !byId('createCatalogError').hidden,
+  catalogRetryVisible: !!byId('createCatalogRetry') && !byId('createCatalogRetry').hidden,
+  createErrorVisible: !!byId('createError') && !byId('createError').hidden,
   scriptFiles: performance.getEntriesByType('resource').filter(item => item.name.includes('.js')).map(item => {
     try { return new URL(item.name).pathname.split('/').pop(); } catch { return 'unknown-script'; }
   }).slice(-24),
@@ -191,17 +200,48 @@ def await_ready(app: Application, artifacts: Path):
     raise TimeoutError(f"Real packaged desktop did not finish starting: {latest}")
 
 
+def await_catalog_ready(app: Application, artifacts: Path):
+    # The real Mojang/Fabric catalogs are loaded asynchronously through Tauri.
+    # Clicking disabled Create is a no-op that could otherwise look like an
+    # unexplained world-creation timeout; require valid, backend-issued choices.
+    deadline = time.monotonic() + 80
+    retried = False
+    last = None
+    while time.monotonic() < deadline:
+        last = state(app)
+        (artifacts / "last-state.json").write_text(json.dumps(last, indent=2))
+        if (not last["createButtonDisabled"] and last["minecraftChosen"]
+                and last["fabricChosen"] and last["compatibilityChosen"]):
+            return
+        if last["catalogErrorVisible"]:
+            if not retried and last["catalogRetryVisible"]:
+                retried = True
+                app.click("#createCatalogRetry")
+                time.sleep(1)
+                continue
+            app.screenshot("catalog-unavailable.png")
+            raise AssertionError(
+                "Real installed GUI cannot create a world: official Minecraft/Fabric "
+                f"catalog retrieval failed after retry: {last}"
+            )
+        time.sleep(0.4)
+    app.screenshot("catalog-timeout.png")
+    raise TimeoutError(f"Real GUI catalog never provided compatible version selections: {last}")
+
+
 def await_world(app: Application, name: str, artifacts: Path):
     deadline = time.monotonic() + 70
     last = None
     while time.monotonic() < deadline:
         last = state(app)
         (artifacts / "last-state.json").write_text(json.dumps(last, indent=2))
-        if last.get("startup") == "failed" or last.get("worldError"):
-            raise AssertionError(f"World creation/list failure: {last}")
+        if last.get("startup") == "failed" or last.get("worldError") or last.get("createErrorVisible"):
+            app.screenshot("world-create-failed.png")
+            raise AssertionError(f"Real GUI world creation/list command failed: {last}")
         if any(world["name"] == name for world in last.get("worlds", [])) and last["worldBusy"] == "false":
             return last
         time.sleep(0.4)
+    app.screenshot("world-create-timeout.png")
     raise TimeoutError(f"Newly created world never appeared in the actual GUI: {last}")
 
 
@@ -222,7 +262,13 @@ def run(binary: Path, artifacts: Path):
         assert first_identity.strip(), "Initialized device has no identity"
         app.screenshot("first-launch.png")
         app.click("#openCreate")
+        await_catalog_ready(app, artifacts)
         app.type("#createName", world_name)
+        entered = state(app)
+        assert entered["createPanelVisible"] and entered["createNamePopulated"], (
+            f"Create form did not accept the world name: {entered}"
+        )
+        app.screenshot("before-world-create.png")
         app.click("#createWorld")
         created = await_world(app, world_name, artifacts)
         assert any(w["name"] == world_name for w in created["worlds"])
