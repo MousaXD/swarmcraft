@@ -13,6 +13,8 @@ let modsRequestGeneration = 0;
 let connectivityRefreshInFlight = false;
 let structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });
 let serviceWarning = '';
+let startupInProgress = false;
+let lastWorldError = null;
 const MIGRATION_REFRESH_MS = 5000;
 const CONNECTIVITY_REFRESH_MS = 10000;
 
@@ -37,6 +39,7 @@ const migrationLabels = {
 };
 
 function setStatus(message, tone = 'neutral') {
+  if (window.__swarmcraftStartup?.failed) return;
   $('status').textContent = message;
   $('statusDot').className = `status-dot ${tone}`;
 }
@@ -46,7 +49,7 @@ function setOutput(output, label = '') {
   const text = String(output || 'Done.');
   const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const entry = `${stamp}${label ? `  ${label}` : ''}\n${text}`;
-  console.textContent = console.textContent.trim() === 'SwarmCraft is ready.' || console.textContent.trim() === 'Activity cleared.'
+  console.textContent = ['SwarmCraft is ready.', 'SwarmCraft is starting.', 'Activity cleared.'].includes(console.textContent.trim())
     ? entry
     : `${console.textContent.trim()}\n\n${entry}`;
   console.scrollTop = console.scrollHeight;
@@ -92,7 +95,7 @@ async function run(label, work, { quiet = false, successMessage = null, logResul
       const message = typeof successMessage === 'function' ? successMessage(result) : successMessage;
       if (message) setOutput(message, activityLabel(label));
       else if (logResult && result !== undefined && result !== null && String(result).trim()) setOutput(result, activityLabel(label));
-      setStatus('Ready', 'safe');
+      if (!startupInProgress) setStatus('Ready', 'safe');
     }
     return result;
   } catch (error) {
@@ -637,6 +640,7 @@ function renderEmptyWorlds() {
 }
 
 async function refreshWorlds() {
+  lastWorldError = null;
   $('worldCards').setAttribute('aria-busy', 'true');
   showInline('worldLoadError', '');
   setStatus('Reading worlds…');
@@ -644,6 +648,7 @@ async function refreshWorlds() {
   try {
     raw = await run('Reading worlds…', () => backend.listWorlds(), { quiet: true });
   } catch (error) {
+    lastWorldError = error;
     renderEmptyWorlds();
     $('worldCount').textContent = 'Could not read local worlds';
     showInline('worldLoadError', `Worlds could not be loaded. ${String(error)}`, 'danger');
@@ -660,7 +665,7 @@ async function refreshWorlds() {
   worldCache.clear();
   if (!worlds.length) {
     renderEmptyWorlds();
-    setStatus('Ready', 'safe');
+    if (!startupInProgress) setStatus('Ready', 'safe');
     return;
   }
 
@@ -684,7 +689,7 @@ async function refreshWorlds() {
   const next = worldCache.get(previousSelection) || worldCache.values().next().value;
   if (next) selectWorld(next);
   else clearSelection();
-  setStatus('Ready', 'safe');
+  if (!startupInProgress) setStatus('Ready', 'safe');
 }
 
 async function ensureNetworkingService({ quiet = false } = {}) {
@@ -715,21 +720,61 @@ async function initialize() {
   await refreshWorlds();
 }
 
-async function startup() {
-  setStatus('Starting SwarmCraft…');
+// Bounded UI waits are intentionally scoped to startup. A timeout is not a
+// backend success: the launcher stays failed until the operation is retried.
+async function startupStep(label, action, timeoutMs) {
+  window.__swarmcraftStartup?.step(label);
+  let timeout;
   try {
-    const result = await backend.initializeNode();
+    return await Promise.race([
+      Promise.resolve().then(action),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs / 1000}s. Restart SwarmCraft if it continues.`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function startup() {
+  if (startupInProgress) return;
+  startupInProgress = true;
+  window.__swarmcraftStartup?.begin();
+  setStatus('Starting SwarmCraft…');
+  setNodeState('Checking…');
+  try {
+    const result = await startupStep('Device setup', () => backend.initializeNode(), 30000);
     $('identity').textContent = String(result);
     setNodeState('Ready', 'safe');
-  } catch (error) {
-    setNodeState('Setup needs attention', 'warning');
-    setOutput(String(error), 'Automatic device setup failed');
+
+    // Local world creation is useful without a network, but never call such a
+    // partially initialized session fully ready.
+    const daemonPid = await startupStep('Networking service', () => ensureNetworkingService({ quiet: true }), 10000)
+      .catch((error) => {
+        setServiceWarning('Automatic networking service could not start. Local worlds remain available; try restarting the networking service in Diagnostics.');
+        setOutput('Networking service startup timed out.', 'Networking');
+        return null;
+      });
+
+    const identity = await startupStep('Device identity', () => showIdentity({ quiet: true }), 15000);
+    if (!identity) throw new Error('Device identity could not be verified. Open Diagnostics and use Set up device.');
+
+    await startupStep('World list', () => refreshWorlds(), 45000);
+    if (lastWorldError) throw new Error('The local world list could not be read. Check the SwarmCraft CLI sidecar and application data permissions.');
+
+    refreshVisibleMigration();
+    refreshVisibleHostReadiness();
+    if (daemonPid === null) {
+      setStatus('Networking needs attention', 'warning');
+      window.__swarmcraftStartup?.ready({ degraded: true });
+    } else {
+      setStatus('Ready', 'safe');
+      window.__swarmcraftStartup?.ready();
+    }
+  } finally {
+    startupInProgress = false;
   }
-  await ensureNetworkingService({ quiet: true });
-  await showIdentity({ quiet: true });
-  await refreshWorlds();
-  refreshVisibleMigration();
-  refreshVisibleHostReadiness();
 }
 
 async function showIdentity({ quiet = false } = {}) {
@@ -1153,10 +1198,17 @@ bindAction('wakeWorld', wakeWorld);
 showView(currentView, { focus: false });
 updateWorldSpecificControls();
 renderMigration(null);
-startup().catch((error) => {
-  setOutput(String(error), 'Desktop startup failed');
-  setStatus('Startup needs attention', 'warning');
-});
+window.swarmcraftRetryStartup = () => {
+  if (startupInProgress) return;
+  startup().catch((error) => {
+    // The runtime retains the technical error; the startup surface avoids
+    // writing raw sidecar stderr (which may include signed arguments).
+    setOutput('Startup operation failed. Check the required sidecars and device data permissions.', 'Desktop startup failed');
+    setNodeState('Setup needs attention', 'warning');
+    window.__swarmcraftStartup?.fail('backend', error);
+  });
+};
+window.swarmcraftRetryStartup();
 document.addEventListener('visibilitychange', refreshVisibleMigration);
 setInterval(refreshVisibleMigration, MIGRATION_REFRESH_MS);
 setInterval(refreshVisibleHostReadiness, MIGRATION_REFRESH_MS);
