@@ -157,6 +157,10 @@ return {
   createNamePopulated: !!byId('createName')?.value?.trim(),
   minecraftChosen: !!byId('createMinecraft')?.value,
   fabricChosen: !!byId('createLoader')?.value,
+  minecraftVersion: (byId('createMinecraft')?.value || '').slice(0, 36),
+  fabricLoaderVersion: (byId('createLoader')?.value || '').slice(0, 36),
+  minecraftOptionAllowed: byId('createMinecraft')?.selectedOptions?.[0]?.disabled === false,
+  fabricOptionAllowed: byId('createLoader')?.selectedOptions?.[0]?.disabled === false,
   compatibilityChosen: !!byId('createCompatibility')?.value,
   catalogErrorVisible: !!byId('createCatalogError') && !byId('createCatalogError').hidden,
   catalogRetryVisible: !!byId('createCatalogRetry') && !byId('createCatalogRetry').hidden,
@@ -215,7 +219,8 @@ def await_catalog_ready(app: Application, artifacts: Path):
         last = state(app)
         (artifacts / "last-state.json").write_text(json.dumps(last, indent=2))
         if (not last["createButtonDisabled"] and last["minecraftChosen"]
-                and last["fabricChosen"] and last["compatibilityChosen"]):
+                and last["fabricChosen"] and last["compatibilityChosen"]
+                and last["minecraftOptionAllowed"] and last["fabricOptionAllowed"]):
             return
         if last["catalogErrorVisible"]:
             if not retried and last["catalogRetryVisible"]:

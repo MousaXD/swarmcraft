@@ -170,3 +170,20 @@ gate; neither platform should be described as E2E-certified. In particular,
 macOS's native WKWebView lacks a direct `tauri-driver` counterpart. These
 tests also do not certify WAN connectivity, full Minecraft hosting or
 multi-device horizontal scaling.
+
+## Official catalogs vs. shipped Fabric compatibility
+
+The Mojang and Fabric Meta catalogs can publish valid new versions **before
+this SwarmCraft build ships a compatible Fabric bridge**. The Desktop's native
+catalog commands now attach `adapter_supported` to every official version,
+using the authoritative `swarm_protocol::SHIPPED_RUNTIME_ADAPTER` validator.
+The original official-provider `supported` flag is retained; newer releases
+stay visible in the Create/Import selectors but cannot be chosen when the
+shipped adapter cannot run them. The default is the newest compatible release
+and Fabric Loader combination, not blindly the newest official version.
+
+Create/Import must never bypass the backend's runtime contract or treat a
+provider-valid tuple as proof of a compatible host runtime. The existing
+canonical creation/import guards and authenticated Fabric handshake remain
+authoritative. When the adapter contract changes, the native catalog
+annotation updates automatically with the shipped protocol implementation.
