@@ -120,7 +120,7 @@ class Application:
 
     def screenshot(self, name):
         try:
-            result = request(f"/session/{self.session}/screenshot")
+            result = request(f"/session/{self.session}/screenshot", timeout=15)
             (self.artifacts / name).write_bytes(base64.b64decode(result))
         except Exception as error:
             (self.artifacts / f"{name}.error.txt").write_text(type(error).__name__ + ": screenshot unavailable\n")
@@ -161,7 +161,11 @@ return {
 
 
 def state(app: Application):
-    return app.execute(STATE_SCRIPT)
+    try:
+        return app.execute(STATE_SCRIPT)
+    except Exception:
+        app.screenshot("webdriver-failure.png")
+        raise
 
 
 def await_ready(app: Application, artifacts: Path):
@@ -171,6 +175,7 @@ def await_ready(app: Application, artifacts: Path):
         latest = state(app)
         (artifacts / "last-state.json").write_text(json.dumps(latest, indent=2))
         if latest.get("startup") == "failed" or latest.get("error") or latest.get("worldError"):
+            app.screenshot("startup-failed.png")
             raise AssertionError(f"Packaged desktop startup failed: {latest}")
         if latest.get("startup") in ("ready", "degraded"):
             assert latest["bridge"], "Tauri command bridge is not connected"
@@ -182,6 +187,7 @@ def await_ready(app: Application, artifacts: Path):
             assert latest["status"] != "Starting…", f"Header falsely reports startup: {latest}"
             return latest
         time.sleep(0.35)
+    app.screenshot("startup-timeout.png")
     raise TimeoutError(f"Real packaged desktop did not finish starting: {latest}")
 
 
