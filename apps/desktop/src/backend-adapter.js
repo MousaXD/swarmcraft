@@ -1,4 +1,5 @@
 import { registerRuntimeWizard } from './runtime-wizard.js';
+import { adaptProviderInvocation } from './provider-contract-bridge.js';
 import { registerTransferWizard } from './transfer-wizard.js';
 
 const unavailable = (feature) => {
