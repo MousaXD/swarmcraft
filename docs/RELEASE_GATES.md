@@ -1,8 +1,8 @@
-# SwarmCraft 0.5.0 Release Gates
+# SwarmCraft 0.5.1 Release Gates
 
-This document is the release-governance contract for SwarmCraft 0.5.0. A package build is not release evidence by itself: the exact commit being published must first pass the required validation graph.
+This document is the release-governance contract for SwarmCraft 0.5.1. A package build is not release evidence by itself: the exact commit being published must first pass the required validation graph.
 
-Application version `0.5.0` and wire protocol version `1` are intentionally independent release dimensions.
+Application version `0.5.1` and wire protocol version `1` are intentionally independent release dimensions.
 
 ## Authoritative validation status
 
