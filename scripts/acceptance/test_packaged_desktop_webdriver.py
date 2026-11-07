@@ -44,6 +44,28 @@ class NativeFailureObservationTests(unittest.TestCase):
             values["retry/displayed"] = False
             self.assertIsNone(app.visible_startup_failure())
 
+    def test_page_source_verifies_failure_without_javascript_execution(self):
+        markup = (
+            '<html data-swarmcraft-startup="failed"><body>'
+            '<div id="status">Startup failed</div>'
+            '<div id="startupFailure"><span>SwarmCraft could not start (backend, Device setup).'
+            ' Missing required sidecar.</span>'
+            '<button id="retryStartup">Retry startup</button></div>'
+            '</body></html>'
+        )
+        result = driver._failure_from_page_source(markup)
+        self.assertEqual(result["observedVia"], "native-webdriver-page-source")
+        self.assertTrue(result["retryVisible"])
+        self.assertIsNone(driver._failure_from_page_source(
+            markup.replace('data-swarmcraft-startup="failed"', 'data-swarmcraft-startup="ready"')
+        ))
+        self.assertIsNone(driver._failure_from_page_source(
+            markup.replace('id="startupFailure"', 'id="startupFailure" hidden')
+        ))
+        self.assertIsNone(driver._failure_from_page_source(
+            markup.replace("Retry startup", "Retry later")
+        ))
+
     def test_execute_failure_uses_only_verified_native_dom(self):
         class FakeApp:
             def __init__(self, verified):

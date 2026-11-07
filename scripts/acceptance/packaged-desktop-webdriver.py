@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+from html.parser import HTMLParser
 import json
 import os
 import re
@@ -119,13 +120,26 @@ class Application:
                 {"text": text, "value": list(text)})
 
     def visible_startup_failure(self):
-        """Read the startup error using native WebDriver element commands.
+        """Independently prove the rendered failed-startup and retry UI.
 
-        WebKitGTK can reject execute/sync while a failed Tauri startup is
-        settling, even though the real failed-startup banner is rendered.
-        This must prove the DOM failure and retry controls; do not infer a
-        failure solely from a WebDriver exception or screenshot.
+        WebKitGTK may reject execute/sync when a missing sidecar triggers a
+        frontend exception. Neither such a driver error nor a screenshot alone
+        is sufficient to pass our negative control.
         """
+        diagnostics = {"source": "not-tried", "elements": "not-tried"}
+        try:
+            markup = request(f"/session/{self.session}/source")
+            if isinstance(markup, str):
+                proof = _failure_from_page_source(markup)
+                diagnostics["source"] = "verified" if proof else "not-verified"
+                if proof:
+                    self._write_startup_observation(diagnostics)
+                    return proof
+            else:
+                diagnostics["source"] = "invalid-response-type"
+        except Exception as error:
+            diagnostics["source"] = type(error).__name__
+
         try:
             def element_value(selector, operation):
                 element = self.element(selector)
@@ -137,22 +151,25 @@ class Application:
             visible = element_value("#startupFailure", "displayed")
             retry = element_value("#retryStartup", "text")
             retry_visible = element_value("#retryStartup", "displayed")
-            if (html != "failed" or status != "Startup failed" or
-                    visible is not True or retry_visible is not True or
-                    retry != "Retry startup" or
-                    "SwarmCraft could not start (" not in banner):
-                return None
-            # Do not retain banner text: native errors can contain private
-            # paths, CLI arguments or data. Only store verified UI booleans.
-            return {
-                "startup": html,
-                "status": status,
-                "error": True,
-                "retryVisible": True,
-                "observedVia": "native-webdriver-elements",
-            }
-        except Exception:
-            return None
+            if (html == "failed" and status == "Startup failed" and
+                    visible is True and retry_visible is True and
+                    retry == "Retry startup" and
+                    "SwarmCraft could not start (" in banner):
+                diagnostics["elements"] = "verified"
+                self._write_startup_observation(diagnostics)
+                return _verified_failure("native-webdriver-elements")
+            diagnostics["elements"] = "not-verified"
+        except Exception as error:
+            diagnostics["elements"] = type(error).__name__
+        self._write_startup_observation(diagnostics)
+        return None
+
+    def _write_startup_observation(self, diagnostics):
+        # Only retain the status of each proof strategy. Never write raw
+        # banner text, sidecar arguments, paths, or native exception messages.
+        (self.artifacts / "startup-observation.json").write_text(
+            json.dumps(diagnostics, indent=2)
+        )
 
     def screenshot(self, name):
         try:
@@ -160,6 +177,67 @@ class Application:
             (self.artifacts / name).write_bytes(base64.b64decode(result))
         except Exception as error:
             (self.artifacts / f"{name}.error.txt").write_text(type(error).__name__ + ": screenshot unavailable\n")
+
+
+def _verified_failure(strategy):
+    return {
+        "startup": "failed",
+        "status": "Startup failed",
+        "error": True,
+        "retryVisible": True,
+        "observedVia": strategy,
+    }
+
+
+class _StartupDocument(HTMLParser):
+    """Read only the specific dynamic failure controls in WebDriver page source."""
+
+    VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+            "link", "meta", "param", "source", "track", "wbr"}
+    TARGETS = ("status", "startupFailure", "retryStartup")
+
+    def __init__(self):
+        super().__init__()
+        self.startup = None
+        self.stack = []
+        self.attributes = {}
+        self.text = {key: [] for key in self.TARGETS}
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if tag == "html":
+            self.startup = values.get("data-swarmcraft-startup")
+        key = values.get("id")
+        if key in self.text:
+            self.attributes[key] = values
+        if tag not in self.VOID:
+            self.stack.append(key)
+
+    def handle_endtag(self, tag):
+        if self.stack:
+            self.stack.pop()
+
+    def handle_data(self, data):
+        for key in self.TARGETS:
+            if key in self.stack:
+                self.text[key].append(data)
+
+    def value(self, key):
+        return "".join(self.text[key]).strip()
+
+    def shown(self, key):
+        return key in self.attributes and "hidden" not in self.attributes[key]
+
+
+def _failure_from_page_source(markup):
+    parser = _StartupDocument()
+    parser.feed(markup)
+    if (parser.startup == "failed" and parser.value("status") == "Startup failed"
+            and parser.shown("startupFailure") and parser.shown("retryStartup")
+            and parser.value("retryStartup") == "Retry startup"
+            and "SwarmCraft could not start (" in parser.value("startupFailure")):
+        return _verified_failure("native-webdriver-page-source")
+    return None
 
 
 # Read only a bounded, explicitly non-secret observability contract.
