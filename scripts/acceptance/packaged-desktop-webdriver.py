@@ -278,6 +278,16 @@ def run(binary: Path, artifacts: Path):
         assert entered["createPanelVisible"] and entered["createNamePopulated"], (
             f"Create form did not accept the world name: {entered}"
         )
+        # Record only public version choices and presence/enablement flags; do
+        # not persist the user-entered name, identity, or any Tauri IPC secret.
+        form_fields = (
+            "createPanelVisible", "createNamePopulated", "minecraftVersion",
+            "fabricLoaderVersion", "createButtonDisabled",
+            "minecraftOptionAllowed", "fabricOptionAllowed",
+        )
+        (artifacts / "before-create-state.json").write_text(
+            json.dumps({key: entered.get(key) for key in form_fields}, indent=2)
+        )
         app.screenshot("before-world-create.png")
         app.click("#createWorld")
         created = await_world(app, world_name, artifacts)
