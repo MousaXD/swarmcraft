@@ -53,6 +53,19 @@ pub struct DataPaths {
 
 impl DataPaths {
     pub fn discover() -> Result<Self, CoreError> {
+        // The packaged Desktop launches CLI sidecars with this same override.
+        // Canonical GUI commands use DataPaths directly, so both paths must
+        // resolve to one identity and world store (including isolated CI data).
+        Self::discover_with_override(std::env::var_os("SWARMCRAFT_DATA_DIR"))
+    }
+
+    fn discover_with_override(override_root: Option<std::ffi::OsString>) -> Result<Self, CoreError> {
+        if let Some(root) = override_root {
+            if root.is_empty() {
+                return Err(CoreError::DataDirectoryUnavailable);
+            }
+            return Ok(Self::from_root(PathBuf::from(root)));
+        }
         let base = BaseDirs::new().ok_or(CoreError::DataDirectoryUnavailable)?;
         Ok(Self { root: base.data_local_dir().join("swarmcraft") })
     }
@@ -313,6 +326,19 @@ fn sync_parent(_parent: &Path) -> Result<(), CoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_paths_discovery_uses_the_same_override_as_cli_sidecars() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("desktop-isolated-worlds");
+        let paths = DataPaths::discover_with_override(Some(root.as_os_str().to_os_string())).unwrap();
+        assert_eq!(paths.root, root);
+        paths.ensure().unwrap();
+        assert!(paths.worlds_dir().is_dir());
+        assert!(paths.identity_dir().is_dir());
+        // An explicitly empty override must never silently write elsewhere.
+        assert!(DataPaths::discover_with_override(Some(std::ffi::OsString::new())).is_err());
+    }
 
     #[test]
     fn identity_persists() {

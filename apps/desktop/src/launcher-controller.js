@@ -1,4 +1,5 @@
-const invoke = () => window.__TAURI__?.core?.invoke;
+import { providerContractInvoke } from './provider-contract-bridge.js';
+const invoke = () => providerContractInvoke(window.__TAURI__?.core);
 const byId = (id) => document.getElementById(id);
 const clean = (value) => String(value ?? '').trim();
 
@@ -203,13 +204,18 @@ function hideInternalInputs() {
   if (details) details.hidden = true;
 }
 
-function importCatalogValues(response, field) {
+function importCatalogValues(response, field, { compatibleOnly = false } = {}) {
   const values = response?.[field] || response?.versions || response?.items || response;
   if (!Array.isArray(values)) throw new Error('Official version catalog returned an invalid response.');
-  return values.map((item) => clean(item?.id ?? item?.version ?? item)).filter(Boolean);
+  return values
+    .filter((item) => !compatibleOnly
+      || typeof item !== 'object'
+      || (item?.supported !== false && item?.adapter_supported !== false))
+    .map((item) => clean(item?.id ?? item?.version ?? item))
+    .filter(Boolean);
 }
 
-function buildImportSelect(source, values, preferred = '') {
+function buildImportSelect(source, values, preferred = '', allowed = new Set(values)) {
   const select = document.createElement('select');
   select.id = source.id;
   select.name = source.name;
@@ -217,11 +223,15 @@ function buildImportSelect(source, values, preferred = '') {
   select.className = source.className;
   for (const value of values) {
     const option = document.createElement('option');
+    const compatible = allowed.has(value);
     option.value = value;
-    option.textContent = value;
+    option.textContent = compatible ? value : `${value} (requires newer SwarmCraft adapter)`;
+    option.disabled = !compatible;
     select.append(option);
   }
-  select.value = values.includes(preferred) ? preferred : values[0] || '';
+  select.value = values.includes(preferred) && allowed.has(preferred)
+    ? preferred
+    : values.find((value) => allowed.has(value)) || '';
   return select;
 }
 
@@ -271,8 +281,9 @@ async function loadImportFabric(call, minecraftSelect, loaderSelect, ui, { refre
   setImportCatalogError(ui, '');
   const result = await call('fabric_loader_versions', { minecraftVersion, refresh });
   const values = importCatalogValues(result, 'loaders');
-  if (!values.length) throw new Error(`Fabric Meta returned no compatible loaders for Minecraft ${minecraftVersion}.`);
-  const replacement = buildImportSelect(loaderSelect, values, preferred);
+  const allowed = new Set(importCatalogValues(result, 'loaders', { compatibleOnly: true }));
+  if (!allowed.size) throw new Error(`No Fabric Loader for Minecraft ${minecraftVersion} is compatible with the shipped SwarmCraft adapter.`);
+  const replacement = buildImportSelect(loaderSelect, values, preferred, allowed);
   loaderSelect.replaceWith(replacement);
   ui.loader = replacement;
   ui.status.textContent = 'Import version catalogs are ready.';
@@ -291,13 +302,15 @@ export async function hydrateImportCatalogs(call, { refresh = false } = {}) {
   try {
     const catalog = await call('minecraft_versions', { includeSnapshots: false, refresh });
     const versions = importCatalogValues(catalog, 'versions');
-    if (!versions.length) throw new Error('Mojang returned no supported Minecraft releases.');
-    const minecraftSelect = buildImportSelect(ui.minecraft, versions, preferredMinecraft);
+    const allowedMinecraft = new Set(importCatalogValues(catalog, 'versions', { compatibleOnly: true }));
+    if (!allowedMinecraft.size) throw new Error('No official Minecraft release is compatible with this shipped SwarmCraft adapter.');
+    const minecraftSelect = buildImportSelect(ui.minecraft, versions, preferredMinecraft, allowedMinecraft);
     const minecraftVersion = clean(minecraftSelect.value);
     const fabric = await call('fabric_loader_versions', { minecraftVersion, refresh });
     const loaders = importCatalogValues(fabric, 'loaders');
-    if (!loaders.length) throw new Error(`Fabric Meta returned no compatible loaders for Minecraft ${minecraftVersion}.`);
-    const loaderSelect = buildImportSelect(ui.loader, loaders, preferredLoader);
+    const allowedLoaders = new Set(importCatalogValues(fabric, 'loaders', { compatibleOnly: true }));
+    if (!allowedLoaders.size) throw new Error(`No Fabric Loader for Minecraft ${minecraftVersion} is compatible with the shipped SwarmCraft adapter.`);
+    const loaderSelect = buildImportSelect(ui.loader, loaders, preferredLoader, allowedLoaders);
 
     ui.minecraft.replaceWith(minecraftSelect);
     ui.loader.replaceWith(loaderSelect);

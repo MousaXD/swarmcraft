@@ -68,9 +68,13 @@ async function instrumentedDocument() {
     readFile(path.join(sourceRoot, 'runtime-wizard.css'), 'utf8'),
   ]);
   const moduleMarker = '<script type="module" src="./app.js"></script>';
+  // This Chrome fixture injects its own module/bridge and intentionally does
+  // not load the packaged-app bootstrap watchdog. Native CI covers that path.
+  const bootstrapMarker = '<script src="./bootstrap.js" defer></script>';
   const styleMarker = '<link rel="stylesheet" href="./style.css" />';
   assert.ok(html.includes(moduleMarker), 'index.html app module marker changed; browser smoke harness must be reviewed');
   assert.ok(html.includes(styleMarker), 'index.html stylesheet marker changed; browser smoke harness must be reviewed');
+  assert.ok(html.includes(bootstrapMarker), 'index.html bootstrap marker changed; browser fixture must be reviewed');
 
   const preloadedStyles = [
     `<style data-agent7-production-style>${mainCss}</style>`,
@@ -79,7 +83,7 @@ async function instrumentedDocument() {
     '<link rel="stylesheet" data-player-experience href="data:text/css," />',
     '<link rel="stylesheet" data-runtime-wizard-style href="data:text/css," />',
   ].join('\n');
-  return html.replace(styleMarker, preloadedStyles).replace(moduleMarker, '');
+  return html.replace(styleMarker, preloadedStyles).replace(moduleMarker, '').replace(bootstrapMarker, '');
 }
 
 async function freePort() {
@@ -202,10 +206,13 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
   switch (command) {
     case 'minecraft_versions':
       if (typeof args.includeSnapshots !== 'boolean' || typeof args.refresh !== 'boolean') throw new Error('minecraft_versions requires includeSnapshots and refresh booleans');
-      return { origin: 'network', versions: [{ id: '26.1.2', type: 'release', release_time: '2026-01-01T00:00:00Z', supported: true }] };
+      return { origin: 'network', versions: [
+        { id: '26.3', type: 'release', release_time: '2026-10-01T00:00:00Z', supported: true, adapter_supported: false },
+        { id: '26.1.2', type: 'release', release_time: '2026-01-01T00:00:00Z', supported: true, adapter_supported: true },
+      ] };
     case 'fabric_loader_versions':
       if (!args.minecraftVersion || typeof args.refresh !== 'boolean') throw new Error('fabric_loader_versions requires minecraftVersion and refresh');
-      return { origin: 'network', versions: [{ version: '0.19.3', stable: true, minecraft_version: args.minecraftVersion }] };
+      return { origin: 'network', versions: [{ version: '0.19.3', stable: true, minecraft_version: args.minecraftVersion, adapter_supported: args.minecraftVersion === '26.1.2' }] };
     case 'list_worlds': return [];
     case 'identity':
     case 'node_identity': return { peerId: '12D3KooWBrowserSmoke' };

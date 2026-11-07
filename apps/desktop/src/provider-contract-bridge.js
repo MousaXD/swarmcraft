@@ -42,18 +42,32 @@ export function adaptProviderInvocation(command, args = {}) {
   return { command, args };
 }
 
-export function installProviderContractBridge(target = globalThis.window) {
-  const core = target?.__TAURI__?.core;
+// The native Tauri 2 bridge exposes core.invoke as a READ-ONLY property in
+// actual packaged WebViews. Never monkey-patch it during module evaluation:
+// doing so throws before app.js can initialize and leaves Loading/Checking
+// forever. Instead wrap each app-owned call site explicitly.
+export function providerContractInvoke(core) {
   const nativeInvoke = core?.invoke;
-  if (typeof nativeInvoke !== 'function' || nativeInvoke.__swarmcraftProviderContractBridge) return false;
-
-  const bridgedInvoke = function bridgedProviderInvoke(command, args = {}) {
+  if (typeof nativeInvoke !== 'function') return null;
+  return (command, args = {}) => {
     const adapted = adaptProviderInvocation(command, args);
     return nativeInvoke.call(core, adapted.command, adapted.args);
   };
-  Object.defineProperty(bridgedInvoke, '__swarmcraftProviderContractBridge', { value: true });
-  core.invoke = bridgedInvoke;
-  return true;
 }
 
-installProviderContractBridge();
+// Legacy explicit opt-in helper for mutable test/extension contexts. Production
+// uses providerContractInvoke and never calls this function implicitly.
+export function installProviderContractBridge(target = globalThis.window) {
+  const core = target?.__TAURI__?.core;
+  if (typeof core?.invoke !== 'function' || core.invoke.__swarmcraftProviderContractBridge) return false;
+  const descriptor = Object.getOwnPropertyDescriptor(core, 'invoke');
+  if (descriptor && descriptor.writable === false && typeof descriptor.set !== 'function') return false;
+  const bridgedInvoke = providerContractInvoke(core);
+  Object.defineProperty(bridgedInvoke, '__swarmcraftProviderContractBridge', { value: true });
+  try {
+    core.invoke = bridgedInvoke;
+  } catch (_) {
+    return false;
+  }
+  return core.invoke === bridgedInvoke;
+}
