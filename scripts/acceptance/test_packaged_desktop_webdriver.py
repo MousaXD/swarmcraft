@@ -18,6 +18,8 @@ class NativeFailureObservationTests(unittest.TestCase):
         ids = {"html": "html", "#status": "status",
                "#startupFailure": "banner", "#retryStartup": "retry"}
         app.element = lambda selector: ids[selector]
+        # This unit test validates the proof logic, not artifact filesystem I/O.
+        app._write_startup_observation = lambda diagnostics: None
         return app
 
     def test_native_dom_requires_actual_failure_and_retry(self):
