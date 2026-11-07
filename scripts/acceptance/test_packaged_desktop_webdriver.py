@@ -17,7 +17,7 @@ class NativeFailureObservationTests(unittest.TestCase):
         app.session = "test"
         ids = {"html": "html", "#status": "status",
                "#startupFailure": "banner", "#retryStartup": "retry"}
-        app.element = lambda selector: ids[selector]
+        app.element = lambda selector, timeout=75: ids[selector]
         # This unit test validates the proof logic, not artifact filesystem I/O.
         app._write_startup_observation = lambda diagnostics: None
         return app

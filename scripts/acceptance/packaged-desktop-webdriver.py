@@ -105,9 +105,9 @@ class Application:
         return request(f"/session/{self.session}/execute/sync", "POST",
                        {"script": script, "args": args or []})
 
-    def element(self, selector):
+    def element(self, selector, timeout=75):
         value = request(f"/session/{self.session}/element", "POST",
-                        {"using": "css selector", "value": selector})
+                        {"using": "css selector", "value": selector}, timeout=timeout)
         return value.get("element-6066-11e4-a52e-4f735466cecf") or value.get("ELEMENT")
 
     def click(self, selector):
@@ -128,7 +128,7 @@ class Application:
         """
         diagnostics = {"source": "not-tried", "elements": "not-tried"}
         try:
-            markup = request(f"/session/{self.session}/source")
+            markup = request(f"/session/{self.session}/source", timeout=12)
             if isinstance(markup, str):
                 proof = _failure_from_page_source(markup)
                 diagnostics["source"] = "verified" if proof else "not-verified"
@@ -142,8 +142,8 @@ class Application:
 
         try:
             def element_value(selector, operation):
-                element = self.element(selector)
-                return request(f"/session/{self.session}/element/{element}/{operation}")
+                element = self.element(selector, timeout=7)
+                return request(f"/session/{self.session}/element/{element}/{operation}", timeout=7)
 
             html = element_value("html", "attribute/data-swarmcraft-startup")
             status = element_value("#status", "text")
@@ -151,10 +151,17 @@ class Application:
             visible = element_value("#startupFailure", "displayed")
             retry = element_value("#retryStartup", "text")
             retry_visible = element_value("#retryStartup", "displayed")
-            if (html == "failed" and status == "Startup failed" and
-                    visible is True and retry_visible is True and
-                    retry == "Retry startup" and
-                    "SwarmCraft could not start (" in banner):
+            checks = {
+                "failedAttribute": html == "failed",
+                "failedStatus": status == "Startup failed",
+                "visibleBanner": visible is True,
+                "visibleRetry": retry_visible is True,
+                "retryLabel": retry == "Retry startup",
+                "actionableDiagnostic": isinstance(banner, str)
+                    and "SwarmCraft could not start (" in banner,
+            }
+            diagnostics["elementChecks"] = checks
+            if all(checks.values()):
                 diagnostics["elements"] = "verified"
                 self._write_startup_observation(diagnostics)
                 return _verified_failure("native-webdriver-elements")
