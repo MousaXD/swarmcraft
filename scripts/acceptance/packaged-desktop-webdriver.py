@@ -118,6 +118,42 @@ class Application:
         request(f"/session/{self.session}/element/{element}/value", "POST",
                 {"text": text, "value": list(text)})
 
+    def visible_startup_failure(self):
+        """Read the startup error using native WebDriver element commands.
+
+        WebKitGTK can reject execute/sync while a failed Tauri startup is
+        settling, even though the real failed-startup banner is rendered.
+        This must prove the DOM failure and retry controls; do not infer a
+        failure solely from a WebDriver exception or screenshot.
+        """
+        try:
+            def element_value(selector, operation):
+                element = self.element(selector)
+                return request(f"/session/{self.session}/element/{element}/{operation}")
+
+            html = element_value("html", "attribute/data-swarmcraft-startup")
+            status = element_value("#status", "text")
+            banner = element_value("#startupFailure", "text")
+            visible = element_value("#startupFailure", "displayed")
+            retry = element_value("#retryStartup", "text")
+            retry_visible = element_value("#retryStartup", "displayed")
+            if (html != "failed" or status != "Startup failed" or
+                    visible is not True or retry_visible is not True or
+                    retry != "Retry startup" or
+                    "SwarmCraft could not start (" not in banner):
+                return None
+            # Do not retain banner text: native errors can contain private
+            # paths, CLI arguments or data. Only store verified UI booleans.
+            return {
+                "startup": html,
+                "status": status,
+                "error": True,
+                "retryVisible": True,
+                "observedVia": "native-webdriver-elements",
+            }
+        except Exception:
+            return None
+
     def screenshot(self, name):
         try:
             result = request(f"/session/{self.session}/screenshot", timeout=15)
@@ -182,6 +218,13 @@ def state(app: Application):
         return app.execute(STATE_SCRIPT)
     except Exception:
         app.screenshot("webdriver-failure.png")
+        # The executable may still render a useful failure screen after
+        # WebKitGTK rejects JavaScript evaluation. Native element commands
+        # independently prove the error, status, and retry affordance.
+        # Never mask an unrelated WebDriver failure as successful acceptance.
+        observed = app.visible_startup_failure()
+        if observed:
+            return observed
         raise
 
 
