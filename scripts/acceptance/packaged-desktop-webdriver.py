@@ -187,6 +187,7 @@ return {
     selected: row.getAttribute('aria-pressed') === 'true',
   })),
   error: !!byId('startupFailure') && !byId('startupFailure').hidden,
+  retryVisible: !!byId('retryStartup') && !byId('retryStartup').hidden,
   worldError: !!byId('worldLoadError') && !byId('worldLoadError').hidden,
   createPanelVisible: !!byId('createPanel') && !byId('createPanel').hidden,
   createButtonDisabled: byId('createWorld')?.disabled === true,
