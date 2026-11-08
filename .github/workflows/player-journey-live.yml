@@ -69,8 +69,31 @@ jobs:
               }
               exit 0
             fi
-            if ! grep -Eq 'curl: \(22\).*returned error: (429|500|502|503|504)' "$console"; then
-              echo "Live journey failed without a retryable upstream HTTP response; failing closed" >&2
+            # Only the terminal failure may authorize a retry. An earlier
+            # recovered 504 must never hide a subsequent product assertion.
+            terminal="$(grep -Ev '^(Preserved acceptance (data|logs):|[[:space:]]*$)' "$console" | tail -n 1)"
+            if ! grep -Eq '^curl: \(22\) The requested URL returned error: (429|500|502|503|504)
+              exit 1
+            fi
+            if [ "$attempt" -eq 4 ]; then
+              echo "Official artifact HTTP outage persisted across all four fresh-state attempts" >&2
+              exit 1
+            fi
+            echo "Official artifact HTTP error; bounded retry with fresh clean-machine state"
+            sleep $((5 * attempt * attempt))
+          done
+      - name: Upload clean-machine evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: clean-machine-live-evidence-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/swarmcraft-clean-machine-logs/**
+            ${{ runner.temp }}/swarmcraft-clean-machine-data/**
+          if-no-files-found: warn
+          retention-days: 14
+ <<<"$terminal"; then
+              echo "Live journey terminal failure is not an upstream HTTP response; failing closed" >&2
               exit 1
             fi
             if [ "$attempt" -eq 4 ]; then
