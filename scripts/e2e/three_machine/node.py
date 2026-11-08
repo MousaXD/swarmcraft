@@ -251,7 +251,7 @@ def java_runtime_version(pid, root, world, binary, cli):
             return None
         # OpenJDK uses stderr, e.g. 'openjdk version "25.0.1"'.
         combined = (version.stderr + "\n" + version.stdout)[:1024]
-        match = re.search(r'(?:openjdk|java) version ["\\']([0-9][0-9A-Za-z._+-]{0,47})["\\']', combined, re.I)
+        match = re.search(r"""(?:openjdk|java) version ["']([0-9][0-9A-Za-z._+-]{0,47})["']""", combined, re.I)
         if not match:
             match = re.search(r'openjdk ([0-9][0-9A-Za-z._+-]{0,47})', combined, re.I)
         return safe_version(match.group(1)) if match else None
