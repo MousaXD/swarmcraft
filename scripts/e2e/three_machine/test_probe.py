@@ -56,6 +56,43 @@ class TestSanitizedDiagnostics(unittest.TestCase):
             self.assertEqual(node.connectivity_summary(temp), {"available": False})
 
 
+class TestFabricClientProvenance(unittest.TestCase):
+    def test_exact_fabric_knot_client_requires_real_java_executable(self):
+        cmd = (b"/usr/bin/java\0-cp\0minecraft.jar:fabric-loader-0.19.3.jar\0"
+               b"net.fabricmc.loader.impl.launch.knot.KnotClient\0--gameDir\0/test\0")
+        with patch.object(Path, "read_bytes", return_value=cmd):
+            with patch.object(Path, "resolve", return_value=Path("/usr/lib/jvm/bin/java")):
+                self.assertTrue(node.fabric_client_process(123, 456))
+                self.assertFalse(node.fabric_client_process(123, 123))
+            with patch.object(Path, "resolve", return_value=Path("/usr/bin/sleep")):
+                self.assertFalse(node.fabric_client_process(123, 456))
+
+    def test_vanilla_server_or_spoofed_minecraft_process_is_not_client(self):
+        commands = (
+            b"sleep\0minecraft-knotclient\0",
+            b"/usr/bin/java\0-jar\0fabric-server.jar\0",
+            b"/usr/bin/java\0-cp\0fabric-loader.jar\0java.lang.Main\0",
+        )
+        with patch.object(Path, "resolve", return_value=Path("/opt/java/bin/java")):
+            for cmd in commands:
+                with patch.object(Path, "read_bytes", return_value=cmd):
+                    self.assertFalse(node.fabric_client_process(123, 456))
+
+    def test_known_fabric_prism_entrypoint_requires_loader_classpath(self):
+        with patch.object(Path, "resolve", return_value=Path("/usr/bin/java")):
+            command = (b"java\0-cp\0fabric-loader-0.19.3.jar:minecraft.jar\0"
+                       b"org.prismlauncher.EntryPoint\0")
+            with patch.object(Path, "read_bytes", return_value=command):
+                self.assertTrue(node.fabric_client_process(127))
+            command = b"java\0-cp\0vanilla.jar\0org.prismlauncher.EntryPoint\0"
+            with patch.object(Path, "read_bytes", return_value=command):
+                self.assertFalse(node.fabric_client_process(127))
+
+    def test_missing_or_invalid_client_pid_fails_closed(self):
+        for pid in (None, 0, 1, True, "123"):
+            self.assertFalse(node.fabric_client_process(pid))
+
+
 class TestCanonicalSnapshotHeadEvidence(unittest.TestCase):
     WORLD = "ab" * 32
 
