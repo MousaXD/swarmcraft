@@ -481,6 +481,9 @@ async fn wait_until_launch_safe(
         None,
     )?;
     loop {
+        if hosting_budget::require_contribution(paths, world).is_err() {
+            return Ok(false);
+        }
         let current = storage.load_epoch_record(world)?;
         if current.epoch_number != epoch.epoch_number
             || current.fencing_token != epoch.fencing_token
@@ -579,6 +582,9 @@ impl Drop for AuthorityRuntimeGuard {
 }
 
 pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options: HostOptions) -> Result<()> {
+    // Explicit hosting must fail immediately instead of waiting indefinitely
+    // for quorum when this device is player-only or under RAM pressure.
+    hosting_budget::require_contribution(paths, options.world)?;
     let identity = PeerIdentity::load_or_create(paths)?;
     let descriptor = storage.load_world_descriptor(options.world)?;
     let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
