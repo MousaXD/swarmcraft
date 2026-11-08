@@ -153,6 +153,8 @@ with socket.create_connection((host, port), timeout=5) as connection:
     fs::write(&dummy_server, b"mock").unwrap();
     fs::write(&dummy_mod, b"mock").unwrap();
 
+    swarm_cli::hosting_budget::set_contribution(&paths, world, 512).unwrap();
+
     host::run(
         &paths,
         &storage,
