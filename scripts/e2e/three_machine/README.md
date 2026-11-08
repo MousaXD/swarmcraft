@@ -92,7 +92,7 @@ standing in as player/host proof.
 
 Update process IDs after a restart or takeover; false, missing or wrong PIDs
 must fail. Process presence is auxiliary evidence, not proof of a successful
-Minecraft login, join or gameplay. The seven phase captures must happen
+Minecraft login, join or gameplay. All ten phase captures must happen
 **in their real chronological order**; the harness does not fabricate them.
 
 ```bash
@@ -146,6 +146,11 @@ python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$O
 
 # Only after independent human review of genuine native desktop, real game
 # client, selected network transport and budget evidence:
+# Produce a digest of all saved observations and the crash receipt, after
+# recording the last phase and before independent reviewer approval. Copy
+# observations_sha256 into the private review JSON; never treat this as PASS.
+python3 scripts/e2e/three_machine/run.py observations-digest --config "$CONFIG" --output "$OUT"
+
 python3 scripts/e2e/three_machine/run.py verify --config "$CONFIG" --output "$OUT" --review "$REVIEW_JSON"
 ```
 
@@ -184,6 +189,23 @@ behavior still require explicit independent evidence and review. Agent 03's
 own contract marks actual policy integration, GUI support and OS-level hard
 memory enforcement as unfinished; this harness does not bypass those safety
 gaps or make them green by inspecting a JSON file.
+
+## Binding reviewed observations to immutable bytes
+
+After all ten phases, run `run.py observations-digest` and place its 64-hex
+`observations_sha256` into the reviewer file. The digest covers the sanitized
+preflight JSON, all ten timestamped phase JSON records, and the guarded
+application-crash receipt in canonical order. Any edit to a stage record after
+the reviewer signs off invalidates the digest and causes final verification
+to fail closed. Store the source observation JSON and a SHA-pinned copy
+of the redacted media package at the linked evidence URL. This digest does
+not prove that a remote machine produced genuine data; that still requires
+independent inspection of the signed-state, native-app and game evidence.
+
+The verifier also requires Bob's Minecraft client to be present after his
+signed join, Carol's client after hers, and both surviving client/desktop
+processes to be observed after Bob's takeover. Those observations are
+necessary, **not** sufficient evidence that a real player connected.
 
 ## Evidence and final review
 
