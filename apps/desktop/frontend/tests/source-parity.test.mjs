@@ -87,3 +87,16 @@ test('legacy activity writers preserve fallback while candidate uses the Svelte 
   assert.ok(component.includes('event.stopImmediatePropagation()'), 'clear cannot race old listener');
   assert.ok(activity.includes("activityText.set('Activity cleared.')"));
 });
+
+
+test('native responsiveness guards prevent horizontal scrollers and min-window regressions', async () => {
+  const [styles, player, workflow] = await Promise.all([
+    source('../../src/style.css'),
+    source('../../src/player-experience.css'),
+    source('../../../.github/workflows/svelte-candidate-native-gui.yml'),
+  ]);
+  assert.ok(styles.includes('overflow-x: hidden;'), 'world-detail must not force page-width overflow');
+  assert.ok(player.includes('overflow-wrap: anywhere;'), 'paths and IDs must be allowed to wrap');
+  assert.match(player, /flex-wrap: wrap;/);
+  assert.ok(workflow.includes('visual-window-acceptance.py'));
+});

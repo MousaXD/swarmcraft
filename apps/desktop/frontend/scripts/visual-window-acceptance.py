@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Visual acceptance of the *installed* Svelte candidate at the real Tauri window bounds.
+
+Uses the actual packaged executable and unmodified #83 WebKitGTK driver.
+No fake IPC, fixture worlds, screenshot generation, or browser source server.
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+ROOT = Path(__file__).resolve().parents[4]
+NATIVE = ROOT / "scripts" / "acceptance" / "packaged-desktop-webdriver.py"
+spec = importlib.util.spec_from_file_location("native_swarmcraft_e2e", NATIVE)
+if spec is None or spec.loader is None:
+    raise RuntimeError("Cannot locate installed-GUI acceptance module")
+native = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = native
+spec.loader.exec_module(native)
+
+
+def inspect_layout(app, width, height):
+    request = native.request
+    request(f"/session/{app.session}/window/rect", "POST", {"width": width, "height": height})
+    time.sleep(0.5)
+    return app.execute(r"""
+      const pane = document.querySelector('.world-detail');
+      const play = document.getElementById('playWorld');
+      const invite = document.getElementById('inviteWorld');
+      const panel = document.getElementById('worldsView');
+      const details = document.getElementById('selectionContent');
+      const visible = (element) => {
+        if (!element) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && rect.right <= window.innerWidth + 2;
+      };
+      return {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        rootScrollWidth: document.documentElement.scrollWidth,
+        paneScrollWidth: pane?.scrollWidth ?? 0,
+        paneClientWidth: pane?.clientWidth ?? 0,
+        panelScrollWidth: panel?.scrollWidth ?? 0,
+        panelClientWidth: panel?.clientWidth ?? 0,
+        detailsVisible: !!details && !details.hidden,
+        playVisible: visible(play),
+        inviteVisible: visible(invite),
+        startup: document.documentElement.dataset.swarmcraftStartup || 'not-run',
+      };
+    """)
+
+
+def run(binary: Path, artifacts: Path):
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise AssertionError("Candidate binary is missing or non-executable")
+    if not os.environ.get("SWARMCRAFT_DATA_DIR"):
+        raise AssertionError("CI must supply the existing isolated acceptance profile")
+    artifacts.mkdir(parents=True, exist_ok=True)
+    with native.Application(binary, artifacts) as app:
+        ready = native.await_ready(app, artifacts)
+        assert ready["startup"] in ("ready", "degraded"), "Native candidate startup not complete"
+        app.click("#navWorlds")
+        app.click("#worldCards .world-row")
+        for width, height in ((980, 760), (720, 560)):
+            result = inspect_layout(app, width, height)
+            (artifacts / f"layout-{width}x{height}.json").write_text(
+                json.dumps(result, indent=2)
+            )
+            app.screenshot(f"world-details-{width}x{height}.png")
+            assert result["startup"] in ("ready", "degraded"), f"Bad GUI state: {result}"
+            assert result["detailsVisible"], f"Selected world is hidden: {result}"
+            assert result["playVisible"] and result["inviteVisible"], (
+                f"Primary controls clipped at {width}x{height}: {result}"
+            )
+            assert result["rootScrollWidth"] <= result["width"] + 2, (
+                f"Horizontal application scroll: {result}"
+            )
+            assert result["paneScrollWidth"] <= result["paneClientWidth"] + 2, (
+                f"Horizontal selected-world scroll: {result}"
+            )
+            assert result["panelScrollWidth"] <= result["panelClientWidth"] + 2, (
+                f"Horizontal world workspace scroll: {result}"
+            )
+            print(f"PASS: installed native Svelte GUI layout at {width}x{height}")
+        # Restore configured default for follow-up screenshots.
+        native.request(f"/session/{app.session}/window/rect", "POST", {
+            "width": 980, "height": 760
+        })
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--artifacts", type=Path, required=True)
+    args = parser.parse_args()
+    try:
+        run(args.binary.resolve(), args.artifacts.resolve())
+    except Exception as error:
+        args.artifacts.mkdir(parents=True, exist_ok=True)
+        (args.artifacts / "failure.txt").write_text(
+            type(error).__name__ + ": layout verification failed\n"
+        )
+        print(f"FAIL: installed candidate layout: {type(error).__name__}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+
+if __name__ == "__main__":
+    main()

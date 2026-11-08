@@ -134,6 +134,17 @@ jobs:
           mkdir -p "$HOME" "$XDG_DATA_HOME"
           xvfb-run -a -s '-screen 0 1280x1024x24' timeout 240s python3 scripts/acceptance/packaged-desktop-webdriver.py \
             --binary "$binary" --artifacts "${{ runner.temp }}/svelte-evidence/positive"
+      - name: Native Svelte visual/overflow acceptance at default and minimum windows
+        shell: bash
+        env:
+          SWARMCRAFT_DATA_DIR: ${{ runner.temp }}/svelte-positive-data
+          HOME: ${{ runner.temp }}/svelte-positive-home
+          XDG_DATA_HOME: ${{ runner.temp }}/svelte-positive-xdg
+        run: |
+          set -euo pipefail
+          xvfb-run -a -s '-screen 0 1280x1024x24' timeout 150s python3 apps/desktop/frontend/scripts/visual-window-acceptance.py \
+            --binary "$binary" --artifacts "${{ runner.temp }}/svelte-evidence/visual"
+
       - name: Negative control — missing required installed CLI sidecar must visibly fail
         shell: bash
         env:

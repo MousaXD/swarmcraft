@@ -5,9 +5,22 @@
 }
 
 .selection-content[data-player-experience="true"] .world-hero {
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 12px 16px;
   padding: 4px 0 22px;
   border-bottom: 0;
+}
+
+/* On compact world-detail panes, move actions below the title instead of
+   squeezing long user-supplied names into a 1-2-word column. */
+.selection-content[data-player-experience="true"] .world-heading {
+  flex: 1 1 240px;
+}
+
+.selection-content[data-player-experience="true"] .hero-actions {
+  flex: 0 1 auto;
+  justify-content: flex-start;
 }
 
 .selection-content[data-player-experience="true"] .world-heading h2 {
@@ -158,6 +171,19 @@
 .selection-content[data-player-experience="true"] #hostReadinessPanel h3 {
   margin-top: 4px;
   font-size: 13px;
+}
+
+/* Native diagnostics contain long identifiers and local paths. Keep every
+   byte selectable while preventing horizontal scroll in 980x760 and 720x560. */
+.selection-content[data-player-experience="true"],
+.selection-content[data-player-experience="true"] .player-journey-overview,
+.selection-content[data-player-experience="true"] #hostReadinessPanel {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.selection-content[data-player-experience="true"] #hostReadinessDetail {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .selection-content[data-player-experience="true"] #worldNotice {
