@@ -1128,6 +1128,11 @@ async function wakeWorld() {
 
 // The Svelte candidate owns Create World submissions. The installed legacy
 // frontend has no ownership flag and continues using this handler as before.
+// Completion-only callbacks are exposed exclusively in the mounted Svelte
+// candidate. The shipping legacy webview does not receive extra globals.
+if (window.__swarmcraftSvelteCreateOwned === true
+    || window.__swarmcraftSvelteJoinOwned === true
+    || window.__swarmcraftSvelteImportOwned === true) {
 window.__swarmcraftAfterSvelteImport = async (importedWorldId) => {
   const id = String(importedWorldId || '').trim();
   if (!/^scworld:[^\s]+$/.test(id)) throw new Error('Import did not return a canonical World ID.');
@@ -1161,6 +1166,7 @@ window.__swarmcraftAfterSvelteCreate = async (createdWorldId) => {
   }
   showView('worlds');
 };
+}
 
 function bindAction(id, handler, { submit = false } = {}) {
   const element = $(id);
