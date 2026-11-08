@@ -226,7 +226,20 @@ def verify(c, output, review_file=None):
             len({x["state_root"] for x in p.values()}) == 1, "checkpoint_not_replicated")
     require(all(x["authority_fingerprint"] == a["identity_fingerprint"] for x in p.values()),
             "alice_not_canonical_authority")
+    consent_a, consent_b, consent_c = (v.get("hosting_consent") for v in (a, b, d))
+    require(all(isinstance(x, dict) and x.get("available") is True and
+                x.get("identity_bound") is True and x.get("world_bound") is True
+                for x in (consent_a, consent_b, consent_c)),
+            "local_identity_bound_host_consents_missing")
+    require(all(x["enabled"] is True and type(x.get("heap_mib")) is int and
+                512 <= x["heap_mib"] <= 65536 and
+                type(x.get("revision")) is int and x["revision"] > 0
+                for x in (consent_a, consent_b)), "alice_or_bob_host_opt_in_missing")
+    require(consent_c["enabled"] is False and consent_c.get("heap_mib") == 0,
+            "carol_player_only_zero_budget_missing")
     require(a["runtime_ready"] and a["minecraft_server_process_observed"], "alice_real_server_missing")
+    require(a.get("minecraft_server_heap_mib") == consent_a["heap_mib"],
+            "alice_real_java_heap_not_bounded_by_consent")
     require(not b["minecraft_server_process_observed"] and not d["minecraft_server_process_observed"],
             "parallel_authority_runtimes_before_crash")
     require(a["safe_to_shutdown"] and a["successor_fingerprint"] == b["identity_fingerprint"],
@@ -251,6 +264,9 @@ def verify(c, output, review_file=None):
             rb["fencing_token"] is not None and a["fencing_token"] is not None and
             rb["fencing_token"] > a["fencing_token"], "unfenced_or_stale_takeover")
     require(rb["runtime_ready"] and rb["minecraft_server_process_observed"], "bob_real_recovery_runtime_missing")
+    require(rb.get("minecraft_server_heap_mib") == consent_b["heap_mib"],
+            "bob_real_java_heap_exceeds_or_ignores_consent")
+    require(rb.get("hosting_consent") == consent_b, "bob_host_consent_changed_during_takeover")
     require(not recovery["carol"]["minecraft_server_process_observed"], "carol_unexpected_server_after_recovery")
     require(all(x["state_root"] == a["state_root"] for x in recovery.values()),
             "latest_accepted_checkpoint_not_restored")
@@ -262,6 +278,9 @@ def verify(c, output, review_file=None):
             len({x["state_root"] for x in returned.values()}) == 1,
             "return_replica_divergence")
     require(returned["alice"]["desktop_process_observed"], "returning_alice_gui_missing")
+    require(returned["carol"].get("hosting_consent") == consent_c and
+            not returned["carol"]["minecraft_server_process_observed"],
+            "carol_zero_budget_or_player_role_violated")
     require(not returned["alice"]["runtime_ready"] and not returned["alice"]["minecraft_server_process_observed"],
             "stale_alice_runtime_still_active")
     require(all(x["minecraft_client_process_observed"] for x in returned.values()),
