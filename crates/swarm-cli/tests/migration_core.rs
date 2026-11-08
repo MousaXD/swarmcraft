@@ -403,10 +403,8 @@ async fn withdrawing_active_host_consent_uses_fabric_barrier_and_durable_sleep()
     let endpoint = "127.0.0.1:25569";
     configure_safe_stop_runtime(temp.path(), &alice, shared.world, endpoint);
 
-    let generation = AuthorityGeneration {
-        epoch: shared.epoch.epoch_number,
-        fencing_token: shared.epoch.fencing_token,
-    };
+    let generation =
+        AuthorityGeneration { epoch: shared.epoch.epoch_number, fencing_token: shared.epoch.fencing_token };
     let heartbeat = spawn_heartbeat(alice.paths.clone(), shared.world, generation);
     let supervisor_paths = alice.paths.clone();
     let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });

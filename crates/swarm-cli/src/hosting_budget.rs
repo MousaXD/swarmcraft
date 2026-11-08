@@ -90,7 +90,12 @@ fn open_lock(path: &Path) -> Result<File> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
         .with_context(|| format!("cannot open hosting lock {}", path.display()))
 }
 
@@ -136,16 +141,17 @@ pub fn set_contribution(paths: &DataPaths, world: WorldId, heap_mib: u64) -> Res
         // are consuming RAM. Check the hard physical limit now; every actual
         // launch still checks CURRENT available headroom under admission lock.
         let memory = memory_snapshot()?;
-        check_budget(heap_mib, AvailableMemory {
-            physical_mib: memory.physical_mib,
-            available_mib: memory.physical_mib,
-        })?;
+        check_budget(
+            heap_mib,
+            AvailableMemory { physical_mib: memory.physical_mib, available_mib: memory.physical_mib },
+        )?;
     }
     let lock = open_lock(&control_path(paths).join("hosting-consent-write.lock"))?;
     lock.lock_exclusive().context("cannot serialize hosting consent updates")?;
     let previous = load_consent(paths, world)?;
     let now_nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let next_revision = previous.map_or(0, |record| record.revision)
+    let next_revision = previous
+        .map_or(0, |record| record.revision)
         .checked_add(1)
         .context("hosting consent revision exhausted; refusing stale update")?;
     let current = (now_nanos.min(u64::MAX as u128) as u64).max(next_revision);
@@ -195,7 +201,11 @@ fn atomic_write(path: &Path, value: &HostingConsentV1) -> Result<()> {
 }
 
 pub fn estimated_native_overhead_mib(heap_mib: u64) -> u64 {
-    if heap_mib == 0 { 0 } else { NATIVE_MIN_MIB.max(heap_mib / 2) }
+    if heap_mib == 0 {
+        0
+    } else {
+        NATIVE_MIN_MIB.max(heap_mib / 2)
+    }
 }
 
 fn os_headroom_mib(physical_mib: u64) -> u64 {
@@ -230,8 +240,8 @@ pub fn check_budget(heap_mib: u64, memory: AvailableMemory) -> Result<()> {
 }
 
 pub fn require_contribution(paths: &DataPaths, world: WorldId) -> Result<HostingConsentV1> {
-    let record = load_consent(paths, world)?
-        .context("hosting consent is absent; this device is player-only (0 MiB)")?;
+    let record =
+        load_consent(paths, world)?.context("hosting consent is absent; this device is player-only (0 MiB)")?;
     if !record.enabled {
         bail!("hosting consent was withdrawn; this device is player-only (0 MiB)");
     }
@@ -244,21 +254,17 @@ pub fn require_contribution(paths: &DataPaths, world: WorldId) -> Result<Hosting
 pub fn admit(paths: &DataPaths, world: WorldId) -> Result<HostingAdmission> {
     let _ = require_contribution(paths, world)?;
     let lock = open_lock(&control_path(paths).join("hosting-active-memory.lock"))?;
-    lock.try_lock_exclusive()
-        .context("another Minecraft hosting admission is active on this device; concurrent memory reservations are denied")?;
+    lock.try_lock_exclusive().context(
+        "another Minecraft hosting admission is active on this device; concurrent memory reservations are denied",
+    )?;
     let consent = require_contribution(paths, world)?;
     Ok(HostingAdmission { _exclusive_memory_lock: lock, consent })
 }
 
 /// Recheck persisted consent and free headroom immediately before spawn,
 /// not only before a potentially slow canonical restore.
-pub fn revalidate_admission(
-    paths: &DataPaths,
-    world: WorldId,
-    admission: &HostingAdmission,
-) -> Result<()> {
-    let current = load_consent(paths, world)?
-        .context("hosting consent disappeared during runtime preparation")?;
+pub fn revalidate_admission(paths: &DataPaths, world: WorldId, admission: &HostingAdmission) -> Result<()> {
+    let current = load_consent(paths, world)?.context("hosting consent disappeared during runtime preparation")?;
     if current != *admission.consent() {
         bail!("hosting consent or heap changed during runtime preparation; Java launch denied");
     }
@@ -267,11 +273,7 @@ pub fn revalidate_admission(
 
 /// Called while serving. Any revision change, revocation or inability to
 /// inspect state requires a safe Fabric shutdown/checkpoint, not a JVM kill.
-pub fn runtime_withdrawal(
-    paths: &DataPaths,
-    world: WorldId,
-    admitted: &HostingConsentV1,
-) -> Result<Option<String>> {
+pub fn runtime_withdrawal(paths: &DataPaths, world: WorldId, admitted: &HostingConsentV1) -> Result<Option<String>> {
     let current = load_consent(paths, world)?;
     if current.as_ref() != Some(admitted) {
         return Ok(Some("hosting contribution changed or was withdrawn".into()));
@@ -325,7 +327,9 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
 pub fn memory_snapshot() -> Result<AvailableMemory> {
     let text = fs::read_to_string("/proc/meminfo").context("cannot read Linux /proc/meminfo")?;
     fn mib(text: &str, name: &str) -> Result<u64> {
-        let line = text.lines().find(|line| line.starts_with(name))
+        let line = text
+            .lines()
+            .find(|line| line.starts_with(name))
             .with_context(|| format!("missing Linux {name} memory measurement"))?;
         let kb: u64 = line.split_whitespace().nth(1).context("missing KiB count")?.parse()?;
         Ok(kb / 1_024)
@@ -339,8 +343,8 @@ pub fn memory_snapshot() -> Result<AvailableMemory> {
         let raw = raw.trim();
         if raw != "max" {
             let limit_bytes: u64 = raw.parse().context("invalid cgroup memory.max")?;
-            let used_bytes: u64 = fs::read_to_string(current_file)
-                .context("cannot read cgroup memory.current")?.trim().parse()?;
+            let used_bytes: u64 =
+                fs::read_to_string(current_file).context("cannot read cgroup memory.current")?.trim().parse()?;
             let limit_mib = limit_bytes / (1024 * 1024);
             physical = physical.min(limit_mib);
             available = available.min(limit_bytes.saturating_sub(used_bytes) / (1024 * 1024));
@@ -353,9 +357,15 @@ pub fn memory_snapshot() -> Result<AvailableMemory> {
 pub fn memory_snapshot() -> Result<AvailableMemory> {
     #[repr(C)]
     struct MemoryStatusEx {
-        length: u32, load: u32, total_physical: u64, available_physical: u64,
-        total_pagefile: u64, available_pagefile: u64, total_virtual: u64,
-        available_virtual: u64, available_extended_virtual: u64,
+        length: u32,
+        load: u32,
+        total_physical: u64,
+        available_physical: u64,
+        total_pagefile: u64,
+        available_pagefile: u64,
+        total_virtual: u64,
+        available_virtual: u64,
+        available_extended_virtual: u64,
     }
     #[link(name = "kernel32")]
     extern "system" {
@@ -363,8 +373,13 @@ pub fn memory_snapshot() -> Result<AvailableMemory> {
     }
     let mut status = MemoryStatusEx {
         length: std::mem::size_of::<MemoryStatusEx>() as u32,
-        load: 0, total_physical: 0, available_physical: 0, total_pagefile: 0,
-        available_pagefile: 0, total_virtual: 0, available_virtual: 0,
+        load: 0,
+        total_physical: 0,
+        available_physical: 0,
+        total_pagefile: 0,
+        available_pagefile: 0,
+        total_virtual: 0,
+        available_virtual: 0,
         available_extended_virtual: 0,
     };
     if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
@@ -379,7 +394,9 @@ pub fn memory_snapshot() -> Result<AvailableMemory> {
 #[cfg(target_os = "macos")]
 pub fn memory_snapshot() -> Result<AvailableMemory> {
     use std::process::Command;
-    let total = Command::new("/usr/sbin/sysctl").args(["-n", "hw.memsize"]).output()
+    let total = Command::new("/usr/sbin/sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
         .context("cannot query macOS physical memory")?;
     if !total.status.success() {
         bail!("macOS physical memory query failed");
@@ -391,13 +408,15 @@ pub fn memory_snapshot() -> Result<AvailableMemory> {
     }
     let stdout = String::from_utf8(stats.stdout)?;
     let header = stdout.lines().next().context("empty vm_stat output")?;
-    let page_size: u64 = header.split("page size of ").nth(1)
+    let page_size: u64 = header
+        .split("page size of ")
+        .nth(1)
         .and_then(|part| part.split_whitespace().next())
-        .context("missing vm_stat page size")?.parse()?;
+        .context("missing vm_stat page size")?
+        .parse()?;
     let pages = |name: &str| -> Result<u64> {
         let line = stdout.lines().find(|line| line.starts_with(name)).context("vm_stat field missing")?;
-        Ok(line.split(':').nth(1).context("vm_stat value missing")?
-            .trim().trim_end_matches('.').parse()?)
+        Ok(line.split(':').nth(1).context("vm_stat value missing")?.trim().trim_end_matches('.').parse()?)
     };
     // Deliberately excludes purgeable/compressed memory to avoid optimistic reuse.
     let free = pages("Pages free:")?.saturating_add(pages("Pages inactive:")?);

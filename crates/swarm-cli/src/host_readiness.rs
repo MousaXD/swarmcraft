@@ -990,16 +990,25 @@ mod tests {
         };
         crate::migration::save_runtime_config(&paths, world, &config).unwrap();
         hosting_budget::set_contribution(&paths, world, 512).unwrap();
-        assert_eq!(local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Unverified);
+        assert_eq!(
+            local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(),
+            HostRuntimeReadinessV1::Unverified
+        );
         record_runtime_verified(&paths, world, &config, fingerprint).unwrap();
         assert_eq!(local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Ready);
 
         fs::write(&server, b"server-v2").unwrap();
-        assert_eq!(local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Incompatible);
+        assert_eq!(
+            local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(),
+            HostRuntimeReadinessV1::Incompatible
+        );
 
         fs::write(&server, b"server-v1").unwrap();
         record_runtime_verified(&paths, world, &config, fingerprint).unwrap();
         crate::migration::save_runtime_config(&paths, world, &config).unwrap();
-        assert_eq!(local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Unverified);
+        assert_eq!(
+            local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(),
+            HostRuntimeReadinessV1::Unverified
+        );
     }
 }

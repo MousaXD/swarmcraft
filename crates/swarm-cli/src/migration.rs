@@ -1,6 +1,6 @@
 use crate::{
-    authority_permit::PermitWatch, host_readiness, hosting_budget, launch_guard, runtime_process_guard::RuntimeProcessGuard,
-    server_mods,
+    authority_permit::PermitWatch, host_readiness, hosting_budget, launch_guard,
+    runtime_process_guard::RuntimeProcessGuard, server_mods,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use fs2::FileExt;
@@ -281,9 +281,15 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
                 // authority generation is installed.
                 if let Err(error) = hosting_budget::require_contribution(&paths, world) {
                     publish_status(
-                        &paths, &storage, world, Some(MigrationTrigger::WorldWake),
-                        MigrationPhase::Blocked, false, config.game_endpoint.clone(),
-                        None, Some(format!("wake denied by local hosting budget: {error}")),
+                        &paths,
+                        &storage,
+                        world,
+                        Some(MigrationTrigger::WorldWake),
+                        MigrationPhase::Blocked,
+                        false,
+                        config.game_endpoint.clone(),
+                        None,
+                        Some(format!("wake denied by local hosting budget: {error}")),
                     )?;
                     sleep(Duration::from_secs(1)).await;
                     continue;
@@ -349,8 +355,14 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
         // A missing/withdrawn or currently unsafe budget is an explicit block.
         if let Err(error) = hosting_budget::require_contribution(&paths, world) {
             publish_status(
-                &paths, &storage, world, None, MigrationPhase::Blocked, false,
-                config.game_endpoint.clone(), None,
+                &paths,
+                &storage,
+                world,
+                None,
+                MigrationPhase::Blocked,
+                false,
+                config.game_endpoint.clone(),
+                None,
                 Some(format!("local hosting contribution is not admitted: {error}")),
             )?;
             sleep(Duration::from_secs(1)).await;
@@ -823,9 +835,15 @@ async fn run_authority_runtime_inner(
                 Ok(None) => unreachable!(),
             };
             publish_status(
-                paths, storage, options.world, Some(trigger),
-                MigrationPhase::Blocked, false, game_endpoint.clone(),
-                Some(latest.manifest_hash()?), Some(detail),
+                paths,
+                storage,
+                options.world,
+                Some(trigger),
+                MigrationPhase::Blocked,
+                false,
+                game_endpoint.clone(),
+                Some(latest.manifest_hash()?),
+                Some(detail),
             )?;
         }
     }
@@ -1011,10 +1029,13 @@ async fn wait_for_runtime_exit(
                     .await
                     .map_err(|_| anyhow!("Minecraft did not stop after hosting withdrawal save barrier"))??;
                 Ok::<(), anyhow::Error>(())
-            }.await;
+            }
+            .await;
             match stopped {
                 Ok(()) => return Ok(RuntimeDisposition::Sleep),
-                Err(error) => warn!(world = %epoch.world_id, %error, "cannot safely checkpoint withdrawn host; preserving running authority and retrying"),
+                Err(error) => {
+                    warn!(world = %epoch.world_id, %error, "cannot safely checkpoint withdrawn host; preserving running authority and retrying")
+                }
             }
         }
         if options.handle_shutdown_signal {
