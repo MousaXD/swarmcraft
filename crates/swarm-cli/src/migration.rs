@@ -710,6 +710,9 @@ async fn run_authority_runtime_inner(
         Some(latest.manifest_hash()?),
         None,
     )?;
+    // Restoring a large snapshot can take time; an opt-out or new resource
+    // pressure during that window must block Java before it starts.
+    hosting_budget::revalidate_admission(paths, options.world, &admission)?;
     let mut child = launch_server(
         &options.java,
         &options.server_jar,
@@ -778,24 +781,43 @@ async fn run_authority_runtime_inner(
         accept_eula: options.accept_eula,
         game_endpoint: game_endpoint.clone(),
     };
-    host_readiness::record_runtime_verified(
-        paths,
-        options.world,
-        &verified_config,
-        metadata.genesis.compatibility_fingerprint,
-    )?;
-    publish_status(
-        paths,
-        storage,
-        options.world,
-        Some(trigger),
-        MigrationPhase::Ready,
-        true,
-        game_endpoint.clone(),
-        Some(latest.manifest_hash()?),
-        None,
-    )?;
-    info!(world = %options.world, pid = child.id(), ?trigger, "Minecraft authority runtime is ready");
+    let admission_state = hosting_budget::runtime_withdrawal(paths, options.world, admission.consent());
+    match admission_state {
+        Ok(None) => {
+            host_readiness::record_runtime_verified(
+                paths,
+                options.world,
+                &verified_config,
+                metadata.genesis.compatibility_fingerprint,
+            )?;
+            publish_status(
+                paths,
+                storage,
+                options.world,
+                Some(trigger),
+                MigrationPhase::Ready,
+                true,
+                game_endpoint.clone(),
+                Some(latest.manifest_hash()?),
+                None,
+            )?;
+            info!(world = %options.world, pid = child.id(), ?trigger, "Minecraft authority runtime is ready");
+        }
+        state => {
+            // Never advertise Ready after consent has changed during Fabric
+            // verification. The exit loop requests a safe Fabric checkpoint.
+            let detail = match state {
+                Ok(Some(reason)) => reason,
+                Err(error) => format!("cannot verify hosting contribution: {error}"),
+                Ok(None) => unreachable!(),
+            };
+            publish_status(
+                paths, storage, options.world, Some(trigger),
+                MigrationPhase::Blocked, false, game_endpoint.clone(),
+                Some(latest.manifest_hash()?), Some(detail),
+            )?;
+        }
+    }
 
     let disposition = match wait_for_runtime_exit(
         paths,
