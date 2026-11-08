@@ -96,6 +96,18 @@ def deb_package_metadata(package):
     return package_name, package_version
 
 
+def installed_package_integrity(package_name):
+    """Reject locally modified dpkg-owned package files.
+
+    dpkg --verify checks installed files against the installed package
+    database. This does NOT cryptographically bind the installation to the
+    separate pinned candidate .deb; independent artifact review is required.
+    """
+    verified = run(["dpkg", "--verify", package_name], timeout=60)
+    return (verified.returncode == 0 and not verified.stdout.strip() and
+            not verified.stderr.strip())
+
+
 def preflight(a):
     package = Path(a.package).resolve(strict=True)
     binary = Path(a.binary).resolve(strict=True)
@@ -113,6 +125,8 @@ def preflight(a):
             or owner.returncode or not owner.stdout.startswith(pkg + ":")
             or cli_owner.returncode or not cli_owner.stdout.startswith(pkg + ":")):
         fail("package_not_installed")
+    if not installed_package_integrity(pkg):
+        fail("installed_package_integrity_failed")
     files = run(["dpkg-query", "-L", pkg])
     if files.returncode or not packaged_sidecars_present(files.stdout.splitlines()):
         fail("required_installed_tauri_sidecars_missing")

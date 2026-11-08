@@ -56,6 +56,14 @@ fields separately, matching `dpkg-deb`'s actual single-field format. Querying
 both fields in one command produces labeled lines and is not equivalent;
 negative tests reject those ambiguous/multiline values.
 
+The preflight also requires an empty, successful `dpkg --verify` result for
+the installed package. Missing, modified or unverifiable dpkg-owned files
+block the test. This is an integrity check against the local package-manager
+database, **not** cryptographic proof that every installed byte came from the
+pinned `.deb`. An independent reviewer must still check the exact candidate
+build provenance and package SHA-256; no installation is field-certified by
+passing this preflight alone.
+
 The command fails if the local or remote SHA differs from the expected
 candidate package. If one host fails, provision.json records which earlier
 hosts were installed; it deliberately does not attempt unsafe uninstall

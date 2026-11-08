@@ -150,6 +150,27 @@ class TestDebianPackageMetadata(unittest.TestCase):
                 self.assertIsNone(node.deb_package_metadata(Path("/tmp/candidate.deb")))
 
 
+class TestInstalledPackageIntegrity(unittest.TestCase):
+    def test_accepts_clean_dpkg_verification_only(self):
+        from types import SimpleNamespace
+        with patch.object(node, "run", return_value=SimpleNamespace(
+                returncode=0, stdout="", stderr="")) as runner:
+            self.assertTrue(node.installed_package_integrity("swarmcraft-desktop"))
+        runner.assert_called_once_with(["dpkg", "--verify", "swarmcraft-desktop"], timeout=60)
+
+    def test_refuses_changed_missing_or_warning_package_files(self):
+        from types import SimpleNamespace
+        for returncode, stdout, stderr in (
+            (1, "", ""),
+            (0, "??5?????? /usr/bin/swarmcraft-desktop\\n", ""),
+            (0, "", "dpkg: warning: unverifiable files\\n"),
+        ):
+            with self.subTest(returncode=returncode, stdout=stdout, stderr=stderr):
+                with patch.object(node, "run", return_value=SimpleNamespace(
+                        returncode=returncode, stdout=stdout, stderr=stderr)):
+                    self.assertFalse(node.installed_package_integrity("swarmcraft-desktop"))
+
+
 class TestFabricClientProvenance(unittest.TestCase):
     def test_exact_fabric_knot_client_requires_real_java_executable(self):
         cmd = (b"/usr/bin/java\0-cp\0minecraft.jar:fabric-loader-0.19.3.jar\0"
