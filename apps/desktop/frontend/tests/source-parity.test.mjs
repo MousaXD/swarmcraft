@@ -133,3 +133,20 @@ test('Svelte Join World owns signed-invite submit and the legacy handler cannot 
   assert.ok(app.includes("id === 'joinForm' && window.__swarmcraftSvelteJoinOwned === true"));
   assert.ok(app.includes('window.__swarmcraftAfterSvelteJoin = async (joinedWorldId) =>'));
 });
+
+test('Svelte Import World owns native form submission without implicit EULA or duplicate import', async () => {
+  const [importer, app, root] = await Promise.all([
+    source('../src/components/ImportWorldView.svelte'),
+    source('../../src/app.js'), source('../src/App.svelte'),
+  ]);
+  assert.ok(importer.includes('data-journey-owner="svelte"'));
+  assert.ok(importer.includes('onsubmit={importWorld}'));
+  assert.ok(importer.includes('nativeWorldActions().import('));
+  assert.ok(importer.includes('noServerMods: noServerMods?.checked === true'));
+  assert.ok(importer.includes('hidden={!error}>{error}'));
+  assert.ok(importer.includes('disabled={busy}'));
+  assert.doesNotMatch(importer, /acceptEula|eula:\s*true/);
+  assert.ok(root.includes('window.__swarmcraftSvelteImportOwned = true;'));
+  assert.ok(app.includes("id === 'importForm' && window.__swarmcraftSvelteImportOwned === true"));
+  assert.ok(app.includes('window.__swarmcraftAfterSvelteImport = async (importedWorldId) =>'));
+});
