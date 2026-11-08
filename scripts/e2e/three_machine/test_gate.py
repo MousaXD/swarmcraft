@@ -39,6 +39,9 @@ def node(role, stage):
         "authority_fingerprint": authority,
         "successor_fingerprint": BOB if role == "alice" else None,
         "authorized_peers": {"alice_created": 1, "bob_joined": 2}.get(stage, 3),
+        "minecraft_version": "26.1.2",
+        "fabric_loader_version": "0.19.3",
+        "java_runtime_version": "25.0.1" if role == ("alice" if authority == ALICE else "bob") else None,
         "snapshot_number": 3,
         "snapshot_epoch": 1 if authority == ALICE else 2,
         "snapshot_hash": "1" * 64 if authority == ALICE else "2" * 64,
@@ -245,6 +248,26 @@ class TestFailClosed(unittest.TestCase):
             check["nodes"]["carol"]["snapshot_verify_passed"] = False
             gate.save(out / "checkpoint.json", check)
             with self.assertRaisesRegex(gate.Blocked, "unsigned_or_conflicted"):
+                gate.verify(c, out)
+
+    def test_rejects_inconsistent_fabric_version(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            check = gate.load_json(out / "checkpoint.json")
+            check["nodes"]["carol"]["fabric_loader_version"] = "0.0.0"
+            gate.save(out / "checkpoint.json", check)
+            with self.assertRaisesRegex(gate.Blocked, "canonical_runtime_version_mismatch_fabric_loader_version"):
+                gate.verify(c, out)
+
+    def test_rejects_missing_real_recovery_java_version(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            check = gate.load_json(out / "bob_recovered.json")
+            check["nodes"]["bob"]["java_runtime_version"] = None
+            gate.save(out / "bob_recovered.json", check)
+            with self.assertRaisesRegex(gate.Blocked, "bob_java_runtime_version_missing"):
                 gate.verify(c, out)
 
     def test_rejects_same_snapshot_but_divergent_epoch(self):
