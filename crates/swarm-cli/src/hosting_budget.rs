@@ -145,8 +145,10 @@ pub fn set_contribution(paths: &DataPaths, world: WorldId, heap_mib: u64) -> Res
     lock.lock_exclusive().context("cannot serialize hosting consent updates")?;
     let previous = load_consent(paths, world)?;
     let now_nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let current = (now_nanos.min(u64::MAX as u128) as u64)
-        .max(previous.map_or(0, |record| record.revision).saturating_add(1));
+    let next_revision = previous.map_or(0, |record| record.revision)
+        .checked_add(1)
+        .context("hosting consent revision exhausted; refusing stale update")?;
+    let current = (now_nanos.min(u64::MAX as u128) as u64).max(next_revision);
     let value = HostingConsentV1 {
         schema_version: SCHEMA_VERSION,
         world_id: world,
@@ -289,18 +291,20 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
         Ok(mem) => (Some(mem.physical_mib), Some(mem.available_mib)),
         Err(_) => (None, None),
     };
-    let reason = if heap == 0 {
-        "Player-only; no Minecraft hosting consent".to_string()
+    let (may_host_now, reason) = if heap == 0 {
+        (false, "Player-only; no Minecraft hosting consent".to_string())
     } else {
         match memory {
             Ok(mem) => match check_budget(heap, mem) {
-                Ok(()) => "Consented and passes current conservative memory admission; must be rechecked at launch".into(),
-                Err(error) => error.to_string(),
+                Ok(()) => (
+                    true,
+                    "Consented and passes current conservative memory admission; must be rechecked at launch".into(),
+                ),
+                Err(error) => (false, error.to_string()),
             },
-            Err(error) => format!("device memory is not measurable; hosting blocked: {error}"),
+            Err(error) => (false, format!("device memory is not measurable; hosting blocked: {error}")),
         }
     };
-    let may_host_now = heap != 0 && reason.starts_with("Consented and passes");
     Ok(ContributionReadiness {
         world_id: world.to_string(),
         consented: heap != 0,
@@ -440,6 +444,26 @@ mod tests {
         assert_eq!(load_consent(&paths, world).unwrap(), Some(revoked));
         assert!(require_contribution(&paths, world).is_err());
     }
+    #[test]
+    fn exhausted_consent_revision_never_wraps_or_reuses_previous_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let world = WorldId([35; 32]);
+        let peer_id = PeerIdentity::load_or_create(&paths).unwrap().peer_id();
+        let previous = HostingConsentV1 {
+            schema_version: SCHEMA_VERSION,
+            world_id: world,
+            peer_id,
+            enabled: false,
+            heap_mib: 0,
+            revision: u64::MAX,
+        };
+        atomic_write(&prefs_path(&paths, world), &previous).unwrap();
+        let error = set_contribution(&paths, world, 0).unwrap_err();
+        assert!(error.to_string().contains("revision exhausted"));
+        assert_eq!(load_consent(&paths, world).unwrap(), Some(previous));
+    }
+
     #[test]
     fn consent_is_scoped_to_the_current_peer_identity() {
         let temp = tempfile::tempdir().unwrap();
