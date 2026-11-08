@@ -101,6 +101,44 @@ def run(binary: Path, artifacts: Path):
                 f"Horizontal world workspace scroll: {result}"
             )
             print(f"PASS: installed native Svelte GUI layout at {width}x{height}")
+        # Exercise the new Svelte signed-invite form in an installed app.
+        # No invite is sent to Rust here; an empty form must fail locally,
+        # stay on Join, and display an actionable validation message.
+        app.click("#openJoin")
+        join_owner = app.execute("""
+          return {
+            form: document.getElementById('joinForm')?.dataset.journeyOwner,
+            active: window.__swarmcraftSvelteJoinOwned === true,
+            bridge: typeof window.__swarmcraftAfterSvelteJoin === 'function'
+          };
+        """)
+        assert (join_owner["form"] == "svelte" and join_owner["active"]
+                and join_owner["bridge"]), (
+            "Installed Join form is not owned by Svelte"
+        )
+        app.click("#joinWorld")
+        observed = None
+        for _ in range(15):
+            observed = app.execute("""
+              const banner = document.getElementById('joinError');
+              const panel = document.getElementById('joinPanel');
+              return {
+                visible: !!banner && !banner.hidden,
+                message: banner?.textContent || '',
+                viewVisible: !!panel && !panel.hidden,
+                inviteEmpty: !document.getElementById('joinInvite')?.value,
+              };
+            """)
+            if observed["visible"]:
+                break
+            time.sleep(0.1)
+        app.screenshot("join-empty-invite-validation.png")
+        assert (observed["visible"] and observed["inviteEmpty"]
+                and observed["viewVisible"]
+                and "signed invite is required" in observed["message"].lower()), (
+            "Empty invite did not fail closed through Svelte: " + repr(observed)
+        )
+        app.click("#navWorlds")
         # Restore configured default for follow-up screenshots.
         native.request(f"/session/{app.session}/window/rect", "POST", {
             "width": 980, "height": 760
