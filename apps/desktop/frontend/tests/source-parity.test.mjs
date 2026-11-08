@@ -276,6 +276,7 @@ test('Svelte invite dialog owns signed creation without duplicate legacy calls o
   assert.ok(dialog.includes('value={signed}'));
   assert.ok(dialog.includes('aria-busy={busy}'));
   assert.ok(dialog.includes('if (busy) event.preventDefault();'));
+  assert.ok(dialog.includes('onsubmit={preventInviteSubmitWhilePending}'), 'guard must be wired to real invite form submission');
   assert.ok(dialog.includes("window.__swarmcraftResetSvelteInvite = resetInvite"));
   assert.ok(app.includes("id === 'createInvite' && window.__swarmcraftSvelteInviteOwned === true"));
   assert.ok(root.includes("window.__swarmcraftSvelteInviteOwned = true"));
