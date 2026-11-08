@@ -342,3 +342,24 @@ test('native completion and subsequent refresh failures are distinguished withou
   const refresh = join.indexOf('await window.__swarmcraftAfterSvelteJoin(');
   assert.ok(clearInvite >= 0 && refresh > clearInvite, 'successful signed tokens must clear before any potentially failing UI refresh');
 });
+
+test('Svelte identity diagnostics use genuine typed Rust IPC without duplicate legacy binding', async () => {
+  const [diagnostics, app, root, identity, types] = await Promise.all([
+    source('../src/components/DiagnosticsView.svelte'),
+    source('../../src/app.js'),
+    source('../src/App.svelte'),
+    source('../src/lib/device-identity.ts'),
+    source('../src/lib/native-bridge.ts'),
+  ]);
+  assert.ok(diagnostics.includes("nativeBridge().invoke('node_identity', {})"));
+  assert.ok(diagnostics.includes('onclick={refreshIdentity}'));
+  assert.ok(diagnostics.includes('disabled={$identityState.busy}'));
+  assert.ok(diagnostics.includes('{$identityState.text}'));
+  assert.ok(root.includes('window.__swarmcraftSvelteIdentityOwned = true;'));
+  assert.ok(app.includes("id === 'identityButton' && window.__swarmcraftSvelteIdentityOwned === true"));
+  assert.ok(app.includes('window.__swarmcraftSvelteIdentity?.publish('));
+  assert.ok(identity.includes('if (request) return request;'), 'duplicate native reads must be coalesced');
+  assert.ok(identity.includes('if (version === generation)'), 'stale native completions must not overwrite a newer identity');
+  assert.ok(types.includes('node_identity: { args: Record<string, never>; result: string }'));
+  assert.doesNotMatch(identity, /error:\s*String\(error\)|error:\s*error\.message/, 'never expose raw native errors');
+});
