@@ -123,7 +123,10 @@ async fn real_host_process_restores_launches_and_commits_mutated_world() {
 import os
 import pathlib
 import socket
+import sys
 import time
+
+assert '-Xmx512m' in sys.argv, f'expected bounded heap, got {sys.argv}'
 
 host = os.environ["SWARMCRAFT_IPC_HOST"]
 port = int(os.environ["SWARMCRAFT_IPC_PORT"])
