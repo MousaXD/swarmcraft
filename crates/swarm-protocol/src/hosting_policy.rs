@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    peer_id_from_public_key, Hash32, PeerId, ProtocolError, WorldConfigV1, WorldId, WorldMemberV1,
-    PROTOCOL_VERSION,
+    peer_id_from_public_key, Hash32, PeerId, ProtocolError, WorldConfigV1, WorldId, WorldMemberV1, PROTOCOL_VERSION,
 };
 
 pub const HOSTING_POLICY_FORMAT_VERSION: u16 = 1;
@@ -199,9 +198,7 @@ impl LocalHostingConsentV1 {
     pub fn supersedes(&self, previous: &Self) -> Result<(), HostingPolicyError> {
         self.validate()?;
         previous.validate()?;
-        if self.world_id != previous.world_id
-            || self.peer_id != previous.peer_id
-            || self.revision <= previous.revision
+        if self.world_id != previous.world_id || self.peer_id != previous.peer_id || self.revision <= previous.revision
         {
             return Err(HostingPolicyError::Invalid("consent revision must increase for the same device and world"));
         }
@@ -304,7 +301,6 @@ pub fn evaluate_hosting_contribution_v1(
     }
     Ok(())
 }
-
 
 /// Short-lived, challenge-bound peer assertion. It is NOT a quorum vote, local
 /// admission permit, executable budget proof, or a new V1 wire variant.
@@ -423,9 +419,7 @@ impl SignedHostContributionClaimV1 {
             return Err(HostingPolicyError::Invalid("host claim does not match challenge or canonical head"));
         }
         // Sender timestamps are untrusted. Never accept a future sample.
-        if expected.now_unix_ms < self.sampled_at_unix_ms
-            || expected.now_unix_ms > self.expires_at_unix_ms
-        {
+        if expected.now_unix_ms < self.sampled_at_unix_ms || expected.now_unix_ms > self.expires_at_unix_ms {
             return Err(HostingPolicyError::Invalid("host claim is expired or from the future"));
         }
         let encoded = self.signing_bytes()?;
