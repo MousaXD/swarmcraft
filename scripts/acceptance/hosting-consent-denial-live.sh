@@ -50,6 +50,10 @@ CREATE="$("$CLI" --data-dir "$DATA" world create \
   --fabric-loader 0.19.3 --compatibility vanilla-fabric --visibility private)"
 WORLD="$(sed -n 's/^World ID: //p' <<<"$CREATE" | tail -n1)"
 [[ "$WORLD" == scworld:* ]] || fail "no real world identity was produced"
+INITIAL_SNAPSHOT="$("$CLI" --data-dir "$DATA" world status "$WORLD" |
+  sed -n 's/^Latest snapshot: //p' | tail -n1)"
+[[ "$INITIAL_SNAPSHOT" =~ ^[0-9]+$ ]] ||
+  fail "world-create did not establish an initial canonical snapshot"
 
 # Missing public command is a genuine failing dependency, never a test skip.
 DEFAULT="$("$CLI" --data-dir "$DATA" world hosting status "$WORLD" --json)" ||
@@ -146,4 +150,8 @@ ZERO="$("$CLI" --data-dir "$DATA" world hosting status "$WORLD" --json)"
 [[ "$(field may_host_now <<<"$ZERO")" == false ]] || fail "zero MiB reported eligible"
 denied_launch zero
 "$CLI" --data-dir "$DATA" world verify "$WORLD" >"$LOG/world-verify.txt"
-echo "HOSTING_CONSENT_NEGATIVE_PASS world=$WORLD cases=absent,zero real_runtime=true managed_java=true"
+AFTER_SNAPSHOT="$("$CLI" --data-dir "$DATA" world status "$WORLD" |
+  sed -n 's/^Latest snapshot: //p' | tail -n1)"
+[[ "$AFTER_SNAPSHOT" == "$INITIAL_SNAPSHOT" ]] ||
+  fail "launch denial unexpectedly advanced canonical snapshot history"
+echo "HOSTING_CONSENT_NEGATIVE_PASS world=$WORLD cases=absent,zero real_runtime=true managed_java=true snapshots_unchanged=true"
