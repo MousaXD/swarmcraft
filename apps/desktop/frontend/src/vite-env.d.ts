@@ -15,7 +15,7 @@ declare global {
     __swarmcraftSvelteDiscoveryOwned?: boolean;
     __swarmcraftSvelteLeaveOwned?: boolean;
     __swarmcraftSvelteIdentityOwned?: boolean;
-    __swarmcraftSvelteIdentity?: { publish(value: string): boolean };
+    __swarmcraftSvelteIdentity?: { publish(value: string, source?: import('./lib/device-identity').IdentitySource): boolean };
     __swarmcraftResetSvelteLeave?: () => void;
     __swarmcraftAfterSvelteLeave?: () => Promise<void>;
     __swarmcraftResetSvelteInvite?: () => void;
