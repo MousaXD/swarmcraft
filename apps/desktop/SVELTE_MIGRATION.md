@@ -58,3 +58,7 @@ Current `createBackendAdapter` wraps `initialize_node`, `node_identity`, `list_w
 ## Component decomposition progress
 
 A concrete Svelte component split now mounts `Sidebar`, `Topbar`, `WorldsView`, `CreateWorldView`, `ImportWorldView`, `JoinWorldView`, `ActivityView`, `DiagnosticsView`, and `Dialogs` through `Workspace`/`App`. All 171 legacy DOM IDs are preserved and tested. This improves structure only; imperative event handling is still delegated until individual journeys are migrated with native verification.
+
+## Reactive session extraction
+
+`frontend/src/lib/desktop-session.ts` now implements a Svelte-readable, Rust-backed session model for first launch, identity, network degradation, local world listing, selection, retries and stale-response quarantine. Its injected backend interface corresponds to existing adapter functions, rather than inventing new Rust authority. Six Vitest regressions cover ready/failed/degraded, retries and out-of-order responses. **This is not yet wired into the live UI:** simultaneous legacy and new coordinators would duplicate device initialization; cutover must be atomic with controller removal and packaged validation.
