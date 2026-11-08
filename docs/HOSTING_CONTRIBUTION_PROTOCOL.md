@@ -384,16 +384,16 @@ V2 authority or real mixed-version legacy exclusion is made here.
 ## Proposed V2 protocol record inventory — Agent 11 handoff
 
 **Status: INERT PROPOSAL-ONLY TYPES, NOT AN APPROVED WIRE VERSION OR ACTIVATION.**
-Agent 02 has added \`crates/swarm-protocol/src/hosting_realm_v2.rs\` and protocol-only
+Agent 02 has added `crates/swarm-protocol/src/hosting_realm_v2.rs` and protocol-only
 negative tests to pin the distinct-active-realm migration option for review.
 These records are **not** reachable from V1 network, storage, daemon, launch,
-recovery or UI paths. \`PROTOCOL_VERSION\` remains \`1\`; the V1 signed/hash
+recovery or UI paths. `PROTOCOL_VERSION` remains `1`; the V1 signed/hash
 tuples and serialized enum discriminants are untouched. Do not use
-\`HostingPolicyActivationV1::Enforced\` on the basis of these records.
+`HostingPolicyActivationV1::Enforced` on the basis of these records.
 
 The distinct V2 active world ID is derived from the fully serialized
-\`ProposedHostingRealmGenesisV2\` under
-\`swarmcraft/hosting-realm-id/v2\0\`. This binds the original V1 world ID,
+`ProposedHostingRealmGenesisV2` under
+`swarmcraft/hosting-realm-id/v2\0`. This binds the original V1 world ID,
 accepted config/membership hashes and sequences, source snapshot hash,
 epoch/fencing token, a new migration nonce and mandatory authority feature
 version 2. V1 genesis and config bytes are not modified or re-signed.
@@ -402,16 +402,16 @@ source**, not a claim that a V1 world has changed policy in place.
 
 | Draft record | Exact purpose | Important absent proof |
 | --- | --- | --- |
-| \`SourceHistoryAnchorV2\` | Check that source world ID, V1 accepted config/membership hashes and sequence, snapshot hash and authority generation agree with supplied accepted V1 records | These V1 records and snapshot must be authenticated and certified by the real storage/consensus layer |
-| \`ProposedHostingRealmGenesisV2\` | Derive separate, mandatory-feature-version-2 target realm ID; reject missing/unknown feature and zero migration nonce | Preventing two conflicting realm migrations from one source requires an external fenced migration barrier |
-| \`SignedRealmHostingPolicyV2\` | Sign a policy for the **target V2 realm ID**, with its own sequence and predecessor full-record hash | Signature and hash-chain shape do not prove canonical policy acceptance |
-| \`SignedHostingMigrationProposalV2\` | Source authority-signed proposal binding target genesis, first target-policy full hash, source identity and strictly newer epoch/fence | Source quorum certificate, snapshot certification, atomic durable uniqueness and current authority lease are not checked here |
-| \`SignedHostingMigrationVoteV2\` | A voter signs one exact migration proposal hash, source membership hash and target realm ID; membership and signature callbacks reject unknown/banned/forged voters | Majority/joint majority, duplicate-vote detection and genuine history head belong to Agent 11; no canonical certificate constructor exists |
-| \`SignedHostingAuthorityActionV2\` | Separate domain for recovery ballot/vote, grant/renewal, transfer phases, wake and direct start; bind action, realm, committed migration+policy+membership hashes, epoch/fence, snapshot, candidate, consent revision, selected JVM heap, signer and nonce | Never sufficient for authority without real signed quorum/lease, session negotiation, verifier-issued one-use nonce, live local consent and budget checks |
+| `SourceHistoryAnchorV2` | Check that source world ID, V1 accepted config/membership hashes and sequence, snapshot hash and authority generation agree with supplied accepted V1 records | These V1 records and snapshot must be authenticated and certified by the real storage/consensus layer |
+| `ProposedHostingRealmGenesisV2` | Derive separate, mandatory-feature-version-2 target realm ID; reject missing/unknown feature and zero migration nonce | Preventing two conflicting realm migrations from one source requires an external fenced migration barrier |
+| `SignedRealmHostingPolicyV2` | Sign a policy for the **target V2 realm ID**, with its own sequence and predecessor full-record hash | Signature and hash-chain shape do not prove canonical policy acceptance |
+| `SignedHostingMigrationProposalV2` | Source authority-signed proposal binding target genesis, first target-policy full hash, source identity and strictly newer epoch/fence | Source quorum certificate, snapshot certification, atomic durable uniqueness and current authority lease are not checked here |
+| `SignedHostingMigrationVoteV2` | A voter signs one exact migration proposal hash, source membership hash and target realm ID; membership and signature callbacks reject unknown/banned/forged voters | Majority/joint majority, duplicate-vote detection and genuine history head belong to Agent 11; no canonical certificate constructor exists |
+| `SignedHostingAuthorityActionV2` | Separate domain for recovery ballot/vote, grant/renewal, transfer phases, wake and direct start; bind action, realm, committed migration+policy+membership hashes, epoch/fence, snapshot, candidate, consent revision, selected JVM heap, signer and nonce | Never sufficient for authority without real signed quorum/lease, session negotiation, verifier-issued one-use nonce, live local consent and budget checks |
 
-**Crypto signing contract:** Each unsigned \`signing_bytes()\` representation
+**Crypto signing contract:** Each unsigned `signing_bytes()` representation
 is domain-separated from V1 and remains computable *before* a signature is
-attached. \`validate_shape\`, \`record_hash\` and verification require a
+attached. `validate_shape`, `record_hash` and verification require a
 64-byte Ed25519 signature for signed policy/proposal records. Vote/action
 verification checks signature length before the external Ed25519 callback.
 All hashes of signed policy/proposal records include the signature. The
@@ -420,18 +420,18 @@ non-cryptographic stubs only to verify context rejection.
 
 **Activation exclusion:** None of these public proposal/record types may be
 converted directly into Agent 11's opaque
-\`VerifiedCanonicalPolicyCommit\`. A separate coordinator-approved
+`VerifiedCanonicalPolicyCommit`. A separate coordinator-approved
 canonical root/certificate/acceptance implementation MUST verify all signed
 source and target records, unique old/joint quorums, valid snapshot, fenced
 single transition, durable accepted head, mandatory V2 session and denial of
 every old V1 authority path before any production activation. A correct
 signature alone proves neither signer authorization nor vote quorum.
 
-**Verifiers supply trusted expectations:** \`ExpectedHostingAuthorityHeadV2\`
+**Verifiers supply trusted expectations:** `ExpectedHostingAuthorityHeadV2`
 pins the exact action, target realm, accepted policy/migration/membership
 hashes, epoch, fence, snapshot, candidate, signer, nonce, consent revision
 and selected JVM heap independently from the incoming signed action.
-\`SignedHostingAuthorityActionV2::verify_for_head\` rejects mismatches
+`SignedHostingAuthorityActionV2::verify_for_head` rejects mismatches
 before signature verification. It does not consume the nonce; the future
 network/consensus implementation must keep an authenticated
 connection-scoped, atomically single-use nonce registry and combine this
@@ -455,7 +455,7 @@ authority votes/leases and cannot satisfy this contract.
    implicit fallback to old V1 authority and no silent replay or downgrade.
 
 **Agent 11 decision required:** The current #101
-\`PolicyCommitmentIntent.world_id\` is a same-ID extension proposal while
+`PolicyCommitmentIntent.world_id` is a same-ID extension proposal while
 these new Agent 02 V2 records represent a *distinct realm ID*. The two
 approaches must NOT be confused or wired together as though they shared
 a canonical hash. Agent 00 must approve the chosen strategy and Agent 07
