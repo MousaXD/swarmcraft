@@ -27,6 +27,7 @@ SAFE_BOOL_KEYS = frozenset({
     'explainsMembership', 'signedInviteStillEmpty', 'hasSignedValue',
     'createEnabled', 'formVisible', 'dialogOpen', 'owned', 'enabled',
     'closed', 'stillSelected', 'worldStillListed',
+    'identityOwned', 'identityVerified', 'identityNotEmpty', 'identityRefreshFinished',
 })
 SAFE_INT_KEYS = frozenset({
     'width', 'height', 'rootScrollWidth', 'paneScrollWidth',
@@ -152,6 +153,34 @@ def run(binary: Path, artifacts: Path):
                 f"Horizontal world workspace scroll: {result}"
             )
             print(f"PASS: installed native Svelte GUI layout at {width}x{height}")
+        # Native identity refresh must be owned by Svelte and actually produce
+        # a verified Rust-backed identity. The evidence records flags only:
+        # never return or screenshot the peer's canonical identity bytes.
+        mark_stage('native-identity-refresh')
+        app.click("#navDiagnostics")
+        identity_owner = app.execute("""
+          return window.__swarmcraftSvelteIdentityOwned === true;
+        """)
+        record_ui({'identityOwned': identity_owner})
+        assert identity_owner, "Installed Diagnostics identity action is not Svelte-owned"
+        app.click("#identityButton")
+        identity_check = None
+        for _ in range(60):
+            identity_check = app.execute("""
+              const output = document.getElementById('identity');
+              const button = document.getElementById('identityButton');
+              return {
+                identityVerified: output?.dataset.identityPhase === 'ready',
+                identityNotEmpty: !!output?.textContent?.trim(),
+                identityRefreshFinished: !!button && !button.disabled,
+              };
+            """)
+            record_ui(identity_check)
+            if all(identity_check.values()):
+                break
+            time.sleep(0.2)
+        assert all(identity_check.values()), "Native Svelte identity refresh did not reach verified Ready"
+        app.click("#navWorlds")
         # Exercise the new Svelte signed-invite form in an installed app.
         # No invite is sent to Rust here; an empty form must fail locally,
         # stay on Join, and display an actionable validation message.

@@ -69,7 +69,7 @@
                 <div class="section-title-row">
                   <div><h3>This device</h3><p>Local peer identity and initialization.</p></div>
                 </div>
-                <pre id="identity" class="diagnostic-output" aria-live="polite">{$identityState.text}</pre>
+                <pre id="identity" class="diagnostic-output" aria-live="polite" aria-busy={$identityState.busy} data-identity-phase={$identityState.phase}>{$identityState.text}</pre>
                 <p class="form-error" role="alert" hidden={!$identityState.error}>{$identityState.error}</p>
                 <div class="compact-actions">
                   <button id="init" class="button button-secondary" type="button">Set up device</button>

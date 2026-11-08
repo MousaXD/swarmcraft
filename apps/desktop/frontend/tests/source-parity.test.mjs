@@ -355,6 +355,8 @@ test('Svelte identity diagnostics use genuine typed Rust IPC without duplicate l
   assert.ok(diagnostics.includes('onclick={refreshIdentity}'));
   assert.ok(diagnostics.includes('disabled={$identityState.busy}'));
   assert.ok(diagnostics.includes('{$identityState.text}'));
+  assert.ok(diagnostics.includes('data-identity-phase={$identityState.phase}'));
+  assert.ok(diagnostics.includes('aria-busy={$identityState.busy}'));
   assert.ok(root.includes('window.__swarmcraftSvelteIdentityOwned = true;'));
   assert.ok(app.includes("id === 'identityButton' && window.__swarmcraftSvelteIdentityOwned === true"));
   assert.ok(app.includes('window.__swarmcraftSvelteIdentity?.publish('));
@@ -371,6 +373,10 @@ test('native visual failures emit only stage, class and allowlisted UI observati
     source('../scripts/test_visual_failure_evidence.py'),
   ]);
   assert.ok(script.includes("'failure.json'"));
+  assert.ok(script.includes("mark_stage('native-identity-refresh')"));
+  assert.ok(script.includes("identityVerified: output?.dataset.identityPhase === 'ready'"));
+  assert.ok(script.includes("identityRefreshFinished: !!button && !button.disabled"));
+  assert.ok(script.includes("'identityOwned', 'identityVerified', 'identityNotEmpty', 'identityRefreshFinished'"));
   assert.ok(script.includes("'stage': CURRENT_STAGE"));
   assert.ok(script.includes("'category': category"));
   assert.ok(script.includes("'ui': CURRENT_UI_STATE"));
