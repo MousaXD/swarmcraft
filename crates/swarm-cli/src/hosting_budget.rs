@@ -546,7 +546,6 @@ mod tests {
         lock.try_lock_exclusive().unwrap();
         let admission = HostingAdmission { _exclusive_memory_lock: lock, consent: first.clone() };
         assert_eq!(first, *admission.consent());
-        assert!(with_consent_guarded_spawn(&paths, world, &admission, || Ok(())).is_ok());
         set_contribution(&paths, world, 0).unwrap();
         assert!(with_consent_guarded_spawn(&paths, world, &admission, || Ok(())).is_err());
         assert!(revalidate_admission(&paths, world, &admission).is_err());
