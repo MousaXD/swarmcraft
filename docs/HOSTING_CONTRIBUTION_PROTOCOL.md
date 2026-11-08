@@ -202,3 +202,180 @@ not implement required wire/schema/storage/UI/runtime changes. Keep this PR
 **draft / BLOCKED** until Agent 00 approves the compatibility migration
 and Agents 03/04 integrate and certify it. Never mark issue #84 complete merely
 because this PR's protocol tests pass.
+
+
+## Final continuation — canonical migration and mandatory authority negotiation
+
+**Decision proposal for Agent 00 and Agent 11 (not yet approved or implemented):**
+An existing V1 world MUST NOT be silently converted to policy-enforced hosting.
+The V1 authority/lease/recovery rules cannot authenticate or enforce a signed
+hosting sidecar as a required feature. A V1-capable binary that is offline at
+cutover can later ignore the sidecar. Even a sidecar accepted by a quorum of
+new clients cannot prove an unmodified V1 binary will reject older V1 authority
+credentials. This is a protocol incompatibility, not a UI or test problem.
+
+### Migration contract and lineage-preserving fallback
+
+**Recommended safe route: explicit V2 authority realm + immutable V1 ancestry.**
+This is a *new canonical authority domain*, NOT an in-place modification of
+`WorldGenesisV1` or `WorldConfigV1`, and not a claim of unchanged active world ID.
+The original V1 world/genesis/identity and its signed history remain valid as
+historical source records. Its latest certified state can be imported into a
+separately identified V2 world, whose mandatory feature and authority domain
+cannot be interpreted as V1 votes/leases. If exact same active world ID is a
+nonnegotiable requirement, keep contributions OFF and return an explicit
+migration NO-GO until a separate protocol and old-client exclusion proof exists.
+
+1. **Inspect / opt in.** Keep V1 operation and policy activation
+   `NotEnforced`. Obtain explicit creator/operator migration authorization;
+   retain every peer's independent local consent as disabled/0 MiB by default.
+   List the last verified V1 genesis/world ID, signed config sequence/hash,
+   signed membership/decision certificate, snapshot hash, epoch and fencing
+   generation. Disputed heads or incomplete signatures abort.
+2. **Prepare a certified source barrier.** The current fenced authority
+   checkpoints its save, signs a final source snapshot and upgrade-intent
+   descriptor, and obtains the existing V1 quorum/certificate required for
+   the source state. The bridge MUST authenticate the relevant source
+   membership head and proof; a single authority signature or a lone
+   `SignedWorldHostingPolicyV1` is insufficient. Write all source files
+   immutably; do not delete/overwrite V1 state or mutate prior signatures.
+3. **Create a distinct V2 realm.** A future `WorldGenesisV2` (or equivalent
+   explicitly versioned canonical root) uses a *new active authority realm/world
+   ID* and anchors the source V1 world ID and genesis hash, accepted source
+   config/membership hashes and certificate, snapshot hash, source epoch and
+   fencing token, and the committed new policy hash. The V2 canonical signed
+   configuration includes protocol/authority generation, mandatory required
+   features and an unambiguous first policy sequence. New domains, encoding,
+   signature binding and version discrimination MUST be separately reviewed.
+   `SignedWorldHostingPolicyV1` remains a proposal; it does not by itself
+   create this V2 canonical root.
+4. **Verify before promotion.** Verify the source checkpoint and certificate,
+   V2 unique identity, new canonical policy commitment, authenticated
+   capability negotiation, member eligibility, local consent, measured budget,
+   snapshot completeness and a fresh fenced V2 quorum/lease. Admit exactly
+   one authoritative Minecraft server to the V2 realm. If any item is absent,
+   stay non-authoritative. There is no automatic V1 authority fallback.
+5. **Commit/abort boundary.** Before the V2 canonical commitment, abort is
+   permitted without modifying V1 signed history. After commitment, do not
+   silently downgrade to V1 or reinterpret V2 votes as V1 votes. Preserve the
+   V1 archive/read-only source state, refuse reused storage paths/process locks
+   and require an explicit, separately reviewed recovery/migration procedure.
+   Users must see that a new active world ID was created, linked to the
+   historical V1 world; never call it a byte-identical V1-world upgrade.
+
+The bridge/certificate MUST carry or authenticate at minimum:
+`source_world_id`, original genesis hash, last accepted V1 config sequence
+and hash, last accepted membership head/hash and its quorum certificate,
+verified source snapshot hash, source epoch/fencing token, target V2 realm ID,
+target protocol/capability requirement, first canonical signed policy record
+hash, cutover generation and anti-replay/uniqueness context. Validation must
+reject conflicting bridge records, missing V1 certificate, non-monotonic
+generations, reused V2 realm IDs, incomplete snapshots and inconsistent
+authority membership. Exactly one canonical successor is selected under the
+new protocol's quorum/fencing rules; do not choose a policy fork by file order
+or timestamp. A new identity/realm isolates authority, not arbitrary
+world-data copying: every imported snapshot must be verified.
+
+This recommendation preserves **V1 historical identity and signed history**;
+it deliberately does **not** promise continuation under the same active
+world ID. Old clients might independently serve an old V1 copy. They must
+never be admitted as V2 authority or share V2 storage/process resources.
+Avoid marketing the transition as preventing all possible independent V1
+forks; it enforces noninterference in the new versioned realm.
+
+### Legacy authority admission matrix (future normative behavior)
+
+| Incoming client | Legacy V1 world | V2 policy-enabled realm |
+| --- | --- | --- |
+| Unmodified V1 authority-capable client | Existing V1 safety rules only; hosting policy NOT enforced | **DENY** authority, leases, recovery votes, snapshot promotions, handoff, wake and direct start. No V2 authority token or cross-version lease interpretation |
+| Updated V2 client with verified mandatory authority feature | Existing V1 rules; no policy activation inferred | Can be authority **only** after canonical commitment, signed capability negotiation, local consent, resource/snapshot verification and current quorum/fencing |
+| Legacy or unknown-capability player | V1 participation according to original membership/compatibility | Player-only **only if** an audited protocol gateway can guarantee zero authority messages and correct client compatibility. Otherwise **DENY** connection, not silent authority fallback |
+| Updated peer with consent disabled/0 MiB | Voting/playing/replication under existing rules where eligible | Player/replica/voter as permitted, **never** authority merely because world-level contributions are allowed |
+| Missing, unrecognized or downgraded feature | No policy-enabled host claim possible | **DENY** all authority-related paths, regardless of optional hello strings |
+
+No V1 protocol-level test can prove that an unmodified binary rejects
+future V2 authority policy: it has no such code path. Mandatory enforcement
+must be implemented in the separately versioned wire/consensus layer and
+demonstrated by mixed-version real-process negative tests. Do NOT represent
+the current `CapabilityNotEnforced` unit test as an integration proof.
+
+### Proposed Agent 11 network / consensus APIs (ownership: Agent 11)
+
+- Future canonical `AcceptedHostingPolicyHead` proof must reference a
+  verified V2 signed root, exact policy hash and sequence, world/realm ID,
+  membership head, quorum certificate, authority epoch and fencing token.
+  Reads must be atomic/snapshot-consistent; never infer from a sidecar.
+- Future authenticated negotiation result, conceptually
+  `AuthorityFeatureProof { realm_id, accepted_policy_hash, required_feature,
+  peer_id, peer_public_key, authenticated_session, epoch, fencing_token,
+  nonce_or_transcript_hash }`, must be issued only after *both sides*
+  authenticate and positively negotiate the canonical mandatory feature.
+  A `PeerHelloV1.capabilities` string or local Boolean cannot create it.
+  Prevent downgrade, replay, mismatched realm/head or feature omission.
+- Reject legacy/unknown client authority capabilities at **every** entry:
+  candidacy advertisements, recovery ballots/votes, authority transfer,
+  lease/epoch promotion, direct start, auto-recovery and wake. Prevent
+  unsupported peers from counting as an eligible *authority* without
+  silently deleting separately valid voting/replica membership.
+- Wire and storage parsing of mandatory new-version records must be
+  length-bounded, strict about unknown versions, domain separated and
+  fail closed on corrupt accepted heads. Old V1 messages may not mutate
+  a V2 canonical head or be accepted as V2 quorum proof.
+- Supply an API that can demonstrate enforcement of a *specific* accepted
+  policy hash at a particular fenced authority generation. Agent 01 must
+  recheck it before each launch, takeover and recovery.
+
+### Agent 01 daemon / Agent 03 runtime / Agent 09 integration handoffs
+
+**Agent 01 — daemon authority:**
+Receive a verified canonical policy-head proof and an Agent-11 authenticated
+mandatory-capability result, not a caller-supplied `Enforced` flag.
+On all authority routes, consume fresh candidate claim and revalidate
+membership, quorum/lease, epoch/fencing, snapshot and current revocable local
+consent before granting the runtime permit. Reject a V1 sidecar as evidence
+for policy activation; do not evict lawful non-hosting voters or replicas.
+
+**Agent 03 — local runtime (existing draft PR #93):**
+`set_contribution(paths, world, heap_mib)` and
+`contribution_readiness(paths, world)` remain machine-local sources of truth.
+Revision increments, withdraw/reduce and pressure invalidate all previously
+issued readiness/challenges. The verifier must pin a trusted consent revision
+and selected heap when issuing each claim challenge, independently of the
+received claim. Recheck under the same admission lock just before JVM launch,
+then throughout a serving generation. Bounds on `-Xmx` do not prove a hard
+process RSS cap. Never make join, create, EULA or migration an opt-in.
+
+**Agent 09 — combined integration/acceptance:**
+Test old V1 client as candidate and as player (only where an audited gateway
+exists); verify denied cross-version handoff/recovery, stale signed policy,
+policy forks, rollback, offline legacy restart, revoked consent, reused nonce,
+wrong consent revision/heap, wrong epoch/fence/snapshot, and clean-machine
+explicit opt-in followed by real Minecraft startup. Certify one integrated
+source SHA using the release DAG; separate green specialist PRs do not suffice.
+
+**Agent 00 — approval:**
+Must decide whether an explicit new-world V2 lineage migration is acceptable;
+approve the canonical format, new realm/world identity, authenticated
+capability semantics and integration ownership **before any code activates**
+`HostingPolicyActivationV1::Enforced`. Without approval, keep everything
+inert and keep #84 open.
+
+### Freshness claim API amendment in this continuation
+
+`ExpectedHostContributionClaimV1` now additionally pins
+`expected_consent_revision: u64` and
+`expected_selected_heap_mib: u32` as **verifier-supplied**
+challenge expectations. `verify_for_challenge` rejects either mismatch
+before trying to consume the verifier's single-use nonce, even if the
+received Ed25519 claim is otherwise valid. This prevents a response from
+substituting a different consent revision or JVM heap under the same
+challenge. Tests cover both expected-value mismatch and changed response
+fields. Callers must create the expected record from verifier-owned pending
+challenge/readiness state, never by copying fields from an untrusted claim.
+The signed wire record and existing V1 wire forms remain unchanged.
+
+**Exact-head CI caveat:** old passing Required Validation #42484337003
+and Main Desktop Installers #42484337104 certify only original
+`326037b53b36abda92a3b2c201209c5ca0ed71fd`. Any subsequent
+source changes require new exact-head validation. No claim of certified
+V2 authority or real mixed-version legacy exclusion is made here.
