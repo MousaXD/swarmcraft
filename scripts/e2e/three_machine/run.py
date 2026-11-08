@@ -7,7 +7,6 @@ runtime data, or claims a real Minecraft join from a CLI-only observation.
 from __future__ import annotations
 import argparse
 import hashlib
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -212,7 +211,12 @@ def verify(c, output, review_file=None):
             else:
                 require(node["canonical"] and node.get("safety_level") == "Canonical",
                         "unsigned_or_conflicted_" + stage + "_" + role)
-            require(node.get("snapshot_hash") and SHA.fullmatch(node["snapshot_hash"]) and node.get("state_root"),
+            # Storage's canonical-snapshot-head.postcard is authoritative.
+            # MigrationStatus.snapshot_hash is optional on a deliberately
+            # nonhosting replica (no runtime launch configuration).
+            require(isinstance(node.get("canonical_head_sha256"), str) and
+                    SHA.fullmatch(node["canonical_head_sha256"]) and
+                    node.get("snapshot_verify_passed") is True and node.get("state_root"),
                     "accepted_snapshot_digest_missing_" + stage + "_" + role)
             require(node["snapshot_number"] is not None and node["snapshot_number"] >= 1,
                     "snapshot_missing_" + stage + "_" + role)
@@ -262,9 +266,11 @@ def verify(c, output, review_file=None):
     require(len({(x["epoch"], x["fencing_token"]) for x in p.values()}) == 1 and
             a["epoch"] is not None and a["fencing_token"] is not None,
             "checkpoint_generation_not_agreed")
-    require(all(x["snapshot_hash"] and x["state_root"] for x in p.values()), "checkpoint_hash_missing")
-    require(len({x["snapshot_hash"] for x in p.values()}) == 1 and
-            len({x["state_root"] for x in p.values()}) == 1, "checkpoint_not_replicated")
+    require(all(x["canonical_head_sha256"] and x["state_root"] for x in p.values()), "checkpoint_hash_missing")
+    require(len({x["canonical_head_sha256"] for x in p.values()}) == 1 and
+            len({x["state_root"] for x in p.values()}) == 1 and
+            len({(x["snapshot_number"], x["snapshot_epoch"]) for x in p.values()}) == 1,
+            "checkpoint_not_replicated")
     require(all(x["authority_fingerprint"] == a["identity_fingerprint"] for x in p.values()),
             "alice_not_canonical_authority")
     consent_a, consent_b, consent_c = (v.get("hosting_consent") for v in (a, b, d))
@@ -322,8 +328,9 @@ def verify(c, output, review_file=None):
     require(all(x["authority_fingerprint"] == b["identity_fingerprint"] and
                 x["epoch"] == rb["epoch"] and x["fencing_token"] == rb["fencing_token"] for x in returned.values()),
             "stale_alice_or_split_brain")
-    require(len({x["snapshot_hash"] for x in returned.values()}) == 1 and
-            len({x["state_root"] for x in returned.values()}) == 1,
+    require(len({x["canonical_head_sha256"] for x in returned.values()}) == 1 and
+            len({x["state_root"] for x in returned.values()}) == 1 and
+            len({(x["snapshot_number"], x["snapshot_epoch"]) for x in returned.values()}) == 1,
             "return_replica_divergence")
     require(returned["alice"]["desktop_process_observed"], "returning_alice_gui_missing")
     require(returned["carol"].get("hosting_consent") == consent_c and
