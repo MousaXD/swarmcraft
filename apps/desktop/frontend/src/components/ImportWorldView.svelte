@@ -22,6 +22,7 @@
     }
     busy = true;
     error = '';
+    let nativeSucceeded = false;
     try {
       // Source/JAR paths are validated by Rust before any canonical import;
       // no files, binaries or EULA state are imported by this renderer.
@@ -34,8 +35,9 @@
         serverMods: serverMods?.value ?? '',
         noServerMods: noServerMods?.checked === true,
       });
-      await window.__swarmcraftAfterSvelteImport(response.worldId);
+      nativeSucceeded = true;
       form?.reset();
+      await window.__swarmcraftAfterSvelteImport(response.worldId);
       if (minecraft) minecraft.value = '26.1.2';
       if (fabricLoader) fabricLoader.value = '0.19.3';
     } catch (failure) {
@@ -45,7 +47,9 @@
       } else {
         // Do not echo arbitrary absolute paths or sensitive backend messages.
         // The backend may have completed; avoid encouraging duplicate imports.
-        error = 'Could not complete the import. Verify the source folder and required mods, and refresh Worlds before retrying.';
+        error = nativeSucceeded
+          ? 'World imported successfully, but the world list could not refresh. Refresh Worlds; do not import it again.'
+          : 'Import could not be confirmed. Verify the source folder and required mods, then refresh Worlds before retrying.';
       }
     } finally {
       busy = false;
