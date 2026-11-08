@@ -325,3 +325,20 @@ test('Svelte signed Leave World remains a deliberate confirmation and never doub
   assert.ok(bridge.includes("nativeBridge().invoke('leave_world', { world: id })"));
   assert.ok(dialog.includes('if (busy || leaving) event.preventDefault();'));
 });
+
+test('native completion and subsequent refresh failures are distinguished without exposing signed invite secrets', async () => {
+  const [create, importer, join] = await Promise.all([
+    source('../src/components/CreateWorldView.svelte'),
+    source('../src/components/ImportWorldView.svelte'),
+    source('../src/components/JoinWorldView.svelte'),
+  ]);
+  for (const component of [create, importer, join]) {
+    assert.ok(component.includes('let nativeSucceeded = false;'));
+    assert.ok(component.includes('nativeSucceeded = true;'));
+    assert.ok(component.includes('error = nativeSucceeded'), 'post-success UI failure needs an honest separate status');
+    assert.doesNotMatch(component, /error\s*=\s*String\(failure\)|error\s*=\s*failure\.message\s*\|\|/, 'raw native command errors may contain secret arguments');
+  }
+  const clearInvite = join.indexOf("if (inviteInput) inviteInput.value = '';");
+  const refresh = join.indexOf('await window.__swarmcraftAfterSvelteJoin(');
+  assert.ok(clearInvite >= 0 && refresh > clearInvite, 'successful signed tokens must clear before any potentially failing UI refresh');
+});
