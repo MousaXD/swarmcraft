@@ -36,7 +36,7 @@ From the repository root:
 
     python -m unittest discover -s scripts/ci-artifacts -p 'test_*.py'
 
-Ten tests cover invalid/missing artifacts, unavailable upstream, bounded HTTP retries, checksum failure, poisoned cache, wrong architecture and NSIS ZIP traversal/version confusion. The required Linux and Windows Desktop jobs run them before package builds.
+Fifteen tests cover invalid/missing artifacts, unavailable upstream, bounded HTTP retries, checksum failure, poisoned cache, wrong architecture and NSIS ZIP traversal/version confusion. Additional tests verify that official GitHub asset API metadata rejects substituted identities, duplicate assets and mismatched published digests, that an HTTP 504 on the canonical asset URL can succeed through the same official API asset ID with the exact pinned bytes, and that corrupted fallback bytes fail immediately. The required Linux and Windows Desktop jobs run these tests before package builds.
 
 ## Boundaries
 
