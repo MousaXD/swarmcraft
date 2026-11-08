@@ -230,6 +230,7 @@ with socket.create_connection((host, port), timeout=5) as connection:
     fs::write(&fabric, b"mock").unwrap();
     let config =
         RuntimeLaunchConfig { java, server_jar: server, mod_jar: fabric, accept_eula: true, game_endpoint: None };
+    swarm_cli::hosting_budget::set_contribution(&peer.paths, world, 512).unwrap();
     save_runtime_config(&peer.paths, world, &config).unwrap();
     let fingerprint = peer.storage.load_world_descriptor(world).unwrap().compatibility_fingerprint;
     host_readiness::record_runtime_verified(&peer.paths, world, &config, fingerprint).unwrap();
