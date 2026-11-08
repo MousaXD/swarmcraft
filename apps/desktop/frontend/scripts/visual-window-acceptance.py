@@ -140,17 +140,27 @@ def run(binary: Path, artifacts: Path):
         )
         # Checking a World ID may display discovery guidance but must not
         # impersonate joining, create membership or request native IPC.
+        # The World ID lookup is inside a collapsed native <details> panel.
+        # Open it as a user would before typing into the field.
+        app.click("#joinPanel details.task-secondary summary")
         app.type("#joinWorldId", "scworld:discovery-only")
         app.click("#joinWorldIdButton")
-        discovery = app.execute("""
-          const note = document.getElementById('joinWorldIdNotice');
-          return {
-            visible: !!note && !note.hidden,
-            explainsMembership: !!note && note.textContent.includes('does not grant membership'),
-            signedInviteStillEmpty: !document.getElementById('joinInvite')?.value,
-          };
-        """)
-        assert all(discovery.values()), "World ID hint must not grant membership"
+        discovery = None
+        for _ in range(70):
+            discovery = app.execute("""
+              const note = document.getElementById('joinWorldIdNotice');
+              const button = document.getElementById('joinWorldIdButton');
+              return {
+                visible: !!note && !note.hidden,
+                finished: !!button && !button.disabled,
+                explainsMembership: !!note && note.textContent.includes('does not grant membership'),
+                signedInviteStillEmpty: !document.getElementById('joinInvite')?.value,
+              };
+            """)
+            if discovery["finished"] and discovery["visible"] and discovery["explainsMembership"]:
+                break
+            time.sleep(0.2)
+        assert all(discovery.values()), "Native signed discovery must not grant membership"
         app.click("#navWorlds")
         # Create a real signed invite on the previously created world, but
         # record only boolean observations, never the token or addresses.
