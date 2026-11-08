@@ -1,4 +1,5 @@
 import test from 'node:test';
+import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
@@ -184,4 +185,81 @@ test('candidate bootstrap retains a visible fail-closed status without loading S
   assert.ok(guard.includes("startup.fail('module-load'"));
   assert.ok(entry.includes("document.getElementById('bootstrapFallback')?.remove()"));
   assert.match(css, /#startupFailure #retryStartup/);
+});
+
+
+test('candidate classic guard visibly fails closed before any Svelte component mounts', async () => {
+  const src = await source('../public/candidate-startup-guard.js');
+  let observerCallback;
+  const callbacks = {};
+  let status;
+  const fallback = {
+    hidden: false,
+    children: [],
+    attrs: {},
+    replaceChildren(...items) {
+      this.children = items;
+      status = items[0];
+    },
+    setAttribute(k, v) { this.attrs[k] = v; },
+  };
+  const html = { dataset: { swarmcraftStartup: 'loading' } };
+  let nativeFailureKind;
+  const sandbox = {
+    document: {
+      documentElement: html,
+      getElementById: (id) => id === 'bootstrapFallback' ? fallback
+        : id === 'status' ? status : null,
+      createElement: (tag) => ({ tag }),
+      querySelector: (selector) => {
+        assert.equal(selector, 'script[type="module"]');
+        return { addEventListener: (name, handler) => { callbacks[name] = handler; } };
+      },
+    },
+    MutationObserver: class {
+      constructor(callback) { observerCallback = callback; }
+      observe(target, options) {
+        assert.equal(target, html);
+        assert.deepEqual([...options.attributeFilter], ['data-swarmcraft-startup']);
+      }
+    },
+    window: {
+      __swarmcraftStartup: {
+        failed: false,
+        fail(kind) {
+          nativeFailureKind = kind;
+          this.failed = true;
+          html.dataset.swarmcraftStartup = 'failed';
+          observerCallback();
+        },
+      },
+    },
+  };
+  vm.runInNewContext(src, sandbox, { filename: 'candidate-startup-guard.js' });
+  assert.equal(status, undefined, 'No duplicate status during normal loading');
+  callbacks.error();
+  assert.equal(nativeFailureKind, 'module-load');
+  assert.equal(status.id, 'status', 'Native GUI source must have status element without Svelte');
+  assert.equal(status.textContent, 'Startup failed');
+  assert.equal(fallback.attrs.role, 'alert');
+  assert.equal(fallback.hidden, false);
+});
+
+test('candidate guard leaves an already mounted native status untouched', async () => {
+  const src = await source('../public/candidate-startup-guard.js');
+  const realStatus = { id: 'status', textContent: 'Startup failed' };
+  const fallback = { replaceChildren() { throw new Error('Duplicate status!'); } };
+  const html = { dataset: { swarmcraftStartup: 'failed' } };
+  const sandbox = {
+    document: {
+      documentElement: html,
+      getElementById: (id) => id === 'status' ? realStatus
+        : id === 'bootstrapFallback' ? fallback : null,
+      querySelector: () => null,
+    },
+    MutationObserver: class { constructor(fn) { this.callback = fn; } observe() {} },
+    window: {},
+  };
+  vm.runInNewContext(src, sandbox);
+  assert.equal(realStatus.textContent, 'Startup failed');
 });
