@@ -15,7 +15,9 @@
     const previousInviteOwner = window.__swarmcraftSvelteInviteOwned;
     const previousDiscoveryOwner = window.__swarmcraftSvelteDiscoveryOwned;
     const previousLeaveOwner = window.__swarmcraftSvelteLeaveOwned;
+    const previousIdentityOwner = window.__swarmcraftSvelteIdentityOwned;
     window.__swarmcraftSvelteLeaveOwned = true;
+    window.__swarmcraftSvelteIdentityOwned = true;
     window.__swarmcraftSvelteDiscoveryOwned = true;
     window.__swarmcraftSvelteInviteOwned = true;
     window.__swarmcraftSvelteImportOwned = true;
@@ -35,6 +37,7 @@
       window.__swarmcraftSvelteInviteOwned = previousInviteOwner;
       window.__swarmcraftSvelteDiscoveryOwned = previousDiscoveryOwner;
       window.__swarmcraftSvelteLeaveOwned = previousLeaveOwner;
+      window.__swarmcraftSvelteIdentityOwned = previousIdentityOwner;
       if (window.__swarmcraftSvelteActivity === activityBridge) {
         window.__swarmcraftSvelteActivity = previous;
       }
