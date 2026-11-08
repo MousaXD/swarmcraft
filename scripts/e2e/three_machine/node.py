@@ -211,7 +211,7 @@ def runtime_heap_mib(pid, root, world, binary, cli):
     if not isolated_process(pid, "server", root, world, binary, cli):
         return None
     try:
-        arguments = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\\0")
+        arguments = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
         for arg in arguments:
             value = arg.decode("ascii", errors="strict")
             match = re.fullmatch(r"-Xmx([1-9][0-9]*)([mMgG])", value)
