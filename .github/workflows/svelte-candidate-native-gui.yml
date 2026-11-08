@@ -173,6 +173,75 @@ jobs:
           )
           print('PASS: candidate native GUI visibly fails closed with a missing sidecar')
           PY
+      - name: Construct intentionally broken Svelte module while preserving the classic startup watchdog
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p apps/desktop/frontend/broken-dist
+          cp -a apps/desktop/frontend/dist/. apps/desktop/frontend/broken-dist/
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          index = Path('apps/desktop/frontend/broken-dist/index.html')
+          html = index.read_text()
+          corrupted, count = re.subn(
+              r'(<script\b[^>]*\btype="module"[^>]*\bsrc=")[^"]+(")',
+              r'\g<1>/assets/required-entry-deliberately-missing.js\g<2>',
+              html, count=1,
+          )
+          assert count == 1, 'Cannot find exactly one real Svelte module entry to break'
+          assert 'bootstrap.js' in html and 'bootstrap.js' in corrupted, (
+              'Classic startup failure watchdog must not be damaged'
+          )
+          index.write_text(corrupted)
+          assert Path('apps/desktop/frontend/broken-dist/bootstrap.js').is_file()
+          print('Negative control: required Vite entry missing, classic watchdog preserved')
+          PY
+      - name: Install intentionally broken Svelte frontend in a separate real Debian package
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo tauri build --bundles deb --ci --config frontend/tauri.candidate.broken.conf.json
+          deb="$(find src-tauri/target/release/bundle/deb -name '*.deb' -type f -print -quit)"
+          test -n "$deb"
+          mkdir -p "${{ runner.temp }}/svelte-broken-installed"
+          sha256sum "$deb" > "${{ runner.temp }}/svelte-evidence/broken-package.sha256"
+          dpkg-deb -x "$deb" "${{ runner.temp }}/svelte-broken-installed"
+          broken_binary="${{ runner.temp }}/svelte-broken-installed/usr/bin/swarmcraft-desktop"
+          test -x "$broken_binary"
+          for sidecar in swarmcraft swarmcraft-host swarmcraft-runtime swarmcraft-import; do
+            test -x "${{ runner.temp }}/svelte-broken-installed/usr/bin/$sidecar"
+          done
+          echo "broken_binary=$broken_binary" >> "$GITHUB_ENV"
+      - name: Negative control — broken Svelte bootstrap must visibly fail native GUI acceptance
+        shell: bash
+        env:
+          SWARMCRAFT_DATA_DIR: ${{ runner.temp }}/svelte-broken-module-data
+          HOME: ${{ runner.temp }}/svelte-broken-module-home
+          XDG_DATA_HOME: ${{ runner.temp }}/svelte-broken-module-xdg
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME" "$XDG_DATA_HOME"
+          if xvfb-run -a -s '-screen 0 1280x1024x24' timeout 140s python3 scripts/acceptance/packaged-desktop-webdriver.py \
+             --binary "$broken_binary" --artifacts "${{ runner.temp }}/svelte-evidence/broken-bootstrap"; then
+            echo 'BROKEN: installed GUI acceptance passed without a required Svelte module entry' >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          state_path = Path(os.environ['RUNNER_TEMP'])/'svelte-evidence/broken-bootstrap/last-state.json'
+          assert state_path.is_file(), 'Must observe the broken installed app, not only a process exit'
+          state = json.loads(state_path.read_text())
+          assert (state['startup'] == 'failed' and state['error']
+                  and state['status'] == 'Startup failed' and state['retryVisible']), (
+              'Broken frontend module must show a real failed state and Retry in the native WebKitGTK GUI'
+          )
+          print('PASS: installed Tauri GUI failed visibly after deliberate Svelte module corruption')
+          PY
+
       - name: Upload exact-SHA native candidate evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

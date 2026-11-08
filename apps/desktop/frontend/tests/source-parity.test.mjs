@@ -150,3 +150,17 @@ test('Svelte Import World owns native form submission without implicit EULA or d
   assert.ok(app.includes("id === 'importForm' && window.__swarmcraftSvelteImportOwned === true"));
   assert.ok(app.includes('window.__swarmcraftAfterSvelteImport = async (importedWorldId) =>'));
 });
+
+
+test('deliberately broken Svelte entry must retain classic watchdog and use a separate Tauri package override', async () => {
+  const [badOverlay, nativeWorkflow] = await Promise.all([
+    source('../tauri.candidate.broken.conf.json'),
+    source('../../../../.github/workflows/svelte-candidate-native-gui.yml'),
+  ]);
+  assert.deepEqual(JSON.parse(badOverlay), {build: {frontendDist: '../frontend/broken-dist'}});
+  assert.ok(nativeWorkflow.includes('required-entry-deliberately-missing.js'));
+  assert.ok(nativeWorkflow.includes('svelte-broken-installed'));
+  assert.ok(nativeWorkflow.includes('svelte-evidence/broken-bootstrap/last-state.json'));
+  assert.ok(nativeWorkflow.includes("state['startup'] == 'failed'"));
+  assert.ok(nativeWorkflow.includes("state['retryVisible']"));
+});
