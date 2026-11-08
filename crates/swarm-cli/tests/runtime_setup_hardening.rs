@@ -537,6 +537,12 @@ with lock_path.open("a+") as handle:
 
 #[tokio::test]
 async fn authority_lock_io_failure_is_not_misreported_as_contention() {
+    // This is a positive admission-path I/O test. A low-RAM host correctly
+    // refuses before it ever reaches the authority lock. Keep that safety
+    // invariant and exercise lock I/O on a capable CI runner instead.
+    if !hosting_capacity_for_process_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let fixture = fixture(temp.path().join("peer-lock-io"));
     // The consent fixture now creates the normal control directory. Create
