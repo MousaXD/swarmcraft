@@ -1,15 +1,87 @@
-<dialog id="inviteDialog" class="dialog">
+<script lang="ts">
+  import { onMount, tick } from 'svelte';
+  import { nativeWorldActions } from '../lib/native-world-actions';
+  import { WorldFormError } from '../lib/world-actions';
+
+  let minutes: HTMLSelectElement | undefined;
+  let addresses: HTMLTextAreaElement | undefined;
+  let output: HTMLTextAreaElement | undefined;
+  let busy = $state(false);
+  let error = $state('');
+  let signed = $state('');
+  let showSigned = $state(false);
+
+  function resetInvite() {
+    if (busy) return;
+    error = '';
+    signed = '';
+    showSigned = false;
+  }
+
+  onMount(() => {
+    const old = window.__swarmcraftResetSvelteInvite;
+    window.__swarmcraftResetSvelteInvite = resetInvite;
+    return () => {
+      if (window.__swarmcraftResetSvelteInvite === resetInvite) {
+        window.__swarmcraftResetSvelteInvite = old;
+      }
+    };
+  });
+
+  async function createInvite() {
+    if (busy) return;
+    busy = true;
+    error = '';
+    signed = '';
+    showSigned = false;
+    try {
+      const world = (document.getElementById('world') as HTMLInputElement | null)?.value ?? '';
+      // Canonical ID comes from the selected-world controller, not the UI.
+      const value = await nativeWorldActions().invite(
+        world,
+        Number(minutes?.value || 60),
+        String(addresses?.value ?? '').split(/\r?\n/),
+      );
+      if (!String(value).trim()) {
+        throw new Error('The backend returned no signed invite.');
+      }
+      signed = String(value);
+      showSigned = true;
+      await tick();
+      output?.focus();
+      // Never add signed tokens or embedded addresses to Activity or CI logs.
+      window.__swarmcraftSvelteActivity?.append(
+        new Date().toLocaleTimeString() + '  Invite\nSigned invite created.',
+      );
+    } catch (failure) {
+      if (failure instanceof WorldFormError) {
+        error = failure.message;
+        if (failure.field === 'inviteMinutes') minutes?.focus();
+      } else {
+        error = 'Could not create a signed invite. Check the world and connection, then retry.';
+      }
+    } finally {
+      busy = false;
+    }
+  }
+
+  function preventCloseWhilePending(event: Event) {
+    if (busy) event.preventDefault();
+  }
+</script>
+
+<dialog id="inviteDialog" class="dialog" oncancel={preventCloseWhilePending}>
     <form id="inviteForm" class="dialog-card" method="dialog">
       <div class="dialog-heading">
         <div>
           <h2>Invite to <span id="inviteWorldName">world</span></h2>
           <p>Create a signed invite. The recipient still joins through canonical membership.</p>
         </div>
-        <button id="closeInvite" class="icon-button" value="cancel" type="submit" aria-label="Close invite dialog">×</button>
+        <button id="closeInvite" class="icon-button" value="cancel" type="submit" disabled={busy} aria-label="Close invite dialog">×</button>
       </div>
       <div class="field">
         <label for="inviteMinutes">Invite expires in</label>
-        <select id="inviteMinutes">
+        <select id="inviteMinutes" bind:this={minutes}>
           <option value="30">30 minutes</option>
           <option value="60" selected>1 hour</option>
           <option value="360">6 hours</option>
@@ -20,18 +92,18 @@
         <summary>Advanced bootstrap addresses</summary>
         <div class="field details-fields">
           <label for="bootstrapAddrs">Bootstrap addresses</label>
-          <textarea id="bootstrapAddrs" class="machine-input" rows="3" placeholder="/ip4/…/p2p/…"></textarea>
+          <textarea id="bootstrapAddrs" bind:this={addresses} class="machine-input" rows="3" placeholder="/ip4/…/p2p/…"></textarea>
         </div>
       </details>
-      <div id="inviteError" class="form-error" role="alert" hidden></div>
-      <div id="inviteResultWrap" class="invite-result" hidden>
+      <div id="inviteError" class="form-error" role="alert" hidden={!error}>{error}</div>
+      <div id="inviteResultWrap" class="invite-result" hidden={!showSigned}>
         <label for="inviteResult">Signed invite</label>
-        <textarea id="inviteResult" rows="5" readonly spellcheck="false"></textarea>
+        <textarea id="inviteResult" bind:this={output} value={signed} rows="5" readonly spellcheck="false"></textarea>
         <button id="copyInvite" class="button button-secondary" type="button">Copy invite</button>
       </div>
       <div class="dialog-actions">
-        <button id="cancelInvite" class="button button-secondary" value="cancel" type="submit">Done</button>
-        <button id="createInvite" class="button button-primary world-required" type="button">Create invite</button>
+        <button id="cancelInvite" class="button button-secondary" value="cancel" type="submit" disabled={busy}>Done</button>
+        <button id="createInvite" class="button button-primary world-required" type="button" disabled={busy} aria-busy={busy} onclick={createInvite}>Create invite</button>
       </div>
     </form>
   </dialog>

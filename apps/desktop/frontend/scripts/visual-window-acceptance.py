@@ -139,6 +139,38 @@ def run(binary: Path, artifacts: Path):
             "Empty invite did not fail closed through Svelte: " + repr(observed)
         )
         app.click("#navWorlds")
+        # Create a real signed invite on the previously created world, but
+        # record only boolean observations, never the token or addresses.
+        app.click("#inviteWorld")
+        dialog_owner = app.execute("""
+          return {
+            active: window.__swarmcraftSvelteInviteOwned === true,
+            createEnabled: !document.getElementById('createInvite')?.disabled
+          };
+        """)
+        assert dialog_owner["active"] and dialog_owner["createEnabled"], (
+            "Native invite dialog is not owned by Svelte"
+        )
+        app.click("#createInvite")
+        invite_observation = None
+        for _ in range(60):
+            invite_observation = app.execute("""
+              const result = document.getElementById('inviteResult');
+              const wrapper = document.getElementById('inviteResultWrap');
+              return {
+                visible: !!wrapper && !wrapper.hidden,
+                hasSignedValue: !!result && result.value.trim().length > 0,
+              };
+            """)
+            if invite_observation["visible"] and invite_observation["hasSignedValue"]:
+                break
+            time.sleep(0.2)
+        assert (invite_observation["visible"] and invite_observation["hasSignedValue"]), (
+            "Signed invite did not appear after actual native Rust creation"
+        )
+        # Do not screenshot the signed token; close the dialog before other
+        # evidence/screenshots are captured.
+        app.click("#closeInvite")
         # The imported world must originate in a real filesystem path. An
         # empty import is rejected in Svelte before any Rust sidecar command;
         # import never synthesizes Minecraft EULA acceptance.

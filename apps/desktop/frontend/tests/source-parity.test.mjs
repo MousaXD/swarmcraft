@@ -263,3 +263,21 @@ test('candidate guard leaves an already mounted native status untouched', async 
   vm.runInNewContext(src, sandbox);
   assert.equal(realStatus.textContent, 'Startup failed');
 });
+
+test('Svelte invite dialog owns signed creation without duplicate legacy calls or token logging', async () => {
+  const [dialog, app, root] = await Promise.all([
+    source('../src/components/Dialogs.svelte'),
+    source('../../src/app.js'),
+    source('../src/App.svelte'),
+  ]);
+  assert.ok(dialog.includes('onclick={createInvite}'));
+  assert.ok(dialog.includes('await nativeWorldActions().invite('));
+  assert.ok(dialog.includes('hidden={!showSigned}'));
+  assert.ok(dialog.includes('value={signed}'));
+  assert.ok(dialog.includes('aria-busy={busy}'));
+  assert.ok(dialog.includes('if (busy) event.preventDefault();'));
+  assert.ok(dialog.includes("window.__swarmcraftResetSvelteInvite = resetInvite"));
+  assert.ok(app.includes("id === 'createInvite' && window.__swarmcraftSvelteInviteOwned === true"));
+  assert.ok(root.includes("window.__swarmcraftSvelteInviteOwned = true"));
+  assert.doesNotMatch(dialog, /append\(\s*signed|setOutput\(\s*signed/);
+});

@@ -929,6 +929,7 @@ function openInviteDialog() {
   const world = selectedWorld();
   if (!world) throw new Error('Choose a world first.');
   $('inviteWorldName').textContent = world.name;
+  if (window.__swarmcraftSvelteInviteOwned) window.__swarmcraftResetSvelteInvite?.();
   $('inviteResult').value = '';
   $('inviteResultWrap').hidden = true;
   showInline('inviteError', '');
@@ -1171,6 +1172,7 @@ function bindAction(id, handler, { submit = false } = {}) {
     if (id === 'createForm' && window.__swarmcraftSvelteCreateOwned === true) return;
     if (id === 'joinForm' && window.__swarmcraftSvelteJoinOwned === true) return;
     if (id === 'importForm' && window.__swarmcraftSvelteImportOwned === true) return;
+    if (id === 'createInvite' && window.__swarmcraftSvelteInviteOwned === true) return;
     if (element.dataset.busy === 'true') return;
     const busyControl = submit && event.submitter ? event.submitter : element;
     element.dataset.busy = 'true';
