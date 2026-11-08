@@ -489,6 +489,42 @@ async fn invalid_transfer_target_does_not_kill_authority_and_withdrawal_still_ch
     heartbeat.abort();
 }
 
+#[test]
+fn player_only_target_rejects_transfer_before_publishing_any_signed_transfer_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let alice = peer(temp.path().join("alice-player-only"));
+    let bob = peer(temp.path().join("bob-player-only"));
+    let source = temp.path().join("player-only-transfer-source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("level.dat"), b"player-only-transfer\\n").unwrap();
+    let shared = initialize_two_peer_world(&alice, &bob, &source);
+    save_sleep(&alice, shared.world);
+    let original_epoch = bob.storage.load_epoch_record(shared.world).unwrap();
+    let original_snapshot = bob.storage.latest_snapshot(shared.world).unwrap().unwrap();
+
+    // An authority-eligible voter/replica is still not an opt-in host.
+    swarm_cli::hosting_budget::set_contribution(&bob.paths, shared.world, 0).unwrap();
+    let prepared = match prepare_manual_transfer(
+        &alice.paths,
+        &alice.storage,
+        shared.world,
+        bob.identity.peer_id(),
+    )
+    .unwrap()
+    {
+        TransferPrepareResult::Prepared(token) => token,
+        TransferPrepareResult::CheckpointRequested => panic!("sleeping source is already checkpointed"),
+    };
+    let error = accept_manual_transfer(&bob.paths, &bob.storage, shared.world, &prepared).unwrap_err();
+    assert!(error.to_string().contains("hosting consent was withdrawn"), "{error}");
+    assert!(bob.storage.load_transfer_record(shared.world).is_err());
+    assert_eq!(bob.storage.load_epoch_record(shared.world).unwrap(), original_epoch);
+    assert_eq!(
+        bob.storage.latest_snapshot(shared.world).unwrap().unwrap().manifest_hash().unwrap(),
+        original_snapshot.manifest_hash().unwrap(),
+    );
+}
+
 #[tokio::test]
 async fn manual_transfer_uses_shared_runner_and_fences_alice() {
     if !hosting_capacity_for_process_test() {
