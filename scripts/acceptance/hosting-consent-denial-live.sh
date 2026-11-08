@@ -78,27 +78,46 @@ print("true" if java.get("managed") else "false")
 # with cleanup; no synthetic JVM, mocked admission, or silently ignored errors.
 denied_launch() {
   python3 - "$RUNTIME" "$DATA" "$WORLD" "$LOG/$1" <<'PY'
-import os, signal, subprocess, sys
+import os, signal, subprocess, sys, time
 runtime, data, world, log = sys.argv[1:]
 p = subprocess.Popen([runtime, "--data-dir", data, "launch", world],
     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+
+def signal_group(sig):
+    # A launch may spawn Java and exit early. Clean the whole detached group,
+    # not just the runtime parent, or a bad regression can leave Java running.
+    try:
+        os.killpg(p.pid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+
 timed_out = False
 try:
     out, err = p.communicate(timeout=45)
 except subprocess.TimeoutExpired:
     timed_out = True
-    os.killpg(p.pid, signal.SIGTERM)
+    signal_group(signal.SIGTERM)
     try:
         out, err = p.communicate(timeout=5)
     except subprocess.TimeoutExpired:
-        os.killpg(p.pid, signal.SIGKILL)
+        signal_group(signal.SIGKILL)
         out, err = p.communicate()
+
+# Reap and reject any still-running child JVM despite a parent error exit.
+orphan_group = signal_group(signal.SIGTERM)
+if orphan_group:
+    time.sleep(1)
+    signal_group(signal.SIGKILL)
+
 with open(log+".stdout", "w") as f:
     f.write(out)
 with open(log+".stderr", "w") as f:
     f.write(err)
 if timed_out:
     sys.exit("HOSTING_DENIAL_FAIL: launch did not promptly reject missing/zero consent")
+if orphan_group:
+    sys.exit("HOSTING_DENIAL_FAIL: runtime left a background process group alive")
 if p.returncode == 0:
     sys.exit("HOSTING_DENIAL_FAIL: real runtime returned success without consent")
 reason = err.lower()
