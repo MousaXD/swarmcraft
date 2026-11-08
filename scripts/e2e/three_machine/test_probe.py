@@ -76,6 +76,24 @@ class TestRealHostBudgetEvidence(unittest.TestCase):
             path.write_text(json.dumps(record))
             self.assertFalse(node.hosting_consent(temp, self.WORLD, self.PEER)["available"])
 
+    def test_version_values_are_bounded_and_cannot_contain_private_paths(self):
+        self.assertEqual(node.safe_version("25.0.5+8"), "25.0.5+8")
+        self.assertEqual(node.safe_version("0.19.3"), "0.19.3")
+        for text in ("25\\\\secret", "../../secrets", "25;cat /etc/passwd", "", None):
+            self.assertIsNone(node.safe_version(text))
+
+    def test_java_version_comes_from_actual_process_executable(self):
+        from types import SimpleNamespace
+        with patch.object(node, "isolated_process", return_value=True):
+            with patch.object(Path, "resolve", return_value=Path("/usr/lib/jvm/java")):
+                with patch.object(node, "run", return_value=SimpleNamespace(
+                    returncode=0, stderr='openjdk version "25.0.1" 2026', stdout=""
+                )) as runner:
+                    version = node.java_runtime_version(123, Path("/tmp/e2e"), self.WORLD,
+                                                        Path("/usr/bin/gui"), Path("/usr/bin/swarmcraft"))
+                    self.assertEqual(version, "25.0.1")
+                    runner.assert_called_once_with(["/usr/lib/jvm/java", "-version"], timeout=8)
+
     def test_java_xmx_reads_real_argument_boundary_not_substrings(self):
         with patch.object(node, "isolated_process", return_value=True):
             with patch.object(Path, "read_bytes", return_value=b"java\0-Xmx4096m\0-jar\0fabric-server.jar\0"):
