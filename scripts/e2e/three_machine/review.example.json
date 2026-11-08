@@ -1,0 +1,19 @@
+{
+  "_instructions": "Copy privately, set every field true only after independent review of real evidence. Do not claim PASS from process presence.",
+  "commit": "0000000000000000000000000000000000000000",
+  "package_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "reviewer": "",
+  "evidence_url": "",
+  "three_independent_gui_installations": false,
+  "explicit_eula_by_alice": false,
+  "signed_invites_and_real_client_join": false,
+  "shared_ingame_marker_three_clients": false,
+  "bob_opt_in_budget_enforced": false,
+  "carol_zero_host_budget_enforced": false,
+  "direct_or_hole_punch_transport_observed": false,
+  "relay_fallback_observed": false,
+  "alice_hard_crash_and_bob_client_reconnection": false,
+  "alice_return_fenced": false,
+  "screenshots_redacted": false,
+  "real_world_network_classes_verified": false
+}
