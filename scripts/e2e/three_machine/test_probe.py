@@ -121,8 +121,8 @@ class TestDebianPackageMetadata(unittest.TestCase):
     def test_extracts_exact_bare_package_and_version_fields(self):
         from types import SimpleNamespace
         outputs = [
-            SimpleNamespace(returncode=0, stdout="swarmcraft-desktop\\n"),
-            SimpleNamespace(returncode=0, stdout="0.5.0-1\\n"),
+            SimpleNamespace(returncode=0, stdout="swarmcraft-desktop\n"),
+            SimpleNamespace(returncode=0, stdout="0.5.0-1\n"),
         ]
         with patch.object(node, "run", side_effect=outputs) as runner:
             metadata = node.deb_package_metadata(Path("/tmp/candidate.deb"))
@@ -136,9 +136,9 @@ class TestDebianPackageMetadata(unittest.TestCase):
     def test_rejects_labeled_multifield_and_injected_control_metadata(self):
         from types import SimpleNamespace
         examples = [
-            ("Package: swarmcraft-desktop\\n", "Version: 0.5.0\\n"),
-            ("swarmcraft-desktop\\nInjected: value\\n", "0.5.0\\n"),
-            ("swarmcraft-desktop", "0.5.0\\nVersion: other"),
+            ("Package: swarmcraft-desktop\n", "Version: 0.5.0\n"),
+            ("swarmcraft-desktop\nInjected: value\n", "0.5.0\n"),
+            ("swarmcraft-desktop", "0.5.0\nVersion: other"),
             ("../path", "0.5.0"),
             ("swarmcraft-desktop", "0.5.0;id"),
         ]
