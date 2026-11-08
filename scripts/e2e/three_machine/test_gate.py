@@ -53,6 +53,13 @@ def node(role, stage):
         "desktop_process_observed": True,
         "minecraft_client_process_observed": True,
         "minecraft_server_process_observed": role == ("alice" if authority == ALICE else "bob"),
+        "connectivity_diagnostics": {
+            "available": True,
+            "state": "relay_connected" if stage == "transport_relay" else "direct_reachable",
+            "direct_connectivity": stage != "transport_relay",
+            "relay_connectivity": stage == "transport_relay",
+            "hole_punch": "idle",
+        },
     }
 
 
@@ -147,6 +154,28 @@ class TestFailClosed(unittest.TestCase):
             check["nodes"]["carol"]["authorized_peers"] = 2
             gate.save(out / "checkpoint.json", check)
             with self.assertRaisesRegex(gate.Blocked, "signed_three_member_quorum_missing"):
+                gate.verify(c, out)
+
+    def test_rejects_configured_but_inactive_relay(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            check = gate.load_json(out / "transport_relay.json")
+            for node in check["nodes"].values():
+                node["connectivity_diagnostics"]["relay_connectivity"] = False
+            gate.save(out / "transport_relay.json", check)
+            with self.assertRaisesRegex(gate.Blocked, "active_relay_fallback_not_observed"):
+                gate.verify(c, out)
+
+    def test_rejects_missing_direct_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            check = gate.load_json(out / "transport_direct.json")
+            for node in check["nodes"].values():
+                node["connectivity_diagnostics"]["direct_connectivity"] = False
+            gate.save(out / "transport_direct.json", check)
+            with self.assertRaisesRegex(gate.Blocked, "real_direct_or_hole_punched_path_not_observed"):
                 gate.verify(c, out)
 
     def test_rejects_only_java_crash(self):
