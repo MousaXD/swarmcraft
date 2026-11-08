@@ -10,6 +10,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use swarm_core::DataPaths;
+
+use crate::host_readiness;
 use swarm_protocol::WorldId;
 
 const SCHEMA_VERSION: u16 = 1;
@@ -140,8 +142,19 @@ pub fn set_contribution(paths: &DataPaths, world: WorldId, heap_mib: u64) -> Res
         heap_mib,
         revision: current,
     };
+    // Any new opt-in must first invalidate a previous Fabric verification
+    // proof so an old ready result cannot be inherited by a new budget.
+    if heap_mib != 0 {
+        host_readiness::invalidate_runtime_verification(paths, world)?;
+        host_readiness::invalidate_cached_readiness(paths, world)?;
+    }
     let path = prefs_path(paths, world);
     atomic_write(&path, &value)?;
+    if heap_mib == 0 {
+        // A durable opt-out is already effective even if cache removal fails.
+        host_readiness::invalidate_runtime_verification(paths, world)?;
+        host_readiness::invalidate_cached_readiness(paths, world)?;
+    }
     // File lock releases when dropped.
     drop(lock);
     Ok(value)
