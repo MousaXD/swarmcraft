@@ -1,5 +1,5 @@
 {
-  "_instructions": "Independent reviewer must validate redacted real GUI/client/transport evidence; provide all 23 unique role-specific media files under OUT/evidence and their SHA-256. See README. A review JSON alone does not certify.",
+  "_instructions": "Review native Minecraft/GUI/media/transport evidence; record output of run.py observations-digest and 23 distinct media SHA-256s. Changing a previously reviewed observation invalidates this digest. This alone does not prove real gameplay.",
   "commit": "0000000000000000000000000000000000000000",
   "package_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "reviewer": "",
@@ -17,5 +17,6 @@
   "alice_return_fenced": false,
   "screenshots_redacted": false,
   "real_world_network_classes_verified": false,
-  "artifacts": []
+  "artifacts": [],
+  "observations_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
 }
