@@ -100,3 +100,21 @@ test('native responsiveness guards prevent horizontal scrollers and min-window r
   assert.match(player, /flex-wrap: wrap;/);
   assert.ok(workflow.includes('visual-window-acceptance.py'));
 });
+
+test('Svelte create journey invokes exactly one native create without legacy double submit', async () => {
+  const [create, app, root, bridge] = await Promise.all([
+    source('../src/components/CreateWorldView.svelte'),
+    source('../../src/app.js'),
+    source('../src/App.svelte'),
+    source('../src/lib/native-world-actions.ts'),
+  ]);
+  assert.ok(create.includes('data-journey-owner="svelte"'));
+  assert.ok(create.includes('onsubmit={create}'));
+  assert.ok(create.includes('disabled={busy}'));
+  assert.ok(create.includes('hidden={!error}>{error}'));
+  assert.ok(root.includes('window.__swarmcraftSvelteCreateOwned = true;'));
+  assert.ok(app.includes("id === 'createForm' && window.__swarmcraftSvelteCreateOwned === true"));
+  assert.ok(app.includes('window.__swarmcraftAfterSvelteCreate = async (createdWorldId) =>'));
+  assert.ok(bridge.includes("native.invoke('create_world', request)"));
+  assert.doesNotMatch(bridge, /__TAURI__\s*=|\.invoke\s*=/);
+});

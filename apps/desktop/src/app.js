@@ -1125,11 +1125,27 @@ async function wakeWorld() {
   await refreshMigrationState(selectedWorld());
 }
 
+// The Svelte candidate owns Create World submissions. The installed legacy
+// frontend has no ownership flag and continues using this handler as before.
+window.__swarmcraftAfterSvelteCreate = async (createdWorldId) => {
+  const id = String(createdWorldId || '').trim();
+  if (!/^scworld:[^\s]+$/.test(id)) throw new Error('Creation did not return a canonical World ID.');
+  selectedWorldId = id;
+  await refreshWorlds();
+  if (lastWorldError) {
+    throw new Error('World was created but the updated world list could not be loaded.');
+  }
+  showView('worlds');
+};
+
 function bindAction(id, handler, { submit = false } = {}) {
   const element = $(id);
   if (!element) return;
   element.addEventListener(submit ? 'submit' : 'click', async (event) => {
     if (submit) event.preventDefault();
+    // Avoid issuing two native create_world commands when the Svelte handler
+    // owns the form. The original production HTML still uses this listener.
+    if (id === 'createForm' && window.__swarmcraftSvelteCreateOwned === true) return;
     if (element.dataset.busy === 'true') return;
     const busyControl = submit && event.submitter ? event.submitter : element;
     element.dataset.busy = 'true';

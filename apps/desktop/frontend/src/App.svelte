@@ -9,6 +9,8 @@
   // Rust-backed event handlers. This does not constitute reactive parity.
   onMount(() => {
     const previous = window.__swarmcraftSvelteActivity;
+    const previousCreateOwner = window.__swarmcraftSvelteCreateOwned;
+    window.__swarmcraftSvelteCreateOwned = true;
     window.__swarmcraftSvelteActivity = activityBridge;
     void import('../../src/app.js').catch(() => {
       window.__swarmcraftStartup?.fail(
@@ -17,6 +19,7 @@
       );
     });
     return () => {
+      window.__swarmcraftSvelteCreateOwned = previousCreateOwner;
       if (window.__swarmcraftSvelteActivity === activityBridge) {
         window.__swarmcraftSvelteActivity = previous;
       }

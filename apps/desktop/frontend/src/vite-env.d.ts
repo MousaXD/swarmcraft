@@ -8,6 +8,8 @@ declare global {
         invoke: <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
       };
     };
+    __swarmcraftSvelteCreateOwned?: boolean;
+    __swarmcraftAfterSvelteCreate?: (worldId: string) => Promise<void>;
     __swarmcraftSvelteActivity?: {
       append(entry: string): boolean;
       clear(): void;
