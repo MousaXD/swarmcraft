@@ -100,6 +100,11 @@ pub fn invalidate_runtime_verification(paths: &DataPaths, world: WorldId) -> Res
     remove_if_present(&runtime_verification_path(paths, world))
 }
 
+/// Local contribution changes invalidate previous shutdown/readiness snapshots.
+pub fn invalidate_cached_readiness(paths: &DataPaths, world: WorldId) -> Result<()> {
+    remove_if_present(&host_readiness_path(paths, world))
+}
+
 pub fn record_runtime_verified(
     paths: &DataPaths,
     world: WorldId,
