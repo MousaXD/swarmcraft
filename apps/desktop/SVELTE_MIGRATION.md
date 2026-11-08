@@ -66,3 +66,7 @@ A concrete Svelte component split now mounts `Sidebar`, `Topbar`, `WorldsView`, 
 ## Frontend dependency reproducibility
 
 The dependency-lock artifact from GitHub Actions run `42468369672` was downloaded independently and verified as a 66,118-byte `package-lock.json`, lockfile version 3, 133 package entries. Imported exact blob SHA `4151e059b92108873ff8bb31ed6de6cc4d281f8e` into GitHub without rewriting its bytes. The migration-only workflow now runs `npm ci` directly. Its success does **not** certify the production Tauri application, which still bundles the original `apps/desktop/src`.
+
+## Typed world actions
+
+`frontend/src/lib/world-actions.ts` now stages typed create/import/join/invite actions using the existing Rust IPC request shapes and frontend validation. It preserves explicit third-party mod declarations, carries no EULA flag for imports, rejects missing canonical IDs instead of inventing success, prevents concurrent duplicate actions, and leaves signed membership, authority and compatibility decisions to Rust. Seven Vitest cases cover payload parity, errors and duplicate attempts. Actual Svelte form binding and installed-GUI acceptance are pending.
