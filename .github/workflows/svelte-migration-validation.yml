@@ -36,9 +36,9 @@ jobs:
       # One-time lockfile bootstrap: the subsequent commit removes this log dump.
       - name: Emit lockfile bytes for exact git-blob import
         run: |
-          printf '%s\\n' SWARMCRAFT_LOCKFILE_BEGIN
+          printf '%s\n' SWARMCRAFT_LOCKFILE_BEGIN
           base64 -w76 package-lock.json
-          printf '%s\\n' SWARMCRAFT_LOCKFILE_END
+          printf '%s\n' SWARMCRAFT_LOCKFILE_END
       - name: Install resolved dependencies from generated candidate lock
         run: npm ci --no-audit --no-fund
       - name: Verify source bindings and PR-88 watchdog
