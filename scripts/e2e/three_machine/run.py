@@ -157,6 +157,8 @@ def verify(c, output, review_file=None):
         stages[stage] = s["nodes"]
         for role, node in s["nodes"].items():
             require(node["snapshot_verify_passed"] and node["canonical"], "unsigned_or_conflicted_" + stage + "_" + role)
+            require(node.get("snapshot_hash") and SHA.fullmatch(node["snapshot_hash"]) and node.get("state_root"),
+                    "accepted_snapshot_digest_missing_" + stage + "_" + role)
             require(node["snapshot_number"] is not None and node["snapshot_number"] >= 1,
                     "snapshot_missing_" + stage + "_" + role)
             require(node["world_fingerprint"] == stages["alice_created"]["alice"]["world_fingerprint"],
@@ -171,6 +173,8 @@ def verify(c, output, review_file=None):
     require(all(x["authority_fingerprint"] == a["identity_fingerprint"] for x in p.values()),
             "alice_not_canonical_authority")
     require(a["runtime_ready"] and a["minecraft_server_process_observed"], "alice_real_server_missing")
+    require(not b["minecraft_server_process_observed"] and not d["minecraft_server_process_observed"],
+            "parallel_authority_runtimes_before_crash")
     require(a["safe_to_shutdown"] and a["successor_fingerprint"] == b["identity_fingerprint"],
             "bob_not_verified_successor_or_no_surviving_quorum")
     require(all(x["desktop_process_observed"] and x["minecraft_client_process_observed"] for x in p.values()),
@@ -188,6 +192,7 @@ def verify(c, output, review_file=None):
             rb["fencing_token"] is not None and a["fencing_token"] is not None and
             rb["fencing_token"] > a["fencing_token"], "unfenced_or_stale_takeover")
     require(rb["runtime_ready"] and rb["minecraft_server_process_observed"], "bob_real_recovery_runtime_missing")
+    require(not recovery["carol"]["minecraft_server_process_observed"], "carol_unexpected_server_after_recovery")
     require(all(x["state_root"] == a["state_root"] for x in recovery.values()),
             "latest_accepted_checkpoint_not_restored")
     returned = stages["alice_returned"]
@@ -197,6 +202,7 @@ def verify(c, output, review_file=None):
     require(len({x["snapshot_hash"] for x in returned.values()}) == 1 and
             len({x["state_root"] for x in returned.values()}) == 1,
             "return_replica_divergence")
+    require(returned["alice"]["desktop_process_observed"], "returning_alice_gui_missing")
     require(not returned["alice"]["runtime_ready"] and not returned["alice"]["minecraft_server_process_observed"],
             "stale_alice_runtime_still_active")
     require(all(x["minecraft_client_process_observed"] for x in returned.values()),
