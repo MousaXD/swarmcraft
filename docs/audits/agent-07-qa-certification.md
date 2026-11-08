@@ -380,3 +380,16 @@ PR #98 latest observed source head **1a0e2867c9b45668b4634fe868f0f7215bcf8b11** 
 5. Re-run **Required Validation** and **Main Desktop Installers** on a single exact integrated SHA; verify security/governance, ALL Rust targets, Fabric mod, verified third-party assets, real native GUI positive/negative, recovery/authority fencing and real Minecraft. No skipping, bypassing, merge, tagging or issue closure before certification.
 
 **Agent 07 remains independent; review report only, release BLOCKED.**
+
+
+### Seventh moving-head checkpoint — follow-up commits after review
+
+Live GitHub heads continued to move during the independent review. These pointers do **not** inherit older successful checks:
+- #92 stable at **326037b53b36abda92a3b2c201209c5ca0ed71fd**: both Required Validation **SUCCESS** and Main Desktop Installers **SUCCESS**, source and tested-head association still valid. Draft because canonical hosting feature intentionally inert.
+- #93 advanced to **7df70ee14f5c9b6124ab12026ec1ec377fe7c087**; diff relative to the exact failing source `fe12097...` changes only `crates/swarm-cli/tests/consensus_partition_safety.rs` (63 additions). It does **not** yet add the missing real CLI/Desktop consent route nor update the real clean-machine journey; the prior real Minecraft consent FAILURE remains an unresolved integration blocker even though [new Required #42492278708](https://github.com/MousaXD/swarmcraft/actions/runs/42492278708) and [Installers #42492278716](https://github.com/MousaXD/swarmcraft/actions/runs/42492278716) were queued/pending.
+- #94 advanced multiple times after source `91e5c2...`, reaching **11aec598a08750900551184f0e38a7f09c76f91d** in the latest branch-workflow listing. New [Svelte native candidate #42492447886](https://github.com/MousaXD/swarmcraft/actions/runs/42492447886), [candidate source #42492447876](https://github.com/MousaXD/swarmcraft/actions/runs/42492447876) and [cross-platform candidate #42492447898](https://github.com/MousaXD/swarmcraft/actions/runs/42492447898) pending/queued. The previous exact-head native interaction failure must be reverified after these changes; historic green Required suite does not transfer.
+- #96 advanced to **e030d0ef1f2061c9609e768d539b63323423a92b** (E2E node probe scripts/tests only relative to `b7f76fe...`). New [manual harness #42492384419](https://github.com/MousaXD/swarmcraft/actions/runs/42492384419), [Required #42492384396](https://github.com/MousaXD/swarmcraft/actions/runs/42492384396), [Installers #42492384502](https://github.com/MousaXD/swarmcraft/actions/runs/42492384502) pending; no real three installed remote machines.
+- #98 at **1a0e2867c9b45668b4634fe868f0f7215bcf8b11** with old SHA full Required PASS but old Installer CANCELLED; fresh [Required #42491995930](https://github.com/MousaXD/swarmcraft/actions/runs/42491995930) and [Installers #42491995914](https://github.com/MousaXD/swarmcraft/actions/runs/42491995914) pending.
+- #90 and #95 unchanged with red exact-head mandatory check runs, #91 QA documentation only. Main unchanged.
+
+**Agent 07 release verdict remains BLOCKED; no source-only fix, isolated green build or automatic consent authorizes production.**
