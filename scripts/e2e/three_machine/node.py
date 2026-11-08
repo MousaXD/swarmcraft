@@ -122,13 +122,28 @@ def preflight(a):
     }
 
 
-def observed(pid, terms):
-    if pid is None:
+def fabric_client_process(pid, server_pid=None):
+    """Require a real Fabric Minecraft client JVM, never an argv substring.
+
+    JVM provenance is necessary but not sufficient: independent field review
+    must still prove genuine game login, joins and shared marker state.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1 or pid == server_pid:
         return False
     try:
-        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").lower()
-        return any(term in cmd for term in terms)
-    except OSError:
+        executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
+        if executable.name.lower() not in ("java", "javaw"):
+            return False
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        if not raw or len(raw) > 131072:
+            return False
+        argv = [arg.decode("utf-8", errors="replace") for arg in raw.split(b"\0") if arg]
+        if len(argv) < 3 or not any(arg in ("-cp", "-classpath", "--class-path") for arg in argv):
+            return False
+        return ("net.fabricmc.loader.impl.launch.knot.KnotClient" in argv or
+                ("org.prismlauncher.EntryPoint" in argv and
+                 any("fabric-loader" in arg.lower() for arg in argv)))
+    except (OSError, ValueError, UnicodeError):
         return False
 
 
@@ -357,7 +372,7 @@ def capture(a):
         "desktop_process_observed": isolated_process(
             a.desktop_pid, "desktop", Path(root), a.world,
             Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True)),
-        "minecraft_client_process_observed": observed(a.client_pid, ("minecraft", "knotclient", "net.fabricmc.loader.impl.launch.knot.knotclient")),
+        "minecraft_client_process_observed": fabric_client_process(a.client_pid, a.server_pid),
         "minecraft_server_process_observed": isolated_process(
             a.server_pid, "server", Path(root), a.world,
             Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True)),
