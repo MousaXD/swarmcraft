@@ -160,6 +160,31 @@ power loss**; literal machine/ISP power-failure field evidence is a separate
 required exercise. It never uses wildcard pkill, unrestricted rm, mocked Java,
 pre-seeded replicas or localhost-only peers.
 
+## Host consent and real JVM heap observations (#84 dependency)
+
+The harness expects the eventually integrated Agent 03 local consent contract
+at `control/<world-hex>/hosting-consent.json`, containing schema version 1,
+the actual fixed-width world ID and local peer identity, explicit enabled
+state, `heap_mib` and positive consent revision. It **never creates or edits**
+these records. Missing, malformed, wrong-device or wrong-world records are
+reported unavailable, and the final verifier stays BLOCKED.
+
+At the signed three-peer checkpoint, Alice and Bob must each have explicit
+opt-in with an allowed nonzero heap, while Carol must have a visible explicit
+revocation/0-MiB player-only record. The verifier checks that Alice's running
+Minecraft server process has a real `-Xmx` flag equal to Alice's allowed
+heap and Bob's recovered Java process uses Bob's independently chosen limit.
+Carol may never become a Java authority while remaining player-only.
+Consent snapshots and revision are rechecked after Bob's takeover; this
+does not replace authenticated quorum or signed recovery.
+
+The `-Xmx` JVM argument is a **heap** limit only, not a guaranteed total
+RSS/cgroup limit. Real runtime memory pressure and OS-level process cap
+behavior still require explicit independent evidence and review. Agent 03's
+own contract marks actual policy integration, GUI support and OS-level hard
+memory enforcement as unfinished; this harness does not bypass those safety
+gaps or make them green by inspecting a JSON file.
+
 ## Evidence and final review
 
 The "transport_direct" and "transport_relay" captures now independently
