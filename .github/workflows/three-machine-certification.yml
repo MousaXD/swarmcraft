@@ -1,0 +1,71 @@
+name: Three-machine real E2E certification (manual / non-release)
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/e2e/**'
+      - '.github/workflows/three-machine-certification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harness-negative-controls:
+    name: Three-machine harness negative assertions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Syntax and fail-closed unit tests (NOT real E2E certification)
+        run: |
+          python3 -m compileall -q scripts/e2e/three_machine
+          python3 -m unittest discover -s scripts/e2e/three_machine -p 'test_*.py' -v
+
+  remote-preflight:
+    name: Three remote installations (preflight ONLY, not certification)
+    if: github.event_name == 'workflow_dispatch'
+    needs: harness-negative-controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      E2E_CONFIG_JSON: ${{ secrets.SWARMCRAFT_E2E_CONFIG_JSON }}
+      E2E_SSH_PRIVATE_KEY: ${{ secrets.SWARMCRAFT_E2E_SSH_PRIVATE_KEY }}
+      E2E_SSH_KNOWN_HOSTS: ${{ secrets.SWARMCRAFT_E2E_SSH_KNOWN_HOSTS }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Require explicitly provisioned hosts and pinned SSH trust
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -z "$E2E_CONFIG_JSON" ] || [ -z "$E2E_SSH_PRIVATE_KEY" ] || [ -z "$E2E_SSH_KNOWN_HOSTS" ]; then
+            echo 'BLOCKED: dedicated machines, SSH key, and pinned known_hosts are required.'
+            exit 2
+          fi
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$E2E_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$E2E_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          printf '%s' "$E2E_CONFIG_JSON" > "$RUNNER_TEMP/e2e-config.json"
+          python3 - "$RUNNER_TEMP/e2e-config.json" "$GITHUB_SHA" <<'PY'
+          import json
+          import sys
+          config = json.load(open(sys.argv[1], encoding='utf-8'))
+          if config.get('commit') != sys.argv[2]:
+              raise SystemExit('BLOCKED: configured package provenance commit differs from workflow SHA')
+          PY
+      - name: Verify three independently installed Debian packages and networks
+        run: |
+          python3 scripts/e2e/three_machine/run.py preflight \
+            --config "$RUNNER_TEMP/e2e-config.json" \
+            --output "$RUNNER_TEMP/three-machine-e2e"
+      - name: Upload only sanitized preflight record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: three-machine-preflight-${{ github.sha }}
+          path: ${{ runner.temp }}/three-machine-e2e/preflight.json
+          if-no-files-found: ignore
+          retention-days: 14
