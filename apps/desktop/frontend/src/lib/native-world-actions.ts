@@ -28,3 +28,12 @@ export function nativeWorldBackend(): WorldActionsBackend {
 export function nativeWorldActions() {
   return createWorldActions(nativeWorldBackend());
 }
+
+/** A signed leave is a Rust-only authority/membership operation. */
+export function requestLeaveWorld(world: string): Promise<string> {
+  const id = String(world || '').trim();
+  if (!/^scworld:\S+$/.test(id)) {
+    return Promise.reject(new Error('A canonical World ID is required for leaving.'));
+  }
+  return nativeBridge().invoke('leave_world', { world: id });
+}

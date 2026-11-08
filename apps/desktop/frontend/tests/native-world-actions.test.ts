@@ -48,3 +48,18 @@ describe('Svelte native world actions bridge', () => {
     });
   });
 });
+
+describe('signed membership leave', () => {
+  it('rejects missing canonical ID without issuing a native command', async () => {
+    const { requestLeaveWorld } = await import('../src/lib/native-world-actions');
+    await expect(requestLeaveWorld('  ')).rejects.toThrow(/canonical World ID/);
+    await expect(requestLeaveWorld('not-a-world')).rejects.toThrow(/canonical World ID/);
+  });
+  it('sends one exact Rust leave_world command only after explicit invocation', async () => {
+    const { requestLeaveWorld } = await import('../src/lib/native-world-actions');
+    const invoke = vi.fn(async () => 'Leave accepted');
+    vi.stubGlobal('window', { __TAURI__: { core: { invoke } } });
+    await expect(requestLeaveWorld(' scworld:canonical ')).resolves.toBe('Leave accepted');
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('leave_world', {world:'scworld:canonical'});
+  });
+});

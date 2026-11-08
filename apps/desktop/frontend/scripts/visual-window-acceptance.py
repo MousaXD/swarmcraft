@@ -234,6 +234,27 @@ def run(binary: Path, artifacts: Path):
             "Empty import did not fail closed through Svelte: " + repr(import_validation)
         )
         app.click("#navWorlds")
+        # Cancellation is non-destructive: open Leave, cancel, and verify
+        # that the canonical world remains in the actual installed GUI.
+        CURRENT_STAGE = 'leave-confirmation-cancel'
+        app.click("#leaveWorld")
+        leave_open = app.execute("""
+          return {
+            dialogOpen: document.getElementById('leaveDialog')?.open === true,
+            owned: window.__swarmcraftSvelteLeaveOwned === true,
+            enabled: !document.getElementById('confirmLeave')?.disabled,
+          };
+        """)
+        assert all(leave_open.values()), "Svelte signed leave confirmation is unavailable"
+        app.click("#cancelLeave")
+        leave_cancelled = app.execute("""
+          return {
+            closed: document.getElementById('leaveDialog')?.open === false,
+            stillSelected: !!document.getElementById('world')?.value,
+            worldStillListed: document.querySelectorAll('#worldCards .world-row').length > 0,
+          };
+        """)
+        assert all(leave_cancelled.values()), "Cancelling leave changed canonical membership"
         # Restore configured default for follow-up screenshots.
         native.request(f"/session/{app.session}/window/rect", "POST", {
             "width": 980, "height": 760

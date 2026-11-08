@@ -308,3 +308,19 @@ test('World ID lookup preserves actual Rust signed discovery and capture-phase l
   assert.ok(discovery.includes("nativeBridge().invoke('discovery_resolve', { world })"), 'Svelte performs a real lookup');
   assert.ok(script.includes('app.click("#joinPanel details.task-secondary summary")'));
 });
+
+test('Svelte signed Leave World remains a deliberate confirmation and never double-invokes Rust', async () => {
+  const [dialog, app, root, bridge] = await Promise.all([
+    source('../src/components/Dialogs.svelte'),
+    source('../../src/app.js'), source('../src/App.svelte'),
+    source('../src/lib/native-world-actions.ts'),
+  ]);
+  assert.ok(dialog.includes('onclick={confirmLeave}'));
+  assert.ok(dialog.includes('disabled={leaving}'));
+  assert.ok(dialog.includes('await requestLeaveWorld(id)'));
+  assert.ok(dialog.includes('await window.__swarmcraftAfterSvelteLeave()'));
+  assert.ok(app.includes("id === 'confirmLeave' && window.__swarmcraftSvelteLeaveOwned === true"));
+  assert.ok(root.includes('window.__swarmcraftSvelteLeaveOwned = true;'));
+  assert.ok(bridge.includes("nativeBridge().invoke('leave_world', { world: id })"));
+  assert.ok(dialog.includes('if (busy || leaving) event.preventDefault();'));
+});

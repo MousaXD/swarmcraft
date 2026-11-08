@@ -1023,6 +1023,7 @@ function openLeaveDialog() {
   const world = selectedWorld();
   if (!world) throw new Error('Choose a world first.');
   $('leaveDialogText').textContent = `This stages a signed leave request for ${world.name}. Local membership changes after the request is accepted.`;
+  if (window.__swarmcraftSvelteLeaveOwned) window.__swarmcraftResetSvelteLeave?.();
   $('leaveDialog').showModal();
 }
 
@@ -1132,7 +1133,17 @@ async function wakeWorld() {
 // candidate. The shipping legacy webview does not receive extra globals.
 if (window.__swarmcraftSvelteCreateOwned === true
     || window.__swarmcraftSvelteJoinOwned === true
-    || window.__swarmcraftSvelteImportOwned === true) {
+    || window.__swarmcraftSvelteImportOwned === true
+    || window.__swarmcraftSvelteLeaveOwned === true) {
+window.__swarmcraftAfterSvelteLeave = async () => {
+  $('leaveDialog').close();
+  selectedWorldId = '';
+  migrationRequestGeneration += 1;
+  $('world').value = '';
+  await refreshWorlds();
+  if (lastWorldError) throw new Error('Membership may have changed but Worlds could not be refreshed.');
+};
+
 window.__swarmcraftAfterSvelteImport = async (importedWorldId) => {
   const id = String(importedWorldId || '').trim();
   if (!/^scworld:[^\s]+$/.test(id)) throw new Error('Import did not return a canonical World ID.');
@@ -1180,6 +1191,7 @@ function bindAction(id, handler, { submit = false } = {}) {
     if (id === 'importForm' && window.__swarmcraftSvelteImportOwned === true) return;
     if (id === 'createInvite' && window.__swarmcraftSvelteInviteOwned === true) return;
     if (id === 'joinWorldIdButton' && window.__swarmcraftSvelteDiscoveryOwned === true) return;
+    if (id === 'confirmLeave' && window.__swarmcraftSvelteLeaveOwned === true) return;
     if (element.dataset.busy === 'true') return;
     const busyControl = submit && event.submitter ? event.submitter : element;
     element.dataset.busy = 'true';

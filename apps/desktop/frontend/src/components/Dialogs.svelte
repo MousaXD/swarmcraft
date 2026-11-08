@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { nativeWorldActions } from '../lib/native-world-actions';
   import { WorldFormError } from '../lib/world-actions';
+  import { requestLeaveWorld } from '../lib/native-world-actions';
 
   let minutes: HTMLSelectElement | undefined;
   let addresses: HTMLTextAreaElement | undefined;
@@ -10,6 +11,9 @@
   let error = $state('');
   let signed = $state('');
   let showSigned = $state(false);
+  let leaving = $state(false);
+  let leaveError = $state('');
+  const resetLeave = () => { if (!leaving) leaveError = ''; };
 
   function resetInvite() {
     if (busy) return;
@@ -20,10 +24,15 @@
 
   onMount(() => {
     const old = window.__swarmcraftResetSvelteInvite;
+    const oldLeave = window.__swarmcraftResetSvelteLeave;
     window.__swarmcraftResetSvelteInvite = resetInvite;
+    window.__swarmcraftResetSvelteLeave = resetLeave;
     return () => {
       if (window.__swarmcraftResetSvelteInvite === resetInvite) {
         window.__swarmcraftResetSvelteInvite = old;
+      }
+      if (window.__swarmcraftResetSvelteLeave === resetLeave) {
+        window.__swarmcraftResetSvelteLeave = oldLeave;
       }
     };
   });
@@ -65,8 +74,30 @@
     }
   }
 
+  async function confirmLeave() {
+    if (leaving) return;
+    const id = (document.getElementById('world') as HTMLInputElement | null)?.value ?? '';
+    if (typeof window.__swarmcraftAfterSvelteLeave !== 'function') {
+      leaveError = 'Desktop initialization has not finished.';
+      return;
+    }
+    leaving = true;
+    leaveError = '';
+    try {
+      await requestLeaveWorld(id);
+      // Only a successful Rust leave response authorizes clearing UI selection.
+      await window.__swarmcraftAfterSvelteLeave();
+    } catch {
+      // The membership operation may already have completed. Never suggest
+      // blindly repeating a signed request after a list-refresh failure.
+      leaveError = 'Could not confirm the leave outcome. Refresh Worlds before trying again.';
+    } finally {
+      leaving = false;
+    }
+  }
+
   function preventCloseWhilePending(event: Event) {
-    if (busy) event.preventDefault();
+    if (busy || leaving) event.preventDefault();
   }
 </script>
 
@@ -121,15 +152,16 @@
     </form>
   </dialog>
 
-<dialog id="leaveDialog" class="dialog">
+<dialog id="leaveDialog" class="dialog" oncancel={preventCloseWhilePending}>
     <form method="dialog" class="dialog-card">
       <div>
         <h2>Leave this world?</h2>
         <p id="leaveDialogText">This stages a signed leave request for the selected world.</p>
       </div>
+      <p class="form-error" role="alert" hidden={!leaveError}>{leaveError}</p>
       <div class="dialog-actions">
-        <button id="cancelLeave" class="button button-secondary" value="cancel" type="submit">Cancel</button>
-        <button id="confirmLeave" class="button button-danger" value="default" type="button">Leave world</button>
+        <button id="cancelLeave" class="button button-secondary" value="cancel" type="submit" disabled={leaving}>Cancel</button>
+        <button id="confirmLeave" class="button button-danger" value="default" type="button" disabled={leaving} aria-busy={leaving} onclick={confirmLeave}>Leave world</button>
       </div>
     </form>
   </dialog>
