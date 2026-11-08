@@ -241,6 +241,21 @@ pub fn admit(paths: &DataPaths, world: WorldId) -> Result<HostingAdmission> {
     Ok(HostingAdmission { _exclusive_memory_lock: lock, consent })
 }
 
+/// Recheck persisted consent and free headroom immediately before spawn,
+/// not only before a potentially slow canonical restore.
+pub fn revalidate_admission(
+    paths: &DataPaths,
+    world: WorldId,
+    admission: &HostingAdmission,
+) -> Result<()> {
+    let current = load_consent(paths, world)?
+        .context("hosting consent disappeared during runtime preparation")?;
+    if current != *admission.consent() {
+        bail!("hosting consent or heap changed during runtime preparation; Java launch denied");
+    }
+    check_budget(admission.heap_mib(), memory_snapshot()?)
+}
+
 /// Called while serving. Any revision change, revocation or inability to
 /// inspect state requires a safe Fabric shutdown/checkpoint, not a JVM kill.
 pub fn runtime_withdrawal(
