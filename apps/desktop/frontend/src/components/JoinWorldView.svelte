@@ -25,8 +25,9 @@
       // Neither the plaintext invite nor signing material is logged here.
       const response = await nativeWorldActions().join(inviteInput?.value ?? '');
       nativeSucceeded = true;
-      // Clear an accepted signed token before refreshing; a display failure
-      // must never encourage resubmitting a completed membership request.
+      // Rust finished the native join command; clearing its token before a
+      // UI refresh failure avoids unintended duplicate submissions. Only
+      // canonical membership status can confirm whether joining is complete.
       if (inviteInput) inviteInput.value = '';
       const match = String(response).match(/World ID:\s*(scworld:[^\s]+)/);
       // A valid Rust join can succeed without an ID in older CLI output:
@@ -40,7 +41,7 @@
         // Preserve the sensitive invite in the input for deliberate retry,
         // but never repeat it or native argument values in an error banner.
         error = nativeSucceeded
-          ? 'Signed membership was accepted, but the world list could not refresh. Refresh Worlds; do not submit that invite again.'
+          ? 'The native join command completed, but the world list could not refresh. Refresh Worlds and confirm membership before submitting the invite again.'
           : 'Join could not be confirmed. Check the invite and networking, then refresh Worlds before retrying.';
       }
     } finally {
