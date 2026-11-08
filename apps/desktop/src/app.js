@@ -715,9 +715,16 @@ async function ensureNetworkingService({ quiet = false } = {}) {
   }
 }
 
+// Svelte owns the identity presentation only when its candidate shell is
+// mounted. The shipping legacy HTML retains the original direct-DOM path.
+function publishIdentity(value, valid = true) {
+  if (window.__swarmcraftSvelteIdentity?.publish(valid ? String(value) : '') === true) return;
+  $('identity').textContent = String(value);
+}
+
 async function initialize() {
   const result = await run('Setting up this device…', () => backend.initializeNode());
-  $('identity').textContent = String(result);
+  publishIdentity(result);
   setNodeState('Ready', 'safe');
   await ensureNetworkingService({ quiet: true });
   await refreshWorlds();
@@ -748,7 +755,7 @@ async function startup() {
   setNodeState('Checking…');
   try {
     const result = await startupStep('Device setup', () => backend.initializeNode(), 30000);
-    $('identity').textContent = String(result);
+    publishIdentity(result);
     setNodeState('Ready', 'safe');
 
     // Local world creation is useful without a network, but never call such a
@@ -783,11 +790,11 @@ async function startup() {
 async function showIdentity({ quiet = false } = {}) {
   try {
     const result = await run('Reading device identity…', () => backend.nodeIdentity(), { quiet });
-    $('identity').textContent = String(result);
+    publishIdentity(result);
     setNodeState('Ready', 'safe');
     return result;
   } catch (error) {
-    $('identity').textContent = quiet ? 'Device is not initialized.' : String(error);
+    publishIdentity(quiet ? 'Device is not initialized.' : String(error), false);
     setNodeState(invoke ? 'Not set up' : 'Desktop bridge unavailable', invoke ? 'warning' : 'danger');
     if (!quiet) throw error;
     return null;
@@ -1192,6 +1199,7 @@ function bindAction(id, handler, { submit = false } = {}) {
     if (id === 'createInvite' && window.__swarmcraftSvelteInviteOwned === true) return;
     if (id === 'joinWorldIdButton' && window.__swarmcraftSvelteDiscoveryOwned === true) return;
     if (id === 'confirmLeave' && window.__swarmcraftSvelteLeaveOwned === true) return;
+    if (id === 'identityButton' && window.__swarmcraftSvelteIdentityOwned === true) return;
     if (element.dataset.busy === 'true') return;
     const busyControl = submit && event.submitter ? event.submitter : element;
     element.dataset.busy = 'true';
