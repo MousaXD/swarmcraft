@@ -10,7 +10,7 @@ Issue #87 and the owner's Agent 04 instructions expressly authorize **Svelte 5 +
 
 The shipping frontend contains one 33 KB HTML document with **171 unique IDs**, six primary views, three `dialog` confirmations/workflows, around 49 KB of controller code in `app.js`, and separate modules for backend adaptation, provider discovery/mod management, catalog selection, import, runtime wizard, transfer wizard, launcher and player experience. Tauri points at `../src`, uses global Tauri core bridge, restricts CSP to local assets/IPC, and packages four Rust sidecars. No cloud-hosted renderer is required.
 
-The original DOM is retained in `frontend/src/App.svelte` with a source-parity regression check; old controllers are loaded **after** Svelte mounting to preserve their element bindings. This proves DOM coverage only — it does **not** certify independently ported Svelte logic, reactive stores, production packaging, keyboard usability, real startup or feature parity.
+The original DOM is retained in ten extracted Svelte components under `frontend/src/components/` with a source-parity regression check; old controllers are loaded **after** Svelte mounting to preserve their element bindings. This proves DOM coverage only — it does **not** certify independently ported Svelte logic, reactive stores, production packaging, keyboard usability, real startup or feature parity.
 
 ## Feature / acceptance traceability
 
@@ -54,3 +54,7 @@ Current `createBackendAdapter` wraps `initialize_node`, `node_identity`, `list_w
 6. Verify all Required Validation and main-installer CI jobs **at the PR's exact SHA**, record screenshots/run links, and deliver for independent Agent 00 review.
 
 **Merge verdict:** BLOCKED. The staged Svelte compatibility shell and typed source are real implementation groundwork, but are not the shipping Svelte application, the complete reactive migration, or release evidence. No issue closure or main-branch changes are authorized.
+
+## Component decomposition progress
+
+A concrete Svelte component split now mounts `Sidebar`, `Topbar`, `WorldsView`, `CreateWorldView`, `ImportWorldView`, `JoinWorldView`, `ActivityView`, `DiagnosticsView`, and `Dialogs` through `Workspace`/`App`. All 171 legacy DOM IDs are preserved and tested. This improves structure only; imperative event handling is still delegated until individual journeys are migrated with native verification.
