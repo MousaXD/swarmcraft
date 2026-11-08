@@ -7,6 +7,7 @@ runtime data, or claims a real Minecraft join from a CLI-only observation.
 from __future__ import annotations
 import argparse
 import hashlib
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -163,6 +164,25 @@ def timestamp(value, field):
     return instant.astimezone(timezone.utc)
 
 
+def observations_sha256(output):
+    """Canonical binding to every recorded stage and crash receipt.
+
+    Contains ONLY a digest; files stay private until a reviewer confirms
+    redaction and source provenance. This binds review to the *recorded*
+    observations, not to real-world authenticity.
+    """
+    names = ("preflight", *STAGES.keys(), "crash")
+    records = []
+    for name in names:
+        value = load_json(Path(output) / (name + ".json"))
+        # Canonical serialization gives a stable digest across JSON
+        # formatting/whitespace changes; changing any stage data changes it.
+        records.append({"stage": name, "record": value})
+    wire = json.dumps(records, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True, allow_nan=False).encode("utf-8")
+    return hashlib.sha256(wire).hexdigest()
+
+
 def verify(c, output, review_file=None):
     pre = load_json(output / "preflight.json")
     require(pre["commit"] == c["commit"] and pre["package_sha256"] == c["package_sha256"],
@@ -204,6 +224,10 @@ def verify(c, output, review_file=None):
             "bob_membership_not_accepted")
     require(all(n["authorized_peers"] == 3 for n in stages["carol_joined"].values()),
             "carol_membership_not_accepted")
+    require(stages["bob_joined"]["bob"]["minecraft_client_process_observed"],
+            "bob_client_missing_after_join")
+    require(stages["carol_joined"]["carol"]["minecraft_client_process_observed"],
+            "carol_client_missing_after_join")
     # Observed runtime transport state must agree with the independent
     # reviewer. A configured relay, unverified NAT label or SSH reachability
     # cannot count as a selected libp2p transport.
@@ -268,6 +292,8 @@ def verify(c, output, review_file=None):
             "bob_real_java_heap_exceeds_or_ignores_consent")
     require(rb.get("hosting_consent") == consent_b, "bob_host_consent_changed_during_takeover")
     require(not recovery["carol"]["minecraft_server_process_observed"], "carol_unexpected_server_after_recovery")
+    require(all(v["desktop_process_observed"] and v["minecraft_client_process_observed"]
+                for v in recovery.values()), "surviving_real_players_not_observed")
     require(all(x["state_root"] == a["state_root"] for x in recovery.values()),
             "latest_accepted_checkpoint_not_restored")
     returned = stages["alice_returned"]
@@ -292,6 +318,8 @@ def verify(c, output, review_file=None):
     review = load_json(review_file)
     require(review.get("commit") == c["commit"] and review.get("package_sha256") == c["package_sha256"],
             "review_candidate_mismatch")
+    require(review.get("observations_sha256") == observations_sha256(output),
+            "reviewed_stage_observations_changed_or_unbound")
     required = ("three_independent_gui_installations", "explicit_eula_by_alice",
                 "signed_invites_and_real_client_join", "shared_ingame_marker_three_clients",
                 "bob_opt_in_budget_enforced", "carol_zero_host_budget_enforced",
@@ -315,12 +343,13 @@ def verify(c, output, review_file=None):
         raise Blocked("unverified_real_player_media_" + str(exc)) from exc
     return {"verdict": "READY", "commit": c["commit"], "package_sha256": c["package_sha256"],
             "reviewer": review["reviewer"], "evidence_url": url,
-            "redacted_media_manifest_sha256": manifest_sha}
+            "redacted_media_manifest_sha256": manifest_sha,
+            "observations_sha256": observations_sha256(output)}
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=["preflight", "capture", "crash", "verify"])
+    p.add_argument("action", choices=["preflight", "capture", "crash", "verify", "observations-digest"])
     p.add_argument("--config", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--stage", choices=list(STAGES))
@@ -343,6 +372,10 @@ def main():
         elif a.action == "crash":
             require(a.world, "crash_needs_world")
             crash(c, out, a.world, a.desktop_pid, a.daemon_pid, a.server_pid)
+        elif a.action == "observations-digest":
+            print(json.dumps({"observations_sha256": observations_sha256(out),
+                              "verdict": "EVIDENCE_DIGEST_ONLY_NOT_CERTIFIED"}))
+            return
         else:
             result = verify(c, out, a.review)
             save(out / "verdict.json", result)
