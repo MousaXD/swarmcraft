@@ -174,6 +174,48 @@ duplicate authority. Include a separately reviewed test for relay fallback,
 packet loss/disconnections and operator-confirmed network classes. Redact IPs,
 tokens, invitations, keys and account names before publishing artifacts.
 
+### Mandatory redacted media manifest (role-specific)
+
+The reviewed evidence must now include **23 distinct image/video files** with
+SHA-256 checksums in the private `$OUT/evidence/` directory. The
+`review.example.json` file includes an `artifacts` array; populate it with
+exactly one object per required `kind` and `role`:
+
+```json
+{
+  "kind": "marker_before",
+  "role": "alice",
+  "file": "evidence/marker_before/alice.png",
+  "sha256": "64 lowercase hex characters of the actual file"
+}
+```
+
+Required evidence categories:
+
+- `native_install` for Alice, Bob, Carol.
+- `client_join` for Alice, Bob, Carol.
+- `marker_before` and `marker_after` for Alice, Bob, Carol; show the same
+  deterministic world state in all **genuine** Minecraft client sessions.
+- `signed_invite` for Alice, Bob, Carol (show that joins use the genuine signed
+  invitation flow, but **redact invite tokens**).
+- `hosting_budget` for Bob and Carol (real backend-enforced consent and
+  explicit 0 GB player role, not a decorative UI selection).
+- `eula_consent` for Alice.
+- `transport_direct` and `transport_relay` for Bob, captured from the
+  actual selected libp2p connection (not simply a configured relay).
+- `disconnect_reconnect` for Bob after network disruption.
+- `alice_crash` and `alice_fenced` for Alice.
+
+Images must be PNG/JPEG; videos may be WebM/MP4. Every file must have a
+matching lowercase SHA-256, a correct media signature and a distinct digest.
+Symlinks, paths escaping `$OUT/evidence`, missing items and reused images are
+rejected; the final verdict includes a digest of the checked manifest.
+Ensure the reviewer checks the **actual content**; matching file hashes
+cannot prove genuine gameplay, privacy redaction, or authenticity on their own.
+Store originals with appropriate privacy controls; only publish explicitly
+redacted proof. Do not confuse the synthetic PNGs used by unit tests with
+real acceptance artifacts.
+
 An independent reviewer fills review.example.json with booleans **only after**
 examining the corresponding evidence and adds a public sanitized evidence URL.
 The automated verifier additionally checks exact package/commit, three distinct
