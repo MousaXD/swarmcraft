@@ -12,6 +12,7 @@
   "carol_zero_host_budget_enforced": false,
   "direct_or_hole_punch_transport_observed": false,
   "relay_fallback_observed": false,
+  "measured_packet_loss_disconnect_and_reconnection": false,
   "alice_hard_crash_and_bob_client_reconnection": false,
   "alice_return_fenced": false,
   "screenshots_redacted": false,
