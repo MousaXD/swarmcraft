@@ -116,15 +116,21 @@ pub fn validate_policy_vote_quorum_shape(
 /// Describes the result of an external, durable, cryptographically verified
 /// canonical migration. V1 worlds MUST always be represented as LegacyV1.
 /// Supplying Active merely from a signed sidecar is a security bug.
+/// Opaque: no public constructor exists until a canonical quorum certificate
+/// verifier + atomic durable acceptance has been implemented. Even a caller
+/// holding a valid signed policy sidecar cannot construct this value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedCanonicalPolicyCommit {
+    policy_hash: Hash32,
+    epoch: u64,
+    fencing_token: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanonicalPolicyView {
     LegacyV1,
     PreparedNotCommitted,
-    Active {
-        policy_hash: Hash32,
-        epoch: u64,
-        fencing_token: u64,
-    },
+    Active(VerifiedCanonicalPolicyCommit),
 }
 
 /// Facts verified by the authoritative membership, runtime, network and
@@ -157,8 +163,8 @@ pub fn check_policy_authority_gate(
     facts: &AuthorityPolicyFacts,
 ) -> Result<(), MigrationGuardError> {
     let (policy_hash, epoch, fencing_token) = match canonical {
-        CanonicalPolicyView::Active { policy_hash, epoch, fencing_token } => {
-            (policy_hash, epoch, fencing_token)
+        CanonicalPolicyView::Active(commit) => {
+            (commit.policy_hash, commit.epoch, commit.fencing_token)
         }
         CanonicalPolicyView::LegacyV1 | CanonicalPolicyView::PreparedNotCommitted => {
             return Err(MigrationGuardError::NotCanonicallyActivated);
@@ -232,7 +238,11 @@ mod tests {
     }
 
     fn active() -> CanonicalPolicyView {
-        CanonicalPolicyView::Active { policy_hash: Hash32([1; 32]), epoch: 11, fencing_token: 21 }
+        CanonicalPolicyView::Active(VerifiedCanonicalPolicyCommit {
+            policy_hash: Hash32([1; 32]),
+            epoch: 11,
+            fencing_token: 21,
+        })
     }
 
     #[test]
