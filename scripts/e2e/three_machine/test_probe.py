@@ -237,6 +237,39 @@ class TestCanonicalSnapshotHeadEvidence(unittest.TestCase):
             self.assertIsNone(node.canonical_head_digest(temp, self.WORLD))
 
 
+    def test_parent_directory_symlinks_are_not_canonical_heads(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / "outside"
+            outside.mkdir()
+            head = outside / "canonical-snapshot-head.postcard"
+            head.write_bytes(b"r" * 80)
+            worlds = root / "worlds"
+            worlds.mkdir()
+            (worlds / self.WORLD).symlink_to(outside, target_is_directory=True)
+            self.assertIsNone(node.canonical_head_digest(root, self.WORLD))
+            (worlds / self.WORLD).unlink()
+            (worlds / self.WORLD).mkdir()
+            (worlds / self.WORLD / "metadata").symlink_to(outside, target_is_directory=True)
+            self.assertIsNone(node.canonical_head_digest(root, self.WORLD))
+
+    def test_nonregular_and_out_of_scope_canonical_head_rejected(self):
+        import os
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "worlds" / self.WORLD / "metadata"
+            folder.mkdir(parents=True)
+            head = folder / "canonical-snapshot-head.postcard"
+            self.assertIsNone(node.canonical_head_digest(root, "../other"))
+            os.mkfifo(head)
+            self.assertIsNone(node.canonical_head_digest(root, self.WORLD))
+            head.unlink()
+            outside = root / "outside.postcard"
+            outside.write_bytes(b"r" * 80)
+            os.link(outside, head)
+            self.assertIsNone(node.canonical_head_digest(root, self.WORLD))
+
+
 class TestRealHostBudgetEvidence(unittest.TestCase):
     WORLD = "ab" * 32
     PEER = "scpeer:" + "cd" * 32

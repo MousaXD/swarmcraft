@@ -2,6 +2,7 @@
 """Remote SwarmCraft probe. Output is an allowlisted JSON record, never raw CLI output."""
 from __future__ import annotations
 import argparse
+from contextlib import ExitStack
 import hashlib
 import hmac
 import ipaddress
@@ -10,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -177,21 +179,45 @@ def fabric_client_process(pid, server_pid=None):
 
 
 def canonical_head_digest(data_dir, world):
-    """Digest the exact persisted canonical head from SwarmCraft Storage.
+    """Digest the exact persisted signed canonical head, never an alias.
 
-    The Rust CLI's world verify must separately succeed; hashing a file
-    alone never authenticates a signed snapshot or proves it is current.
-    Replica-only peers may correctly have no migration snapshot_hash.
+    Traverse each directory using Linux no-follow descriptors. Merely
+    checking Path.is_symlink() on the final file is insufficient: a parent
+    directory may point outside the isolated test profile or be swapped
+    between pathname checks. Rust CLI world verify must separately succeed.
     """
-    path = (Path(data_dir) / "worlds" / world / "metadata" /
-            "canonical-snapshot-head.postcard")
+    if not isinstance(world, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", world):
+        return None
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
-        if path.is_symlink() or not path.is_file():
-            return None
-        if not 40 <= path.stat().st_size <= 16384:
-            return None
-        return digest(path)
-    except (OSError, ValueError):
+        with ExitStack() as opened:
+            directory = os.open(data_dir, flags | os.O_DIRECTORY)
+            opened.callback(os.close, directory)
+            for part in ("worlds", world, "metadata"):
+                directory = os.open(part, flags | os.O_DIRECTORY, dir_fd=directory)
+                opened.callback(os.close, directory)
+            file_fd = os.open("canonical-snapshot-head.postcard",
+                              flags | os.O_NONBLOCK, dir_fd=directory)
+            opened.callback(os.close, file_fd)
+            meta = os.fstat(file_fd)
+            if (not stat.S_ISREG(meta.st_mode) or meta.st_nlink != 1 or
+                    not 40 <= meta.st_size <= 16384):
+                return None
+            # Bound read as well as metadata: a concurrent mutation cannot
+            # turn a bounded observation into an unbounded data disclosure.
+            pieces = []
+            left = 16385
+            while left:
+                piece = os.read(file_fd, left)
+                if not piece:
+                    break
+                pieces.append(piece)
+                left -= len(piece)
+            raw = b"".join(pieces)
+            if len(raw) != meta.st_size:
+                return None
+            return hashlib.sha256(raw).hexdigest()
+    except (OSError, ValueError, TypeError):
         return None
 
 
