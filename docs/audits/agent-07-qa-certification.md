@@ -203,3 +203,17 @@ Agent 03 now calls swarm_cli::hosting_budget::set_contribution(&peer.paths, worl
 Agent 05 evidence.py requires expected player/stage media slots, distinct hashes, size limits and magic bytes, plus a stable digest of the reviewed manifest. This improves file integrity against substitutions, reused images and missing slots. It cannot prove a specific image/video was recorded from a real installed Tauri/Minecraft client, a different ISP, that a server recovered, or that the reviewer is independent. Signed native state, transport traces, real in-world marker and human observation remain separate gates.
 
 **Independent verdict remains BLOCKED for all current engineering integration; research-only NO-GO may be accepted separately after review and required CI.** Any later PR push invalidates earlier tested-SHA certification.
+
+
+## Last observed moving-head checkpoint — 2026-11-08
+
+While the agents were actively pushing, exact PR HEADs moved again:
+- #92: 1cd9371990f6099a0b6fe4ec913a7d9a347fb372 (draft)
+- #93: decd92f9a9031d7488cc1031e7cf50886cd3e8d9 (draft); [Required 42470379110](https://github.com/MousaXD/swarmcraft/actions/runs/42470379110) and [Installers 42470379086](https://github.com/MousaXD/swarmcraft/actions/runs/42470379086) queued. Prior failures refer only to their earlier exact head and need independent confirmation on this new SHA.
+- #94: 2b6d08640fd531f97ddd06f363e0013badd2aa3f (draft); crucial new [Svelte native candidate GUI run 42470386080](https://github.com/MousaXD/swarmcraft/actions/runs/42470386080) **IN PROGRESS**; [Required 42470389669](https://github.com/MousaXD/swarmcraft/actions/runs/42470389669) queued and [Installers 42470389680](https://github.com/MousaXD/swarmcraft/actions/runs/42470389680) pending. Do NOT promote the source-reviewed native workflow to passing evidence until its actual jobs, WebDriver observations and artifact SHA are independently inspected.
+- #96: 0b7f6a026eaa625dd6365ba943dd68b407178cb6 (draft); [manual harness 42470340547](https://github.com/MousaXD/swarmcraft/actions/runs/42470340547), [Required 42470340513](https://github.com/MousaXD/swarmcraft/actions/runs/42470340513), [Installers 42470340498](https://github.com/MousaXD/swarmcraft/actions/runs/42470340498) queued. No true three-machine field artifacts submitted.
+- #90: e8092dd499ccaba1b2fc3470f93676c8ced1dac1, draft, previous Required and Installer runs FAILED.
+- #95: 598c1a2899c415d520d7a0e7e5d9e8702c37dbb3, open research-only, no full-success Required run documented in this audit.
+- The base main SHA remains 45174310d1433116e64b9b6978cb4f2aa1c22c15. QA PR #91 itself is document-only and remains draft.
+
+**This snapshot is a moving-HEAD pointer, not a final verdict update. No production work, merge or issue closure was performed by Agent 07.**
