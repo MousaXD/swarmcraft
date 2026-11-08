@@ -82,6 +82,12 @@ class TestRealHostBudgetEvidence(unittest.TestCase):
                 value = node.runtime_heap_mib(123, Path("/private/test"), self.WORLD,
                                               Path("/usr/bin/gui"), Path("/usr/bin/swarmcraft"))
                 self.assertEqual(value, 4096)
+            # A localized/non-ASCII world path must not hide a genuine
+            # ASCII heap argument elsewhere in the Java command line.
+            with patch.object(Path, "read_bytes", return_value=b"java\0\xff\xfe\0-Xmx4096m\0-jar\0fabric.jar"):
+                value = node.runtime_heap_mib(123, Path("/private/test"), self.WORLD,
+                                              Path("/usr/bin/gui"), Path("/usr/bin/swarmcraft"))
+                self.assertEqual(value, 4096)
             with patch.object(Path, "read_bytes", return_value=b"java\0-jar\0-Xmx4096m.fake"):
                 value = node.runtime_heap_mib(123, Path("/private/test"), self.WORLD,
                                               Path("/usr/bin/gui"), Path("/usr/bin/swarmcraft"))
