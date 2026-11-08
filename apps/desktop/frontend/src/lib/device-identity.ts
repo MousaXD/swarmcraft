@@ -7,9 +7,10 @@ export interface IdentityState {
   busy: boolean;
   error: string;
 }
+export type IdentitySource = 'setup' | 'identity' | 'unavailable';
 export interface IdentityController {
   state: Readable<IdentityState>;
-  publishLegacy(value: unknown): boolean;
+  publishLegacy(value: unknown, source?: IdentitySource): boolean;
   refresh(): Promise<void>;
 }
 
@@ -36,9 +37,16 @@ export function createIdentityController(readNative: () => Promise<string>): Ide
 
   return {
     state: { subscribe: state.subscribe },
-    publishLegacy(value) {
+    publishLegacy(value, source = 'identity') {
       ++generation;
-      state.set(present(value));
+      // initialize_node can produce setup text, not a verified node_identity.
+      if (source === 'setup') {
+        state.set({ phase: 'checking', text: String(value || 'Device setup complete. Reading identity…'), busy: false, error: '' });
+      } else if (source === 'unavailable') {
+        state.set(present(''));
+      } else {
+        state.set(present(value));
+      }
       return true;
     },
     refresh() {
