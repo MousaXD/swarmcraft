@@ -31,15 +31,9 @@ jobs:
           node-version: '22.16.0'
       - name: Verify production is still the legacy frontend
         run: node -e "const c=require('../src-tauri/tauri.conf.json'); if(c.build.frontendDist !== '../src') process.exit(1);"
-      - name: Generate reviewable transitive dependency lockfile (bootstrap only)
-        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
-      # One-time lockfile bootstrap: the subsequent commit removes this log dump.
-      - name: Emit lockfile bytes for exact git-blob import
-        run: |
-          printf '%s\n' SWARMCRAFT_LOCKFILE_BEGIN
-          base64 -w76 package-lock.json
-          printf '%s\n' SWARMCRAFT_LOCKFILE_END
-      - name: Install resolved dependencies from generated candidate lock
+      - name: Verify dependency lockfile is present
+        run: test -s package-lock.json
+      - name: Install exactly locked dependencies
         run: npm ci --no-audit --no-fund
       - name: Verify source bindings and PR-88 watchdog
         run: npm run test:source

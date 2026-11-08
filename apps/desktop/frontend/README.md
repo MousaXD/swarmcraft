@@ -13,11 +13,11 @@ This is the dedicated frontend migration workspace for SwarmCraft issue #87. The
 
 ## Development and gates
 
-Use Node 22.12+; install a fully resolved **committed** lockfile before claiming a reproducible build or using `npm ci`. A lockfile has not been generated/verified in this environment and is a mandatory outstanding blocker.
+Use Node 22.12+. `package-lock.json` was generated on a clean GitHub Actions Node 22.16 runner and committed after matching the exact Git blob SHA-1 with the downloaded candidate artifact. Run `npm ci` (never an unlocked install) to reproduce the dependencies. This is candidate-build evidence, not a certification of the native Tauri installer.
 
 ```sh
 cd apps/desktop/frontend
-npm install                 # for local prototyping only, until lockfile is reviewed
+npm ci                      # use the committed lockfile
 npm run check
 npm run test
 npm run build
