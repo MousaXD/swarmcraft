@@ -16,6 +16,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[4]
 NATIVE = ROOT / "scripts" / "acceptance" / "packaged-desktop-webdriver.py"
+CURRENT_STAGE = 'boot'
 spec = importlib.util.spec_from_file_location("native_swarmcraft_e2e", NATIVE)
 if spec is None or spec.loader is None:
     raise RuntimeError("Cannot locate installed-GUI acceptance module")
@@ -104,6 +105,8 @@ def run(binary: Path, artifacts: Path):
         # Exercise the new Svelte signed-invite form in an installed app.
         # No invite is sent to Rust here; an empty form must fail locally,
         # stay on Join, and display an actionable validation message.
+        global CURRENT_STAGE
+        CURRENT_STAGE = 'join-form-validation'
         app.click("#openJoin")
         join_owner = app.execute("""
           return {
@@ -142,6 +145,7 @@ def run(binary: Path, artifacts: Path):
         # impersonate joining, create membership or request native IPC.
         # The World ID lookup is inside a collapsed native <details> panel.
         # Open it as a user would before typing into the field.
+        CURRENT_STAGE = 'signed-discovery-resolution'
         app.click("#joinPanel details.task-secondary summary")
         app.type("#joinWorldId", "scworld:discovery-only")
         app.click("#joinWorldIdButton")
@@ -164,6 +168,7 @@ def run(binary: Path, artifacts: Path):
         app.click("#navWorlds")
         # Create a real signed invite on the previously created world, but
         # record only boolean observations, never the token or addresses.
+        CURRENT_STAGE = 'real-signed-invite-issuance'
         app.click("#inviteWorld")
         dialog_owner = app.execute("""
           return {
@@ -197,6 +202,7 @@ def run(binary: Path, artifacts: Path):
         # The imported world must originate in a real filesystem path. An
         # empty import is rejected in Svelte before any Rust sidecar command;
         # import never synthesizes Minecraft EULA acceptance.
+        CURRENT_STAGE = 'import-form-validation'
         app.click("#openImport")
         import_owner = app.execute("""
           return {
@@ -244,9 +250,9 @@ def main():
     except Exception as error:
         args.artifacts.mkdir(parents=True, exist_ok=True)
         (args.artifacts / "failure.txt").write_text(
-            type(error).__name__ + ": layout verification failed\n"
+            type(error).__name__ + ': ' + CURRENT_STAGE + ' failed\n'
         )
-        print(f"FAIL: installed candidate layout: {type(error).__name__}", file=sys.stderr)
+        print(f"FAIL: installed candidate stage {CURRENT_STAGE}: {type(error).__name__}", file=sys.stderr)
         raise SystemExit(1) from None
 
 
