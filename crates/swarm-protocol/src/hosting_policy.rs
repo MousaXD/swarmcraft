@@ -349,14 +349,19 @@ pub struct ExpectedHostContributionClaimV1 {
 
 impl SignedHostContributionClaimV1 {
     pub fn validate_shape(&self) -> Result<(), HostingPolicyError> {
+        self.validate_fields()?;
+        if self.signature.len() != 64 {
+            return Err(HostingPolicyError::Invalid("host claim requires a 64-byte signature"));
+        }
+        Ok(())
+    }
+
+    fn validate_fields(&self) -> Result<(), HostingPolicyError> {
         if self.format_version != HOSTING_POLICY_FORMAT_VERSION {
             return Err(HostingPolicyError::UnsupportedVersion(self.format_version));
         }
         if peer_id_from_public_key(&self.public_key) != self.peer_id {
             return Err(HostingPolicyError::Invalid("host claim key does not match peer"));
-        }
-        if self.signature.len() != 64 {
-            return Err(HostingPolicyError::Invalid("host claim requires a 64-byte signature"));
         }
         if self.consent_revision == 0
             || !(MIN_HOSTING_HEAP_MIB..=MAX_HOSTING_HEAP_MIB).contains(&self.selected_heap_mib)
@@ -374,7 +379,7 @@ impl SignedHostContributionClaimV1 {
     }
 
     pub fn signing_bytes(&self) -> Result<Vec<u8>, HostingPolicyError> {
-        self.validate_shape()?;
+        self.validate_fields()?;
         let unsigned = (
             self.format_version,
             self.world_id,
