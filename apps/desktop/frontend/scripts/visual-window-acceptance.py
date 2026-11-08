@@ -139,6 +139,40 @@ def run(binary: Path, artifacts: Path):
             "Empty invite did not fail closed through Svelte: " + repr(observed)
         )
         app.click("#navWorlds")
+        # The imported world must originate in a real filesystem path. An
+        # empty import is rejected in Svelte before any Rust sidecar command;
+        # import never synthesizes Minecraft EULA acceptance.
+        app.click("#openImport")
+        import_owner = app.execute("""
+          return {
+            form: document.getElementById('importForm')?.dataset.journeyOwner,
+            active: window.__swarmcraftSvelteImportOwned === true,
+            bridge: typeof window.__swarmcraftAfterSvelteImport === 'function'
+          };
+        """)
+        assert (import_owner["form"] == "svelte" and import_owner["active"]
+                and import_owner["bridge"]), "Installed Import form is not owned by Svelte"
+        app.click("#importWorld")
+        import_validation = None
+        for _ in range(15):
+            import_validation = app.execute("""
+              const banner = document.getElementById('importError');
+              const panel = document.getElementById('importPanel');
+              return {
+                visible: !!banner && !banner.hidden,
+                message: banner?.textContent || '',
+                formVisible: !!panel && !panel.hidden,
+              };
+            """)
+            if import_validation["visible"]:
+                break
+            time.sleep(0.1)
+        app.screenshot("import-missing-source-validation.png")
+        assert (import_validation["visible"] and import_validation["formVisible"]
+                and "world folder is required" in import_validation["message"].lower()), (
+            "Empty import did not fail closed through Svelte: " + repr(import_validation)
+        )
+        app.click("#navWorlds")
         # Restore configured default for follow-up screenshots.
         native.request(f"/session/{app.session}/window/rect", "POST", {
             "width": 980, "height": 760
