@@ -48,6 +48,18 @@ describe('Svelte native identity presentation', () => {
     });
   });
 
+  it('never represents initialize_node setup text as a verified identity', async () => {
+    const identity = createIdentityController(async () => 'Peer ID: scpeer:real');
+    identity.publishLegacy('Initialized SwarmCraft device', 'setup');
+    expect(get(identity.state).phase).toBe('checking');
+    expect(get(identity.state).text).toContain('Initialized');
+    identity.publishLegacy('private identity read failure', 'unavailable');
+    expect(get(identity.state).phase).toBe('unavailable');
+    expect(JSON.stringify(get(identity.state))).not.toContain('private identity read failure');
+    await identity.refresh();
+    expect(get(identity.state)).toMatchObject({ phase: 'ready', text: 'Peer ID: scpeer:real' });
+  });
+
   it('can refresh after a failed request without leaving an endless spinner', async () => {
     let fail = true;
     const identity = createIdentityController(async () => {
