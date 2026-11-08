@@ -105,9 +105,13 @@ python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$O
 # until all 3 store the same signed/verified latest accepted checkpoint.
 python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage checkpoint --world "$WORLD_ID" --pids "$PIDS"
 
-# On a DISPOSABLE test world, record Alice's real authority Java/SwarmCraft PID
-# and explicitly hard-kill only that world-bound process.
-python3 scripts/e2e/three_machine/run.py crash --config "$CONFIG" --output "$OUT" --world "$WORLD_ID" --pid "$ALICE_AUTHORITY_PID"
+# On a DISPOSABLE dedicated test profile, record Alice's live Tauri GUI,
+# replication daemon and genuine Minecraft server JVM PIDs. An isolated
+# application outage requires all three components to die; Java-only crash
+# is explicitly rejected and cannot masquerade as a genuine authority loss.
+python3 scripts/e2e/three_machine/run.py crash --config "$CONFIG" --output "$OUT" \
+  --world "$WORLD_ID" --desktop-pid "$ALICE_DESKTOP_PID" \
+  --daemon-pid "$ALICE_DAEMON_PID" --server-pid "$ALICE_SERVER_PID"
 python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage alice_crashed --world "$WORLD_ID" --pids "$PIDS"
 
 # Confirm surviving-majority quorum, Bob promoted with higher epoch/fencing,
@@ -122,11 +126,16 @@ python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$O
 python3 scripts/e2e/three_machine/run.py verify --config "$CONFIG" --output "$OUT" --review "$REVIEW_JSON"
 ```
 
-The crash injector validates that the explicit PID is a Java/SwarmCraft
-process bound to the isolated test-world directory before sending SIGKILL. It
-tests **process hard crash, not full machine power loss**. Literal host power
-failure requires separate real-machine evidence. It never uses wildcard pkill,
-unrestricted rm, mocked Java, pre-seeded fake replicas or localhost-only peers.
+The crash injector requires three distinct PIDs: the test-profile native
+Tauri desktop, its SwarmCraft replication daemon, and the real Minecraft
+server JVM in the exact world runtime directory. It checks executable identity
+and/or test-profile environment, validates all three before stopping them,
+freezes their processes to prevent partial restart, and sends SIGKILL to each.
+A Java-only or desktop-only crash is **not** accepted as authority loss.
+This is **a full isolated application-process outage, not physical machine
+power loss**; literal machine/ISP power-failure field evidence is a separate
+required exercise. It never uses wildcard pkill, unrestricted rm, mocked Java,
+pre-seeded replicas or localhost-only peers.
 
 ## Evidence and final review
 
