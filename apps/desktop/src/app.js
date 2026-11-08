@@ -717,14 +717,14 @@ async function ensureNetworkingService({ quiet = false } = {}) {
 
 // Svelte owns the identity presentation only when its candidate shell is
 // mounted. The shipping legacy HTML retains the original direct-DOM path.
-function publishIdentity(value, valid = true) {
-  if (window.__swarmcraftSvelteIdentity?.publish(valid ? String(value) : '') === true) return;
+function publishIdentity(value, source = 'identity') {
+  if (window.__swarmcraftSvelteIdentity?.publish(String(value), source) === true) return;
   $('identity').textContent = String(value);
 }
 
 async function initialize() {
   const result = await run('Setting up this device…', () => backend.initializeNode());
-  publishIdentity(result);
+  publishIdentity(result, 'setup');
   setNodeState('Ready', 'safe');
   await ensureNetworkingService({ quiet: true });
   await refreshWorlds();
@@ -755,7 +755,7 @@ async function startup() {
   setNodeState('Checking…');
   try {
     const result = await startupStep('Device setup', () => backend.initializeNode(), 30000);
-    publishIdentity(result);
+    publishIdentity(result, 'setup');
     setNodeState('Ready', 'safe');
 
     // Local world creation is useful without a network, but never call such a
@@ -794,7 +794,7 @@ async function showIdentity({ quiet = false } = {}) {
     setNodeState('Ready', 'safe');
     return result;
   } catch (error) {
-    publishIdentity(quiet ? 'Device is not initialized.' : String(error), false);
+    publishIdentity(quiet ? 'Device is not initialized.' : String(error), 'unavailable');
     setNodeState(invoke ? 'Not set up' : 'Desktop bridge unavailable', invoke ? 'warning' : 'danger');
     if (!quiet) throw error;
     return null;
