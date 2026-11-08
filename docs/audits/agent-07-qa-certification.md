@@ -264,3 +264,17 @@ Latest head **326037b53b36abda92a3b2c201209c5ca0ed71fd**, [Required #42484337003
 Main SHA remains `45174310d1433116e64b9b6978cb4f2aa1c22c15`. PR #90 remains blocked on failed mandatory external downloads. Release PR #89, though earlier green for its metadata-only branch, does not fix or waive unsafe baseline safety paths; integrated future release requires PR #90, signed hosting feature planning, packaged GUI and full exact-head gates.
 
 **Independent combined release verdict: BLOCKED.** The only newly accepted sub-certification is **PR #94 extracted Debian-native Svelte GUI first-launch/create/persistence/visible failed-startup** on exact source HEAD `62344d9...`. Do not translate this into a completed Svelte migration, field E2E, or production release approval. Agent 07 has not modified any production source, tests, workflow, original issues, or release metadata.
+
+
+### Final moving-head alert for current continuation
+
+Additional pushes during the independent review make all prior green sub-certifications **commit-specific only**:
+
+- **#94 current HEAD d817633e0f2c3dff50e3538df702afeecc927364**: three commits *after* the independently verified native candidate PASS at 62344d92903dfd632eb3398acebbec796d2b5610. New source modifications include CreateWorldView.svelte, typed native-world-actions.ts, App.svelte, app.js, visual acceptance and tests. Therefore the earlier native GUI passing result is historical and **not a PASS for this new head**. [Required Validation #42484910224](https://github.com/MousaXD/swarmcraft/actions/runs/42484910224), [Installers #42484910277](https://github.com/MousaXD/swarmcraft/actions/runs/42484910277) pending; a new native Svelte candidate run must be checked separately. Production config is still not the Svelte bundle.
+- **#96 current HEAD 32a71efd304365dce7ef19eef78233fb707cbd0b**: more additions to run.py, test_gate.py and field setup README since prior observed c9e503a1f39b864c4b5cb07b48236815321519b8. [Harness #42484972638](https://github.com/MousaXD/swarmcraft/actions/runs/42484972638), [Required #42484972635](https://github.com/MousaXD/swarmcraft/actions/runs/42484972635), [Installers #42484972700](https://github.com/MousaXD/swarmcraft/actions/runs/42484972700) queued/pending at last check; no actual three-network result.
+- **#93 current HEAD 1b46e8320c9e6488d7c8ab26e393d433ac8a4af5**, [Required #42484616252](https://github.com/MousaXD/swarmcraft/actions/runs/42484616252) and [Installers #42484616113](https://github.com/MousaXD/swarmcraft/actions/runs/42484616113) queued. Earlier failing manual-transfer tests were on older head 3c072788... only. Exact-head green recovery, transfer and resource checks still required.
+- **#92 current HEAD 326037b53b36abda92a3b2c201209c5ca0ed71fd**, Required #42484337003 in progress and Installers #42484337104 queued. No canonical feature activation.
+- #90 and #95 remain at their documented old heads with terminal required CI FAILURE.
+- **No combined integration commit has been validated**. Main has not moved from 45174310d1433116e64b9b6978cb4f2aa1c22c15; this is deliberately not release approval.
+
+**Overall Agent 07 verdict: BLOCKED.**
