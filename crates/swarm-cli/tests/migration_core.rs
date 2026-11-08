@@ -777,6 +777,9 @@ fn sequential_manual_transfers_ignore_terminal_metadata() {
     fs::write(source.join("level.dat"), b"sequential-transfer\n").unwrap();
     let shared = initialize_two_peer_world(&alice, &bob, &source);
     add_third_peer(&alice, &bob, &carol, &shared, &source);
+    // Carol is a third authority successor only for this positive handoff
+    // scenario. Membership and snapshot replication alone never opt her in.
+    swarm_cli::hosting_budget::set_contribution(&carol.paths, shared.world, 512).unwrap();
 
     save_sleep(&alice, shared.world);
     let (_, _, first_committed, first_epoch) = complete_sleeping_transfer(&alice, &bob, shared.world);
