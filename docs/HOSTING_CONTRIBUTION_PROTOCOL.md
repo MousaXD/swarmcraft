@@ -64,9 +64,15 @@ protocol-only PR.
   **recipient-issued unpredictable 32-byte nonce** and Ed25519 signature.
   `ExpectedHostContributionClaimV1` binds the exact expected canonical
   world/policy/head/nonce and the receiver's current time.
-  `verify_for_challenge` checks domain-separated canonical signing bytes,
-  signature, identity, exact challenge/head/policy and a maximum **30-second
-  lifetime**, rejecting expired/future claims. It does not prove free RAM,
+  `verify_for_challenge(expected, verify_ed25519, consume_challenge)`
+  checks domain-separated canonical signing bytes, signature, identity,
+  exact challenge/head/policy and a maximum **30-second lifetime**,
+  rejecting expired/future claims. The caller MUST keep a verifier-owned
+  outstanding challenge table bound to the authenticated peer/connection
+  and use `consume_challenge` to atomically remove the matching challenge
+  **exactly once after successful signature verification**. Replayed or
+  missing challenges fail closed; an invalid signature does not consume a
+  challenge. It does not prove free RAM,
   policy activation, signed quorum, a trusted world-member vote, or an actual
   running JVM. Clock skew can cause rejection; fail closed and re-challenge.
   It is **not** added to `PeerHelloV1`, `HostCapabilityV1` or any network
