@@ -17,6 +17,50 @@ import time
 ROOT = Path(__file__).resolve().parents[4]
 NATIVE = ROOT / "scripts" / "acceptance" / "packaged-desktop-webdriver.py"
 CURRENT_STAGE = 'boot'
+CURRENT_UI_STATE: dict[str, bool | int | str] = {}
+
+# Only these values may enter CI failure artifacts. Native errors, invite
+# contents, filesystem paths, and arbitrary DOM text must NEVER be serialized.
+SAFE_BOOL_KEYS = frozenset({
+    'detailsVisible', 'playVisible', 'inviteVisible', 'active', 'bridge',
+    'visible', 'viewVisible', 'inviteEmpty', 'finished',
+    'explainsMembership', 'signedInviteStillEmpty', 'hasSignedValue',
+    'createEnabled', 'formVisible', 'dialogOpen', 'owned', 'enabled',
+    'closed', 'stillSelected', 'worldStillListed',
+})
+SAFE_INT_KEYS = frozenset({
+    'width', 'height', 'rootScrollWidth', 'paneScrollWidth',
+    'paneClientWidth', 'panelScrollWidth', 'panelClientWidth',
+})
+SAFE_STARTUP = frozenset({'loading', 'ready', 'degraded', 'failed', 'not-run'})
+
+
+def mark_stage(stage: str, observed: dict | None = None) -> None:
+    global CURRENT_STAGE, CURRENT_UI_STATE
+    CURRENT_STAGE = stage
+    CURRENT_UI_STATE = {}
+    record_ui(observed)
+
+
+def record_ui(observed: dict | None) -> None:
+    if not isinstance(observed, dict):
+        return
+    for key, value in observed.items():
+        if key in SAFE_BOOL_KEYS and type(value) is bool:
+            CURRENT_UI_STATE[key] = value
+        elif key in SAFE_INT_KEYS and type(value) is int and 0 <= value <= 100_000:
+            CURRENT_UI_STATE[key] = value
+        elif key == 'startup' and value in SAFE_STARTUP:
+            CURRENT_UI_STATE[key] = value
+
+
+def failure_category(error: Exception) -> str:
+    if isinstance(error, AssertionError):
+        return 'assertion'
+    if isinstance(error, TimeoutError):
+        return 'timeout'
+    return 'native-driver-or-runtime'
+
 spec = importlib.util.spec_from_file_location("native_swarmcraft_e2e", NATIVE)
 if spec is None or spec.loader is None:
     raise RuntimeError("Cannot locate installed-GUI acceptance module")
@@ -62,12 +106,15 @@ def run(binary: Path, artifacts: Path):
     if not os.environ.get("SWARMCRAFT_DATA_DIR"):
         raise AssertionError("CI must supply the existing isolated acceptance profile")
     artifacts.mkdir(parents=True, exist_ok=True)
+    mark_stage('native-boot')
     with native.Application(binary, artifacts) as app:
         ready = native.await_ready(app, artifacts)
+        record_ui({'startup': ready.get('startup')})
         assert ready["startup"] in ("ready", "degraded"), "Native candidate startup not complete"
         # The preceding real packaged GUI acceptance creates a world. Ensure
         # that Create World was actually owned by the Svelte handler rather
         # than coincidentally passing through the legacy fallback.
+        mark_stage('svelte-create-ownership')
         create_owner = app.execute("""
           return {
             form: document.getElementById('createForm')?.dataset.journeyOwner,
@@ -75,6 +122,7 @@ def run(binary: Path, artifacts: Path):
             bridge: typeof window.__swarmcraftAfterSvelteCreate === 'function',
           };
         """)
+        record_ui({'active': create_owner.get('active'), 'bridge': create_owner.get('bridge')})
         assert (create_owner["form"] == "svelte" and create_owner["active"]
                 and create_owner["bridge"]), (
             "Svelte native Create World ownership/handoff not active in installed app"
@@ -82,7 +130,9 @@ def run(binary: Path, artifacts: Path):
         app.click("#navWorlds")
         app.click("#worldCards .world-row")
         for width, height in ((980, 760), (720, 560)):
+            mark_stage(f'layout-{width}x{height}')
             result = inspect_layout(app, width, height)
+            record_ui(result)
             (artifacts / f"layout-{width}x{height}.json").write_text(
                 json.dumps(result, indent=2)
             )
@@ -105,8 +155,7 @@ def run(binary: Path, artifacts: Path):
         # Exercise the new Svelte signed-invite form in an installed app.
         # No invite is sent to Rust here; an empty form must fail locally,
         # stay on Join, and display an actionable validation message.
-        global CURRENT_STAGE
-        CURRENT_STAGE = 'join-form-validation'
+        mark_stage('join-form-validation')
         app.click("#openJoin")
         join_owner = app.execute("""
           return {
@@ -115,6 +164,7 @@ def run(binary: Path, artifacts: Path):
             bridge: typeof window.__swarmcraftAfterSvelteJoin === 'function'
           };
         """)
+        record_ui({'active': join_owner.get('active'), 'bridge': join_owner.get('bridge')})
         assert (join_owner["form"] == "svelte" and join_owner["active"]
                 and join_owner["bridge"]), (
             "Installed Join form is not owned by Svelte"
@@ -132,6 +182,7 @@ def run(binary: Path, artifacts: Path):
                 inviteEmpty: !document.getElementById('joinInvite')?.value,
               };
             """)
+            record_ui(observed)
             if observed["visible"]:
                 break
             time.sleep(0.1)
@@ -145,7 +196,7 @@ def run(binary: Path, artifacts: Path):
         # impersonate joining, create membership or request native IPC.
         # The World ID lookup is inside a collapsed native <details> panel.
         # Open it as a user would before typing into the field.
-        CURRENT_STAGE = 'signed-discovery-resolution'
+        mark_stage('signed-discovery-resolution')
         app.click("#joinPanel details.task-secondary summary")
         app.type("#joinWorldId", "scworld:discovery-only")
         app.click("#joinWorldIdButton")
@@ -161,6 +212,7 @@ def run(binary: Path, artifacts: Path):
                 signedInviteStillEmpty: !document.getElementById('joinInvite')?.value,
               };
             """)
+            record_ui(discovery)
             if discovery["finished"] and discovery["visible"] and discovery["explainsMembership"]:
                 break
             time.sleep(0.2)
@@ -168,7 +220,7 @@ def run(binary: Path, artifacts: Path):
         app.click("#navWorlds")
         # Create a real signed invite on the previously created world, but
         # record only boolean observations, never the token or addresses.
-        CURRENT_STAGE = 'real-signed-invite-issuance'
+        mark_stage('real-signed-invite-issuance')
         app.click("#inviteWorld")
         dialog_owner = app.execute("""
           return {
@@ -176,6 +228,7 @@ def run(binary: Path, artifacts: Path):
             createEnabled: !document.getElementById('createInvite')?.disabled
           };
         """)
+        record_ui(dialog_owner)
         assert dialog_owner["active"] and dialog_owner["createEnabled"], (
             "Native invite dialog is not owned by Svelte"
         )
@@ -190,6 +243,7 @@ def run(binary: Path, artifacts: Path):
                 hasSignedValue: !!result && result.value.trim().length > 0,
               };
             """)
+            record_ui(invite_observation)
             if invite_observation["visible"] and invite_observation["hasSignedValue"]:
                 break
             time.sleep(0.2)
@@ -202,7 +256,7 @@ def run(binary: Path, artifacts: Path):
         # The imported world must originate in a real filesystem path. An
         # empty import is rejected in Svelte before any Rust sidecar command;
         # import never synthesizes Minecraft EULA acceptance.
-        CURRENT_STAGE = 'import-form-validation'
+        mark_stage('import-form-validation')
         app.click("#openImport")
         import_owner = app.execute("""
           return {
@@ -211,6 +265,7 @@ def run(binary: Path, artifacts: Path):
             bridge: typeof window.__swarmcraftAfterSvelteImport === 'function'
           };
         """)
+        record_ui({'active': import_owner.get('active'), 'bridge': import_owner.get('bridge')})
         assert (import_owner["form"] == "svelte" and import_owner["active"]
                 and import_owner["bridge"]), "Installed Import form is not owned by Svelte"
         app.click("#importWorld")
@@ -225,6 +280,7 @@ def run(binary: Path, artifacts: Path):
                 formVisible: !!panel && !panel.hidden,
               };
             """)
+            record_ui(import_validation)
             if import_validation["visible"]:
                 break
             time.sleep(0.1)
@@ -236,7 +292,7 @@ def run(binary: Path, artifacts: Path):
         app.click("#navWorlds")
         # Cancellation is non-destructive: open Leave, cancel, and verify
         # that the canonical world remains in the actual installed GUI.
-        CURRENT_STAGE = 'leave-confirmation-cancel'
+        mark_stage('leave-confirmation-cancel')
         app.click("#leaveWorld")
         leave_open = app.execute("""
           return {
@@ -245,6 +301,7 @@ def run(binary: Path, artifacts: Path):
             enabled: !document.getElementById('confirmLeave')?.disabled,
           };
         """)
+        record_ui(leave_open)
         assert all(leave_open.values()), "Svelte signed leave confirmation is unavailable"
         app.click("#cancelLeave")
         leave_cancelled = app.execute("""
@@ -254,6 +311,7 @@ def run(binary: Path, artifacts: Path):
             worldStillListed: document.querySelectorAll('#worldCards .world-row').length > 0,
           };
         """)
+        record_ui(leave_cancelled)
         assert all(leave_cancelled.values()), "Cancelling leave changed canonical membership"
         # Restore configured default for follow-up screenshots.
         native.request(f"/session/{app.session}/window/rect", "POST", {
@@ -270,10 +328,16 @@ def main():
         run(args.binary.resolve(), args.artifacts.resolve())
     except Exception as error:
         args.artifacts.mkdir(parents=True, exist_ok=True)
-        (args.artifacts / "failure.txt").write_text(
-            type(error).__name__ + ': ' + CURRENT_STAGE + ' failed\n'
+        category = failure_category(error)
+        (args.artifacts / 'failure.json').write_text(json.dumps({
+            'stage': CURRENT_STAGE,
+            'category': category,
+            'ui': CURRENT_UI_STATE,
+        }, indent=2) + '\\n')
+        (args.artifacts / 'failure.txt').write_text(
+            f'{CURRENT_STAGE}: {category}\\n'
         )
-        print(f"FAIL: installed candidate stage {CURRENT_STAGE}: {type(error).__name__}", file=sys.stderr)
+        print(f'FAIL: installed candidate stage {CURRENT_STAGE}: {category}', file=sys.stderr)
         raise SystemExit(1) from None
 
 
