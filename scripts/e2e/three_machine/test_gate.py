@@ -123,7 +123,7 @@ class TestFailClosed(unittest.TestCase):
             review_file = out / "review.json"
             gate.save(review_file, review)
             with self.assertRaisesRegex(gate.Blocked, "reviewed_stage_observations_changed_or_unbound"):
-                gate.verify(c, out)
+                gate.verify(c, out, review_file)
 
     def test_surviving_client_missing_after_crash_is_blocked(self):
         with tempfile.TemporaryDirectory() as temp:
