@@ -402,10 +402,16 @@ impl SignedHostContributionClaimV1 {
     /// MUST also validate accepted canonical policy/membership/capability,
     /// observe snapshot readiness and enforce independent local launch
     /// consent + budget. A remote claim is never proof of physical free RAM.
+    ///
+    /// consume_challenge MUST atomically check that the nonce is outstanding
+    /// for this authenticated connection/peer and remove it exactly once.
+    /// The callback is invoked ONLY after signature and freshness checks;
+    /// repeated claims and missing challenges are denied.
     pub fn verify_for_challenge(
         &self,
         expected: &ExpectedHostContributionClaimV1,
         verify_ed25519: impl FnOnce(&[u8; 32], &[u8], &[u8]) -> bool,
+        consume_challenge: impl FnOnce(&[u8; 32]) -> bool,
     ) -> Result<(), HostingPolicyError> {
         self.validate_shape()?;
         if self.world_id != expected.world_id
@@ -425,6 +431,9 @@ impl SignedHostContributionClaimV1 {
         let encoded = self.signing_bytes()?;
         if !verify_ed25519(&self.public_key, &encoded, &self.signature) {
             return Err(HostingPolicyError::InvalidSignature);
+        }
+        if !consume_challenge(&self.challenge_nonce) {
+            return Err(HostingPolicyError::Invalid("host claim challenge is missing or already consumed"));
         }
         Ok(())
     }
