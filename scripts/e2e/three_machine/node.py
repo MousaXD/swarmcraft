@@ -164,6 +164,66 @@ def connectivity_summary(data_dir):
         return {"available": False}
 
 
+def typed_id_bytes(value):
+    """Decode SwarmCraft's fixed 32-byte Serde ID array, not an untrusted text alias."""
+    if not isinstance(value, list) or len(value) != 32:
+        return None
+    if any(type(part) is not int or not 0 <= part <= 255 for part in value):
+        return None
+    return bytes(value)
+
+
+def hosting_consent(data_dir, world, peer):
+    """Read Agent 03's signed-world-bound, *local* opt-in record if integrated.
+
+    File availability is not permission to run a JVM; authority still depends
+    on Rust admission, current memory headroom, signed policy and quorum.
+    """
+    path = Path(data_dir) / "control" / world / "hosting-consent.json"
+    try:
+        if not path.is_file() or path.is_symlink() or path.stat().st_size > 16384:
+            return {"available": False}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("schema_version") != 1:
+            return {"available": False}
+        world_id = typed_id_bytes(data.get("world_id"))
+        peer_id = typed_id_bytes(data.get("peer_id"))
+        expected_peer = peer.removeprefix("scpeer:")
+        if world_id is None or peer_id is None or world_id.hex() != world.lower() or peer_id.hex() != expected_peer:
+            return {"available": False}
+        enabled = data.get("enabled")
+        heap = data.get("heap_mib")
+        revision = data.get("revision")
+        if (type(enabled) is not bool or type(heap) is not int or type(revision) is not int
+                or revision <= 0 or not 0 <= heap <= 65536 or (enabled and heap < 512)
+                or (not enabled and heap != 0)):
+            return {"available": False}
+        return {
+            "available": True, "enabled": enabled,
+            "heap_mib": heap, "revision": revision,
+            "world_bound": True, "identity_bound": True,
+        }
+    except (OSError, TypeError, ValueError, UnicodeError):
+        return {"available": False}
+
+
+def runtime_heap_mib(pid, root, world, binary, cli):
+    if not isolated_process(pid, "server", root, world, binary, cli):
+        return None
+    try:
+        arguments = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\\0")
+        for arg in arguments:
+            value = arg.decode("ascii", errors="strict")
+            match = re.fullmatch(r"-Xmx([1-9][0-9]*)([mMgG])", value)
+            if match:
+                number = int(match.group(1))
+                mib = number * (1024 if match.group(2).lower() == "g" else 1)
+                return mib if 0 < mib <= 65536 else None
+    except (OSError, UnicodeError, ValueError):
+        pass
+    return None
+
+
 def capture(a):
     if not re.fullmatch("[a-fA-F0-9]{64}", a.world):
         fail("world_id_invalid")
@@ -217,6 +277,10 @@ def capture(a):
         "minecraft_client_process_observed": observed(a.client_pid, ("minecraft", "knotclient", "net.fabricmc.loader.impl.launch.knot.knotclient")),
         "minecraft_server_process_observed": isolated_process(
             a.server_pid, "server", Path(root), a.world,
+            Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True)),
+        "hosting_consent": hosting_consent(root, a.world, peer),
+        "minecraft_server_heap_mib": runtime_heap_mib(
+            a.server_pid, Path(root), a.world,
             Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True)),
         "test_profile_log_digests": log_digests(root),
         "connectivity_diagnostics": connectivity_summary(root),
