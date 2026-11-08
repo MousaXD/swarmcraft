@@ -8,6 +8,9 @@ pub use canonical_modpack::*;
 mod runtime_support;
 pub use runtime_support::*;
 
+mod hosting_policy;
+pub use hosting_policy::*;
+
 mod v2;
 pub use v2::*;
 
