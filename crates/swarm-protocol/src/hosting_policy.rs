@@ -14,7 +14,7 @@ use super::{
 
 pub const HOSTING_POLICY_FORMAT_VERSION: u16 = 1;
 pub const MIN_HOSTING_HEAP_MIB: u32 = 512;
-pub const MAX_HOSTING_HEAP_MIB: u32 = 1_048_576;
+pub const MAX_HOSTING_HEAP_MIB: u32 = 65_536;
 pub const HOSTING_POLICY_CAPABILITY: &str = "swarmcraft/hosting-policy/v1";
 
 const HOSTING_POLICY_SIGN_DOMAIN: &[u8] = b"swarmcraft/hosting-policy-sign/v1\0";
