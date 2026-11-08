@@ -211,9 +211,13 @@ def capture(a):
         "runtime_ready": m.get("runtime_ready") is True,
         "host_readiness_state": r.get("state") if isinstance(r.get("state"), str) else None,
         "safe_to_shutdown": r.get("safe_to_shutdown") is True,
-        "desktop_process_observed": observed(a.desktop_pid, ("swarmcraft-desktop",)),
+        "desktop_process_observed": isolated_process(
+            a.desktop_pid, "desktop", Path(root), a.world,
+            Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True)),
         "minecraft_client_process_observed": observed(a.client_pid, ("minecraft", "knotclient", "net.fabricmc.loader.impl.launch.knot.knotclient")),
-        "minecraft_server_process_observed": observed(a.server_pid, ("java",)),
+        "minecraft_server_process_observed": isolated_process(
+            a.server_pid, "server", Path(root), a.world,
+            Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True)),
         "test_profile_log_digests": log_digests(root),
         "connectivity_diagnostics": connectivity_summary(root),
     }
