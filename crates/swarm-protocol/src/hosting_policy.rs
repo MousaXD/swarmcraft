@@ -338,6 +338,10 @@ pub struct ExpectedHostContributionClaimV1 {
     pub epoch: u64,
     pub fencing_token: u64,
     pub snapshot_hash: Hash32,
+    /// Verifier-pinned consent revision, never copied from the received claim.
+    pub expected_consent_revision: u64,
+    /// Verifier-pinned intended JVM heap size, never copied from the received claim.
+    pub expected_selected_heap_mib: u32,
     pub challenge_nonce: [u8; 32],
     /// Receiver-side wall clock; never trust claimed sender time alone.
     pub now_unix_ms: u64,
@@ -420,6 +424,8 @@ impl SignedHostContributionClaimV1 {
             || self.epoch != expected.epoch
             || self.fencing_token != expected.fencing_token
             || self.snapshot_hash != expected.snapshot_hash
+            || self.consent_revision != expected.expected_consent_revision
+            || self.selected_heap_mib != expected.expected_selected_heap_mib
             || self.challenge_nonce != expected.challenge_nonce
         {
             return Err(HostingPolicyError::Invalid("host claim does not match challenge or canonical head"));
