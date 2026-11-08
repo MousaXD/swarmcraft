@@ -256,6 +256,9 @@ def verify(c, output, review_file=None):
     a, b, d = p["alice"], p["bob"], p["carol"]
     require(len({v["identity_fingerprint"] for v in p.values()}) == 3, "duplicate_player_identity")
     require(all(x["authorized_peers"] == 3 for x in p.values()), "signed_three_member_quorum_missing")
+    for key in ("minecraft_version", "fabric_loader_version"):
+        values = {x.get(key) for x in p.values()}
+        require(len(values) == 1 and None not in values, "canonical_runtime_version_mismatch_" + key)
     require(len({(x["epoch"], x["fencing_token"]) for x in p.values()}) == 1 and
             a["epoch"] is not None and a["fencing_token"] is not None,
             "checkpoint_generation_not_agreed")
@@ -276,6 +279,8 @@ def verify(c, output, review_file=None):
     require(consent_c["enabled"] is False and consent_c.get("heap_mib") == 0,
             "carol_player_only_zero_budget_missing")
     require(a["runtime_ready"] and a["minecraft_server_process_observed"], "alice_real_server_missing")
+    require(isinstance(a.get("java_runtime_version"), str) and a["java_runtime_version"],
+            "alice_java_runtime_version_missing")
     require(a.get("minecraft_server_heap_mib") == consent_a["heap_mib"],
             "alice_real_java_heap_not_bounded_by_consent")
     require(not b["minecraft_server_process_observed"] and not d["minecraft_server_process_observed"],
@@ -303,6 +308,8 @@ def verify(c, output, review_file=None):
             rb["fencing_token"] is not None and a["fencing_token"] is not None and
             rb["fencing_token"] > a["fencing_token"], "unfenced_or_stale_takeover")
     require(rb["runtime_ready"] and rb["minecraft_server_process_observed"], "bob_real_recovery_runtime_missing")
+    require(isinstance(rb.get("java_runtime_version"), str) and rb["java_runtime_version"],
+            "bob_java_runtime_version_missing")
     require(rb.get("minecraft_server_heap_mib") == consent_b["heap_mib"],
             "bob_real_java_heap_exceeds_or_ignores_consent")
     require(rb.get("hosting_consent") == consent_b, "bob_host_consent_changed_during_takeover")
