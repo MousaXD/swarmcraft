@@ -322,3 +322,10 @@ At inspection [Main Desktop Installers #42486221339](https://github.com/MousaXD/
 After above inspections, PR #92 unchanged at 326037b53b36abda92a3b2c201209c5ca0ed71fd (Required PASS, installer x86_64 macOS DMG still in progress); PR #93 at fe12097da0c3b806c0da9f4a46e219b9a851f394 (Required #42487403501 / Installers #42487403515 not yet terminal); PR #94 at 3e3c6209d498d0386cbe9cc1fda6d5bf69b092cc (newer checks not terminal); PR #96 at fbe7978efae49e3adcf4de9704a5d05c9fbf98f6 (newer checks not terminal and still code-path bug in unbound-review test); PR #98 at ba36b6a94b33d33c85cf830b791627421f994ef7 (partial verified artifact gates); #90 and #95 unchanged with terminal failed earlier required runs.
 
 **Final Agent 07 decision:** overall release **BLOCKED**, independent code changes only to this QA documentation and the PR review discussions, no merges/issue closures/workflow downgrades. The recovered real Minecraft live gateway and optional per-branch native Svelte checks are valid *limited* evidence; certification requires final exact combined HEAD with all mandatory checks and actual 3-network field proof.
+
+
+### Final commit-pointer check in this QA session
+
+At the end of this review, agents continued pushing. **PR #94 moved again to `14205ec41808d739e9e15acd7289698f370622b4`** and **PR #96 to `8e3b6cb7f7cd981770a218315fa3448e06327cc8`**. Any previous workflow evidence on historical heads, including PR #94's native Svelte candidate PASS and later deliberate module-corruption FAIL, is intentionally labeled by its SHA and does **not** certify the new heads. PR #92's [installer run #42484337104](https://github.com/MousaXD/swarmcraft/actions/runs/42484337104) was *still in progress* (only macOS Intel DMG unresolved), while PR #98's [installer run #42486221339](https://github.com/MousaXD/swarmcraft/actions/runs/42486221339) was *not yet terminal*. Both must be rechecked; no release gate waiver authorized.
+
+**QA handoff unchanged:** BLOCKED; Agent 00 can review this draft document, and the engineering agents should continue exact-head work. No release, merge, or issue closure performed.
