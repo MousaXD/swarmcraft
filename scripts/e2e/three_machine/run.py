@@ -149,27 +149,58 @@ def crash(c, output, world, desktop_pid, daemon_pid, server_pid):
                                   "observed_utc": datetime.now(timezone.utc).isoformat()})
 
 
+def timestamp(value, field):
+    require(isinstance(value, str), "missing_timestamp_" + field)
+    try:
+        instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise Blocked("invalid_timestamp_" + field) from exc
+    require(instant.tzinfo is not None and instant.utcoffset() is not None,
+            "timestamp_not_timezone_aware_" + field)
+    return instant.astimezone(timezone.utc)
+
+
 def verify(c, output, review_file=None):
     pre = load_json(output / "preflight.json")
     require(pre["commit"] == c["commit"] and pre["package_sha256"] == c["package_sha256"],
             "preflight_wrong_candidate")
     require(len({x["machine_fingerprint"] for x in pre["nodes"].values()}) == 3, "duplicate_machine")
     require(len({x["egress_fingerprint"] for x in pre["nodes"].values()}) == 3, "duplicate_egress")
+    previous_timestamp = timestamp(pre.get("observed_utc"), "preflight")
     stages = {}
+    stage_times = {}
     for stage, roles in STAGES.items():
         s = load_json(output / (stage + ".json"))
         require(s["stage"] == stage and s["commit"] == c["commit"] and
                 s["package_sha256"] == c["package_sha256"], "stage_candidate_mismatch_" + stage)
         require(set(s["nodes"]) == set(roles), "stage_missing_machine_" + stage)
+        observed = timestamp(s.get("observed_utc"), stage)
+        require(observed > previous_timestamp, "stale_or_out_of_order_stage_" + stage)
+        previous_timestamp = observed
+        stage_times[stage] = observed
         stages[stage] = s["nodes"]
         for role, node in s["nodes"].items():
-            require(node["snapshot_verify_passed"] and node["canonical"], "unsigned_or_conflicted_" + stage + "_" + role)
+            require(node["snapshot_verify_passed"], "unsigned_or_conflicted_" + stage + "_" + role)
+            if stage in ("alice_created", "bob_joined", "carol_joined"):
+                # Genuine first host can be solo until a signed multi-member
+                # quorum exists. Conflicts/unknown never qualify here.
+                require(node.get("safety_level") in ("Canonical", "SoloUnreplicated"),
+                        "bootstrap_state_conflicted_" + stage + "_" + role)
+            else:
+                require(node["canonical"] and node.get("safety_level") == "Canonical",
+                        "unsigned_or_conflicted_" + stage + "_" + role)
             require(node.get("snapshot_hash") and SHA.fullmatch(node["snapshot_hash"]) and node.get("state_root"),
                     "accepted_snapshot_digest_missing_" + stage + "_" + role)
             require(node["snapshot_number"] is not None and node["snapshot_number"] >= 1,
                     "snapshot_missing_" + stage + "_" + role)
             require(node["world_fingerprint"] == stages["alice_created"]["alice"]["world_fingerprint"],
                     "world_divergence_" + stage + "_" + role)
+    require(stages["alice_created"]["alice"]["authorized_peers"] == 1,
+            "fresh_signed_alice_world_not_solo")
+    require(all(n["authorized_peers"] >= 2 for n in stages["bob_joined"].values()),
+            "bob_membership_not_accepted")
+    require(all(n["authorized_peers"] == 3 for n in stages["carol_joined"].values()),
+            "carol_membership_not_accepted")
     # Observed runtime transport state must agree with the independent
     # reviewer. A configured relay, unverified NAT label or SSH reachability
     # cannot count as a selected libp2p transport.
@@ -200,6 +231,9 @@ def verify(c, output, review_file=None):
     require(all(x["desktop_process_observed"] and x["minecraft_client_process_observed"] for x in p.values()),
             "installed_gui_or_real_client_not_observed")
     receipt = load_json(output / "crash.json")
+    crash_time = timestamp(receipt.get("observed_utc"), "crash")
+    require(stage_times["checkpoint"] < crash_time < stage_times["alice_crashed"],
+            "crash_timestamp_outside_recorded_authority_loss")
     require(receipt["commit"] == c["commit"] and receipt["receipt"]["process_gone"] and
             receipt["receipt"]["signal"] == "SIGKILL" and
             receipt["receipt"].get("crashed_components") == ["desktop", "daemon", "server"],
