@@ -115,7 +115,7 @@ export function createDesktopSession(backend: DesktopSessionBackend, listen = ''
       if (!current(g)) return;
       if (!String(initialized).trim()) throw new Error('Device initialization returned an empty result.');
       const daemon = await within('Networking service', 10000, () => backend.ensureDaemonRunning(listen))
-        .then(() => true)
+        .then(pid => pid !== null && pid !== undefined && String(pid).trim() !== '')
         .catch(() => false);
       if (!current(g)) return;
       if (!daemon) {
