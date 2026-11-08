@@ -1,6 +1,7 @@
 use swarm_protocol::{
     evaluate_hosting_contribution_v1, peer_id_from_public_key, AuthorityPolicyV1, Hash32,
     HostingAdmissionDenialV1 as Denial, HostingContributionAdmissionV1, HostingPolicyActivationV1,
+    ExpectedHostContributionClaimV1, SignedHostContributionClaimV1,
     LocalHostingConsentV1, MembershipPolicyV1, PeerId, RuntimeCompatibilityManifestV1,
     SignedWorldHostingPolicyV1, WorldConfigV1, WorldHostingPolicyV1, WorldMemberV1,
     WorldPresentationV1, WorldVisibilityV1, WorldId, HOSTING_POLICY_FORMAT_VERSION,
@@ -319,4 +320,111 @@ fn forged_or_malformed_policy_never_promotes_a_peer() {
     a.policy = Some(&bad);
     a.activation = HostingPolicyActivationV1::Enforced { accepted_policy_hash: Hash32([9; 32]) };
     assert!(evaluate_hosting_contribution_v1(&a, test_signature).is_err());
+}
+
+
+fn signed_host_claim(f: &Fixture) -> SignedHostContributionClaimV1 {
+    SignedHostContributionClaimV1 {
+        format_version: HOSTING_POLICY_FORMAT_VERSION,
+        world_id: f.config.world_id,
+        peer_id: f.member.peer_id,
+        public_key: f.member.public_key,
+        accepted_policy_hash: f.policy.record_hash().unwrap(),
+        epoch: 7,
+        fencing_token: 12,
+        snapshot_hash: Hash32([6; 32]),
+        consent_revision: f.consent.revision,
+        selected_heap_mib: 2048,
+        sampled_at_unix_ms: 1000,
+        expires_at_unix_ms: 2000,
+        challenge_nonce: [42; 32],
+        signature: vec![7; 64],
+    }
+}
+
+fn expected_host_claim(claim: &SignedHostContributionClaimV1) -> ExpectedHostContributionClaimV1 {
+    ExpectedHostContributionClaimV1 {
+        world_id: claim.world_id,
+        peer_id: claim.peer_id,
+        policy_hash: claim.accepted_policy_hash,
+        epoch: claim.epoch,
+        fencing_token: claim.fencing_token,
+        snapshot_hash: claim.snapshot_hash,
+        challenge_nonce: claim.challenge_nonce,
+        now_unix_ms: 1500,
+    }
+}
+
+#[test]
+fn challenge_bound_host_claim_is_not_a_legacy_hello_or_authority_token() {
+    let f = Fixture::new();
+    let claim = signed_host_claim(&f);
+    let expected = expected_host_claim(&claim);
+    assert!(claim.signing_bytes().unwrap().starts_with(b"swarmcraft/host-contribution-claim/v1\0"));
+    assert!(claim.verify_for_challenge(&expected, test_signature).is_ok());
+    assert!(claim.verify_for_challenge(&expected, |_, _, _| false).is_err());
+    let bytes = postcard::to_allocvec(&claim).unwrap();
+    assert_eq!(postcard::from_bytes::<SignedHostContributionClaimV1>(&bytes).unwrap(), claim);
+}
+
+#[test]
+fn host_claim_must_bind_challenge_policy_head_peer_and_epoch() {
+    let f = Fixture::new();
+    let claim = signed_host_claim(&f);
+    let mut expected = expected_host_claim(&claim);
+    expected.challenge_nonce[0] ^= 1;
+    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    expected = expected_host_claim(&claim);
+    expected.policy_hash = Hash32([9; 32]);
+    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    expected = expected_host_claim(&claim);
+    expected.peer_id = PeerId([9; 32]);
+    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    expected = expected_host_claim(&claim);
+    expected.world_id = WorldId([9; 32]);
+    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    expected = expected_host_claim(&claim);
+    expected.epoch += 1;
+    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    expected = expected_host_claim(&claim);
+    expected.fencing_token += 1;
+    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    expected = expected_host_claim(&claim);
+    expected.snapshot_hash = Hash32([4; 32]);
+    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+}
+
+#[test]
+fn host_claim_expiration_replay_and_malformed_signed_data_fail_closed() {
+    let f = Fixture::new();
+    let mut claim = signed_host_claim(&f);
+    let mut expected = expected_host_claim(&claim);
+
+    expected.now_unix_ms = claim.expires_at_unix_ms + 1;
+    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    expected.now_unix_ms = claim.sampled_at_unix_ms - 1;
+    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+
+    expected = expected_host_claim(&claim);
+    claim.format_version = HOSTING_POLICY_FORMAT_VERSION + 1;
+    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    claim.format_version = HOSTING_POLICY_FORMAT_VERSION;
+    claim.expires_at_unix_ms = claim.sampled_at_unix_ms + 30_001;
+    assert!(claim.validate_shape().is_err());
+    claim.expires_at_unix_ms = claim.sampled_at_unix_ms;
+    assert!(claim.validate_shape().is_err());
+    claim.expires_at_unix_ms = claim.sampled_at_unix_ms - 1;
+    assert!(claim.validate_shape().is_err());
+    claim = signed_host_claim(&f);
+    claim.consent_revision = 0;
+    assert!(claim.validate_shape().is_err());
+    claim = signed_host_claim(&f);
+    claim.selected_heap_mib = 0;
+    assert!(claim.validate_shape().is_err());
+    claim = signed_host_claim(&f);
+    claim.signature.pop();
+    assert!(claim.validate_shape().is_err());
+    claim = signed_host_claim(&f);
+    claim.public_key[0] ^= 1;
+    assert!(claim.validate_shape().is_err());
 }
