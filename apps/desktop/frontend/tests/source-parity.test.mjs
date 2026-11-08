@@ -290,8 +290,21 @@ test('Svelte World-ID hint never impersonates signed membership or issues duplic
   ]);
   assert.ok(join.includes('onclick={checkWorldId}'));
   assert.ok(join.includes('hidden={!worldIdNotice}>{worldIdNotice}'));
-  assert.ok(join.includes('it does not grant membership'));
-  assert.doesNotMatch(join.slice(join.indexOf('function checkWorldId()')), /nativeWorldActions\(\)\.join/);
+  assert.ok(join.includes('resolveSignedDiscovery(world)'));
+  assert.ok(join.includes('disabled={resolvingWorldId}'));
+  assert.doesNotMatch(join.slice(join.indexOf('async function checkWorldId()')), /nativeWorldActions\(\)\.join/);
   assert.ok(app.includes("id === 'joinWorldIdButton' && window.__swarmcraftSvelteDiscoveryOwned === true"));
   assert.ok(root.includes('window.__swarmcraftSvelteDiscoveryOwned = true;'));
+});
+
+test('World ID lookup preserves actual Rust signed discovery and capture-phase legacy fallback', async () => {
+  const [controller, discovery, script] = await Promise.all([
+    source('../../src/launcher-controller.js'),
+    source('../src/lib/discovery.ts'),
+    source('../scripts/visual-window-acceptance.py'),
+  ]);
+  assert.ok(controller.includes('window.__swarmcraftSvelteDiscoveryOwned === true) return'));
+  assert.ok(controller.includes("await call('discovery_resolve', { world })"), 'Shipping lookup is retained');
+  assert.ok(discovery.includes("nativeBridge().invoke('discovery_resolve', { world })"), 'Svelte performs a real lookup');
+  assert.ok(script.includes('app.click("#joinPanel details.task-secondary summary")'));
 });
