@@ -56,7 +56,7 @@ fn require_identity(peer: PeerId, public_key: &[u8; 32]) -> Result<(), HostingRe
 }
 
 fn signed_bytes<T: Serialize>(domain: &[u8], value: &T) -> Result<Vec<u8>, HostingRealmV2Error> {
-    let encoded = postcard::to_allocvec(value)?;
+    let encoded = postcard::to_allocvec(value).map_err(ProtocolError::from)?;
     let mut out = Vec::with_capacity(domain.len() + encoded.len());
     out.extend_from_slice(domain);
     out.extend_from_slice(&encoded);
@@ -126,7 +126,7 @@ impl ProposedHostingRealmGenesisV2 {
         if self.migration_nonce == [0; 32] {
             return Err(HostingRealmV2Error::Invalid("migration nonce must be nonzero"));
         }
-        let bytes = postcard::to_allocvec(self)?;
+        let bytes = postcard::to_allocvec(self).map_err(ProtocolError::from)?;
         let id = WorldId(Hash32::from_domain_bytes(REALM_ID_DOMAIN, &bytes).0);
         if id == self.source.source_world_id {
             return Err(HostingRealmV2Error::Invalid("target realm must differ from the V1 source world"));
@@ -150,7 +150,7 @@ pub struct SignedRealmHostingPolicyV2 {
 }
 
 impl SignedRealmHostingPolicyV2 {
-    pub fn validate_shape(&self) -> Result<(), HostingRealmV2Error> {
+    fn validate_unsigned(&self) -> Result<(), HostingRealmV2Error> {
         if self.format_version != HOSTING_REALM_FORMAT_VERSION_V2 {
             return Err(HostingRealmV2Error::UnsupportedVersion(self.format_version));
         }
@@ -160,12 +160,16 @@ impl SignedRealmHostingPolicyV2 {
         {
             return Err(HostingRealmV2Error::Invalid("invalid policy sequence or predecessor"));
         }
-        require_identity(self.signer_peer_id, &self.signer_public_key)?;
+        require_identity(self.signer_peer_id, &self.signer_public_key)
+    }
+
+    pub fn validate_shape(&self) -> Result<(), HostingRealmV2Error> {
+        self.validate_unsigned()?;
         require_signature(&self.signature)
     }
 
     pub fn signing_bytes(&self) -> Result<Vec<u8>, HostingRealmV2Error> {
-        self.validate_shape()?;
+        self.validate_unsigned()?;
         signed_bytes(
             REALM_POLICY_SIGN_DOMAIN,
             &(
@@ -184,7 +188,7 @@ impl SignedRealmHostingPolicyV2 {
         self.validate_shape()?;
         Ok(Hash32::from_domain_bytes(
             REALM_POLICY_RECORD_DOMAIN,
-            &postcard::to_allocvec(self)?,
+            &postcard::to_allocvec(self).map_err(ProtocolError::from)?,
         ))
     }
 
@@ -235,7 +239,7 @@ pub struct SignedHostingMigrationProposalV2 {
 }
 
 impl SignedHostingMigrationProposalV2 {
-    pub fn validate_shape(&self) -> Result<(), HostingRealmV2Error> {
+    fn validate_unsigned(&self) -> Result<(), HostingRealmV2Error> {
         if self.format_version != HOSTING_REALM_FORMAT_VERSION_V2 {
             return Err(HostingRealmV2Error::UnsupportedVersion(self.format_version));
         }
@@ -246,12 +250,16 @@ impl SignedHostingMigrationProposalV2 {
         {
             return Err(HostingRealmV2Error::Invalid("migration target, policy or fencing is invalid"));
         }
-        require_identity(self.source_authority_peer_id, &self.source_authority_public_key)?;
+        require_identity(self.source_authority_peer_id, &self.source_authority_public_key)
+    }
+
+    pub fn validate_shape(&self) -> Result<(), HostingRealmV2Error> {
+        self.validate_unsigned()?;
         require_signature(&self.signature)
     }
 
     pub fn signing_bytes(&self) -> Result<Vec<u8>, HostingRealmV2Error> {
-        self.validate_shape()?;
+        self.validate_unsigned()?;
         signed_bytes(
             MIGRATION_SIGN_DOMAIN,
             &(
@@ -271,7 +279,7 @@ impl SignedHostingMigrationProposalV2 {
         self.validate_shape()?;
         Ok(Hash32::from_domain_bytes(
             MIGRATION_RECORD_DOMAIN,
-            &postcard::to_allocvec(self)?,
+            &postcard::to_allocvec(self).map_err(ProtocolError::from)?,
         ))
     }
 
@@ -321,7 +329,6 @@ impl SignedHostingMigrationVoteV2 {
             return Err(HostingRealmV2Error::UnsupportedVersion(self.format_version));
         }
         require_identity(self.voter_peer_id, &self.voter_public_key)?;
-        require_signature(&self.signature)?;
         signed_bytes(
             MIGRATION_VOTE_DOMAIN,
             &(
@@ -341,6 +348,7 @@ impl SignedHostingMigrationVoteV2 {
         membership: &MembershipRecordV1,
         verify_ed25519: impl FnOnce(&[u8; 32], &[u8], &[u8]) -> bool,
     ) -> Result<(), HostingRealmV2Error> {
+        require_signature(&self.signature)?;
         membership.validate_semantics()?;
         if self.target_realm_id != proposal.target_realm_id
             || self.migration_proposal_hash != proposal.proposal_hash()?
@@ -388,6 +396,8 @@ pub struct SignedHostingAuthorityActionV2 {
     pub fencing_token: u64,
     pub snapshot_hash: Hash32,
     pub candidate_peer_id: PeerId,
+    pub consent_revision: u64,
+    pub selected_heap_mib: u32,
     pub signer_peer_id: PeerId,
     pub signer_public_key: [u8; 32],
     pub nonce: [u8; 32],
@@ -405,6 +415,10 @@ pub struct ExpectedHostingAuthorityHeadV2 {
     pub fencing_token: u64,
     pub snapshot_hash: Hash32,
     pub candidate_peer_id: PeerId,
+    pub expected_consent_revision: u64,
+    pub expected_selected_heap_mib: u32,
+    pub expected_signer_peer_id: PeerId,
+    pub expected_nonce: [u8; 32],
 }
 
 impl SignedHostingAuthorityActionV2 {
@@ -412,11 +426,15 @@ impl SignedHostingAuthorityActionV2 {
         if self.format_version != HOSTING_REALM_FORMAT_VERSION_V2 {
             return Err(HostingRealmV2Error::UnsupportedVersion(self.format_version));
         }
-        if self.epoch == 0 || self.fencing_token == 0 || self.nonce == [0; 32] {
-            return Err(HostingRealmV2Error::Invalid("authority generation or nonce is invalid"));
+        if self.epoch == 0
+            || self.fencing_token == 0
+            || self.nonce == [0; 32]
+            || self.consent_revision == 0
+            || !(super::MIN_HOSTING_HEAP_MIB..=super::MAX_HOSTING_HEAP_MIB).contains(&self.selected_heap_mib)
+        {
+            return Err(HostingRealmV2Error::Invalid("authority generation, nonce or consent is invalid"));
         }
         require_identity(self.signer_peer_id, &self.signer_public_key)?;
-        require_signature(&self.signature)?;
         signed_bytes(
             AUTHORITY_ACTION_DOMAIN,
             &(
@@ -430,6 +448,8 @@ impl SignedHostingAuthorityActionV2 {
                 self.fencing_token,
                 self.snapshot_hash,
                 self.candidate_peer_id,
+                self.consent_revision,
+                self.selected_heap_mib,
                 self.signer_peer_id,
                 self.signer_public_key,
                 self.nonce,
@@ -453,9 +473,14 @@ impl SignedHostingAuthorityActionV2 {
             || self.fencing_token != expected.fencing_token
             || self.snapshot_hash != expected.snapshot_hash
             || self.candidate_peer_id != expected.candidate_peer_id
+            || self.consent_revision != expected.expected_consent_revision
+            || self.selected_heap_mib != expected.expected_selected_heap_mib
+            || self.signer_peer_id != expected.expected_signer_peer_id
+            || self.nonce != expected.expected_nonce
         {
             return Err(HostingRealmV2Error::Invalid("V2 authority action does not match expected canonical head"));
         }
+        require_signature(&self.signature)?;
         if !verify_ed25519(&self.signer_public_key, &self.signing_bytes()?, &self.signature) {
             return Err(HostingRealmV2Error::InvalidSignature);
         }
