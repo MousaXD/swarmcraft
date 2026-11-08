@@ -42,6 +42,8 @@ Never replace a missing action with a placeholder or claim UI completeness based
 
 A classic candidate startup guard and minimal static fallback DOM/CSS ensure a broken or missing Vite module still produces `Startup failed` and a clickable retry, rather than a blank WebKitGTK window. PR #88's original `bootstrap.js` is copied verbatim and continues to own the failure state. Do not remove the fallback until the native deliberately-damaged installer test remains green.
 
+Native visual acceptance writes `failure.json` with a safe stage label, coarse error category and allowlisted boolean/dimension/status observations. No raw native exception text, signed invite data, or filesystem paths may enter that diagnostic. `test_visual_failure_evidence.py` runs as a required candidate-native preflight. The installed Linux GUI must still independently prove the normal, missing-sidecar and damaged-Svelte-module cases.
+
 ### Verified identity vs device setup
 
 The candidate's `Refresh identity` control reads the existing Rust Tauri `node_identity` command; it never generates peer IDs in JavaScript. Legacy startup and device setup can publish their actual results to the Svelte identity display without adding a second startup coordinator. An `initialize_node` response is displayed as setup progress, **not proof that a peer identity was verified**. If the native read fails, details are redacted from the renderer. The legacy production frontend remains unchanged in ownership and is preserved until Agent 00 authorizes the final cutover.
