@@ -190,6 +190,20 @@ own contract marks actual policy integration, GUI support and OS-level hard
 memory enforcement as unfinished; this harness does not bypass those safety
 gaps or make them green by inspecting a JSON file.
 
+## Captured software and runtime versions
+
+Each backend capture now records the canonical world Minecraft version and
+Fabric Loader version from the real installed SwarmCraft CLI; the verifier
+requires agreement across Alice, Bob and Carol at the accepted checkpoint.
+For an active Minecraft JVM, the harness resolves the *actual running Java
+executable* from its world-bound PID and executes that binary's `-version`
+command. Alice's authority JVM and Bob's recovered authority JVM must both
+provide a bounded, sanitized nonempty Java version string. The 32-byte
+package SHA-256, package-manager version and source commit remain recorded
+separately. A matching version is **not sufficient package provenance**;
+independent QA must also verify the actual exact-SHA build run and artifact
+digest. Version fields contain no hostnames, private paths or raw log text.
+
 ## Binding reviewed observations to immutable bytes
 
 After all ten phases, run `run.py observations-digest` and place its 64-hex
