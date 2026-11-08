@@ -9,10 +9,10 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
-use swarm_core::DataPaths;
+use swarm_core::{DataPaths, PeerIdentity};
 
 use crate::host_readiness;
-use swarm_protocol::WorldId;
+use swarm_protocol::{PeerId, WorldId};
 
 const SCHEMA_VERSION: u16 = 1;
 pub const MIN_HEAP_MIB: u64 = 512;
@@ -29,6 +29,8 @@ const OS_MIN_HEADROOM_MIB: u64 = 1_024;
 pub struct HostingConsentV1 {
     pub schema_version: u16,
     pub world_id: WorldId,
+    /// Binds local consent to the current authenticated device identity.
+    pub peer_id: PeerId,
     pub enabled: bool,
     pub heap_mib: u64,
     pub revision: u64,
@@ -92,9 +94,9 @@ fn open_lock(path: &Path) -> Result<File> {
         .with_context(|| format!("cannot open hosting lock {}", path.display()))
 }
 
-fn verify_record(world: WorldId, value: &HostingConsentV1) -> Result<()> {
-    if value.schema_version != SCHEMA_VERSION || value.world_id != world {
-        bail!("hosting consent schema/world mismatch; hosting disabled");
+fn verify_record(world: WorldId, peer: PeerId, value: &HostingConsentV1) -> Result<()> {
+    if value.schema_version != SCHEMA_VERSION || value.world_id != world || value.peer_id != peer {
+        bail!("hosting consent schema/world/peer identity mismatch; hosting disabled");
     }
     if (!value.enabled && value.heap_mib != 0)
         || (value.enabled && !(MIN_HEAP_MIB..=MAX_HEAP_MIB).contains(&value.heap_mib))
@@ -118,7 +120,10 @@ pub fn load_consent(paths: &DataPaths, world: WorldId) -> Result<Option<HostingC
     };
     let consent: HostingConsentV1 = serde_json::from_slice(&bytes)
         .with_context(|| format!("invalid local hosting consent {}; refusing hosting", path.display()))?;
-    verify_record(world, &consent)?;
+    // Replacing or repairing a local identity must never silently reenable
+    // consent granted to a different cryptographic peer.
+    let peer = PeerIdentity::load_or_create(paths)?.peer_id();
+    verify_record(world, peer, &consent)?;
     Ok(Some(consent))
 }
 
@@ -138,23 +143,18 @@ pub fn set_contribution(paths: &DataPaths, world: WorldId, heap_mib: u64) -> Res
     let value = HostingConsentV1 {
         schema_version: SCHEMA_VERSION,
         world_id: world,
+        peer_id: PeerIdentity::load_or_create(paths)?.peer_id(),
         enabled: heap_mib != 0,
         heap_mib,
         revision: current,
     };
-    // Any new opt-in must first invalidate a previous Fabric verification
-    // proof so an old ready result cannot be inherited by a new budget.
-    if heap_mib != 0 {
-        host_readiness::invalidate_runtime_verification(paths, world)?;
-        host_readiness::invalidate_cached_readiness(paths, world)?;
-    }
+    // Invalidate stale runtime/candidate reports BEFORE the consent revision
+    // is published, for both opt-in and revocation. If publication fails, an
+    // old runtime proof still cannot be silently reused.
+    host_readiness::invalidate_runtime_verification(paths, world)?;
+    host_readiness::invalidate_cached_readiness(paths, world)?;
     let path = prefs_path(paths, world);
     atomic_write(&path, &value)?;
-    if heap_mib == 0 {
-        // A durable opt-out is already effective even if cache removal fails.
-        host_readiness::invalidate_runtime_verification(paths, world)?;
-        host_readiness::invalidate_cached_readiness(paths, world)?;
-    }
     // File lock releases when dropped.
     drop(lock);
     Ok(value)
@@ -433,6 +433,27 @@ mod tests {
         assert_eq!(load_consent(&paths, world).unwrap(), Some(revoked));
         assert!(require_contribution(&paths, world).is_err());
     }
+    #[test]
+    fn consent_is_scoped_to_the_current_peer_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let world = WorldId([34; 32]);
+        let current_peer = PeerIdentity::load_or_create(&paths).unwrap().peer_id();
+        let consent = HostingConsentV1 {
+            schema_version: SCHEMA_VERSION,
+            world_id: world,
+            peer_id: PeerId([0xFF; 32]),
+            enabled: true,
+            heap_mib: 512,
+            revision: 1,
+        };
+        assert_ne!(consent.peer_id, current_peer);
+        atomic_write(&prefs_path(&paths, world), &consent).unwrap();
+        let error = load_consent(&paths, world).unwrap_err();
+        assert!(error.to_string().contains("identity mismatch"));
+        assert!(admit(&paths, world).is_err());
+    }
+
     #[test]
     fn malformed_record_never_becomes_consent() {
         let temp = tempfile::tempdir().unwrap();
