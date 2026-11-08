@@ -132,6 +132,25 @@ def observed(pid, terms):
         return False
 
 
+def canonical_head_digest(data_dir, world):
+    """Digest the exact persisted canonical head from SwarmCraft Storage.
+
+    The Rust CLI's world verify must separately succeed; hashing a file
+    alone never authenticates a signed snapshot or proves it is current.
+    Replica-only peers may correctly have no migration snapshot_hash.
+    """
+    path = (Path(data_dir) / "worlds" / world / "metadata" /
+            "canonical-snapshot-head.postcard")
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        if not 40 <= path.stat().st_size <= 16384:
+            return None
+        return digest(path)
+    except (OSError, ValueError):
+        return None
+
+
 def log_digests(data_dir):
     """Hash bounded test-profile log files; never return log text or filenames."""
     folder = Path(data_dir) / "logs"
@@ -320,7 +339,11 @@ def capture(a):
         "snapshot_number": integer(field(status.stdout, "Latest snapshot")),
         "snapshot_epoch": integer(field(status.stdout, "Epoch")),
         "state_root": field(status.stdout, "State root"),
+        # The migration supervisor can be blocked (and omit snapshot_hash)
+        # on a deliberately player-only replica; signed storage owns the
+        # canonical head, not this optional runtime status.
         "snapshot_hash": snapshot if isinstance(snapshot, str) and re.fullmatch("[a-fA-F0-9]{64}", snapshot) else None,
+        "canonical_head_sha256": canonical_head_digest(root, observed_world),
         "snapshot_verify_passed": verify.returncode == 0,
         "canonical": field(status.stdout, "Safety") == "Canonical",
         "safety_level": field(status.stdout, "Safety") if field(status.stdout, "Safety") in
