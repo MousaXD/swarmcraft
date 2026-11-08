@@ -132,7 +132,14 @@ pub fn load_consent(paths: &DataPaths, world: WorldId) -> Result<Option<HostingC
 /// Choosing zero explicitly revokes permission and invalidates in-flight admissions.
 pub fn set_contribution(paths: &DataPaths, world: WorldId, heap_mib: u64) -> Result<HostingConsentV1> {
     if heap_mib != 0 {
-        check_budget(heap_mib, memory_snapshot()?)?;
+        // The user's durable preference may be configured while other apps
+        // are consuming RAM. Check the hard physical limit now; every actual
+        // launch still checks CURRENT available headroom under admission lock.
+        let memory = memory_snapshot()?;
+        check_budget(heap_mib, AvailableMemory {
+            physical_mib: memory.physical_mib,
+            available_mib: memory.physical_mib,
+        })?;
     }
     let lock = open_lock(&control_path(paths).join("hosting-consent-write.lock"))?;
     lock.lock_exclusive().context("cannot serialize hosting consent updates")?;
@@ -471,7 +478,12 @@ mod tests {
         let paths = DataPaths::from_root(temp.path().join("data"));
         let world = WorldId([37; 32]);
         let first = set_contribution(&paths, world, 512).unwrap();
-        let admission = admit(&paths, world).unwrap();
+        // The consent revision check is deterministic regardless of free RAM
+        // on a heavily loaded CI machine. A real admit() must still reject
+        // insufficient free RAM, which is tested in check_budget().
+        let lock = open_lock(&control_path(&paths).join("hosting-active-memory.lock")).unwrap();
+        lock.try_lock_exclusive().unwrap();
+        let admission = HostingAdmission { _exclusive_memory_lock: lock, consent: first.clone() };
         assert_eq!(first, *admission.consent());
         set_contribution(&paths, world, 0).unwrap();
         assert!(revalidate_admission(&paths, world, &admission).is_err());
