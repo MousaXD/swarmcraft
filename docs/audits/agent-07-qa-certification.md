@@ -217,3 +217,50 @@ While the agents were actively pushing, exact PR HEADs moved again:
 - The base main SHA remains 45174310d1433116e64b9b6978cb4f2aa1c22c15. QA PR #91 itself is document-only and remains draft.
 
 **This snapshot is a moving-HEAD pointer, not a final verdict update. No production work, merge or issue closure was performed by Agent 07.**
+
+
+## Independent QA continuation — confirmed real native Svelte success and mandatory CI failures (2026-11-08)
+
+This snapshot supersedes earlier *pending* candidate workflow claims. All reviewed candidates still target main 45174310d1433116e64b9b6978cb4f2aa1c22c15, unchanged at this inspection.
+
+### QA-NEW-015 — PR #94 Svelte native GUI positive + negative now verified at exact candidate head
+
+PR #94 latest observed source commit: **62344d92903dfd632eb3398acebbec796d2b5610**.
+
+- [Svelte candidate native GUI workflow #42471710709](https://github.com/MousaXD/swarmcraft/actions/runs/42471710709) **SUCCESS**, [native job 128704415756](https://github.com/MousaXD/swarmcraft/actions/runs/42471710709/job/128704415756). I inspected actual raw job logs, not only the green workflow badge.
+- The job used a temporary Tauri frontendDist overlay (../frontend/dist), built locked Svelte assets, exact-repository Rust sidecars and a real Debian installer, then **extracted** that .deb and launched its packaged executable under Xvfb/Tauri WebKitGTK/WebDriver. Extraction is not a system-level dpkg installation; document as package-extracted native GUI.
+- Actual positive log: `PASS: installed Tauri/WebKitGTK + real bundled sidecars: initial state, GUI create, relaunch, identity/world persistence`.
+- Actual visual logs: `PASS: installed native Svelte GUI layout at 980x760`; same at `720x560`. Source check confirms script runs at each dimension, but QA has not visually inspected all screenshot bytes; artifact ID **13614057560** stores evidence with source SHA in its name.
+- Negative control removed the required packaged CLI sidecar and native acceptance duly emitted an *expected negative* `FAIL: packaged GUI acceptance ... startup failed`; surrounding job then positively confirmed `PASS: candidate native GUI visibly fails closed with a missing sidecar`, with startup=failed/error/retry visible. Do not count the expected application-level negative as a failing workflow.
+- This is meaningful native candidate success, covering a real Svelte renderer and Rust IPC for startup/world persistence, not just selectors, browser mocks, or a Vite-only build. It does **not** prove migration of every delegated legacy controller or the release application, because shipping Tauri config remains ../src and App.svelte still loads legacy app.js.
+
+**Release mandatory checks remain RED:**
+- [PR #94 Required Validation #42471715653](https://github.com/MousaXD/swarmcraft/actions/runs/42471715653) finished **FAILURE**. [Linux native package job 128704287520](https://github.com/MousaXD/swarmcraft/actions/runs/42471715653/job/128704287520) reached a .deb bundle but failed fetching linuxdeploy tool for AppImage with **HTTP 503**; the same workflow therefore **SKIPPED** normal installed GUI smoke. All Rust OS matrix tests, RustSec, live clean-machine journey, Fabric, migrations/process tests, provider, governance and macOS/Windows packaging passed in this Required run. The negative native Svelte workflow cannot waive the mandatory AppImage gate.
+- [PR #94 Main Desktop Installers #42471715755](https://github.com/MousaXD/swarmcraft/actions/runs/42471715755) finished **FAILURE** even though its nested Linux installed desktop GUI smoke **PASSED** and network multi-GiB soak **PASSED**. Its clean-machine official Java artifact fetch returned **HTTP 503** (curl connection failed after retries). Required release gate failed, platform packaging publishing jobs skipped.
+- This further supports a **cross-PR transient external artifact delivery problem**, not automatically a frontend source defect. Nonetheless it is a real unresolved release infrastructure blocker (issue #97); never disable these gates or describe PR as all-green.
+
+### QA-NEW-016 — PR #93 manual transfer failures and subsequent fixture fixes
+
+- On historical source head **3c07278856938fd0bdbffa3a813cd2d7e69849fb**, [Ubuntu Rust job 128702184547](https://github.com/MousaXD/swarmcraft/actions/runs/42470961278/job/128702184547) failed **five** unchanged `migration_core` acceptance tests (manual transfer, sequential transfer, former-source return, stale-token rejection, restart-safe transfer). Raw panic in every failing case is `hosting consent is absent; this device is player-only (0 MiB)`, not an HTTP download failure or a proof that cryptographic fencing became unsound. Fix requires explicitly consenting the eligible test peers, preserving all signed-transfer/replay/fencing assertions. The same run's 3/5 earlier consensus failures were addressed in prior commits; a newer [macOS Rust job 128702184438](https://github.com/MousaXD/swarmcraft/actions/runs/42470961278/job/128702184438) confirms **all five partition-safety tests passed** on this historical source head. This is genuine positive evidence that the previously failing consensus fixture issue was resolved at least on that exact historical head, even though overall Required failed.
+- Agent 03 current head later moved to **1b46e8320c9e6488d7c8ab26e393d433ac8a4af5**; it adds opt-in to new/manual transfer fixture helpers, negative tests for 0-MiB transfer and withdrawal, and other checks. [Required 42484616252](https://github.com/MousaXD/swarmcraft/actions/runs/42484616252) / [Installers 42484616113](https://github.com/MousaXD/swarmcraft/actions/runs/42484616113) pending/queued at this review. Do not mark the five historical manual-transfer test failures fixed until current exact-head CI passes; do not silently permit player-only transfer or remove failures.
+- The agent's updated run documents resource-aware test gating. This is acceptable ONLY when low-memory **denial is explicitly tested** and positive host/join/recovery acceptance is still proven elsewhere on appropriately provisioned required OS runners; a silent green skip of all positive hosting tests would not meet the requested coverage. Await exact-current-sha evidence.
+- Hosting policy signed peer claim/daemon candidacy coordination and actual frontend user opt-in are still missing from this isolated PR. Even perfect unit CI cannot justify shipping the new default 0-MiB restriction alone.
+
+### QA-NEW-017 — PR #95 research-only required gate terminal failure
+
+Research PR #95 remains **598c1a2899c415d520d7a0e7e5d9e8702c37dbb3**. [Required Validation #42467114738](https://github.com/MousaXD/swarmcraft/actions/runs/42467114738) **FINISHED FAILURE**, not pending; live player official managed Java download plus Linux AppImage/Windows tool downloads failed. All other Rust OS, Fabric, security, governance, process acceptance and direct gates in the checked log passed. This is unrelated to research source changes but blocks policy-required merge unless Agent 00 approves a rigorously justified, separately documented exception; research NO-GO conclusion itself remains supported only within its synthetic scope. No production parallelism implementation exists.
+
+### QA-NEW-018 — PR #96 test harness latest exact-head is not three-machine certification
+
+At reviewed head **7ee9687647d2bcac2eab80067dad4d45ece30c93**, [manual/non-release three-machine workflow #42471150009](https://github.com/MousaXD/swarmcraft/actions/runs/42471150009) finished SUCCESS on the negative-check harness but its three-remote-installation job **SKIPPED**. [Required #42471150033](https://github.com/MousaXD/swarmcraft/actions/runs/42471150033) FAILED (Linux package + live managed-Java external downloads); [Installers #42471150015](https://github.com/MousaXD/swarmcraft/actions/runs/42471150015) FAILED (Windows/Linux packaging and managed-Java downloads). Process acceptance, core Rust tests and security jobs passed.
+The branch moved again to **c9e503a1f39b864c4b5cb07b48236815321519b8** with stronger evidence/test requirements; new [Required #42484715442](https://github.com/MousaXD/swarmcraft/actions/runs/42484715442), [Installers #42484715174](https://github.com/MousaXD/swarmcraft/actions/runs/42484715174), [harness #42484715283](https://github.com/MousaXD/swarmcraft/actions/runs/42484715283) pending at inspection. **No** field triplet, real three Minecraft clients, proof of transport/relay failure, or full recovery is certified.
+
+### QA-NEW-019 — PR #92 protocol-only status, pending current CI
+
+Latest head **326037b53b36abda92a3b2c201209c5ca0ed71fd**, [Required #42484337003](https://github.com/MousaXD/swarmcraft/actions/runs/42484337003) in progress and [Installers #42484337104](https://github.com/MousaXD/swarmcraft/actions/runs/42484337104) in progress/queued. The live player journey and several independent governance/Fabric/provider gates were already green in the partial run. Signed challenge claims remain *inactive* until a canonically committed policy and all authority-capable peers negotiate enforcement, so feature merge remains blocked independent of eventual CI result.
+
+### Main and QA state
+
+Main SHA remains `45174310d1433116e64b9b6978cb4f2aa1c22c15`. PR #90 remains blocked on failed mandatory external downloads. Release PR #89, though earlier green for its metadata-only branch, does not fix or waive unsafe baseline safety paths; integrated future release requires PR #90, signed hosting feature planning, packaged GUI and full exact-head gates.
+
+**Independent combined release verdict: BLOCKED.** The only newly accepted sub-certification is **PR #94 extracted Debian-native Svelte GUI first-launch/create/persistence/visible failed-startup** on exact source HEAD `62344d9...`. Do not translate this into a completed Svelte migration, field E2E, or production release approval. Agent 07 has not modified any production source, tests, workflow, original issues, or release metadata.
