@@ -54,6 +54,15 @@ def node(role, stage):
         "desktop_process_observed": True,
         "minecraft_client_process_observed": True,
         "minecraft_server_process_observed": role == ("alice" if authority == ALICE else "bob"),
+        "hosting_consent": {
+            "available": True, "enabled": role != "carol",
+            "heap_mib": {"alice": 2048, "bob": 4096, "carol": 0}[role],
+            "revision": 123, "world_bound": True, "identity_bound": True,
+        },
+        "minecraft_server_heap_mib": (
+            {"alice": 2048, "bob": 4096}.get(role)
+            if role == ("alice" if authority == ALICE else "bob") else None
+        ),
         "connectivity_diagnostics": {
             "available": True,
             "state": "relay_connected" if stage == "transport_relay" else "direct_reachable",
@@ -246,6 +255,48 @@ class TestFailClosed(unittest.TestCase):
             record["receipt"]["crashed_components"] = ["server"]
             gate.save(out / "crash.json", record)
             with self.assertRaisesRegex(gate.Blocked, "alice_full_authority_process_crash_missing"):
+                gate.verify(c, out)
+
+    def test_rejects_bob_without_explicit_opt_in(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            check = gate.load_json(out / "checkpoint.json")
+            check["nodes"]["bob"]["hosting_consent"]["enabled"] = False
+            gate.save(out / "checkpoint.json", check)
+            with self.assertRaisesRegex(gate.Blocked, "alice_or_bob_host_opt_in_missing"):
+                gate.verify(c, out)
+
+    def test_rejects_carol_host_allocation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            check = gate.load_json(out / "checkpoint.json")
+            check["nodes"]["carol"]["hosting_consent"]["enabled"] = True
+            check["nodes"]["carol"]["hosting_consent"]["heap_mib"] = 512
+            gate.save(out / "checkpoint.json", check)
+            with self.assertRaisesRegex(gate.Blocked, "carol_player_only_zero_budget_missing"):
+                gate.verify(c, out)
+
+    def test_rejects_bob_java_without_configured_heap(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            check = gate.load_json(out / "bob_recovered.json")
+            check["nodes"]["bob"]["minecraft_server_heap_mib"] = None
+            gate.save(out / "bob_recovered.json", check)
+            with self.assertRaisesRegex(gate.Blocked, "bob_real_java_heap_exceeds_or_ignores_consent"):
+                gate.verify(c, out)
+
+    def test_rejects_carol_host_on_return(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            check = gate.load_json(out / "alice_returned.json")
+            check["nodes"]["carol"]["hosting_consent"]["enabled"] = True
+            check["nodes"]["carol"]["hosting_consent"]["heap_mib"] = 1024
+            gate.save(out / "alice_returned.json", check)
+            with self.assertRaisesRegex(gate.Blocked, "carol_zero_budget_or_player_role_violated"):
                 gate.verify(c, out)
 
     def test_rejects_real_client_not_observed(self):
