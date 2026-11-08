@@ -304,3 +304,129 @@ pub fn evaluate_hosting_contribution_v1(
     }
     Ok(())
 }
+
+
+/// Short-lived, challenge-bound peer assertion. It is NOT a quorum vote, local
+/// admission permit, executable budget proof, or a new V1 wire variant.
+///
+/// This standalone record may only be carried over a *future negotiated*
+/// capability-aware transport. Existing PeerHelloV1 and HostCapabilityV1 do
+/// not enforce this structure and cannot grant policy-enabled authority.
+pub const HOST_CONTRIBUTION_CLAIM_MAX_TTL_MS: u64 = 30_000;
+const HOST_CONTRIBUTION_CLAIM_SIGN_DOMAIN: &[u8] = b"swarmcraft/host-contribution-claim/v1\0";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedHostContributionClaimV1 {
+    pub format_version: u16,
+    pub world_id: WorldId,
+    pub peer_id: PeerId,
+    pub public_key: [u8; 32],
+    pub accepted_policy_hash: Hash32,
+    pub epoch: u64,
+    pub fencing_token: u64,
+    pub snapshot_hash: Hash32,
+    pub consent_revision: u64,
+    pub selected_heap_mib: u32,
+    pub sampled_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+    /// Unpredictable fresh challenge supplied by the verifying recipient.
+    pub challenge_nonce: [u8; 32],
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpectedHostContributionClaimV1 {
+    pub world_id: WorldId,
+    pub peer_id: PeerId,
+    pub policy_hash: Hash32,
+    pub epoch: u64,
+    pub fencing_token: u64,
+    pub snapshot_hash: Hash32,
+    pub challenge_nonce: [u8; 32],
+    /// Receiver-side wall clock; never trust claimed sender time alone.
+    pub now_unix_ms: u64,
+}
+
+impl SignedHostContributionClaimV1 {
+    pub fn validate_shape(&self) -> Result<(), HostingPolicyError> {
+        if self.format_version != HOSTING_POLICY_FORMAT_VERSION {
+            return Err(HostingPolicyError::UnsupportedVersion(self.format_version));
+        }
+        if peer_id_from_public_key(&self.public_key) != self.peer_id {
+            return Err(HostingPolicyError::Invalid("host claim key does not match peer"));
+        }
+        if self.signature.len() != 64 {
+            return Err(HostingPolicyError::Invalid("host claim requires a 64-byte signature"));
+        }
+        if self.consent_revision == 0
+            || !(MIN_HOSTING_HEAP_MIB..=MAX_HOSTING_HEAP_MIB).contains(&self.selected_heap_mib)
+        {
+            return Err(HostingPolicyError::Invalid("host claim has invalid consent revision or heap"));
+        }
+        let duration = self
+            .expires_at_unix_ms
+            .checked_sub(self.sampled_at_unix_ms)
+            .ok_or(HostingPolicyError::Invalid("host claim expires before its sample"))?;
+        if duration == 0 || duration > HOST_CONTRIBUTION_CLAIM_MAX_TTL_MS {
+            return Err(HostingPolicyError::Invalid("host claim has invalid expiration window"));
+        }
+        Ok(())
+    }
+
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, HostingPolicyError> {
+        self.validate_shape()?;
+        let unsigned = (
+            self.format_version,
+            self.world_id,
+            self.peer_id,
+            self.public_key,
+            self.accepted_policy_hash,
+            self.epoch,
+            self.fencing_token,
+            self.snapshot_hash,
+            self.consent_revision,
+            self.selected_heap_mib,
+            self.sampled_at_unix_ms,
+            self.expires_at_unix_ms,
+            self.challenge_nonce,
+        );
+        let encoded = postcard::to_allocvec(&unsigned).map_err(ProtocolError::from)?;
+        let mut bytes = Vec::with_capacity(HOST_CONTRIBUTION_CLAIM_SIGN_DOMAIN.len() + encoded.len());
+        bytes.extend_from_slice(HOST_CONTRIBUTION_CLAIM_SIGN_DOMAIN);
+        bytes.extend_from_slice(&encoded);
+        Ok(bytes)
+    }
+
+    /// Authentication, freshness, challenge and head binding only. Caller
+    /// MUST also validate accepted canonical policy/membership/capability,
+    /// observe snapshot readiness and enforce independent local launch
+    /// consent + budget. A remote claim is never proof of physical free RAM.
+    pub fn verify_for_challenge(
+        &self,
+        expected: &ExpectedHostContributionClaimV1,
+        verify_ed25519: impl FnOnce(&[u8; 32], &[u8], &[u8]) -> bool,
+    ) -> Result<(), HostingPolicyError> {
+        self.validate_shape()?;
+        if self.world_id != expected.world_id
+            || self.peer_id != expected.peer_id
+            || self.accepted_policy_hash != expected.policy_hash
+            || self.epoch != expected.epoch
+            || self.fencing_token != expected.fencing_token
+            || self.snapshot_hash != expected.snapshot_hash
+            || self.challenge_nonce != expected.challenge_nonce
+        {
+            return Err(HostingPolicyError::Invalid("host claim does not match challenge or canonical head"));
+        }
+        // Sender timestamps are untrusted. Never accept a future sample.
+        if expected.now_unix_ms < self.sampled_at_unix_ms
+            || expected.now_unix_ms > self.expires_at_unix_ms
+        {
+            return Err(HostingPolicyError::Invalid("host claim is expired or from the future"));
+        }
+        let encoded = self.signing_bytes()?;
+        if !verify_ed25519(&self.public_key, &encoded, &self.signature) {
+            return Err(HostingPolicyError::InvalidSignature);
+        }
+        Ok(())
+    }
+}
