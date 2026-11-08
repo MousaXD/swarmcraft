@@ -42,7 +42,7 @@ def node(role, stage):
         "minecraft_version": "26.1.2",
         "fabric_loader_version": "0.19.3",
         "java_runtime_version": "25.0.1" if role == ("alice" if authority == ALICE else "bob") else None,
-        "snapshot_number": 3,
+        "snapshot_number": 4 if stage == "alice_returned" else 3,
         "snapshot_epoch": 1 if authority == ALICE else 2,
         "snapshot_hash": "1" * 64 if authority == ALICE else "2" * 64,
         "canonical_head_sha256": "1" * 64 if authority == ALICE else "2" * 64,
@@ -249,6 +249,28 @@ class TestFailClosed(unittest.TestCase):
             check["nodes"]["carol"]["snapshot_verify_passed"] = False
             gate.save(out / "checkpoint.json", check)
             with self.assertRaisesRegex(gate.Blocked, "unsigned_or_conflicted"):
+                gate.verify(c, out)
+
+    def test_rejects_alice_return_without_new_signed_bob_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            returned = gate.load_json(out / "alice_returned.json")
+            for peer in returned["nodes"].values():
+                peer["snapshot_number"] = 3
+            gate.save(out / "alice_returned.json", returned)
+            with self.assertRaisesRegex(gate.Blocked, "recovered_bob_checkpoint_not_durable_or_replicated"):
+                gate.verify(c, out)
+
+    def test_rejects_return_with_old_epoch_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            returned = gate.load_json(out / "alice_returned.json")
+            for peer in returned["nodes"].values():
+                peer["snapshot_epoch"] = 1
+            gate.save(out / "alice_returned.json", returned)
+            with self.assertRaisesRegex(gate.Blocked, "recovered_bob_checkpoint_not_durable_or_replicated"):
                 gate.verify(c, out)
 
     def test_rejects_unavailable_replica_canonical_head_digest(self):
