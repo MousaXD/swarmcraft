@@ -95,6 +95,15 @@ class TestFailClosed(unittest.TestCase):
             with self.assertRaisesRegex(gate.Blocked, "invalid_ssh_target_alice"):
                 gate.config(path)
 
+    def test_disallow_ssh_option_as_destination(self):
+        with tempfile.TemporaryDirectory() as temp:
+            c = config()
+            c["nodes"]["alice"]["ssh"] = "-oStrictHostKeyChecking=no"
+            path = Path(temp) / "config.json"
+            gate.save(path, c)
+            with self.assertRaisesRegex(gate.Blocked, "invalid_ssh_target_alice"):
+                gate.config(path)
+
     def test_disallow_missing_expected_commit(self):
         with tempfile.TemporaryDirectory() as temp:
             c = config()
