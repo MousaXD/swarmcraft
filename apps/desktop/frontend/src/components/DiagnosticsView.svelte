@@ -1,14 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { nativeBridge } from '../lib/native-bridge';
-  import { createIdentityController } from '../lib/device-identity';
+  import { createIdentityController, type IdentitySource } from '../lib/device-identity';
 
   const controller = createIdentityController(() => nativeBridge().invoke('node_identity', {}));
   const identityState = controller.state;
 
   onMount(() => {
     const original = window.__swarmcraftSvelteIdentity;
-    const bridge = { publish: (value: string) => controller.publishLegacy(value) };
+    const bridge = { publish: (value: string, source?: IdentitySource) => controller.publishLegacy(value, source) };
     window.__swarmcraftSvelteIdentity = bridge;
     return () => {
       if (window.__swarmcraftSvelteIdentity === bridge) {
