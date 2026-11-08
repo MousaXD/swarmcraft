@@ -78,3 +78,15 @@ PR #79 was a narrow composite (workflow, two lockfiles, discovery test and recov
 **Current recommendation:** HOLD all new integration/release certification. Treat PR #89 as automated-gate passing but **not independently safety-certified for a new public release** until Agent 01 reconciles the remaining known failure paths. Prioritize Agent 01, then protocol/runtime work, frontend parity, real three-machine certification and separate research. Keep historical PRs and issues open unless explicitly reviewed by Agent 00.
 
 This report does **not** claim local Rust tests, native installed GUI, three-network gameplay, or signed release artifacts were executed by Agent 07. It records directly inspected source and GitHub-hosted evidence.
+
+## Live update — newer Agent 01 patch inspection (2026-11-08)
+
+The initial ledger above records PR #90's *first*, intentionally failing commit. Subsequent observation:
+
+- PR #90 advanced to **draft HEAD** `e8092dd499ccaba1b2fc3470f93676c8ced1dac1`.
+- Compared all **eight per-file unified patches** returned by GitHub for [PR #77](https://github.com/MousaXD/swarmcraft/pull/77) and [PR #90](https://github.com/MousaXD/swarmcraft/pull/90): each of the eight Rust file patch strings is **identical**; the only additional changed path in #90 is `docs/audits/agent-01-rust-safety-reconciliation.md`. This is a strong port-parity finding, not an integrated or runnable certification.
+- Verified the expected **red-first** failure in [job 128686266472](https://github.com/MousaXD/swarmcraft/actions/runs/42466225204/job/128686266472): `corrupt_membership_prepare_blocks_authority_and_recovery_transitions` failed at line 141, asserting `ensure_no_membership_prepare(...).is_err()` on unmodified production code. This confirms the previously identified baseline defect with an executable regression, rather than only source inference.
+- New exact-head [Required Validation 42466519745](https://github.com/MousaXD/swarmcraft/actions/runs/42466519745) was queued and [Main Desktop Installers 42466519780](https://github.com/MousaXD/swarmcraft/actions/runs/42466519780) was in progress when observed. Neither had a terminal-success verdict. **PR #90 remains BLOCKED pending successful final SHA checks, full negative paths and coordinator review.**
+- Branches `agent-05/three-machine-real-e2e` and `agent-06/distributed-simulation-research` later appeared, but no submitted PRs or testable evidence had been reviewed. Their verdict remains **BLOCKED / NOT APPLICABLE**, respectively.
+
+No merged integration candidate exists from this campaign yet. The baseline safety findings on `main` remain valid until the missing fixes are **merged** and their integrated commit revalidated. No partial read of #90 supersedes final exact-head CI.
