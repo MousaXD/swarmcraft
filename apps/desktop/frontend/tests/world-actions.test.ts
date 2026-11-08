@@ -52,7 +52,7 @@ describe('world actions preserve native contracts', () => {
     expect(native.createInvite).toHaveBeenCalledWith({
       world:'scworld:abc', expiresMinutes:60, bootstrapAddrs:['/ip4/127.0.0.1/tcp/123'],
     });
-    await expect(actions.invite('scworld:abc', 0, [])).rejects.toThrow(/valid invite expiry/);
+    expect(() => actions.invite('scworld:abc', 0, [])).toThrow(/valid invite expiry/);
   });
   it('rejects concurrent duplicate destructive/create operations', async () => {
     let resolve!: (value:string) => void;
