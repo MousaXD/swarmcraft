@@ -196,6 +196,16 @@ pub fn local_runtime_readiness(
     if hosting_budget::require_contribution(paths, world).is_err() {
         return Ok(HostRuntimeReadinessV1::Unverified);
     }
+    local_runtime_proof_readiness(paths, world, compatibility_fingerprint)
+}
+
+/// Isolated artifact proof for deterministic tests; budget and permission
+/// checks remain mandatory in the public authority capability producer.
+fn local_runtime_proof_readiness(
+    paths: &DataPaths,
+    world: WorldId,
+    compatibility_fingerprint: Hash32,
+) -> Result<HostRuntimeReadinessV1> {
     let config = match load_runtime_config(paths, world) {
         Ok(config) => config,
         Err(_) => return Ok(HostRuntimeReadinessV1::MissingConfiguration),
@@ -980,16 +990,16 @@ mod tests {
         };
         crate::migration::save_runtime_config(&paths, world, &config).unwrap();
         hosting_budget::set_contribution(&paths, world, 512).unwrap();
-        assert_eq!(local_runtime_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Unverified);
+        assert_eq!(local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Unverified);
         record_runtime_verified(&paths, world, &config, fingerprint).unwrap();
-        assert_eq!(local_runtime_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Ready);
+        assert_eq!(local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Ready);
 
         fs::write(&server, b"server-v2").unwrap();
-        assert_eq!(local_runtime_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Incompatible);
+        assert_eq!(local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Incompatible);
 
         fs::write(&server, b"server-v1").unwrap();
         record_runtime_verified(&paths, world, &config, fingerprint).unwrap();
         crate::migration::save_runtime_config(&paths, world, &config).unwrap();
-        assert_eq!(local_runtime_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Unverified);
+        assert_eq!(local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Unverified);
     }
 }
