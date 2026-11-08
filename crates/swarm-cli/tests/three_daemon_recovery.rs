@@ -177,6 +177,7 @@ fn configure_mock_runtime(peer: &PeerFixture, world: WorldId, endpoint: &str) {
         accept_eula: true,
         game_endpoint: Some(endpoint.into()),
     };
+    swarm_cli::hosting_budget::set_contribution(&peer.paths, world, 512).unwrap();
     save_runtime_config(&peer.paths, world, &config).unwrap();
     let fingerprint = peer.storage.load_world_descriptor(world).unwrap().compatibility_fingerprint;
     host_readiness::record_runtime_verified(&peer.paths, world, &config, fingerprint).unwrap();
