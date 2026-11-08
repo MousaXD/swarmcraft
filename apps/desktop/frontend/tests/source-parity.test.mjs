@@ -42,3 +42,20 @@ test('native IPC invocation remains read-only and production packaging is not si
   assert.doesNotMatch(bridge, /__TAURI__\s*=|\.invoke\s*=/);
   assert.equal(JSON.parse(tauri).build.frontendDist, '../src', 'Svelte pilot must not ship before Agent 00 release approval');
 });
+
+
+test('typed frontend IPC table exactly matches every Rust Tauri-registered command', async () => {
+  const [main, bridge] = await Promise.all([
+    source('../../src-tauri/src/main.rs'),
+    source('../src/lib/native-bridge.ts'),
+  ]);
+  const handler = main.match(/\.invoke_handler\(tauri::generate_handler!\[([\s\S]*?)\]\)/);
+  assert.ok(handler, 'Rust Tauri invoke registry must be present');
+  const commands = handler[1].split(',').map(x => x.trim()).filter(Boolean);
+  const table = bridge.match(/export interface NativeCommandTable \{([\s\S]*?)\n\}/);
+  assert.ok(table, 'Native command table must be present');
+  const typed = [...table[1].matchAll(/^\s+([a-z_]+): \{ args:/gm)].map(x => x[1]);
+  assert.equal(commands.length, 61, 'A Rust registry addition requires deliberate typed contract review');
+  assert.deepEqual(new Set(typed), new Set(commands));
+  assert.equal(new Set(typed).size, typed.length, 'No duplicate command definitions');
+});
