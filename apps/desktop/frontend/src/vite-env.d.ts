@@ -12,6 +12,7 @@ declare global {
     __swarmcraftSvelteJoinOwned?: boolean;
     __swarmcraftSvelteImportOwned?: boolean;
     __swarmcraftSvelteInviteOwned?: boolean;
+    __swarmcraftSvelteDiscoveryOwned?: boolean;
     __swarmcraftResetSvelteInvite?: () => void;
     __swarmcraftAfterSvelteImport?: (worldId: string) => Promise<void>;
     __swarmcraftAfterSvelteJoin?: (worldId: string) => Promise<void>;

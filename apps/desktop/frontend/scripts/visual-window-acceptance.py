@@ -138,6 +138,19 @@ def run(binary: Path, artifacts: Path):
                 and "signed invite is required" in observed["message"].lower()), (
             "Empty invite did not fail closed through Svelte: " + repr(observed)
         )
+        # Checking a World ID may display discovery guidance but must not
+        # impersonate joining, create membership or request native IPC.
+        app.type("#joinWorldId", "scworld:discovery-only")
+        app.click("#joinWorldIdButton")
+        discovery = app.execute("""
+          const note = document.getElementById('joinWorldIdNotice');
+          return {
+            visible: !!note && !note.hidden,
+            explainsMembership: !!note && note.textContent.includes('does not grant membership'),
+            signedInviteStillEmpty: !document.getElementById('joinInvite')?.value,
+          };
+        """)
+        assert all(discovery.values()), "World ID hint must not grant membership"
         app.click("#navWorlds")
         # Create a real signed invite on the previously created world, but
         # record only boolean observations, never the token or addresses.

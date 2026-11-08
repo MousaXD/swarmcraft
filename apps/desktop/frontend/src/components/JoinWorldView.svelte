@@ -3,6 +3,9 @@
   import { WorldFormError } from '../lib/world-actions';
 
   let inviteInput: HTMLTextAreaElement | undefined;
+  let worldIdInput: HTMLInputElement | undefined;
+  let worldIdNotice = $state('');
+  let worldIdTone = $state('neutral');
   let busy = $state(false);
   let error = $state('');
 
@@ -37,6 +40,25 @@
       busy = false;
     }
   }
+
+  // This is only an informational discovery hint. As in the old frontend,
+  // it never sends a join request or confers signed membership.
+  function checkWorldId() {
+    const world = worldIdInput?.value.trim() ?? '';
+    if (!world) {
+      worldIdNotice = 'Enter a World ID first.';
+      worldIdTone = 'danger';
+      worldIdInput?.focus();
+      return;
+    }
+    const message = 'Discovery can look for ' + world
+      + ', but it does not grant membership. A private world still needs a signed invite.';
+    worldIdNotice = message;
+    worldIdTone = 'neutral';
+    window.__swarmcraftSvelteActivity?.append(
+      new Date().toLocaleTimeString() + '  World discovery\n' + message,
+    );
+  }
 </script>
 
 <section id="joinPanel" class="view task-view" data-view-panel="join" aria-labelledby="joinTitle" hidden>
@@ -66,10 +88,10 @@
               <p>A World ID can check discovery for public or unlisted worlds, but you still need accepted membership before joining a private world.</p>
               <div class="inline-field">
                 <label for="joinWorldId">World ID</label>
-                <input id="joinWorldId" class="machine-input" placeholder="scworld:…" />
-                <button id="joinWorldIdButton" class="button button-secondary" type="button">Check</button>
+                <input id="joinWorldId" bind:this={worldIdInput} class="machine-input" placeholder="scworld:…" />
+                <button id="joinWorldIdButton" class="button button-secondary" type="button" onclick={checkWorldId}>Check</button>
               </div>
-              <div id="joinWorldIdNotice" class="inline-notice" role="status" hidden></div>
+              <div id="joinWorldIdNotice" class="inline-notice" role="status" data-tone={worldIdTone} hidden={!worldIdNotice}>{worldIdNotice}</div>
             </details>
           </div>
         </section>

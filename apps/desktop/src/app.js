@@ -1179,6 +1179,7 @@ function bindAction(id, handler, { submit = false } = {}) {
     if (id === 'joinForm' && window.__swarmcraftSvelteJoinOwned === true) return;
     if (id === 'importForm' && window.__swarmcraftSvelteImportOwned === true) return;
     if (id === 'createInvite' && window.__swarmcraftSvelteInviteOwned === true) return;
+    if (id === 'joinWorldIdButton' && window.__swarmcraftSvelteDiscoveryOwned === true) return;
     if (element.dataset.busy === 'true') return;
     const busyControl = submit && event.submitter ? event.submitter : element;
     element.dataset.busy = 'true';

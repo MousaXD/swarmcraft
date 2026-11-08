@@ -116,3 +116,7 @@ At `3906b8b7ec04bd0a2de305a622003d7032493cab`, [native GUI run 42485876003](http
 ## Native-backed Svelte signed invite creation
 
 `Dialogs.svelte` now owns invite creation with reactive busy/error/result state, Rust-backed `create_invite`, safe reset on every dialog opening, no duplicate legacy native invocation and no token content written to Activity logs. Signed invitations remain Rust-authoritative. An actual native WebKitGTK test requests a signed invite for the test-created world and verifies **only boolean presence**, intentionally not saving the token in artifacts/screenshots; it closes the dialog before capturing subsequent screenshots. This must pass at the exact head before certification. Signed invite acceptance and remote membership remain separately unverified in multi-machine E2E.
+
+## Svelte World-ID discovery guidance
+
+`JoinWorldView.svelte` now owns the existing informational World-ID Check action with reactive validation and focus. It explicitly explains that a World ID does **not** grant membership and does not call Rust `join_world`, matching the prior frontend behavior. The duplicate legacy click handler is disabled only when Svelte owns the form, with a native GUI check confirming the signed invite input remains empty. Full public discovery/resolve provider flows are still delegated to the legacy launcher module.

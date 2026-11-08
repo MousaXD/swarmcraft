@@ -281,3 +281,17 @@ test('Svelte invite dialog owns signed creation without duplicate legacy calls o
   assert.ok(root.includes("window.__swarmcraftSvelteInviteOwned = true"));
   assert.doesNotMatch(dialog, /append\(\s*signed|setOutput\(\s*signed/);
 });
+
+test('Svelte World-ID hint never impersonates signed membership or issues duplicate legacy actions', async () => {
+  const [join, app, root] = await Promise.all([
+    source('../src/components/JoinWorldView.svelte'),
+    source('../../src/app.js'),
+    source('../src/App.svelte'),
+  ]);
+  assert.ok(join.includes('onclick={checkWorldId}'));
+  assert.ok(join.includes('hidden={!worldIdNotice}>{worldIdNotice}'));
+  assert.ok(join.includes('it does not grant membership'));
+  assert.doesNotMatch(join.slice(join.indexOf('function checkWorldId()')), /nativeWorldActions\(\)\.join/);
+  assert.ok(app.includes("id === 'joinWorldIdButton' && window.__swarmcraftSvelteDiscoveryOwned === true"));
+  assert.ok(root.includes('window.__swarmcraftSvelteDiscoveryOwned = true;'));
+});
