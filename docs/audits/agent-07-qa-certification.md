@@ -128,3 +128,44 @@ While this QA review was underway, three agents pushed additional commits. Earli
 - **#92 newer head 91774224146b2ce3628f7283ac40dca86fadc49d** remains unverified by terminal required workflow; code fixes the specific borrowed-record test pattern. Preserve the protocol migration blockade.
 
 **No Agent 07 READY verdict on any of these new heads.** Re-audit every new exact SHA and its actual checked-out PR merge SHA after tests terminate, especially the combined candidate. No production code/workflow/issue/release mutations were made by Agent 07.
+
+
+## Third independent audit snapshot — after latest new submissions (November 8, 2026)
+
+The following supersedes earlier per-head conclusions where new commits have been pushed. All PRs still target unmodified main 45174310d1433116e64b9b6978cb4f2aa1c22c15. All statuses are observations, not guaranteed future outcomes.
+
+### Moving-head ledger
+
+| Agent / PR | Latest observed source head | Exact source-head CI evidence and result at review | Verdict |
+| --- | --- | --- | --- |
+| Agent 01 / #90 Rust safety | e8092dd499ccaba1b2fc3470f93676c8ced1dac1 | Required 42466519745 FAILED, Installers 42466519780 FAILED: externally returning 504 for official Java/Tauri assets; core Rust tests and audits passed, installed Linux GUI skipped | BLOCKED |
+| Agent 02 / #92 hosting policy | a1e0473442d38e560c7d0844c6169516b6f2ccc8 | [Required 42468726219](https://github.com/MousaXD/swarmcraft/actions/runs/42468726219), [Installers 42468726202](https://github.com/MousaXD/swarmcraft/actions/runs/42468726202) queued during inspection | BLOCKED, not activated |
+| Agent 03 / #93 runtime consent | 2efb842ae72a7e8f567c3e4ad761b1257eb9fd70 | [Required 42468786005](https://github.com/MousaXD/swarmcraft/actions/runs/42468786005) in progress with **actual macOS Rust test FAILURES** and **Ubuntu cargo fmt FAILURE**; [Installers 42468786007](https://github.com/MousaXD/swarmcraft/actions/runs/42468786007) not verified complete | BLOCKED — P0 regression evidence |
+| Agent 04 / #94 Svelte | 2181ab566d3d1900c4ade7e3d9fc01bb47631951 | [Isolated Svelte workflow 42469433323](https://github.com/MousaXD/swarmcraft/actions/runs/42469433323) SUCCESS on exact branch head, confirms locked npm ci, 4 source tests, Svelte/TS checks, 22 Vitest tests, Vite build. [Required 42469436384](https://github.com/MousaXD/swarmcraft/actions/runs/42469436384) and [Installers 42469436426](https://github.com/MousaXD/swarmcraft/actions/runs/42469436426) queued at snapshot | BLOCKED — not installed native Svelte app |
+| Agent 05 / #96 real-network harness | 979dae7a634eecae6927d3d6ef1bc45b2f8773ce | [Manual/nonrelease workflow 42468599857](https://github.com/MousaXD/swarmcraft/actions/runs/42468599857) SUCCESS only in 18 negative assertion tests; remote three-installation preflight SKIPPED. Other mandatory checks not yet complete | BLOCKED — no field evidence |
+| Agent 06 / #95 research NO-GO | 598c1a2899c415d520d7a0e7e5d9e8702c37dbb3 | [Required 42467114738](https://github.com/MousaXD/swarmcraft/actions/runs/42467114738) at last view had pending/running jobs; not a recorded full-success run. Research JSON internally consistent with synthetic limits | PROVISIONAL research review only; merge gate incomplete |
+
+### QA-NEW-008 — PR #93 consensus partition-safety failures (release-blocking)
+
+On source HEAD 2efb842ae72a7e8f567c3e4ad761b1257eb9fd70, [macOS Rust job 128695058146](https://github.com/MousaXD/swarmcraft/actions/runs/42468786005/job/128695058146) failed three tests in unchanged crates/swarm-cli/tests/consensus_partition_safety.rs:
+- five_peer_membership_churn_partition_cannot_activate_new_voter_universe — timed out waiting for **old committed 2-of-3 recovery quorum**
+- five_daemon_unclean_quorum_loss_never_falls_back_to_solo — timed out waiting for **majority recovery permit**
+- three_daemon_unclean_quorum_loss_never_falls_back_to_solo — timed out waiting for **majority recovery permit**
+
+Source-level mechanism strongly suggests a newly introduced fixture/behavior mismatch: configure_host_capability in the old partition tests creates a runtime config and records verified runtime readiness but does not opt into local hosting. The new host_readiness::local_runtime_readiness checks hosting_budget::require_contribution and returns Unverified if consent is absent. Thus an otherwise previously eligible test successor may no longer advertise ready; do not declare this conclusively the only cause without reproduction/diagnostics. No test, quorum rule or negative assertion may be deleted, ignored, weakened or bypassed to get green. Fix setup to use explicit consent for intended legitimate successor peers, preserve zero-budget nonhost assertions, then revalidate expected quorum progress and negative partition protections.
+
+Separately, [Ubuntu Rust job 128695057430](https://github.com/MousaXD/swarmcraft/actions/runs/42468786005/job/128695057430) failed cargo fmt --all -- --check, with rustfmt diffs in host_readiness.rs, hosting_budget.rs, migration.rs and tests. This is a genuine gate, not HTTP availability. The same workflow's managed Java live journey also failed external asset download. PR #93 remains BLOCKED independently of external outages.
+
+### QA-NEW-009 — PR #94 candidate build proof is real but nonshipping
+
+The newest Svelte branch includes an actual committed package-lock.json (earlier missing-lockfile concern is **resolved** for the candidate), a typed world-actions layer and staging session work. Isolated push workflow #42469433323 at exact head 2181ab566d3d1900c4ade7e3d9fc01bb47631951 actually ran npm ci from the committed lock, 4 source-parity tests, Svelte check, 22 Vitest tests across four files, and Vite build — all succeeded. But the same workflow asserts Tauri build.frontendDist remains ../src. This proves source/build hygiene, NOT real native GUI launching the Svelte bundle, legacy controller removal, end-to-end feature parity, or provider/transfer/mod/keyboard/offline acceptance. Do not count this as release or installed-GUI certification.
+
+### QA-NEW-010 — PR #92 new challenge-bound claim security scope
+
+Latest source adds a short-lived signed host-contribution claim binding world, peer/key, policy head, epoch/fencing token, snapshot hash, consent revision, heap, timestamp and an unpredictable challenge. verify_for_challenge checks shape, canonical-head expectation, expiration, signature, then requires a consuming challenge callback. This is promising isolated cryptographic contract design; its comments expressly state remote claims cannot prove local available RAM or replace consensus, and no V1 runtime can truthfully activate the policy. The external callback must be authenticated, atomic and single-use. End-to-end capability negotiation, accepted canonical policy history and daemon enforcement remain absent. Do not merge as a user-visible hosting feature.
+
+### QA-NEW-011 — PR #96 harness success is not remotely executed gameplay
+
+Latest manual/nonrelease workflow #42468599857 **successfully ran 18 fail-closed harness negative unit tests**. The remote preflight job was **skipped**, no real three-network installation/recovery has been provided, and the harness still requires independently reviewed signed/gameplay artifacts. This distinction must survive future PR comments, release notes and acceptance gates.
+
+**Overall decision unchanged: BLOCKED.** A passing isolated framework/test harness or Rust subset cannot substitute for the mandatory integrated exact-head gate. Agent 07 has not performed real installed app/Minecraft field execution.
