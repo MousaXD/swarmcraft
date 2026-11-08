@@ -110,7 +110,8 @@ def preflight(c, output):
     require(all(p["package_sha256"].lower() == c["package_sha256"].lower() for p in probes.values()),
             "package_sha_mismatch")
     require(len({p["package_version"] for p in probes.values()}) == 1, "package_version_mismatch")
-    require(all(p["app_installed"] and p["cli_installed"] and p["os"] == "linux" for p in probes.values()),
+    require(all(p["app_installed"] and p["cli_installed"] and p["all_required_sidecars_installed"]
+                and p["os"] == "linux" for p in probes.values()),
             "installed_linux_package_required")
     save(output / "preflight.json", {
         "commit": c["commit"], "package_sha256": c["package_sha256"],
