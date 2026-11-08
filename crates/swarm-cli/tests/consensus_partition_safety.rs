@@ -493,6 +493,69 @@ fn five_peer_membership_churn_partition_cannot_activate_new_voter_universe() {
 }
 
 #[test]
+fn withdrawn_successors_cannot_receive_recovery_permits_despite_quorum() {
+    let alice = peer_fixture();
+    let bob = peer_fixture();
+    let carol = peer_fixture();
+    let source_temp = tempfile::tempdir().unwrap();
+    let (metadata, config, descriptor, membership, epoch, manifest) =
+        build_seed(&alice, &[&alice, &bob, &carol], "withdrawn-recovery-candidates", &source_temp);
+    let source = source_temp.path().join("world");
+    let seed = Seed {
+        metadata: &metadata,
+        config: &config,
+        descriptor: &descriptor,
+        membership: &membership,
+        epoch: &epoch,
+        manifest: &manifest,
+        source: &source,
+        authority: &alice.identity,
+    };
+    install_seed(&bob, &seed);
+    install_seed(&carol, &seed);
+
+    // These two eligible, fully replicated peers form the surviving 2-of-3
+    // recovery quorum. Neither is allowed to host after explicit withdrawal.
+    for peer in [&bob, &carol] {
+        swarm_cli::hosting_budget::set_contribution(&peer.paths, metadata.world_id, 0).unwrap();
+        assert!(swarm_cli::hosting_budget::require_contribution(&peer.paths, metadata.world_id).is_err());
+        // Simulate an old or improperly refreshed "verified artifacts" proof:
+        // local permission must still override the presence of that proof.
+        let launch = swarm_cli::migration::load_runtime_config(&peer.paths, metadata.world_id).unwrap();
+        host_readiness::record_runtime_verified(
+            &peer.paths, metadata.world_id, &launch, descriptor.compatibility_fingerprint,
+        )
+        .unwrap();
+        assert_eq!(
+            host_readiness::local_runtime_readiness(
+                &peer.paths, metadata.world_id, descriptor.compatibility_fingerprint,
+            )
+            .unwrap(),
+            swarm_protocol::HostRuntimeReadinessV1::Unverified,
+        );
+    }
+
+    let mut daemon_b = spawn_daemon(&bob, &[]);
+    thread::sleep(Duration::from_millis(500));
+    let mut daemon_c = spawn_daemon(&carol, &[address(&bob)]);
+    thread::sleep(Duration::from_secs(12));
+    for peer in [&bob, &carol] {
+        assert!(
+            permit(peer, metadata.world_id).is_none(),
+            "a withdrawn player-only successor must never receive an authority permit"
+        );
+        assert_eq!(
+            peer.storage.load_epoch_record(metadata.world_id).unwrap(),
+            epoch,
+            "withdrawal may not manufacture a new authority epoch"
+        );
+        let snapshot = peer.storage.latest_snapshot(metadata.world_id).unwrap().unwrap();
+        assert_eq!(snapshot.manifest_hash().unwrap(), manifest.manifest_hash().unwrap());
+    }
+    assert!(daemon_b.alive() && daemon_c.alive(), "player-only peers must remain connected as replicas");
+}
+
+#[test]
 fn three_peer_divergent_membership_partition_cannot_form_two_quorums() {
     let a = peer_fixture();
     let b = peer_fixture();
