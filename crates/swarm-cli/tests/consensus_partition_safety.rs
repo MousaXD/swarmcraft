@@ -531,7 +531,7 @@ fn withdrawn_successors_cannot_receive_recovery_permits_despite_quorum() {
                 &peer.paths, metadata.world_id, descriptor.compatibility_fingerprint,
             )
             .unwrap(),
-            swarm_protocol::HostRuntimeReadinessV1::Unverified,
+            swarm_network::HostRuntimeReadinessV1::Unverified,
         );
     }
 
