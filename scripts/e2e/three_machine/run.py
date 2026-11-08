@@ -14,6 +14,9 @@ import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
+from urllib.parse import urlparse
+
+from evidence import EvidenceError, verify_review_artifacts
 
 ROLES = ("alice", "bob", "carol")
 STAGES = {
@@ -278,10 +281,22 @@ def verify(c, output, review_file=None):
                 "alice_hard_crash_and_bob_client_reconnection", "alice_return_fenced",
                 "screenshots_redacted", "real_world_network_classes_verified")
     require(all(review.get(k) is True for k in required), "real_player_or_network_review_incomplete")
-    require(bool(review.get("reviewer")) and bool(review.get("evidence_url")),
-            "independent_review_identity_or_evidence_missing")
+    require(isinstance(review.get("reviewer"), str) and len(review["reviewer"].strip()) >= 3,
+            "independent_review_identity_missing")
+    url = review.get("evidence_url")
+    require(isinstance(url, str) and urlparse(url).scheme == "https" and
+            bool(urlparse(url).hostname) and "example." not in urlparse(url).hostname,
+            "immutable_redacted_evidence_url_missing")
+    # External media still require independent visual review. This guard
+    # only proves that the reviewed per-role evidence files are present,
+    # distinct, unmodified and bound to the verdict by their SHA-256.
+    try:
+        manifest_sha = verify_review_artifacts(review, output)
+    except EvidenceError as exc:
+        raise Blocked("unverified_real_player_media_" + str(exc)) from exc
     return {"verdict": "READY", "commit": c["commit"], "package_sha256": c["package_sha256"],
-            "reviewer": review["reviewer"], "evidence_url": review["evidence_url"]}
+            "reviewer": review["reviewer"], "evidence_url": url,
+            "redacted_media_manifest_sha256": manifest_sha}
 
 
 def main():
