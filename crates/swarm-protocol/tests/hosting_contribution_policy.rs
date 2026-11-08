@@ -1,11 +1,9 @@
 use swarm_protocol::{
-    evaluate_hosting_contribution_v1, peer_id_from_public_key, AuthorityPolicyV1, Hash32,
-    HostingAdmissionDenialV1 as Denial, HostingContributionAdmissionV1, HostingPolicyActivationV1,
-    ExpectedHostContributionClaimV1, SignedHostContributionClaimV1,
-    LocalHostingConsentV1, MembershipPolicyV1, PeerId, RuntimeCompatibilityManifestV1,
-    SignedWorldHostingPolicyV1, WorldConfigV1, WorldHostingPolicyV1, WorldMemberV1,
-    WorldPresentationV1, WorldVisibilityV1, WorldId, HOSTING_POLICY_FORMAT_VERSION,
-    MIN_HOSTING_HEAP_MIB, PROTOCOL_VERSION,
+    evaluate_hosting_contribution_v1, peer_id_from_public_key, AuthorityPolicyV1, ExpectedHostContributionClaimV1,
+    Hash32, HostingAdmissionDenialV1 as Denial, HostingContributionAdmissionV1, HostingPolicyActivationV1,
+    LocalHostingConsentV1, MembershipPolicyV1, PeerId, RuntimeCompatibilityManifestV1, SignedHostContributionClaimV1,
+    SignedWorldHostingPolicyV1, WorldConfigV1, WorldHostingPolicyV1, WorldId, WorldMemberV1, WorldPresentationV1,
+    WorldVisibilityV1, HOSTING_POLICY_FORMAT_VERSION, MIN_HOSTING_HEAP_MIB, PROTOCOL_VERSION,
 };
 
 fn config() -> WorldConfigV1 {
@@ -26,10 +24,7 @@ fn config() -> WorldConfigV1 {
             datapacks: Vec::new(),
         },
         visibility: WorldVisibilityV1::Private,
-        authority_policy: AuthorityPolicyV1 {
-            allow_solo_advancement: false,
-            preferred_replication_factor: 2,
-        },
+        authority_policy: AuthorityPolicyV1 { allow_solo_advancement: false, preferred_replication_factor: 2 },
         membership_policy: MembershipPolicyV1::InviteOnly,
         presentation: WorldPresentationV1 {
             name: "Legacy world".into(),
@@ -65,12 +60,7 @@ fn policy(config: &WorldConfigV1) -> SignedWorldHostingPolicyV1 {
 
 fn member() -> WorldMemberV1 {
     let public_key = [2; 32];
-    WorldMemberV1 {
-        peer_id: peer_id_from_public_key(&public_key),
-        public_key,
-        authority_eligible: true,
-        banned: false,
-    }
+    WorldMemberV1 { peer_id: peer_id_from_public_key(&public_key), public_key, authority_eligible: true, banned: false }
 }
 
 fn consent(world_id: WorldId, peer_id: PeerId) -> LocalHostingConsentV1 {
@@ -150,7 +140,7 @@ fn new_records_roundtrip_and_have_distinct_canonical_domains() {
     assert_eq!(restored.record_hash().unwrap(), p.record_hash().unwrap());
     assert!(p.signing_bytes().unwrap().starts_with(b"swarmcraft/hosting-policy-sign/v1\0"));
     assert_ne!(p.record_hash().unwrap(), p.config_hash);
-    assert!(postcard::from_bytes::<SignedWorldHostingPolicyV1>(&bytes[..bytes.len()-1]).is_err());
+    assert!(postcard::from_bytes::<SignedWorldHostingPolicyV1>(&bytes[..bytes.len() - 1]).is_err());
 }
 
 #[test]
@@ -321,7 +311,6 @@ fn forged_or_malformed_policy_never_promotes_a_peer() {
     a.activation = HostingPolicyActivationV1::Enforced { accepted_policy_hash: Hash32([9; 32]) };
     assert!(evaluate_hosting_contribution_v1(&a, test_signature).is_err());
 }
-
 
 fn signed_host_claim(f: &Fixture) -> SignedHostContributionClaimV1 {
     SignedHostContributionClaimV1 {
