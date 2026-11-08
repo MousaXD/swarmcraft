@@ -213,7 +213,12 @@ def runtime_heap_mib(pid, root, world, binary, cli):
     try:
         arguments = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
         for arg in arguments:
-            value = arg.decode("ascii", errors="strict")
+            try:
+                value = arg.decode("ascii", errors="strict")
+            except UnicodeDecodeError:
+                # Localized executable/world paths may be non-ASCII. That
+                # must not conceal a valid standalone ASCII -Xmx argument.
+                continue
             match = re.fullmatch(r"-Xmx([1-9][0-9]*)([mMgG])", value)
             if match:
                 number = int(match.group(1))
