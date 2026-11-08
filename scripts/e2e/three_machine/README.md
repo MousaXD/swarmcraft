@@ -82,6 +82,14 @@ to a private JSON file of current, genuinely observed process IDs:
      "bob":{"desktop":2234,"client":2235},
      "carol":{"desktop":3234,"client":3235}}
 
+Launch each installed SwarmCraft desktop with SWARMCRAFT_DATA_DIR set to the
+configured isolated profile (without giving the runner your private key or
+secrets). The probe requires the native desktop process's actual executable
+and data-root environment to match the installed package; the Java server
+must have the expected world-bound runtime working directory and a genuine
+Java executable with a -jar command. This prevents unrelated processes from
+standing in as player/host proof.
+
 Update process IDs after a restart or takeover; false, missing or wrong PIDs
 must fail. Process presence is auxiliary evidence, not proof of a successful
 Minecraft login, join or gameplay. The seven phase captures must happen
