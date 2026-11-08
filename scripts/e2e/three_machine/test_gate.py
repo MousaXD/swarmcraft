@@ -45,6 +45,7 @@ def node(role, stage):
         "snapshot_number": 3,
         "snapshot_epoch": 1 if authority == ALICE else 2,
         "snapshot_hash": "1" * 64 if authority == ALICE else "2" * 64,
+        "canonical_head_sha256": "1" * 64 if authority == ALICE else "2" * 64,
         "state_root": "3" * 64,
         "snapshot_verify_passed": True,
         "canonical": stage != "alice_created",
@@ -248,6 +249,39 @@ class TestFailClosed(unittest.TestCase):
             check["nodes"]["carol"]["snapshot_verify_passed"] = False
             gate.save(out / "checkpoint.json", check)
             with self.assertRaisesRegex(gate.Blocked, "unsigned_or_conflicted"):
+                gate.verify(c, out)
+
+    def test_rejects_unavailable_replica_canonical_head_digest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            check = gate.load_json(out / "checkpoint.json")
+            check["nodes"]["carol"]["canonical_head_sha256"] = None
+            gate.save(out / "checkpoint.json", check)
+            with self.assertRaisesRegex(gate.Blocked, "accepted_snapshot_digest_missing_checkpoint_carol"):
+                gate.verify(c, out)
+
+    def test_rejects_divergent_signed_canonical_head(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            check = gate.load_json(out / "checkpoint.json")
+            check["nodes"]["carol"]["canonical_head_sha256"] = "9" * 64
+            gate.save(out / "checkpoint.json", check)
+            with self.assertRaisesRegex(gate.Blocked, "checkpoint_not_replicated"):
+                gate.verify(c, out)
+
+    def test_allows_replica_without_migration_snapshot_hash_but_still_requires_review(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            for stage in ("bob_joined", "carol_joined", "checkpoint"):
+                check = gate.load_json(out / (stage + ".json"))
+                for role in check["nodes"]:
+                    if role != "alice":
+                        check["nodes"][role]["snapshot_hash"] = None
+                gate.save(out / (stage + ".json"), check)
+            with self.assertRaisesRegex(gate.Blocked, "independent_player_evidence_review_missing"):
                 gate.verify(c, out)
 
     def test_rejects_inconsistent_fabric_version(self):
