@@ -1008,14 +1008,38 @@ async fn wait_for_runtime_exit(
         // contribution otherwise requests the same Fabric save barrier used by
         // a safe user stop; a failed barrier does NOT kill an unfenced JVM.
         match load_transfer_intent(paths, epoch.world_id) {
-            Ok(Some(target)) => {
-                validate_transfer_target(storage, identity, epoch.world_id, target)?;
-                session.prepare_shutdown(2, FABRIC_SHUTDOWN_TIMEOUT).await?;
-                timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
-                    .await
-                    .map_err(|_| anyhow!("Minecraft did not stop after the transfer save barrier"))??;
-                return Ok(RuntimeDisposition::Transfer(target));
-            }
+            Ok(Some(target)) => match validate_transfer_target(storage, identity, epoch.world_id, target) {
+                Ok(()) => {
+                    let outcome = async {
+                        session.prepare_shutdown(2, FABRIC_SHUTDOWN_TIMEOUT).await?;
+                        timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
+                            .await
+                            .map_err(|_| anyhow!("Minecraft did not stop after the transfer save barrier"))??;
+                        Ok::<(), anyhow::Error>(())
+                    }
+                    .await;
+                    match outcome {
+                        Ok(()) => return Ok(RuntimeDisposition::Transfer(target)),
+                        Err(error) => {
+                            warn!(
+                                world = %epoch.world_id,
+                                %error,
+                                "transfer save barrier failed; keeping Minecraft running rather than terminating an uncheckpointed authority"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        world = %epoch.world_id,
+                        %error,
+                        "invalid manual transfer target; preserving running authority and removing invalid local intent"
+                    );
+                    if let Err(clear_error) = clear_transfer_intent(paths, epoch.world_id) {
+                        warn!(world = %epoch.world_id, %clear_error, "cannot clear rejected local transfer intent");
+                    }
+                }
+            },
             Ok(None) => {}
             Err(error) => warn!(world = %epoch.world_id, %error, "ignoring unreadable transfer intent"),
         }

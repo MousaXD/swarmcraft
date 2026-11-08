@@ -430,6 +430,62 @@ async fn withdrawing_active_host_consent_uses_fabric_barrier_and_durable_sleep()
 }
 
 #[tokio::test]
+async fn invalid_transfer_target_does_not_kill_authority_and_withdrawal_still_checkpoints() {
+    if !hosting_capacity_for_process_test() {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let alice = peer(temp.path().join("alice-rejected-transfer"));
+    let bob = peer(temp.path().join("bob-rejected-transfer"));
+    let source = temp.path().join("source-rejected-transfer");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("level.dat"), b"before-rejected-transfer\n").unwrap();
+    let shared = initialize_two_peer_world(&alice, &bob, &source);
+    let before = alice.storage.latest_snapshot(shared.world).unwrap().unwrap();
+    let endpoint = "127.0.0.1:25570";
+    configure_safe_stop_runtime(temp.path(), &alice, shared.world, endpoint);
+
+    let generation =
+        AuthorityGeneration { epoch: shared.epoch.epoch_number, fencing_token: shared.epoch.fencing_token };
+    let heartbeat = spawn_heartbeat(alice.paths.clone(), shared.world, generation);
+    let supervisor_paths = alice.paths.clone();
+    let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });
+    wait_until_ready(&alice, shared.world, endpoint).await;
+
+    // An unsigned local intent naming the current authority is invalid.
+    // The previous implementation propagated its validation error, causing
+    // the outer runtime to terminate Java without a Fabric save barrier.
+    let intent = alice.paths.root.join("control").join(shared.world.to_hex()).join("transfer.intent");
+    fs::write(&intent, format!("{}\n", alice.identity.peer_id())).unwrap();
+    timeout(Duration::from_secs(5), async {
+        while intent.exists() {
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("invalid transfer intent must be rejected and cleared");
+    let status = migration::load_migration_status(&alice.paths, shared.world).unwrap();
+    assert_eq!(status.phase, MigrationPhase::Ready);
+    assert!(status.runtime_ready);
+    assert!(alice.storage.load_sleep_record(shared.world).is_err());
+    assert_eq!(
+        alice.storage.latest_snapshot(shared.world).unwrap().unwrap().manifest_hash().unwrap(),
+        before.manifest_hash().unwrap()
+    );
+
+    swarm_cli::hosting_budget::set_contribution(&alice.paths, shared.world, 0).unwrap();
+    wait_until_sleeping(&alice, shared.world).await;
+    let latest = alice.storage.latest_snapshot(shared.world).unwrap().unwrap();
+    alice.storage.verify_snapshot(&latest).unwrap();
+    assert_eq!(latest.previous_snapshot_hash, Some(before.manifest_hash().unwrap()));
+    let restored = temp.path().join("rejected-transfer-restored");
+    alice.storage.restore_snapshot(&latest, &restored).unwrap();
+    assert_eq!(fs::read_to_string(restored.join("safe-stop-latest.txt")).unwrap(), "saved-at-shutdown\n");
+    supervisor.abort();
+    heartbeat.abort();
+}
+
+#[tokio::test]
 async fn manual_transfer_uses_shared_runner_and_fences_alice() {
     if !hosting_capacity_for_process_test() {
         return;
