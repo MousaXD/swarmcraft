@@ -81,16 +81,31 @@ def packaged_sidecars_present(file_paths):
     return True
 
 
+def deb_package_metadata(package):
+    """Read one Debian field per invocation; querying multiple labels prints
+    'Package: ...' and 'Version: ...', not bare values.
+    """
+    pkg = run(["dpkg-deb", "-f", str(package), "Package"])
+    version = run(["dpkg-deb", "-f", str(package), "Version"])
+    if pkg.returncode or version.returncode:
+        return None
+    package_name, package_version = pkg.stdout.strip(), version.stdout.strip()
+    if (not re.fullmatch(r"[a-z0-9][a-z0-9+.-]{1,127}", package_name) or
+            not re.fullmatch(r"[0-9][0-9A-Za-z.+:~_-]{0,127}", package_version)):
+        return None
+    return package_name, package_version
+
+
 def preflight(a):
     package = Path(a.package).resolve(strict=True)
     binary = Path(a.binary).resolve(strict=True)
     cli = Path(a.cli).resolve(strict=True)
     if package.suffix != ".deb" or not all(os.access(p, os.X_OK) for p in (binary, cli)):
         fail("package_or_binary_invalid")
-    meta = run(["dpkg-deb", "-f", str(package), "Package", "Version"])
-    if meta.returncode or len(meta.stdout.splitlines()) != 2:
+    metadata = deb_package_metadata(package)
+    if metadata is None:
         fail("deb_metadata_invalid")
-    pkg, version = meta.stdout.splitlines()
+    pkg, version = metadata
     installed = run(["dpkg-query", "-W", "-f=\x24{Status} \x24{Version}", pkg])
     owner = run(["dpkg-query", "-S", str(binary)])
     cli_owner = run(["dpkg-query", "-S", str(cli)])
