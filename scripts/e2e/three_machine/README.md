@@ -101,6 +101,21 @@ python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$O
 # Carol independently accepts invitation, joins real client, sets 0 GB host.
 python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage carol_joined --world "$WORLD_ID" --pids "$PIDS"
 
+# First observe a real established direct path (or legitimate successful
+# DCUtR upgrade) between independently networked peers; it must be backend
+# connectivity state, NOT just a configured bootstrap address or local ping.
+python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage transport_direct --world "$WORLD_ID" --pids "$PIDS"
+
+# Then deliberately make direct communication unavailable while retaining a
+# real configured and reachable relay. Observe active relay connectivity.
+# Do not rely on test-loopback or a configured-but-unused relay.
+python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage transport_relay --world "$WORLD_ID" --pids "$PIDS"
+
+# Field operator applies/reverts measured packet loss and a genuine peer
+# disconnection at the network/device boundary, captures the transport
+# outcome and verifies all clients reconnect without split-brain.
+python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage transport_disrupted --world "$WORLD_ID" --pids "$PIDS"
+
 # Interact in game, observe deterministic marker in all 3 real clients, wait
 # until all 3 store the same signed/verified latest accepted checkpoint.
 python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage checkpoint --world "$WORLD_ID" --pids "$PIDS"
@@ -138,6 +153,16 @@ required exercise. It never uses wildcard pkill, unrestricted rm, mocked Java,
 pre-seeded replicas or localhost-only peers.
 
 ## Evidence and final review
+
+The "transport_direct" and "transport_relay" captures now independently
+require actual backend connectivity to report direct/hole-punched and active
+relay transport respectively. Configured but inactive relays are explicitly
+rejected. If no genuine direct path is available on this network set, do
+**not** fake it: run a separate independent-network scenario where possible,
+or keep the overall certification BLOCKED. Packet-loss/disconnect evidence is
+captured as a stage but still requires external measured-loss/router logs
+and real client reconnection review; a JSON stage alone does not prove it.
+
 
 Record native GUI installation/first-run/EULA/invitation screens, genuine
 Minecraft server and client versions and logs, signed world ID, real player
