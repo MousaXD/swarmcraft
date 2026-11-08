@@ -169,3 +169,37 @@ Latest source adds a short-lived signed host-contribution claim binding world, p
 Latest manual/nonrelease workflow #42468599857 **successfully ran 18 fail-closed harness negative unit tests**. The remote preflight job was **skipped**, no real three-network installation/recovery has been provided, and the harness still requires independently reviewed signed/gameplay artifacts. This distinction must survive future PR comments, release notes and acceptance gates.
 
 **Overall decision unchanged: BLOCKED.** A passing isolated framework/test harness or Rust subset cannot substitute for the mandatory integrated exact-head gate. Agent 07 has not performed real installed app/Minecraft field execution.
+
+
+## Fourth snapshot — agent patches responding to QA findings (2026-11-08)
+
+These agent commits supersede earlier SHA descriptions; they do NOT establish green certification:
+
+| PR | New head at inspection | Change since prior observation | Workflow status |
+| --- | --- | --- | --- |
+| #92 protocol | 1cd9371990f6099a0b6fe4ec913a7d9a347fb372 | Added protocol claim tests/docs and negative coverage, still inert V1 foundation | [Required 42469961234](https://github.com/MousaXD/swarmcraft/actions/runs/42469961234), [Installers 42469961231](https://github.com/MousaXD/swarmcraft/actions/runs/42469961231): queued, no certified result |
+| #93 runtime | ca6bc8ed8939f1d8c5276976f5cb104c2a9c650a | Added explicit consent in formerly failing consensus_partition_safety test fixture plus additional checks; this directly targets the probable cause of previous three recovery test timeouts. It changes tests, not the production default-no-consent semantics | [Required 42470107453](https://github.com/MousaXD/swarmcraft/actions/runs/42470107453), [Installers 42470107516](https://github.com/MousaXD/swarmcraft/actions/runs/42470107516): queued |
+| #94 frontend | 81a9e7dda180ad2990f7ea8c067734bae1052c81 | Added separate candidate-only **real native WebKitGTK** workflow and temporary Tauri frontendDist overlay. Also adds typed world-state logic and tests. Production Tauri config stays untouched. | [Required 42470245443](https://github.com/MousaXD/swarmcraft/actions/runs/42470245443), [Installers 42470245486](https://github.com/MousaXD/swarmcraft/actions/runs/42470245486): queued/pending; candidate-native workflow not yet observed as successful |
+| #96 E2E harness | 1620843a04260d9b905b603412602b40fba391ce | Adds evidence.py with bounded media magic, SHA256, unique per-role/stage evidence and manifest digest checks; still requires independent human review, does not prove photos represent real gameplay or provide remote machine attestation | [Required 42470216483](https://github.com/MousaXD/swarmcraft/actions/runs/42470216483) queued; [manual harness 42470216442](https://github.com/MousaXD/swarmcraft/actions/runs/42470216442) queued; [Installers 42470216616](https://github.com/MousaXD/swarmcraft/actions/runs/42470216616) cancelled at observation |
+
+### QA-NEW-012 — Svelte candidate native GUI validation plan
+
+Agent 04's new workflow .github/workflows/svelte-candidate-native-gui.yml explicitly:
+- checks shipping Tauri config still points to ../src and that its candidate config overlay changes *only* frontendDist to ../frontend/dist;
+- runs locked npm ci, Svelte check, parity tests, 22+ unit tests and Vite build;
+- rebuilds the exact-branch Rust sidecars and a Debian installer with the overlay;
+- extracts .deb to an isolated location (important: extraction and execution of packaged binaries is **not** a system-package-manager installation via dpkg -i);
+- launches the extracted packaged desktop binary under Xvfb with real WebKitWebDriver/tauri-driver to perform first launch, create, relaunch and persistence; then deliberately removes the CLI sidecar and requires a real GUI visible failure/retry observation;
+- uploads exact-commit candidate package hash, logs, WebDriver acceptance and bundle-size evidence.
+
+If this workflow completes successfully on the exact final SHA and its extracted Debian asset is inspected, it would be meaningful **Svelte packaged GUI launch** evidence rather than only legacy/browser source tests. At present it is **unproven**: no completed successful run was observed. It does not replace the eventual merged production Tauri config, cross-OS installer gating, 980x760/720x560 keyboard/accessibility review, all original features, real Minecraft player E2E, or combined release CI. Agent 00 must review this new workflow before integration.
+
+### QA-NEW-013 — Recovery test corrective patch observed, not yet proved
+
+Agent 03 now calls swarm_cli::hosting_budget::set_contribution(&peer.paths, world, 512) in consensus_partition_safety::configure_host_capability. This matches the new local permission contract better than the earlier fixture. The three historical recovery test failures remain real evidence for the **earlier SHA** and cannot be marked resolved until this newer SHA's exact-head Rust and consensus tests pass. Keep explicit revoked and 0-MiB negative scenarios; do not re-enable old unsafe fallback. Shipping still lacks user-facing consent and canonical signed policy activation.
+
+### QA-NEW-014 — Evidence integrity is not player authenticity
+
+Agent 05 evidence.py requires expected player/stage media slots, distinct hashes, size limits and magic bytes, plus a stable digest of the reviewed manifest. This improves file integrity against substitutions, reused images and missing slots. It cannot prove a specific image/video was recorded from a real installed Tauri/Minecraft client, a different ISP, that a server recovered, or that the reviewer is independent. Signed native state, transport traces, real in-world marker and human observation remain separate gates.
+
+**Independent verdict remains BLOCKED for all current engineering integration; research-only NO-GO may be accepted separately after review and required CI.** Any later PR push invalidates earlier tested-SHA certification.
