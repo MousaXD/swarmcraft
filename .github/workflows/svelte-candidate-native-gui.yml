@@ -121,8 +121,10 @@ jobs:
           done
           echo "binary=$app" >> "$GITHUB_ENV"
           echo "commit=$GITHUB_SHA" > "${{ runner.temp }}/svelte-evidence/commit.txt"
-      - name: Check fail-closed native WebDriver observation tests
-        run: python3 -m unittest discover -s scripts/acceptance -p 'test_packaged_desktop_webdriver.py'
+      - name: Check fail-closed native WebDriver and sanitized Svelte stage evidence
+        run: |
+          python3 -m unittest discover -s scripts/acceptance -p 'test_packaged_desktop_webdriver.py'
+          python3 -m unittest discover -s apps/desktop/frontend/scripts -p 'test_visual_failure_evidence.py'
       - name: Real installed Svelte GUI first launch, create, restart and persistence
         shell: bash
         env:
