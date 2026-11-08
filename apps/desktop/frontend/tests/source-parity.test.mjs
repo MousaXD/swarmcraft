@@ -363,3 +363,21 @@ test('Svelte identity diagnostics use genuine typed Rust IPC without duplicate l
   assert.ok(types.includes('node_identity: { args: Record<string, never>; result: string }'));
   assert.doesNotMatch(identity, /error:\s*String\(error\)|error:\s*error\.message/, 'never expose raw native errors');
 });
+
+test('native visual failures emit only stage, class and allowlisted UI observations', async () => {
+  const [script, workflow, regression] = await Promise.all([
+    source('../scripts/visual-window-acceptance.py'),
+    source('../../../../.github/workflows/svelte-candidate-native-gui.yml'),
+    source('../scripts/test_visual_failure_evidence.py'),
+  ]);
+  assert.ok(script.includes("'failure.json'"));
+  assert.ok(script.includes("'stage': CURRENT_STAGE"));
+  assert.ok(script.includes("'category': category"));
+  assert.ok(script.includes("'ui': CURRENT_UI_STATE"));
+  assert.ok(script.includes('SAFE_BOOL_KEYS'));
+  assert.ok(script.includes('SAFE_INT_KEYS'));
+  assert.ok(script.includes('failure_category(error)'));
+  assert.doesNotMatch(script, /failure\.json[^\n]*String\(error\)|write_text\(str\(error\)\)/);
+  assert.ok(workflow.includes("test_visual_failure_evidence.py"));
+  assert.ok(regression.includes('scinvite:secret-private-token'));
+});
