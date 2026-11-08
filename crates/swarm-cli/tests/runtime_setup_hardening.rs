@@ -142,6 +142,7 @@ fn fixture(root: PathBuf) -> RuntimeFixture {
     epoch.signature = identity.sign(&epoch.signing_bytes().unwrap());
     storage.save_epoch_record(&epoch).unwrap();
 
+    swarm_cli::hosting_budget::set_contribution(&paths, world, 512).unwrap();
     RuntimeFixture {
         paths,
         storage,
