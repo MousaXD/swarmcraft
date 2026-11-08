@@ -339,6 +339,9 @@ fn expected_host_claim(claim: &SignedHostContributionClaimV1) -> ExpectedHostCon
         epoch: claim.epoch,
         fencing_token: claim.fencing_token,
         snapshot_hash: claim.snapshot_hash,
+        // The verifier's outstanding challenge pins these independently of the received claim.
+        expected_consent_revision: 1,
+        expected_selected_heap_mib: 2_048,
         challenge_nonce: claim.challenge_nonce,
         now_unix_ms: 1500,
     }
@@ -398,6 +401,32 @@ fn host_claim_must_bind_challenge_policy_head_peer_and_epoch() {
     expected = expected_host_claim(&claim);
     expected.snapshot_hash = Hash32([4; 32]);
     assert!(claim.verify_for_challenge(&expected, test_signature, |_| true).is_err());
+    expected = expected_host_claim(&claim);
+    expected.expected_consent_revision += 1;
+    assert!(claim.verify_for_challenge(&expected, test_signature, |_| panic!("stale consent may not consume nonce")).is_err());
+    expected = expected_host_claim(&claim);
+    expected.expected_selected_heap_mib += 512;
+    assert!(claim.verify_for_challenge(&expected, test_signature, |_| panic!("wrong heap may not consume nonce")).is_err());
+}
+
+#[test]
+fn host_claim_cannot_reuse_challenge_after_consent_or_heap_changes() {
+    let f = Fixture::new();
+    let original = signed_host_claim(&f);
+    let expected = expected_host_claim(&original);
+    let mut stale_revision = original.clone();
+    stale_revision.consent_revision += 1;
+    // The fake verifier accepts the unchanged test signature, so this fails
+    // specifically because the challenge pins the previously accepted revision.
+    assert!(stale_revision
+        .verify_for_challenge(&expected, test_signature, |_| panic!("changed consent may not consume nonce"))
+        .is_err());
+    let mut changed_heap = original.clone();
+    changed_heap.selected_heap_mib += 512;
+    assert!(changed_heap
+        .verify_for_challenge(&expected, test_signature, |_| panic!("changed heap may not consume nonce"))
+        .is_err());
+    assert!(original.verify_for_challenge(&expected, test_signature, |_| true).is_ok());
 }
 
 #[test]
