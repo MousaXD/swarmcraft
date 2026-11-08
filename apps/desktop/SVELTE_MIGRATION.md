@@ -70,3 +70,7 @@ The dependency-lock artifact from GitHub Actions run `42468369672` was downloade
 ## Typed world actions
 
 `frontend/src/lib/world-actions.ts` now stages typed create/import/join/invite actions using the existing Rust IPC request shapes and frontend validation. It preserves explicit third-party mod declarations, carries no EULA flag for imports, rejects missing canonical IDs instead of inventing success, prevents concurrent duplicate actions, and leaves signed membership, authority and compatibility decisions to Rust. Seven Vitest cases cover payload parity, errors and duplicate attempts. Actual Svelte form binding and installed-GUI acceptance are pending.
+
+## Native candidate certification (separate from shipping)
+
+A dedicated candidate-only workflow `.github/workflows/svelte-candidate-native-gui.yml` now builds the Svelte `dist` using the committed npm lockfile and packages an actual Tauri Linux Debian installer with the ephemeral `frontend/tauri.candidate.conf.json` overlay. That overlay changes **only** `build.frontendDist`; the production `src-tauri/tauri.conf.json`, four Rust sidecars, CSP and release gates remain untouched. The workflow reuses #83's unmocked installed WebKitGTK/WebDriver first-launch/create/restart/persistence acceptance and a missing-sidecar negative control. A passing check is required before proposing a production cutover. Do not represent a queued/unrun workflow as passing evidence.

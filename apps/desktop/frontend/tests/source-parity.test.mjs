@@ -59,3 +59,17 @@ test('typed frontend IPC table exactly matches every Rust Tauri-registered comma
   assert.deepEqual(new Set(typed), new Set(commands));
   assert.equal(new Set(typed).size, typed.length, 'No duplicate command definitions');
 });
+
+
+test('candidate native Tauri overlay is limited to the tested frontend directory', async () => {
+  const [override, native] = await Promise.all([
+    source('../tauri.candidate.conf.json'),
+    source('../../src-tauri/tauri.conf.json'),
+  ]);
+  assert.deepEqual(JSON.parse(override), { build: { frontendDist: '../frontend/dist' } });
+  const config = JSON.parse(native);
+  assert.equal(config.build.frontendDist, '../src');
+  assert.equal(config.app.withGlobalTauri, true);
+  assert.equal(config.bundle.externalBin.length, 4);
+  assert.ok(config.app.security.csp.includes("connect-src ipc:"));
+});

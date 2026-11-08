@@ -1,0 +1,174 @@
+# Issue #87 candidate-only installed Tauri validation.
+# Never replaces shipping tauri.conf.json or existing release gates.
+name: Svelte candidate native GUI (Linux/WebKitGTK)
+
+on:
+  push:
+    branches:
+      - agent-04/svelte-typescript-desktop
+    paths:
+      - 'apps/desktop/frontend/**'
+      - 'apps/desktop/src/**'
+      - 'apps/desktop/tests/**'
+      - '.github/workflows/svelte-candidate-native-gui.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: svelte-candidate-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-svelte-gui:
+    name: Candidate installed Debian GUI / unmocked Tauri IPC
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    env:
+      WEBKIT_DISABLE_DMABUF_RENDERER: '1'
+      WEBKIT_DISABLE_COMPOSITING_MODE: '1'
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      GDK_BACKEND: x11
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.16.0'
+          cache: npm
+          cache-dependency-path: apps/desktop/frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-05
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+      - name: Install WebKitGTK build dependencies and native driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libwebkit2gtk-4.1-0 libayatana-appindicator3-dev libappindicator3-dev librsvg2-dev patchelf webkit2gtk-driver xvfb
+          command -v WebKitWebDriver
+      - name: Reject accidental production configuration override
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          base = json.loads(Path('apps/desktop/src-tauri/tauri.conf.json').read_text())
+          override = json.loads(Path('apps/desktop/frontend/tauri.candidate.conf.json').read_text())
+          assert base['build']['frontendDist'] == '../src', 'shipping frontend changed without Agent 00 approval'
+          assert override == {'build': {'frontendDist': '../frontend/dist'}}, 'test overlay must override only frontendDist'
+          assert base['app']['withGlobalTauri'] is True
+          assert len(base['bundle']['externalBin']) == 4
+          print('Candidate overlay changes ONLY the frontendDist; native bundle/security settings are inherited')
+          PY
+      - name: Check frontend parity, type safety and reproducible build
+        working-directory: apps/desktop/frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npm run test:source
+          npm run check
+          npm run test
+          npm run build
+          test -s dist/index.html
+          test -s dist/bootstrap.js
+          test -s dist/runtime-wizard.css
+          test -s dist/player-experience.css
+          find dist -type f -printf '%P %s bytes\n' | sort | tee bundle-sizes.txt
+      - name: Verify Rust Desktop lockfile
+        run: cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --format-version 1 > /dev/null
+      - name: Build exact-commit native sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p swarm-cli --locked
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          for sidecar in swarmcraft swarmcraft-host swarmcraft-runtime swarmcraft-import; do
+            cp "target/release/$sidecar" "apps/desktop/src-tauri/binaries/$sidecar-$target"
+            "apps/desktop/src-tauri/binaries/$sidecar-$target" --version
+          done
+      - name: Install pinned native Tauri and WebDriver CLIs
+        run: |
+          cargo install tauri-cli --version 2.11.4 --locked
+          cargo install tauri-driver --version 2.1.0 --locked
+      - name: Build candidate Svelte Debian installer with temporary config overlay
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo tauri build --bundles deb --ci --config frontend/tauri.candidate.conf.json
+          test -n "$(find src-tauri/target/release/bundle/deb -name '*.deb' -type f -print -quit)"
+      - name: Extract installed candidate and verify real sidecars and compiled frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/svelte-installed" "${{ runner.temp }}/svelte-evidence"
+          deb="$(find apps/desktop/src-tauri/target/release/bundle/deb -name '*.deb' -type f -print -quit)"
+          test -n "$deb"
+          sha256sum "$deb" > "${{ runner.temp }}/svelte-evidence/package.sha256"
+          dpkg-deb -x "$deb" "${{ runner.temp }}/svelte-installed"
+          app="${{ runner.temp }}/svelte-installed/usr/bin/swarmcraft-desktop"
+          test -x "$app"
+          for sidecar in swarmcraft swarmcraft-host swarmcraft-runtime swarmcraft-import; do
+            path="${{ runner.temp }}/svelte-installed/usr/bin/$sidecar"
+            test -x "$path"
+            timeout 15s "$path" --version >/dev/null
+          done
+          echo "binary=$app" >> "$GITHUB_ENV"
+          echo "commit=$GITHUB_SHA" > "${{ runner.temp }}/svelte-evidence/commit.txt"
+      - name: Check fail-closed native WebDriver observation tests
+        run: python3 -m unittest discover -s scripts/acceptance -p 'test_packaged_desktop_webdriver.py'
+      - name: Real installed Svelte GUI first launch, create, restart and persistence
+        shell: bash
+        env:
+          SWARMCRAFT_DATA_DIR: ${{ runner.temp }}/svelte-positive-data
+          HOME: ${{ runner.temp }}/svelte-positive-home
+          XDG_DATA_HOME: ${{ runner.temp }}/svelte-positive-xdg
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME" "$XDG_DATA_HOME"
+          xvfb-run -a -s '-screen 0 1280x1024x24' timeout 240s python3 scripts/acceptance/packaged-desktop-webdriver.py \
+            --binary "$binary" --artifacts "${{ runner.temp }}/svelte-evidence/positive"
+      - name: Negative control — missing required installed CLI sidecar must visibly fail
+        shell: bash
+        env:
+          SWARMCRAFT_DATA_DIR: ${{ runner.temp }}/svelte-negative-data
+          HOME: ${{ runner.temp }}/svelte-negative-home
+          XDG_DATA_HOME: ${{ runner.temp }}/svelte-negative-xdg
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME" "$XDG_DATA_HOME"
+          sidecar="${{ runner.temp }}/svelte-installed/usr/bin/swarmcraft"
+          mv "$sidecar" "$sidecar.disabled"
+          trap 'mv "$sidecar.disabled" "$sidecar"' EXIT
+          if xvfb-run -a -s '-screen 0 1280x1024x24' timeout 120s python3 scripts/acceptance/packaged-desktop-webdriver.py \
+             --binary "$binary" --artifacts "${{ runner.temp }}/svelte-evidence/negative-control"; then
+            echo 'BROKEN: candidate GUI acceptance passed without a required installed sidecar' >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          state = json.loads((Path(os.environ['RUNNER_TEMP'])/'svelte-evidence/negative-control/last-state.json').read_text())
+          assert (state['startup']=='failed' and state['error'] and
+                  state['status']=='Startup failed' and state['retryVisible']), (
+              'Missing-sidecar control must prove a visible failure and retry'
+          )
+          print('PASS: candidate native GUI visibly fails closed with a missing sidecar')
+          PY
+      - name: Upload exact-SHA native candidate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: svelte-native-gui-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/svelte-evidence/
+            apps/desktop/frontend/bundle-sizes.txt
+          if-no-files-found: warn
+          retention-days: 14
