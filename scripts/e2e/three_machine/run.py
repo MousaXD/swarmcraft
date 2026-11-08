@@ -228,6 +228,17 @@ def verify(c, output, review_file=None):
             "bob_client_missing_after_join")
     require(stages["carol_joined"]["carol"]["minecraft_client_process_observed"],
             "carol_client_missing_after_join")
+    # An unconsented third player can stay in quorum/storage but must never
+    # turn into a host, even briefly during the intermediate network stages.
+    for name in tuple(STAGES)[2:]:
+        if "carol" not in stages[name]:
+            continue
+        carol = stages[name]["carol"]
+        consent = carol.get("hosting_consent")
+        require(isinstance(consent, dict) and consent.get("available") is True and
+                consent.get("enabled") is False and consent.get("heap_mib") == 0 and
+                not carol["minecraft_server_process_observed"],
+                "carol_player_only_role_violated_" + name)
     # Observed runtime transport state must agree with the independent
     # reviewer. A configured relay, unverified NAT label or SSH reachability
     # cannot count as a selected libp2p transport.
@@ -245,6 +256,9 @@ def verify(c, output, review_file=None):
     a, b, d = p["alice"], p["bob"], p["carol"]
     require(len({v["identity_fingerprint"] for v in p.values()}) == 3, "duplicate_player_identity")
     require(all(x["authorized_peers"] == 3 for x in p.values()), "signed_three_member_quorum_missing")
+    require(len({(x["epoch"], x["fencing_token"]) for x in p.values()}) == 1 and
+            a["epoch"] is not None and a["fencing_token"] is not None,
+            "checkpoint_generation_not_agreed")
     require(all(x["snapshot_hash"] and x["state_root"] for x in p.values()), "checkpoint_hash_missing")
     require(len({x["snapshot_hash"] for x in p.values()}) == 1 and
             len({x["state_root"] for x in p.values()}) == 1, "checkpoint_not_replicated")
@@ -266,7 +280,8 @@ def verify(c, output, review_file=None):
             "alice_real_java_heap_not_bounded_by_consent")
     require(not b["minecraft_server_process_observed"] and not d["minecraft_server_process_observed"],
             "parallel_authority_runtimes_before_crash")
-    require(a["safe_to_shutdown"] and a["successor_fingerprint"] == b["identity_fingerprint"],
+    require(a["host_readiness_state"] == "safe" and a["safe_to_shutdown"] and
+            a["successor_fingerprint"] == b["identity_fingerprint"],
             "bob_not_verified_successor_or_no_surviving_quorum")
     require(all(x["desktop_process_observed"] and x["minecraft_client_process_observed"] for x in p.values()),
             "installed_gui_or_real_client_not_observed")
