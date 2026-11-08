@@ -218,6 +218,30 @@ fn manual_runtime_files(temp: &Path, minecraft: &str, loader: &str) -> (PathBuf,
 }
 
 #[tokio::test]
+async fn revoked_host_budget_denies_direct_launch_before_changing_signed_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fixture(temp.path().join("peer"));
+    swarm_cli::hosting_budget::set_contribution(&fixture.paths, fixture.world, 0).unwrap();
+
+    let error = run_authority_runtime(
+        &fixture.paths,
+        &fixture.storage,
+        HostOptions {
+            world: fixture.world,
+            java: temp.path().join("java-must-not-run"),
+            server_jar: temp.path().join("server-must-not-run.jar"),
+            mod_jar: temp.path().join("fabric-must-not-run.jar"),
+            accept_eula: true,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("consent"), "unexpected admission error: {error}");
+    assert_eq!(canonical_hash(&fixture), fixture.baseline_hash);
+    assert!(!runtime_dir(&fixture).exists(), "revoked budget must block runtime reset/launch");
+}
+
+#[tokio::test]
 async fn eula_rejection_never_launches_or_replaces_existing_runtime() {
     let temp = tempfile::tempdir().unwrap();
     let fixture = fixture(temp.path().join("peer"));
