@@ -50,7 +50,7 @@ def record_ui(observed: dict | None) -> None:
             CURRENT_UI_STATE[key] = value
         elif key in SAFE_INT_KEYS and type(value) is int and 0 <= value <= 100_000:
             CURRENT_UI_STATE[key] = value
-        elif key == 'startup' and value in SAFE_STARTUP:
+        elif key == 'startup' and isinstance(value, str) and value in SAFE_STARTUP:
             CURRENT_UI_STATE[key] = value
 
 
@@ -333,9 +333,9 @@ def main():
             'stage': CURRENT_STAGE,
             'category': category,
             'ui': CURRENT_UI_STATE,
-        }, indent=2) + '\\n')
+        }, indent=2) + '\n')
         (args.artifacts / 'failure.txt').write_text(
-            f'{CURRENT_STAGE}: {category}\\n'
+            f'{CURRENT_STAGE}: {category}\n'
         )
         print(f'FAIL: installed candidate stage {CURRENT_STAGE}: {category}', file=sys.stderr)
         raise SystemExit(1) from None
