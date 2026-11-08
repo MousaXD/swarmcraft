@@ -1,6 +1,7 @@
 <script lang="ts">
   import { nativeWorldActions } from '../lib/native-world-actions';
   import { WorldFormError } from '../lib/world-actions';
+  import { resolveSignedDiscovery, formatDiscoveryResult, discoveryUnavailable } from '../lib/discovery';
 
   let inviteInput: HTMLTextAreaElement | undefined;
   let worldIdInput: HTMLInputElement | undefined;
@@ -41,9 +42,10 @@
     }
   }
 
-  // This is only an informational discovery hint. As in the old frontend,
-  // it never sends a join request or confers signed membership.
-  function checkWorldId() {
+  // Resolve the signed announcement through Rust. Discovery never joins.
+  let resolvingWorldId = $state(false);
+  async function checkWorldId() {
+    if (resolvingWorldId) return;
     const world = worldIdInput?.value.trim() ?? '';
     if (!world) {
       worldIdNotice = 'Enter a World ID first.';
@@ -51,13 +53,20 @@
       worldIdInput?.focus();
       return;
     }
-    const message = 'Discovery can look for ' + world
-      + ', but it does not grant membership. A private world still needs a signed invite.';
-    worldIdNotice = message;
+    resolvingWorldId = true;
+    worldIdNotice = 'Checking the signed discovery announcement…';
     worldIdTone = 'neutral';
-    window.__swarmcraftSvelteActivity?.append(
-      new Date().toLocaleTimeString() + '  World discovery\n' + message,
-    );
+    try {
+      const display = formatDiscoveryResult(await resolveSignedDiscovery(world));
+      worldIdNotice = display.message;
+      worldIdTone = display.tone;
+    } catch {
+      const display = discoveryUnavailable();
+      worldIdNotice = display.message;
+      worldIdTone = display.tone;
+    } finally {
+      resolvingWorldId = false;
+    }
   }
 </script>
 
@@ -89,7 +98,7 @@
               <div class="inline-field">
                 <label for="joinWorldId">World ID</label>
                 <input id="joinWorldId" bind:this={worldIdInput} class="machine-input" placeholder="scworld:…" />
-                <button id="joinWorldIdButton" class="button button-secondary" type="button" onclick={checkWorldId}>Check</button>
+                <button id="joinWorldIdButton" class="button button-secondary" type="button" onclick={checkWorldId} disabled={resolvingWorldId} aria-busy={resolvingWorldId}>Check</button>
               </div>
               <div id="joinWorldIdNotice" class="inline-notice" role="status" data-tone={worldIdTone} hidden={!worldIdNotice}>{worldIdNotice}</div>
             </details>
