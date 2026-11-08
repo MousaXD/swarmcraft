@@ -185,7 +185,7 @@ pub fn local_runtime_readiness(
     paths: &DataPaths,
     world: WorldId,
     compatibility_fingerprint: Hash32,
- ) -> Result<HostRuntimeReadinessV1> {
+) -> Result<HostRuntimeReadinessV1> {
     // This peer cannot be an authority successor without live local consent
     // and capacity, even if an older Fabric runtime verification is still valid.
     if hosting_budget::require_contribution(paths, world).is_err() {
