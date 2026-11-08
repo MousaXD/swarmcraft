@@ -496,7 +496,7 @@ fn player_only_target_rejects_transfer_before_publishing_any_signed_transfer_sta
     let bob = peer(temp.path().join("bob-player-only"));
     let source = temp.path().join("player-only-transfer-source");
     fs::create_dir_all(&source).unwrap();
-    fs::write(source.join("level.dat"), b"player-only-transfer\\n").unwrap();
+    fs::write(source.join("level.dat"), b"player-only-transfer\n").unwrap();
     let shared = initialize_two_peer_world(&alice, &bob, &source);
     save_sleep(&alice, shared.world);
     let original_epoch = bob.storage.load_epoch_record(shared.world).unwrap();
@@ -506,9 +506,9 @@ fn player_only_target_rejects_transfer_before_publishing_any_signed_transfer_sta
     swarm_cli::hosting_budget::set_contribution(&bob.paths, shared.world, 0).unwrap();
     let prepared =
         match prepare_manual_transfer(&alice.paths, &alice.storage, shared.world, bob.identity.peer_id()).unwrap() {
-        TransferPrepareResult::Prepared(token) => token,
-        TransferPrepareResult::CheckpointRequested => panic!("sleeping source is already checkpointed"),
-    };
+            TransferPrepareResult::Prepared(token) => token,
+            TransferPrepareResult::CheckpointRequested => panic!("sleeping source is already checkpointed"),
+        };
     let error = accept_manual_transfer(&bob.paths, &bob.storage, shared.world, &prepared).unwrap_err();
     assert!(error.to_string().contains("hosting consent was withdrawn"), "{error}");
     assert!(bob.storage.load_transfer_record(shared.world).is_err());
