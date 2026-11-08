@@ -164,3 +164,24 @@ test('deliberately broken Svelte entry must retain classic watchdog and use a se
   assert.ok(nativeWorkflow.includes("state['startup'] == 'failed'"));
   assert.ok(nativeWorkflow.includes("state['retryVisible']"));
 });
+
+
+test('candidate bootstrap retains a visible fail-closed status without loading Svelte', async () => {
+  const [html, guard, css, entry] = await Promise.all([
+    source('../index.html'),
+    source('../public/candidate-startup-guard.js'),
+    source('../public/candidate-startup.css'),
+    source('../src/main.ts'),
+  ]);
+  assert.match(html, /id="bootstrapFallback"/);
+  assert.match(html, /src="\/bootstrap.js"/);
+  assert.match(html, /src="\/candidate-startup-guard.js"/);
+  assert.match(html, /href="\/candidate-startup.css"/);
+  assert.ok(guard.includes("document.documentElement.dataset.swarmcraftStartup !== 'failed'"));
+  assert.ok(guard.includes("document.querySelector('script[type=\"module\"]')"));
+  assert.ok(guard.includes("status.textContent = 'Startup failed'"));
+  assert.ok(guard.includes("fallback.replaceChildren(status)"));
+  assert.ok(guard.includes("startup.fail('module-load'"));
+  assert.ok(entry.includes("document.getElementById('bootstrapFallback')?.remove()"));
+  assert.match(css, /#startupFailure #retryStartup/);
+});

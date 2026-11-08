@@ -37,3 +37,7 @@ The new Svelte Create, Join and Import forms use exact Rust command names and a 
 A production cutover additionally needs Agent 00 approval for `src-tauri/tauri.conf.json` (`build.frontendDist`), tightly coordinated workflow changes so Vite runs before every package build, unchanged CSP/sidecars, real installed WebKitGTK acceptance, missing-sidecar negative control, and documented Windows/macOS package builds. These changes are **not** made here.
 
 Never replace a missing action with a placeholder or claim UI completeness based on compilation. The majority of rich desktop behaviors remain delegated to old JavaScript modules. Migrate each with contract tests and installed-GUI evidence; do not replace a working action with a placeholder.
+
+### Failure before Svelte can render
+
+A classic candidate startup guard and minimal static fallback DOM/CSS ensure a broken or missing Vite module still produces `Startup failed` and a clickable retry, rather than a blank WebKitGTK window. PR #88's original `bootstrap.js` is copied verbatim and continues to own the failure state. Do not remove the fallback until the native deliberately-damaged installer test remains green.

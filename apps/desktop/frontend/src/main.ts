@@ -8,3 +8,6 @@ import '../../src/runtime-wizard.css';
 const target = document.getElementById('app');
 if (!target) throw new Error('SwarmCraft desktop mount target is missing.');
 mount(App, { target });
+// Remove only after the Svelte component tree has mounted. A missing module
+// never reaches this line, so the classic watchdog can show a real fallback.
+document.getElementById('bootstrapFallback')?.remove();

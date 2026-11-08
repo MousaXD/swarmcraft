@@ -4,10 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SwarmCraft</title>
-    <!-- Runs before any ES module: PR #88 native startup failure must remain visible. -->
+    <!-- The classic PR #88 watchdog is unchanged. The candidate guard also
+         ensures a visible status UI exists if the Svelte module never mounts. -->
+    <link rel="stylesheet" href="/candidate-startup.css" />
     <script src="/bootstrap.js" defer></script>
+    <script src="/candidate-startup-guard.js" defer></script>
   </head>
   <body>
+    <div id="bootstrapFallback" role="status" aria-live="polite">
+      <span>Starting SwarmCraft desktop interface…</span>
+    </div>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
