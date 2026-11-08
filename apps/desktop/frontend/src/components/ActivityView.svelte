@@ -7,6 +7,6 @@
               </div>
               <button id="clearActivity" class="button button-subtle button-small" type="button">Clear</button>
             </div>
-            <pre id="output" class="activity-console" tabindex="0" aria-label="Activity log">SwarmCraft is starting.</pre>
+            <pre id="output" class="activity-console" role="textbox" aria-readonly="true" aria-multiline="true" tabindex="0" aria-label="Activity log">SwarmCraft is starting.</pre>
           </div>
         </section>
