@@ -56,6 +56,35 @@ class TestSanitizedDiagnostics(unittest.TestCase):
             self.assertEqual(node.connectivity_summary(temp), {"available": False})
 
 
+class TestCanonicalSnapshotHeadEvidence(unittest.TestCase):
+    WORLD = "ab" * 32
+
+    def test_reads_exact_swarm_storage_canonical_head_bytes(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as temp:
+            head = (Path(temp) / "worlds" / self.WORLD / "metadata" /
+                    "canonical-snapshot-head.postcard")
+            head.parent.mkdir(parents=True)
+            actual = b"\\x01" * 80
+            head.write_bytes(actual)
+            self.assertEqual(node.canonical_head_digest(temp, self.WORLD),
+                             hashlib.sha256(actual).hexdigest())
+            head.write_bytes(b"")
+            self.assertIsNone(node.canonical_head_digest(temp, self.WORLD))
+            head.write_bytes(b"a" * 20000)
+            self.assertIsNone(node.canonical_head_digest(temp, self.WORLD))
+
+    def test_canonical_head_symlink_is_never_accepted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            head = root / "worlds" / self.WORLD / "metadata" / "canonical-snapshot-head.postcard"
+            head.parent.mkdir(parents=True)
+            secret = root / "outside.postcard"
+            secret.write_bytes(b"b" * 80)
+            head.symlink_to(secret)
+            self.assertIsNone(node.canonical_head_digest(temp, self.WORLD))
+
+
 class TestRealHostBudgetEvidence(unittest.TestCase):
     WORLD = "ab" * 32
     PEER = "scpeer:" + "cd" * 32
