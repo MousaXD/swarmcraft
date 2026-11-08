@@ -51,6 +51,11 @@ python3 scripts/e2e/three_machine/ops.py provision --config "$CONFIG" \
   --confirm INSTALL-THREE-REAL-TEST-MACHINES
 ```
 
+The remote preflight reads the Debian `Package` and `Version` control
+fields separately, matching `dpkg-deb`'s actual single-field format. Querying
+both fields in one command produces labeled lines and is not equivalent;
+negative tests reject those ambiguous/multiline values.
+
 The command fails if the local or remote SHA differs from the expected
 candidate package. If one host fails, provision.json records which earlier
 hosts were installed; it deliberately does not attempt unsafe uninstall
@@ -91,8 +96,14 @@ Java executable with a -jar command. This prevents unrelated processes from
 standing in as player/host proof.
 
 Update process IDs after a restart or takeover; false, missing or wrong PIDs
-must fail. Process presence is auxiliary evidence, not proof of a successful
-Minecraft login, join or gameplay. All ten phase captures must happen
+must fail. Each Minecraft client PID is now checked against its actual Java
+executable and a supported Fabric launch entrypoint (KnotClient or a
+Fabric-loader-backed PrismLauncher entrypoint). A process merely named
+`minecraft` or a Java server cannot masquerade as a third player. Unsupported
+launchers fail closed until their real provenance is independently reviewed
+and a narrowly tested adapter is added. Process presence is auxiliary
+evidence, not proof of a successful Minecraft login, join or gameplay.
+All ten phase captures must happen
 **in their real chronological order**; the harness does not fabricate them.
 
 ```bash
