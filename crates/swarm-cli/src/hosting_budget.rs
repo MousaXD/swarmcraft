@@ -453,6 +453,7 @@ mod tests {
         let admission = admit(&paths, world).unwrap();
         assert_eq!(first, *admission.consent());
         set_contribution(&paths, world, 0).unwrap();
+        assert!(revalidate_admission(&paths, world, &admission).is_err());
         assert!(runtime_withdrawal(&paths, world, admission.consent()).unwrap().is_some());
         drop(admission);
         assert!(admit(&paths, world).is_err());
