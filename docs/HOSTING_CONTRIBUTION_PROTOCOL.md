@@ -57,6 +57,20 @@ protocol-only PR.
   record. Disabled **requires 0 MiB**. Enabled requires 512–1,048,576 MiB.
   `supersedes` requires a strictly increasing revision on the same
   device identity and world; never accept remote consent as local consent.
+- `SignedHostContributionClaimV1` is an **inert, future-negotiated**
+  peer freshness claim with `format_version`, world, member peer/public key,
+  accepted policy hash, epoch, fencing token, snapshot hash, local consent
+  revision, claimed selected heap, sampled/expiration timestamps, a
+  **recipient-issued unpredictable 32-byte nonce** and Ed25519 signature.
+  `ExpectedHostContributionClaimV1` binds the exact expected canonical
+  world/policy/head/nonce and the receiver's current time.
+  `verify_for_challenge` checks domain-separated canonical signing bytes,
+  signature, identity, exact challenge/head/policy and a maximum **30-second
+  lifetime**, rejecting expired/future claims. It does not prove free RAM,
+  policy activation, signed quorum, a trusted world-member vote, or an actual
+  running JVM. Clock skew can cause rejection; fail closed and re-challenge.
+  It is **not** added to `PeerHelloV1`, `HostCapabilityV1` or any network
+  message in this PR. Older clients cannot use it to gain authority.
 - `HostingPolicyActivationV1::NotEnforced` is the only presently legal
   state. `Enforced { accepted_policy_hash }` is reserved for a future
   canonical migration that commits that exact record and excludes legacy
