@@ -62,9 +62,14 @@ def preflight(a):
     pkg, version = meta.stdout.splitlines()
     installed = run(["dpkg-query", "-W", "-f=\x24{Status} \x24{Version}", pkg])
     owner = run(["dpkg-query", "-S", str(binary)])
+    cli_owner = run(["dpkg-query", "-S", str(cli)])
     if (installed.returncode or installed.stdout.strip() != "install ok installed " + version
-            or owner.returncode or not owner.stdout.startswith(pkg + ":")):
+            or owner.returncode or not owner.stdout.startswith(pkg + ":")
+            or cli_owner.returncode or not cli_owner.stdout.startswith(pkg + ":")):
         fail("package_not_installed")
+    profile = Path(a.data_dir)
+    if profile.exists() and any(profile.iterdir()):
+        fail("preflight_requires_fresh_profile")
     machine_id = Path("/etc/machine-id").read_text().strip()
     if not machine_id:
         fail("machine_id_missing")
@@ -138,7 +143,7 @@ def capture(a):
         "host_readiness_state": r.get("state") if isinstance(r.get("state"), str) else None,
         "safe_to_shutdown": r.get("safe_to_shutdown") is True,
         "desktop_process_observed": observed(a.desktop_pid, ("swarmcraft-desktop",)),
-        "minecraft_client_process_observed": observed(a.client_pid, ("minecraft", "java")),
+        "minecraft_client_process_observed": observed(a.client_pid, ("minecraft", "knotclient", "net.fabricmc.loader.impl.launch.knot.knotclient")),
         "minecraft_server_process_observed": observed(a.server_pid, ("java",)),
     }
 
