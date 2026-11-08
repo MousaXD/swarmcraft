@@ -64,6 +64,20 @@ def run(binary: Path, artifacts: Path):
     with native.Application(binary, artifacts) as app:
         ready = native.await_ready(app, artifacts)
         assert ready["startup"] in ("ready", "degraded"), "Native candidate startup not complete"
+        # The preceding real packaged GUI acceptance creates a world. Ensure
+        # that Create World was actually owned by the Svelte handler rather
+        # than coincidentally passing through the legacy fallback.
+        create_owner = app.execute("""
+          return {
+            form: document.getElementById('createForm')?.dataset.journeyOwner,
+            active: window.__swarmcraftSvelteCreateOwned === true,
+            bridge: typeof window.__swarmcraftAfterSvelteCreate === 'function',
+          };
+        """)
+        assert (create_owner["form"] == "svelte" and create_owner["active"]
+                and create_owner["bridge"]), (
+            "Svelte native Create World ownership/handoff not active in installed app"
+        )
         app.click("#navWorlds")
         app.click("#worldCards .world-row")
         for width, height in ((980, 760), (720, 560)):
