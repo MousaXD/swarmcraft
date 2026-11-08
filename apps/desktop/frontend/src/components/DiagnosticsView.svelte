@@ -6,9 +6,15 @@
   const controller = createIdentityController(() => nativeBridge().invoke('node_identity', {}));
   const identityState = controller.state;
 
+  // A named method avoids optional TypeScript arrow parameters in the
+  // component's SSR transform while preserving the typed legacy bridge.
+  function publishIdentity(value: string, source: IdentitySource = 'identity'): boolean {
+    return controller.publishLegacy(value, source);
+  }
+
   onMount(() => {
     const original = window.__swarmcraftSvelteIdentity;
-    const bridge = { publish: (value: string, source?: IdentitySource) => controller.publishLegacy(value, source) };
+    const bridge = { publish: publishIdentity };
     window.__swarmcraftSvelteIdentity = bridge;
     return () => {
       if (window.__swarmcraftSvelteIdentity === bridge) {
