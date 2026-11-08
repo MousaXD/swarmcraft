@@ -123,9 +123,28 @@ class TestFailClosed(unittest.TestCase):
                 "package_version": "0.5.0",
                 "app_installed": True,
                 "cli_installed": True,
+                "all_required_sidecars_installed": True,
                 "os": "linux",
             }):
                 with self.assertRaisesRegex(gate.Blocked, "external_networks_not_independent"):
+                    gate.preflight(c, Path(temp))
+
+    def test_preflight_rejects_missing_sidecar(self):
+        with tempfile.TemporaryDirectory() as temp:
+            c = config()
+            def probe(cfg, role, operation):
+                return {
+                    "machine_fingerprint": role,
+                    "egress_fingerprint": role,
+                    "package_sha256": SHA,
+                    "package_version": "0.5.0",
+                    "app_installed": True,
+                    "cli_installed": True,
+                    "all_required_sidecars_installed": role != "carol",
+                    "os": "linux",
+                }
+            with patch.object(gate, "remote", side_effect=probe):
+                with self.assertRaisesRegex(gate.Blocked, "installed_linux_package_required"):
                     gate.preflight(c, Path(temp))
 
     def test_synthetic_state_cannot_pass_without_real_player_review(self):
