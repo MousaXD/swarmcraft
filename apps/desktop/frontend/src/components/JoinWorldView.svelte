@@ -19,15 +19,19 @@
     }
     busy = true;
     error = '';
+    let nativeSucceeded = false;
     try {
       // The Rust command verifies the entire signed invite and membership.
       // Neither the plaintext invite nor signing material is logged here.
       const response = await nativeWorldActions().join(inviteInput?.value ?? '');
+      nativeSucceeded = true;
+      // Clear an accepted signed token before refreshing; a display failure
+      // must never encourage resubmitting a completed membership request.
+      if (inviteInput) inviteInput.value = '';
       const match = String(response).match(/World ID:\s*(scworld:[^\s]+)/);
       // A valid Rust join can succeed without an ID in older CLI output:
       // still refresh the actual world list, never fabricate a membership.
       await window.__swarmcraftAfterSvelteJoin(match?.[1] ?? '');
-      if (inviteInput) inviteInput.value = '';
     } catch (failure) {
       if (failure instanceof WorldFormError) {
         error = failure.message;
@@ -35,7 +39,9 @@
       } else {
         // Preserve the sensitive invite in the input for deliberate retry,
         // but never repeat it or native argument values in an error banner.
-        error = 'Could not complete the join. Check the invite and networking, then refresh Worlds before retrying in case the request succeeded.';
+        error = nativeSucceeded
+          ? 'Signed membership was accepted, but the world list could not refresh. Refresh Worlds; do not submit that invite again.'
+          : 'Join could not be confirmed. Check the invite and networking, then refresh Worlds before retrying.';
       }
     } finally {
       busy = false;
