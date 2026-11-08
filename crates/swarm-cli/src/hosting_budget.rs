@@ -1,6 +1,6 @@
 //! Machine-local, fail-closed hosting consent and conservative memory admission.
 //! A heap limit is NOT a total JVM RSS limit. See HOSTING_BUDGET_CONTRACT.md.
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -318,6 +318,7 @@ pub fn memory_snapshot() -> Result<AvailableMemory> {
         total_pagefile: u64, available_pagefile: u64, total_virtual: u64,
         available_virtual: u64, available_extended_virtual: u64,
     }
+    #[link(name = "kernel32")]
     extern "system" {
         fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> i32;
     }
@@ -370,7 +371,7 @@ pub fn memory_snapshot() -> Result<AvailableMemory> {
 
 #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
 pub fn memory_snapshot() -> Result<AvailableMemory> {
-    Err(anyhow!("hosting memory admission unsupported on this operating system"))
+    Err(anyhow::anyhow!("hosting memory admission unsupported on this operating system"))
 }
 
 #[cfg(test)]
