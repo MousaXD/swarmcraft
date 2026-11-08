@@ -733,18 +733,20 @@ async fn run_authority_runtime_inner(
         Some(latest.manifest_hash()?),
         None,
     )?;
-    // Restoring a large snapshot can take time; an opt-out or new resource
-    // pressure during that window must block Java before it starts.
-    hosting_budget::revalidate_admission(paths, options.world, &admission)?;
-    let mut child = launch_server(
-        &options.java,
-        &options.server_jar,
-        admission.heap_mib(),
-        &runtime,
-        &world_dir,
-        metadata.genesis.compatibility_fingerprint,
-        &launch.environment(),
-    )?;
+    // Restoring a large snapshot can take time; opt-out and resource
+    // pressure must be rechecked immediately before Java starts. Serialize
+    // consent publication with the synchronous spawn to close that race.
+    let mut child = hosting_budget::with_consent_guarded_spawn(paths, options.world, &admission, || {
+        launch_server(
+            &options.java,
+            &options.server_jar,
+            admission.heap_mib(),
+            &runtime,
+            &world_dir,
+            metadata.genesis.compatibility_fingerprint,
+            &launch.environment(),
+        )
+    })?;
     if let Err(error) = runtime_process.record_java(child.id()) {
         terminate_child(&mut child);
         return Err(error);

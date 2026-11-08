@@ -271,6 +271,24 @@ pub fn revalidate_admission(paths: &DataPaths, world: WorldId, admission: &Hosti
     check_budget(admission.heap_mib(), memory_snapshot()?)
 }
 
+/// Serialize the final admission check with explicit local opt-in/opt-out
+/// so a revocation cannot slip between validation and Command::spawn.
+/// This guard is held for the brief synchronous spawn only; subsequent
+/// withdrawals are observed by runtime_withdrawal and use the save barrier.
+pub fn with_consent_guarded_spawn<T>(
+    paths: &DataPaths,
+    world: WorldId,
+    admission: &HostingAdmission,
+    spawn: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let lock = open_lock(&control_path(paths).join("hosting-consent-write.lock"))?;
+    lock.lock_exclusive().context("cannot serialize final hosting admission with consent updates")?;
+    revalidate_admission(paths, world, admission)?;
+    let result = spawn();
+    drop(lock);
+    result
+}
+
 /// Called while serving. Any revision change, revocation or inability to
 /// inspect state requires a safe Fabric shutdown/checkpoint, not a JVM kill.
 pub fn runtime_withdrawal(paths: &DataPaths, world: WorldId, admitted: &HostingConsentV1) -> Result<Option<String>> {
@@ -528,7 +546,9 @@ mod tests {
         lock.try_lock_exclusive().unwrap();
         let admission = HostingAdmission { _exclusive_memory_lock: lock, consent: first.clone() };
         assert_eq!(first, *admission.consent());
+        assert!(with_consent_guarded_spawn(&paths, world, &admission, || Ok(())).is_ok());
         set_contribution(&paths, world, 0).unwrap();
+        assert!(with_consent_guarded_spawn(&paths, world, &admission, || Ok(())).is_err());
         assert!(revalidate_admission(&paths, world, &admission).is_err());
         assert!(runtime_withdrawal(&paths, world, admission.consent()).unwrap().is_some());
         drop(admission);
