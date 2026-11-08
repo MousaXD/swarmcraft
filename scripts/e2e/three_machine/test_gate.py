@@ -72,7 +72,8 @@ def fixtures(directory):
         })
     gate.save(directory / "crash.json", {
         "commit": COMMIT,
-        "receipt": {"signal": "SIGKILL", "process_gone": True, "role": "alice"},
+        "receipt": {"signal": "SIGKILL", "process_gone": True, "role": "alice",
+                    "crashed_components": ["desktop", "daemon", "server"]},
     })
     return c
 
@@ -146,6 +147,16 @@ class TestFailClosed(unittest.TestCase):
             check["nodes"]["carol"]["authorized_peers"] = 2
             gate.save(out / "checkpoint.json", check)
             with self.assertRaisesRegex(gate.Blocked, "signed_three_member_quorum_missing"):
+                gate.verify(c, out)
+
+    def test_rejects_only_java_crash(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "crash.json")
+            record["receipt"]["crashed_components"] = ["server"]
+            gate.save(out / "crash.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "alice_full_authority_process_crash_missing"):
                 gate.verify(c, out)
 
     def test_rejects_real_client_not_observed(self):
