@@ -523,12 +523,17 @@ fn withdrawn_successors_cannot_receive_recovery_permits_despite_quorum() {
         // local permission must still override the presence of that proof.
         let launch = swarm_cli::migration::load_runtime_config(&peer.paths, metadata.world_id).unwrap();
         host_readiness::record_runtime_verified(
-            &peer.paths, metadata.world_id, &launch, descriptor.compatibility_fingerprint,
+            &peer.paths,
+            metadata.world_id,
+            &launch,
+            descriptor.compatibility_fingerprint,
         )
         .unwrap();
         assert_eq!(
             host_readiness::local_runtime_readiness(
-                &peer.paths, metadata.world_id, descriptor.compatibility_fingerprint,
+                &peer.paths,
+                metadata.world_id,
+                descriptor.compatibility_fingerprint,
             )
             .unwrap(),
             swarm_network::HostRuntimeReadinessV1::Unverified,
