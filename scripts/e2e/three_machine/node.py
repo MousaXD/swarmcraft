@@ -97,6 +97,25 @@ def observed(pid, terms):
         return False
 
 
+def log_digests(data_dir):
+    """Hash bounded test-profile log files; never return log text or filenames."""
+    folder = Path(data_dir) / "logs"
+    if not folder.is_dir():
+        return []
+    records = []
+    for file in sorted(folder.glob("*.log"))[:16]:
+        try:
+            if file.is_symlink() or not file.is_file():
+                continue
+            size = file.stat().st_size
+            if size > 20 * 1024 * 1024:
+                continue
+            records.append({"sha256": digest(file), "bytes": size})
+        except OSError:
+            continue
+    return records
+
+
 def capture(a):
     if not re.fullmatch("[a-fA-F0-9]{64}", a.world):
         fail("world_id_invalid")
@@ -145,6 +164,7 @@ def capture(a):
         "desktop_process_observed": observed(a.desktop_pid, ("swarmcraft-desktop",)),
         "minecraft_client_process_observed": observed(a.client_pid, ("minecraft", "knotclient", "net.fabricmc.loader.impl.launch.knot.knotclient")),
         "minecraft_server_process_observed": observed(a.server_pid, ("java",)),
+        "test_profile_log_digests": log_digests(root),
     }
 
 
