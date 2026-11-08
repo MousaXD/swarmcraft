@@ -1,3 +1,27 @@
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { nativeBridge } from '../lib/native-bridge';
+  import { createIdentityController } from '../lib/device-identity';
+
+  const controller = createIdentityController(() => nativeBridge().invoke('node_identity', {}));
+  const identityState = controller.state;
+
+  onMount(() => {
+    const original = window.__swarmcraftSvelteIdentity;
+    const bridge = { publish: (value: string) => controller.publishLegacy(value) };
+    window.__swarmcraftSvelteIdentity = bridge;
+    return () => {
+      if (window.__swarmcraftSvelteIdentity === bridge) {
+        window.__swarmcraftSvelteIdentity = original;
+      }
+    };
+  });
+
+  async function refreshIdentity() {
+    await controller.refresh();
+  }
+</script>
+
 <section id="diagnosticsView" class="view diagnostics-view" data-view-panel="diagnostics" aria-labelledby="diagnosticsTitle" hidden>
           <div class="content-shell">
             <div class="task-header diagnostics-header">
@@ -39,10 +63,11 @@
                 <div class="section-title-row">
                   <div><h3>This device</h3><p>Local peer identity and initialization.</p></div>
                 </div>
-                <pre id="identity" class="diagnostic-output">Checking identity…</pre>
+                <pre id="identity" class="diagnostic-output" aria-live="polite">{$identityState.text}</pre>
+                <p class="form-error" role="alert" hidden={!$identityState.error}>{$identityState.error}</p>
                 <div class="compact-actions">
                   <button id="init" class="button button-secondary" type="button">Set up device</button>
-                  <button id="identityButton" class="button button-subtle" type="button">Refresh identity</button>
+                  <button id="identityButton" class="button button-subtle" type="button" onclick={refreshIdentity} aria-busy={$identityState.busy} disabled={$identityState.busy}>Refresh identity</button>
                 </div>
               </section>
 
