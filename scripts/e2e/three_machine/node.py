@@ -203,6 +203,8 @@ def capture(a):
         "snapshot_hash": snapshot if isinstance(snapshot, str) and re.fullmatch("[a-fA-F0-9]{64}", snapshot) else None,
         "snapshot_verify_passed": verify.returncode == 0,
         "canonical": field(status.stdout, "Safety") == "Canonical",
+        "safety_level": field(status.stdout, "Safety") if field(status.stdout, "Safety") in
+                        ("Canonical", "SoloUnreplicated", "Conflict") else "Unknown",
         "epoch": integer(m.get("epoch")),
         "fencing_token": integer(m.get("fencing_token")),
         "phase": m.get("phase") if isinstance(m.get("phase"), str) else None,
