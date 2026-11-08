@@ -804,8 +804,7 @@ async fn run_authority_runtime_inner(
         &epoch,
         &mut child,
         &mut session,
-        handle_shutdown_signal,
-        &admission,
+        RuntimeExitOptions { handle_shutdown_signal, admission: &admission },
     )
     .await
     {
@@ -912,6 +911,11 @@ enum RuntimeDisposition {
     Transfer(PeerId),
 }
 
+struct RuntimeExitOptions<'a> {
+    handle_shutdown_signal: bool,
+    admission: &'a hosting_budget::HostingAdmission,
+}
+
 async fn wait_for_runtime_exit(
     paths: &DataPaths,
     storage: &Storage,
@@ -919,8 +923,7 @@ async fn wait_for_runtime_exit(
     epoch: &EpochRecordV1,
     child: &mut Child,
     session: &mut swarm_ipc::FabricSession,
-    handle_shutdown_signal: bool,
-    admission: &hosting_budget::HostingAdmission,
+    options: RuntimeExitOptions<'_>,
 ) -> Result<RuntimeDisposition> {
     loop {
         if let Some(status) = child.try_wait()? {
@@ -963,7 +966,7 @@ async fn wait_for_runtime_exit(
             Ok(None) => {}
             Err(error) => warn!(world = %epoch.world_id, %error, "ignoring unreadable transfer intent"),
         }
-        let withdrawal = match hosting_budget::runtime_withdrawal(paths, epoch.world_id, admission.consent()) {
+        let withdrawal = match hosting_budget::runtime_withdrawal(paths, epoch.world_id, options.admission.consent()) {
             Ok(reason) => reason,
             Err(error) => Some(format!("cannot revalidate local hosting consent or memory: {error}")),
         };
@@ -981,7 +984,7 @@ async fn wait_for_runtime_exit(
                 Err(error) => warn!(world = %epoch.world_id, %error, "cannot safely checkpoint withdrawn host; preserving running authority and retrying"),
             }
         }
-        if handle_shutdown_signal {
+        if options.handle_shutdown_signal {
             tokio::select! {
                 _ = sleep(SUPERVISOR_POLL) => {}
                 result = tokio::signal::ctrl_c() => {
