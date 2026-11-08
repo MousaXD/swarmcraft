@@ -204,6 +204,8 @@ fn initialize_two_peer_world(alice: &PeerFixture, bob: &PeerFixture, source: &Pa
     epoch.signature = alice.identity.sign(&epoch.signing_bytes().unwrap());
     alice.storage.save_epoch_record(&epoch).unwrap();
     bob.storage.save_epoch_record(&epoch).unwrap();
+    swarm_cli::hosting_budget::set_contribution(&alice.paths, world, 512).unwrap();
+    swarm_cli::hosting_budget::set_contribution(&bob.paths, world, 512).unwrap();
     SharedWorld { world, epoch }
 }
 
