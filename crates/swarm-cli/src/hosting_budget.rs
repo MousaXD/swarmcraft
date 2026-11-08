@@ -417,6 +417,19 @@ mod tests {
         assert!(admit(&paths, world).is_err());
     }
     #[test]
+    fn opt_out_invalidates_an_active_admission_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let world = WorldId([37; 32]);
+        let first = set_contribution(&paths, world, 512).unwrap();
+        let admission = admit(&paths, world).unwrap();
+        assert_eq!(first, *admission.consent());
+        set_contribution(&paths, world, 0).unwrap();
+        assert!(runtime_withdrawal(&paths, world, admission.consent()).unwrap().is_some());
+        drop(admission);
+        assert!(admit(&paths, world).is_err());
+    }
+    #[test]
     fn concurrent_host_admission_is_serialized() {
         // Exercises a live file lock without requiring Java or a synthetic memory reading.
         let temp = tempfile::tempdir().unwrap();
