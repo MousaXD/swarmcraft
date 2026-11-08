@@ -15,6 +15,7 @@ use swarm_protocol::{
 };
 use swarm_storage::Storage;
 
+use crate::hosting_budget;
 use crate::migration::{load_runtime_config, RuntimeLaunchConfig};
 use crate::server_mods;
 
@@ -184,7 +185,12 @@ pub fn local_runtime_readiness(
     paths: &DataPaths,
     world: WorldId,
     compatibility_fingerprint: Hash32,
-) -> Result<HostRuntimeReadinessV1> {
+ ) -> Result<HostRuntimeReadinessV1> {
+    // This peer cannot be an authority successor without live local consent
+    // and capacity, even if an older Fabric runtime verification is still valid.
+    if hosting_budget::require_contribution(paths, world).is_err() {
+        return Ok(HostRuntimeReadinessV1::Unverified);
+    }
     let config = match load_runtime_config(paths, world) {
         Ok(config) => config,
         Err(_) => return Ok(HostRuntimeReadinessV1::MissingConfiguration),
@@ -968,6 +974,7 @@ mod tests {
             game_endpoint: None,
         };
         crate::migration::save_runtime_config(&paths, world, &config).unwrap();
+        hosting_budget::set_contribution(&paths, world, 512).unwrap();
         assert_eq!(local_runtime_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Unverified);
         record_runtime_verified(&paths, world, &config, fingerprint).unwrap();
         assert_eq!(local_runtime_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Ready);
