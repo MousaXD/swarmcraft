@@ -50,6 +50,26 @@ def integer(value):
         return None
 
 
+def canonical_world_id(value):
+    """Normalize exact SwarmCraft CLI WorldId display (scworld:<hex>)."""
+    if not isinstance(value, str):
+        return None
+    raw = value.removeprefix("scworld:")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", raw):
+        return None
+    return raw.lower()
+
+
+def canonical_peer_id(value):
+    """Normalize a typed PeerId only, disallow unsanitized CLI text."""
+    if not isinstance(value, str):
+        return None
+    raw = value.removeprefix("scpeer:")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", raw):
+        return None
+    return "scpeer:" + raw.lower()
+
+
 def packaged_sidecars_present(file_paths):
     """All four actual Tauri-packaged sidecars must remain executable."""
     required = ("swarmcraft-host", "swarmcraft-runtime", "swarmcraft-import")
@@ -266,11 +286,12 @@ def capture(a):
     cli = str(Path(a.cli).resolve(strict=True))
     cmd = [cli, "--data-dir", root]
     status = run(cmd + ["world", "status", a.world])
-    if status.returncode or field(status.stdout, "World ID") != a.world:
+    observed_world = canonical_world_id(field(status.stdout, "World ID"))
+    if status.returncode or observed_world is None or observed_world != a.world.lower():
         fail("world_status_unavailable")
     identity = run(cmd + ["identity"])
-    peer = field(identity.stdout, "Peer ID") if identity.returncode == 0 else None
-    if not peer:
+    peer = canonical_peer_id(field(identity.stdout, "Peer ID")) if identity.returncode == 0 else None
+    if peer is None:
         fail("device_identity_missing")
     verify = run(cmd + ["world", "verify", a.world], timeout=45)
     migration = run(cmd + ["world", "migration-status", a.world, "--json"])
@@ -281,10 +302,12 @@ def capture(a):
         m, r = json.loads(migration.stdout), json.loads(readiness.stdout)
     except (TypeError, ValueError):
         fail("backend_status_invalid")
-    authority = m.get("authority_peer_id")
-    if not isinstance(authority, str) or not authority:
+    if canonical_world_id(m.get("world_id")) != observed_world or canonical_world_id(r.get("world_id")) != observed_world:
+        fail("backend_world_reference_mismatch")
+    authority = canonical_peer_id(m.get("authority_peer_id"))
+    if authority is None:
         fail("backend_authority_missing")
-    successor = r.get("successor_peer_id")
+    successor = canonical_peer_id(r.get("successor_peer_id"))
     snapshot = m.get("snapshot_hash")
     return {
         "world_fingerprint": fp(a.salt, a.world),
