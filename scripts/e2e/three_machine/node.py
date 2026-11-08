@@ -50,6 +50,17 @@ def integer(value):
         return None
 
 
+def packaged_sidecars_present(file_paths):
+    """All four actual Tauri-packaged sidecars must remain executable."""
+    required = ("swarmcraft-host", "swarmcraft-runtime", "swarmcraft-import")
+    for name in required:
+        if not any(Path(path).name.startswith(name) and
+                   Path(path).is_file() and os.access(path, os.X_OK)
+                   for path in file_paths):
+            return False
+    return True
+
+
 def preflight(a):
     package = Path(a.package).resolve(strict=True)
     binary = Path(a.binary).resolve(strict=True)
@@ -67,6 +78,9 @@ def preflight(a):
             or owner.returncode or not owner.stdout.startswith(pkg + ":")
             or cli_owner.returncode or not cli_owner.stdout.startswith(pkg + ":")):
         fail("package_not_installed")
+    files = run(["dpkg-query", "-L", pkg])
+    if files.returncode or not packaged_sidecars_present(files.stdout.splitlines()):
+        fail("required_installed_tauri_sidecars_missing")
     profile = Path(a.data_dir)
     if profile.exists() and any(profile.iterdir()):
         fail("preflight_requires_fresh_profile")
@@ -83,7 +97,8 @@ def preflight(a):
         "package_sha256": digest(package), "package_version": version,
         "machine_fingerprint": fp(a.salt, machine_id),
         "egress_fingerprint": fp(a.salt, public_ip),
-        "app_installed": True, "cli_installed": True, "os": sys.platform,
+        "app_installed": True, "cli_installed": True,
+        "all_required_sidecars_installed": True, "os": sys.platform,
     }
 
 
