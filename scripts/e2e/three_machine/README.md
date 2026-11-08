@@ -36,6 +36,42 @@ publish the config or salt. The probe pseudonymizes peer IDs, machine IDs
 and public egress addresses; it never exposes invitation strings or raw CLI
 logs.
 
+## Optional exact-package provisioning and bounded cleanup
+
+A dedicated test operator can install the same source-provenance-linked .deb
+on all three hosts with the optional script below. Before doing so, provision
+the dedicated /opt/swarmcraft-e2e/ directory on each host as writable by the
+authorized SSH operator and allow noninteractive sudo for the exact dpkg
+install action. It does **not** configure identities, modify signed worlds,
+download Minecraft, or approve the EULA.
+
+```bash
+python3 scripts/e2e/three_machine/ops.py provision --config "$CONFIG" \
+  --deb /private/build/candidate.deb --output "$OUT" \
+  --confirm INSTALL-THREE-REAL-TEST-MACHINES
+```
+
+The command fails if the local or remote SHA differs from the expected
+candidate package. If one host fails, provision.json records which earlier
+hosts were installed; it deliberately does not attempt unsafe uninstall
+rollbacks. The field operator starts genuine native GUI and Minecraft clients
+in each machine's logged-in desktop session.
+
+After the test and evidence review, staged .deb files can be deleted with
+a second **explicit** confirmation. The installed application, players,
+canonical worlds and game data are never removed by this script:
+
+```bash
+python3 scripts/e2e/three_machine/ops.py cleanup-stage \
+  --config "$CONFIG" --output "$OUT" \
+  --confirm DELETE-ONLY-STAGED-E2E-DEBS
+```
+
+Remote capture additionally records SHA-256 digests and sizes for a bounded
+set of log files under each test data profile's logs directory. Full sensitive
+log contents remain local for secure operator inspection; they are not
+published in the sanitized JSON.
+
 ## Running the scenario
 
 Run from repository root. Set CONFIG to your private config path, OUT to a
