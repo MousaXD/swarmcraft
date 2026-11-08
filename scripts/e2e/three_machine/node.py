@@ -229,6 +229,36 @@ def runtime_heap_mib(pid, root, world, binary, cli):
     return None
 
 
+VERSION = re.compile(r"^[0-9][0-9A-Za-z._+\\-]{0,47}$")
+
+
+def safe_version(text):
+    if isinstance(text, str):
+        text = text.strip()
+        if VERSION.fullmatch(text):
+            return text
+    return None
+
+
+def java_runtime_version(pid, root, world, binary, cli):
+    """Report version of the exact verified JVM executable, not PATH's java."""
+    if not isolated_process(pid, "server", root, world, binary, cli):
+        return None
+    try:
+        executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
+        version = run([str(executable), "-version"], timeout=8)
+        if version.returncode:
+            return None
+        # OpenJDK uses stderr, e.g. 'openjdk version "25.0.1"'.
+        combined = (version.stderr + "\\n" + version.stdout)[:1024]
+        match = re.search(r'(?:openjdk|java) version ["\\']([0-9][0-9A-Za-z._+\\-]{0,47})["\\']', combined, re.I)
+        if not match:
+            match = re.search(r'openjdk ([0-9][0-9A-Za-z._+\\-]{0,47})', combined, re.I)
+        return safe_version(match.group(1)) if match else None
+    except (OSError, subprocess.TimeoutExpired, UnicodeError, ValueError):
+        return None
+
+
 def capture(a):
     if not re.fullmatch("[a-fA-F0-9]{64}", a.world):
         fail("world_id_invalid")
@@ -262,6 +292,8 @@ def capture(a):
         "authority_fingerprint": fp(a.salt, authority),
         "successor_fingerprint": fp(a.salt, successor) if successor else None,
         "authorized_peers": integer(field(status.stdout, "Authorized peers")),
+        "minecraft_version": safe_version(field(status.stdout, "Minecraft")),
+        "fabric_loader_version": safe_version(field(status.stdout, "Fabric loader")),
         "snapshot_number": integer(field(status.stdout, "Latest snapshot")),
         "snapshot_epoch": integer(field(status.stdout, "Epoch")),
         "state_root": field(status.stdout, "State root"),
@@ -284,6 +316,9 @@ def capture(a):
             a.server_pid, "server", Path(root), a.world,
             Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True)),
         "hosting_consent": hosting_consent(root, a.world, peer),
+        "java_runtime_version": java_runtime_version(
+            a.server_pid, Path(root), a.world,
+            Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True)),
         "minecraft_server_heap_mib": runtime_heap_mib(
             a.server_pid, Path(root), a.world,
             Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True)),
