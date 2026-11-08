@@ -141,6 +141,10 @@ python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$O
 # real Fabric running on Bob, and genuine Minecraft client reconnection.
 python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage bob_recovered --world "$WORLD_ID" --pids "$PIDS"
 
+# After Bob's real Fabric authority takes over, have surviving real players
+# act in the world and wait until Bob commits a NEW, signed checkpoint in his
+# higher recovery epoch. Ensure Carol has replicated that canonical head.
+# Alice must later synchronize the same new head and remain nonauthoritative.
 # Bring Alice back; prove she is nonauthoritative, fully synchronized, fenced.
 python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage alice_returned --world "$WORLD_ID" --pids "$PIDS"
 
@@ -199,7 +203,10 @@ interprets this SHA as the BLAKE3 manifest hash. The matching persisted head
 contents, plus the CLI's successful `world verify` (signed manifest, link
 chain, blob verification and canonical namespace checks) and matching state
 roots, epoch, number and fencing token, are all required at the checkpoint.
-Matching head digests are also required after Alice's return.
+Matching head digests are also required after Alice's return, and Bob must
+have committed a NEW snapshot number under his new recovery epoch. All three
+machines must have replicated that post-recovery canonical head; reusing only
+the old pre-crash manifest cannot certify durable failover.
 
 The separate migration supervisor's `snapshot_hash` is optional runtime
 diagnostics; it can be absent on Carol's deliberately player-only/nonhosting
