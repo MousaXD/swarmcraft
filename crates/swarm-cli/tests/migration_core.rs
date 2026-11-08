@@ -504,14 +504,8 @@ fn player_only_target_rejects_transfer_before_publishing_any_signed_transfer_sta
 
     // An authority-eligible voter/replica is still not an opt-in host.
     swarm_cli::hosting_budget::set_contribution(&bob.paths, shared.world, 0).unwrap();
-    let prepared = match prepare_manual_transfer(
-        &alice.paths,
-        &alice.storage,
-        shared.world,
-        bob.identity.peer_id(),
-    )
-    .unwrap()
-    {
+    let prepared =
+        match prepare_manual_transfer(&alice.paths, &alice.storage, shared.world, bob.identity.peer_id()).unwrap() {
         TransferPrepareResult::Prepared(token) => token,
         TransferPrepareResult::CheckpointRequested => panic!("sleeping source is already checkpointed"),
     };
