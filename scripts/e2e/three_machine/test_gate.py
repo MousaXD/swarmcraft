@@ -99,6 +99,38 @@ def fixtures(directory):
 
 
 class TestFailClosed(unittest.TestCase):
+    def test_observation_digest_binds_staged_records_and_crash(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            fixtures(out)
+            before = gate.observations_sha256(out)
+            self.assertRegex(before, r"^[0-9a-f]{64}$")
+            record = gate.load_json(out / "bob_recovered.json")
+            record["nodes"]["bob"]["fencing_token"] = 99
+            gate.save(out / "bob_recovered.json", record)
+            self.assertNotEqual(before, gate.observations_sha256(out))
+
+    def test_unbound_review_is_blocked_before_human_signoff(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            review = {"commit": COMMIT, "package_sha256": SHA, "reviewer": "QA reviewer",
+                      "evidence_url": "https://github.com/MousaXD/swarmcraft/actions/runs/1"}
+            review_file = out / "review.json"
+            gate.save(review_file, review)
+            with self.assertRaisesRegex(gate.Blocked, "reviewed_stage_observations_changed_or_unbound"):
+                gate.verify(c, out)
+
+    def test_surviving_client_missing_after_crash_is_blocked(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            recovered = gate.load_json(out / "bob_recovered.json")
+            recovered["nodes"]["carol"]["minecraft_client_process_observed"] = False
+            gate.save(out / "bob_recovered.json", recovered)
+            with self.assertRaisesRegex(gate.Blocked, "surviving_real_players_not_observed"):
+                gate.verify(c, out)
+
     def test_disallow_shell_target_injection(self):
         with tempfile.TemporaryDirectory() as temp:
             c = config()
