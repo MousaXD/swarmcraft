@@ -69,3 +69,7 @@ Do not close #84 until: signed policy + migration/election hooks + actual Deskto
 * `main.rs`/Tauri/Desktop command routes are out of Agent 03's ownership, so the new typed Rust API is not yet available as a player action.
 * No platform advertises a guaranteed whole-JVM memory cap; a Linux cgroup/Windows Job Object enforcement design and real integration tests are still needed if such a cap is promised.
 * Existing legacy world/player workflows need an explicit opt-in UX; tests use opt-in fixtures, never implicit production consent.
+
+## CI runner resource-aware acceptance
+
+The actual JVM admission remains fail-closed at every launch and is NEVER bypassed in production or tests. A macOS runner with 7168 MiB physical but ~2970 MiB available fails the conservative minimum 512 MiB JVM budget, which requires 3840 MiB including OS, client, daemon and JVM-native reserves. Tests requiring a successful live host process therefore log this explicit capacity-denial case and exercise their positive lifecycle paths only on hosts with sufficient real available RAM. Numeric safety and consent/revision behavior use deterministic unit fixtures; the Linux/Windows process lanes provide positive host-process coverage when adequately provisioned. This limitation must be visible to Agent 07, not interpreted as macOS positive hosting certification. Real multi-machine acceptance remains a separate requirement.
