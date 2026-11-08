@@ -582,6 +582,11 @@ impl Drop for AuthorityRuntimeGuard {
 }
 
 pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options: HostOptions) -> Result<()> {
+    // Preserve the explicit EULA rejection even when the machine is under
+    // pressure or player-only; consent is never a substitute for EULA.
+    if !options.accept_eula {
+        bail!("Minecraft server EULA acceptance is required; configure the runtime only after reviewing Mojang's EULA");
+    }
     // Explicit hosting must fail immediately instead of waiting indefinitely
     // for quorum when this device is player-only or under RAM pressure.
     hosting_budget::require_contribution(paths, options.world)?;
