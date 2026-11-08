@@ -78,11 +78,11 @@ class TestRealHostBudgetEvidence(unittest.TestCase):
 
     def test_java_xmx_reads_real_argument_boundary_not_substrings(self):
         with patch.object(node, "isolated_process", return_value=True):
-            with patch.object(Path, "read_bytes", return_value=b"java\\0-Xmx4096m\\0-jar\\0fabric-server.jar\\0"):
+            with patch.object(Path, "read_bytes", return_value=b"java\0-Xmx4096m\0-jar\0fabric-server.jar\0"):
                 value = node.runtime_heap_mib(123, Path("/private/test"), self.WORLD,
                                               Path("/usr/bin/gui"), Path("/usr/bin/swarmcraft"))
                 self.assertEqual(value, 4096)
-            with patch.object(Path, "read_bytes", return_value=b"java\\0-jar\\0-Xmx4096m.fake"):
+            with patch.object(Path, "read_bytes", return_value=b"java\0-jar\0-Xmx4096m.fake"):
                 value = node.runtime_heap_mib(123, Path("/private/test"), self.WORLD,
                                               Path("/usr/bin/gui"), Path("/usr/bin/swarmcraft"))
                 self.assertIsNone(value)
