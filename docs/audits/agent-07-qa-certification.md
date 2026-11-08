@@ -393,3 +393,10 @@ Live GitHub heads continued to move during the independent review. These pointer
 - #90 and #95 unchanged with red exact-head mandatory check runs, #91 QA documentation only. Main unchanged.
 
 **Agent 07 release verdict remains BLOCKED; no source-only fix, isolated green build or automatic consent authorizes production.**
+
+
+### End-of-turn moving-head warning (2026-11-08)
+
+At final refresh, #92 stayed **326037b53b36abda92a3b2c201209c5ca0ed71fd**, both mandatory workflows SUCCESS. #93 stayed **7df70ee14f5c9b6124ab12026ec1ec377fe7c087**, new Required #42492278708 queued and Installers #42492278716 pending; old branch's real player-journey consent failure is still unresolved by its test-only delta. #98 stayed **1a0e2867c9b45668b4634fe868f0f7215bcf8b11**, Required #42491995930 queued and Installers #42491995914 in progress.
+
+The actively edited Svelte PR #94 moved again to **67fc3dbc868f285ea9194e11d0efd57af26984a7** (new Required #42492594244, Installers #42492594618 pending), and E2E PR #96 moved to **a30fdb66cfe2c8ae3f638c146a6a91de5c574651** (new Required #42492596555, Installers #42492596585 pending; new harness #42492596570 queued). These moving heads **have no completed newly checked exact-head certification** in this review. Earlier failures/successes are historical evidence only. Main remains unchanged and release **BLOCKED**.
