@@ -243,18 +243,6 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
             }
         };
 
-        // Player-only peers continue to replicate, but may never start a JVM.
-        // A missing/withdrawn or currently unsafe budget is an explicit block.
-        if let Err(error) = hosting_budget::require_contribution(&paths, world) {
-            publish_status(
-                &paths, &storage, world, None, MigrationPhase::Blocked, false,
-                config.game_endpoint.clone(), None,
-                Some(format!("local hosting contribution is not admitted: {error}")),
-            )?;
-            sleep(Duration::from_secs(1)).await;
-            continue;
-        }
-
         if let Some(transfer) = active_outbound_transfer(&storage, world, identity.peer_id())? {
             publish_status(
                 &paths,
@@ -286,6 +274,18 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
                         None,
                     )?;
                     sleep(SUPERVISOR_POLL).await;
+                    continue;
+                }
+                // A sleeping world stays Sleeping for player-only peers.
+                // But an explicit wake must re-check admission before any
+                // authority generation is installed.
+                if let Err(error) = hosting_budget::require_contribution(&paths, world) {
+                    publish_status(
+                        &paths, &storage, world, Some(MigrationTrigger::WorldWake),
+                        MigrationPhase::Blocked, false, config.game_endpoint.clone(),
+                        None, Some(format!("wake denied by local hosting budget: {error}")),
+                    )?;
+                    sleep(Duration::from_secs(1)).await;
                     continue;
                 }
                 let descriptor = storage.load_world_descriptor(world)?;
@@ -343,6 +343,18 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
                 sleep(Duration::from_secs(1)).await;
                 continue;
             }
+        }
+
+        // Player-only peers continue to replicate, but may never start a JVM.
+        // A missing/withdrawn or currently unsafe budget is an explicit block.
+        if let Err(error) = hosting_budget::require_contribution(&paths, world) {
+            publish_status(
+                &paths, &storage, world, None, MigrationPhase::Blocked, false,
+                config.game_endpoint.clone(), None,
+                Some(format!("local hosting contribution is not admitted: {error}")),
+            )?;
+            sleep(Duration::from_secs(1)).await;
+            continue;
         }
 
         let descriptor = storage.load_world_descriptor(world)?;
