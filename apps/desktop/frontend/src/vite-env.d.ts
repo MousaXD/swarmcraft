@@ -9,6 +9,8 @@ declare global {
       };
     };
     __swarmcraftSvelteCreateOwned?: boolean;
+    __swarmcraftSvelteJoinOwned?: boolean;
+    __swarmcraftAfterSvelteJoin?: (worldId: string) => Promise<void>;
     __swarmcraftAfterSvelteCreate?: (worldId: string) => Promise<void>;
     __swarmcraftSvelteActivity?: {
       append(entry: string): boolean;

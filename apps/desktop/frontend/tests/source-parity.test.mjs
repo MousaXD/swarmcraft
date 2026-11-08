@@ -118,3 +118,18 @@ test('Svelte create journey invokes exactly one native create without legacy dou
   assert.ok(bridge.includes("native.invoke('create_world', request)"));
   assert.doesNotMatch(bridge, /__TAURI__\s*=|\.invoke\s*=/);
 });
+
+test('Svelte Join World owns signed-invite submit and the legacy handler cannot double-join', async () => {
+  const [join, root, app] = await Promise.all([
+    source('../src/components/JoinWorldView.svelte'), source('../src/App.svelte'),
+    source('../../src/app.js'),
+  ]);
+  assert.ok(join.includes('data-journey-owner="svelte"'));
+  assert.ok(join.includes('onsubmit={join}'));
+  assert.ok(join.includes('nativeWorldActions().join('));
+  assert.ok(join.includes('hidden={!error}>{error}'));
+  assert.ok(join.includes('disabled={busy}'));
+  assert.ok(root.includes('window.__swarmcraftSvelteJoinOwned = true;'));
+  assert.ok(app.includes("id === 'joinForm' && window.__swarmcraftSvelteJoinOwned === true"));
+  assert.ok(app.includes('window.__swarmcraftAfterSvelteJoin = async (joinedWorldId) =>'));
+});

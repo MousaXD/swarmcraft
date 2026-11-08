@@ -10,6 +10,8 @@
   onMount(() => {
     const previous = window.__swarmcraftSvelteActivity;
     const previousCreateOwner = window.__swarmcraftSvelteCreateOwned;
+    const previousJoinOwner = window.__swarmcraftSvelteJoinOwned;
+    window.__swarmcraftSvelteJoinOwned = true;
     window.__swarmcraftSvelteCreateOwned = true;
     window.__swarmcraftSvelteActivity = activityBridge;
     void import('../../src/app.js').catch(() => {
@@ -20,6 +22,7 @@
     });
     return () => {
       window.__swarmcraftSvelteCreateOwned = previousCreateOwner;
+      window.__swarmcraftSvelteJoinOwned = previousJoinOwner;
       if (window.__swarmcraftSvelteActivity === activityBridge) {
         window.__swarmcraftSvelteActivity = previous;
       }
