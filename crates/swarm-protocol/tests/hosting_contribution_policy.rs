@@ -237,13 +237,13 @@ fn joining_and_membership_never_imply_hosting_consent() {
     a.local_consent = Some(&player_only);
     assert_eq!(evaluate_hosting_contribution_v1(&a, test_signature), Err(Denial::LocalConsentMissingOrRevoked));
 
-    let mut ineligible = f.member.clone();
-    ineligible.authority_eligible = false;
+    let ineligible = WorldMemberV1 { authority_eligible: false, ..f.member.clone() };
     a = f.admission();
     a.member = &ineligible;
     assert_eq!(evaluate_hosting_contribution_v1(&a, test_signature), Err(Denial::MemberNotEligible));
-    ineligible.authority_eligible = true;
-    ineligible.banned = true;
+
+    let banned = WorldMemberV1 { banned: true, ..f.member.clone() };
+    a.member = &banned;
     assert_eq!(evaluate_hosting_contribution_v1(&a, test_signature), Err(Denial::MemberNotEligible));
 }
 
@@ -251,12 +251,12 @@ fn joining_and_membership_never_imply_hosting_consent() {
 fn consent_is_per_world_per_peer_local_and_monotonically_revocable() {
     let f = Fixture::new();
     let mut a = f.admission();
-    let mut foreign = f.consent;
-    foreign.world_id = WorldId([4; 32]);
-    a.local_consent = Some(&foreign);
+    let wrong_world = LocalHostingConsentV1 { world_id: WorldId([4; 32]), ..f.consent };
+    a.local_consent = Some(&wrong_world);
     assert_eq!(evaluate_hosting_contribution_v1(&a, test_signature), Err(Denial::ConsentStaleOrInvalid));
-    foreign.world_id = f.config.world_id;
-    foreign.peer_id = PeerId([1; 32]);
+
+    let wrong_peer = LocalHostingConsentV1 { peer_id: PeerId([1; 32]), ..f.consent };
+    a.local_consent = Some(&wrong_peer);
     assert_eq!(evaluate_hosting_contribution_v1(&a, test_signature), Err(Denial::ConsentStaleOrInvalid));
     a = f.admission();
     a.expected_consent_revision = 0;
