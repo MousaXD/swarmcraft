@@ -5,7 +5,7 @@ This is the dedicated frontend migration workspace for SwarmCraft issue #87. The
 ## What exists
 
 - Svelte 5, TypeScript and Vite source/configuration in an isolated directory.
-- Ten extracted Svelte components retain all 171 existing DOM IDs. `App.svelte` mounts them before loading the original controller for still-unported flows. The Create, Join and Import forms now have native Svelte submit/busy/error handlers and exact Rust IPC calls; Activity is a reactive Svelte store. Complex hosting, runtime, provider, safety, recovery, diagnostics and navigation workflows still delegate to legacy modules. Do not mislabel the transitional architecture as complete.
+- Ten extracted Svelte components retain all 171 existing DOM IDs. `App.svelte` mounts them before loading the original controller for still-unported flows. Create, Join, Import, signed invite creation/leave confirmation and signed World-ID lookup use typed Rust IPC with Svelte submit/busy/error handling. Activity is a reactive Svelte store. The Diagnostics identity refresh is Svelte-owned, with genuine `node_identity` reads, stale-request protection, sanitized errors, and setup-vs-verified-identity distinction; legacy startup still handles initialization. Rich world listing, runtime, provider, safety, recovery, wider diagnostics and navigation still delegate to legacy modules. Do not mislabel this transitional architecture as complete.
 - Classic PR #88 startup watchdog copied byte-for-byte to `public/bootstrap.js`, with a test preventing drift.
 - A typed, non-patching native invoke wrapper for incremental controller extraction; backend remains authoritative.
 - Typed native World actions, fail-closed world/safety modeling, a reactive startup/session coordinator staged for atomic cutover, and component/native-contract tests. The separate session coordinator is **not** currently instantiated alongside the legacy one.
@@ -41,3 +41,7 @@ Never replace a missing action with a placeholder or claim UI completeness based
 ### Failure before Svelte can render
 
 A classic candidate startup guard and minimal static fallback DOM/CSS ensure a broken or missing Vite module still produces `Startup failed` and a clickable retry, rather than a blank WebKitGTK window. PR #88's original `bootstrap.js` is copied verbatim and continues to own the failure state. Do not remove the fallback until the native deliberately-damaged installer test remains green.
+
+### Verified identity vs device setup
+
+The candidate's `Refresh identity` control reads the existing Rust Tauri `node_identity` command; it never generates peer IDs in JavaScript. Legacy startup and device setup can publish their actual results to the Svelte identity display without adding a second startup coordinator. An `initialize_node` response is displayed as setup progress, **not proof that a peer identity was verified**. If the native read fails, details are redacted from the renderer. The legacy production frontend remains unchanged in ownership and is preserved until Agent 00 authorizes the final cutover.
