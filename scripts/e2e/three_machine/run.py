@@ -332,6 +332,13 @@ def verify(c, output, review_file=None):
             len({x["state_root"] for x in returned.values()}) == 1 and
             len({(x["snapshot_number"], x["snapshot_epoch"]) for x in returned.values()}) == 1,
             "return_replica_divergence")
+    # Bob must persist a NEW signed canonical checkpoint in the accepted
+    # recovery epoch, replicated before Alice is admitted back. Identical
+    # old data from before the crash alone cannot prove durable progress.
+    require(returned["bob"]["snapshot_number"] > a["snapshot_number"] and
+            returned["bob"]["snapshot_epoch"] == rb["epoch"] and
+            returned["bob"]["canonical_head_sha256"] != a["canonical_head_sha256"],
+            "recovered_bob_checkpoint_not_durable_or_replicated")
     require(returned["alice"]["desktop_process_observed"], "returning_alice_gui_missing")
     require(returned["carol"].get("hosting_consent") == consent_c and
             not returned["carol"]["minecraft_server_process_observed"],
