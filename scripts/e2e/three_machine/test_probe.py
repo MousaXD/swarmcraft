@@ -56,6 +56,67 @@ class TestSanitizedDiagnostics(unittest.TestCase):
             self.assertEqual(node.connectivity_summary(temp), {"available": False})
 
 
+class TestRealCliCaptureContract(unittest.TestCase):
+    WORLD = "ab" * 32
+    PEER = "cd" * 32
+
+    def test_real_prefixed_world_identity_and_backend_status_capture(self):
+        from types import SimpleNamespace
+
+        def completed(text):
+            return SimpleNamespace(returncode=0, stdout=text, stderr="")
+
+        status = (
+            "World: Test\n"
+            f"World ID: scworld:{self.WORLD}\n"
+            "Minecraft: 1.21.4\n"
+            "Fabric loader: 0.16.13\n"
+            "Authorized peers: 3\n"
+            "Safety: Canonical\n"
+            "Latest snapshot: 8\n"
+            "Epoch: 2\n"
+            f"State root: {'11' * 32}\n"
+        )
+        identity = f"Peer ID: scpeer:{self.PEER}\nPublic key: 0000\n"
+        migration = json.dumps({
+            "world_id": "scworld:" + self.WORLD,
+            "authority_peer_id": "scpeer:" + self.PEER,
+            "epoch": 2, "fencing_token": 4, "snapshot_hash": "22" * 32,
+            "phase": "Ready", "runtime_ready": True,
+        })
+        readiness = json.dumps({
+            "world_id": "scworld:" + self.WORLD,
+            "successor_peer_id": None, "state": "safe",
+            "safe_to_shutdown": True,
+        })
+        args = type("CaptureArgs", (), {
+            "world": self.WORLD, "data_dir": "/tmp", "cli": "/bin/true",
+            "binary": "/bin/true", "salt": "33" * 32,
+            "desktop_pid": 123, "server_pid": 124, "client_pid": 125,
+        })()
+        outputs = list(map(completed, (status, identity, "OK snapshot #8\n",
+                                       migration, readiness)))
+        with patch.object(node, "run", side_effect=outputs):
+            with patch.object(node, "canonical_head_digest", return_value="44" * 32):
+                with patch.object(node, "hosting_consent", return_value={"available": True}):
+                    with patch.object(node, "isolated_process", return_value=True):
+                        with patch.object(node, "fabric_client_process", return_value=True):
+                            with patch.object(node, "runtime_heap_mib", return_value=4096):
+                                with patch.object(node, "java_runtime_version", return_value="25.0.1"):
+                                    with patch.object(node, "log_digests", return_value=[]):
+                                        with patch.object(node, "connectivity_summary",
+                                                          return_value={"available": False}):
+                                            report = node.capture(args)
+        self.assertEqual(report["minecraft_version"], "1.21.4")
+        self.assertEqual(report["fabric_loader_version"], "0.16.13")
+        self.assertTrue(report["snapshot_verify_passed"])
+        self.assertEqual(report["canonical_head_sha256"], "44" * 32)
+        self.assertEqual(report["authorized_peers"], 3)
+        self.assertEqual(report["identity_fingerprint"], node.fp(args.salt, "scpeer:" + self.PEER))
+        self.assertEqual(report["world_fingerprint"], node.fp(args.salt, self.WORLD))
+        self.assertTrue(report["minecraft_client_process_observed"])
+
+
 class TestDebianPackageMetadata(unittest.TestCase):
     def test_extracts_exact_bare_package_and_version_fields(self):
         from types import SimpleNamespace
