@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Three independently installed SwarmCraft machines: orchestration + fail-closed evidence.
+
+This runner never creates worlds, joins players, accepts the EULA, supplies fake
+runtime data, or claims a real Minecraft join from a CLI-only observation.
+"""
+from __future__ import annotations
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+ROLES = ("alice", "bob", "carol")
+STAGES = {
+    "alice_created": ("alice",),
+    "bob_joined": ("alice", "bob"),
+    "carol_joined": ROLES,
+    "checkpoint": ROLES,
+    "alice_crashed": ("bob", "carol"),
+    "bob_recovered": ("bob", "carol"),
+    "alice_returned": ROLES,
+}
+SHA = re.compile(r"^[0-9a-fA-F]{64}$")
+COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
+SSH_TARGET = re.compile(r"^[a-zA-Z0-9_.@:-]+$")
+HERE = Path(__file__).resolve().parent
+
+
+class Blocked(Exception):
+    pass
+
+
+def require(condition, reason):
+    if not condition:
+        raise Blocked(reason)
+
+
+def load_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def save(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+
+def config(path):
+    c = load_json(path)
+    require(c.get("schema_version") == 1, "unsupported_config_schema")
+    require(COMMIT.fullmatch(c.get("commit", "")), "expected_commit_missing")
+    require(SHA.fullmatch(c.get("package_sha256", "")), "expected_package_hash_missing")
+    require(SHA.fullmatch(c.get("fingerprint_salt", "")), "private_fingerprint_salt_missing")
+    nodes = c.get("nodes", {})
+    require(set(nodes) == set(ROLES), "exactly_three_roles_required")
+    for role in ROLES:
+        n = nodes[role]
+        require(SSH_TARGET.fullmatch(n.get("ssh", "")), "invalid_ssh_target_" + role)
+        for key in ("package", "binary", "cli", "data_dir"):
+            require(isinstance(n.get(key), str) and n[key].startswith("/"), "absolute_path_required_" + role + "_" + key)
+        require(n.get("network_class") in ("home_nat", "cgnat", "mobile", "public_wan", "other_wan"),
+                "network_class_missing_" + role)
+    return c
+
+
+def remote(c, role, operation, **kwargs):
+    node = c["nodes"][role]
+    arguments = [
+        operation, "--salt", c["fingerprint_salt"],
+        "--package", node["package"], "--binary", node["binary"],
+        "--cli", node["cli"], "--data-dir", node["data_dir"],
+    ]
+    for name, value in kwargs.items():
+        if value is not None:
+            arguments.extend(("--" + name.replace("_", "-"), str(value)))
+    command = "python3 - " + " ".join(shlex.quote(arg) for arg in arguments)
+    ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+           "-o", "ConnectTimeout=12", node["ssh"], command]
+    try:
+        response = subprocess.run(
+            ssh, input=(HERE / "node.py").read_bytes(), capture_output=True,
+            timeout=100, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Blocked("ssh_unavailable_" + role) from exc
+    # Never include SSH stderr: it may contain private network identifiers.
+    require(response.returncode == 0, "remote_probe_failed_" + role)
+    try:
+        data = json.loads(response.stdout)
+    except (ValueError, UnicodeError) as exc:
+        raise Blocked("remote_response_invalid_" + role) from exc
+    require(data.get("ok") is True and data.get("operation") == operation, "remote_probe_rejected_" + role)
+    del data["ok"]
+    del data["operation"]
+    return data
+
+
+def preflight(c, output):
+    probes = {role: remote(c, role, "preflight") for role in ROLES}
+    require(len({p["machine_fingerprint"] for p in probes.values()}) == 3, "machines_not_independent")
+    require(len({p["egress_fingerprint"] for p in probes.values()}) == 3, "external_networks_not_independent")
+    require(all(p["package_sha256"].lower() == c["package_sha256"].lower() for p in probes.values()),
+            "package_sha_mismatch")
+    require(len({p["package_version"] for p in probes.values()}) == 1, "package_version_mismatch")
+    require(all(p["app_installed"] and p["cli_installed"] and p["os"] == "linux" for p in probes.values()),
+            "installed_linux_package_required")
+    save(output / "preflight.json", {
+        "commit": c["commit"], "package_sha256": c["package_sha256"],
+        "observed_utc": datetime.now(timezone.utc).isoformat(),
+        "nodes": {role: {**probes[role], "network_class": c["nodes"][role]["network_class"]} for role in ROLES},
+    })
+
+
+def capture(c, output, stage, world, pids):
+    require(stage in STAGES, "unknown_capture_stage")
+    pid_data = load_json(pids) if pids else {}
+    probes = {}
+    for role in STAGES[stage]:
+        local = pid_data.get(role, {})
+        probes[role] = remote(
+            c, role, "capture", world=world,
+            desktop_pid=local.get("desktop"), client_pid=local.get("client"),
+            server_pid=local.get("server"),
+        )
+    save(output / (stage + ".json"), {
+        "stage": stage, "commit": c["commit"], "package_sha256": c["package_sha256"],
+        "observed_utc": datetime.now(timezone.utc).isoformat(),
+        "nodes": probes,
+    })
+
+
+def crash(c, output, world, pid):
+    require(pid > 1, "invalid_authority_pid")
+    receipt = remote(c, "alice", "crash", world=world, pid=pid, confirm="CRASH-ALICE-AUTHORITY")
+    require(receipt.get("process_gone") is True and receipt.get("signal") == "SIGKILL", "crash_not_observed")
+    save(output / "crash.json", {"commit": c["commit"], "receipt": receipt,
+                                  "observed_utc": datetime.now(timezone.utc).isoformat()})
+
+
+def verify(c, output, review_file=None):
+    pre = load_json(output / "preflight.json")
+    require(pre["commit"] == c["commit"] and pre["package_sha256"] == c["package_sha256"],
+            "preflight_wrong_candidate")
+    require(len({x["machine_fingerprint"] for x in pre["nodes"].values()}) == 3, "duplicate_machine")
+    require(len({x["egress_fingerprint"] for x in pre["nodes"].values()}) == 3, "duplicate_egress")
+    stages = {}
+    for stage, roles in STAGES.items():
+        s = load_json(output / (stage + ".json"))
+        require(s["stage"] == stage and s["commit"] == c["commit"] and
+                s["package_sha256"] == c["package_sha256"], "stage_candidate_mismatch_" + stage)
+        require(set(s["nodes"]) == set(roles), "stage_missing_machine_" + stage)
+        stages[stage] = s["nodes"]
+        for role, node in s["nodes"].items():
+            require(node["snapshot_verify_passed"] and node["canonical"], "unsigned_or_conflicted_" + stage + "_" + role)
+            require(node["snapshot_number"] is not None and node["snapshot_number"] >= 1,
+                    "snapshot_missing_" + stage + "_" + role)
+            require(node["world_fingerprint"] == stages["alice_created"]["alice"]["world_fingerprint"],
+                    "world_divergence_" + stage + "_" + role)
+    p = stages["checkpoint"]
+    a, b, d = p["alice"], p["bob"], p["carol"]
+    require(len({v["identity_fingerprint"] for v in p.values()}) == 3, "duplicate_player_identity")
+    require(all(x["authorized_peers"] == 3 for x in p.values()), "signed_three_member_quorum_missing")
+    require(all(x["snapshot_hash"] and x["state_root"] for x in p.values()), "checkpoint_hash_missing")
+    require(len({x["snapshot_hash"] for x in p.values()}) == 1 and
+            len({x["state_root"] for x in p.values()}) == 1, "checkpoint_not_replicated")
+    require(all(x["authority_fingerprint"] == a["identity_fingerprint"] for x in p.values()),
+            "alice_not_canonical_authority")
+    require(a["runtime_ready"] and a["minecraft_server_process_observed"], "alice_real_server_missing")
+    require(a["safe_to_shutdown"] and a["successor_fingerprint"] == b["identity_fingerprint"],
+            "bob_not_verified_successor_or_no_surviving_quorum")
+    require(all(x["desktop_process_observed"] and x["minecraft_client_process_observed"] for x in p.values()),
+            "installed_gui_or_real_client_not_observed")
+    receipt = load_json(output / "crash.json")
+    require(receipt["commit"] == c["commit"] and receipt["receipt"]["process_gone"] and
+            receipt["receipt"]["signal"] == "SIGKILL", "alice_hard_crash_missing")
+    recovery = stages["bob_recovered"]
+    require(all(x["authority_fingerprint"] == b["identity_fingerprint"] for x in recovery.values()),
+            "bob_not_sole_recovered_authority")
+    require(len({(x["epoch"], x["fencing_token"]) for x in recovery.values()}) == 1,
+            "recovery_generation_divergence")
+    rb = recovery["bob"]
+    require(rb["epoch"] is not None and a["epoch"] is not None and rb["epoch"] > a["epoch"] and
+            rb["fencing_token"] is not None and a["fencing_token"] is not None and
+            rb["fencing_token"] > a["fencing_token"], "unfenced_or_stale_takeover")
+    require(rb["runtime_ready"] and rb["minecraft_server_process_observed"], "bob_real_recovery_runtime_missing")
+    require(all(x["state_root"] == a["state_root"] for x in recovery.values()),
+            "latest_accepted_checkpoint_not_restored")
+    returned = stages["alice_returned"]
+    require(all(x["authority_fingerprint"] == b["identity_fingerprint"] and
+                x["epoch"] == rb["epoch"] and x["fencing_token"] == rb["fencing_token"] for x in returned.values()),
+            "stale_alice_or_split_brain")
+    require(len({x["snapshot_hash"] for x in returned.values()}) == 1 and
+            len({x["state_root"] for x in returned.values()}) == 1,
+            "return_replica_divergence")
+    require(not returned["alice"]["runtime_ready"] and not returned["alice"]["minecraft_server_process_observed"],
+            "stale_alice_runtime_still_active")
+    require(all(x["minecraft_client_process_observed"] for x in returned.values()),
+            "real_player_reconnection_unobserved")
+
+    # Human examination of redacted native GUI, Minecraft-client and network
+    # evidence is mandatory; process presence never proves a successful join.
+    require(review_file is not None, "independent_player_evidence_review_missing")
+    review = load_json(review_file)
+    require(review.get("commit") == c["commit"] and review.get("package_sha256") == c["package_sha256"],
+            "review_candidate_mismatch")
+    required = ("three_independent_gui_installations", "explicit_eula_by_alice",
+                "signed_invites_and_real_client_join", "shared_ingame_marker_three_clients",
+                "bob_opt_in_budget_enforced", "carol_zero_host_budget_enforced",
+                "direct_or_hole_punch_transport_observed", "relay_fallback_observed",
+                "alice_hard_crash_and_bob_client_reconnection", "alice_return_fenced",
+                "screenshots_redacted", "real_world_network_classes_verified")
+    require(all(review.get(k) is True for k in required), "real_player_or_network_review_incomplete")
+    require(bool(review.get("reviewer")) and bool(review.get("evidence_url")),
+            "independent_review_identity_or_evidence_missing")
+    return {"verdict": "READY", "commit": c["commit"], "package_sha256": c["package_sha256"],
+            "reviewer": review["reviewer"], "evidence_url": review["evidence_url"]}
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("action", choices=["preflight", "capture", "crash", "verify"])
+    p.add_argument("--config", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--stage", choices=list(STAGES))
+    p.add_argument("--world")
+    p.add_argument("--pids")
+    p.add_argument("--pid", type=int)
+    p.add_argument("--review")
+    a = p.parse_args()
+    try:
+        c = config(a.config)
+        out = Path(a.output)
+        if a.action == "preflight":
+            preflight(c, out)
+        elif a.action == "capture":
+            require(a.stage and a.world, "capture_needs_stage_and_world")
+            capture(c, out, a.stage, a.world, a.pids)
+        elif a.action == "crash":
+            require(a.world and a.pid, "crash_needs_world_and_pid")
+            crash(c, out, a.world, a.pid)
+        else:
+            result = verify(c, out, a.review)
+            save(out / "verdict.json", result)
+            print(json.dumps(result))
+            return
+        print(json.dumps({"action": a.action, "verdict": "EVIDENCE_RECORDED_NOT_CERTIFIED"}))
+    except (Blocked, OSError, ValueError, KeyError, TypeError) as error:
+        code = str(error) if isinstance(error, Blocked) else "missing_or_invalid_evidence"
+        print(json.dumps({"verdict": "BLOCKED", "reason": code}), file=sys.stderr)
+        if a.action == "verify":
+            save(Path(a.output) / "verdict.json", {"verdict": "BLOCKED", "reason": code})
+        raise SystemExit(2) from None
+
+
+if __name__ == "__main__":
+    main()
