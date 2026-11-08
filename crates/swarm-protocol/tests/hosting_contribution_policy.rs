@@ -403,10 +403,14 @@ fn host_claim_must_bind_challenge_policy_head_peer_and_epoch() {
     assert!(claim.verify_for_challenge(&expected, test_signature, |_| true).is_err());
     expected = expected_host_claim(&claim);
     expected.expected_consent_revision += 1;
-    assert!(claim.verify_for_challenge(&expected, test_signature, |_| panic!("stale consent may not consume nonce")).is_err());
+    assert!(claim
+        .verify_for_challenge(&expected, test_signature, |_| panic!("stale consent may not consume nonce"))
+        .is_err());
     expected = expected_host_claim(&claim);
     expected.expected_selected_heap_mib += 512;
-    assert!(claim.verify_for_challenge(&expected, test_signature, |_| panic!("wrong heap may not consume nonce")).is_err());
+    assert!(claim
+        .verify_for_challenge(&expected, test_signature, |_| panic!("wrong heap may not consume nonce"))
+        .is_err());
 }
 
 #[test]
