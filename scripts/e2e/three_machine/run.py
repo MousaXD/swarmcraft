@@ -239,6 +239,7 @@ def verify(c, output, review_file=None):
                 "signed_invites_and_real_client_join", "shared_ingame_marker_three_clients",
                 "bob_opt_in_budget_enforced", "carol_zero_host_budget_enforced",
                 "direct_or_hole_punch_transport_observed", "relay_fallback_observed",
+                "measured_packet_loss_disconnect_and_reconnection",
                 "alice_hard_crash_and_bob_client_reconnection", "alice_return_fenced",
                 "screenshots_redacted", "real_world_network_classes_verified")
     require(all(review.get(k) is True for k in required), "real_player_or_network_review_incomplete")
