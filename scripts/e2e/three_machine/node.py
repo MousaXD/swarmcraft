@@ -202,24 +202,95 @@ def capture(a):
     }
 
 
+def process_command(pid):
+    return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").lower()
+
+
+def isolated_process(pid, kind, root, world, binary, cli):
+    """Verify PID belongs to this exact ephemeral world before SIGSTOP/SIGKILL."""
+    if not pid or pid <= 1 or pid == os.getpid():
+        return False
+    try:
+        command = process_command(pid)
+        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+        profile = ("SWARMCRAFT_DATA_DIR=" + str(root)).encode()
+        matches_profile = profile in environ or (
+            "--data-dir" in command and str(root).lower() in command
+        )
+        executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
+        cwd = Path(f"/proc/{pid}/cwd").resolve(strict=True)
+        if kind == "desktop":
+            return matches_profile and executable == binary and "swarmcraft" in command
+        if kind == "daemon":
+            return matches_profile and "swarmcraft" in executable.name.lower() and "daemon" in command
+        if kind == "server":
+            return (
+                cwd == root / "runtime" / world
+                and "java" in executable.name.lower()
+                and "-jar" in command
+                and ("fabric" in command or ".jar" in command)
+            )
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return False
+
+
+def process_exited(pid):
+    location = Path(f"/proc/{pid}")
+    if not location.exists():
+        return True
+    try:
+        # A zombie has already lost all file handles/listeners and cannot
+        # regain authority; a parent may reap it after the SSH call ends.
+        stat = (location / "stat").read_text()
+        return stat.rsplit(") ", 1)[1].split(" ", 1)[0] in ("Z", "X")
+    except (OSError, IndexError):
+        return not location.exists()
+
+
 def crash(a):
     if a.confirm != "CRASH-ALICE-AUTHORITY":
         fail("crash_confirmation_missing")
-    if not re.fullmatch("[a-fA-F0-9]{64}", a.world) or not a.pid or a.pid <= 1 or a.pid == os.getpid():
-        fail("crash_target_invalid")
+    if not a.world or not re.fullmatch("[a-fA-F0-9]{64}", a.world):
+        fail("crash_world_invalid")
     root = Path(a.data_dir).resolve(strict=True)
-    cwd = Path(f"/proc/{a.pid}/cwd").resolve(strict=True)
-    cmd = Path(f"/proc/{a.pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").lower()
-    if not (cwd == root or root in cwd.parents or a.world.lower() in cmd.lower()):
-        fail("target_not_bound_to_isolated_world")
-    if "java" not in cmd and "swarmcraft" not in cmd:
-        fail("target_not_swarmcraft_runtime")
-    os.kill(a.pid, signal.SIGKILL)
+    targets = [
+        ("desktop", a.desktop_pid),
+        ("daemon", a.daemon_pid),
+        ("server", a.server_pid),
+    ]
+    pids = [pid for _, pid in targets]
+    if any(not pid or pid <= 1 for pid in pids) or len(set(pids)) != 3:
+        fail("three_distinct_crash_targets_required")
+    binary = Path(a.binary).resolve(strict=True)
+    cli = Path(a.cli).resolve(strict=True)
+    if any(not isolated_process(pid, kind, root, a.world, binary, cli) for kind, pid in targets):
+        fail("crash_targets_not_isolated_test_owned_processes")
+    # Freeze all three before killing any to prevent Tauri or Rust from
+    # repairing a deliberately crashed child during partial shutdown.
+    frozen = []
+    try:
+        for _, pid in targets:
+            os.kill(pid, signal.SIGSTOP)
+            frozen.append(pid)
+        for _, pid in targets:
+            os.kill(pid, signal.SIGKILL)
+    except OSError:
+        for pid in frozen:
+            try:
+                os.kill(pid, signal.SIGCONT)
+            except OSError:
+                pass
+        fail("crash_injection_partial_failure")
     for _ in range(40):
-        if not Path(f"/proc/{a.pid}").exists():
-            return {"signal": "SIGKILL", "process_gone": True, "role": "alice"}
+        if all(process_exited(pid) for pid in pids):
+            return {
+                "signal": "SIGKILL", "process_gone": True, "role": "alice",
+                "crashed_components": ["desktop", "daemon", "server"],
+                "crash_scope": "isolated_application_processes_not_machine_power",
+            }
         time.sleep(0.25)
-    fail("crashed_pid_not_reaped")
+    fail("crash_processes_still_alive")
 
 
 def main():
@@ -227,7 +298,7 @@ def main():
     p.add_argument("operation", choices=["preflight", "capture", "crash"])
     for name in ("salt", "package", "binary", "cli", "data-dir", "world", "confirm"):
         p.add_argument("--" + name)
-    for name in ("pid", "desktop-pid", "client-pid", "server-pid"):
+    for name in ("pid", "desktop-pid", "daemon-pid", "client-pid", "server-pid"):
         p.add_argument("--" + name, type=int)
     a = p.parse_args()
     if not a.salt or not re.fullmatch("[a-fA-F0-9]{64}", a.salt):
