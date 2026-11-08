@@ -96,13 +96,20 @@
     }
   }
 
+  // Form submission can originate from Enter or requestSubmit(), even when
+  // the visible action buttons are disabled. Never let it close a dialog while
+  // a signed invitation is still being issued by the native backend.
+  function preventInviteSubmitWhilePending(event: SubmitEvent) {
+    if (busy) event.preventDefault();
+  }
+
   function preventCloseWhilePending(event: Event) {
     if (busy || leaving) event.preventDefault();
   }
 </script>
 
 <dialog id="inviteDialog" class="dialog" oncancel={preventCloseWhilePending}>
-    <form id="inviteForm" class="dialog-card" method="dialog">
+    <form id="inviteForm" class="dialog-card" method="dialog" onsubmit={preventInviteSubmitWhilePending}>
       <div class="dialog-heading">
         <div>
           <h2>Invite to <span id="inviteWorldName">world</span></h2>
