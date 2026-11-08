@@ -134,10 +134,13 @@ def capture(c, output, stage, world, pids):
     })
 
 
-def crash(c, output, world, pid):
-    require(pid > 1, "invalid_authority_pid")
-    receipt = remote(c, "alice", "crash", world=world, pid=pid, confirm="CRASH-ALICE-AUTHORITY")
-    require(receipt.get("process_gone") is True and receipt.get("signal") == "SIGKILL", "crash_not_observed")
+def crash(c, output, world, desktop_pid, daemon_pid, server_pid):
+    pids = (desktop_pid, daemon_pid, server_pid)
+    require(all(pid and pid > 1 for pid in pids) and len(set(pids)) == 3, "three_crash_process_ids_required")
+    receipt = remote(c, "alice", "crash", world=world, desktop_pid=desktop_pid,
+                     daemon_pid=daemon_pid, server_pid=server_pid, confirm="CRASH-ALICE-AUTHORITY")
+    require(receipt.get("process_gone") is True and receipt.get("signal") == "SIGKILL" and
+            receipt.get("crashed_components") == ["desktop", "daemon", "server"], "three_component_crash_not_observed")
     save(output / "crash.json", {"commit": c["commit"], "receipt": receipt,
                                   "observed_utc": datetime.now(timezone.utc).isoformat()})
 
@@ -181,7 +184,9 @@ def verify(c, output, review_file=None):
             "installed_gui_or_real_client_not_observed")
     receipt = load_json(output / "crash.json")
     require(receipt["commit"] == c["commit"] and receipt["receipt"]["process_gone"] and
-            receipt["receipt"]["signal"] == "SIGKILL", "alice_hard_crash_missing")
+            receipt["receipt"]["signal"] == "SIGKILL" and
+            receipt["receipt"].get("crashed_components") == ["desktop", "daemon", "server"],
+            "alice_full_authority_process_crash_missing")
     recovery = stages["bob_recovered"]
     require(all(x["authority_fingerprint"] == b["identity_fingerprint"] for x in recovery.values()),
             "bob_not_sole_recovered_authority")
@@ -236,6 +241,9 @@ def main():
     p.add_argument("--world")
     p.add_argument("--pids")
     p.add_argument("--pid", type=int)
+    p.add_argument("--desktop-pid", type=int)
+    p.add_argument("--daemon-pid", type=int)
+    p.add_argument("--server-pid", type=int)
     p.add_argument("--review")
     a = p.parse_args()
     try:
@@ -247,8 +255,8 @@ def main():
             require(a.stage and a.world, "capture_needs_stage_and_world")
             capture(c, out, a.stage, a.world, a.pids)
         elif a.action == "crash":
-            require(a.world and a.pid, "crash_needs_world_and_pid")
-            crash(c, out, a.world, a.pid)
+            require(a.world, "crash_needs_world")
+            crash(c, out, a.world, a.desktop_pid, a.daemon_pid, a.server_pid)
         else:
             result = verify(c, out, a.review)
             save(out / "verdict.json", result)
