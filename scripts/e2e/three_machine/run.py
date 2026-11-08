@@ -20,6 +20,9 @@ STAGES = {
     "alice_created": ("alice",),
     "bob_joined": ("alice", "bob"),
     "carol_joined": ROLES,
+    "transport_direct": ROLES,
+    "transport_relay": ROLES,
+    "transport_disrupted": ROLES,
     "checkpoint": ROLES,
     "alice_crashed": ("bob", "carol"),
     "bob_recovered": ("bob", "carol"),
@@ -166,6 +169,19 @@ def verify(c, output, review_file=None):
                     "snapshot_missing_" + stage + "_" + role)
             require(node["world_fingerprint"] == stages["alice_created"]["alice"]["world_fingerprint"],
                     "world_divergence_" + stage + "_" + role)
+    # Observed runtime transport state must agree with the independent
+    # reviewer. A configured relay, unverified NAT label or SSH reachability
+    # cannot count as a selected libp2p transport.
+    direct = [n.get("connectivity_diagnostics") for n in stages["transport_direct"].values()]
+    relay = [n.get("connectivity_diagnostics") for n in stages["transport_relay"].values()]
+    require(any(isinstance(d, dict) and d.get("available") is True and
+                (d.get("direct_connectivity") is True or
+                 (d.get("hole_punch") == "succeeded" and d.get("state") == "hole_punched"))
+                for d in direct), "real_direct_or_hole_punched_path_not_observed")
+    require(any(isinstance(d, dict) and d.get("available") is True and
+                d.get("relay_connectivity") is True and
+                d.get("state") in ("relay_connected", "relay_required")
+                for d in relay), "active_relay_fallback_not_observed")
     p = stages["checkpoint"]
     a, b, d = p["alice"], p["bob"], p["carol"]
     require(len({v["identity_fingerprint"] for v in p.values()}) == 3, "duplicate_player_identity")
