@@ -9,6 +9,23 @@ from unittest.mock import patch
 import node
 
 
+class TestCanonicalCliIdentifiers(unittest.TestCase):
+    WORLD = "ab" * 32
+    PEER = "cd" * 32
+
+    def test_cli_display_world_prefix_is_normalized(self):
+        self.assertEqual(node.canonical_world_id("scworld:" + self.WORLD), self.WORLD)
+        self.assertEqual(node.canonical_world_id(self.WORLD.upper()), self.WORLD)
+        for bad in ("scpeer:" + self.WORLD, "scworld:../world", "scworld:" + "a" * 63, None, ""):
+            self.assertIsNone(node.canonical_world_id(bad))
+
+    def test_backend_peer_id_is_validated_and_canonical(self):
+        self.assertEqual(node.canonical_peer_id("scpeer:" + self.PEER), "scpeer:" + self.PEER)
+        self.assertEqual(node.canonical_peer_id(self.PEER.upper()), "scpeer:" + self.PEER)
+        for bad in ("scworld:" + self.PEER, "secret", "", None):
+            self.assertIsNone(node.canonical_peer_id(bad))
+
+
 class TestSanitizedDiagnostics(unittest.TestCase):
     def test_does_not_publish_addresses_tokens_or_error_details(self):
         with tempfile.TemporaryDirectory() as temp:
