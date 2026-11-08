@@ -53,7 +53,19 @@ AFTER="$("$CLI" --data-dir "$DATA" world hosting status "$WORLD" --json)"
   fail "device cannot safely host selected $HEAP MiB heap: $REASON"
 }
 CAP="$(field hard_process_memory_cap_guaranteed <<<"$AFTER")"
-[[ "$CAP" == true || "$CAP" == false ]] ||
-  fail "backend did not state whole-process hard-cap support"
-printf 'HOSTING_CONSENT_OPT_IN_PASS world=%s heap_mib=%s current_eligibility=true hard_process_memory_cap_guaranteed=%s\n' \
-  "$WORLD" "$HEAP" "$CAP"
+# Agent 03 currently enforces -Xmx (Java heap) but no whole-process RSS cap.
+# A backend falsely promising hard-RSS enforcement must fail certification.
+[[ "$CAP" == false ]] ||
+  fail "backend incorrectly claims a guaranteed whole-process RSS cap"
+python3 -c '
+import json,sys
+report=json.load(sys.stdin)
+physical=report["physical_mib"]
+available=report["available_mib"]
+if not isinstance(physical,int) or isinstance(physical,bool) or physical <= 0:
+    sys.exit("HOSTING_CONSENT_OPT_IN_FAIL: physical device RAM was not actually measured")
+if not isinstance(available,int) or isinstance(available,bool) or not 0 < available <= physical:
+    sys.exit("HOSTING_CONSENT_OPT_IN_FAIL: available device RAM is invalid")
+' <<<"$AFTER" || fail "physical/available memory probes were not valid"
+printf 'HOSTING_CONSENT_OPT_IN_PASS world=%s heap_mib=%s current_eligibility=true hard_process_memory_cap_guaranteed=false\n' \
+  "$WORLD" "$HEAP"
