@@ -173,7 +173,7 @@ fn atomic_write(path: &Path, value: &HostingConsentV1) -> Result<()> {
 }
 
 pub fn estimated_native_overhead_mib(heap_mib: u64) -> u64 {
-    NATIVE_MIN_MIB.max(heap_mib / 2)
+    if heap_mib == 0 { 0 } else { NATIVE_MIN_MIB.max(heap_mib / 2) }
 }
 
 fn os_headroom_mib(physical_mib: u64) -> u64 {
