@@ -74,3 +74,7 @@ The dependency-lock artifact from GitHub Actions run `42468369672` was downloade
 ## Native candidate certification (separate from shipping)
 
 A dedicated candidate-only workflow `.github/workflows/svelte-candidate-native-gui.yml` now builds the Svelte `dist` using the committed npm lockfile and packages an actual Tauri Linux Debian installer with the ephemeral `frontend/tauri.candidate.conf.json` overlay. That overlay changes **only** `build.frontendDist`; the production `src-tauri/tauri.conf.json`, four Rust sidecars, CSP and release gates remain untouched. The workflow reuses #83's unmocked installed WebKitGTK/WebDriver first-launch/create/restart/persistence acceptance and a missing-sidecar negative control. A passing check is required before proposing a production cutover. Do not represent a queued/unrun workflow as passing evidence.
+
+## World details and authority display safety
+
+The reactive model now requests each world's actual `world_status` and `world_compatibility` through bounded batches of at most four worlds. Failed detail calls do not erase the local world list or invent a compatible host. Presentation-only `playAvailability` prevents Play for conflicting, replica-only, unknown and partially unavailable states; Rust remains the final admission authority. Vitest covers failed/unknown compatibility, solo vs canonical distinctions, conflicts and prototype-pollution-resistant status parsing. This module remains staged until the full Svelte controller cutover.

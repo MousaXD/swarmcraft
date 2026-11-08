@@ -8,6 +8,8 @@ function backend(overrides: Partial<DesktopSessionBackend> = {}): DesktopSession
     nodeIdentity: vi.fn(async () => 'Peer ID: scpeer:abc'),
     ensureDaemonRunning: vi.fn(async () => 123),
     listWorlds: vi.fn(async () => 'scworld:a Alpha snapshots=2\nscworld:b Beta snapshots=1'),
+    worldStatus: vi.fn(async () => 'Safety: canonical'),
+    worldCompatibility: vi.fn(async () => 'Authority eligibility: Compatible'),
     ...overrides,
   };
 }
@@ -83,5 +85,23 @@ describe('native session startup', () => {
     await desktop.start();
     expect(get(desktop.state).startup.phase).toBe('degraded');
     expect(Object.keys(get(desktop.state))).not.toContain('authorityEligible');
+  });
+});
+
+
+describe('world details are fetched from Rust rather than inferred by the renderer', () => {
+  it('keeps all worlds visible but marks failed status unavailable', async () => {
+    const desktop = createDesktopSession(backend({
+      worldStatus: async (world) => {
+        if (world === 'scworld:a') throw new Error('canonical record inaccessible');
+        return 'Safety: solo';
+      },
+    }));
+    await desktop.start();
+    const state = get(desktop.state);
+    expect(state.startup.phase).toBe('ready');
+    expect(state.worlds.length).toBe(2);
+    expect(state.worlds[0].statusAvailable).toBe(false);
+    expect(state.worlds[1].status.Safety).toBe('solo');
   });
 });

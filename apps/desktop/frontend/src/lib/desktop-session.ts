@@ -1,5 +1,6 @@
 import { get, writable, type Readable } from 'svelte/store';
-import { parseWorldList, type WorldSummary } from './world-list';
+import { parseWorldList } from './world-list';
+import { worldModel, type WorldModel } from './world-state';
 import { initialStartupState, transitionStartup, type StartupState } from './startup-state';
 
 /**
@@ -15,6 +16,8 @@ export interface DesktopSessionBackend {
   nodeIdentity(): Promise<string>;
   ensureDaemonRunning(listen: string): Promise<unknown>;
   listWorlds(): Promise<string>;
+  worldStatus(world: string): Promise<string>;
+  worldCompatibility(world: string): Promise<string>;
 }
 
 export type WorldsPhase = 'idle' | 'loading' | 'loaded' | 'failed';
@@ -24,7 +27,7 @@ export interface DesktopSessionState {
   identity: string | null;
   networkWarning: string | null;
   worldsPhase: WorldsPhase;
-  worlds: WorldSummary[];
+  worlds: WorldModel[];
   worldsError: string | null;
   selectedWorldId: string | null;
 }
@@ -86,7 +89,21 @@ export function createDesktopSession(backend: DesktopSessionBackend, listen = ''
     try {
       const raw = await within('World list', 45000, () => backend.listWorlds());
       if (!current(g) || request !== worldsRequest) return;
-      const worlds = parseWorldList(raw);
+      const summaries = parseWorldList(raw);
+      // Status and compatibility are always requested from Rust. Parallelism is
+      // bounded to avoid stampeding the local sidecar on large world lists.
+      const worlds: WorldModel[] = [];
+      for (let i = 0; i < summaries.length; i += 4) {
+        const batch = await Promise.all(summaries.slice(i, i + 4).map(async (summary) => {
+          const results = await Promise.allSettled([
+            within('World status', 15000, () => backend.worldStatus(summary.id)),
+            within('World compatibility', 15000, () => backend.worldCompatibility(summary.id)),
+          ]);
+          return worldModel(summary, results as [PromiseSettledResult<string>, PromiseSettledResult<string>]);
+        }));
+        if (!current(g) || request !== worldsRequest) return;
+        worlds.push(...batch);
+      }
       change(s => ({
         ...s,
         worldsPhase: 'loaded',
