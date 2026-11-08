@@ -350,10 +350,33 @@ fn challenge_bound_host_claim_is_not_a_legacy_hello_or_authority_token() {
     let claim = signed_host_claim(&f);
     let expected = expected_host_claim(&claim);
     assert!(claim.signing_bytes().unwrap().starts_with(b"swarmcraft/host-contribution-claim/v1\0"));
-    assert!(claim.verify_for_challenge(&expected, test_signature).is_ok());
-    assert!(claim.verify_for_challenge(&expected, |_, _, _| false).is_err());
+    assert!(claim.verify_for_challenge(&expected, test_signature, |_| true).is_ok());
+    assert!(claim.verify_for_challenge(&expected, |_, _, _| false, |_| true).is_err());
     let bytes = postcard::to_allocvec(&claim).unwrap();
     assert_eq!(postcard::from_bytes::<SignedHostContributionClaimV1>(&bytes).unwrap(), claim);
+}
+
+#[test]
+fn signed_host_claim_is_single_use_even_before_expiration() {
+    use std::collections::BTreeSet;
+
+    let f = Fixture::new();
+    let claim = signed_host_claim(&f);
+    let expected = expected_host_claim(&claim);
+    let mut pending = BTreeSet::from([claim.challenge_nonce]);
+    assert!(claim
+        .verify_for_challenge(&expected, test_signature, |nonce| pending.remove(nonce))
+        .is_ok());
+    assert_eq!(pending.len(), 0);
+    assert!(claim
+        .verify_for_challenge(&expected, test_signature, |nonce| pending.remove(nonce))
+        .is_err());
+    let mut pending = BTreeSet::from([claim.challenge_nonce]);
+    assert!(claim
+        .verify_for_challenge(&expected, |_, _, _| false, |nonce| pending.remove(nonce))
+        .is_err());
+    // Forged signatures must never consume a valid outstanding challenge.
+    assert!(pending.contains(&claim.challenge_nonce));
 }
 
 #[test]
@@ -362,25 +385,25 @@ fn host_claim_must_bind_challenge_policy_head_peer_and_epoch() {
     let claim = signed_host_claim(&f);
     let mut expected = expected_host_claim(&claim);
     expected.challenge_nonce[0] ^= 1;
-    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    assert!(claim.verify_for_challenge(&expected, test_signature, |_| true).is_err());
     expected = expected_host_claim(&claim);
     expected.policy_hash = Hash32([9; 32]);
-    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    assert!(claim.verify_for_challenge(&expected, test_signature, |_| true).is_err());
     expected = expected_host_claim(&claim);
     expected.peer_id = PeerId([9; 32]);
-    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    assert!(claim.verify_for_challenge(&expected, test_signature, |_| true).is_err());
     expected = expected_host_claim(&claim);
     expected.world_id = WorldId([9; 32]);
-    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    assert!(claim.verify_for_challenge(&expected, test_signature, |_| true).is_err());
     expected = expected_host_claim(&claim);
     expected.epoch += 1;
-    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    assert!(claim.verify_for_challenge(&expected, test_signature, |_| true).is_err());
     expected = expected_host_claim(&claim);
     expected.fencing_token += 1;
-    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    assert!(claim.verify_for_challenge(&expected, test_signature, |_| true).is_err());
     expected = expected_host_claim(&claim);
     expected.snapshot_hash = Hash32([4; 32]);
-    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    assert!(claim.verify_for_challenge(&expected, test_signature, |_| true).is_err());
 }
 
 #[test]
@@ -390,13 +413,13 @@ fn host_claim_expiration_replay_and_malformed_signed_data_fail_closed() {
     let mut expected = expected_host_claim(&claim);
 
     expected.now_unix_ms = claim.expires_at_unix_ms + 1;
-    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    assert!(claim.verify_for_challenge(&expected, test_signature, |_| true).is_err());
     expected.now_unix_ms = claim.sampled_at_unix_ms - 1;
-    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    assert!(claim.verify_for_challenge(&expected, test_signature, |_| true).is_err());
 
     expected = expected_host_claim(&claim);
     claim.format_version = HOSTING_POLICY_FORMAT_VERSION + 1;
-    assert!(claim.verify_for_challenge(&expected, test_signature).is_err());
+    assert!(claim.verify_for_challenge(&expected, test_signature, |_| true).is_err());
     claim.format_version = HOSTING_POLICY_FORMAT_VERSION;
     claim.expires_at_unix_ms = claim.sampled_at_unix_ms + 30_001;
     assert!(claim.validate_shape().is_err());
