@@ -23,6 +23,7 @@
     }
     busy = true;
     error = '';
+    let nativeSucceeded = false;
     try {
       const id = await nativeWorldActions().create({
         name: createName?.value ?? '',
@@ -31,10 +32,11 @@
         compatibility: createCompatibility?.value ?? '',
         visibility: (createVisibility?.value ?? 'private') as WorldVisibility,
       });
+      nativeSucceeded = true;
       // Rust created the real world. The established world-list controller
       // still owns its rich details, selection and navigation until migrated.
-      await window.__swarmcraftAfterSvelteCreate(id);
       form?.reset();
+      await window.__swarmcraftAfterSvelteCreate(id);
       if (createMinecraft) createMinecraft.value = '26.1.2';
       if (createLoader) createLoader.value = '0.19.3';
       if (createCompatibility) createCompatibility.value = 'vanilla-fabric';
@@ -45,7 +47,9 @@
       } else {
         // Never reflect potentially sensitive native argv or invite data into
         // the renderer. Keep the form intact for explicit user retry.
-        error = 'Could not create the world. Check the selected versions and local installation, then retry. If creation may have succeeded, refresh Worlds before trying again.';
+        error = nativeSucceeded
+          ? 'World created successfully, but the world list could not refresh. Refresh Worlds; do not create the world again.'
+          : 'Creation could not be confirmed. Check the selected versions and local installation, then refresh Worlds before trying again.';
       }
     } finally {
       busy = false;
