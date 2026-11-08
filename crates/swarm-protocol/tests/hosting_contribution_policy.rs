@@ -364,17 +364,11 @@ fn signed_host_claim_is_single_use_even_before_expiration() {
     let claim = signed_host_claim(&f);
     let expected = expected_host_claim(&claim);
     let mut pending = BTreeSet::from([claim.challenge_nonce]);
-    assert!(claim
-        .verify_for_challenge(&expected, test_signature, |nonce| pending.remove(nonce))
-        .is_ok());
+    assert!(claim.verify_for_challenge(&expected, test_signature, |nonce| pending.remove(nonce)).is_ok());
     assert_eq!(pending.len(), 0);
-    assert!(claim
-        .verify_for_challenge(&expected, test_signature, |nonce| pending.remove(nonce))
-        .is_err());
+    assert!(claim.verify_for_challenge(&expected, test_signature, |nonce| pending.remove(nonce)).is_err());
     let mut pending = BTreeSet::from([claim.challenge_nonce]);
-    assert!(claim
-        .verify_for_challenge(&expected, |_, _, _| false, |nonce| pending.remove(nonce))
-        .is_err());
+    assert!(claim.verify_for_challenge(&expected, |_, _, _| false, |nonce| pending.remove(nonce)).is_err());
     // Forged signatures must never consume a valid outstanding challenge.
     assert!(pending.contains(&claim.challenge_nonce));
 }
