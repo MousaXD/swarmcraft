@@ -38,7 +38,7 @@ protocol-only PR.
   negotiation identifier. The string alone does not prove enforcement.
 - `WorldHostingPolicyV1 { format_version, allow_member_contributions,
   minimum_server_heap_mib }`: world intent. If disallowed, minimum must be
-  exactly 0; if allowed, minimum must be 512–1,048,576 MiB. The minimum is
+  exactly 0; if allowed, minimum must be 512–65,536 MiB. The minimum is
   only JVM `-Xmx`, not an OS-enforced RSS/cgroup limit.
 - `SignedWorldHostingPolicyV1 { protocol_version, world_id, config_sequence,
   config_hash, sequence, previous_policy_hash, policy, authority_peer_id,
@@ -54,7 +54,7 @@ protocol-only PR.
   signature checks still belong to integration work.
 - `LocalHostingConsentV1 { format_version, world_id, peer_id, revision,
   enabled, max_server_heap_mib }`: machine-local, per-world, per-identity
-  record. Disabled **requires 0 MiB**. Enabled requires 512–1,048,576 MiB.
+  record. Disabled **requires 0 MiB**. Enabled requires 512–65,536 MiB.
   `supersedes` requires a strictly increasing revision on the same
   device identity and world; never accept remote consent as local consent.
 - `SignedHostContributionClaimV1` is an **inert, future-negotiated**
