@@ -38,13 +38,14 @@ def node(role, stage):
         "identity_fingerprint": {"alice": ALICE, "bob": BOB, "carol": CAROL}[role],
         "authority_fingerprint": authority,
         "successor_fingerprint": BOB if role == "alice" else None,
-        "authorized_peers": 3,
+        "authorized_peers": {"alice_created": 1, "bob_joined": 2}.get(stage, 3),
         "snapshot_number": 3,
         "snapshot_epoch": 1 if authority == ALICE else 2,
         "snapshot_hash": "1" * 64 if authority == ALICE else "2" * 64,
         "state_root": "3" * 64,
         "snapshot_verify_passed": True,
-        "canonical": True,
+        "canonical": stage != "alice_created",
+        "safety_level": "SoloUnreplicated" if stage == "alice_created" else "Canonical",
         "epoch": 1 if authority == ALICE else 2,
         "fencing_token": 1 if authority == ALICE else 2,
         "phase": "ready", "runtime_ready": role == ("alice" if authority == ALICE else "bob"),
@@ -67,18 +68,21 @@ def fixtures(directory):
     c = config()
     gate.save(directory / "preflight.json", {
         "commit": COMMIT, "package_sha256": SHA,
+        "observed_utc": "2026-11-08T00:00:00+00:00",
         "nodes": {
             role: {"machine_fingerprint": "host-" + role,
                    "egress_fingerprint": "wan-" + role} for role in gate.ROLES
         },
     })
-    for stage, roles in gate.STAGES.items():
+    for index, (stage, roles) in enumerate(gate.STAGES.items(), 1):
         gate.save(directory / (stage + ".json"), {
             "stage": stage, "commit": COMMIT, "package_sha256": SHA,
+            "observed_utc": f"2026-11-08T00:{index:02}:00+00:00",
             "nodes": {role: node(role, stage) for role in roles},
         })
     gate.save(directory / "crash.json", {
         "commit": COMMIT,
+        "observed_utc": "2026-11-08T00:07:30+00:00",
         "receipt": {"signal": "SIGKILL", "process_gone": True, "role": "alice",
                     "crashed_components": ["desktop", "daemon", "server"]},
     })
@@ -146,6 +150,34 @@ class TestFailClosed(unittest.TestCase):
             with patch.object(gate, "remote", side_effect=probe):
                 with self.assertRaisesRegex(gate.Blocked, "installed_linux_package_required"):
                     gate.preflight(c, Path(temp))
+
+    def test_signed_solo_bootstrap_is_not_canonical_quorum(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            self.assertFalse(gate.load_json(out / "alice_created.json")["nodes"]["alice"]["canonical"])
+            with self.assertRaisesRegex(gate.Blocked, "independent_player_evidence_review_missing"):
+                gate.verify(c, out)
+
+    def test_rejects_out_of_order_observations(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "bob_joined.json")
+            record["observed_utc"] = "2026-11-07T12:00:00+00:00"
+            gate.save(out / "bob_joined.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "stale_or_out_of_order_stage_bob_joined"):
+                gate.verify(c, out)
+
+    def test_rejects_conflicted_bootstrap(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "alice_created.json")
+            record["nodes"]["alice"]["safety_level"] = "Conflict"
+            gate.save(out / "alice_created.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "bootstrap_state_conflicted"):
+                gate.verify(c, out)
 
     def test_synthetic_state_cannot_pass_without_real_player_review(self):
         with tempfile.TemporaryDirectory() as temp:
