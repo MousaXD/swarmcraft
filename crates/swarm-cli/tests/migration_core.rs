@@ -203,6 +203,7 @@ fn configure_mock_runtime(temp: &Path, peer: &PeerFixture, world: WorldId, endpo
     let fabric = temp.join(format!("swarmcraft-fabric-{}.jar", world.to_hex()));
     fs::write(&server, b"mock").unwrap();
     fs::write(&fabric, b"mock").unwrap();
+    swarm_cli::hosting_budget::set_contribution(&peer.paths, world, 512).unwrap();
     migration::save_runtime_config(
         &peer.paths,
         world,
@@ -224,6 +225,7 @@ fn configure_safe_stop_runtime(temp: &Path, peer: &PeerFixture, world: WorldId, 
     let fabric = temp.join(format!("safe-stop-fabric-{}.jar", world.to_hex()));
     fs::write(&server, b"mock").unwrap();
     fs::write(&fabric, b"mock").unwrap();
+    swarm_cli::hosting_budget::set_contribution(&peer.paths, world, 512).unwrap();
     migration::save_runtime_config(
         &peer.paths,
         world,
