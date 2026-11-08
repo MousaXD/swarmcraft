@@ -1,0 +1,147 @@
+# Three real machines — SwarmCraft field certification
+
+**Agent 05 / issue #85. Current verdict: BLOCKED.** This is a reproducible,
+fail-closed field-test harness, not a claim that a real three-player run passed.
+Do not close #85 or add this job to mandatory release gates without the complete
+evidence and independent review.
+
+## Scope and prerequisites
+
+SwarmCraft's existing single-runner player journey and synthetic three-daemon
+recovery tests are useful regressions, but do not certify three genuine Minecraft
+clients on independent networks. This harness checks three **independently
+installed Debian packages**, distinct remote machine identities, distinct
+observed WAN egress, live signed backend state, verified canonical snapshots,
+accepted recovery epoch/fencing, and a guarded authority process crash.
+
+Prerequisites: #82/#83 packaged startup acceptance, #84 actual enforced
+hosting consent (Bob opt-in; Carol 0 GB), and #87 genuine Tauri/Svelte desktop.
+Provision three different Linux machines with real graphical desktops, real
+Minecraft clients, legitimate logins, compatible Fabric/Java installations,
+and three **separate external networks**. Cloud VMs on three WAN IPs do not
+by themselves prove representative home NAT/CGNAT/mobile connectivity.
+
+Use the exact same .deb artifact produced from the candidate integrated SHA;
+retain its trustworthy build CI URL and SHA-256. Install that package using
+the actual OS package manager on each machine. Verify the installed Tauri
+binary and CLI sidecar locations and adjust the private config accordingly.
+Use a new SwarmCraft data profile and independently initialize through each
+installed GUI, never by cloning another machine's data.
+
+Verify SSH host keys out of band. SSH must use pinned known_hosts and key-only
+BatchMode. Keep a private copy of config.example.json **outside the repo**.
+Fill exact 40-hex commit, 64-hex package SHA, random 32-byte hex fingerprint
+salt, SSH destinations and absolute package/binary/CLI/data paths. Do not
+publish the config or salt. The probe pseudonymizes peer IDs, machine IDs
+and public egress addresses; it never exposes invitation strings or raw CLI
+logs.
+
+## Running the scenario
+
+Run from repository root. Set CONFIG to your private config path, OUT to a
+private directory, WORLD_ID to the actual signed 64-hex world ID, and PIDS
+to a private JSON file of current, genuinely observed process IDs:
+
+    {"alice":{"desktop":1234,"client":1235,"server":1236},
+     "bob":{"desktop":2234,"client":2235},
+     "carol":{"desktop":3234,"client":3235}}
+
+Update process IDs after a restart or takeover; false, missing or wrong PIDs
+must fail. Process presence is auxiliary evidence, not proof of a successful
+Minecraft login, join or gameplay. The seven phase captures must happen
+**in their real chronological order**; the harness does not fabricate them.
+
+```bash
+python3 scripts/e2e/three_machine/run.py preflight --config "$CONFIG" --output "$OUT"
+
+# Alice opens the installed GUI, initializes identity, explicitly accepts the
+# Minecraft server EULA, creates a signed world, starts genuine Fabric/Minecraft.
+python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage alice_created --world "$WORLD_ID" --pids "$PIDS"
+
+# Bob installs/initializes separately, accepts Alice's signed invitation,
+# joins with a real Minecraft client and chooses an allowed hosting budget.
+python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage bob_joined --world "$WORLD_ID" --pids "$PIDS"
+
+# Carol independently accepts invitation, joins real client, sets 0 GB host.
+python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage carol_joined --world "$WORLD_ID" --pids "$PIDS"
+
+# Interact in game, observe deterministic marker in all 3 real clients, wait
+# until all 3 store the same signed/verified latest accepted checkpoint.
+python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage checkpoint --world "$WORLD_ID" --pids "$PIDS"
+
+# On a DISPOSABLE test world, record Alice's real authority Java/SwarmCraft PID
+# and explicitly hard-kill only that world-bound process.
+python3 scripts/e2e/three_machine/run.py crash --config "$CONFIG" --output "$OUT" --world "$WORLD_ID" --pid "$ALICE_AUTHORITY_PID"
+python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage alice_crashed --world "$WORLD_ID" --pids "$PIDS"
+
+# Confirm surviving-majority quorum, Bob promoted with higher epoch/fencing,
+# real Fabric running on Bob, and genuine Minecraft client reconnection.
+python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage bob_recovered --world "$WORLD_ID" --pids "$PIDS"
+
+# Bring Alice back; prove she is nonauthoritative, fully synchronized, fenced.
+python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage alice_returned --world "$WORLD_ID" --pids "$PIDS"
+
+# Only after independent human review of genuine native desktop, real game
+# client, selected network transport and budget evidence:
+python3 scripts/e2e/three_machine/run.py verify --config "$CONFIG" --output "$OUT" --review "$REVIEW_JSON"
+```
+
+The crash injector validates that the explicit PID is a Java/SwarmCraft
+process bound to the isolated test-world directory before sending SIGKILL. It
+tests **process hard crash, not full machine power loss**. Literal host power
+failure requires separate real-machine evidence. It never uses wildcard pkill,
+unrestricted rm, mocked Java, pre-seeded fake replicas or localhost-only peers.
+
+## Evidence and final review
+
+Record native GUI installation/first-run/EULA/invitation screens, genuine
+Minecraft server and client versions and logs, signed world ID, real player
+session and deterministic shared marker screenshots/video from all three
+clients, accepted snapshot hash/state root, epoch and fencing changes, Bob's
+consent/budget enforcement, Carol's 0 GB role, real direct or DCUtR/relay
+transport selection, client reconnections, stale-Alice rejection and absence of
+duplicate authority. Include a separately reviewed test for relay fallback,
+packet loss/disconnections and operator-confirmed network classes. Redact IPs,
+tokens, invitations, keys and account names before publishing artifacts.
+
+An independent reviewer fills review.example.json with booleans **only after**
+examining the corresponding evidence and adds a public sanitized evidence URL.
+The automated verifier additionally checks exact package/commit, three distinct
+machines/egress routes, three signed memberships, valid replicated snapshot,
+Bob as proven successor before Alice is killed, legitimate recovered generation,
+restored accepted checkpoint and Alice's nonauthoritative return. Missing
+evidence blocks certification. Human checkbox attestations are not independent
+machine cryptographic attestations; a READY verdict must be accompanied by the
+actual reviewed artifacts.
+
+## Isolated optional GitHub Action
+
+The new .github/workflows/three-machine-certification.yml runs **negative-only
+harness unit tests** on relevant PR changes. When manually dispatched it
+performs **preflight only**, using three repository secrets:
+
+- SWARMCRAFT_E2E_CONFIG_JSON — private config matching workflow source commit.
+- SWARMCRAFT_E2E_SSH_PRIVATE_KEY — scoped field-lab SSH identity.
+- SWARMCRAFT_E2E_SSH_KNOWN_HOSTS — independently verified host-key pins.
+
+A green preflight means only that three installed .deb packages and network
+endpoints passed preliminary checks. It does **not** mean the complete E2E
+scenario passed. The currently interactive game/GUI test must be performed on
+real machines and its external evidence reviewed before the verifier can
+return READY. No full E2E CI run URL exists until the real lab is provisioned.
+
+## Local negative unit checks
+
+```bash
+python3 -m compileall -q scripts/e2e/three_machine
+python3 -m unittest discover -s scripts/e2e/three_machine -p 'test_*.py' -v
+```
+
+Clean up **only** the named test-owned processes and explicitly isolated
+profiles/VMs after evidence retention. Stop worlds via their safe durability
+barrier if possible; never silently delete user saves.
+
+**Current blocker:** no connected three-machine field lab, E2E credentials or
+reviewed real-client artifacts were supplied, and the #84/#87 integrated
+candidate remains to be certified. Thus no field PASS, no certified package SHA,
+and no full E2E CI URL can truthfully be reported.
