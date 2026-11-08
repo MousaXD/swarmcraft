@@ -18,7 +18,7 @@ permissions:
 
 concurrency:
   group: svelte-candidate-native-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   native-svelte-gui:

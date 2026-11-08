@@ -45,10 +45,13 @@ function setStatus(message, tone = 'neutral') {
 }
 
 function setOutput(output, label = '') {
-  const console = $('output');
   const text = String(output || 'Done.');
   const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const entry = `${stamp}${label ? `  ${label}` : ''}\n${text}`;
+  // The Svelte migration may own activity state. The unmodified shipping
+  // frontend has no bridge and keeps the original direct DOM behavior.
+  if (window.__swarmcraftSvelteActivity?.append(entry) === true) return;
+  const console = $('output');
   console.textContent = ['SwarmCraft is ready.', 'SwarmCraft is starting.', 'Activity cleared.'].includes(console.textContent.trim())
     ? entry
     : `${console.textContent.trim()}\n\n${entry}`;

@@ -46,6 +46,12 @@ export function playAvailability(world: WorldModel | null):
       reason: 'World status or compatibility is unavailable. Refresh before attempting to host.',
     };
   }
+  if (safety === 'unknown') {
+    return {
+      enabled: false, safety,
+      reason: 'World safety has not been verified. Refresh before attempting to host.',
+    };
+  }
   const eligibility = String(world.compatibility['Authority eligibility'] ?? '').trim();
   if (eligibility === 'Compatible') {
     return { enabled: true, safety, reason: 'This device is eligible to request hosting; the Rust backend performs final admission.' };

@@ -78,3 +78,9 @@ A dedicated candidate-only workflow `.github/workflows/svelte-candidate-native-g
 ## World details and authority display safety
 
 The reactive model now requests each world's actual `world_status` and `world_compatibility` through bounded batches of at most four worlds. Failed detail calls do not erase the local world list or invent a compatible host. Presentation-only `playAvailability` prevents Play for conflicting, replica-only, unknown and partially unavailable states; Rust remains the final admission authority. Vitest covers failed/unknown compatibility, solo vs canonical distinctions, conflicts and prototype-pollution-resistant status parsing. This module remains staged until the full Svelte controller cutover.
+
+## Live Activity UI migration (hybrid handoff)
+
+`ActivityView.svelte` now owns a reactive `activityText` store and native keyboard-readable read-only console. The original `app.js` and `runtime-wizard.js` log producers forward formatted activity entries to the Svelte activity bridge **only when mounted by the Svelte shell**; otherwise their existing direct-DOM fallback remains unchanged. Clear activity is handled by Svelte without double firing the legacy listener. Separate source and Vitest regressions protect this coexistence path. This completes the Activity presentation slice only, not the other legacy controller migrations.
+
+The staged Play hint now also fails closed if Rust safety is unknown even when compatibility appears `Compatible`. The migration-only native CI uses non-canceling concurrency so a useful in-progress installed-app run is not discarded by another documentation or test commit.

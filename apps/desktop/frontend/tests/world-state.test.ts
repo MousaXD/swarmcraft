@@ -42,3 +42,14 @@ describe('Rust status presentation is fail-closed', () => {
     expect(playAvailability(null).enabled).toBe(false);
   });
 });
+
+it('does not enable Play when compatibility is verified but safety is unknown', () => {
+  const model = worldModel(
+    { id: 'scworld:unknown', name: 'Unknown', snapshots: 1 },
+    [
+      { status: 'fulfilled', value: 'Members: 2' },
+      { status: 'fulfilled', value: 'Authority eligibility: Compatible' },
+    ],
+  );
+  expect(playAvailability(model)).toMatchObject({ enabled: false, safety: 'unknown' });
+});

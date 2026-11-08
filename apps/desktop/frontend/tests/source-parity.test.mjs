@@ -73,3 +73,17 @@ test('candidate native Tauri overlay is limited to the tested frontend directory
   assert.equal(config.bundle.externalBin.length, 4);
   assert.ok(config.app.security.csp.includes("connect-src ipc:"));
 });
+
+test('legacy activity writers preserve fallback while candidate uses the Svelte store', async () => {
+  const [legacy, runtime, component, activity] = await Promise.all([
+    source('../../src/app.js'), source('../../src/runtime-wizard.js'),
+    source('../src/components/ActivityView.svelte'), source('../src/lib/activity.ts'),
+  ]);
+  assert.ok(legacy.includes('window.__swarmcraftSvelteActivity?.append(entry)'));
+  assert.ok(runtime.includes('window.__swarmcraftSvelteActivity?.append(entry)'));
+  assert.ok(legacy.includes('console.textContent ='), 'original legacy path remains available');
+  assert.ok(runtime.includes('output.textContent ='), 'wizard fallback remains available');
+  assert.ok(component.includes('{$activityText}'), 'Svelte activity display subscribes reactively');
+  assert.ok(component.includes('event.stopImmediatePropagation()'), 'clear cannot race old listener');
+  assert.ok(activity.includes("activityText.set('Activity cleared.')"));
+});
