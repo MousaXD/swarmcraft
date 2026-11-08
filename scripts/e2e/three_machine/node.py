@@ -116,6 +116,39 @@ def log_digests(data_dir):
     return records
 
 
+def connectivity_summary(data_dir):
+    """Optional backend JSON diagnostics; exclude addresses, relays, peer IDs and errors."""
+    path = Path(data_dir) / "connectivity-diagnostics-v1.json"
+    try:
+        if not path.is_file() or path.is_symlink() or path.stat().st_size > 65536:
+            return {"available": False}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {"available": False}
+        state = data.get("state")
+        allowed = {
+            "nat_status_unknown", "direct_reachable", "hole_punched",
+            "relay_connected", "relay_required", "private_unreachable",
+            "bootstrap_unavailable", "no_viable_path",
+        }
+        nat = data.get("nat_status")
+        punch = data.get("hole_punch")
+        if isinstance(punch, dict):
+            punch = "failed" if "failed" in punch else "other"
+        return {
+            "available": True,
+            "state": state if state in allowed else "unknown",
+            "nat_status": nat if nat in ("public", "private", "unknown") else "unknown",
+            "direct_connectivity": data.get("direct_connectivity") is True,
+            "relay_connectivity": data.get("relay_connectivity") is True,
+            "hole_punch": punch if punch in ("idle", "attempting", "succeeded", "failed") else "unknown",
+            "ipv4_available": data.get("ipv4_available") is True,
+            "ipv6_available": data.get("ipv6_available") is True,
+        }
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return {"available": False}
+
+
 def capture(a):
     if not re.fullmatch("[a-fA-F0-9]{64}", a.world):
         fail("world_id_invalid")
@@ -165,6 +198,7 @@ def capture(a):
         "minecraft_client_process_observed": observed(a.client_pid, ("minecraft", "knotclient", "net.fabricmc.loader.impl.launch.knot.knotclient")),
         "minecraft_server_process_observed": observed(a.server_pid, ("java",)),
         "test_profile_log_digests": log_digests(root),
+        "connectivity_diagnostics": connectivity_summary(root),
     }
 
 
