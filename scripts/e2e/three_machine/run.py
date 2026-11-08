@@ -30,7 +30,7 @@ STAGES = {
 }
 SHA = re.compile(r"^[0-9a-fA-F]{64}$")
 COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
-SSH_TARGET = re.compile(r"^[a-zA-Z0-9_.@:-]+$")
+SSH_TARGET = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.@:-]*$")
 HERE = Path(__file__).resolve().parent
 
 
