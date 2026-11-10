@@ -102,7 +102,7 @@ Run locally on Alice (replace values with the genuine Alice profile and
 
 ```bash
 DATA_DIR=/home/e2e/.local/share/swarmcraft-e2e
-WORLD_ID=<actual-64-hex-world-id>
+WORLD_ID=REPLACE_WITH_REAL_64_HEX_WORLD_ID
 python3 - "$DATA_DIR" "$WORLD_ID" <<'PY'
 import os, re, sys
 from pathlib import Path
