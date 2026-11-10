@@ -25,7 +25,7 @@ use swarm_protocol::{
     DiscoveryFreshnessChallengeV1, DiscoveryFreshnessVoteV1, DiscoveryMembershipProofV1, FriendPresenceV1,
     MembershipPolicyV1, PeerId, WorldAnnouncementV1, WorldId, WorldVisibilityV1, PROTOCOL_VERSION,
 };
-use swarm_storage::Storage;
+use swarm_storage::{Storage, StorageError};
 use tokio::time::{timeout, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
@@ -264,8 +264,16 @@ fn refresh_publications(
         let local_is_current = membership.members.iter().any(|member| {
             member.peer_id == identity.peer_id() && member.public_key == identity.public_key() && !member.banned
         });
-        let local_is_pending = storage.load_membership_promise(world).ok().is_some_and(|promise| {
-            promise.proposal.proposed.members.iter().any(|member| {
+        let pending_membership = match storage.load_membership_promise(world) {
+            Ok(promise) => Some(promise.proposal),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                warn!(world = %world, %error, "refusing discovery publication with unreadable membership promise");
+                continue;
+            }
+        };
+        let local_is_pending = pending_membership.as_ref().is_some_and(|proposal| {
+            proposal.proposed.members.iter().any(|member| {
                 member.peer_id == identity.peer_id() && member.public_key == identity.public_key() && !member.banned
             })
         });
@@ -490,7 +498,11 @@ fn build_discovery_membership_proof(storage: &Storage, world: WorldId) -> Result
         .first()
         .map(|certificate| certificate.proposal.previous.clone())
         .unwrap_or_else(|| current.clone());
-    let pending = storage.load_membership_promise(world).ok().map(|promise| promise.proposal);
+    let pending = match storage.load_membership_promise(world) {
+        Ok(promise) => Some(promise.proposal),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     let proof = DiscoveryMembershipProofV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
@@ -518,11 +530,16 @@ fn local_state_matches_freshness_challenge(
     if membership.sequence != challenge.membership_sequence || membership.record_hash()? != challenge.membership_hash {
         return Ok(false);
     }
-    if storage.load_recovery_promise(world).ok().is_some_and(|promise| {
-        (promise.ballot.target_epoch, promise.ballot.target_fencing_token)
-            > (challenge.authority_epoch, challenge.fencing_token)
-    }) {
-        return Ok(false);
+    match storage.load_recovery_promise(world) {
+        Ok(promise)
+            if (promise.ballot.target_epoch, promise.ballot.target_fencing_token)
+                > (challenge.authority_epoch, challenge.fencing_token) =>
+        {
+            return Ok(false);
+        }
+        Ok(_) => {}
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Ok(false),
     }
     let epoch = match storage.load_epoch_record(world) {
         Ok(value) => value,
@@ -554,7 +571,11 @@ fn local_state_matches_freshness_challenge(
     if head != challenge.canonical_head {
         return Ok(false);
     }
-    let pending = storage.load_membership_promise(world).ok().map(|promise| promise.proposal);
+    let pending = match storage.load_membership_promise(world) {
+        Ok(promise) => Some(promise.proposal),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Ok(false),
+    };
     let pending_hash = pending.as_ref().map(|proposal| proposal.proposal_hash()).transpose()?;
     if pending_hash != challenge.pending_membership_proposal_hash {
         return Ok(false);
