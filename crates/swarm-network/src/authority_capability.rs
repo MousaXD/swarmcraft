@@ -146,13 +146,27 @@ pub struct VerifiedAuthorityFeatureSession {
 }
 
 impl VerifiedAuthorityFeatureSession {
-    pub fn peer_id(self) -> PeerId { self.peer_id }
-    pub fn world_id(self) -> WorldId { self.world_id }
-    pub fn policy_hash(self) -> Hash32 { self.policy_hash }
-    pub fn epoch(self) -> u64 { self.epoch }
-    pub fn fencing_token(self) -> u64 { self.fencing_token }
-    pub fn consent_revision(self) -> u64 { self.consent_revision }
-    pub fn valid_at(self, now_unix_ms: u64) -> bool { now_unix_ms <= self.expires_unix_ms }
+    pub fn peer_id(self) -> PeerId {
+        self.peer_id
+    }
+    pub fn world_id(self) -> WorldId {
+        self.world_id
+    }
+    pub fn policy_hash(self) -> Hash32 {
+        self.policy_hash
+    }
+    pub fn epoch(self) -> u64 {
+        self.epoch
+    }
+    pub fn fencing_token(self) -> u64 {
+        self.fencing_token
+    }
+    pub fn consent_revision(self) -> u64 {
+        self.consent_revision
+    }
+    pub fn valid_at(self, now_unix_ms: u64) -> bool {
+        now_unix_ms <= self.expires_unix_ms
+    }
 }
 
 /// Must be called only for an actually negotiated V2 stream. The verifier
@@ -263,7 +277,12 @@ mod tests {
         let consumed = Cell::new(false);
         let validate = || {
             verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &v, &expected(&v), || {
-                if consumed.get() { false } else { consumed.set(true); true }
+                if consumed.get() {
+                    false
+                } else {
+                    consumed.set(true);
+                    true
+                }
             })
         };
         let verified = validate().unwrap();
