@@ -663,7 +663,15 @@ async fn run_authority_runtime_inner(
         Some(initial.manifest_hash()?),
         None,
     )?;
-    let epoch = prepare_authority_epoch(storage, &identity, options.world, &initial)?;
+    // The initial budget admission predates snapshot lookup. Recheck under
+    // the same consent-write lock used by local opt-out before mutating the
+    // signed authority epoch, then independently recheck before Java spawn.
+    let epoch = hosting_budget::with_consent_guarded_epoch_transition(
+        paths,
+        options.world,
+        &admission,
+        || prepare_authority_epoch(storage, &identity, options.world, &initial),
+    )?;
     let latest = storage.latest_snapshot(options.world)?.context("authority transition lost its canonical snapshot")?;
     storage.verify_snapshot(&latest)?;
     verify_snapshot_signature(&latest)?;
