@@ -487,3 +487,26 @@ fn corrupt_previous_transfer_cannot_be_replaced_by_new_prepared_transfer() {
     assert!(validate_transfer(&fixture.storage, &transfer).is_err());
     assert_eq!(std::fs::read(&transfer_path).unwrap(), corrupt);
 }
+
+#[test]
+fn tampered_durable_recovery_signatures_block_cached_and_inbound_authority() {
+    let fixture = fixture();
+    let (ballot, vote) = signed_recovery_ballot_and_vote(&fixture);
+    fixture.storage.promise_recovery_ballot(&ballot, &vote).unwrap();
+    let original = fixture.storage.load_recovery_promise(fixture.world).unwrap();
+    let path = fixture.storage.world_dir(fixture.world).join("metadata/recovery-promise.postcard");
+
+    let mut broken_vote = original.clone();
+    broken_vote.vote.signature[0] ^= 0x55;
+    std::fs::write(&path, postcard::to_allocvec(&broken_vote).unwrap()).unwrap();
+    assert!(ensure_active_recovery_promise(&fixture.storage, &ballot).is_err());
+    assert!(ensure_local_recovery_promise_allows_certificate(&fixture.storage, &ballot).is_err());
+
+    let mut broken_ballot = original;
+    broken_ballot.ballot.signature[0] ^= 0x55;
+    std::fs::write(&path, postcard::to_allocvec(&broken_ballot).unwrap()).unwrap();
+    assert!(ensure_active_recovery_promise(&fixture.storage, &ballot).is_err());
+    assert!(ensure_local_recovery_promise_allows_certificate(&fixture.storage, &ballot).is_err());
+    assert_eq!(fixture.storage.load_epoch_record(fixture.world).unwrap().epoch_number, 0);
+    assert!(fixture.storage.load_recovery_certificate(fixture.world).is_err());
+}
