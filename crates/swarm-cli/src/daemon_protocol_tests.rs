@@ -355,10 +355,7 @@ fn dangling_durable_recovery_promise_rejects_inbound_certificate_and_cached_ball
 #[test]
 fn corrupt_accepted_epoch_cannot_be_treated_as_missing_before_recovery_control_writes() {
     let fixture = fixture();
-    assert_eq!(
-        load_optional_epoch_record(&fixture.storage, fixture.world).unwrap().unwrap().epoch_number,
-        0
-    );
+    assert_eq!(load_optional_epoch_record(&fixture.storage, fixture.world).unwrap().unwrap().epoch_number, 0);
 
     let epoch_path = fixture.storage.world_dir(fixture.world).join("metadata/epoch.postcard");
     let corrupt = b"invalid accepted epoch";
