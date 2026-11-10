@@ -495,12 +495,48 @@ def process_exited(pid):
         return not location.exists()
 
 
+def approved_disposable_crash_profile(root, world):
+    """Require explicit world-bound operator approval in a dedicated test profile.
+
+    This marker is never created by the harness. A profile-name check alone
+    cannot authorize SIGKILL of the installed desktop, daemon, and JVM.
+    """
+    if root.name != "swarmcraft-e2e" or not re.fullmatch(r"[0-9a-fA-F]{64}", world):
+        return False
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        with ExitStack() as opened:
+            directory = os.open(root, flags | os.O_DIRECTORY)
+            opened.callback(os.close, directory)
+            owner = os.fstat(directory)
+            if owner.st_uid != os.geteuid() or (owner.st_mode & 0o022):
+                return False
+            marker = os.open(".swarmcraft-e2e-crash-approval",
+                             flags | os.O_NONBLOCK, dir_fd=directory)
+            opened.callback(os.close, marker)
+            meta = os.fstat(marker)
+            if (not stat.S_ISREG(meta.st_mode) or meta.st_nlink != 1 or
+                    meta.st_uid != os.geteuid() or
+                    stat.S_IMODE(meta.st_mode) != 0o600 or meta.st_size > 128):
+                return False
+            expected = ("SWARMCRAFT_E2E_CRASH\\n" + world.lower() + "\\n").encode("ascii")
+            return os.read(marker, 129) == expected
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def crash(a):
     if a.confirm != "CRASH-ALICE-AUTHORITY":
         fail("crash_confirmation_missing")
     if not a.world or not re.fullmatch("[a-fA-F0-9]{64}", a.world):
         fail("crash_world_invalid")
+    # Never crash a normal user profile, even if PID and world arguments
+    # appear valid. Explicit operator approval must name this exact world.
+    if Path(a.data_dir).is_symlink():
+        fail("crash_test_profile_symlink_refused")
     root = Path(a.data_dir).resolve(strict=True)
+    if not approved_disposable_crash_profile(root, a.world):
+        fail("disposable_world_bound_crash_approval_missing")
     targets = [
         ("desktop", a.desktop_pid),
         ("daemon", a.daemon_pid),
