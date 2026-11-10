@@ -1,6 +1,6 @@
 use crate::{
-    authority_permit::PermitWatch, host_readiness, launch_guard, runtime_process_guard::RuntimeProcessGuard,
-    server_mods,
+    authority_permit::PermitWatch, host_readiness, hosting_budget, launch_guard,
+    runtime_process_guard::RuntimeProcessGuard, server_mods,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use fs2::FileExt;
@@ -155,6 +155,7 @@ pub fn request_world_stop(paths: &DataPaths, storage: &Storage, world: WorldId) 
 }
 
 pub fn request_world_wake(paths: &DataPaths, storage: &Storage, world: WorldId) -> Result<()> {
+    hosting_budget::require_contribution(paths, world)?;
     let identity = PeerIdentity::load_or_create(paths)?;
     let sleep_record = storage.load_sleep_record(world).context("world is not durably sleeping")?;
     verify_sleep_record_signature(&sleep_record)?;
@@ -275,6 +276,24 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
                     sleep(SUPERVISOR_POLL).await;
                     continue;
                 }
+                // A sleeping world stays Sleeping for player-only peers.
+                // But an explicit wake must re-check admission before any
+                // authority generation is installed.
+                if let Err(error) = hosting_budget::require_contribution(&paths, world) {
+                    publish_status(
+                        &paths,
+                        &storage,
+                        world,
+                        Some(MigrationTrigger::WorldWake),
+                        MigrationPhase::Blocked,
+                        false,
+                        config.game_endpoint.clone(),
+                        None,
+                        Some(format!("wake denied by local hosting budget: {error}")),
+                    )?;
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
                 let descriptor = storage.load_world_descriptor(world)?;
                 let members = descriptor.members.iter().filter(|member| !member.banned).count();
                 if members > 1 {
@@ -330,6 +349,24 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
                 sleep(Duration::from_secs(1)).await;
                 continue;
             }
+        }
+
+        // Player-only peers continue to replicate, but may never start a JVM.
+        // A missing/withdrawn or currently unsafe budget is an explicit block.
+        if let Err(error) = hosting_budget::require_contribution(&paths, world) {
+            publish_status(
+                &paths,
+                &storage,
+                world,
+                None,
+                MigrationPhase::Blocked,
+                false,
+                config.game_endpoint.clone(),
+                None,
+                Some(format!("local hosting contribution is not admitted: {error}")),
+            )?;
+            sleep(Duration::from_secs(1)).await;
+            continue;
         }
 
         let descriptor = storage.load_world_descriptor(world)?;
@@ -456,6 +493,9 @@ async fn wait_until_launch_safe(
         None,
     )?;
     loop {
+        if hosting_budget::require_contribution(paths, world).is_err() {
+            return Ok(false);
+        }
         let current = storage.load_epoch_record(world)?;
         if current.epoch_number != epoch.epoch_number
             || current.fencing_token != epoch.fencing_token
@@ -554,6 +594,14 @@ impl Drop for AuthorityRuntimeGuard {
 }
 
 pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options: HostOptions) -> Result<()> {
+    // Preserve the explicit EULA rejection even when the machine is under
+    // pressure or player-only; consent is never a substitute for EULA.
+    if !options.accept_eula {
+        bail!("Minecraft server EULA acceptance is required; configure the runtime only after reviewing Mojang's EULA");
+    }
+    // Explicit hosting must fail immediately instead of waiting indefinitely
+    // for quorum when this device is player-only or under RAM pressure.
+    hosting_budget::require_contribution(paths, options.world)?;
     let identity = PeerIdentity::load_or_create(paths)?;
     let descriptor = storage.load_world_descriptor(options.world)?;
     let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
@@ -595,6 +643,9 @@ async fn run_authority_runtime_inner(
     if !options.accept_eula {
         bail!("Minecraft server EULA acceptance is required; configure the runtime only after reviewing Mojang's EULA");
     }
+    // This admission must happen before authority epoch mutation, runtime reset,
+    // snapshot restore, or Java spawn for ALL launch triggers.
+    let admission = hosting_budget::admit(paths, options.world)?;
     let identity = PeerIdentity::load_or_create(paths)?;
     let metadata = storage.load_world(options.world)?;
     let initial = storage.latest_snapshot(options.world)?.context("world has no verified snapshot to host")?;
@@ -612,7 +663,12 @@ async fn run_authority_runtime_inner(
         Some(initial.manifest_hash()?),
         None,
     )?;
-    let epoch = prepare_authority_epoch(storage, &identity, options.world, &initial)?;
+    // The initial budget admission predates snapshot lookup. Recheck under
+    // the same consent-write lock used by local opt-out before mutating the
+    // signed authority epoch, then independently recheck before Java spawn.
+    let epoch = hosting_budget::with_consent_guarded_epoch_transition(paths, options.world, &admission, || {
+        prepare_authority_epoch(storage, &identity, options.world, &initial)
+    })?;
     let latest = storage.latest_snapshot(options.world)?.context("authority transition lost its canonical snapshot")?;
     storage.verify_snapshot(&latest)?;
     verify_snapshot_signature(&latest)?;
@@ -682,14 +738,20 @@ async fn run_authority_runtime_inner(
         Some(latest.manifest_hash()?),
         None,
     )?;
-    let mut child = launch_server(
-        &options.java,
-        &options.server_jar,
-        &runtime,
-        &world_dir,
-        metadata.genesis.compatibility_fingerprint,
-        &launch.environment(),
-    )?;
+    // Restoring a large snapshot can take time; opt-out and resource
+    // pressure must be rechecked immediately before Java starts. Serialize
+    // consent publication with the synchronous spawn to close that race.
+    let mut child = hosting_budget::with_consent_guarded_spawn(paths, options.world, &admission, || {
+        launch_server(
+            &options.java,
+            &options.server_jar,
+            admission.heap_mib(),
+            &runtime,
+            &world_dir,
+            metadata.genesis.compatibility_fingerprint,
+            &launch.environment(),
+        )
+    })?;
     if let Err(error) = runtime_process.record_java(child.id()) {
         terminate_child(&mut child);
         return Err(error);
@@ -749,24 +811,49 @@ async fn run_authority_runtime_inner(
         accept_eula: options.accept_eula,
         game_endpoint: game_endpoint.clone(),
     };
-    host_readiness::record_runtime_verified(
-        paths,
-        options.world,
-        &verified_config,
-        metadata.genesis.compatibility_fingerprint,
-    )?;
-    publish_status(
-        paths,
-        storage,
-        options.world,
-        Some(trigger),
-        MigrationPhase::Ready,
-        true,
-        game_endpoint.clone(),
-        Some(latest.manifest_hash()?),
-        None,
-    )?;
-    info!(world = %options.world, pid = child.id(), ?trigger, "Minecraft authority runtime is ready");
+    let admission_state = hosting_budget::runtime_withdrawal(paths, options.world, admission.consent());
+    match admission_state {
+        Ok(None) => {
+            host_readiness::record_runtime_verified(
+                paths,
+                options.world,
+                &verified_config,
+                metadata.genesis.compatibility_fingerprint,
+            )?;
+            publish_status(
+                paths,
+                storage,
+                options.world,
+                Some(trigger),
+                MigrationPhase::Ready,
+                true,
+                game_endpoint.clone(),
+                Some(latest.manifest_hash()?),
+                None,
+            )?;
+            info!(world = %options.world, pid = child.id(), ?trigger, "Minecraft authority runtime is ready");
+        }
+        state => {
+            // Never advertise Ready after consent has changed during Fabric
+            // verification. The exit loop requests a safe Fabric checkpoint.
+            let detail = match state {
+                Ok(Some(reason)) => reason,
+                Err(error) => format!("cannot verify hosting contribution: {error}"),
+                Ok(None) => unreachable!(),
+            };
+            publish_status(
+                paths,
+                storage,
+                options.world,
+                Some(trigger),
+                MigrationPhase::Blocked,
+                false,
+                game_endpoint.clone(),
+                Some(latest.manifest_hash()?),
+                Some(detail),
+            )?;
+        }
+    }
 
     let disposition = match wait_for_runtime_exit(
         paths,
@@ -775,7 +862,7 @@ async fn run_authority_runtime_inner(
         &epoch,
         &mut child,
         &mut session,
-        handle_shutdown_signal,
+        RuntimeExitOptions { handle_shutdown_signal, admission: &admission },
     )
     .await
     {
@@ -882,6 +969,11 @@ enum RuntimeDisposition {
     Transfer(PeerId),
 }
 
+struct RuntimeExitOptions<'a> {
+    handle_shutdown_signal: bool,
+    admission: &'a hosting_budget::HostingAdmission,
+}
+
 async fn wait_for_runtime_exit(
     paths: &DataPaths,
     storage: &Storage,
@@ -889,7 +981,7 @@ async fn wait_for_runtime_exit(
     epoch: &EpochRecordV1,
     child: &mut Child,
     session: &mut swarm_ipc::FabricSession,
-    handle_shutdown_signal: bool,
+    options: RuntimeExitOptions<'_>,
 ) -> Result<RuntimeDisposition> {
     loop {
         if let Some(status) = child.try_wait()? {
@@ -917,19 +1009,67 @@ async fn wait_for_runtime_exit(
                 }
             }
         }
+        // Prefer any already-requested signed transfer checkpoint. A withdrawn
+        // contribution otherwise requests the same Fabric save barrier used by
+        // a safe user stop; a failed barrier does NOT kill an unfenced JVM.
         match load_transfer_intent(paths, epoch.world_id) {
-            Ok(Some(target)) => {
-                validate_transfer_target(storage, identity, epoch.world_id, target)?;
-                session.prepare_shutdown(2, FABRIC_SHUTDOWN_TIMEOUT).await?;
-                timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
-                    .await
-                    .map_err(|_| anyhow!("Minecraft did not stop after the transfer save barrier"))??;
-                return Ok(RuntimeDisposition::Transfer(target));
-            }
+            Ok(Some(target)) => match validate_transfer_target(storage, identity, epoch.world_id, target) {
+                Ok(()) => {
+                    let outcome = async {
+                        session.prepare_shutdown(2, FABRIC_SHUTDOWN_TIMEOUT).await?;
+                        timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
+                            .await
+                            .map_err(|_| anyhow!("Minecraft did not stop after the transfer save barrier"))??;
+                        Ok::<(), anyhow::Error>(())
+                    }
+                    .await;
+                    match outcome {
+                        Ok(()) => return Ok(RuntimeDisposition::Transfer(target)),
+                        Err(error) => {
+                            warn!(
+                                world = %epoch.world_id,
+                                %error,
+                                "transfer save barrier failed; keeping Minecraft running rather than terminating an uncheckpointed authority"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        world = %epoch.world_id,
+                        %error,
+                        "invalid manual transfer target; preserving running authority and removing invalid local intent"
+                    );
+                    if let Err(clear_error) = clear_transfer_intent(paths, epoch.world_id) {
+                        warn!(world = %epoch.world_id, %clear_error, "cannot clear rejected local transfer intent");
+                    }
+                }
+            },
             Ok(None) => {}
             Err(error) => warn!(world = %epoch.world_id, %error, "ignoring unreadable transfer intent"),
         }
-        if handle_shutdown_signal {
+        let withdrawal = match hosting_budget::runtime_withdrawal(paths, epoch.world_id, options.admission.consent()) {
+            Ok(reason) => reason,
+            Err(error) => Some(format!("cannot revalidate local hosting consent or memory: {error}")),
+        };
+        if let Some(reason) = withdrawal {
+            warn!(world = %epoch.world_id, %reason, "hosting contribution withdrawn or unsafe; requesting durable safe stop");
+            let stopped = async {
+                session.prepare_shutdown(1, FABRIC_SHUTDOWN_TIMEOUT).await?;
+                timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
+                    .await
+                    .map_err(|_| anyhow!("Minecraft did not stop after hosting withdrawal save barrier"))??;
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+            match stopped {
+                Ok(()) => return Ok(RuntimeDisposition::Sleep),
+                Err(error) => {
+                    warn!(world = %epoch.world_id, %error, "cannot safely checkpoint withdrawn host; preserving running authority and retrying")
+                }
+            }
+        }
+        if options.handle_shutdown_signal {
             tokio::select! {
                 _ = sleep(SUPERVISOR_POLL) => {}
                 result = tokio::signal::ctrl_c() => {
@@ -1014,6 +1154,7 @@ pub fn export_transfer(storage: &Storage, world: WorldId) -> Result<String> {
 }
 
 pub fn accept_manual_transfer(paths: &DataPaths, storage: &Storage, world: WorldId, token: &str) -> Result<String> {
+    hosting_budget::require_contribution(paths, world)?;
     let identity = PeerIdentity::load_or_create(paths)?;
     let prepared = decode_transfer(token)?;
     if prepared.world_id != world || prepared.phase != TransferPhase::Prepared {
@@ -1087,6 +1228,7 @@ pub fn commit_manual_transfer(paths: &DataPaths, storage: &Storage, world: World
 }
 
 pub fn activate_manual_transfer(paths: &DataPaths, storage: &Storage, world: WorldId, token: &str) -> Result<String> {
+    hosting_budget::require_contribution(paths, world)?;
     let identity = PeerIdentity::load_or_create(paths)?;
     let committed = decode_transfer(token)?;
     if committed.world_id != world || committed.phase != TransferPhase::Committed {
@@ -1530,13 +1672,14 @@ fn ensure_authority_generation(storage: &Storage, identity: &PeerIdentity, expec
 fn launch_server(
     java: &Path,
     server_jar: &Path,
+    heap_mib: u64,
     runtime: &Path,
     world_dir: &Path,
     compatibility: Hash32,
     ipc_environment: &[(String, String); 3],
 ) -> Result<Child> {
     let mut command = Command::new(java);
-    command.arg("-jar").arg(server_jar).arg("nogui").current_dir(runtime);
+    command.arg(format!("-Xmx{heap_mib}m")).arg("-jar").arg(server_jar).arg("nogui").current_dir(runtime);
     for (name, value) in ipc_environment {
         command.env(name, value);
     }

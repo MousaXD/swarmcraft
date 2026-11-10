@@ -4,7 +4,7 @@ mod invite;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
-use swarm_cli::host_readiness;
+use swarm_cli::{host_readiness, hosting_budget};
 use swarm_cli::migration::{self, RuntimeLaunchConfig, TransferPrepareResult};
 use swarm_cli::server_mods;
 use swarm_core::{
@@ -68,6 +68,24 @@ enum InviteCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum HostingCommand {
+    /// Inspect this device's voluntary hosting preference and current memory eligibility, not a signed authority grant.
+    Status {
+        world: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Explicitly select a Java server heap budget; zero withdraws consent and leaves this device player-only.
+    Set {
+        world: String,
+        #[arg(long)]
+        heap_mib: u64,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum WorldCommand {
     /// Create a world identity and local durable metadata.
     Create {
@@ -86,6 +104,11 @@ enum WorldCommand {
         /// private, unlisted, or public.
         #[arg(long, default_value = "private")]
         visibility: String,
+    },
+    /// Explicitly manage this device's per-world local hosting preference, never world authority.
+    Hosting {
+        #[command(subcommand)]
+        command: HostingCommand,
     },
     /// Stage a signed authority-mediated join request from a scinvite token.
     Join { invite: String },
@@ -492,6 +515,30 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 }
             }
         }
+        WorldCommand::Hosting { command } => match command {
+            HostingCommand::Status { world, json } => {
+                let world = parse_world(&world)?;
+                storage.load_world(world)?;
+                let readiness = hosting_budget::contribution_readiness(paths, world)?;
+                print_local_hosting_readiness(&readiness, json)?;
+            }
+            HostingCommand::Set { world, heap_mib, json } => {
+                let world = parse_world(&world)?;
+                storage.load_world(world)?;
+                let consent = hosting_budget::set_contribution(paths, world, heap_mib)?;
+                let readiness = hosting_budget::contribution_readiness(paths, world)?;
+                if !json {
+                    println!(
+                        "Local preference persisted: {} MiB Java heap (revision {})",
+                        consent.heap_mib, consent.revision
+                    );
+                    if heap_mib == 0 {
+                        println!("Player-only selected. Any active server must complete a separate safe save, stop, or fenced transfer.");
+                    }
+                }
+                print_local_hosting_readiness(&readiness, json)?;
+            }
+        },
         WorldCommand::HostReadiness { world, json } => {
             let world = parse_world(&world)?;
             storage.load_world(world)?;
@@ -838,6 +885,32 @@ fn parse_visibility(value: &str) -> Result<WorldVisibilityV1> {
         "public" => Ok(WorldVisibilityV1::Public),
         _ => bail!("visibility must be private, unlisted, or public"),
     }
+}
+
+fn print_local_hosting_readiness(readiness: &hosting_budget::ContributionReadiness, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(readiness)?);
+        return Ok(());
+    }
+    println!("World: {}", readiness.world_id);
+    if readiness.consented {
+        println!("Local device preference: opt-in, Java heap {} MiB", readiness.selected_heap_mib);
+    } else {
+        println!("Local device preference: Player only (0 MiB)");
+    }
+    println!("Current memory admission eligible: {}", readiness.may_host_now);
+    println!("Current reason: {}", readiness.reason);
+    let physical = readiness.physical_mib.map_or_else(|| "unknown".to_string(), |mib| mib.to_string());
+    let available = readiness.available_mib.map_or_else(|| "unknown".to_string(), |mib| mib.to_string());
+    println!("Physical memory: {physical} MiB");
+    println!("Available memory: {available} MiB");
+    println!("Estimated native JVM overhead: {} MiB", readiness.estimated_native_overhead_mib);
+    println!("OS headroom: {} MiB", readiness.os_headroom_mib);
+    println!("Minecraft client headroom: {} MiB", readiness.client_headroom_mib);
+    println!("Daemon headroom: {} MiB", readiness.daemon_headroom_mib);
+    println!("Hard process RSS cap guaranteed: {}", readiness.hard_process_memory_cap_guaranteed);
+    println!("Consent alone does not grant signed world policy, quorum authority, or a running Minecraft server.");
+    Ok(())
 }
 
 fn parse_world(value: &str) -> Result<WorldId> {
