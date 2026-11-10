@@ -146,6 +146,12 @@ INITIAL_SNAPSHOT="$(latest_snapshot_number)"
   exit 1
 }
 
+INITIAL_HOSTING="$("$CLI" --data-dir "$DATA" world hosting status "$WORLD" --json)"
+[[ "$(json_field "$INITIAL_HOSTING" consented)" == "false" ]]
+[[ "$(json_field "$INITIAL_HOSTING" selected_heap_mib)" == "0" ]]
+[[ "$(json_field "$INITIAL_HOSTING" may_host_now)" == "false" ]]
+[[ "$(json_field "$INITIAL_HOSTING" hard_process_memory_cap_guaranteed)" == "false" ]]
+
 INITIAL_STATUS="$(runtime_status)"
 [[ "$(json_field "$INITIAL_STATUS" eula_accepted)" == "false" ]]
 [[ "$(json_field "$INITIAL_STATUS" launch_configured)" == "false" ]]
@@ -166,6 +172,22 @@ if migration_status | grep -q '"runtime_ready": true'; then
   exit 1
 fi
 
+printf '== explicit per-device Minecraft hosting opt-in (not world authority) ==\n'
+HOST_HEAP="${SWARMCRAFT_ACCEPTANCE_HEAP_MIB:-512}"
+[[ "$HOST_HEAP" =~ ^[0-9]+$ ]] && (( HOST_HEAP >= 512 && HOST_HEAP <= 65536 )) || {
+  printf "Invalid explicit acceptance heap MiB: %s\n" "$HOST_HEAP" >&2
+  exit 1
+}
+"$CLI" --data-dir "$DATA" world hosting set "$WORLD" --heap-mib "$HOST_HEAP" --json >"$LOG_DIR/hosting-consent.json"
+HOSTING_CURRENT="$("$CLI" --data-dir "$DATA" world hosting status "$WORLD" --json)"
+[[ "$(json_field "$HOSTING_CURRENT" consented)" == "true" ]]
+[[ "$(json_field "$HOSTING_CURRENT" selected_heap_mib)" == "$HOST_HEAP" ]]
+[[ "$(json_field "$HOSTING_CURRENT" hard_process_memory_cap_guaranteed)" == "false" ]]
+if [[ "$(json_field "$HOSTING_CURRENT" may_host_now)" != "true" ]]; then
+  printf "Explicit opt-in saved but current memory admission DENIED; cannot launch real Minecraft: %s\n" "$(json_field "$HOSTING_CURRENT" reason)" >&2
+  exit 1
+fi
+printf 'Explicit opt-in verified for real Java/Fabric launch: %s MiB (memory eligibility is rechecked at spawn)\n' "$HOST_HEAP"
 printf '== explicit EULA acceptance and managed installation ==\n'
 "$RUNTIME" --data-dir "$DATA" install "$WORLD" --accept-eula >"$LOG_DIR/install-accepted.json"
 VERIFIED_STATUS="$("$RUNTIME" --data-dir "$DATA" verify "$WORLD")"

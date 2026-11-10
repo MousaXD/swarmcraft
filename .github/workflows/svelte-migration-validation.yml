@@ -1,0 +1,60 @@
+# Isolated diagnostic workflow for draft issue #87 migration.
+# This is NOT a release gate and does NOT reconfigure or package the shipping UI.
+name: Svelte migration candidate validation
+
+on:
+  push:
+    branches:
+      - agent-04/svelte-typescript-desktop
+      - integration/svelte-hosting-ui-20261111
+    paths:
+      - 'apps/desktop/frontend/**'
+      - 'apps/desktop/src/**'
+      - 'apps/desktop/tests/svelte-migration-parity.test.mjs'
+      - '.github/workflows/svelte-migration-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  migration-candidate:
+    name: Migration candidate — source, types, tests, Vite build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/desktop/frontend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.16.0'
+      - name: Verify production is still the legacy frontend
+        run: node -e "const c=require('../src-tauri/tauri.conf.json'); if(c.build.frontendDist !== '../src') process.exit(1);"
+      - name: Verify dependency lockfile is present
+        run: test -s package-lock.json
+      - name: Install exactly locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Verify source bindings and PR-88 watchdog
+        run: npm run test:source
+      - name: Typecheck Svelte and TypeScript
+        run: npm run check
+      - name: Run Vitest regression suite
+        run: npm run test
+      - name: Build candidate Svelte bundle
+        run: npm run build
+      - name: Record candidate bundle sizes
+        run: |
+          test -f dist/index.html
+          find dist -type f -printf '%P %s bytes\n' | sort | tee bundle-sizes.txt
+      - name: Upload candidate lockfile and build-size evidence for explicit review
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: svelte-migration-candidate-${{ github.sha }}
+          path: |
+            apps/desktop/frontend/package-lock.json
+            apps/desktop/frontend/bundle-sizes.txt
+          if-no-files-found: warn
+          retention-days: 7

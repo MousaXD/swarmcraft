@@ -45,10 +45,13 @@ function setStatus(message, tone = 'neutral') {
 }
 
 function setOutput(output, label = '') {
-  const console = $('output');
   const text = String(output || 'Done.');
   const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const entry = `${stamp}${label ? `  ${label}` : ''}\n${text}`;
+  // The Svelte migration may own activity state. The unmodified shipping
+  // frontend has no bridge and keeps the original direct DOM behavior.
+  if (window.__swarmcraftSvelteActivity?.append(entry) === true) return;
+  const console = $('output');
   console.textContent = ['SwarmCraft is ready.', 'SwarmCraft is starting.', 'Activity cleared.'].includes(console.textContent.trim())
     ? entry
     : `${console.textContent.trim()}\n\n${entry}`;
@@ -271,6 +274,7 @@ function clearSelection() {
   $('world').value = '';
   $('selectionContent').hidden = true;
   $('noSelection').hidden = false;
+  window.dispatchEvent(new CustomEvent('swarmcraft:world-selected', { detail: { world: '' } }));
   for (const row of document.querySelectorAll('.world-row')) {
     row.classList.remove('is-selected');
     row.setAttribute('aria-pressed', 'false');
@@ -548,6 +552,7 @@ function selectWorld(world, { focusDetail = false } = {}) {
 
   $('noSelection').hidden = true;
   $('selectionContent').hidden = false;
+  window.dispatchEvent(new CustomEvent('swarmcraft:world-selected', { detail: { world: world.id } }));
   showInline('worldNotice', '');
   showInline('runtimeNotice', '');
   for (const row of document.querySelectorAll('.world-row')) {
@@ -712,9 +717,16 @@ async function ensureNetworkingService({ quiet = false } = {}) {
   }
 }
 
+// Svelte owns the identity presentation only when its candidate shell is
+// mounted. The shipping legacy HTML retains the original direct-DOM path.
+function publishIdentity(value, source = 'identity') {
+  if (window.__swarmcraftSvelteIdentity?.publish(String(value), source) === true) return;
+  $('identity').textContent = String(value);
+}
+
 async function initialize() {
   const result = await run('Setting up this device…', () => backend.initializeNode());
-  $('identity').textContent = String(result);
+  publishIdentity(result, 'setup');
   setNodeState('Ready', 'safe');
   await ensureNetworkingService({ quiet: true });
   await refreshWorlds();
@@ -745,7 +757,7 @@ async function startup() {
   setNodeState('Checking…');
   try {
     const result = await startupStep('Device setup', () => backend.initializeNode(), 30000);
-    $('identity').textContent = String(result);
+    publishIdentity(result, 'setup');
     setNodeState('Ready', 'safe');
 
     // Local world creation is useful without a network, but never call such a
@@ -780,11 +792,11 @@ async function startup() {
 async function showIdentity({ quiet = false } = {}) {
   try {
     const result = await run('Reading device identity…', () => backend.nodeIdentity(), { quiet });
-    $('identity').textContent = String(result);
+    publishIdentity(result);
     setNodeState('Ready', 'safe');
     return result;
   } catch (error) {
-    $('identity').textContent = quiet ? 'Device is not initialized.' : String(error);
+    publishIdentity(quiet ? 'Device is not initialized.' : String(error), 'unavailable');
     setNodeState(invoke ? 'Not set up' : 'Desktop bridge unavailable', invoke ? 'warning' : 'danger');
     if (!quiet) throw error;
     return null;
@@ -926,6 +938,7 @@ function openInviteDialog() {
   const world = selectedWorld();
   if (!world) throw new Error('Choose a world first.');
   $('inviteWorldName').textContent = world.name;
+  if (window.__swarmcraftSvelteInviteOwned) window.__swarmcraftResetSvelteInvite?.();
   $('inviteResult').value = '';
   $('inviteResultWrap').hidden = true;
   showInline('inviteError', '');
@@ -1019,6 +1032,7 @@ function openLeaveDialog() {
   const world = selectedWorld();
   if (!world) throw new Error('Choose a world first.');
   $('leaveDialogText').textContent = `This stages a signed leave request for ${world.name}. Local membership changes after the request is accepted.`;
+  if (window.__swarmcraftSvelteLeaveOwned) window.__swarmcraftResetSvelteLeave?.();
   $('leaveDialog').showModal();
 }
 
@@ -1122,11 +1136,72 @@ async function wakeWorld() {
   await refreshMigrationState(selectedWorld());
 }
 
+// The Svelte candidate owns Create World submissions. The installed legacy
+// frontend has no ownership flag and continues using this handler as before.
+// Completion-only callbacks are exposed exclusively in the mounted Svelte
+// candidate. The shipping legacy webview does not receive extra globals.
+if (window.__swarmcraftSvelteCreateOwned === true
+    || window.__swarmcraftSvelteJoinOwned === true
+    || window.__swarmcraftSvelteImportOwned === true
+    || window.__swarmcraftSvelteLeaveOwned === true) {
+window.__swarmcraftAfterSvelteLeave = async () => {
+  $('leaveDialog').close();
+  selectedWorldId = '';
+  migrationRequestGeneration += 1;
+  $('world').value = '';
+  await refreshWorlds();
+  if (lastWorldError) throw new Error('Membership may have changed but Worlds could not be refreshed.');
+};
+
+window.__swarmcraftAfterSvelteImport = async (importedWorldId) => {
+  const id = String(importedWorldId || '').trim();
+  if (!/^scworld:[^\s]+$/.test(id)) throw new Error('Import did not return a canonical World ID.');
+  selectedWorldId = id;
+  await refreshWorlds();
+  if (lastWorldError) throw new Error('Import completed but the updated world list could not be loaded.');
+  showView('worlds');
+  showInline(
+    'worldNotice',
+    'Existing world imported. Minecraft EULA acceptance and this device’s runtime setup were not changed.',
+    'safe',
+  );
+};
+
+window.__swarmcraftAfterSvelteJoin = async (joinedWorldId) => {
+  const id = String(joinedWorldId || '').trim();
+  if (id && !/^scworld:[^\s]+$/.test(id)) throw new Error('Join returned an invalid World ID.');
+  if (id) selectedWorldId = id;
+  await refreshWorlds();
+  if (lastWorldError) throw new Error('Join completed but the updated world list could not be loaded.');
+  showView('worlds');
+};
+
+window.__swarmcraftAfterSvelteCreate = async (createdWorldId) => {
+  const id = String(createdWorldId || '').trim();
+  if (!/^scworld:[^\s]+$/.test(id)) throw new Error('Creation did not return a canonical World ID.');
+  selectedWorldId = id;
+  await refreshWorlds();
+  if (lastWorldError) {
+    throw new Error('World was created but the updated world list could not be loaded.');
+  }
+  showView('worlds');
+};
+}
+
 function bindAction(id, handler, { submit = false } = {}) {
   const element = $(id);
   if (!element) return;
   element.addEventListener(submit ? 'submit' : 'click', async (event) => {
     if (submit) event.preventDefault();
+    // Avoid issuing two native create_world commands when the Svelte handler
+    // owns the form. The original production HTML still uses this listener.
+    if (id === 'createForm' && window.__swarmcraftSvelteCreateOwned === true) return;
+    if (id === 'joinForm' && window.__swarmcraftSvelteJoinOwned === true) return;
+    if (id === 'importForm' && window.__swarmcraftSvelteImportOwned === true) return;
+    if (id === 'createInvite' && window.__swarmcraftSvelteInviteOwned === true) return;
+    if (id === 'joinWorldIdButton' && window.__swarmcraftSvelteDiscoveryOwned === true) return;
+    if (id === 'confirmLeave' && window.__swarmcraftSvelteLeaveOwned === true) return;
+    if (id === 'identityButton' && window.__swarmcraftSvelteIdentityOwned === true) return;
     if (element.dataset.busy === 'true') return;
     const busyControl = submit && event.submitter ? event.submitter : element;
     element.dataset.busy = 'true';
