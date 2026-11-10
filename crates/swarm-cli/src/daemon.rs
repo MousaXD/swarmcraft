@@ -36,7 +36,8 @@ use swarm_protocol::{
     WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{
-    DurableMembershipPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage, StorageError,
+    DurableMembershipPromiseV1, DurableRecoveryPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage,
+    StorageError,
 };
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
@@ -535,6 +536,38 @@ struct RecoveryAttempt<'a> {
     wake: bool,
 }
 
+/// Only a genuinely missing canonical promise is the absence of a durable vote.
+/// Decoding, metadata, and permission errors must fence recovery instead.
+fn load_optional_recovery_promise(storage: &Storage, world: WorldId) -> Result<Option<DurableRecoveryPromiseV1>> {
+    match storage.load_recovery_promise(world) {
+        Ok(promise) => Ok(Some(promise)),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn ensure_active_recovery_promise(storage: &Storage, ballot: &RecoveryBallotV1) -> Result<()> {
+    let durable = storage
+        .load_recovery_promise(ballot.world_id)
+        .context("cached recovery ballot has no readable canonical durable promise")?;
+    if durable.ballot.ballot_hash()? != ballot.ballot_hash()? {
+        return Err(anyhow!("cached recovery ballot differs from its durable promise"));
+    }
+    Ok(())
+}
+
+fn ensure_local_recovery_promise_allows_certificate(storage: &Storage, ballot: &RecoveryBallotV1) -> Result<()> {
+    if let Some(promise) = load_optional_recovery_promise(storage, ballot.world_id)? {
+        if promise.ballot.round > ballot.round {
+            return Err(anyhow!("certified recovery epoch is stale relative to a newer durable promise"));
+        }
+        if promise.ballot.round == ballot.round && promise.ballot.ballot_hash()? != ballot.ballot_hash()? {
+            return Err(anyhow!("certified recovery epoch conflicts with this peer's durable same-round promise"));
+        }
+    }
+    Ok(())
+}
+
 fn drive_recovery_ballot(
     attempt: RecoveryAttempt<'_>,
     node: &mut SwarmNode,
@@ -557,7 +590,7 @@ fn drive_recovery_ballot(
     let membership = storage.load_membership_record(world)?;
     verify_membership_signature(&membership)?;
     let membership_hash = membership.record_hash()?;
-    let durable_round = storage.load_recovery_promise(world).map_or(0, |promise| promise.ballot.round);
+    let durable_round = load_optional_recovery_promise(storage, world)?.map_or(0, |promise| promise.ballot.round);
     let floor = runtime.recovery_round_floor.get(&world).copied().unwrap_or(0).max(durable_round);
     let active_is_usable = runtime.recovery_ballots.get(&world).is_some_and(|ballot| {
         ballot.base_epoch == previous.epoch_number
@@ -649,6 +682,10 @@ fn drive_recovery_ballot(
     for vote in &certificate.votes {
         verify_recovery_vote_signature(vote)?;
     }
+
+    // An in-memory ballot is not a substitute for its canonical durable promise.
+    // Recheck after collecting quorum votes, immediately before any promotion write.
+    ensure_active_recovery_promise(storage, &ballot)?;
 
     // Persist the quorum proof before the epoch. A crash between these writes can
     // safely retry promotion; the proof itself never grants an older round power.
@@ -1939,6 +1976,7 @@ fn handle_request(
             let certificate = *certificate;
             ensure_no_membership_prepare(storage, record.world_id)?;
             validate_recovery_epoch(storage, application_peer, &record, &certificate)?;
+            ensure_local_recovery_promise_allows_certificate(storage, &certificate.ballot)?;
             if let Ok(current) = storage.load_epoch_record(record.world_id) {
                 if record == current {
                     storage.save_recovery_certificate(&certificate)?;
@@ -1960,18 +1998,6 @@ fn handle_request(
                     || record.previous_epoch_hash != Some(epoch_record_hash(&current)?)
                 {
                     return Err(anyhow!("certified recovery epoch does not directly extend the accepted epoch"));
-                }
-            }
-            if let Ok(promise) = storage.load_recovery_promise(record.world_id) {
-                if promise.ballot.round > certificate.ballot.round {
-                    return Err(anyhow!("certified recovery epoch is stale relative to a newer durable promise"));
-                }
-                if promise.ballot.round == certificate.ballot.round
-                    && promise.ballot.ballot_hash()? != certificate.ballot.ballot_hash()?
-                {
-                    return Err(anyhow!(
-                        "certified recovery epoch conflicts with this peer's durable same-round promise"
-                    ));
                 }
             }
             storage.save_recovery_certificate(&certificate)?;
