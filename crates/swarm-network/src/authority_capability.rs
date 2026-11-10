@@ -16,6 +16,9 @@ pub const MANDATORY_AUTHORITY_WIRE_PROTOCOL: &str = "/swarmcraft/hosting-authori
 pub const MANDATORY_AUTHORITY_FEATURE_VERSION: u16 = 2;
 pub const MAX_AUTHORITY_SESSION_AGE_MS: u64 = 30_000;
 pub const MAX_AUTHORITY_TRANSPORT_ID_BYTES: usize = 128;
+/// These limits must match the canonical Agent 02 hosting policy before V2 activation.
+pub const MIN_V2_AUTHORITY_HEAP_MIB: u32 = 512;
+pub const MAX_V2_AUTHORITY_HEAP_MIB: u32 = 65_536;
 const AUTHORITY_FEATURE_SIGN_DOMAIN: &[u8] = b"swarmcraft/authority-feature-session/v2\0";
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -48,6 +51,10 @@ pub struct SignedAuthorityFeatureV2 {
     pub peer_id: PeerId,
     pub public_key: [u8; 32],
     pub committed_policy_hash: Hash32,
+    pub committed_migration_hash: Hash32,
+    pub accepted_membership_hash: Hash32,
+    pub snapshot_hash: Hash32,
+    pub selected_heap_mib: u32,
     pub epoch: u64,
     pub fencing_token: u64,
     pub consent_revision: u64,
@@ -71,6 +78,12 @@ impl SignedAuthorityFeatureV2 {
             || self.verifier_transport_peer.is_empty()
             || self.claimant_transport_peer.len() > MAX_AUTHORITY_TRANSPORT_ID_BYTES
             || self.verifier_transport_peer.len() > MAX_AUTHORITY_TRANSPORT_ID_BYTES
+            || self.committed_policy_hash == Hash32::default()
+            || self.committed_migration_hash == Hash32::default()
+            || self.accepted_membership_hash == Hash32::default()
+            || self.snapshot_hash == Hash32::default()
+            || !(MIN_V2_AUTHORITY_HEAP_MIB..=MAX_V2_AUTHORITY_HEAP_MIB)
+                .contains(&self.selected_heap_mib)
             || self.challenge == [0; 32]
             || self.epoch == 0
             || self.fencing_token == 0
@@ -85,13 +98,17 @@ impl SignedAuthorityFeatureV2 {
 
     pub fn signing_bytes(&self) -> Result<Vec<u8>, AuthorityCapabilityError> {
         self.validate_transcript()?;
-        let mut bytes = Vec::with_capacity(AUTHORITY_FEATURE_SIGN_DOMAIN.len() + 320);
+        let mut bytes = Vec::with_capacity(AUTHORITY_FEATURE_SIGN_DOMAIN.len() + 448);
         bytes.extend_from_slice(AUTHORITY_FEATURE_SIGN_DOMAIN);
         bytes.extend_from_slice(&self.feature_version.to_be_bytes());
         bytes.extend_from_slice(&self.world_id.0);
         bytes.extend_from_slice(&self.peer_id.0);
         bytes.extend_from_slice(&self.public_key);
         bytes.extend_from_slice(&self.committed_policy_hash.0);
+        bytes.extend_from_slice(&self.committed_migration_hash.0);
+        bytes.extend_from_slice(&self.accepted_membership_hash.0);
+        bytes.extend_from_slice(&self.snapshot_hash.0);
+        bytes.extend_from_slice(&self.selected_heap_mib.to_be_bytes());
         bytes.extend_from_slice(&self.epoch.to_be_bytes());
         bytes.extend_from_slice(&self.fencing_token.to_be_bytes());
         bytes.extend_from_slice(&self.consent_revision.to_be_bytes());
@@ -122,6 +139,10 @@ pub struct ExpectedAuthorityFeatureV2<'a> {
     /// Obtained from an independently verified *durable canonical* commitment,
     /// not from discovery, a sidecar or the remote peer.
     pub policy_hash: Hash32,
+    pub migration_hash: Hash32,
+    pub membership_hash: Hash32,
+    pub snapshot_hash: Hash32,
+    pub selected_heap_mib: u32,
     pub epoch: u64,
     pub fencing_token: u64,
     pub consent_revision: u64,
@@ -139,9 +160,14 @@ pub struct VerifiedAuthorityFeatureSession {
     peer_id: PeerId,
     world_id: WorldId,
     policy_hash: Hash32,
+    migration_hash: Hash32,
+    membership_hash: Hash32,
+    snapshot_hash: Hash32,
+    selected_heap_mib: u32,
     epoch: u64,
     fencing_token: u64,
     consent_revision: u64,
+    issued_unix_ms: u64,
     expires_unix_ms: u64,
 }
 
@@ -155,6 +181,18 @@ impl VerifiedAuthorityFeatureSession {
     pub fn policy_hash(self) -> Hash32 {
         self.policy_hash
     }
+    pub fn migration_hash(self) -> Hash32 {
+        self.migration_hash
+    }
+    pub fn membership_hash(self) -> Hash32 {
+        self.membership_hash
+    }
+    pub fn snapshot_hash(self) -> Hash32 {
+        self.snapshot_hash
+    }
+    pub fn selected_heap_mib(self) -> u32 {
+        self.selected_heap_mib
+    }
     pub fn epoch(self) -> u64 {
         self.epoch
     }
@@ -165,7 +203,7 @@ impl VerifiedAuthorityFeatureSession {
         self.consent_revision
     }
     pub fn valid_at(self, now_unix_ms: u64) -> bool {
-        now_unix_ms <= self.expires_unix_ms
+        now_unix_ms >= self.issued_unix_ms && now_unix_ms <= self.expires_unix_ms
     }
 }
 
@@ -186,6 +224,10 @@ pub fn verify_authority_feature_session(
     if claim.world_id != expected.world_id
         || claim.peer_id != expected.peer_id
         || claim.committed_policy_hash != expected.policy_hash
+        || claim.committed_migration_hash != expected.migration_hash
+        || claim.accepted_membership_hash != expected.membership_hash
+        || claim.snapshot_hash != expected.snapshot_hash
+        || claim.selected_heap_mib != expected.selected_heap_mib
         || claim.epoch != expected.epoch
         || claim.fencing_token != expected.fencing_token
         || claim.consent_revision != expected.consent_revision
@@ -211,9 +253,14 @@ pub fn verify_authority_feature_session(
         peer_id: claim.peer_id,
         world_id: claim.world_id,
         policy_hash: claim.committed_policy_hash,
+        migration_hash: claim.committed_migration_hash,
+        membership_hash: claim.accepted_membership_hash,
+        snapshot_hash: claim.snapshot_hash,
+        selected_heap_mib: claim.selected_heap_mib,
         epoch: claim.epoch,
         fencing_token: claim.fencing_token,
         consent_revision: claim.consent_revision,
+        issued_unix_ms: claim.issued_unix_ms,
         expires_unix_ms: claim.expires_unix_ms,
     })
 }
@@ -231,6 +278,10 @@ mod tests {
             peer_id: peer_id_from_public_key(&key.verifying_key().to_bytes()),
             public_key: key.verifying_key().to_bytes(),
             committed_policy_hash: Hash32([2; 32]),
+            committed_migration_hash: Hash32([10; 32]),
+            accepted_membership_hash: Hash32([11; 32]),
+            snapshot_hash: Hash32([12; 32]),
+            selected_heap_mib: 4096,
             epoch: 3,
             fencing_token: 4,
             consent_revision: 5,
@@ -250,6 +301,10 @@ mod tests {
             world_id: v.world_id,
             peer_id: v.peer_id,
             policy_hash: v.committed_policy_hash,
+            migration_hash: v.committed_migration_hash,
+            membership_hash: v.accepted_membership_hash,
+            snapshot_hash: v.snapshot_hash,
+            selected_heap_mib: v.selected_heap_mib,
             epoch: v.epoch,
             fencing_token: v.fencing_token,
             consent_revision: v.consent_revision,
@@ -288,6 +343,11 @@ mod tests {
         let verified = validate().unwrap();
         assert_eq!(verified.peer_id(), v.peer_id);
         assert_eq!(verified.policy_hash(), v.committed_policy_hash);
+        assert_eq!(verified.migration_hash(), v.committed_migration_hash);
+        assert_eq!(verified.membership_hash(), v.accepted_membership_hash);
+        assert_eq!(verified.snapshot_hash(), v.snapshot_hash);
+        assert_eq!(verified.selected_heap_mib(), 4096);
+        assert!(!verified.valid_at(99_999));
         assert!(verified.valid_at(110_000));
         assert!(!verified.valid_at(110_001));
         assert_eq!(validate(), Err(AuthorityCapabilityError::ReplayOrUnknownChallenge));
@@ -356,6 +416,49 @@ mod tests {
         assert_eq!(
             verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &v, &ex, || true),
             Err(AuthorityCapabilityError::WrongContext)
+        );
+    }
+
+    #[test]
+    fn rejects_stale_migration_membership_snapshot_or_runtime_heap() {
+        let (v, _) = claim();
+        let mut ex = expected(&v);
+        ex.migration_hash = Hash32([99; 32]);
+        assert_eq!(
+            verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &v, &ex, || true),
+            Err(AuthorityCapabilityError::WrongContext)
+        );
+        ex = expected(&v);
+        ex.membership_hash = Hash32([99; 32]);
+        assert_eq!(
+            verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &v, &ex, || true),
+            Err(AuthorityCapabilityError::WrongContext)
+        );
+        ex = expected(&v);
+        ex.snapshot_hash = Hash32([99; 32]);
+        assert_eq!(
+            verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &v, &ex, || true),
+            Err(AuthorityCapabilityError::WrongContext)
+        );
+        ex = expected(&v);
+        ex.selected_heap_mib = 2048;
+        assert_eq!(
+            verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &v, &ex, || true),
+            Err(AuthorityCapabilityError::WrongContext)
+        );
+
+        let mut tampered = v.clone();
+        tampered.snapshot_hash = Hash32([88; 32]);
+        let ex = expected(&tampered);
+        assert_eq!(
+            verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &tampered, &ex, || true),
+            Err(AuthorityCapabilityError::InvalidSignature)
+        );
+        tampered = v.clone();
+        tampered.selected_heap_mib = 0;
+        assert_eq!(
+            verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &tampered, &expected(&v), || true),
+            Err(AuthorityCapabilityError::InvalidTranscript)
         );
     }
 
