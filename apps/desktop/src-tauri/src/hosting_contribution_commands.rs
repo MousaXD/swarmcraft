@@ -68,6 +68,26 @@ pub fn validated_set<B: HostingContributionBackend>(
     backend.set(world, heap_mib)
 }
 
+/// Safe, bounded result of a successful persisted native consent mutation.
+/// The production adapter constructs this only from Agent 03's validated
+/// HostingConsentV1 after set_contribution returns Ok. Never serialize that
+/// record directly into the webview: it also contains the local peer identity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HostingContributionConsentReply {
+    pub world_id: String,
+    pub enabled: bool,
+    pub heap_mib: u64,
+    /// Revision is a decimal string; Rust's u64 nanosecond-scale revisions
+    /// exceed JavaScript's Number.MAX_SAFE_INTEGER.
+    pub revision: String,
+}
+
+impl HostingContributionConsentReply {
+    pub fn from_persisted(world: WorldId, enabled: bool, heap_mib: u64, revision: u64) -> Self {
+        Self { world_id: world.to_string(), enabled, heap_mib, revision: revision.to_string() }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +183,21 @@ mod tests {
         assert_eq!(validated_set(&spy, WORLD, 4096).unwrap_err(), "insufficient hosting memory");
         assert_eq!(validated_get(&spy, WORLD).unwrap_err(), "insufficient hosting memory");
         assert_eq!(*spy.selected.lock().unwrap(), None);
+    }
+
+    #[test]
+    fn persisted_consent_reply_has_only_public_fields_and_lossless_revision() {
+        let world = validate_world_id(WORLD).unwrap();
+        let reply = HostingContributionConsentReply::from_persisted(world, false, 0, u64::MAX);
+        assert_eq!(
+            serde_json::to_value(reply).unwrap(),
+            serde_json::json!({
+                "world_id": WORLD,
+                "enabled": false,
+                "heap_mib": 0,
+                "revision": u64::MAX.to_string(),
+            })
+        );
     }
 
     #[test]
