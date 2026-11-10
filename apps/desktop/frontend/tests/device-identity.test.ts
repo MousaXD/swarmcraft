@@ -7,10 +7,11 @@ describe('Svelte native identity presentation', () => {
     const invoke = vi.fn(async () => 'Peer ID: scpeer:verified');
     const identity = createIdentityController(invoke);
     expect(get(identity.state).phase).toBe('checking');
+    expect(get(identity.state).nativeVerifiedRefreshCount).toBe(0);
     await identity.refresh();
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(get(identity.state)).toMatchObject({
-      phase: 'ready', text: 'Peer ID: scpeer:verified', busy: false, error: '',
+      phase: 'ready', text: 'Peer ID: scpeer:verified', busy: false, error: '', nativeVerifiedRefreshCount: 1,
     });
   });
 
@@ -21,6 +22,7 @@ describe('Svelte native identity presentation', () => {
     await identity.refresh();
     const value = get(identity.state);
     expect(value.phase).toBe('unavailable');
+    expect(value.nativeVerifiedRefreshCount).toBe(0);
     expect(value.error).toContain('Native identity lookup failed');
     expect(JSON.stringify(value)).not.toMatch(/secret|signing material|private\/identity/i);
 
@@ -28,6 +30,7 @@ describe('Svelte native identity presentation', () => {
     await empty.refresh();
     expect(get(empty.state).phase).toBe('unavailable');
     expect(get(empty.state).text).toBe('Device identity is unavailable.');
+    expect(get(empty.state).nativeVerifiedRefreshCount).toBe(0);
   });
 
   it('coalesces duplicate refresh requests and keeps legacy startup updates current', async () => {
@@ -44,7 +47,7 @@ describe('Svelte native identity presentation', () => {
     resolve('Peer ID: scpeer:stale');
     await first;
     expect(get(identity.state)).toMatchObject({
-      phase: 'ready', text: 'Peer ID: scpeer:startup', busy: false,
+      phase: 'ready', text: 'Peer ID: scpeer:startup', busy: false, nativeVerifiedRefreshCount: 0,
     });
   });
 
@@ -55,9 +58,10 @@ describe('Svelte native identity presentation', () => {
     expect(get(identity.state).text).toContain('Initialized');
     identity.publishLegacy('private identity read failure', 'unavailable');
     expect(get(identity.state).phase).toBe('unavailable');
+    expect(get(identity.state).nativeVerifiedRefreshCount).toBe(0);
     expect(JSON.stringify(get(identity.state))).not.toContain('private identity read failure');
     await identity.refresh();
-    expect(get(identity.state)).toMatchObject({ phase: 'ready', text: 'Peer ID: scpeer:real' });
+    expect(get(identity.state)).toMatchObject({ phase: 'ready', text: 'Peer ID: scpeer:real', nativeVerifiedRefreshCount: 1 });
   });
 
   it('can refresh after a failed request without leaving an endless spinner', async () => {
@@ -68,8 +72,10 @@ describe('Svelte native identity presentation', () => {
     });
     await identity.refresh();
     expect(get(identity.state).busy).toBe(false);
+    expect(get(identity.state).nativeVerifiedRefreshCount).toBe(0);
     fail = false;
     await identity.refresh();
     expect(get(identity.state).phase).toBe('ready');
+    expect(get(identity.state).nativeVerifiedRefreshCount).toBe(1);
   });
 });
