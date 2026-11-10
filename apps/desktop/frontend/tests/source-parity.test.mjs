@@ -377,6 +377,11 @@ test('Svelte identity diagnostics use genuine typed Rust IPC without duplicate l
   assert.ok(diagnostics.includes('disabled={$identityState.busy}'));
   assert.ok(diagnostics.includes('{$identityState.text}'));
   assert.ok(diagnostics.includes('data-identity-phase={$identityState.phase}'));
+  assert.ok(diagnostics.includes('data-native-verified-refresh-count={$identityState.nativeVerifiedRefreshCount}'));
+  assert.ok(identity.includes('if (text && fromNativeRefresh) nativeVerifiedRefreshCount += 1;'));
+  assert.ok(identity.includes('if (version === generation) state.set(present(value, true));'));
+  assert.ok(identity.includes('nativeVerifiedRefreshCount: 0'));
+
   assert.ok(diagnostics.includes('aria-busy={$identityState.busy}'));
   assert.ok(root.includes('window.__swarmcraftSvelteIdentityOwned = true;'));
   assert.ok(app.includes("id === 'identityButton' && window.__swarmcraftSvelteIdentityOwned === true"));
@@ -397,6 +402,11 @@ test('native visual failures emit only stage, class and allowlisted UI observati
   assert.ok(script.includes("mark_stage('native-identity-refresh')"));
   assert.ok(script.includes("identityVerified: output?.dataset.identityPhase === 'ready'"));
   assert.ok(script.includes("identityRefreshFinished: !!button && !button.disabled"));
+  assert.ok(script.includes('identityNativeConfirmed:'));
+  assert.ok(script.includes('nativeVerifiedRefreshCount ?? -1'));
+  assert.ok(script.includes('app.click("#identityButton")'));
+  assert.ok(script.includes('type(native_before) is int'));
+
   assert.ok(script.includes("'identityOwned', 'identityVerified', 'identityNotEmpty', 'identityRefreshFinished'"));
   assert.ok(script.includes("'stage': CURRENT_STAGE"));
   assert.ok(script.includes("'category': category"));
