@@ -44,9 +44,7 @@ pub fn validate_heap_mib(heap_mib: u64) -> Result<(), String> {
     if heap_mib == 0 || (MIN_HEAP_MIB..=MAX_HEAP_MIB).contains(&heap_mib) {
         Ok(())
     } else {
-        Err(format!(
-            "Server heap must be 0 (player-only) or between {MIN_HEAP_MIB} and {MAX_HEAP_MIB} MiB"
-        ))
+        Err(format!("Server heap must be 0 (player-only) or between {MIN_HEAP_MIB} and {MAX_HEAP_MIB} MiB"))
     }
 }
 
@@ -120,7 +118,9 @@ mod tests {
     #[test]
     fn malformed_world_and_path_injection_are_rejected_before_backend_access() {
         let spy = BoundarySpy::default();
-        for world in ["", " ", " ./world", "../escape", "world/abc", "scworld:zz", "scworld:", "a\n--java", "scworld:111"] {
+        for world in
+            ["", " ", " ./world", "../escape", "world/abc", "scworld:zz", "scworld:", "a\n--java", "scworld:111"]
+        {
             assert!(validated_get(&spy, world).is_err(), "unexpectedly accepted: {world:?}");
             assert!(validated_set(&spy, world, 512).is_err(), "unexpectedly accepted: {world:?}");
         }
