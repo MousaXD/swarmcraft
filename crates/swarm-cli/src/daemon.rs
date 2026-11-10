@@ -540,7 +540,11 @@ struct RecoveryAttempt<'a> {
 /// Decoding, metadata, and permission errors must fence recovery instead.
 fn load_optional_recovery_promise(storage: &Storage, world: WorldId) -> Result<Option<DurableRecoveryPromiseV1>> {
     match storage.load_recovery_promise(world) {
-        Ok(promise) => Ok(Some(promise)),
+        Ok(promise) => {
+            verify_recovery_ballot_signature(&promise.ballot)?;
+            verify_recovery_vote_signature(&promise.vote)?;
+            Ok(Some(promise))
+        }
         Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
@@ -557,8 +561,7 @@ fn load_optional_epoch_record(storage: &Storage, world: WorldId) -> Result<Optio
 }
 
 fn ensure_active_recovery_promise(storage: &Storage, ballot: &RecoveryBallotV1) -> Result<()> {
-    let durable = storage
-        .load_recovery_promise(ballot.world_id)
+    let durable = load_optional_recovery_promise(storage, ballot.world_id)?
         .context("cached recovery ballot has no readable canonical durable promise")?;
     if durable.ballot.ballot_hash()? != ballot.ballot_hash()? {
         return Err(anyhow!("cached recovery ballot differs from its durable promise"));
