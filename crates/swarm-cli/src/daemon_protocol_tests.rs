@@ -426,7 +426,9 @@ fn corrupt_epoch_blocks_config_snapshot_and_transfer_preflight() {
     fixture.authority.sign_snapshot(&mut second).unwrap();
 
     let legitimate = config(&fixture, &fixture.authority);
-    assert!(authorize_world_config_current_authority(&fixture.storage, fixture.authority.peer_id(), &legitimate).is_ok());
+    assert!(
+        authorize_world_config_current_authority(&fixture.storage, fixture.authority.peer_id(), &legitimate).is_ok()
+    );
     assert!(authorize_manifest(&fixture.storage, fixture.authority.peer_id(), &second).is_ok());
     assert!(validate_transfer(&fixture.storage, &transfer).is_ok());
 
@@ -434,7 +436,9 @@ fn corrupt_epoch_blocks_config_snapshot_and_transfer_preflight() {
     let corrupt = b"corrupt accepted authority epoch";
     std::fs::write(&epoch_path, corrupt).unwrap();
 
-    assert!(authorize_world_config_current_authority(&fixture.storage, fixture.authority.peer_id(), &legitimate).is_err());
+    assert!(
+        authorize_world_config_current_authority(&fixture.storage, fixture.authority.peer_id(), &legitimate).is_err()
+    );
     assert!(authorize_manifest(&fixture.storage, fixture.authority.peer_id(), &second).is_err());
     assert!(validate_transfer(&fixture.storage, &transfer).is_err());
     assert_eq!(std::fs::read(&epoch_path).unwrap(), corrupt);
