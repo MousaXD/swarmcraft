@@ -94,8 +94,14 @@ impl Storage {
     pub fn save_transfer_record(&self, transfer: &AuthorityTransferV1) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(transfer.world_id)?;
         transfer.validate_semantics()?;
+        let path = self.control_path(transfer.world_id, "transfer.postcard");
+        // An existing canonical transfer may be at a later protocol phase.
+        // Never replace it if corruption makes its phase/generation unreadable.
+        if canonical_file_exists(&path)? {
+            self.load_transfer_record(transfer.world_id)?;
+        }
         let bytes = postcard::to_allocvec(transfer)?;
-        durable_atomic_write(&self.control_path(transfer.world_id, "transfer.postcard"), &bytes)
+        durable_atomic_write(&path, &bytes)
     }
 
     pub fn load_transfer_record(&self, world: WorldId) -> Result<AuthorityTransferV1, StorageError> {
