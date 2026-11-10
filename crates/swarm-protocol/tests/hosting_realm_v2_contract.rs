@@ -2,14 +2,12 @@
 //! and does NOT establish cryptographic acceptance, V1 quorum or live authority.
 
 use swarm_protocol::{
-    peer_id_from_public_key, AuthorityPolicyV1, ExpectedHostingAuthorityHeadV2, Hash32,
-    HostingAuthorityOperationV2, MembershipPolicyV1, MembershipRecordV1, PeerId,
-    ProposedHostingRealmGenesisV2, RuntimeCompatibilityManifestV1, SignedHostingAuthorityActionV2,
-    SignedHostingMigrationProposalV2, SignedHostingMigrationVoteV2, SignedRealmHostingPolicyV2,
-    SourceHistoryAnchorV2, WorldConfigV1, WorldGenesisV1, WorldHostingPolicyV1, WorldId,
+    peer_id_from_public_key, AuthorityPolicyV1, ExpectedHostingAuthorityHeadV2, Hash32, HostingAuthorityOperationV2,
+    MembershipPolicyV1, MembershipRecordV1, PeerId, ProposedHostingRealmGenesisV2, RuntimeCompatibilityManifestV1,
+    SignedHostingAuthorityActionV2, SignedHostingMigrationProposalV2, SignedHostingMigrationVoteV2,
+    SignedRealmHostingPolicyV2, SourceHistoryAnchorV2, WorldConfigV1, WorldGenesisV1, WorldHostingPolicyV1, WorldId,
     WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, HOSTING_POLICY_FORMAT_VERSION,
-    HOSTING_REALM_FORMAT_VERSION_V2, HOSTING_REALM_REQUIRED_AUTHORITY_FEATURE_V2,
-    PROTOCOL_VERSION,
+    HOSTING_REALM_FORMAT_VERSION_V2, HOSTING_REALM_REQUIRED_AUTHORITY_FEATURE_V2, PROTOCOL_VERSION,
 };
 
 fn accepts_test_signatures(_: &[u8; 32], _: &[u8], signature: &[u8]) -> bool {
@@ -69,10 +67,7 @@ impl Fixture {
                 datapacks: Vec::new(),
             },
             visibility: WorldVisibilityV1::Private,
-            authority_policy: AuthorityPolicyV1 {
-                allow_solo_advancement: false,
-                preferred_replication_factor: 2,
-            },
+            authority_policy: AuthorityPolicyV1 { allow_solo_advancement: false, preferred_replication_factor: 2 },
             membership_policy: MembershipPolicyV1::InviteOnly,
             presentation: WorldPresentationV1 {
                 name: "Source".into(),
@@ -137,12 +132,7 @@ impl Fixture {
             source_authority_public_key: authority_public_key,
             signature: vec![8; 64],
         };
-        let voter = membership
-            .members
-            .iter()
-            .find(|member| member.public_key == [2; 32])
-            .unwrap()
-            .clone();
+        let voter = membership.members.iter().find(|member| member.public_key == [2; 32]).unwrap().clone();
         Self { genesis, config, membership, realm, policy, proposal, voter }
     }
 
@@ -204,7 +194,7 @@ fn distinct_v2_realm_preserves_source_v1_genesis_and_config_bytes() {
     let genesis_bytes = postcard::to_allocvec(&f.genesis).unwrap();
     let config_bytes = postcard::to_allocvec(&f.config).unwrap();
     let config_signature = f.config.signing_bytes().unwrap();
-    let old_world_id = f.genesis.world_id().unwrap();
+    let old_world_id: WorldId = f.genesis.world_id().unwrap();
     let new_realm = f.realm.realm_id().unwrap();
 
     assert_ne!(old_world_id, new_realm);
@@ -219,20 +209,14 @@ fn distinct_v2_realm_preserves_source_v1_genesis_and_config_bytes() {
 #[test]
 fn migration_proposal_is_signed_but_does_not_grant_canonical_authority() {
     let f = Fixture::new();
-    assert!(f.proposal.verify_against_accepted_source(
-        &f.genesis,
-        &f.config,
-        &f.membership,
-        &f.policy,
-        accepts_test_signatures,
-    ).is_ok());
-    assert!(f.proposal.verify_against_accepted_source(
-        &f.genesis,
-        &f.config,
-        &f.membership,
-        &f.policy,
-        |_, _, _| false,
-    ).is_err());
+    assert!(f
+        .proposal
+        .verify_against_accepted_source(&f.genesis, &f.config, &f.membership, &f.policy, accepts_test_signatures,)
+        .is_ok());
+    assert!(f
+        .proposal
+        .verify_against_accepted_source(&f.genesis, &f.config, &f.membership, &f.policy, |_, _, _| false,)
+        .is_err());
     assert!(f.policy.verify_for_realm(&f.realm, f.config.authority_peer_id, |_, _, _| false).is_err());
     assert!(f.proposal.signing_bytes().unwrap().starts_with(b"swarmcraft/hosting-migration-proposal-sign/v2\0"));
     assert!(f.policy.signing_bytes().unwrap().starts_with(b"swarmcraft/hosting-realm-policy-sign/v2\0"));
@@ -298,9 +282,9 @@ fn migration_proposal_must_bind_source_authority_target_policy_and_fence() {
     assert!(bad.validate_shape().is_err());
     bad = f.proposal.clone();
     bad.initial_policy_hash = Hash32([4; 32]);
-    assert!(bad.verify_against_accepted_source(
-        &f.genesis, &f.config, &f.membership, &f.policy, accepts_test_signatures,
-    ).is_err());
+    assert!(bad
+        .verify_against_accepted_source(&f.genesis, &f.config, &f.membership, &f.policy, accepts_test_signatures,)
+        .is_err());
     bad = f.proposal.clone();
     bad.activation_epoch = f.realm.source.source_epoch;
     assert!(bad.validate_shape().is_err());
@@ -358,6 +342,9 @@ fn signed_v2_authority_actions_reject_v1_downgrade_and_stale_context() {
     bad.operation = HostingAuthorityOperationV2::LeaseGrant;
     assert!(bad.verify_for_head(&expected, accepts_test_signatures).is_err());
     bad = action.clone();
+    bad.candidate_peer_id = PeerId([17; 32]);
+    assert!(bad.verify_for_head(&expected, accepts_test_signatures).is_err());
+    bad = action.clone();
     bad.epoch += 1;
     assert!(bad.verify_for_head(&expected, accepts_test_signatures).is_err());
     bad = action.clone();
@@ -383,6 +370,9 @@ fn signed_v2_authority_actions_reject_v1_downgrade_and_stale_context() {
     assert!(bad.verify_for_head(&expected, accepts_test_signatures).is_err());
     bad = action.clone();
     bad.selected_heap_mib += 512;
+    assert!(bad.verify_for_head(&expected, accepts_test_signatures).is_err());
+    bad = action.clone();
+    bad.signer_public_key = [42; 32];
     assert!(bad.verify_for_head(&expected, accepts_test_signatures).is_err());
     bad = action.clone();
     bad.signature.clear();

@@ -475,3 +475,69 @@ memory behavior or complete player-only participation.
 Validation and Main Desktop Installers again. Preserve PR #92 DRAFT,
 issue #84 OPEN and leave the new records inert until a full integrated
 candidate is reviewed and certified.
+
+
+## 2026-11-10 final continuation — CI correction and V2 decision boundary
+
+**Exact-head repair:** the original `0ef32c2c25ec6570749e20dc342d4e90629eb4e9`
+failed Rust formatting on Ubuntu and strict `-D warnings` Clippy on
+macOS/Windows because a test-only `WorldId` import was unused. This
+continuation applies the exact eight rustfmt hunks emitted by CI and
+uses the explicit `WorldId` type in the distinct-realm identity test.
+It also adds wrong-candidate and wrong-signer-key rejection cases.
+There is **no V1 signed-byte, wire, daemon, storage or activation change**.
+Prior green jobs do not certify this new commit; both mandatory workflows
+must complete on this exact head.
+
+**Recommended unified authority contract for Agent 00 and Agent 11
+(PROPOSED, NOT AGREED OR ACTIVE):**
+
+- The new `ProposedHostingRealmGenesisV2::realm_id` is a separate
+  authoritative world ID. The source V1 world ID, immutable genesis,
+  signed configuration, membership history and verified snapshot remain
+  an authenticated source lineage; there is **no same-world-ID update**.
+- The canonical migration root, to be designed/approved separately,
+  must commit the *full signed* `SignedHostingMigrationProposalV2`
+  hash, initial *target-realm* `SignedRealmHostingPolicyV2` record hash,
+  V1 source anchor and verified checkpoint, mandatory authority
+  feature version, source and target voter universes, certified old/joint
+  quorum, cutover epoch/fence, and a durable unique accepted successor.
+  A source authority signature or one migration vote is insufficient.
+- Agent 11's current same-ID `PolicyCommitmentIntent` must **not** be
+  cast to this distinct-realm proposal. Until Agent 00 resolves this
+  schema conflict and Agent 07 verifies legacy-binary exclusion, no
+  `VerifiedCanonicalPolicyCommit` or active lease may be constructed
+  from these protocol records.
+- Policy updates require monotonic target-realm sequence/previous hash,
+  signed voter certificate, durable conflict detection and newer
+  epoch/fence. V1 ballots, leases, transfer acknowledgements, snapshots,
+  optional feature strings and signed sidecars must not satisfy any
+  V2 authority gate. No rollback to V1 policy enforcement is allowed.
+- `SignedHostingAuthorityActionV2::verify_for_head` checks a
+  verifier-supplied exact accepted context, but is **not** sufficient
+  for a lease, source quorum, single-use nonce consumption or physical
+  RAM verification. Only Agent 11's verified V2 session, real signed
+  certificate, durable accepted head and Agent 03's live launch/consent
+  admission lock can authorize a local candidate.
+
+**Mixed-version rule:** V1-only peers operate under historical V1
+rules in V1 worlds but are categorically ineligible for authority
+in the new V2 realm. Legacy gameplay/replication in the V2 realm is
+allowed *only* via an audited read-only gateway; otherwise reject
+connection. V2 peers with 0 MiB consent may remain eligible to play,
+vote or replicate where separately authorized, but never host.
+A new realm isolates its V2 authority; it does not remotely disable
+an already offline legacy binary from running an independent V1 copy.
+
+**Integration owners:** Agent 11 owns signed old/joint quorum verification,
+canonical migration acceptance and mandatory authenticated authority
+transport; Agent 01 plus the assigned storage owner own atomic source
+checkpoint, unique durable target root, epoch/fencing/recovery and
+every authority producer/consumer; Agent 03 owns local opt-in, JVM
+budget, revocation and launch lock; Agent 09 owns real Rust/desktop IPC;
+Agent 10 owns explicit CLI consent and live Minecraft acceptance;
+Agent 07 owns mixed-version, partition, rollback and integrated QA;
+Agent 00 decides the realm identity contract and merge order.
+
+**Status:** Protocol records remain inert; PR #92 remains draft,
+issue #84 remains open, and active voluntary-hosting migration is BLOCKED.

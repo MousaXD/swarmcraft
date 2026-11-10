@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    peer_id_from_public_key, Hash32, HostingPolicyError, MembershipRecordV1, PeerId, ProtocolError,
-    WorldConfigV1, WorldGenesisV1, WorldHostingPolicyV1, WorldId,
+    peer_id_from_public_key, Hash32, HostingPolicyError, MembershipRecordV1, PeerId, ProtocolError, WorldConfigV1,
+    WorldGenesisV1, WorldHostingPolicyV1, WorldId,
 };
 
 pub const HOSTING_REALM_FORMAT_VERSION_V2: u16 = 2;
@@ -155,9 +155,7 @@ impl SignedRealmHostingPolicyV2 {
             return Err(HostingRealmV2Error::UnsupportedVersion(self.format_version));
         }
         self.policy.validate()?;
-        if self.sequence == 0
-            || (self.sequence == 1) != self.previous_policy_hash.is_none()
-        {
+        if self.sequence == 0 || (self.sequence == 1) != self.previous_policy_hash.is_none() {
             return Err(HostingRealmV2Error::Invalid("invalid policy sequence or predecessor"));
         }
         require_identity(self.signer_peer_id, &self.signer_public_key)
@@ -357,9 +355,11 @@ impl SignedHostingMigrationVoteV2 {
         {
             return Err(HostingRealmV2Error::Invalid("migration vote does not bind the accepted source/proposal"));
         }
-        if !membership.members.iter().any(|m| {
-            m.peer_id == self.voter_peer_id && m.public_key == self.voter_public_key && !m.banned
-        }) {
+        if !membership
+            .members
+            .iter()
+            .any(|m| m.peer_id == self.voter_peer_id && m.public_key == self.voter_public_key && !m.banned)
+        {
             return Err(HostingRealmV2Error::Invalid("migration voter is absent or banned"));
         }
         if !verify_ed25519(&self.voter_public_key, &self.signing_bytes()?, &self.signature) {
