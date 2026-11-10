@@ -367,3 +367,123 @@ fn corrupt_accepted_epoch_cannot_be_treated_as_missing_before_recovery_control_w
     std::fs::remove_file(&epoch_path).unwrap();
     assert!(load_optional_epoch_record(&fixture.storage, fixture.world).unwrap().is_none());
 }
+
+#[test]
+fn corrupt_epoch_blocks_config_snapshot_and_transfer_preflight() {
+    let fixture = fixture();
+    let source = fixture._temp.path().join("epoch-corruption-snapshots");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("level.dat"), b"accepted-state").unwrap();
+    let mut first = fixture
+        .storage
+        .snapshot_directory(
+            &source,
+            SnapshotContext {
+                world: fixture.world,
+                snapshot_number: 1,
+                epoch: 0,
+                sequence: 1,
+                previous_snapshot_hash: None,
+                authority_peer_id: fixture.authority.peer_id(),
+                authority_public_key: fixture.authority.public_key(),
+            },
+        )
+        .unwrap();
+    fixture.authority.sign_snapshot(&mut first).unwrap();
+    fixture.storage.commit_snapshot(&first).unwrap();
+
+    let mut transfer = swarm_protocol::AuthorityTransferV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: fixture.world,
+        from_peer_id: fixture.authority.peer_id(),
+        to_peer_id: fixture.member.peer_id(),
+        base_snapshot_hash: first.manifest_hash().unwrap(),
+        next_epoch: 1,
+        next_fencing_token: 1,
+        phase: TransferPhase::Prepared,
+        signer_peer_id: fixture.authority.peer_id(),
+        signer_public_key: fixture.authority.public_key(),
+        signature: Vec::new(),
+    };
+    fixture.authority.sign_transfer(&mut transfer).unwrap();
+
+    std::fs::write(source.join("level.dat"), b"next-replicated-state").unwrap();
+    let mut second = fixture
+        .storage
+        .snapshot_directory(
+            &source,
+            SnapshotContext {
+                world: fixture.world,
+                snapshot_number: 2,
+                epoch: 0,
+                sequence: 2,
+                previous_snapshot_hash: Some(first.manifest_hash().unwrap()),
+                authority_peer_id: fixture.authority.peer_id(),
+                authority_public_key: fixture.authority.public_key(),
+            },
+        )
+        .unwrap();
+    fixture.authority.sign_snapshot(&mut second).unwrap();
+
+    let legitimate = config(&fixture, &fixture.authority);
+    assert!(authorize_world_config_current_authority(&fixture.storage, fixture.authority.peer_id(), &legitimate).is_ok());
+    assert!(authorize_manifest(&fixture.storage, fixture.authority.peer_id(), &second).is_ok());
+    assert!(validate_transfer(&fixture.storage, &transfer).is_ok());
+
+    let epoch_path = fixture.storage.world_dir(fixture.world).join("metadata/epoch.postcard");
+    let corrupt = b"corrupt accepted authority epoch";
+    std::fs::write(&epoch_path, corrupt).unwrap();
+
+    assert!(authorize_world_config_current_authority(&fixture.storage, fixture.authority.peer_id(), &legitimate).is_err());
+    assert!(authorize_manifest(&fixture.storage, fixture.authority.peer_id(), &second).is_err());
+    assert!(validate_transfer(&fixture.storage, &transfer).is_err());
+    assert_eq!(std::fs::read(&epoch_path).unwrap(), corrupt);
+    assert!(fixture.storage.load_transfer_record(fixture.world).is_err());
+}
+
+#[test]
+fn corrupt_previous_transfer_cannot_be_replaced_by_new_prepared_transfer() {
+    let fixture = fixture();
+    let source = fixture._temp.path().join("transfer-corruption-source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("level.dat"), b"transfer-canonical-base").unwrap();
+    let mut first = fixture
+        .storage
+        .snapshot_directory(
+            &source,
+            SnapshotContext {
+                world: fixture.world,
+                snapshot_number: 1,
+                epoch: 0,
+                sequence: 1,
+                previous_snapshot_hash: None,
+                authority_peer_id: fixture.authority.peer_id(),
+                authority_public_key: fixture.authority.public_key(),
+            },
+        )
+        .unwrap();
+    fixture.authority.sign_snapshot(&mut first).unwrap();
+    fixture.storage.commit_snapshot(&first).unwrap();
+
+    let mut transfer = swarm_protocol::AuthorityTransferV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: fixture.world,
+        from_peer_id: fixture.authority.peer_id(),
+        to_peer_id: fixture.member.peer_id(),
+        base_snapshot_hash: first.manifest_hash().unwrap(),
+        next_epoch: 1,
+        next_fencing_token: 1,
+        phase: TransferPhase::Prepared,
+        signer_peer_id: fixture.authority.peer_id(),
+        signer_public_key: fixture.authority.public_key(),
+        signature: Vec::new(),
+    };
+    fixture.authority.sign_transfer(&mut transfer).unwrap();
+    fixture.storage.save_transfer_record(&transfer).unwrap();
+
+    let transfer_path = fixture.storage.world_dir(fixture.world).join("metadata/transfer.postcard");
+    let corrupt = b"corrupt previously prepared authority transfer";
+    std::fs::write(&transfer_path, corrupt).unwrap();
+    assert!(validate_transfer(&fixture.storage, &transfer).is_err());
+    assert_eq!(std::fs::read(&transfer_path).unwrap(), corrupt);
+}
