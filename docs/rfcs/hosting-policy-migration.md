@@ -117,12 +117,12 @@ migration is durably committed, all authority admission gates pass and a
 fresh V2 fenced lease exists. The source archive remains immutable and
 user-visible, with no automatic rollback from V2 to V1.
 
-The existing consensus `validate_policy_commitment_intent` validates
-only a hypothetical V1 same-ID extension's local chain shape; do not
-interpret its success as authority authorization or V2 acceptance.
-`check_distinct_authority_realm` rejects same-ID targeting, but its
-success **also** does not verify source signatures, quorum, source
-snapshot, target policy or durable uniqueness.
+The historical consensus `validate_policy_commitment_intent` helper and
+`PolicyCommitmentIntent` struct are now **test-only** to prevent production
+callers from treating their positive V1 same-ID shape result as activation.
+`check_distinct_authority_realm` refuses same-ID or empty source/target
+identities, but its success **also** does not verify source signatures,
+quorum, source snapshot, target policy or durable uniqueness.
 `CanonicalPolicyView::Active` remains unconstructible by production callers.
 No live activation can be permitted until Agent 00 approves the root,
 Agent 02/11 agree certificate bytes, Agent 01/storage implement accepted
