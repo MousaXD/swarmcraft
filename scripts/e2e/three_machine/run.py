@@ -202,6 +202,9 @@ def verify(c, output, review_file=None):
         stage_times[stage] = observed
         stages[stage] = s["nodes"]
         for role, node in s["nodes"].items():
+            require(node.get("machine_fingerprint") ==
+                    pre["nodes"][role]["machine_fingerprint"],
+                    "capture_machine_changed_" + stage + "_" + role)
             require(node["snapshot_verify_passed"], "unsigned_or_conflicted_" + stage + "_" + role)
             if stage in ("alice_created", "bob_joined", "carol_joined"):
                 # Genuine first host can be solo until a signed multi-member
@@ -222,6 +225,15 @@ def verify(c, output, review_file=None):
                     "snapshot_missing_" + stage + "_" + role)
             require(node["world_fingerprint"] == stages["alice_created"]["alice"]["world_fingerprint"],
                     "world_divergence_" + stage + "_" + role)
+    # Distinct users at the checkpoint are insufficient if an earlier or
+    # later capture silently substitutes a different peer/identity.
+    expected_identities = {
+        role: stages["checkpoint"][role]["identity_fingerprint"] for role in ROLES
+    }
+    for stage, nodes in stages.items():
+        for role, node in nodes.items():
+            require(node.get("identity_fingerprint") == expected_identities[role],
+                    "participant_identity_changed_" + stage + "_" + role)
     require(stages["alice_created"]["alice"]["authorized_peers"] == 1,
             "fresh_signed_alice_world_not_solo")
     require(all(n["authorized_peers"] >= 2 for n in stages["bob_joined"].values()),
