@@ -4,3 +4,10 @@
 #navDiagnostics {
   display: flex;
 }
+
+/* The legacy player-experience controller moves this button into Tools.
+   Scope a higher-specificity rule to the expanded disclosure so the
+   imported wizard's hidden Diagnostics rule cannot win in packaged CSS. */
+#advancedNavigation[open] #navDiagnostics {
+  display: flex;
+}

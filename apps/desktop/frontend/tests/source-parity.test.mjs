@@ -112,6 +112,12 @@ test('candidate Diagnostics navigation is visible despite the legacy wizard rule
   ]);
   assert.match(legacyCss, /#navDiagnostics\s*\{\s*display:\s*none\s*;/);
   assert.match(overrideCss, /#navDiagnostics\s*\{\s*display:\s*flex\s*;/);
+  assert.match(overrideCss, /#advancedNavigation\[open\]\s+#navDiagnostics\s*\{\s*display:\s*flex\s*;/,
+    'Expanded Tools must override the legacy hidden Diagnostics rule with greater specificity');
+  assert.ok(nativeAcceptance.includes('identityNavDisplayVisible') &&
+    nativeAcceptance.includes('identityNavHasGeometry') &&
+    nativeAcceptance.includes('identityNavInsideViewport'),
+    'Installed native failures must distinguish hidden navigation from clipping without exposing private DOM text');
   const legacyIndex = entry.indexOf("import '../../src/runtime-wizard.css';");
   const overrideIndex = entry.indexOf("import './candidate-navigation.css';");
   assert.ok(legacyIndex >= 0 && overrideIndex > legacyIndex,

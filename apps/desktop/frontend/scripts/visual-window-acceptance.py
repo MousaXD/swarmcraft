@@ -29,6 +29,7 @@ SAFE_BOOL_KEYS = frozenset({
     'closed', 'stillSelected', 'worldStillListed',
     'identityOwned', 'identityVerified', 'identityNotEmpty', 'identityRefreshFinished',
     'identityNavigationVisible', 'identityNativeConfirmed',
+    'identityNavDisplayVisible', 'identityNavHasGeometry', 'identityNavInsideViewport',
     'identityToolsPresent', 'identityToolsOpen',
 })
 SAFE_INT_KEYS = frozenset({
@@ -189,6 +190,10 @@ def run(binary: Path, artifacts: Path):
           const nav = document.getElementById('navDiagnostics');
           const rect = nav?.getBoundingClientRect();
           return {
+            identityNavDisplayVisible: !!nav && getComputedStyle(nav).display !== 'none',
+            identityNavHasGeometry: !!rect && rect.width > 0 && rect.height > 0,
+            identityNavInsideViewport: !!rect && rect.left >= 0 && rect.top >= 0
+              && rect.right <= window.innerWidth + 2 && rect.bottom <= window.innerHeight + 2,
             identityNavigationVisible: !!nav && getComputedStyle(nav).display !== 'none'
               && !!rect && rect.width > 0 && rect.height > 0
               && rect.left >= 0 && rect.top >= 0
