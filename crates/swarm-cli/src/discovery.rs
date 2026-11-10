@@ -25,7 +25,7 @@ use swarm_protocol::{
     DiscoveryFreshnessChallengeV1, DiscoveryFreshnessVoteV1, DiscoveryMembershipProofV1, FriendPresenceV1,
     MembershipPolicyV1, PeerId, WorldAnnouncementV1, WorldId, WorldVisibilityV1, PROTOCOL_VERSION,
 };
-use swarm_storage::Storage;
+use swarm_storage::{Storage, StorageError};
 use tokio::time::{timeout, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
@@ -264,8 +264,16 @@ fn refresh_publications(
         let local_is_current = membership.members.iter().any(|member| {
             member.peer_id == identity.peer_id() && member.public_key == identity.public_key() && !member.banned
         });
-        let local_is_pending = storage.load_membership_promise(world).ok().is_some_and(|promise| {
-            promise.proposal.proposed.members.iter().any(|member| {
+        let pending_membership = match storage.load_membership_promise(world) {
+            Ok(promise) => Some(promise.proposal),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                warn!(world = %world, %error, "refusing discovery publication with unreadable membership promise");
+                continue;
+            }
+        };
+        let local_is_pending = pending_membership.as_ref().is_some_and(|proposal| {
+            proposal.proposed.members.iter().any(|member| {
                 member.peer_id == identity.peer_id() && member.public_key == identity.public_key() && !member.banned
             })
         });
@@ -490,7 +498,11 @@ fn build_discovery_membership_proof(storage: &Storage, world: WorldId) -> Result
         .first()
         .map(|certificate| certificate.proposal.previous.clone())
         .unwrap_or_else(|| current.clone());
-    let pending = storage.load_membership_promise(world).ok().map(|promise| promise.proposal);
+    let pending = match storage.load_membership_promise(world) {
+        Ok(promise) => Some(promise.proposal),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     let proof = DiscoveryMembershipProofV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
@@ -502,6 +514,23 @@ fn build_discovery_membership_proof(storage: &Storage, world: WorldId) -> Result
     };
     validate_discovery_membership_proof_shape(&proof).map_err(|error| anyhow!(error))?;
     Ok(proof)
+}
+
+/// A corrupt or unreadable durable ballot cannot certify a fresh discovery
+/// response. A genuinely missing promise has no higher-round constraint.
+fn canonical_recovery_promise_allows_freshness(
+    storage: &Storage,
+    world: WorldId,
+    authority_epoch: u64,
+    fencing_token: u64,
+) -> bool {
+    match storage.load_recovery_promise(world) {
+        Ok(promise) => {
+            (promise.ballot.target_epoch, promise.ballot.target_fencing_token) <= (authority_epoch, fencing_token)
+        }
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
 }
 
 fn local_state_matches_freshness_challenge(
@@ -518,10 +547,8 @@ fn local_state_matches_freshness_challenge(
     if membership.sequence != challenge.membership_sequence || membership.record_hash()? != challenge.membership_hash {
         return Ok(false);
     }
-    if storage.load_recovery_promise(world).ok().is_some_and(|promise| {
-        (promise.ballot.target_epoch, promise.ballot.target_fencing_token)
-            > (challenge.authority_epoch, challenge.fencing_token)
-    }) {
+    if !canonical_recovery_promise_allows_freshness(storage, world, challenge.authority_epoch, challenge.fencing_token)
+    {
         return Ok(false);
     }
     let epoch = match storage.load_epoch_record(world) {
@@ -554,7 +581,11 @@ fn local_state_matches_freshness_challenge(
     if head != challenge.canonical_head {
         return Ok(false);
     }
-    let pending = storage.load_membership_promise(world).ok().map(|promise| promise.proposal);
+    let pending = match storage.load_membership_promise(world) {
+        Ok(promise) => Some(promise.proposal),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Ok(false),
+    };
     let pending_hash = pending.as_ref().map(|proposal| proposal.proposal_hash()).transpose()?;
     if pending_hash != challenge.pending_membership_proposal_hash {
         return Ok(false);
@@ -1878,5 +1909,44 @@ mod tests {
                 signature: Vec::new(),
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod recovery_freshness_fail_closed_tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_promise_cannot_prove_discovery_freshness() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0xb1; 32]);
+        assert!(canonical_recovery_promise_allows_freshness(&storage, world, 1, 1));
+
+        let metadata = storage.world_dir(world).join("metadata");
+        fs::create_dir_all(&metadata).unwrap();
+        let path = metadata.join("recovery-promise.postcard");
+        let corrupt = b"unreadable higher-round durable promise";
+        fs::write(&path, corrupt).unwrap();
+
+        assert!(!canonical_recovery_promise_allows_freshness(&storage, world, 1, 1));
+        assert_eq!(fs::read(&path).unwrap(), corrupt);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_promise_symlink_cannot_prove_discovery_freshness() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0xb2; 32]);
+        let metadata = storage.world_dir(world).join("metadata");
+        fs::create_dir_all(&metadata).unwrap();
+        let path = metadata.join("recovery-promise.postcard");
+        symlink(temp.path().join("missing-durable-vote"), &path).unwrap();
+
+        assert!(!canonical_recovery_promise_allows_freshness(&storage, world, 1, 1));
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
     }
 }

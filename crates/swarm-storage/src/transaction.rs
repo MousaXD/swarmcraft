@@ -37,6 +37,31 @@ impl Storage {
     }
 }
 
+/// Check whether a signed control record is present without allowing a dangling
+/// symbolic link, directory, or filesystem error to masquerade as absence.
+pub(crate) fn canonical_file_exists(path: &Path) -> Result<bool, StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StorageError::SymlinkUnsupported(path.to_path_buf())),
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(StorageError::WorldMetadataMismatch),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io_error(path, source)),
+    }
+}
+
+/// Read a canonical on-disk record without treating a dangling symlink as
+/// missing state. The same rule applies to all signed control/promise files.
+pub(crate) fn read_canonical_file(path: &Path) -> Result<Vec<u8>, StorageError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
+    if metadata.file_type().is_symlink() {
+        return Err(StorageError::SymlinkUnsupported(path.to_path_buf()));
+    }
+    if !metadata.is_file() {
+        return Err(StorageError::WorldMetadataMismatch);
+    }
+    fs::read(path).map_err(|source| io_error(path, source))
+}
+
 pub(crate) fn durable_atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
     let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
     fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
