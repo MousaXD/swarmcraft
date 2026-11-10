@@ -58,3 +58,11 @@ Diagnostics action. The source-parity test checks this ordering, and the
 installed WebKitGTK acceptance verifies the real navigation is visible and
 clickable before invoking Rust-backed `node_identity`. A successful Vite
 build or the earlier legacy GUI smoke does not certify this native interaction.
+
+
+The Diagnostics acceptance also requires `data-native-verified-refresh-count`
+to increase after its native click. That count changes only when the real
+`node_identity` call succeeds with a nonempty current-generation result;
+a pre-existing identity from first boot, a failed native call, a stale reply,
+or an inert button cannot satisfy the installed-GUI gate. No identity bytes
+are written to evidence artifacts.
