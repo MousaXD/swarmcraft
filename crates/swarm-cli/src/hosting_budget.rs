@@ -271,22 +271,45 @@ pub fn revalidate_admission(paths: &DataPaths, world: WorldId, admission: &Hosti
     check_budget(admission.heap_mib(), memory_snapshot()?)
 }
 
-/// Serialize the final admission check with explicit local opt-in/opt-out
-/// so a revocation cannot slip between validation and Command::spawn.
-/// This guard is held for the brief synchronous spawn only; subsequent
-/// withdrawals are observed by runtime_withdrawal and use the save barrier.
+/// Serialize short, synchronous authority-changing operations with explicit
+/// local opt-in/opt-out. This closes the admission-to-epoch/Java-spawn race:
+/// a withdrawn or revised consent cannot be accepted just because it passed
+/// an earlier capacity check. Never hold this lock across async waits.
+fn with_consent_guarded_operation<T>(
+    paths: &DataPaths,
+    world: WorldId,
+    admission: &HostingAdmission,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let lock = open_lock(&control_path(paths).join("hosting-consent-write.lock"))?;
+    lock.lock_exclusive().context("cannot serialize final hosting admission with consent updates")?;
+    revalidate_admission(paths, world, admission)?;
+    let result = operation();
+    drop(lock);
+    result
+}
+
+/// Revalidate consent/capacity while atomically preparing the local authority
+/// epoch. Revocation either wins before this operation (no epoch mutation) or
+/// follows it (in which case the separately guarded spawn must still deny).
+pub fn with_consent_guarded_epoch_transition<T>(
+    paths: &DataPaths,
+    world: WorldId,
+    admission: &HostingAdmission,
+    transition: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    with_consent_guarded_operation(paths, world, admission, transition)
+}
+
+/// Serialize the final consent check with the synchronous Java spawn. Once
+/// launched, withdrawals use the Fabric save/checkpoint barrier, not a kill.
 pub fn with_consent_guarded_spawn<T>(
     paths: &DataPaths,
     world: WorldId,
     admission: &HostingAdmission,
     spawn: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    let lock = open_lock(&control_path(paths).join("hosting-consent-write.lock"))?;
-    lock.lock_exclusive().context("cannot serialize final hosting admission with consent updates")?;
-    revalidate_admission(paths, world, admission)?;
-    let result = spawn();
-    drop(lock);
-    result
+    with_consent_guarded_operation(paths, world, admission, spawn)
 }
 
 /// Called while serving. Any revision change, revocation or inability to
@@ -553,6 +576,33 @@ mod tests {
         drop(admission);
         assert!(admit(&paths, world).is_err());
     }
+    #[test]
+    fn revoked_then_reauthorized_consent_cannot_reuse_stale_epoch_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let world = WorldId([38; 32]);
+        let first = set_contribution(&paths, world, 512).unwrap();
+        let lock = open_lock(&control_path(&paths).join("hosting-active-memory.lock")).unwrap();
+        lock.try_lock_exclusive().unwrap();
+        let admission = HostingAdmission { _exclusive_memory_lock: lock, consent: first.clone() };
+
+        let revoked = set_contribution(&paths, world, 0).unwrap();
+        let reauthorized = set_contribution(&paths, world, 512).unwrap();
+        assert!(first.revision < revoked.revision);
+        assert!(revoked.revision < reauthorized.revision);
+        assert!(reauthorized.enabled);
+
+        // A previously admitted authority may not mutate signed epoch state,
+        // even if a new user action later restores the exact same heap value.
+        let transition_ran = std::cell::Cell::new(false);
+        let result = with_consent_guarded_epoch_transition(&paths, world, &admission, || {
+            transition_ran.set(true);
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(!transition_ran.get());
+    }
+
     #[test]
     fn concurrent_host_admission_is_serialized() {
         // Exercises a live file lock without requiring Java or a synthetic memory reading.
