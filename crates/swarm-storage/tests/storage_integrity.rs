@@ -396,3 +396,35 @@ fn two_processes_cannot_accept_conflicting_equal_round_recovery_promises() {
     assert_eq!(results.iter().filter(|result| result.as_str() == "accepted").count(), 1);
     assert_eq!(results.iter().filter(|result| result.as_str() == "rejected").count(), 1);
 }
+
+#[test]
+fn corrupt_recovery_promise_cleanup_reports_error_without_discarding_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::open(temp.path().join("store")).unwrap();
+    let world = WorldId([0xa2; 32]);
+    let metadata = storage.world_dir(world).join("metadata");
+    fs::create_dir_all(&metadata).unwrap();
+    let promise_path = metadata.join("recovery-promise.postcard");
+    let corrupt = b"invalid durable recovery promise";
+    fs::write(&promise_path, corrupt).unwrap();
+
+    assert!(storage.clear_recovery_promise_after_epoch_advance(world, 3).is_err());
+    assert_eq!(fs::read(&promise_path).unwrap(), corrupt);
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_recovery_promise_cleanup_fails_closed() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::open(temp.path().join("store")).unwrap();
+    let world = WorldId([0xa3; 32]);
+    let metadata = storage.world_dir(world).join("metadata");
+    fs::create_dir_all(&metadata).unwrap();
+    let promise_path = metadata.join("recovery-promise.postcard");
+    symlink(temp.path().join("nonexistent-promise"), &promise_path).unwrap();
+
+    assert!(storage.clear_recovery_promise_after_epoch_advance(world, 3).is_err());
+    assert!(fs::symlink_metadata(&promise_path).unwrap().file_type().is_symlink());
+}
