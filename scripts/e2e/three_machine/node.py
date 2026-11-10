@@ -519,7 +519,7 @@ def approved_disposable_crash_profile(root, world):
                     meta.st_uid != os.geteuid() or
                     stat.S_IMODE(meta.st_mode) != 0o600 or meta.st_size > 128):
                 return False
-            expected = ("SWARMCRAFT_E2E_CRASH\\n" + world.lower() + "\\n").encode("ascii")
+            expected = ("SWARMCRAFT_E2E_CRASH\n" + world.lower() + "\n").encode("ascii")
             return os.read(marker, 129) == expected
     except (OSError, ValueError, TypeError):
         return False
