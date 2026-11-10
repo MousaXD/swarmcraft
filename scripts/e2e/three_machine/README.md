@@ -154,6 +154,31 @@ python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$O
 # replication daemon and genuine Minecraft server JVM PIDs. An isolated
 # application outage requires all three components to die; Java-only crash
 # is explicitly rejected and cannot masquerade as a genuine authority loss.
+#
+# BEFORE invoking crash, the Alice operator must explicitly approve this exact
+# world ON ALICE'S machine, within the dedicated swarmcraft-e2e data profile.
+# Run as the profile owner, never with sudo. An existing marker is NOT overwritten.
+# The configured data directory must end exactly in /swarmcraft-e2e.
+# The following example uses the private DATA_DIR and WORLD_ID on Alice:
+#
+# export DATA_DIR=/home/e2e/.local/share/swarmcraft-e2e
+# python3 - "$DATA_DIR" "$WORLD_ID" <<'PY'
+# import os, re, sys
+# from pathlib import Path
+# root = Path(sys.argv[1])
+# world = sys.argv[2].lower()
+# assert root.name == "swarmcraft-e2e" and not root.is_symlink()
+# assert re.fullmatch(r"[0-9a-f]{64}", world)
+# assert root.is_dir() and root.stat().st_uid == os.geteuid()
+# marker = root / ".swarmcraft-e2e-crash-approval"
+# fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+# with os.fdopen(fd, "w", encoding="ascii") as stream:
+#     stream.write("SWARMCRAFT_E2E_CRASH\\n" + world + "\\n")
+# PY
+#
+# Review the approved world ID, expected PIDs and surviving-quorum evidence
+# before continuing. Without this operator-created 0600 approval, SIGKILL is
+# refused before opening any target PID. Remove the marker after the test.
 python3 scripts/e2e/three_machine/run.py crash --config "$CONFIG" --output "$OUT" \
   --world "$WORLD_ID" --desktop-pid "$ALICE_DESKTOP_PID" \
   --daemon-pid "$ALICE_DAEMON_PID" --server-pid "$ALICE_SERVER_PID"
