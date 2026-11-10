@@ -1,0 +1,6 @@
+/* Candidate-only navigation: the legacy runtime wizard hides Diagnostics.
+   Svelte owns Refresh identity, so this view must remain reachable through
+   the real sidebar. Keep shipping ../src styles and behavior unchanged. */
+#navDiagnostics {
+  display: flex;
+}
