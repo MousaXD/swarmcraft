@@ -516,6 +516,23 @@ fn build_discovery_membership_proof(storage: &Storage, world: WorldId) -> Result
     Ok(proof)
 }
 
+/// A corrupt or unreadable durable ballot cannot certify a fresh discovery
+/// response. A genuinely missing promise has no higher-round constraint.
+fn canonical_recovery_promise_allows_freshness(
+    storage: &Storage,
+    world: WorldId,
+    authority_epoch: u64,
+    fencing_token: u64,
+) -> bool {
+    match storage.load_recovery_promise(world) {
+        Ok(promise) => {
+            (promise.ballot.target_epoch, promise.ballot.target_fencing_token) <= (authority_epoch, fencing_token)
+        }
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
+}
+
 fn local_state_matches_freshness_challenge(
     storage: &Storage,
     identity: &PeerIdentity,
@@ -530,16 +547,13 @@ fn local_state_matches_freshness_challenge(
     if membership.sequence != challenge.membership_sequence || membership.record_hash()? != challenge.membership_hash {
         return Ok(false);
     }
-    match storage.load_recovery_promise(world) {
-        Ok(promise)
-            if (promise.ballot.target_epoch, promise.ballot.target_fencing_token)
-                > (challenge.authority_epoch, challenge.fencing_token) =>
-        {
-            return Ok(false);
-        }
-        Ok(_) => {}
-        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Ok(false),
+    if !canonical_recovery_promise_allows_freshness(
+        storage,
+        world,
+        challenge.authority_epoch,
+        challenge.fencing_token,
+    ) {
+        return Ok(false);
     }
     let epoch = match storage.load_epoch_record(world) {
         Ok(value) => value,
@@ -1899,5 +1913,44 @@ mod tests {
                 signature: Vec::new(),
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod recovery_freshness_fail_closed_tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_promise_cannot_prove_discovery_freshness() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0xb1; 32]);
+        assert!(canonical_recovery_promise_allows_freshness(&storage, world, 1, 1));
+
+        let metadata = storage.world_dir(world).join("metadata");
+        fs::create_dir_all(&metadata).unwrap();
+        let path = metadata.join("recovery-promise.postcard");
+        let corrupt = b"unreadable higher-round durable promise";
+        fs::write(&path, corrupt).unwrap();
+
+        assert!(!canonical_recovery_promise_allows_freshness(&storage, world, 1, 1));
+        assert_eq!(fs::read(&path).unwrap(), corrupt);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_promise_symlink_cannot_prove_discovery_freshness() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0xb2; 32]);
+        let metadata = storage.world_dir(world).join("metadata");
+        fs::create_dir_all(&metadata).unwrap();
+        let path = metadata.join("recovery-promise.postcard");
+        symlink(temp.path().join("missing-durable-vote"), &path).unwrap();
+
+        assert!(!canonical_recovery_promise_allows_freshness(&storage, world, 1, 1));
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
     }
 }
