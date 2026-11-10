@@ -35,6 +35,53 @@ The final response must not leak private data-root paths, tokens, secrets, or de
 6. Live authority revocation is a durable consent change followed by an independent **safe save/barrier + fenced checkpoint or handoff**. Never kill a current authority JVM directly from a settings toggle. Do not report a completed stop until the backend proves it.
 7. Agent 04 must keep feature controls hidden/disabled or explain unsupported state until an integrated exact-head packaged candidate proves the registered API. The presence of this PR does not authorize the UI to show an enabled hosting feature.
 
+## Exact Agent 04 IPC DTO proposal (approval-gated, NOT IMPLEMENTED)
+
+The following is the **proposed post-integration** wire contract. It is not an exported or registered command on PR #100. Both commands must be real Rust/Tauri calls, with Tauri `#[tauri::command(rename_all = "camelCase")]` mapping JavaScript's `heapMib` to the Rust `heap_mib` argument. Rust `serde` output fields stay **snake_case** unless both teams explicitly choose a different serialization convention.
+
+```ts
+// Add to Agent 04's NativeCommandTable ONLY when the Rust registry actually
+// compiles and registers these commands on the approved combined candidate.
+type HostingContributionReadiness = {
+  world_id: string; // canonical scworld:<64 lowercase hex>
+  consented: boolean;
+  selected_heap_mib: number;
+  physical_mib: number | null;
+  available_mib: number | null;
+  estimated_native_overhead_mib: number;
+  client_headroom_mib: number;
+  os_headroom_mib: number;
+  daemon_headroom_mib: number;
+  may_host_now: boolean; // LOCAL capacity check ONLY, not authority eligibility
+  reason: string;
+  hard_process_memory_cap_guaranteed: boolean; // currently false
+  consent_revision: string | null; // coherent snapshot required; null if absent
+};
+type HostingContributionConsentResult = {
+  world_id: string;
+  enabled: boolean;
+  heap_mib: number;
+  revision: string; // persisted Rust u64 converted to decimal string
+};
+// Interface keys and args; commands must be present in generate_handler!.
+hosting_contribution_get: {
+  args: { world: string };
+  result: HostingContributionReadiness;
+};
+hosting_contribution_set: {
+  args: { world: string; heapMib: number };
+  result: HostingContributionConsentResult;
+};
+```
+
+**Revision precision matters:** Agent 03's `set_contribution` sets `revision` from a nanosecond-scale `u64` value. Serializing that `u64` directly to an ordinary JavaScript `number` loses precision above `Number.MAX_SAFE_INTEGER`. The Desktop adapter must convert it to a decimal string before crossing native IPC; the frontend should compare revisions as strings (or parse with `BigInt` only where necessary). The Rust wire DTO deliberately omits `peer_id`, `DataPaths`, signing material and private filesystem paths. Return stable public errors without echoing private paths in backend context chains.
+
+**Consistency contract:** Agent 03's current `ContributionReadiness` lacks a revision while `load_consent` is a separate read. The combined get endpoint must obtain `consent_revision` and the readiness fields from a single coherent consent revision, or retry/reject on an intervening concurrent write. Obtain a backend-supported coherent snapshot before implementing the field; never fabricate the value or return a mixed-revision result. The set response acknowledges persisted consent, **not** completion of a live JVM's asynchronous save, handoff, fencing or shutdown.
+
+**Native adapter on approved base:** Use `swarm_core::DataPaths::discover()` so Desktop resolves `SWARMCRAFT_DATA_DIR` and normal OS-local data directory exactly as its packaged CLI sidecars do; use `swarm_storage::Storage::open(paths.root.clone())?.load_world(world)?` before reads **and** mutations. Bind `validated_get/set` to `swarm_cli::hosting_budget::contribution_readiness` and `set_contribution`, without changing their admission or consent logic. File/memory operations should run off the UI thread using a safe Tauri async/blocking boundary; never return optimistic success from the webview. Reject a world missing from local storage, preserve default-deny on missing/corrupt/mismatched consent, and avoid claiming that world membership or a local readiness sample alone confers signed hosting authority. Agent 00 must approve the Desktop `Cargo.toml` dependency and production registration changes first.
+
+**Agent 04 tests:** Add the two commands to the typed command table only after their real Rust registration; run Rust-registry parity, invalid-world/heap native IPC negatives, absent-consent player-only, explicit opt-in/persistence/restart, 0 MiB withdrawal, memory rejection, backend failures, and real installed-GUI invocation. Do not introduce a simulated hosting backend or JavaScript-only persistence. User-visible active-host withdrawal must say checkpoint/handoff may still be pending, rather than claiming an immediate safe stop.
+
 ## Validation matrix
 
 | Scenario | Agent 09 staged contract | Required integrated certification |
