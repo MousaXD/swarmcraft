@@ -13,8 +13,11 @@ use thiserror::Error;
 /// IN-PLACE ACTIVATION IS NO-GO: offline V1 binaries cannot be forced to
 /// exclude conflicting old authority. This is NOT the V2 target-realm record.
 /// It is NOT a WorldConfigV1 or a substitute for a durable accepted record.
+/// It is deliberately test-only: production code must not be offered a
+/// positive-result validator for unsafe same-identity authority migration.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PolicyCommitmentIntent {
+struct PolicyCommitmentIntent {
     pub world_id: WorldId,
     pub config_hash: Hash32,
     pub membership_hash: Hash32,
@@ -29,6 +32,8 @@ pub struct PolicyCommitmentIntent {
 pub enum MigrationGuardError {
     #[error("same-identity V1 to V2 authority migration is forbidden")]
     SameIdentityMigration,
+    #[error("source or target realm identity is empty")]
+    InvalidRealmIdentity,
     #[error("a canonical V1 policy sidecar cannot activate hosting")]
     NotCanonicallyActivated,
     #[error("the policy commitment is not bound to the accepted canonical head")]
@@ -67,16 +72,20 @@ pub fn check_distinct_authority_realm(
     source_world_id: WorldId,
     target_realm_id: WorldId,
 ) -> Result<(), MigrationGuardError> {
+    if source_world_id == WorldId([0; 32]) || target_realm_id == WorldId([0; 32]) {
+        return Err(MigrationGuardError::InvalidRealmIdentity);
+    }
     if source_world_id == target_realm_id {
         return Err(MigrationGuardError::SameIdentityMigration);
     }
     Ok(())
 }
 
-/// Check a prospective bridge using already accepted V1 config and membership
-/// hashes and generation. Does NOT verify signatures, establish a quorum,
-/// atomically persist the bridge, or make it active.
-pub fn validate_policy_commitment_intent(
+/// Historical V1 same-identity bridge shape checks, retained for negative
+/// regression coverage only. Not compiled into production authority code.
+/// It does not verify signatures or establish acceptance.
+#[cfg(test)]
+fn validate_policy_commitment_intent(
     accepted_world: WorldId,
     accepted_config_hash: Hash32,
     accepted_membership_hash: Hash32,
@@ -276,6 +285,14 @@ mod tests {
             Err(MigrationGuardError::SameIdentityMigration)
         );
         assert_eq!(check_distinct_authority_realm(source, WorldId([2; 32])), Ok(()));
+        assert_eq!(
+            check_distinct_authority_realm(source, WorldId([0; 32])),
+            Err(MigrationGuardError::InvalidRealmIdentity)
+        );
+        assert_eq!(
+            check_distinct_authority_realm(WorldId([0; 32]), WorldId([2; 32])),
+            Err(MigrationGuardError::InvalidRealmIdentity)
+        );
     }
 
     #[test]
