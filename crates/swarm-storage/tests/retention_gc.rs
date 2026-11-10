@@ -231,6 +231,12 @@ fn dangling_canonical_retention_roots_cannot_prune_pinned_snapshots_or_blobs() {
         fs::create_dir_all(&metadata).unwrap();
         let root_path = metadata.join(root_name);
         symlink(temp.path().join("absent-root-target"), &root_path).unwrap();
+        let orphan = storage.put_blob(world(), b"unreferenced-orphan").unwrap();
+        assert!(
+            storage.garbage_collect_blobs(world()).is_err(),
+            "direct blob GC ignored dangling canonical root: {root_name}"
+        );
+        assert!(blob_path(&storage, &orphan).exists());
 
         assert!(
             storage.apply_retention(
@@ -260,6 +266,9 @@ fn non_file_canonical_retention_root_blocks_destructive_pruning() {
 
     let unexpected_directory = storage.world_dir(world()).join("metadata/transfer.postcard");
     fs::create_dir_all(&unexpected_directory).unwrap();
+    let orphan = storage.put_blob(world(), b"not-safe-to-prune").unwrap();
+    assert!(storage.garbage_collect_blobs(world()).is_err());
+    assert!(blob_path(&storage, &orphan).exists());
 
     let result = storage.apply_retention(
         world(),
