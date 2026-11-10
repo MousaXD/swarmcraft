@@ -505,33 +505,49 @@ def crash(a):
         fail("three_distinct_crash_targets_required")
     binary = Path(a.binary).resolve(strict=True)
     cli = Path(a.cli).resolve(strict=True)
-    if any(not isolated_process(pid, kind, root, a.world, binary, cli) for kind, pid in targets):
-        fail("crash_targets_not_isolated_test_owned_processes")
-    # Freeze all three before killing any to prevent Tauri or Rust from
-    # repairing a deliberately crashed child during partial shutdown.
-    frozen = []
-    try:
-        for _, pid in targets:
-            os.kill(pid, signal.SIGSTOP)
-            frozen.append(pid)
-        for _, pid in targets:
-            os.kill(pid, signal.SIGKILL)
-    except OSError:
-        for pid in frozen:
-            try:
-                os.kill(pid, signal.SIGCONT)
-            except OSError:
-                pass
-        fail("crash_injection_partial_failure")
-    for _ in range(40):
-        if all(process_exited(pid) for pid in pids):
-            return {
-                "signal": "SIGKILL", "process_gone": True, "role": "alice",
-                "crashed_components": ["desktop", "daemon", "server"],
-                "crash_scope": "isolated_application_processes_not_machine_power",
-            }
-        time.sleep(0.25)
-    fail("crash_processes_still_alive")
+    # Hold kernel process references *before* validating ownership. A numeric
+    # PID can be reused between the /proc check and os.kill(); a pidfd pins the
+    # target process identity, so an unrelated replacement cannot be signaled.
+    # Never fall back to unsafe numeric-PID signaling on older Linux kernels.
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        fail("safe_pidfd_crash_signaling_unavailable")
+    with ExitStack() as opened:
+        guarded = []
+        try:
+            for kind, pid in targets:
+                fd = os.pidfd_open(pid, 0)
+                opened.callback(os.close, fd)
+                guarded.append((kind, pid, fd))
+        except OSError:
+            fail("crash_target_pidfd_unavailable")
+        if any(not isolated_process(pid, kind, root, a.world, binary, cli)
+               for kind, pid, _ in guarded):
+            fail("crash_targets_not_isolated_test_owned_processes")
+        # Freeze all three before killing any to prevent Tauri or Rust from
+        # repairing a deliberately crashed child during partial shutdown.
+        frozen = []
+        try:
+            for _, _, fd in guarded:
+                signal.pidfd_send_signal(fd, signal.SIGSTOP)
+                frozen.append(fd)
+            for _, _, fd in guarded:
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+        except OSError:
+            for fd in frozen:
+                try:
+                    signal.pidfd_send_signal(fd, signal.SIGCONT)
+                except OSError:
+                    pass
+            fail("crash_injection_partial_failure")
+        for _ in range(40):
+            if all(process_exited(pid) for pid in pids):
+                return {
+                    "signal": "SIGKILL", "process_gone": True, "role": "alice",
+                    "crashed_components": ["desktop", "daemon", "server"],
+                    "crash_scope": "isolated_application_processes_not_machine_power",
+                }
+            time.sleep(0.25)
+        fail("crash_processes_still_alive")
 
 
 def main():
