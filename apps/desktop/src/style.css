@@ -123,7 +123,7 @@ p { line-height: 1.45; }
 @keyframes loading-pulse { 0%, 100% { opacity: .45; } 50% { opacity: .85; } }
 @media (prefers-reduced-motion: reduce) { .loading-list span { animation: none; opacity: .7; } }
 
-.world-detail { min-width: 0; min-height: 0; overflow: auto; background: var(--surface); }
+.world-detail { min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden; background: var(--surface); }
 .selection-empty, .empty-state { min-height: 100%; display: grid; place-content: center; justify-items: start; gap: var(--s2); padding: var(--s5); }
 .selection-empty p, .empty-state p { max-width: 44ch; color: var(--muted); font-size: 12px; }
 .empty-mark { width: 34px; height: 34px; display: grid; place-items: center; margin-bottom: var(--s1); border: 1px solid var(--border); border-radius: var(--r-md); color: var(--muted); background: var(--surface-2); }
