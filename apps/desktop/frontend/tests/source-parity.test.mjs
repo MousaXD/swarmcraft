@@ -56,7 +56,13 @@ test('typed frontend IPC table exactly matches every Rust Tauri-registered comma
   const table = bridge.match(/export interface NativeCommandTable \{([\s\S]*?)\n\}/);
   assert.ok(table, 'Native command table must be present');
   const typed = [...table[1].matchAll(/^\s+([a-z_]+): \{ args:/gm)].map(x => x[1]);
-  assert.equal(commands.length, 61, 'A Rust registry addition requires deliberate typed contract review');
+  assert.equal(commands.length, 63, 'Every Rust registry addition requires deliberate typed contract review');
+  assert.ok(commands.includes('hosting_contribution_get'), 'Rust must register a real hosting status command');
+  assert.ok(commands.includes('hosting_contribution_set'), 'Rust must register an explicit hosting consent mutation command');
+  assert.match(bridge, /hosting_contribution_get:\s*\{\s*args:\s*\{\s*world:\s*string\s*\}/,
+    'Typed host status must accept the Rust world identifier');
+  assert.match(bridge, /hosting_contribution_set:\s*\{\s*args:\s*\{\s*world:\s*string;\s*heapMib:\s*number\s*\}/,
+    'Typed host consent must preserve the actual Rust camelCase heapMib argument');
   assert.deepEqual(new Set(typed), new Set(commands));
   assert.equal(new Set(typed).size, typed.length, 'No duplicate command definitions');
 });
