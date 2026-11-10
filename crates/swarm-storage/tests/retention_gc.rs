@@ -239,10 +239,9 @@ fn dangling_canonical_retention_roots_cannot_prune_pinned_snapshots_or_blobs() {
         assert!(blob_path(&storage, &orphan).exists());
 
         assert!(
-            storage.apply_retention(
-                world(),
-                &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() }
-            ).is_err(),
+            storage
+                .apply_retention(world(), &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() })
+                .is_err(),
             "dangling canonical retention root was treated as absent: {root_name}"
         );
         assert!(fs::symlink_metadata(&root_path).unwrap().file_type().is_symlink());
@@ -270,10 +269,8 @@ fn non_file_canonical_retention_root_blocks_destructive_pruning() {
     assert!(storage.garbage_collect_blobs(world()).is_err());
     assert!(blob_path(&storage, &orphan).exists());
 
-    let result = storage.apply_retention(
-        world(),
-        &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() },
-    );
+    let result =
+        storage.apply_retention(world(), &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() });
     assert!(result.is_err(), "canonical retention directory was silently ignored");
     assert!(storage.load_snapshot(world(), 1).is_ok());
     assert!(blob_path(&storage, &old_blob).exists());
