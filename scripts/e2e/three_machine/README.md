@@ -13,6 +13,9 @@ clients on independent networks. This harness checks three **independently
 installed Debian packages**, distinct remote machine identities, distinct
 observed WAN egress, live signed backend state, verified canonical snapshots,
 accepted recovery epoch/fencing, and a guarded authority process crash.
+Every subsequent stage is bound to the **same machine fingerprint recorded
+in preflight** and the **same authenticated peer identity** observed in the
+accepted checkpoint; switching hosts or players between stages fails closed.
 
 Prerequisites: #82/#83 packaged startup acceptance, #84 actual enforced
 hosting consent (Bob opt-in; Carol 0 GB), and #87 genuine Tauri/Svelte desktop.
