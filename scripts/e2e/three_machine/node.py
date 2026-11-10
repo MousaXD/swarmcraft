@@ -371,6 +371,11 @@ def java_runtime_version(pid, root, world, binary, cli):
 def capture(a):
     if not re.fullmatch("[a-fA-F0-9]{64}", a.world):
         fail("world_id_invalid")
+    # Every phase must originate on the same machine that passed preflight.
+    # SSH host-key trust alone cannot detect a changed target or copied data.
+    machine_id = Path("/etc/machine-id").read_text(encoding="utf-8").strip()
+    if not machine_id:
+        fail("machine_id_missing")
     root = str(Path(a.data_dir).resolve(strict=True))
     cli = str(Path(a.cli).resolve(strict=True))
     cmd = [cli, "--data-dir", root]
@@ -399,6 +404,7 @@ def capture(a):
     successor = canonical_peer_id(r.get("successor_peer_id"))
     snapshot = m.get("snapshot_hash")
     return {
+        "machine_fingerprint": fp(a.salt, machine_id),
         "world_fingerprint": fp(a.salt, a.world),
         "identity_fingerprint": fp(a.salt, peer),
         "authority_fingerprint": fp(a.salt, authority),
