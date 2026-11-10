@@ -546,6 +546,16 @@ fn load_optional_recovery_promise(storage: &Storage, world: WorldId) -> Result<O
     }
 }
 
+/// A corrupt accepted epoch is never a bootstrap epoch. Recovery and ordinary
+/// epoch handlers must check this before writing ancillary control records.
+fn load_optional_epoch_record(storage: &Storage, world: WorldId) -> Result<Option<EpochRecordV1>> {
+    match storage.load_epoch_record(world) {
+        Ok(epoch) => Ok(Some(epoch)),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn ensure_active_recovery_promise(storage: &Storage, ballot: &RecoveryBallotV1) -> Result<()> {
     let durable = storage
         .load_recovery_promise(ballot.world_id)
@@ -1977,7 +1987,7 @@ fn handle_request(
             ensure_no_membership_prepare(storage, record.world_id)?;
             validate_recovery_epoch(storage, application_peer, &record, &certificate)?;
             ensure_local_recovery_promise_allows_certificate(storage, &certificate.ballot)?;
-            if let Ok(current) = storage.load_epoch_record(record.world_id) {
+            if let Some(current) = load_optional_epoch_record(storage, record.world_id)? {
                 if record == current {
                     storage.save_recovery_certificate(&certificate)?;
                     storage.clear_sleep_record(record.world_id)?;
@@ -2017,7 +2027,7 @@ fn handle_request(
                 return Err(anyhow!("recovery epoch requires a durable quorum certificate"));
             }
             authorize_epoch(storage, application_peer, &record)?;
-            if let Ok(current) = storage.load_epoch_record(record.world_id) {
+            if let Some(current) = load_optional_epoch_record(storage, record.world_id)? {
                 if record == current {
                     node.respond(
                         channel,
