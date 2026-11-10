@@ -443,6 +443,10 @@ test('installed Svelte leave-cancel exercises the real membership disclosure bef
     source('../scripts/visual-window-acceptance.py'),
   ]);
   assert.match(view, /<details class="danger-zone">[\s\S]*?<button id="leaveWorld"/);
+  assert.ok(nativeAcceptance.includes("summary.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' })"),
+    'native GUI must scroll the real offscreen membership control into view before clicking it');
+  assert.ok(nativeAcceptance.includes("assert summary_on_screen['leaveSummaryOnScreen']"),
+    'native GUI must reject clipped or unreachable membership controls');
   const open = nativeAcceptance.indexOf('app.click("#selectionContent details.danger-zone > summary")');
   const leave = nativeAcceptance.indexOf('app.click("#leaveWorld")');
   assert.ok(open >= 0 && leave > open, 'real native WebDriver must expand Membership before clicking Leave');

@@ -30,7 +30,7 @@ SAFE_BOOL_KEYS = frozenset({
     'identityOwned', 'identityVerified', 'identityNotEmpty', 'identityRefreshFinished',
     'identityNavigationVisible', 'identityNativeConfirmed',
     'identityNavDisplayVisible', 'identityNavHasGeometry', 'identityNavInsideViewport',
-    'leaveSelectionVisible', 'leaveDisclosureOpen', 'leaveButtonVisible',
+    'leaveSelectionVisible', 'leaveDisclosureOpen', 'leaveButtonVisible', 'leaveSummaryOnScreen',
     'identityToolsPresent', 'identityToolsOpen',
 })
 SAFE_INT_KEYS = frozenset({
@@ -401,6 +401,23 @@ def run(binary: Path, artifacts: Path):
         """)
         record_ui(disclosure)
         if not disclosure['leaveDisclosureOpen']:
+            # The danger-zone is below the initial 980x760 right-pane viewport.
+            # Scroll its real summary into view before the native WebDriver
+            # click; a hidden/programmatic click would mask a broken GUI.
+            summary_on_screen = app.execute("""
+              const summary = document.querySelector('#selectionContent details.danger-zone > summary');
+              if (summary) summary.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
+              const rect = summary?.getBoundingClientRect();
+              return {
+                leaveSummaryOnScreen: !!rect && rect.width > 0 && rect.height > 0
+                  && rect.left >= 0 && rect.top >= 0
+                  && rect.right <= window.innerWidth + 2 && rect.bottom <= window.innerHeight + 2,
+              };
+            """)
+            record_ui(summary_on_screen)
+            assert summary_on_screen['leaveSummaryOnScreen'], (
+                "Membership and recovery disclosure is not reachable after scrolling"
+            )
             app.click("#selectionContent details.danger-zone > summary")
         expanded = app.execute("""
           const section = document.querySelector('#selectionContent details.danger-zone');
