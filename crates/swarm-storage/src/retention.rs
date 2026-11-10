@@ -9,7 +9,7 @@ use crate::{Storage, StorageError};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{self, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
@@ -403,6 +403,20 @@ impl Storage {
     }
 }
 
+/// Canonical retention records are destructive-operation guards. A dangling
+/// symlink, directory, or unreadable entry must never look like a missing root.
+fn canonical_retention_root_present(path: &Path) -> Result<bool, StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(io_error(
+            path,
+            io::Error::new(io::ErrorKind::InvalidData, "canonical retention root is not a regular file"),
+        )),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io_error(path, source)),
+    }
+}
+
 fn retention_roots(
     storage: &Storage,
     world: WorldId,
@@ -419,19 +433,19 @@ fn retention_roots(
 
     let metadata_dir = storage.world_dir(world).join("metadata");
     let mut required_hashes = BTreeSet::new();
-    if metadata_dir.join("transfer.postcard").exists() {
+    if canonical_retention_root_present(&metadata_dir.join("transfer.postcard"))? {
         required_hashes.insert(storage.load_transfer_record(world)?.base_snapshot_hash);
     }
-    if metadata_dir.join("sleep.postcard").exists() {
+    if canonical_retention_root_present(&metadata_dir.join("sleep.postcard"))? {
         required_hashes.insert(storage.load_sleep_record(world)?.latest_snapshot_hash);
     }
-    if metadata_dir.join("recovery-promise.postcard").exists() {
+    if canonical_retention_root_present(&metadata_dir.join("recovery-promise.postcard"))? {
         required_hashes.insert(storage.load_recovery_promise(world)?.ballot.base_snapshot_hash);
     }
-    if metadata_dir.join("recovery-certificate.postcard").exists() {
+    if canonical_retention_root_present(&metadata_dir.join("recovery-certificate.postcard"))? {
         required_hashes.insert(storage.load_recovery_certificate(world)?.ballot.base_snapshot_hash);
     }
-    if metadata_dir.join("solo-branch.postcard").exists() {
+    if canonical_retention_root_present(&metadata_dir.join("solo-branch.postcard"))? {
         let branch = storage.load_solo_branch(world)?;
         required_hashes.insert(branch.base_snapshot_hash);
         required_hashes.insert(branch.head_snapshot_hash);
