@@ -14,11 +14,7 @@ fn invoke(data: &Path, args: &[&str]) -> Output {
 }
 
 fn assert_success(output: &Output) {
-    assert!(
-        output.status.success(),
-        "real CLI exited unsuccessfully: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "real CLI exited unsuccessfully: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 fn fresh_world(data: &Path) -> String {
@@ -38,11 +34,7 @@ fn fresh_world(data: &Path) -> String {
     );
     assert_success(&created);
     let output = String::from_utf8(created.stdout).expect("CLI output is UTF-8");
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix("World ID: "))
-        .expect("real world ID")
-        .to_owned()
+    output.lines().find_map(|line| line.strip_prefix("World ID: ")).expect("real world ID").to_owned()
 }
 
 fn status_json(data: &Path, world: &str) -> serde_json::Value {
