@@ -5,6 +5,7 @@ mod canonical_world_commands;
 mod catalog_commands;
 mod curseforge;
 mod launcher_commands;
+mod hosting_contribution_commands;
 mod modrinth_commands;
 mod runtime;
 mod runtime_commands;
@@ -212,6 +213,51 @@ async fn world_status(app: AppHandle, world: String) -> Result<String, String> {
 async fn host_readiness(app: AppHandle, world: String) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
     run_cli(&app, vec!["world".into(), "host-readiness".into(), world, "--json".into()]).await
+}
+
+#[tauri::command]
+async fn hosting_contribution_get(
+    app: AppHandle,
+    world: String,
+) -> Result<hosting_contribution_commands::HostingContributionReadinessReply, String> {
+    let world = hosting_contribution_commands::validate_world_id(&world)?;
+    let raw = run_cli(
+        &app,
+        vec!["world".into(), "hosting".into(), "status".into(), world.to_string(), "--json".into()],
+    )
+    .await?;
+    hosting_contribution_commands::decode_readiness(&raw, world)
+}
+
+/// A local preference update is not a signed authority grant or a completed
+/// safe stop. All persistence and memory checks occur in the real Rust CLI.
+#[tauri::command(rename_all = "camelCase")]
+async fn hosting_contribution_set(
+    app: AppHandle,
+    world: String,
+    heap_mib: u64,
+) -> Result<hosting_contribution_commands::HostingContributionReadinessReply, String> {
+    let world = hosting_contribution_commands::validate_world_id(&world)?;
+    hosting_contribution_commands::validate_heap_mib(heap_mib)?;
+    let raw = run_cli(
+        &app,
+        vec![
+            "world".into(),
+            "hosting".into(),
+            "set".into(),
+            world.to_string(),
+            "--heap-mib".into(),
+            heap_mib.to_string(),
+            "--json".into(),
+        ],
+    )
+    .await?;
+    let report = hosting_contribution_commands::decode_readiness(&raw, world)?;
+    if report.selected_heap_mib != heap_mib || report.consented != (heap_mib != 0) || report.consent_revision.is_none()
+    {
+        return Err("Local hosting preference was not confirmed; refresh status".into());
+    }
+    Ok(report)
 }
 
 #[tauri::command]
@@ -485,6 +531,8 @@ fn main() {
             create_invite,
             world_status,
             host_readiness,
+            hosting_contribution_get,
+            hosting_contribution_set,
             world_mods_status,
             world_mods_add,
             world_mods_remove,
