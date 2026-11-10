@@ -436,3 +436,20 @@ test('native visual failures emit only stage, class and allowlisted UI observati
   assert.ok(workflow.includes("test_visual_failure_evidence.py"));
   assert.ok(regression.includes('scinvite:secret-private-token'));
 });
+
+test('installed Svelte leave-cancel exercises the real membership disclosure before hidden destructive action', async () => {
+  const [view, nativeAcceptance] = await Promise.all([
+    source('../src/components/WorldsView.svelte'),
+    source('../scripts/visual-window-acceptance.py'),
+  ]);
+  assert.match(view, /<details class="danger-zone">[\s\S]*?<button id="leaveWorld"/);
+  const open = nativeAcceptance.indexOf('app.click("#selectionContent details.danger-zone > summary")');
+  const leave = nativeAcceptance.indexOf('app.click("#leaveWorld")');
+  assert.ok(open >= 0 && leave > open, 'real native WebDriver must expand Membership before clicking Leave');
+  assert.ok(nativeAcceptance.includes("assert expanded['leaveDisclosureOpen'] and expanded['leaveButtonVisible']"),
+    'native leave test must not bypass collapsed or hidden membership controls');
+  assert.ok(nativeAcceptance.includes("assert selected['leaveSelectionVisible']"),
+    'native test must not mask losing selected world before leave');
+  assert.ok(nativeAcceptance.includes('app.click("#cancelLeave")'),
+    'native cancellation must remain a real click, not a programmatic dialog close');
+});

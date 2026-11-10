@@ -30,6 +30,7 @@ SAFE_BOOL_KEYS = frozenset({
     'identityOwned', 'identityVerified', 'identityNotEmpty', 'identityRefreshFinished',
     'identityNavigationVisible', 'identityNativeConfirmed',
     'identityNavDisplayVisible', 'identityNavHasGeometry', 'identityNavInsideViewport',
+    'leaveSelectionVisible', 'leaveDisclosureOpen', 'leaveButtonVisible',
     'identityToolsPresent', 'identityToolsOpen',
 })
 SAFE_INT_KEYS = frozenset({
@@ -380,6 +381,41 @@ def run(binary: Path, artifacts: Path):
         # Cancellation is non-destructive: open Leave, cancel, and verify
         # that the canonical world remains in the actual installed GUI.
         mark_stage('leave-confirmation-cancel')
+        selected = app.execute("""
+          const content = document.getElementById('selectionContent');
+          const world = document.getElementById('world');
+          return {
+            leaveSelectionVisible: !!content && !content.hidden && !!world?.value,
+          };
+        """)
+        record_ui(selected)
+        assert selected['leaveSelectionVisible'], (
+            "World selection was lost before the real leave-cancellation journey"
+        )
+        # Leave world is intentionally inside a collapsed danger-zone <details>.
+        # Open its real summary through native WebDriver rather than synthesizing
+        # a click on a hidden destructive action or weakening the visibility gate.
+        disclosure = app.execute("""
+          const section = document.querySelector('#selectionContent details.danger-zone');
+          return { leaveDisclosureOpen: section?.open === true };
+        """)
+        record_ui(disclosure)
+        if not disclosure['leaveDisclosureOpen']:
+            app.click("#selectionContent details.danger-zone > summary")
+        expanded = app.execute("""
+          const section = document.querySelector('#selectionContent details.danger-zone');
+          const leave = document.getElementById('leaveWorld');
+          const rect = leave?.getBoundingClientRect();
+          return {
+            leaveDisclosureOpen: section?.open === true,
+            leaveButtonVisible: !!leave && getComputedStyle(leave).display !== 'none'
+              && !!rect && rect.width > 0 && rect.height > 0,
+          };
+        """)
+        record_ui(expanded)
+        assert expanded['leaveDisclosureOpen'] and expanded['leaveButtonVisible'], (
+            "Installed membership disclosure must visibly expose the real Leave world action"
+        )
         app.click("#leaveWorld")
         leave_open = app.execute("""
           return {
