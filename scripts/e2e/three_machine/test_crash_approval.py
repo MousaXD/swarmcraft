@@ -47,6 +47,12 @@ class TestDisposableAuthorityCrashApproval(unittest.TestCase):
             marker.write_text("SWARMCRAFT_E2E_CRASH\n" + WORLD + "\nEXTRA", encoding="ascii")
             self.assertFalse(node.approved_disposable_crash_profile(root, WORLD))
 
+    def test_root_operator_cannot_authorize_destructive_crash(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = make_profile(temp)
+            with patch.object(node.os, "geteuid", return_value=0):
+                self.assertFalse(node.approved_disposable_crash_profile(root, WORLD))
+
     def test_world_approval_not_accepted_in_normal_profile(self):
         with tempfile.TemporaryDirectory() as temp:
             root, _ = make_profile(temp)
