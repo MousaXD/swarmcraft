@@ -181,3 +181,19 @@ controls, and three-OS candidate packaging **must pass** before this slice is
 certified. The remaining delegated world list, runtime/catalog/mods, hosting,
 authority/transfer and recovery actions are not independently Svelte-owned.
 Do not merge PR #94 or close #87; Agent 00 must approve any shipping cutover.
+
+
+### Native identity freshness hardening
+
+The original native assertion could have accepted a pre-existing
+`ready` identity published by the legacy first-boot controller, even if
+clicking `Refresh identity` never completed a fresh Rust call. The Svelte
+identity state now exposes a non-secret
+`nativeVerifiedRefreshCount` which increments **only** on a successful,
+nonempty, current-generation `node_identity` response. It is not increased
+by device-setup text, legacy identity publication, failed lookups, empty data
+or stale asynchronous completions. The actual installed WebKitGTK test
+records the count *before* clicking `#identityButton` and requires it to
+increase, in addition to Ready, nonempty identity and non-busy state. Unit and
+source-parity regressions enforce this native-only distinction. **This
+hardening is not certified until fresh exact-head CI passes.**
