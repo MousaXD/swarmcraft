@@ -6,6 +6,9 @@ export interface IdentityState {
   text: string;
   busy: boolean;
   error: string;
+  // Counts only successful, current-generation native node_identity responses.
+  // Legacy startup/setup presentation never increases this counter.
+  nativeVerifiedRefreshCount: number;
 }
 export type IdentitySource = 'setup' | 'identity' | 'unavailable';
 export interface IdentityController {
@@ -21,17 +24,21 @@ export interface IdentityController {
 export function createIdentityController(readNative: () => Promise<string>): IdentityController {
   const state = writable<IdentityState>({
     phase: 'checking', text: 'Checking identity…', busy: false, error: '',
+    nativeVerifiedRefreshCount: 0,
   });
+  let nativeVerifiedRefreshCount = 0;
   let request: Promise<void> | null = null;
   let generation = 0;
 
-  function present(value: unknown): IdentityState {
+  function present(value: unknown, fromNativeRefresh = false): IdentityState {
     const text = typeof value === 'string' ? value.trim() : '';
+    if (text && fromNativeRefresh) nativeVerifiedRefreshCount += 1;
     return text
-      ? { phase: 'ready', text, busy: false, error: '' }
+      ? { phase: 'ready', text, busy: false, error: '', nativeVerifiedRefreshCount }
       : {
           phase: 'unavailable', text: 'Device identity is unavailable.',
           busy: false, error: 'Set up this device and refresh its identity.',
+          nativeVerifiedRefreshCount,
         };
   }
 
@@ -41,7 +48,7 @@ export function createIdentityController(readNative: () => Promise<string>): Ide
       ++generation;
       // initialize_node can produce setup text, not a verified node_identity.
       if (source === 'setup') {
-        state.set({ phase: 'checking', text: String(value || 'Device setup complete. Reading identity…'), busy: false, error: '' });
+        state.set({ phase: 'checking', text: String(value || 'Device setup complete. Reading identity…'), busy: false, error: '', nativeVerifiedRefreshCount });
       } else if (source === 'unavailable') {
         state.set(present(''));
       } else {
@@ -54,12 +61,13 @@ export function createIdentityController(readNative: () => Promise<string>): Ide
       const version = ++generation;
       state.update(s => ({ ...s, busy: true, error: '' }));
       const task = Promise.resolve().then(readNative).then(value => {
-        if (version === generation) state.set(present(value));
+        if (version === generation) state.set(present(value, true));
       }).catch(() => {
         if (version !== generation) return;
         state.set({
           phase: 'unavailable', text: 'Device identity could not be read.',
           busy: false, error: 'Native identity lookup failed. Check device setup and retry.',
+          nativeVerifiedRefreshCount,
         });
       });
       request = task.finally(() => {
