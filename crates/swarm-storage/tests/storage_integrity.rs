@@ -428,3 +428,52 @@ fn dangling_recovery_promise_cleanup_fails_closed() {
     assert!(storage.clear_recovery_promise_after_epoch_advance(world, 3).is_err());
     assert!(fs::symlink_metadata(&promise_path).unwrap().file_type().is_symlink());
 }
+
+fn prepared_transfer_for_corrupt_write_test(world: WorldId) -> swarm_protocol::AuthorityTransferV1 {
+    swarm_protocol::AuthorityTransferV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        from_peer_id: PeerId([1; 32]),
+        to_peer_id: PeerId([2; 32]),
+        base_snapshot_hash: Hash32([3; 32]),
+        next_epoch: 2,
+        next_fencing_token: 2,
+        phase: swarm_protocol::TransferPhase::Prepared,
+        signer_peer_id: PeerId([1; 32]),
+        signer_public_key: [4; 32],
+        signature: vec![5; 64],
+    }
+}
+
+#[test]
+fn corrupted_canonical_authority_transfer_cannot_be_overwritten() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::open(temp.path().join("store")).unwrap();
+    let world = WorldId([0xa4; 32]);
+    let path = storage.world_dir(world).join("metadata/transfer.postcard");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+    let original = prepared_transfer_for_corrupt_write_test(world);
+    storage.save_transfer_record(&original).unwrap();
+    let corrupted = b"unreadable durable transfer evidence";
+    fs::write(&path, corrupted).unwrap();
+
+    assert!(storage.save_transfer_record(&original).is_err());
+    assert_eq!(fs::read(&path).unwrap(), corrupted);
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_canonical_authority_transfer_cannot_be_overwritten() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::open(temp.path().join("store")).unwrap();
+    let world = WorldId([0xa5; 32]);
+    let path = storage.world_dir(world).join("metadata/transfer.postcard");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    symlink(temp.path().join("unavailable-transfer"), &path).unwrap();
+
+    assert!(storage.save_transfer_record(&prepared_transfer_for_corrupt_write_test(world)).is_err());
+    assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+}
