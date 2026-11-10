@@ -5,6 +5,7 @@
 //! verification, signature checks and a mandatory V2 authority transport must
 //! exist before the caller may supply an Active policy view.
 
+#[cfg(test)]
 use std::collections::BTreeSet;
 use swarm_protocol::{Hash32, PeerId, WorldId};
 use thiserror::Error;
@@ -120,11 +121,13 @@ fn validate_policy_commitment_intent(
     }
 }
 
-/// Validate only the voter-universe/majority *shape*. The integration MUST
-/// independently verify every signed ballot and a matching canonical digest,
-/// and atomically persist the resulting certificate before activation.
-/// Membership transitions require the existing joint old/new quorum rules.
-pub fn validate_policy_vote_quorum_shape(
+/// Historical, TEST-ONLY voter-universe/majority shape regression helper.
+/// Production callers MUST use an independent cryptographic signed quorum
+/// certificate verifier with authenticated canonical voter keys, joint quorums
+/// where applicable, and atomic accepted-root persistence. A majority-shaped
+/// list, even when validated here, cannot authorize migration or authority.
+#[cfg(test)]
+fn validate_policy_vote_quorum_shape(
     canonical_voters: &[PeerId],
     approvers: &[PeerId],
 ) -> Result<(), MigrationGuardError> {
