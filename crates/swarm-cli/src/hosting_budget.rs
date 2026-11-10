@@ -57,6 +57,9 @@ pub struct ContributionReadiness {
     pub reason: String,
     /// Heap-only JVM configuration, never a guaranteed whole-process RSS cap.
     pub hard_process_memory_cap_guaranteed: bool,
+    /// Decimal string, never a lossy JavaScript number. None is an absent
+    /// local preference; zero MiB can have a durable revocation revision.
+    pub consent_revision: Option<String>,
 }
 
 /// The process-wide allocation lock intentionally permits at most ONE active
@@ -326,8 +329,16 @@ pub fn runtime_withdrawal(paths: &DataPaths, world: WorldId, admitted: &HostingC
     Ok(None)
 }
 
+/// A coherent native IPC view. Lock out concurrent contribution updates while
+/// reading the revision, consent, and sampled eligibility. The revision is a
+/// decimal string because nanosecond-based u64 values exceed JS safe integers.
+/// This is local preflight status, NEVER a signed authority grant or a promise
+/// that capacity remains available after the response.
 pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<ContributionReadiness> {
+    let lock = open_lock(&control_path(paths).join("hosting-consent-write.lock"))?;
+    lock.lock_exclusive().context("cannot serialize hosting readiness with consent updates")?;
     let consent = load_consent(paths, world)?;
+    let consent_revision = consent.as_ref().map(|value| value.revision.to_string());
     let heap = consent.as_ref().filter(|v| v.enabled).map_or(0, |v| v.heap_mib);
     let memory = memory_snapshot();
     let (physical_mib, available_mib) = match &memory {
@@ -361,6 +372,7 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
         may_host_now,
         reason,
         hard_process_memory_cap_guaranteed: false,
+        consent_revision,
     })
 }
 
@@ -504,6 +516,33 @@ mod tests {
         assert_eq!(load_consent(&paths, world).unwrap(), Some(revoked));
         assert!(require_contribution(&paths, world).is_err());
     }
+    #[test]
+    fn readiness_revision_is_atomic_with_consent_and_json_safe() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let world = WorldId([39; 32]);
+        let absent = contribution_readiness(&paths, world).unwrap();
+        assert!(!absent.consented);
+        assert_eq!(absent.selected_heap_mib, 0);
+        assert_eq!(absent.consent_revision, None);
+
+        let first = set_contribution(&paths, world, 0).unwrap();
+        let revoked = contribution_readiness(&paths, world).unwrap();
+        assert!(!revoked.consented);
+        assert!(!revoked.may_host_now);
+        assert_eq!(revoked.selected_heap_mib, 0);
+        assert_eq!(revoked.consent_revision, Some(first.revision.to_string()));
+        let wire = serde_json::to_value(&revoked).unwrap();
+        assert_eq!(wire["consent_revision"].as_str(), Some(first.revision.to_string().as_str()));
+        assert!(wire.get("peer_id").is_none());
+
+        let second = set_contribution(&paths, world, 0).unwrap();
+        assert!(second.revision > first.revision);
+        let latest = contribution_readiness(&paths, world).unwrap();
+        assert_eq!(latest.consent_revision, Some(second.revision.to_string()));
+        assert!(!latest.consented);
+    }
+
     #[test]
     fn exhausted_consent_revision_never_wraps_or_reuses_previous_authority() {
         let temp = tempfile::tempdir().unwrap();
