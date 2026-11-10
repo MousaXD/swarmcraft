@@ -6,7 +6,7 @@ Status: **INCOMPLETE / BLOCKED for feature-level readiness** until Agents 01, 02
 
 * **Player-only is the default.** A missing consent file, `0 MiB`, a malformed consent file, or any unsupported memory probe cannot authorize Java launch. Joining, replication and voting must remain possible independently of server-hosting consent.
 * A locally explicit opt-in invokes `swarm_cli::hosting_budget::set_contribution(paths, world, heap_mib)`; `heap_mib=0` revokes consent. This API does **not** run at world create/join or when EULA is accepted. A write increments the persisted revision, including same-value edits. It survives restarts in `control/<world>/hosting-consent.json`.
-* `hosting_budget::contribution_readiness(paths, world)` is the typed, machine-local, player-facing read endpoint, and is only a **preflight sample**, not a future guarantee or signed quorum claim.
+* `hosting_budget::contribution_readiness(paths, world)` is the typed, machine-local, player-facing read endpoint. It serializes its consent read and memory sample with concurrent opt-in/withdrawal writes using `hosting-consent-write.lock`, and returns `consent_revision: Option<String>` as a **decimal string** (`None` when the record is absent). The response contains no device `peer_id` or private paths. This is only a **preflight sample**, not a future guarantee, signed quorum claim or durable stop acknowledgment.
 * `hosting_budget::require_contribution(paths, world)` fails closed on missing, corrupt or withdrawn consent, unavailable OS memory, unsafe device headroom or an excessive limit. It is safe to call at every candidacy gate.
 * `hosting_budget::admit(paths, world)` acquires an exclusive **data-root-wide** memory admission lock and revalidates capacity/consent before any restore, epoch mutation or JVM launch. It deliberately permits only one active authority JVM per device/data root. Release the guard only after process exit and checkpointing. Cross-root capacity coordination and hard-killed Rust controllers with orphan JVMs need dedicated process accounting; this lock alone must not be advertised as a global guaranteed allocator.
 * `hosting_budget::runtime_withdrawal(paths, world, admitted)` notices an altered revision, opt-out and severe available-memory pressure during service. The authority runtime requests Fabric's safe save/stop barrier and then commits the fenced canonical snapshot and sleep record. On barrier failure, it **does not silently kill** a live authority and lose signed progress: it logs and retries. An explicit signed manual transfer intent is attempted first. This is not a guarantee of immediate revocation if the JVM is unresponsive.
@@ -46,6 +46,16 @@ No automatic opt-in from a signed world policy; world permission is not device p
 2. Distinguish member/replica/voter from authority candidate. Missing consent or insufficient budget makes the latter false while preserving the former.
 3. Publish a precise versioned capability structure to bind a per-world consent/budget revision, current readiness sample time and policy version; the current `HostCapabilityV1` cannot carry those assertions. Use explicit compatibility behavior for older peers.
 4. Do not expand quorum or permit transfer when a candidate has no fresh budget confirmation. Agent 03 must add the final signed-policy check once contract is merged.
+
+### Agent 09 — Rust/Tauri coherent native API (approved integration base only)
+
+The existing Rust `hosting_budget::contribution_readiness(paths, world)` now returns all the planned response fields plus `consent_revision: Option<String>` in one coherent read. **Do not call `load_consent` separately** to mix an old revision with new readiness; this function acquires the same cross-process write lock as `set_contribution` through the entire read. Every `set_contribution`, including 0 MiB withdrawal and repeated same-value choices, commits a strictly greater revision under that lock.
+
+* `hosting_contribution_get(world: String)`: validate canonical world ID, discover persistent `DataPaths`, validate world exists, then call `contribution_readiness` and serialize the result directly as the snake_case DTO proposed in PR #100. Its revision is already a JSON **string or null**, never a lossy `u64` JavaScript number. `may_host_now` refers to local permission and sampled budget only, not signed world-policy authority.
+* `hosting_contribution_set(world: String, heap_mib: u64)`: validate world and explicit user action, call `set_contribution`, and map only `world_id`, `enabled`, `heap_mib`, `revision: record.revision.to_string()` to the public DTO. Never serialize `HostingConsentV1` directly: it also includes `peer_id` and a numeric `revision`.
+* Set success means the preference is durable, not that an active authority has completed Fabric save, fencing, transfer or shutdown. There is **no** implicit opt-in at world creation, joining, EULA acceptance, restart, or V2 migration.
+
+The daemon/CLI/desktop command files remain outside Agent 03 ownership and cannot be considered integrated while these Rust module functions are unregistered.
 
 ### Agent 04 — Desktop typed bridge and controls
 
