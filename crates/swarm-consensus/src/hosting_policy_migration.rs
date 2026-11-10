@@ -9,8 +9,10 @@ use std::collections::BTreeSet;
 use swarm_protocol::{Hash32, PeerId, WorldId};
 use thiserror::Error;
 
-/// Proposed commitment into a NEW versioned canonical extension family.
-/// This is NOT a WorldConfigV1 or a substitute for a durable accepted record.
+/// Historical shape check for a hypothetical SAME-IDENTITY V1 extension.
+/// IN-PLACE ACTIVATION IS NO-GO: offline V1 binaries cannot be forced to
+/// exclude conflicting old authority. This is NOT the V2 target-realm record.
+/// It is NOT a WorldConfigV1 or a substitute for a durable accepted record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PolicyCommitmentIntent {
     pub world_id: WorldId,
@@ -25,6 +27,8 @@ pub struct PolicyCommitmentIntent {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MigrationGuardError {
+    #[error("same-identity V1 to V2 authority migration is forbidden")]
+    SameIdentityMigration,
     #[error("a canonical V1 policy sidecar cannot activate hosting")]
     NotCanonicallyActivated,
     #[error("the policy commitment is not bound to the accepted canonical head")]
@@ -49,6 +53,24 @@ pub enum MigrationGuardError {
     MissingLocalConsent,
     #[error("snapshot, runtime readiness, quorum, or fencing proof is missing")]
     MissingAuthorityProof,
+}
+
+/// Negative-only realm boundary check before a prospective V2 activation.
+///
+/// Agent 02's ProposedHostingRealmGenesisV2 derives an independently identified
+/// target realm from immutable certified V1 ancestry. A distinct ID is
+/// necessary but is NOT sufficient: signed source history, V1 quorum/joint
+/// certificate, migration votes, canonical durable acceptance and fresh V2
+/// fenced authority must still be independently verified. NEVER construct an
+/// Active canonical policy view merely because this shape check succeeds.
+pub fn check_distinct_authority_realm(
+    source_world_id: WorldId,
+    target_realm_id: WorldId,
+) -> Result<(), MigrationGuardError> {
+    if source_world_id == target_realm_id {
+        return Err(MigrationGuardError::SameIdentityMigration);
+    }
+    Ok(())
 }
 
 /// Check a prospective bridge using already accepted V1 config and membership
@@ -247,7 +269,17 @@ mod tests {
     }
 
     #[test]
-    fn bridge_keeps_v1_identity_and_requires_fenced_chain() {
+    fn same_identity_is_not_an_admissible_v2_migration() {
+        let source = WorldId([1; 32]);
+        assert_eq!(
+            check_distinct_authority_realm(source, source),
+            Err(MigrationGuardError::SameIdentityMigration)
+        );
+        assert_eq!(check_distinct_authority_realm(source, WorldId([2; 32])), Ok(()));
+    }
+
+    #[test]
+    fn historical_same_id_extension_shape_is_not_activation() {
         let first = intent(1, None);
         assert_eq!(check(None, &first), Ok(()));
         assert_eq!(check(Some(&first), &intent(2, Some(first.policy_hash))), Ok(()));
