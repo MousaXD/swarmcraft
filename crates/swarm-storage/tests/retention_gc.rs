@@ -244,3 +244,28 @@ fn dangling_canonical_retention_roots_cannot_prune_pinned_snapshots_or_blobs() {
         assert!(blob_path(&storage, &old_blob).exists(), "deleted blob under {root_name}");
     }
 }
+
+#[test]
+fn non_file_canonical_retention_root_blocks_destructive_pruning() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("world");
+    fs::create_dir_all(&source).unwrap();
+    let storage = Storage::open(temp.path().join("store")).unwrap();
+
+    fs::write(source.join("level.dat"), b"old-state").unwrap();
+    let old = snapshot(&storage, &source, 1, None);
+    let old_blob = old.entries[0].blob.clone();
+    fs::write(source.join("level.dat"), b"new-state").unwrap();
+    snapshot(&storage, &source, 2, Some(old.manifest_hash().unwrap()));
+
+    let unexpected_directory = storage.world_dir(world()).join("metadata/transfer.postcard");
+    fs::create_dir_all(&unexpected_directory).unwrap();
+
+    let result = storage.apply_retention(
+        world(),
+        &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() },
+    );
+    assert!(result.is_err(), "canonical retention directory was silently ignored");
+    assert!(storage.load_snapshot(world(), 1).is_ok());
+    assert!(blob_path(&storage, &old_blob).exists());
+}
