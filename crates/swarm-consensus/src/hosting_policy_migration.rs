@@ -163,9 +163,7 @@ pub fn check_policy_authority_gate(
     facts: &AuthorityPolicyFacts,
 ) -> Result<(), MigrationGuardError> {
     let (policy_hash, epoch, fencing_token) = match canonical {
-        CanonicalPolicyView::Active(commit) => {
-            (commit.policy_hash, commit.epoch, commit.fencing_token)
-        }
+        CanonicalPolicyView::Active(commit) => (commit.policy_hash, commit.epoch, commit.fencing_token),
         CanonicalPolicyView::LegacyV1 | CanonicalPolicyView::PreparedNotCommitted => {
             return Err(MigrationGuardError::NotCanonicallyActivated);
         }
@@ -213,7 +211,10 @@ mod tests {
         }
     }
 
-    fn check(previous: Option<&PolicyCommitmentIntent>, next: &PolicyCommitmentIntent) -> Result<(), MigrationGuardError> {
+    fn check(
+        previous: Option<&PolicyCommitmentIntent>,
+        next: &PolicyCommitmentIntent,
+    ) -> Result<(), MigrationGuardError> {
         validate_policy_commitment_intent(WorldId([1; 32]), Hash32([2; 32]), Hash32([3; 32]), 10, 20, previous, next)
     }
 
@@ -277,11 +278,23 @@ mod tests {
     fn only_signed_canonical_majority_shape_is_eligible() {
         let voters = [PeerId([1; 32]), PeerId([2; 32]), PeerId([3; 32])];
         assert_eq!(validate_policy_vote_quorum_shape(&voters, &voters[..2]), Ok(()));
-        assert_eq!(validate_policy_vote_quorum_shape(&voters, &voters[..1]), Err(MigrationGuardError::QuorumUnavailable));
-        assert_eq!(validate_policy_vote_quorum_shape(&voters, &[voters[0], voters[0]]), Err(MigrationGuardError::InvalidVote));
-        assert_eq!(validate_policy_vote_quorum_shape(&voters, &[voters[0], PeerId([9; 32])]), Err(MigrationGuardError::InvalidVote));
+        assert_eq!(
+            validate_policy_vote_quorum_shape(&voters, &voters[..1]),
+            Err(MigrationGuardError::QuorumUnavailable)
+        );
+        assert_eq!(
+            validate_policy_vote_quorum_shape(&voters, &[voters[0], voters[0]]),
+            Err(MigrationGuardError::InvalidVote)
+        );
+        assert_eq!(
+            validate_policy_vote_quorum_shape(&voters, &[voters[0], PeerId([9; 32])]),
+            Err(MigrationGuardError::InvalidVote)
+        );
         assert_eq!(validate_policy_vote_quorum_shape(&[], &[]), Err(MigrationGuardError::InvalidVoterSet));
-        assert_eq!(validate_policy_vote_quorum_shape(&[voters[0], voters[0]], &[voters[0]]), Err(MigrationGuardError::InvalidVoterSet));
+        assert_eq!(
+            validate_policy_vote_quorum_shape(&[voters[0], voters[0]], &[voters[0]]),
+            Err(MigrationGuardError::InvalidVoterSet)
+        );
     }
 
     #[test]
