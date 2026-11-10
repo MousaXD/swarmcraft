@@ -179,9 +179,13 @@ python3 scripts/e2e/three_machine/run.py verify --config "$CONFIG" --output "$OU
 
 The crash injector requires three distinct PIDs: the test-profile native
 Tauri desktop, its SwarmCraft replication daemon, and the real Minecraft
-server JVM in the exact world runtime directory. It checks executable identity
-and/or test-profile environment, validates all three before stopping them,
-freezes their processes to prevent partial restart, and sends SIGKILL to each.
+server JVM in the exact world runtime directory. On Linux it first opens a
+kernel pidfd for each process, checks executable identity and/or test-profile
+ownership **while holding the pidfds**, freezes all three, and sends SIGKILL
+through those pinned descriptors. This avoids killing an unrelated replacement
+process if a numeric PID is reused between validation and injection. Missing
+pidfd support or permissions BLOCK the field test; there is no unsafe
+numeric-PID fallback.
 A Java-only or desktop-only crash is **not** accepted as authority loss.
 This is **a full isolated application-process outage, not physical machine
 power loss**; literal machine/ISP power-failure field evidence is a separate
