@@ -1,3 +1,7 @@
+<script lang="ts">
+  import HostingContributionPanel from './HostingContributionPanel.svelte';
+</script>
+
 <section id="worldsView" class="view is-active" data-view-panel="worlds" aria-labelledby="viewTitle">
           <div id="worldLoadError" class="page-notice notice-danger" role="alert" hidden></div>
           <div class="worlds-layout">
@@ -86,6 +90,8 @@
                     <p id="hostReadinessDetail">SwarmCraft is checking whether another device can safely keep this world available.</p>
                   </div>
                 </section>
+
+                <HostingContributionPanel />
 
                 <section class="player-section" aria-labelledby="availabilityTitle">
                   <div class="section-heading">

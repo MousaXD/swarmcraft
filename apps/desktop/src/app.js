@@ -274,6 +274,7 @@ function clearSelection() {
   $('world').value = '';
   $('selectionContent').hidden = true;
   $('noSelection').hidden = false;
+  window.dispatchEvent(new CustomEvent('swarmcraft:world-selected', { detail: { world: '' } }));
   for (const row of document.querySelectorAll('.world-row')) {
     row.classList.remove('is-selected');
     row.setAttribute('aria-pressed', 'false');
@@ -551,6 +552,7 @@ function selectWorld(world, { focusDetail = false } = {}) {
 
   $('noSelection').hidden = true;
   $('selectionContent').hidden = false;
+  window.dispatchEvent(new CustomEvent('swarmcraft:world-selected', { detail: { world: world.id } }));
   showInline('worldNotice', '');
   showInline('runtimeNotice', '');
   for (const row of document.querySelectorAll('.world-row')) {

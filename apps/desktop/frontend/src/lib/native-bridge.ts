@@ -6,6 +6,22 @@
  * fencing, snapshots, signed invites and hosting. 'unknown' response types
  * must be normalized and validated by a caller before presentation.
  */
+export interface HostingContributionReadiness {
+  world_id: string;
+  consented: boolean;
+  selected_heap_mib: number;
+  physical_mib: number | null;
+  available_mib: number | null;
+  estimated_native_overhead_mib: number;
+  client_headroom_mib: number;
+  os_headroom_mib: number;
+  daemon_headroom_mib: number;
+  may_host_now: boolean;
+  reason: string;
+  hard_process_memory_cap_guaranteed: boolean;
+  consent_revision: string | null;
+}
+
 export interface NativeCommandTable {
   initialize_node: { args: Record<string, never>; result: string };
   node_identity: { args: Record<string, never>; result: string };
@@ -20,6 +36,8 @@ export interface NativeCommandTable {
   create_invite: { args: { world: string; expiresMinutes: number; bootstrapAddrs: string[] }; result: string };
   world_status: { args: { world: string }; result: string };
   host_readiness: { args: { world: string }; result: string };
+  hosting_contribution_get: { args: { world: string }; result: HostingContributionReadiness };
+  hosting_contribution_set: { args: { world: string; heapMib: number }; result: HostingContributionReadiness };
   world_mods_status: { args: { world: string }; result: string };
   world_mods_add: { args: { world: string; jarPath: string }; result: string };
   world_mods_remove: { args: { world: string; modId: string }; result: string };
