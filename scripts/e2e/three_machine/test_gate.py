@@ -34,6 +34,7 @@ def config():
 def node(role, stage):
     authority = ALICE if stage not in ("bob_recovered", "alice_returned") else BOB
     return {
+        "machine_fingerprint": "host-" + role,
         "world_fingerprint": "world-fp",
         "identity_fingerprint": {"alice": ALICE, "bob": BOB, "carol": CAROL}[role],
         "authority_fingerprint": authority,
@@ -133,6 +134,26 @@ class TestFailClosed(unittest.TestCase):
             recovered["nodes"]["carol"]["minecraft_client_process_observed"] = False
             gate.save(out / "bob_recovered.json", recovered)
             with self.assertRaisesRegex(gate.Blocked, "surviving_real_players_not_observed"):
+                gate.verify(c, out)
+
+    def test_rejects_machine_switch_after_valid_preflight(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            joined = gate.load_json(out / "bob_joined.json")
+            joined["nodes"]["bob"]["machine_fingerprint"] = "host-alice"
+            gate.save(out / "bob_joined.json", joined)
+            with self.assertRaisesRegex(gate.Blocked, "capture_machine_changed_bob_joined_bob"):
+                gate.verify(c, out)
+
+    def test_rejects_identity_substitution_in_any_phase(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            joined = gate.load_json(out / "carol_joined.json")
+            joined["nodes"]["carol"]["identity_fingerprint"] = "different-peer"
+            gate.save(out / "carol_joined.json", joined)
+            with self.assertRaisesRegex(gate.Blocked, "participant_identity_changed_carol_joined_carol"):
                 gate.verify(c, out)
 
     def test_disallow_shell_target_injection(self):
