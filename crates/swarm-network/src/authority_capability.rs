@@ -83,8 +83,7 @@ impl SignedAuthorityFeatureV2 {
             || self.committed_migration_hash == Hash32::default()
             || self.accepted_membership_hash == Hash32::default()
             || self.snapshot_hash == Hash32::default()
-            || !(MIN_V2_AUTHORITY_HEAP_MIB..=MAX_V2_AUTHORITY_HEAP_MIB)
-                .contains(&self.selected_heap_mib)
+            || !(MIN_V2_AUTHORITY_HEAP_MIB..=MAX_V2_AUTHORITY_HEAP_MIB).contains(&self.selected_heap_mib)
             || self.challenge == [0; 32]
             || self.epoch == 0
             || self.fencing_token == 0
