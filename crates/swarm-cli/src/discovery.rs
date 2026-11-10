@@ -547,12 +547,8 @@ fn local_state_matches_freshness_challenge(
     if membership.sequence != challenge.membership_sequence || membership.record_hash()? != challenge.membership_hash {
         return Ok(false);
     }
-    if !canonical_recovery_promise_allows_freshness(
-        storage,
-        world,
-        challenge.authority_epoch,
-        challenge.fencing_token,
-    ) {
+    if !canonical_recovery_promise_allows_freshness(storage, world, challenge.authority_epoch, challenge.fencing_token)
+    {
         return Ok(false);
     }
     let epoch = match storage.load_epoch_record(world) {
