@@ -31,6 +31,7 @@ SAFE_BOOL_KEYS = frozenset({
     'identityNavigationVisible', 'identityNativeConfirmed',
     'identityNavDisplayVisible', 'identityNavHasGeometry', 'identityNavInsideViewport',
     'leaveSelectionVisible', 'leaveDisclosureOpen', 'leaveButtonVisible', 'leaveSummaryOnScreen',
+    'hostingPanelPresent', 'hostingPlayerOnly', 'hostingOptInDisabled', 'hostingWithdrawDisabled',
     'identityToolsPresent', 'identityToolsOpen',
 })
 SAFE_INT_KEYS = frozenset({
@@ -134,6 +135,30 @@ def run(binary: Path, artifacts: Path):
         )
         app.click("#navWorlds")
         app.click("#worldCards .world-row")
+        # This combined stack registers real Tauri hosting-contribution
+        # commands. The Svelte UI must start player-only based on a verified
+        # Rust read, not static text, a browser preference, or auto-consent.
+        mark_stage('hosting-default-player-only')
+        hosting = None
+        for _ in range(80):
+            hosting = app.execute("""
+              const panel = document.getElementById('hostingContributionPanel');
+              const optIn = document.getElementById('hostingContributionOptIn');
+              const withdraw = document.getElementById('hostingContributionWithdraw');
+              return {
+                hostingPanelPresent: !!panel,
+                hostingPlayerOnly: panel?.dataset.consentState === 'player-only',
+                hostingOptInDisabled: !!optIn && optIn.disabled,
+                hostingWithdrawDisabled: !!withdraw && withdraw.disabled,
+              };
+            """)
+            record_ui(hosting)
+            if hosting['hostingPlayerOnly']:
+                break
+            time.sleep(0.2)
+        assert all(hosting.values()), (
+            "Installed Rust-backed consent must show default-zero player-only with no automatic opt-in"
+        )
         for width, height in ((980, 760), (720, 560)):
             mark_stage(f'layout-{width}x{height}')
             result = inspect_layout(app, width, height)
