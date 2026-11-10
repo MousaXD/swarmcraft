@@ -74,7 +74,8 @@ impl SignedAuthorityFeatureV2 {
         if peer_id_from_public_key(&self.public_key) != self.peer_id {
             return Err(AuthorityCapabilityError::InvalidIdentity);
         }
-        if self.claimant_transport_peer.is_empty()
+        if self.world_id == WorldId([0; 32])
+            || self.claimant_transport_peer.is_empty()
             || self.verifier_transport_peer.is_empty()
             || self.claimant_transport_peer.len() > MAX_AUTHORITY_TRANSPORT_ID_BYTES
             || self.verifier_transport_peer.len() > MAX_AUTHORITY_TRANSPORT_ID_BYTES
@@ -458,6 +459,17 @@ mod tests {
         tampered.selected_heap_mib = 0;
         assert_eq!(
             verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &tampered, &expected(&v), || true),
+            Err(AuthorityCapabilityError::InvalidTranscript)
+        );
+    }
+
+    #[test]
+    fn rejects_empty_target_realm_even_with_a_valid_signer() {
+        let (mut signed, key) = claim();
+        signed.world_id = WorldId([0; 32]);
+        assert_eq!(signed.sign(&key), Err(AuthorityCapabilityError::InvalidTranscript));
+        assert_eq!(
+            verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &signed, &expected(&signed), || true),
             Err(AuthorityCapabilityError::InvalidTranscript)
         );
     }
