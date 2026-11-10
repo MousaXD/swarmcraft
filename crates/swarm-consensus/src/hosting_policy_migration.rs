@@ -283,10 +283,7 @@ mod tests {
     #[test]
     fn same_identity_is_not_an_admissible_v2_migration() {
         let source = WorldId([1; 32]);
-        assert_eq!(
-            check_distinct_authority_realm(source, source),
-            Err(MigrationGuardError::SameIdentityMigration)
-        );
+        assert_eq!(check_distinct_authority_realm(source, source), Err(MigrationGuardError::SameIdentityMigration));
         assert_eq!(check_distinct_authority_realm(source, WorldId([2; 32])), Ok(()));
         assert_eq!(
             check_distinct_authority_realm(source, WorldId([0; 32])),
