@@ -501,7 +501,8 @@ def approved_disposable_crash_profile(root, world):
     This marker is never created by the harness. A profile-name check alone
     cannot authorize SIGKILL of the installed desktop, daemon, and JVM.
     """
-    if root.name != "swarmcraft-e2e" or not re.fullmatch(r"[0-9a-fA-F]{64}", world):
+    if (root.name != "swarmcraft-e2e" or os.geteuid() == 0 or
+            not re.fullmatch(r"[0-9a-fA-F]{64}", world)):
         return False
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
