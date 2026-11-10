@@ -14,6 +14,13 @@ import node
 class TestPidfdCrashSafety(unittest.TestCase):
     WORLD = "ab" * 32
 
+    def setUp(self):
+        # PID-signaling tests control the separate disposable-profile guard;
+        # actual approval-file safety has its own negative test suite.
+        approval = patch.object(node, "approved_disposable_crash_profile", return_value=True)
+        approval.start()
+        self.addCleanup(approval.stop)
+
     def args(self, home):
         root = Path(home)
         binary = root / "swarmcraft-desktop"
