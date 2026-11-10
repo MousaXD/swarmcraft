@@ -329,6 +329,18 @@ impl Storage {
         // local publication create their pins while holding the same lock, so
         // GC either sees a durable pin or wins before complete publication.
         let snapshots = self.list_snapshots(world)?;
+        let required_hashes = canonical_snapshot_retention_hashes(self, world)?;
+        if !required_hashes.is_empty() {
+            let manifest_hashes = snapshots
+                .iter()
+                .map(|manifest| manifest.manifest_hash().map_err(StorageError::from))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            for hash in required_hashes {
+                if !manifest_hashes.contains(&hash) {
+                    return Err(RetentionError::MissingRequiredSnapshot(hash));
+                }
+            }
+        }
         let mut live = referenced_blob_hashes(&snapshots);
         live.extend(read_hash_pins(&replication_pins_dir(&world_dir))?);
 
@@ -417,20 +429,9 @@ fn canonical_retention_root_present(path: &Path) -> Result<bool, StorageError> {
     }
 }
 
-fn retention_roots(
-    storage: &Storage,
-    world: WorldId,
-    snapshots: &[SnapshotManifestV1],
-    policy: &RetentionPolicy,
-) -> Result<BTreeSet<u64>, RetentionError> {
-    let mut retained = policy.protected_snapshots.clone();
-    let latest = snapshots.last().expect("non-empty snapshot list");
-    retained.insert(latest.snapshot_number);
-
-    for manifest in snapshots.iter().rev().take(policy.keep_latest) {
-        retained.insert(manifest.snapshot_number);
-    }
-
+/// Resolve all mandatory recovery roots before any destructive snapshot or
+/// blob operation, including direct garbage-collection calls.
+fn canonical_snapshot_retention_hashes(storage: &Storage, world: WorldId) -> Result<BTreeSet<Hash32>, StorageError> {
     let metadata_dir = storage.world_dir(world).join("metadata");
     let mut required_hashes = BTreeSet::new();
     if canonical_retention_root_present(&metadata_dir.join("transfer.postcard"))? {
@@ -454,6 +455,24 @@ fn retention_roots(
         required_hashes.insert(branch.base_snapshot_hash);
         required_hashes.insert(branch.head_snapshot_hash);
     }
+    Ok(required_hashes)
+}
+
+fn retention_roots(
+    storage: &Storage,
+    world: WorldId,
+    snapshots: &[SnapshotManifestV1],
+    policy: &RetentionPolicy,
+) -> Result<BTreeSet<u64>, RetentionError> {
+    let mut retained = policy.protected_snapshots.clone();
+    let latest = snapshots.last().expect("non-empty snapshot list");
+    retained.insert(latest.snapshot_number);
+
+    for manifest in snapshots.iter().rev().take(policy.keep_latest) {
+        retained.insert(manifest.snapshot_number);
+    }
+
+    let required_hashes = canonical_snapshot_retention_hashes(storage, world)?;
 
     if !required_hashes.is_empty() {
         let mut by_hash = BTreeMap::new();
