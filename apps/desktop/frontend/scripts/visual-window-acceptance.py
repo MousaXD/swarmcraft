@@ -28,7 +28,7 @@ SAFE_BOOL_KEYS = frozenset({
     'createEnabled', 'formVisible', 'dialogOpen', 'owned', 'enabled',
     'closed', 'stillSelected', 'worldStillListed',
     'identityOwned', 'identityVerified', 'identityNotEmpty', 'identityRefreshFinished',
-    'identityNavigationVisible',
+    'identityNavigationVisible', 'identityNativeConfirmed',
 })
 SAFE_INT_KEYS = frozenset({
     'width', 'height', 'rootScrollWidth', 'paneScrollWidth',
@@ -181,6 +181,15 @@ def run(binary: Path, artifacts: Path):
         """)
         record_ui({'identityOwned': identity_owner})
         assert identity_owner, "Installed Diagnostics identity action is not Svelte-owned"
+        # A prior legacy startup identity may already render Ready. Require a
+        # new SUCCESSFUL current-generation native read after this user click,
+        # not merely the old Ready text (which could otherwise falsely pass).
+        native_before = app.execute("""
+          return Number(document.getElementById('identity')?.dataset.nativeVerifiedRefreshCount ?? -1);
+        """)
+        assert type(native_before) is int and native_before >= 0, (
+            "Svelte Diagnostics must expose its native-only refresh completion count"
+        )
         app.click("#identityButton")
         identity_check = None
         for _ in range(60):
@@ -191,13 +200,15 @@ def run(binary: Path, artifacts: Path):
                 identityVerified: output?.dataset.identityPhase === 'ready',
                 identityNotEmpty: !!output?.textContent?.trim(),
                 identityRefreshFinished: !!button && !button.disabled,
+                identityNativeConfirmed:
+                  Number(output?.dataset.nativeVerifiedRefreshCount ?? -1) > arguments[0],
               };
-            """)
+            """, [native_before])
             record_ui(identity_check)
             if all(identity_check.values()):
                 break
             time.sleep(0.2)
-        assert all(identity_check.values()), "Native Svelte identity refresh did not reach verified Ready"
+        assert all(identity_check.values()), "Native Svelte identity refresh did not complete a new verified Rust read"
         app.click("#navWorlds")
         # Exercise the new Svelte signed-invite form in an installed app.
         # No invite is sent to Rust here; an empty form must fail locally,
