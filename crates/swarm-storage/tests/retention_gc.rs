@@ -203,3 +203,44 @@ fn latest_snapshot_is_retained_even_when_keep_latest_is_zero() {
     assert!(report.removed_snapshots.is_empty());
     storage.verify_snapshot(&manifest).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn dangling_canonical_retention_roots_cannot_prune_pinned_snapshots_or_blobs() {
+    use std::os::unix::fs::symlink;
+
+    for root_name in [
+        "transfer.postcard",
+        "sleep.postcard",
+        "recovery-promise.postcard",
+        "recovery-certificate.postcard",
+        "solo-branch.postcard",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("world");
+        fs::create_dir_all(&source).unwrap();
+        let storage = Storage::open(temp.path().join("store")).unwrap();
+
+        fs::write(source.join("level.dat"), b"old-protected-state").unwrap();
+        let old = snapshot(&storage, &source, 1, None);
+        let old_blob = old.entries[0].blob.clone();
+        fs::write(source.join("level.dat"), b"new-latest-state").unwrap();
+        snapshot(&storage, &source, 2, Some(old.manifest_hash().unwrap()));
+
+        let metadata = storage.world_dir(world()).join("metadata");
+        fs::create_dir_all(&metadata).unwrap();
+        let root_path = metadata.join(root_name);
+        symlink(temp.path().join("absent-root-target"), &root_path).unwrap();
+
+        assert!(
+            storage.apply_retention(
+                world(),
+                &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() }
+            ).is_err(),
+            "dangling canonical retention root was treated as absent: {root_name}"
+        );
+        assert!(fs::symlink_metadata(&root_path).unwrap().file_type().is_symlink());
+        assert!(storage.load_snapshot(world(), 1).is_ok(), "deleted snapshot under {root_name}");
+        assert!(blob_path(&storage, &old_blob).exists(), "deleted blob under {root_name}");
+    }
+}
