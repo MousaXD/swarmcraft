@@ -1,0 +1,212 @@
+{
+  "classification": "SYNTHETIC_LOCAL_PROCESS_MODEL_NOT_MINECRAFT_NOT_NETWORK",
+  "hardware": {
+    "affinity_cpus": 5,
+    "cgroup_cpu_quota": 4,
+    "logical_cpus": 5
+  },
+  "limitations": "Single-machine Python process benchmark; neither real game ticks nor inter-machine network, consensus, durable writes or mod hooks.",
+  "network_rtt_budget_sensitivity_NOT_MEASURED": [
+    {
+      "rtt_ms_assumption": 5,
+      "single_barrier_lower_bound_ms": 5,
+      "two_serial_barriers_lower_bound_ms": 10,
+      "within_50ms_tick_if_one_barrier": true,
+      "within_50ms_tick_if_two_barriers": true
+    },
+    {
+      "rtt_ms_assumption": 25,
+      "single_barrier_lower_bound_ms": 25,
+      "two_serial_barriers_lower_bound_ms": 50,
+      "within_50ms_tick_if_one_barrier": true,
+      "within_50ms_tick_if_two_barriers": false
+    },
+    {
+      "rtt_ms_assumption": 60,
+      "single_barrier_lower_bound_ms": 60,
+      "two_serial_barriers_lower_bound_ms": 120,
+      "within_50ms_tick_if_one_barrier": false,
+      "within_50ms_tick_if_two_barriers": false
+    }
+  ],
+  "parameters": {
+    "entities": 12000,
+    "output": "/mnt/data/swarmcraft-agent06/research/distributed-simulation/evidence/2026-11-08-synthetic-local.json",
+    "regions": 12,
+    "repeats": 5,
+    "rounds": 64,
+    "workers": "1,2,4"
+  },
+  "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "python": "3.13.5",
+  "scenarios": {
+    "boundary": {
+      "region_entity_counts": [
+        1000,
+        1000,
+        1000,
+        1000,
+        1000,
+        1000,
+        1000,
+        1000,
+        1000,
+        1000,
+        1000,
+        1000
+      ],
+      "synthetic_transfer_proxy": {
+        "bytes_per_tick_proxy": 200400,
+        "events_per_tick_assumed": 1200,
+        "median_local_encode_decode_ms": 6.93
+      },
+      "workers": {
+        "1": {
+          "checksum": "b1b2a0b0c8f8536a",
+          "median_ms": 70.063,
+          "samples_ms": [
+            70.188,
+            70.809,
+            69.137,
+            70.063,
+            69.479
+          ]
+        },
+        "2": {
+          "checksum": "b1b2a0b0c8f8536a",
+          "median_ms": 38.746,
+          "samples_ms": [
+            38.746,
+            38.37,
+            38.53,
+            41.402,
+            41.943
+          ]
+        },
+        "4": {
+          "checksum": "b1b2a0b0c8f8536a",
+          "median_ms": 25.347,
+          "samples_ms": [
+            22.987,
+            21.334,
+            25.697,
+            25.497,
+            25.347
+          ]
+        }
+      }
+    },
+    "clustered": {
+      "region_entity_counts": [
+        10200,
+        164,
+        164,
+        164,
+        164,
+        164,
+        164,
+        164,
+        163,
+        163,
+        163,
+        163
+      ],
+      "synthetic_transfer_proxy": {
+        "bytes_per_tick_proxy": 20040,
+        "events_per_tick_assumed": 120,
+        "median_local_encode_decode_ms": 0.624
+      },
+      "workers": {
+        "1": {
+          "checksum": "b3fd68f1cf837a1d",
+          "median_ms": 73.77,
+          "samples_ms": [
+            73.77,
+            74.136,
+            77.547,
+            73.63,
+            72.731
+          ]
+        },
+        "2": {
+          "checksum": "b3fd68f1cf837a1d",
+          "median_ms": 66.96,
+          "samples_ms": [
+            63.66,
+            66.188,
+            67.425,
+            67.108,
+            66.96
+          ]
+        },
+        "4": {
+          "checksum": "b3fd68f1cf837a1d",
+          "median_ms": 65.278,
+          "samples_ms": [
+            67.378,
+            62.804,
+            65.278,
+            68.983,
+            62.575
+          ]
+        }
+      }
+    },
+    "spread": {
+      "region_entity_counts": [
+        1000,
+        1000,
+        1000,
+        1000,
+        1000,
+        1000,
+        1000,
+        1000,
+        1000,
+        1000,
+        1000,
+        1000
+      ],
+      "synthetic_transfer_proxy": {
+        "bytes_per_tick_proxy": 0,
+        "events_per_tick_assumed": 0,
+        "median_local_encode_decode_ms": 0
+      },
+      "workers": {
+        "1": {
+          "checksum": "b1b2a0b0c8f8536a",
+          "median_ms": 74.097,
+          "samples_ms": [
+            74.097,
+            74.398,
+            74.478,
+            73.436,
+            71.278
+          ]
+        },
+        "2": {
+          "checksum": "b1b2a0b0c8f8536a",
+          "median_ms": 40.278,
+          "samples_ms": [
+            40.545,
+            38.736,
+            40.278,
+            43.19,
+            39.582
+          ]
+        },
+        "4": {
+          "checksum": "b1b2a0b0c8f8536a",
+          "median_ms": 27.948,
+          "samples_ms": [
+            28.699,
+            28.268,
+            27.948,
+            26.86,
+            22.363
+          ]
+        }
+      }
+    }
+  }
+}
