@@ -1787,7 +1787,7 @@ fn handle_request(
         WireRequest::Membership(record) => {
             verify_membership_signature(&record)?;
             authorize_member(storage, record.world_id, record.authority_peer_id)?;
-            if let Ok(epoch) = storage.load_epoch_record(record.world_id) {
+            if let Some(epoch) = load_optional_epoch_record(storage, record.world_id)? {
                 if record.epoch > epoch.epoch_number {
                     return Err(anyhow!("membership cannot advance before its authority epoch is accepted"));
                 }
@@ -2671,7 +2671,7 @@ fn authorize_world_config_current_authority(
     if sender != config.authority_peer_id {
         return Err(anyhow!("world config sender does not match its signed authority"));
     }
-    if let Ok(epoch) = storage.load_epoch_record(config.world_id) {
+    if let Some(epoch) = load_optional_epoch_record(storage, config.world_id)? {
         if config.authority_peer_id != epoch.authority_peer_id
             || config.authority_public_key != epoch.authority_public_key
         {
@@ -2701,7 +2701,7 @@ fn authorize_manifest(storage: &Storage, sender: PeerId, manifest: &SnapshotMani
     }
     verify_snapshot_signature(manifest)?;
     storage.validate_replica_history(manifest)?;
-    if let Ok(epoch) = storage.load_epoch_record(manifest.world_id) {
+    if let Some(epoch) = load_optional_epoch_record(storage, manifest.world_id)? {
         if manifest.epoch != epoch.epoch_number
             || manifest.authority_peer_id != epoch.authority_peer_id
             || manifest.authority_public_key != epoch.authority_public_key
@@ -2838,7 +2838,7 @@ fn validate_transfer(storage: &Storage, transfer: &swarm_protocol::AuthorityTran
     if latest.manifest_hash()? != transfer.base_snapshot_hash {
         return Err(anyhow!("transfer does not reference the exact latest snapshot"));
     }
-    if let Ok(epoch) = storage.load_epoch_record(transfer.world_id) {
+    if let Some(epoch) = load_optional_epoch_record(storage, transfer.world_id)? {
         let expected = AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token }
             .checked_next()
             .context("accepted authority generation is exhausted")?;
@@ -2846,7 +2846,12 @@ fn validate_transfer(storage: &Storage, transfer: &swarm_protocol::AuthorityTran
             return Err(anyhow!("transfer generation does not advance the accepted epoch exactly once"));
         }
     }
-    if let Ok(previous) = storage.load_transfer_record(transfer.world_id) {
+    let previous = match storage.load_transfer_record(transfer.world_id) {
+        Ok(previous) => Some(previous),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(previous) = previous {
         let valid_progression = matches!(
             (previous.phase, transfer.phase),
             (TransferPhase::Prepared, TransferPhase::Accepted) | (TransferPhase::Accepted, TransferPhase::Committed)
