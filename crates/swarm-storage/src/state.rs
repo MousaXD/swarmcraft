@@ -1,5 +1,5 @@
 use crate::{
-    transaction::{durable_atomic_write, durable_remove},
+    transaction::{durable_atomic_write, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
 use serde::{Deserialize, Serialize};
@@ -68,7 +68,7 @@ impl Storage {
 
     pub fn load_recovery_promise(&self, world: WorldId) -> Result<DurableRecoveryPromiseV1, StorageError> {
         let path = self.control_path_v2(world, "recovery-promise.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let promise: DurableRecoveryPromiseV1 = postcard::from_bytes(&bytes)?;
         promise.ballot.validate_semantics()?;
         promise.vote.validate_semantics()?;
@@ -89,8 +89,12 @@ impl Storage {
         accepted_epoch: u64,
     ) -> Result<bool, StorageError> {
         let _guard = self.lock_world_transaction(world)?;
-        let Ok(promise) = self.load_recovery_promise(world) else {
-            return Ok(false);
+        let promise = match self.load_recovery_promise(world) {
+            Ok(promise) => promise,
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
         };
         if accepted_epoch < promise.ballot.target_epoch {
             return Ok(false);
@@ -116,8 +120,13 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
 
-        if let Ok(existing) = self.load_world_config(config.world_id) {
-            if config == existing {
+        let existing = match self.load_world_config(config.world_id) {
+            Ok(config) => Some(config),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(existing) = existing.as_ref() {
+            if config == *existing {
                 return Ok(());
             }
             if config.sequence <= existing.sequence {
@@ -131,7 +140,12 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
 
-        if let Ok(epoch) = self.load_epoch_record(config.world_id) {
+        let accepted_epoch = match self.load_epoch_record(config.world_id) {
+            Ok(epoch) => Some(epoch),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(epoch) = accepted_epoch.as_ref() {
             if config.authority_peer_id != epoch.authority_peer_id
                 || config.authority_public_key != epoch.authority_public_key
             {
@@ -152,7 +166,7 @@ impl Storage {
 
     pub fn load_world_config(&self, world: WorldId) -> Result<WorldConfigV1, StorageError> {
         let path = self.control_path_v2(world, "world-config.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let config: WorldConfigV1 = postcard::from_bytes(&bytes)?;
         if config.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -170,7 +184,7 @@ impl Storage {
 
     pub fn load_solo_branch(&self, world: WorldId) -> Result<SoloBranchV1, StorageError> {
         let path = self.control_path_v2(world, "solo-branch.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let branch: SoloBranchV1 = postcard::from_bytes(&bytes)?;
         if branch.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -227,7 +241,7 @@ impl Storage {
         if !path.exists() {
             return Ok(false);
         }
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         Ok(bytes == b"1\n")
     }
 
@@ -389,6 +403,27 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn dangling_recovery_promise_is_not_missing_state() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let (_, world) = test_world();
+        let store = Storage::open(temp.path()).unwrap();
+        let path = store.control_path_v2(world, "recovery-promise.postcard");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let target = path.with_extension("nonexistent");
+        symlink(&target, &path).unwrap();
+
+        let proposed = ballot(world, 2, 1);
+        assert!(matches!(
+            store.promise_recovery_ballot(&proposed, &vote(&proposed, 6)),
+            Err(StorageError::SymlinkUnsupported(actual)) if actual == path
+        ));
+        assert_eq!(fs::read_link(&path).unwrap(), target);
+    }
+
     #[test]
     fn corrupt_recovery_promise_cannot_be_overwritten_by_a_new_ballot() {
         let temp = tempfile::tempdir().unwrap();
@@ -474,6 +509,54 @@ mod tests {
         let current_authority = world_config(world, 7, 2, Some(previous));
         store.save_world_config(&current_authority).unwrap();
         assert_eq!(store.load_world_config(world).unwrap(), current_authority);
+    }
+
+    #[test]
+    fn corrupt_world_config_cannot_be_reinitialized_from_sequence_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let (genesis, world) = test_world();
+        let store = Storage::open(temp.path()).unwrap();
+        store
+            .create_world(&WorldMetadataV1 {
+                storage_schema_version: STORAGE_SCHEMA_VERSION,
+                display_name: "test".into(),
+                world_id: world,
+                genesis,
+            })
+            .unwrap();
+        store.save_membership_record(&bootstrap_membership(world)).unwrap();
+        let initial = world_config(world, 6, 1, None);
+        store.save_world_config(&initial).unwrap();
+        let path = store.control_path_v2(world, "world-config.postcard");
+        let corrupted = b"invalid signed world configuration";
+        fs::write(&path, corrupted).unwrap();
+
+        assert!(store.save_world_config(&initial).is_err());
+        assert_eq!(fs::read(&path).unwrap(), corrupted);
+    }
+
+    #[test]
+    fn corrupt_epoch_cannot_fall_back_to_bootstrap_world_config_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let (genesis, world) = test_world();
+        let store = Storage::open(temp.path()).unwrap();
+        store
+            .create_world(&WorldMetadataV1 {
+                storage_schema_version: STORAGE_SCHEMA_VERSION,
+                display_name: "test".into(),
+                world_id: world,
+                genesis,
+            })
+            .unwrap();
+        store.save_membership_record(&bootstrap_membership(world)).unwrap();
+        let epoch_path = store.world_dir(world).join("metadata/epoch.postcard");
+        let corrupted = b"invalid accepted epoch";
+        fs::write(&epoch_path, corrupted).unwrap();
+
+        let attempted = world_config(world, 6, 1, None);
+        assert!(store.save_world_config(&attempted).is_err());
+        assert_eq!(fs::read(&epoch_path).unwrap(), corrupted);
+        assert!(store.load_world_config(world).is_err());
     }
 
     #[test]

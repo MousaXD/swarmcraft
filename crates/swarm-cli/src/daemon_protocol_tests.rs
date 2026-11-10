@@ -130,6 +130,19 @@ fn config(fixture: &Fixture, signer: &PeerIdentity) -> WorldConfigV1 {
 }
 
 #[test]
+fn corrupt_membership_prepare_blocks_authority_and_recovery_transitions() {
+    let fixture = fixture();
+    assert!(ensure_no_membership_prepare(&fixture.storage, fixture.world).is_ok());
+
+    let path = fixture.storage.world_dir(fixture.world).join("metadata/membership-promise.postcard");
+    let corrupted = b"invalid membership prepare";
+    std::fs::write(&path, corrupted).unwrap();
+
+    assert!(ensure_no_membership_prepare(&fixture.storage, fixture.world).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), corrupted);
+}
+
+#[test]
 fn daemon_rejects_valid_non_authority_world_config() {
     let fixture = fixture();
     let malicious = config(&fixture, &fixture.member);
@@ -257,4 +270,247 @@ fn quorum_wake_is_bound_to_the_signed_sleep_generation_and_exact_snapshot() {
     wrong_snapshot.latest_snapshot_hash = Hash32([92; 32]);
     fixture.authority.sign_sleep_record(&mut wrong_snapshot).unwrap();
     assert!(validate_sleep_recovery_base(&wrong_snapshot, &epoch, &latest).is_err());
+}
+
+fn signed_recovery_ballot_and_vote(fixture: &Fixture) -> (RecoveryBallotV1, RecoveryVoteV1) {
+    let membership = fixture.storage.load_membership_record(fixture.world).unwrap();
+    let mut ballot = RecoveryBallotV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: fixture.world,
+        base_epoch: 0,
+        base_fencing_token: 0,
+        target_epoch: 1,
+        target_fencing_token: 1,
+        round: 7,
+        candidate_peer_id: fixture.authority.peer_id(),
+        candidate_public_key: fixture.authority.public_key(),
+        base_snapshot_hash: Hash32([67; 32]),
+        base_state_hash: Hash32([44; 32]),
+        membership_hash: membership.record_hash().unwrap(),
+        signature: Vec::new(),
+    };
+    sign_recovery_ballot(&fixture.authority, &mut ballot).unwrap();
+    let mut vote = RecoveryVoteV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: fixture.world,
+        ballot_hash: ballot.ballot_hash().unwrap(),
+        base_epoch: ballot.base_epoch,
+        target_epoch: ballot.target_epoch,
+        round: ballot.round,
+        candidate_peer_id: ballot.candidate_peer_id,
+        voter_peer_id: fixture.authority.peer_id(),
+        voter_public_key: fixture.authority.public_key(),
+        signature: Vec::new(),
+    };
+    sign_recovery_vote(&fixture.authority, &mut vote).unwrap();
+    (ballot, vote)
+}
+
+#[test]
+fn cached_recovery_ballot_must_match_readable_durable_promise_before_certification() {
+    let fixture = fixture();
+    let (ballot, vote) = signed_recovery_ballot_and_vote(&fixture);
+    assert!(matches!(
+        fixture.storage.promise_recovery_ballot(&ballot, &vote).unwrap(),
+        RecoveryPromiseResult::Accepted
+    ));
+    assert!(ensure_active_recovery_promise(&fixture.storage, &ballot).is_ok());
+    assert!(ensure_local_recovery_promise_allows_certificate(&fixture.storage, &ballot).is_ok());
+
+    let mut conflicting = ballot.clone();
+    conflicting.base_snapshot_hash = Hash32([92; 32]);
+    conflicting.signature.clear();
+    sign_recovery_ballot(&fixture.authority, &mut conflicting).unwrap();
+    assert!(ensure_local_recovery_promise_allows_certificate(&fixture.storage, &conflicting).is_err());
+
+    let promise_path = fixture.storage.world_dir(fixture.world).join("metadata/recovery-promise.postcard");
+    let corrupt = b"invalid durable recovery vote after quorum was in memory";
+    std::fs::write(&promise_path, corrupt).unwrap();
+    assert!(load_optional_recovery_promise(&fixture.storage, fixture.world).is_err());
+    assert!(ensure_active_recovery_promise(&fixture.storage, &ballot).is_err());
+    assert!(ensure_local_recovery_promise_allows_certificate(&fixture.storage, &ballot).is_err());
+    assert_eq!(std::fs::read(&promise_path).unwrap(), corrupt);
+    assert!(fixture.storage.load_recovery_certificate(fixture.world).is_err());
+    assert_eq!(fixture.storage.load_epoch_record(fixture.world).unwrap().epoch_number, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_durable_recovery_promise_rejects_inbound_certificate_and_cached_ballot() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = fixture();
+    let (ballot, vote) = signed_recovery_ballot_and_vote(&fixture);
+    fixture.storage.promise_recovery_ballot(&ballot, &vote).unwrap();
+    let promise_path = fixture.storage.world_dir(fixture.world).join("metadata/recovery-promise.postcard");
+    std::fs::remove_file(&promise_path).unwrap();
+    symlink(fixture._temp.path().join("missing-vote"), &promise_path).unwrap();
+
+    assert!(ensure_active_recovery_promise(&fixture.storage, &ballot).is_err());
+    assert!(ensure_local_recovery_promise_allows_certificate(&fixture.storage, &ballot).is_err());
+    assert!(std::fs::symlink_metadata(&promise_path).unwrap().file_type().is_symlink());
+    assert_eq!(fixture.storage.load_epoch_record(fixture.world).unwrap().epoch_number, 0);
+}
+
+#[test]
+fn corrupt_accepted_epoch_cannot_be_treated_as_missing_before_recovery_control_writes() {
+    let fixture = fixture();
+    assert_eq!(load_optional_epoch_record(&fixture.storage, fixture.world).unwrap().unwrap().epoch_number, 0);
+
+    let epoch_path = fixture.storage.world_dir(fixture.world).join("metadata/epoch.postcard");
+    let corrupt = b"invalid accepted epoch";
+    std::fs::write(&epoch_path, corrupt).unwrap();
+    assert!(load_optional_epoch_record(&fixture.storage, fixture.world).is_err());
+    assert_eq!(std::fs::read(&epoch_path).unwrap(), corrupt);
+    assert!(fixture.storage.load_recovery_certificate(fixture.world).is_err());
+
+    std::fs::remove_file(&epoch_path).unwrap();
+    assert!(load_optional_epoch_record(&fixture.storage, fixture.world).unwrap().is_none());
+}
+
+#[test]
+fn corrupt_epoch_blocks_config_snapshot_and_transfer_preflight() {
+    let fixture = fixture();
+    let source = fixture._temp.path().join("epoch-corruption-snapshots");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("level.dat"), b"accepted-state").unwrap();
+    let mut first = fixture
+        .storage
+        .snapshot_directory(
+            &source,
+            SnapshotContext {
+                world: fixture.world,
+                snapshot_number: 1,
+                epoch: 0,
+                sequence: 1,
+                previous_snapshot_hash: None,
+                authority_peer_id: fixture.authority.peer_id(),
+                authority_public_key: fixture.authority.public_key(),
+            },
+        )
+        .unwrap();
+    fixture.authority.sign_snapshot(&mut first).unwrap();
+    fixture.storage.commit_snapshot(&first).unwrap();
+
+    let mut transfer = swarm_protocol::AuthorityTransferV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: fixture.world,
+        from_peer_id: fixture.authority.peer_id(),
+        to_peer_id: fixture.member.peer_id(),
+        base_snapshot_hash: first.manifest_hash().unwrap(),
+        next_epoch: 1,
+        next_fencing_token: 1,
+        phase: TransferPhase::Prepared,
+        signer_peer_id: fixture.authority.peer_id(),
+        signer_public_key: fixture.authority.public_key(),
+        signature: Vec::new(),
+    };
+    fixture.authority.sign_transfer(&mut transfer).unwrap();
+
+    std::fs::write(source.join("level.dat"), b"next-replicated-state").unwrap();
+    let mut second = fixture
+        .storage
+        .snapshot_directory(
+            &source,
+            SnapshotContext {
+                world: fixture.world,
+                snapshot_number: 2,
+                epoch: 0,
+                sequence: 2,
+                previous_snapshot_hash: Some(first.manifest_hash().unwrap()),
+                authority_peer_id: fixture.authority.peer_id(),
+                authority_public_key: fixture.authority.public_key(),
+            },
+        )
+        .unwrap();
+    fixture.authority.sign_snapshot(&mut second).unwrap();
+
+    let legitimate = config(&fixture, &fixture.authority);
+    assert!(
+        authorize_world_config_current_authority(&fixture.storage, fixture.authority.peer_id(), &legitimate).is_ok()
+    );
+    assert!(authorize_manifest(&fixture.storage, fixture.authority.peer_id(), &second).is_ok());
+    assert!(validate_transfer(&fixture.storage, &transfer).is_ok());
+
+    let epoch_path = fixture.storage.world_dir(fixture.world).join("metadata/epoch.postcard");
+    let corrupt = b"corrupt accepted authority epoch";
+    std::fs::write(&epoch_path, corrupt).unwrap();
+
+    assert!(
+        authorize_world_config_current_authority(&fixture.storage, fixture.authority.peer_id(), &legitimate).is_err()
+    );
+    assert!(authorize_manifest(&fixture.storage, fixture.authority.peer_id(), &second).is_err());
+    assert!(validate_transfer(&fixture.storage, &transfer).is_err());
+    assert_eq!(std::fs::read(&epoch_path).unwrap(), corrupt);
+    assert!(fixture.storage.load_transfer_record(fixture.world).is_err());
+}
+
+#[test]
+fn corrupt_previous_transfer_cannot_be_replaced_by_new_prepared_transfer() {
+    let fixture = fixture();
+    let source = fixture._temp.path().join("transfer-corruption-source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("level.dat"), b"transfer-canonical-base").unwrap();
+    let mut first = fixture
+        .storage
+        .snapshot_directory(
+            &source,
+            SnapshotContext {
+                world: fixture.world,
+                snapshot_number: 1,
+                epoch: 0,
+                sequence: 1,
+                previous_snapshot_hash: None,
+                authority_peer_id: fixture.authority.peer_id(),
+                authority_public_key: fixture.authority.public_key(),
+            },
+        )
+        .unwrap();
+    fixture.authority.sign_snapshot(&mut first).unwrap();
+    fixture.storage.commit_snapshot(&first).unwrap();
+
+    let mut transfer = swarm_protocol::AuthorityTransferV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: fixture.world,
+        from_peer_id: fixture.authority.peer_id(),
+        to_peer_id: fixture.member.peer_id(),
+        base_snapshot_hash: first.manifest_hash().unwrap(),
+        next_epoch: 1,
+        next_fencing_token: 1,
+        phase: TransferPhase::Prepared,
+        signer_peer_id: fixture.authority.peer_id(),
+        signer_public_key: fixture.authority.public_key(),
+        signature: Vec::new(),
+    };
+    fixture.authority.sign_transfer(&mut transfer).unwrap();
+    fixture.storage.save_transfer_record(&transfer).unwrap();
+
+    let transfer_path = fixture.storage.world_dir(fixture.world).join("metadata/transfer.postcard");
+    let corrupt = b"corrupt previously prepared authority transfer";
+    std::fs::write(&transfer_path, corrupt).unwrap();
+    assert!(validate_transfer(&fixture.storage, &transfer).is_err());
+    assert_eq!(std::fs::read(&transfer_path).unwrap(), corrupt);
+}
+
+#[test]
+fn tampered_durable_recovery_signatures_block_cached_and_inbound_authority() {
+    let fixture = fixture();
+    let (ballot, vote) = signed_recovery_ballot_and_vote(&fixture);
+    fixture.storage.promise_recovery_ballot(&ballot, &vote).unwrap();
+    let original = fixture.storage.load_recovery_promise(fixture.world).unwrap();
+    let path = fixture.storage.world_dir(fixture.world).join("metadata/recovery-promise.postcard");
+
+    let mut broken_vote = original.clone();
+    broken_vote.vote.signature[0] ^= 0x55;
+    std::fs::write(&path, postcard::to_allocvec(&broken_vote).unwrap()).unwrap();
+    assert!(ensure_active_recovery_promise(&fixture.storage, &ballot).is_err());
+    assert!(ensure_local_recovery_promise_allows_certificate(&fixture.storage, &ballot).is_err());
+
+    let mut broken_ballot = original;
+    broken_ballot.ballot.signature[0] ^= 0x55;
+    std::fs::write(&path, postcard::to_allocvec(&broken_ballot).unwrap()).unwrap();
+    assert!(ensure_active_recovery_promise(&fixture.storage, &ballot).is_err());
+    assert!(ensure_local_recovery_promise_allows_certificate(&fixture.storage, &ballot).is_err());
+    assert_eq!(fixture.storage.load_epoch_record(fixture.world).unwrap().epoch_number, 0);
+    assert!(fixture.storage.load_recovery_certificate(fixture.world).is_err());
 }
