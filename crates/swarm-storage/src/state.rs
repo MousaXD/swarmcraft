@@ -89,8 +89,12 @@ impl Storage {
         accepted_epoch: u64,
     ) -> Result<bool, StorageError> {
         let _guard = self.lock_world_transaction(world)?;
-        let Ok(promise) = self.load_recovery_promise(world) else {
-            return Ok(false);
+        let promise = match self.load_recovery_promise(world) {
+            Ok(promise) => promise,
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
         };
         if accepted_epoch < promise.ballot.target_epoch {
             return Ok(false);
