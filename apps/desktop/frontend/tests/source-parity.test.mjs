@@ -121,6 +121,18 @@ test('candidate Diagnostics navigation is visible despite the legacy wizard rule
     'Installed WebKitGTK must click the real visible Diagnostics navigation');
   assert.ok(nativeAcceptance.includes('identityNavigationVisible'),
     'Native acceptance must prove navigation is visible before clicking it');
+  const hybridExperience = await source('../../src/player-experience.js');
+  assert.ok(hybridExperience.includes("details.id = 'advancedNavigation'"),
+    'Hybrid player controller currently owns the Tools disclosure');
+  assert.ok(hybridExperience.includes('body.append(activity, diagnostics)'),
+    'Diagnostics still moves under the Tools disclosure before full Svelte cutover');
+  assert.ok(nativeAcceptance.includes('app.click("#advancedNavigation > summary")'),
+    'Native acceptance must open the real Tools disclosure, not click a hidden child');
+  assert.ok(nativeAcceptance.includes("assert opened['identityToolsOpen']"),
+    'Native acceptance must prove the Tools disclosure actually expanded');
+  assert.ok(nativeAcceptance.indexOf('app.click("#advancedNavigation > summary")') <
+    nativeAcceptance.indexOf('app.click("#navDiagnostics")'),
+    'Expand Tools before clicking the real Diagnostics control');
 });
 
 test('Svelte create journey invokes exactly one native create without legacy double submit', async () => {
