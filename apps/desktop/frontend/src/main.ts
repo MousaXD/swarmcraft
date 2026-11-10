@@ -4,6 +4,7 @@ import App from './App.svelte';
 import '../../src/style.css';
 import '../../src/player-experience.css';
 import '../../src/runtime-wizard.css';
+import './candidate-navigation.css';
 
 const target = document.getElementById('app');
 if (!target) throw new Error('SwarmCraft desktop mount target is missing.');
