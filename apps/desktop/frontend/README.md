@@ -47,3 +47,14 @@ Native visual acceptance writes `failure.json` with a safe stage label, coarse e
 ### Verified identity vs device setup
 
 The candidate's `Refresh identity` control reads the existing Rust Tauri `node_identity` command; it never generates peer IDs in JavaScript. Legacy startup and device setup can publish their actual results to the Svelte identity display without adding a second startup coordinator. An `initialize_node` response is displayed as setup progress, **not proof that a peer identity was verified**. If the native read fails, details are redacted from the renderer. The legacy production frontend remains unchanged in ownership and is preserved until Agent 00 authorizes the final cutover.
+
+
+### Candidate-only Diagnostics visibility
+
+The shipping legacy runtime wizard stylesheet hides `#navDiagnostics`.
+The Svelte candidate keeps legacy styles for parity but imports
+`src/candidate-navigation.css` last to expose its actual Svelte-owned
+Diagnostics action. The source-parity test checks this ordering, and the
+installed WebKitGTK acceptance verifies the real navigation is visible and
+clickable before invoking Rust-backed `node_identity`. A successful Vite
+build or the earlier legacy GUI smoke does not certify this native interaction.
