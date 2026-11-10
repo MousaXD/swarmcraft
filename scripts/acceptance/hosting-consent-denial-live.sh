@@ -81,7 +81,9 @@ print("true" if java.get("managed") else "false")
 # Execute real public runtime in an isolated process group. Timeouts fail,
 # with cleanup; no synthetic JVM, mocked admission, or silently ignored errors.
 denied_launch() {
-  python3 - "$RUNTIME" "$DATA" "$WORLD" "$LOG/$1" <<'PY'
+  local case_name="$1"
+  local target_world="$2"
+  python3 - "$RUNTIME" "$DATA" "$target_world" "$LOG/$case_name" <<'PY'
 import os, signal, subprocess, sys, time
 runtime, data, world, log = sys.argv[1:]
 p = subprocess.Popen([runtime, "--data-dir", data, "launch", world],
@@ -137,21 +139,63 @@ PY
 }
 
 printf '== missing consent must deny actual runtime launch ==\n'
-denied_launch absent
+denied_launch absent "$WORLD"
 AFTER_INSTALL="$("$CLI" --data-dir "$DATA" world hosting status "$WORLD" --json)"
 [[ "$(field selected_heap_mib <<<"$AFTER_INSTALL")" == 0 ]] ||
   fail "EULA or runtime installation implicitly opted into hosting"
 
-printf '== explicit zero heap must deny actual runtime launch ==\n'
-"$CLI" --data-dir "$DATA" world hosting set "$WORLD" --heap-mib 0 >"$LOG/set-zero.txt"
-ZERO="$("$CLI" --data-dir "$DATA" world hosting status "$WORLD" --json)"
+# Complete the first case before using a distinct world. This ensures that
+# any failed-state bookkeeping cannot affect the explicit-zero negative case.
+"$CLI" --data-dir "$DATA" world verify "$WORLD" >"$LOG/absent-world-verify.txt"
+ABSENT_AFTER_SNAPSHOT="$("$CLI" --data-dir "$DATA" world status "$WORLD" |
+  sed -n 's/^Latest snapshot: //p' | tail -n1)"
+[[ "$ABSENT_AFTER_SNAPSHOT" == "$INITIAL_SNAPSHOT" ]] ||
+  fail "absent-consent denial unexpectedly advanced canonical snapshot history"
+
+printf '== explicit zero heap must deny a separately prepared real runtime ==\n'
+ZERO_CREATE="$("$CLI" --data-dir "$DATA" world create \
+  --name 'Explicit Zero-MiB Hosting Denial' --minecraft 26.1.2 \
+  --fabric-loader 0.19.3 --compatibility vanilla-fabric --visibility private)"
+ZERO_WORLD="$(sed -n 's/^World ID: //p' <<<"$ZERO_CREATE" | tail -n1)"
+[[ "$ZERO_WORLD" == scworld:* && "$ZERO_WORLD" != "$WORLD" ]] ||
+  fail "zero-consent fixture must have a distinct real world identity"
+ZERO_INITIAL_SNAPSHOT="$("$CLI" --data-dir "$DATA" world status "$ZERO_WORLD" |
+  sed -n 's/^Latest snapshot: //p' | tail -n1)"
+[[ "$ZERO_INITIAL_SNAPSHOT" =~ ^[0-9]+$ ]] ||
+  fail "zero-consent world did not establish an initial canonical snapshot"
+ZERO_DEFAULT="$("$CLI" --data-dir "$DATA" world hosting status "$ZERO_WORLD" --json)"
+[[ "$(field selected_heap_mib <<<"$ZERO_DEFAULT")" == 0 ]] ||
+  fail "second world unexpectedly received a nonzero initial heap"
+[[ "$(field consented <<<"$ZERO_DEFAULT")" == false ]] ||
+  fail "second world was implicitly opted into hosting"
+
+# Zero is a deliberate public CLI action; never edit consent JSON directly.
+"$CLI" --data-dir "$DATA" world hosting set "$ZERO_WORLD" --heap-mib 0 >"$LOG/set-zero.txt"
+ZERO="$("$CLI" --data-dir "$DATA" world hosting status "$ZERO_WORLD" --json)"
 [[ "$(field selected_heap_mib <<<"$ZERO")" == 0 ]] || fail "zero MiB did not persist"
 [[ "$(field consented <<<"$ZERO")" == false ]] || fail "zero MiB still consented"
 [[ "$(field may_host_now <<<"$ZERO")" == false ]] || fail "zero MiB reported eligible"
-denied_launch zero
-"$CLI" --data-dir "$DATA" world verify "$WORLD" >"$LOG/world-verify.txt"
-AFTER_SNAPSHOT="$("$CLI" --data-dir "$DATA" world status "$WORLD" |
+
+# Prepare real Java/Fabric plus explicit EULA for this second world, so a
+# denied launch cannot be excused by missing components or EULA refusal.
+"$RUNTIME" --data-dir "$DATA" plan "$ZERO_WORLD" >"$LOG/zero-plan.json"
+"$RUNTIME" --data-dir "$DATA" install "$ZERO_WORLD" --accept-eula >"$LOG/zero-install.json"
+ZERO_VERIFY="$("$RUNTIME" --data-dir "$DATA" verify "$ZERO_WORLD")"
+[[ "$(field ready <<<"$ZERO_VERIFY")" == true ]] || fail "zero-consent runtime not ready"
+[[ "$(field eula_accepted <<<"$ZERO_VERIFY")" == true ]] ||
+  fail "zero-consent runtime EULA not explicitly accepted"
+[[ "$(field launch_configured <<<"$ZERO_VERIFY")" == true ]] ||
+  fail "zero-consent launch not configured"
+ZERO_AFTER_INSTALL="$("$CLI" --data-dir "$DATA" world hosting status "$ZERO_WORLD" --json)"
+[[ "$(field selected_heap_mib <<<"$ZERO_AFTER_INSTALL")" == 0 ]] ||
+  fail "zero heap changed during managed runtime installation"
+[[ "$(field consented <<<"$ZERO_AFTER_INSTALL")" == false ]] ||
+  fail "managed runtime installation implicitly opted in zero-consent world"
+denied_launch zero "$ZERO_WORLD"
+
+"$CLI" --data-dir "$DATA" world verify "$ZERO_WORLD" >"$LOG/zero-world-verify.txt"
+ZERO_AFTER_SNAPSHOT="$("$CLI" --data-dir "$DATA" world status "$ZERO_WORLD" |
   sed -n 's/^Latest snapshot: //p' | tail -n1)"
-[[ "$AFTER_SNAPSHOT" == "$INITIAL_SNAPSHOT" ]] ||
-  fail "launch denial unexpectedly advanced canonical snapshot history"
-echo "HOSTING_CONSENT_NEGATIVE_PASS world=$WORLD cases=absent,zero real_runtime=true managed_java=true snapshots_unchanged=true"
+[[ "$ZERO_AFTER_SNAPSHOT" == "$ZERO_INITIAL_SNAPSHOT" ]] ||
+  fail "zero-consent denial unexpectedly advanced canonical snapshot history"
+echo "HOSTING_CONSENT_NEGATIVE_PASS worlds=$WORLD,$ZERO_WORLD cases=absent,zero real_runtime=true managed_java=true snapshots_unchanged=true"
