@@ -29,6 +29,7 @@ SAFE_BOOL_KEYS = frozenset({
     'closed', 'stillSelected', 'worldStillListed',
     'identityOwned', 'identityVerified', 'identityNotEmpty', 'identityRefreshFinished',
     'identityNavigationVisible', 'identityNativeConfirmed',
+    'identityToolsPresent', 'identityToolsOpen',
 })
 SAFE_INT_KEYS = frozenset({
     'width', 'height', 'rootScrollWidth', 'paneScrollWidth',
@@ -158,9 +159,32 @@ def run(binary: Path, artifacts: Path):
         # a verified Rust-backed identity. The evidence records flags only:
         # never return or screenshot the peer's canonical identity bytes.
         mark_stage('native-identity-refresh')
-        # The legacy runtime wizard hides #navDiagnostics. The Svelte
-        # candidate must override that rule: test actual computed visibility
-        # before using a native click (never trigger the button via JavaScript).
+        # The still-delegated player-experience controller moves Activity and
+        # Diagnostics inside the collapsed #advancedNavigation <details>
+        # ("Tools"). Open the real disclosure through native WebDriver first.
+        # A synthetic JavaScript click on the hidden button would bypass the
+        # user's actual navigation and leave a release regression undetected.
+        tools = app.execute("""
+          const menu = document.getElementById('advancedNavigation');
+          return {
+            identityToolsPresent: menu?.tagName === 'DETAILS',
+            identityToolsOpen: menu?.open === true,
+          };
+        """)
+        record_ui(tools)
+        assert tools['identityToolsPresent'], (
+            "Installed hybrid desktop must expose the real Tools disclosure"
+        )
+        if not tools['identityToolsOpen']:
+            app.click("#advancedNavigation > summary")
+        opened = app.execute("""
+          return { identityToolsOpen: document.getElementById('advancedNavigation')?.open === true };
+        """)
+        record_ui(opened)
+        assert opened['identityToolsOpen'], "Native Tools navigation did not expand"
+        # The legacy runtime wizard also hides #navDiagnostics in its own CSS.
+        # The Svelte candidate's specific override must win after expansion.
+        # Check computed visibility before the real native WebDriver click.
         navigation = app.execute("""
           const nav = document.getElementById('navDiagnostics');
           const rect = nav?.getBoundingClientRect();
