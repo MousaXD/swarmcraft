@@ -28,6 +28,7 @@ SAFE_BOOL_KEYS = frozenset({
     'createEnabled', 'formVisible', 'dialogOpen', 'owned', 'enabled',
     'closed', 'stillSelected', 'worldStillListed',
     'identityOwned', 'identityVerified', 'identityNotEmpty', 'identityRefreshFinished',
+    'identityNavigationVisible',
 })
 SAFE_INT_KEYS = frozenset({
     'width', 'height', 'rootScrollWidth', 'paneScrollWidth',
@@ -157,6 +158,23 @@ def run(binary: Path, artifacts: Path):
         # a verified Rust-backed identity. The evidence records flags only:
         # never return or screenshot the peer's canonical identity bytes.
         mark_stage('native-identity-refresh')
+        # The legacy runtime wizard hides #navDiagnostics. The Svelte
+        # candidate must override that rule: test actual computed visibility
+        # before using a native click (never trigger the button via JavaScript).
+        navigation = app.execute("""
+          const nav = document.getElementById('navDiagnostics');
+          const rect = nav?.getBoundingClientRect();
+          return {
+            identityNavigationVisible: !!nav && getComputedStyle(nav).display !== 'none'
+              && !!rect && rect.width > 0 && rect.height > 0
+              && rect.left >= 0 && rect.top >= 0
+              && rect.right <= window.innerWidth + 2 && rect.bottom <= window.innerHeight + 2
+          };
+        """)
+        record_ui(navigation)
+        assert navigation['identityNavigationVisible'], (
+            "Installed Svelte Diagnostics navigation must be visibly reachable"
+        )
         app.click("#navDiagnostics")
         identity_owner = app.execute("""
           return window.__swarmcraftSvelteIdentityOwned === true;
