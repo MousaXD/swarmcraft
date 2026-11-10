@@ -117,9 +117,12 @@ migration is durably committed, all authority admission gates pass and a
 fresh V2 fenced lease exists. The source archive remains immutable and
 user-visible, with no automatic rollback from V2 to V1.
 
-The historical consensus `validate_policy_commitment_intent` helper and
-`PolicyCommitmentIntent` struct are now **test-only** to prevent production
-callers from treating their positive V1 same-ID shape result as activation.
+The historical consensus `validate_policy_commitment_intent`,
+`PolicyCommitmentIntent`, and `validate_policy_vote_quorum_shape` helpers
+are now **test-only**: neither a positive same-ID shape check nor a
+majority-shaped voter array can be called by production code as migration
+authorization. An independent cryptographic V1/joint signed quorum
+certificate verifier is still required.
 `check_distinct_authority_realm` refuses same-ID or empty source/target
 identities, but its success **also** does not verify source signatures,
 quorum, source snapshot, target policy or durable uniqueness.
