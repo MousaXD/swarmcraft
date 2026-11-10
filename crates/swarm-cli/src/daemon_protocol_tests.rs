@@ -271,3 +271,83 @@ fn quorum_wake_is_bound_to_the_signed_sleep_generation_and_exact_snapshot() {
     fixture.authority.sign_sleep_record(&mut wrong_snapshot).unwrap();
     assert!(validate_sleep_recovery_base(&wrong_snapshot, &epoch, &latest).is_err());
 }
+
+fn signed_recovery_ballot_and_vote(fixture: &Fixture) -> (RecoveryBallotV1, RecoveryVoteV1) {
+    let membership = fixture.storage.load_membership_record(fixture.world).unwrap();
+    let mut ballot = RecoveryBallotV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: fixture.world,
+        base_epoch: 0,
+        base_fencing_token: 0,
+        target_epoch: 1,
+        target_fencing_token: 1,
+        round: 7,
+        candidate_peer_id: fixture.authority.peer_id(),
+        candidate_public_key: fixture.authority.public_key(),
+        base_snapshot_hash: Hash32([67; 32]),
+        base_state_hash: Hash32([44; 32]),
+        membership_hash: membership.record_hash().unwrap(),
+        signature: Vec::new(),
+    };
+    sign_recovery_ballot(&fixture.authority, &mut ballot).unwrap();
+    let mut vote = RecoveryVoteV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: fixture.world,
+        ballot_hash: ballot.ballot_hash().unwrap(),
+        base_epoch: ballot.base_epoch,
+        target_epoch: ballot.target_epoch,
+        round: ballot.round,
+        candidate_peer_id: ballot.candidate_peer_id,
+        voter_peer_id: fixture.authority.peer_id(),
+        voter_public_key: fixture.authority.public_key(),
+        signature: Vec::new(),
+    };
+    sign_recovery_vote(&fixture.authority, &mut vote).unwrap();
+    (ballot, vote)
+}
+
+#[test]
+fn cached_recovery_ballot_must_match_readable_durable_promise_before_certification() {
+    let fixture = fixture();
+    let (ballot, vote) = signed_recovery_ballot_and_vote(&fixture);
+    assert!(matches!(
+        fixture.storage.promise_recovery_ballot(&ballot, &vote).unwrap(),
+        RecoveryPromiseResult::Accepted
+    ));
+    assert!(ensure_active_recovery_promise(&fixture.storage, &ballot).is_ok());
+    assert!(ensure_local_recovery_promise_allows_certificate(&fixture.storage, &ballot).is_ok());
+
+    let mut conflicting = ballot.clone();
+    conflicting.base_snapshot_hash = Hash32([92; 32]);
+    conflicting.signature.clear();
+    sign_recovery_ballot(&fixture.authority, &mut conflicting).unwrap();
+    assert!(ensure_local_recovery_promise_allows_certificate(&fixture.storage, &conflicting).is_err());
+
+    let promise_path = fixture.storage.world_dir(fixture.world).join("metadata/recovery-promise.postcard");
+    let corrupt = b"invalid durable recovery vote after quorum was in memory";
+    std::fs::write(&promise_path, corrupt).unwrap();
+    assert!(load_optional_recovery_promise(&fixture.storage, fixture.world).is_err());
+    assert!(ensure_active_recovery_promise(&fixture.storage, &ballot).is_err());
+    assert!(ensure_local_recovery_promise_allows_certificate(&fixture.storage, &ballot).is_err());
+    assert_eq!(std::fs::read(&promise_path).unwrap(), corrupt);
+    assert!(fixture.storage.load_recovery_certificate(fixture.world).is_err());
+    assert_eq!(fixture.storage.load_epoch_record(fixture.world).unwrap().epoch_number, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_durable_recovery_promise_rejects_inbound_certificate_and_cached_ballot() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = fixture();
+    let (ballot, vote) = signed_recovery_ballot_and_vote(&fixture);
+    fixture.storage.promise_recovery_ballot(&ballot, &vote).unwrap();
+    let promise_path = fixture.storage.world_dir(fixture.world).join("metadata/recovery-promise.postcard");
+    std::fs::remove_file(&promise_path).unwrap();
+    symlink(fixture._temp.path().join("missing-vote"), &promise_path).unwrap();
+
+    assert!(ensure_active_recovery_promise(&fixture.storage, &ballot).is_err());
+    assert!(ensure_local_recovery_promise_allows_certificate(&fixture.storage, &ballot).is_err());
+    assert!(std::fs::symlink_metadata(&promise_path).unwrap().file_type().is_symlink());
+    assert_eq!(fixture.storage.load_epoch_record(fixture.world).unwrap().epoch_number, 0);
+}
