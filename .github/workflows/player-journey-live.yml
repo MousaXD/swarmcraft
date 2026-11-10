@@ -46,16 +46,43 @@ jobs:
           SWARMCRAFT_ACCEPTANCE_LOG_DIR: ${{ runner.temp }}/swarmcraft-clean-machine-logs
         run: |
           set -euo pipefail
-          # setup-java is needed to build the candidate Fabric artifact, but the
-          # player journey must not inherit that compatible JVM. A base OS PATH
-          # forces Runtime Installer to exercise managed-Java resolution.
-          env -u JAVA_HOME \
-            PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-            SWARMCRAFT_FABRIC_MOD_JAR="$SWARMCRAFT_FABRIC_MOD_JAR" \
-            SWARMCRAFT_ACCEPTANCE_KEEP_DATA="$SWARMCRAFT_ACCEPTANCE_KEEP_DATA" \
-            SWARMCRAFT_ACCEPTANCE_DATA_DIR="$SWARMCRAFT_ACCEPTANCE_DATA_DIR" \
-            SWARMCRAFT_ACCEPTANCE_LOG_DIR="$SWARMCRAFT_ACCEPTANCE_LOG_DIR" \
-            bash scripts/acceptance/clean-machine-live.sh
+          # Each attempt MUST start from a genuinely empty data directory and
+          # install the official managed Java/Minecraft/Fabric artifacts itself.
+          # Never retry a product assertion, checksum failure or other non-504
+          # error as if it were an infrastructure outage.
+          for attempt in 1 2 3 4; do
+            data="$SWARMCRAFT_ACCEPTANCE_DATA_DIR/attempt-$attempt"
+            logs="$SWARMCRAFT_ACCEPTANCE_LOG_DIR/attempt-$attempt"
+            mkdir -p "$logs"
+            console="$logs/console.log"
+            echo "Live player journey attempt $attempt/4 (fresh state)"
+            if env -u JAVA_HOME \
+                PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+                SWARMCRAFT_FABRIC_MOD_JAR="$SWARMCRAFT_FABRIC_MOD_JAR" \
+                SWARMCRAFT_ACCEPTANCE_KEEP_DATA=1 \
+                SWARMCRAFT_ACCEPTANCE_DATA_DIR="$data" \
+                SWARMCRAFT_ACCEPTANCE_LOG_DIR="$logs" \
+                bash scripts/acceptance/clean-machine-live.sh 2>&1 | tee "$console"; then
+              grep -q '^CLEAN_MACHINE_LIVE_PASS ' "$console" || {
+                echo "Live journey returned success without required success marker" >&2
+                exit 1
+              }
+              exit 0
+            fi
+            # Only a terminal transient curl response authorizes fresh-state
+            # retry. Earlier recovered errors cannot hide later product errors.
+            terminal="$(grep -Ev '^(Preserved acceptance (data|logs):|[[:space:]]*$)' "$console" | tail -n 1)"
+            if ! grep -Eq '^curl: \(22\) The requested URL returned error: (429|500|502|503|504)$' <<<"$terminal"; then
+              echo "Live journey terminal failure is not an upstream HTTP response; failing closed" >&2
+              exit 1
+            fi
+            if [ "$attempt" -eq 4 ]; then
+              echo "Official artifact HTTP outage persisted across all four fresh-state attempts" >&2
+              exit 1
+            fi
+            echo "Official artifact HTTP error; bounded retry with fresh clean-machine state"
+            sleep $((5 * attempt * attempt))
+          done
       - name: Upload clean-machine evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
