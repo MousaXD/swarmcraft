@@ -102,6 +102,27 @@ test('native responsiveness guards prevent horizontal scrollers and min-window r
   assert.ok(workflow.includes('visual-window-acceptance.py'));
 });
 
+test('candidate Diagnostics navigation is visible despite the legacy wizard rule', async () => {
+  const [legacyCss, overrideCss, entry, sidebar, nativeAcceptance] = await Promise.all([
+    source('../../src/runtime-wizard.css'),
+    source('../src/candidate-navigation.css'),
+    source('../src/main.ts'),
+    source('../src/components/Sidebar.svelte'),
+    source('../scripts/visual-window-acceptance.py'),
+  ]);
+  assert.match(legacyCss, /#navDiagnostics\s*\{\s*display:\s*none\s*;/);
+  assert.match(overrideCss, /#navDiagnostics\s*\{\s*display:\s*flex\s*;/);
+  const legacyIndex = entry.indexOf("import '../../src/runtime-wizard.css';");
+  const overrideIndex = entry.indexOf("import './candidate-navigation.css';");
+  assert.ok(legacyIndex >= 0 && overrideIndex > legacyIndex,
+    'Svelte candidate override must load AFTER the legacy rule, never change shipping styling');
+  assert.match(sidebar, /id="navDiagnostics"/);
+  assert.ok(nativeAcceptance.includes('app.click("#navDiagnostics")'),
+    'Installed WebKitGTK must click the real visible Diagnostics navigation');
+  assert.ok(nativeAcceptance.includes('identityNavigationVisible'),
+    'Native acceptance must prove navigation is visible before clicking it');
+});
+
 test('Svelte create journey invokes exactly one native create without legacy double submit', async () => {
   const [create, app, root, bridge] = await Promise.all([
     source('../src/components/CreateWorldView.svelte'),
