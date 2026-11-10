@@ -152,3 +152,32 @@ A new Python `test_visual_failure_evidence.py` injects sentinel invite tokens, p
 ## Native real-IPC Svelte identity refresh acceptance
 
 The candidate WebKitGTK test now opens Diagnostics and activates the actual Svelte Refresh identity control against the installed application's unmocked Tauri `node_identity` IPC. It requires the Svelte ownership flag, a verified `ready` identity phase and the refresh button returning to a non-busy state. Only Boolean observations are retained; the canonical peer identity is neither returned as a test result nor recorded in artifacts. Source parity checks that the Svelte element exposes honest phase/busy state and the test calls this real user path. All claims remain conditional on exact-head native job success; this does not replace multi-device or full feature-parity certification.
+
+
+## 2026-11-10: Candidate-only Diagnostics navigation defect (native blocker)
+
+At source `be9d2eac5048d2b00f27d7b9d63052a584cf6408`, installed WebKitGTK run
+[42509494937](https://github.com/MousaXD/swarmcraft/actions/runs/42509494937)
+passed initial native Create/relaunch/persistence and both layout windows, but failed
+at `native-identity-refresh` before writing any identity observation. The
+allowlisted `failure.json` contained `stage=native-identity-refresh`,
+`category=native-driver-or-runtime`, `ui={}`; it does **not** establish
+that the Rust `node_identity` command failed.
+
+Root cause in candidate source: `frontend/src/main.ts` imported legacy
+`../src/runtime-wizard.css`, whose `#navDiagnostics { display: none; }`
+hid the actual Svelte Diagnostics navigation. The candidate now imports
+`frontend/src/candidate-navigation.css` **after** the legacy styles to make
+the button visible, without changing shipping CSS or production Tauri config.
+Source parity asserts both the rule and ordering. Native GUI acceptance now
+checks computed Diagnostics visibility and screen bounds, records only the
+allowlisted `identityNavigationVisible` boolean, **clicks the real visible
+button**, and still requires Rust-backed identity phase, value presence and
+non-busy completion. No simulated UI or weakened gate.
+
+**Certification status:** fix committed on the existing draft branch;
+new exact-head Svelte source, Linux installed positive and both negative
+controls, and three-OS candidate packaging **must pass** before this slice is
+certified. The remaining delegated world list, runtime/catalog/mods, hosting,
+authority/transfer and recovery actions are not independently Svelte-owned.
+Do not merge PR #94 or close #87; Agent 00 must approve any shipping cutover.
