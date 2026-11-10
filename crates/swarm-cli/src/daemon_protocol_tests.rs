@@ -351,3 +351,22 @@ fn dangling_durable_recovery_promise_rejects_inbound_certificate_and_cached_ball
     assert!(std::fs::symlink_metadata(&promise_path).unwrap().file_type().is_symlink());
     assert_eq!(fixture.storage.load_epoch_record(fixture.world).unwrap().epoch_number, 0);
 }
+
+#[test]
+fn corrupt_accepted_epoch_cannot_be_treated_as_missing_before_recovery_control_writes() {
+    let fixture = fixture();
+    assert_eq!(
+        load_optional_epoch_record(&fixture.storage, fixture.world).unwrap().unwrap().epoch_number,
+        0
+    );
+
+    let epoch_path = fixture.storage.world_dir(fixture.world).join("metadata/epoch.postcard");
+    let corrupt = b"invalid accepted epoch";
+    std::fs::write(&epoch_path, corrupt).unwrap();
+    assert!(load_optional_epoch_record(&fixture.storage, fixture.world).is_err());
+    assert_eq!(std::fs::read(&epoch_path).unwrap(), corrupt);
+    assert!(fixture.storage.load_recovery_certificate(fixture.world).is_err());
+
+    std::fs::remove_file(&epoch_path).unwrap();
+    assert!(load_optional_epoch_record(&fixture.storage, fixture.world).unwrap().is_none());
+}
