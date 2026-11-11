@@ -479,7 +479,7 @@ def run(binary: Path, artifacts: Path):
             for _ in range(20):
                 summary_on_screen = app.execute("""
                   const summary = document.querySelector('#selectionContent details.danger-zone > summary');
-                  summary?.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
+                  if (summary) summary.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
                   const rect = summary?.getBoundingClientRect();
                   return {
                     leaveSummaryOnScreen: !!rect && rect.width > 0 && rect.height > 0
