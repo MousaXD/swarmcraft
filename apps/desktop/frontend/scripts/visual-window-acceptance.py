@@ -31,6 +31,7 @@ SAFE_BOOL_KEYS = frozenset({
     'identityNavigationVisible', 'identityNativeConfirmed',
     'identityNavDisplayVisible', 'identityNavHasGeometry', 'identityNavInsideViewport',
     'leaveSelectionVisible', 'leaveDisclosureOpen', 'leaveButtonVisible', 'leaveSummaryOnScreen',
+    'advancedWorldToolsPresent', 'advancedWorldToolsOpen', 'advancedWorldSummaryOnScreen',
     'hostingPanelPresent', 'hostingPlayerOnly', 'hostingOptInDisabled', 'hostingWithdrawDisabled',
     'identityToolsPresent', 'identityToolsOpen',
 })
@@ -417,7 +418,52 @@ def run(binary: Path, artifacts: Path):
         assert selected['leaveSelectionVisible'], (
             "World selection was lost before the real leave-cancellation journey"
         )
-        # Leave world is intentionally inside a collapsed danger-zone <details>.
+        # The actual player-first layout moves the Leave disclosure inside
+        # #advancedWorldTools. A closed ancestor makes its nested summary
+        # invisible even after scrollIntoView. Open the visible parent via a
+        # native user click first; do not bypass either disclosure with JS.
+        advanced = app.execute("""
+          const section = document.getElementById('advancedWorldTools');
+          return {
+            advancedWorldToolsPresent: section?.tagName === 'DETAILS',
+            advancedWorldToolsOpen: section?.open === true,
+          };
+        """)
+        record_ui(advanced)
+        assert advanced['advancedWorldToolsPresent'], (
+            "Installed world controls must retain their Advanced disclosure"
+        )
+        if not advanced['advancedWorldToolsOpen']:
+            advanced_summary = None
+            for _ in range(20):
+                advanced_summary = app.execute("""
+                  const summary = document.querySelector('#advancedWorldTools > summary');
+                  summary?.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
+                  const rect = summary?.getBoundingClientRect();
+                  return {
+                    advancedWorldSummaryOnScreen: !!rect && rect.width > 0 && rect.height > 0
+                      && rect.left >= 0 && rect.top >= 0
+                      && rect.right <= window.innerWidth + 2 && rect.bottom <= window.innerHeight + 2,
+                  };
+                """)
+                record_ui(advanced_summary)
+                if advanced_summary['advancedWorldSummaryOnScreen']:
+                    break
+                time.sleep(0.1)
+            assert advanced_summary['advancedWorldSummaryOnScreen'], (
+                "Advanced world controls cannot be reached by scrolling the installed GUI"
+            )
+            app.click("#advancedWorldTools > summary")
+        advanced_open = app.execute("""
+          return {
+            advancedWorldToolsOpen: document.getElementById('advancedWorldTools')?.open === true,
+          };
+        """)
+        record_ui(advanced_open)
+        assert advanced_open['advancedWorldToolsOpen'], (
+            "Native click did not expand Advanced world controls"
+        )
+        # Leave world is intentionally inside a second collapsed danger-zone <details>.
         # Open its real summary through native WebDriver rather than synthesizing
         # a click on a hidden destructive action or weakening the visibility gate.
         disclosure = app.execute("""
@@ -429,17 +475,22 @@ def run(binary: Path, artifacts: Path):
             # The danger-zone is below the initial 980x760 right-pane viewport.
             # Scroll its real summary into view before the native WebDriver
             # click; a hidden/programmatic click would mask a broken GUI.
-            summary_on_screen = app.execute("""
-              const summary = document.querySelector('#selectionContent details.danger-zone > summary');
-              if (summary) summary.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
-              const rect = summary?.getBoundingClientRect();
-              return {
-                leaveSummaryOnScreen: !!rect && rect.width > 0 && rect.height > 0
-                  && rect.left >= 0 && rect.top >= 0
-                  && rect.right <= window.innerWidth + 2 && rect.bottom <= window.innerHeight + 2,
-              };
-            """)
-            record_ui(summary_on_screen)
+            summary_on_screen = None
+            for _ in range(20):
+                summary_on_screen = app.execute("""
+                  const summary = document.querySelector('#selectionContent details.danger-zone > summary');
+                  summary?.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
+                  const rect = summary?.getBoundingClientRect();
+                  return {
+                    leaveSummaryOnScreen: !!rect && rect.width > 0 && rect.height > 0
+                      && rect.left >= 0 && rect.top >= 0
+                      && rect.right <= window.innerWidth + 2 && rect.bottom <= window.innerHeight + 2,
+                  };
+                """)
+                record_ui(summary_on_screen)
+                if summary_on_screen['leaveSummaryOnScreen']:
+                    break
+                time.sleep(0.1)
             assert summary_on_screen['leaveSummaryOnScreen'], (
                 "Membership and recovery disclosure is not reachable after scrolling"
             )

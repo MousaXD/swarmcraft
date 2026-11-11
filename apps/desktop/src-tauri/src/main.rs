@@ -4,8 +4,8 @@ mod canonical_commands;
 mod canonical_world_commands;
 mod catalog_commands;
 mod curseforge;
-mod launcher_commands;
 mod hosting_contribution_commands;
+mod launcher_commands;
 mod modrinth_commands;
 mod runtime;
 mod runtime_commands;
@@ -221,11 +221,9 @@ async fn hosting_contribution_get(
     world: String,
 ) -> Result<hosting_contribution_commands::HostingContributionReadinessReply, String> {
     let world = hosting_contribution_commands::validate_world_id(&world)?;
-    let raw = run_cli(
-        &app,
-        vec!["world".into(), "hosting".into(), "status".into(), world.to_string(), "--json".into()],
-    )
-    .await?;
+    let raw =
+        run_cli(&app, vec!["world".into(), "hosting".into(), "status".into(), world.to_string(), "--json".into()])
+            .await?;
     hosting_contribution_commands::decode_readiness(&raw, world)
 }
 

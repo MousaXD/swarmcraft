@@ -268,7 +268,8 @@ mod tests {
             "reason": "Player-only; no Minecraft hosting consent",
             "hard_process_memory_cap_guaranteed": false,
             "consent_revision": null
-        }).to_string()
+        })
+        .to_string()
     }
 
     #[test]
