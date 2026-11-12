@@ -32,20 +32,25 @@ const PUBLIC_DIRECTORY_KEY: &[u8] = b"swarmcraft/discovery/public/v1";
 const WORLD_KEY_PREFIX: &[u8] = b"swarmcraft/discovery/world/v1\0";
 const FRIEND_KEY_PREFIX: &[u8] = b"swarmcraft/discovery/friend/v2\0";
 
-// Rust 1.100 flags an unreachable call emitted by the pinned
-// libp2p-swarm-derive 0.36.0 NetworkBehaviour macro. This lint is
-// restricted to this generated implementation; workspace Clippy
-// still runs with -D warnings and all network tests stay required.
+// libp2p-swarm-derive 0.36.0 emits unreachable code for an uninhabited
+// connection_limits event on Rust 1.100. Only the generated behaviour lives
+// under this lint scope; all actual transport/discovery logic remains subject
+// to strict workspace Clippy (-D warnings).
 #[allow(unreachable_code)]
-#[derive(NetworkBehaviour)]
-struct DiscoveryBehaviour {
-    request_response: cbor::Behaviour<WireRequest, WireResponse>,
-    mdns: mdns::tokio::Behaviour,
-    identify: identify::Behaviour,
-    ping: ping::Behaviour,
-    kad: kad::Behaviour<MemoryStore>,
-    limits: connection_limits::Behaviour,
+mod generated_behaviour {
+    use super::*;
+
+    #[derive(NetworkBehaviour)]
+    pub(super) struct DiscoveryBehaviour {
+        pub(super) request_response: cbor::Behaviour<WireRequest, WireResponse>,
+        pub(super) mdns: mdns::tokio::Behaviour,
+        pub(super) identify: identify::Behaviour,
+        pub(super) ping: ping::Behaviour,
+        pub(super) kad: kad::Behaviour<MemoryStore>,
+        pub(super) limits: connection_limits::Behaviour,
+    }
 }
+use generated_behaviour::{DiscoveryBehaviour, DiscoveryBehaviourEvent};
 
 #[derive(Debug)]
 pub enum DiscoveryNetworkEvent {
