@@ -34,6 +34,11 @@ pub const WIRE_PROTOCOL: &str = "/swarmcraft/1";
 pub const BOOTSTRAP_ENV: &str = "SWARMCRAFT_BOOTSTRAP";
 pub const RELAY_ENV: &str = "SWARMCRAFT_RELAY";
 
+// Rust 1.100 flags an unreachable call emitted by the pinned
+// libp2p-swarm-derive 0.36.0 NetworkBehaviour macro. This lint is
+// restricted to this generated implementation; workspace Clippy
+// still runs with -D warnings and all network tests stay required.
+#[allow(unreachable_code)]
 #[derive(NetworkBehaviour)]
 struct Behaviour {
     request_response: cbor::Behaviour<WireRequest, WireResponse>,

@@ -32,6 +32,11 @@ const PUBLIC_DIRECTORY_KEY: &[u8] = b"swarmcraft/discovery/public/v1";
 const WORLD_KEY_PREFIX: &[u8] = b"swarmcraft/discovery/world/v1\0";
 const FRIEND_KEY_PREFIX: &[u8] = b"swarmcraft/discovery/friend/v2\0";
 
+// Rust 1.100 flags an unreachable call emitted by the pinned
+// libp2p-swarm-derive 0.36.0 NetworkBehaviour macro. This lint is
+// restricted to this generated implementation; workspace Clippy
+// still runs with -D warnings and all network tests stay required.
+#[allow(unreachable_code)]
 #[derive(NetworkBehaviour)]
 struct DiscoveryBehaviour {
     request_response: cbor::Behaviour<WireRequest, WireResponse>,
