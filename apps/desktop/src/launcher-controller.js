@@ -656,6 +656,9 @@ export function install() {
   byId('joinWorldIdButton')?.addEventListener(
     'click',
     async (event) => {
+      // Preserve real legacy discovery in the shipping UI; the Svelte
+      // candidate resolves the same announcement through typed native IPC.
+      if (window.__swarmcraftSvelteDiscoveryOwned === true) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       const world = clean(byId('joinWorldId').value);

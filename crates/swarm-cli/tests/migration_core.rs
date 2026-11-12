@@ -37,6 +37,25 @@ struct SharedWorld {
     epoch: EpochRecordV1,
 }
 
+fn hosting_capacity_for_process_test() -> bool {
+    match swarm_cli::hosting_budget::memory_snapshot()
+        .and_then(|sample| swarm_cli::hosting_budget::check_budget(512, sample))
+    {
+        Ok(()) => true,
+        Err(error) => {
+            // A runner too small for a real host must reject admission; never
+            // weaken the production RAM safety margin to make CI appear green.
+            assert!(
+                error.to_string().contains("insufficient hosting memory")
+                    || error.to_string().contains("cannot safely establish"),
+                "unexpected memory-probe error: {error}"
+            );
+            eprintln!("Host process scenario requires >=3840 MiB currently available; low-memory runner correctly denies capacity: {error}");
+            false
+        }
+    }
+}
+
 fn peer(root: PathBuf) -> PeerFixture {
     let paths = DataPaths::from_root(root);
     let storage = Storage::open(paths.root.clone()).unwrap();
@@ -142,6 +161,10 @@ fn initialize_two_peer_world(alice: &PeerFixture, bob: &PeerFixture, source: &Pa
     epoch.signature = alice.identity.sign(&epoch.signing_bytes().unwrap());
     alice.storage.save_epoch_record(&epoch).unwrap();
     bob.storage.save_epoch_record(&epoch).unwrap();
+    // This fixture tests an explicitly authorized authority handoff. Signed
+    // membership eligibility never grants per-device hosting consent.
+    swarm_cli::hosting_budget::set_contribution(&alice.paths, world, 512).unwrap();
+    swarm_cli::hosting_budget::set_contribution(&bob.paths, world, 512).unwrap();
     SharedWorld { world, epoch }
 }
 
@@ -203,6 +226,7 @@ fn configure_mock_runtime(temp: &Path, peer: &PeerFixture, world: WorldId, endpo
     let fabric = temp.join(format!("swarmcraft-fabric-{}.jar", world.to_hex()));
     fs::write(&server, b"mock").unwrap();
     fs::write(&fabric, b"mock").unwrap();
+    swarm_cli::hosting_budget::set_contribution(&peer.paths, world, 512).unwrap();
     migration::save_runtime_config(
         &peer.paths,
         world,
@@ -224,6 +248,7 @@ fn configure_safe_stop_runtime(temp: &Path, peer: &PeerFixture, world: WorldId, 
     let fabric = temp.join(format!("safe-stop-fabric-{}.jar", world.to_hex()));
     fs::write(&server, b"mock").unwrap();
     fs::write(&fabric, b"mock").unwrap();
+    swarm_cli::hosting_budget::set_contribution(&peer.paths, world, 512).unwrap();
     migration::save_runtime_config(
         &peer.paths,
         world,
@@ -318,6 +343,9 @@ async fn wait_until_sleeping(peer: &PeerFixture, world: WorldId) {
 
 #[tokio::test]
 async fn safe_stop_waits_for_fabric_barrier_then_commits_latest_state_and_sleep_record() {
+    if !hosting_capacity_for_process_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let alice = peer(temp.path().join("alice-safe-stop"));
     let bob = peer(temp.path().join("bob-safe-stop"));
@@ -364,7 +392,138 @@ async fn safe_stop_waits_for_fabric_barrier_then_commits_latest_state_and_sleep_
 }
 
 #[tokio::test]
+async fn withdrawing_active_host_consent_uses_fabric_barrier_and_durable_sleep() {
+    if !hosting_capacity_for_process_test() {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let alice = peer(temp.path().join("alice-withdrawal"));
+    let bob = peer(temp.path().join("bob-withdrawal"));
+    let source = temp.path().join("source-withdrawal");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("level.dat"), b"before-withdrawal\n").unwrap();
+    let shared = initialize_two_peer_world(&alice, &bob, &source);
+    let before = alice.storage.latest_snapshot(shared.world).unwrap().unwrap();
+    let endpoint = "127.0.0.1:25569";
+    configure_safe_stop_runtime(temp.path(), &alice, shared.world, endpoint);
+
+    let generation =
+        AuthorityGeneration { epoch: shared.epoch.epoch_number, fencing_token: shared.epoch.fencing_token };
+    let heartbeat = spawn_heartbeat(alice.paths.clone(), shared.world, generation);
+    let supervisor_paths = alice.paths.clone();
+    let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });
+
+    wait_until_ready(&alice, shared.world, endpoint).await;
+    swarm_cli::hosting_budget::set_contribution(&alice.paths, shared.world, 0).unwrap();
+    wait_until_sleeping(&alice, shared.world).await;
+
+    let latest = alice.storage.latest_snapshot(shared.world).unwrap().unwrap();
+    alice.storage.verify_snapshot(&latest).unwrap();
+    assert_eq!(latest.snapshot_number, before.snapshot_number + 1);
+    assert_eq!(latest.previous_snapshot_hash, Some(before.manifest_hash().unwrap()));
+    let sleeping = alice.storage.load_sleep_record(shared.world).unwrap();
+    assert_eq!(sleeping.latest_snapshot_hash, latest.manifest_hash().unwrap());
+
+    let restored = temp.path().join("withdrawal-restored");
+    alice.storage.restore_snapshot(&latest, &restored).unwrap();
+    assert_eq!(fs::read_to_string(restored.join("safe-stop-latest.txt")).unwrap(), "saved-at-shutdown\n");
+    assert!(swarm_cli::hosting_budget::require_contribution(&alice.paths, shared.world).is_err());
+
+    supervisor.abort();
+    heartbeat.abort();
+}
+
+#[tokio::test]
+async fn invalid_transfer_target_does_not_kill_authority_and_withdrawal_still_checkpoints() {
+    if !hosting_capacity_for_process_test() {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let alice = peer(temp.path().join("alice-rejected-transfer"));
+    let bob = peer(temp.path().join("bob-rejected-transfer"));
+    let source = temp.path().join("source-rejected-transfer");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("level.dat"), b"before-rejected-transfer\n").unwrap();
+    let shared = initialize_two_peer_world(&alice, &bob, &source);
+    let before = alice.storage.latest_snapshot(shared.world).unwrap().unwrap();
+    let endpoint = "127.0.0.1:25570";
+    configure_safe_stop_runtime(temp.path(), &alice, shared.world, endpoint);
+
+    let generation =
+        AuthorityGeneration { epoch: shared.epoch.epoch_number, fencing_token: shared.epoch.fencing_token };
+    let heartbeat = spawn_heartbeat(alice.paths.clone(), shared.world, generation);
+    let supervisor_paths = alice.paths.clone();
+    let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });
+    wait_until_ready(&alice, shared.world, endpoint).await;
+
+    // An unsigned local intent naming the current authority is invalid.
+    // The previous implementation propagated its validation error, causing
+    // the outer runtime to terminate Java without a Fabric save barrier.
+    let intent = alice.paths.root.join("control").join(shared.world.to_hex()).join("transfer.intent");
+    fs::write(&intent, format!("{}\n", alice.identity.peer_id())).unwrap();
+    timeout(Duration::from_secs(5), async {
+        while intent.exists() {
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("invalid transfer intent must be rejected and cleared");
+    let status = migration::load_migration_status(&alice.paths, shared.world).unwrap();
+    assert_eq!(status.phase, MigrationPhase::Ready);
+    assert!(status.runtime_ready);
+    assert!(alice.storage.load_sleep_record(shared.world).is_err());
+    assert_eq!(
+        alice.storage.latest_snapshot(shared.world).unwrap().unwrap().manifest_hash().unwrap(),
+        before.manifest_hash().unwrap()
+    );
+
+    swarm_cli::hosting_budget::set_contribution(&alice.paths, shared.world, 0).unwrap();
+    wait_until_sleeping(&alice, shared.world).await;
+    let latest = alice.storage.latest_snapshot(shared.world).unwrap().unwrap();
+    alice.storage.verify_snapshot(&latest).unwrap();
+    assert_eq!(latest.previous_snapshot_hash, Some(before.manifest_hash().unwrap()));
+    let restored = temp.path().join("rejected-transfer-restored");
+    alice.storage.restore_snapshot(&latest, &restored).unwrap();
+    assert_eq!(fs::read_to_string(restored.join("safe-stop-latest.txt")).unwrap(), "saved-at-shutdown\n");
+    supervisor.abort();
+    heartbeat.abort();
+}
+
+#[test]
+fn player_only_target_rejects_transfer_before_publishing_any_signed_transfer_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let alice = peer(temp.path().join("alice-player-only"));
+    let bob = peer(temp.path().join("bob-player-only"));
+    let source = temp.path().join("player-only-transfer-source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("level.dat"), b"player-only-transfer\n").unwrap();
+    let shared = initialize_two_peer_world(&alice, &bob, &source);
+    save_sleep(&alice, shared.world);
+    let original_epoch = bob.storage.load_epoch_record(shared.world).unwrap();
+    let original_snapshot = bob.storage.latest_snapshot(shared.world).unwrap().unwrap();
+
+    // An authority-eligible voter/replica is still not an opt-in host.
+    swarm_cli::hosting_budget::set_contribution(&bob.paths, shared.world, 0).unwrap();
+    let prepared =
+        match prepare_manual_transfer(&alice.paths, &alice.storage, shared.world, bob.identity.peer_id()).unwrap() {
+            TransferPrepareResult::Prepared(token) => token,
+            TransferPrepareResult::CheckpointRequested => panic!("sleeping source is already checkpointed"),
+        };
+    let error = accept_manual_transfer(&bob.paths, &bob.storage, shared.world, &prepared).unwrap_err();
+    assert!(error.to_string().contains("hosting consent was withdrawn"), "{error}");
+    assert!(bob.storage.load_transfer_record(shared.world).is_err());
+    assert_eq!(bob.storage.load_epoch_record(shared.world).unwrap(), original_epoch);
+    assert_eq!(
+        bob.storage.latest_snapshot(shared.world).unwrap().unwrap().manifest_hash().unwrap(),
+        original_snapshot.manifest_hash().unwrap(),
+    );
+}
+
+#[tokio::test]
 async fn manual_transfer_uses_shared_runner_and_fences_alice() {
+    if !hosting_capacity_for_process_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let alice = peer(temp.path().join("alice"));
     let bob = peer(temp.path().join("bob"));
@@ -421,6 +580,9 @@ async fn manual_transfer_uses_shared_runner_and_fences_alice() {
 
 #[tokio::test]
 async fn recovered_bob_waits_for_exact_permit_then_restores_and_reaches_fabric_ready() {
+    if !hosting_capacity_for_process_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let alice = peer(temp.path().join("alice"));
     let bob = peer(temp.path().join("bob"));
@@ -603,6 +765,9 @@ fn promote_snapshot_for_epoch(
 
 #[test]
 fn sequential_manual_transfers_ignore_terminal_metadata() {
+    if !hosting_capacity_for_process_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let alice = peer(temp.path().join("alice"));
     let bob = peer(temp.path().join("bob"));
@@ -612,6 +777,9 @@ fn sequential_manual_transfers_ignore_terminal_metadata() {
     fs::write(source.join("level.dat"), b"sequential-transfer\n").unwrap();
     let shared = initialize_two_peer_world(&alice, &bob, &source);
     add_third_peer(&alice, &bob, &carol, &shared, &source);
+    // Carol is a third authority successor only for this positive handoff
+    // scenario. Membership and snapshot replication alone never opt her in.
+    swarm_cli::hosting_budget::set_contribution(&carol.paths, shared.world, 512).unwrap();
 
     save_sleep(&alice, shared.world);
     let (_, _, first_committed, first_epoch) = complete_sleeping_transfer(&alice, &bob, shared.world);
@@ -645,6 +813,9 @@ fn sequential_manual_transfers_ignore_terminal_metadata() {
 
 #[tokio::test]
 async fn former_transfer_source_can_launch_when_a_later_generation_returns_to_it() {
+    if !hosting_capacity_for_process_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let alice = peer(temp.path().join("alice"));
     let bob = peer(temp.path().join("bob"));
@@ -700,6 +871,9 @@ async fn former_transfer_source_can_launch_when_a_later_generation_returns_to_it
 
 #[test]
 fn stale_transfer_tokens_are_rejected_after_generation_advances() {
+    if !hosting_capacity_for_process_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let alice = peer(temp.path().join("alice"));
     let bob = peer(temp.path().join("bob"));
@@ -724,6 +898,9 @@ fn stale_transfer_tokens_are_rejected_after_generation_advances() {
 
 #[test]
 fn transfer_phase_state_survives_restart_without_permanent_wedge() {
+    if !hosting_capacity_for_process_test() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let alice = peer(temp.path().join("alice"));
     let bob = peer(temp.path().join("bob"));

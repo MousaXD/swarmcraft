@@ -36,6 +36,10 @@ pub const FRIEND_PRESENCE_TTL_MS: u64 = 30 * 1_000;
 const DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const DISCOVERY_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 const DISCOVERY_FRESHNESS_TIMEOUT: Duration = Duration::from_secs(5);
+// A transient QUIC stream loss must not permanently hide a signed canonical
+// provider. Limit retries to the caller's explicit locators and the existing
+// overall discovery deadline; retries never bypass authentication or quorum.
+const DISCOVERY_EXPLICIT_BROWSE_RETRIES: u8 = 2;
 const FRIENDS_FILE_VERSION: u16 = 1;
 const MAX_FRIEND_LABEL_BYTES: usize = 96;
 
@@ -881,6 +885,14 @@ pub fn list_friends(paths: &DataPaths) -> Result<Vec<FriendCardV1>> {
         .collect()
 }
 
+fn reserve_explicit_browse_retry(attempts: &mut u8) -> bool {
+    if *attempts >= DISCOVERY_EXPLICIT_BROWSE_RETRIES {
+        return false;
+    }
+    *attempts += 1;
+    true
+}
+
 pub async fn search_public_worlds(
     paths: &DataPaths,
     input: DiscoverySearchInputV1,
@@ -904,6 +916,7 @@ pub async fn search_public_worlds(
     let mut providers = bootstrap_peers.clone();
     let mut requested = HashSet::new();
     let mut pending = HashSet::new();
+    let mut retry_attempts = HashMap::<TransportPeerId, u8>::new();
     for transport_peer in bootstrap_order.iter().copied() {
         if node.application_peer(&transport_peer).is_some() && requested.insert(transport_peer) {
             let request_id =
@@ -980,9 +993,29 @@ pub async fn search_public_worlds(
                         }
                     }
                 }
-                DiscoveryNetworkEvent::OutboundFailure { request_id, error, .. } => {
-                    pending.remove(&format!("{request_id:?}"));
+                DiscoveryNetworkEvent::OutboundFailure { transport_peer, request_id, error } => {
+                    let was_pending = pending.remove(&format!("{request_id:?}"));
                     network_error.get_or_insert(error);
+                    // Only retry a request we actually issued to a caller-
+                    // specified locator. DHT-discovered peers and unsolicited
+                    // failures receive no retry budget. Signature, membership
+                    // and freshness quorum verification below are unchanged.
+                    if was_pending && bootstrap_peers.contains(&transport_peer) {
+                        let attempts = retry_attempts.entry(transport_peer).or_default();
+                        if reserve_explicit_browse_retry(attempts) {
+                            requested.remove(&transport_peer);
+                            if node.application_peer(&transport_peer).is_some() {
+                                let next = node.send_request(
+                                    &transport_peer,
+                                    WireRequest::DiscoveryPublic { filter: filter.clone() },
+                                )?;
+                                pending.insert(format!("{next:?}"));
+                                requested.insert(transport_peer);
+                            } else if let Err(dial_error) = node.dial_peer(transport_peer) {
+                                debug!(%dial_error, %transport_peer, "discovery provider retry dial failed");
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -1527,6 +1560,15 @@ fn unix_millis() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_public_provider_retry_budget_is_bounded() {
+        let mut retries = 0;
+        assert!(reserve_explicit_browse_retry(&mut retries));
+        assert!(reserve_explicit_browse_retry(&mut retries));
+        assert!(!reserve_explicit_browse_retry(&mut retries));
+        assert_eq!(retries, DISCOVERY_EXPLICIT_BROWSE_RETRIES);
+    }
     use swarm_core::{sign_recovery_ballot, sign_recovery_vote, sign_world_config, PeerIdentity};
     use swarm_protocol::{
         AuthorityPolicyV1, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, RecoveryBallotV1, RecoveryVoteV1,
