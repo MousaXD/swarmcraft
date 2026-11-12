@@ -24,3 +24,12 @@ The real installed-GUI acceptance is currently **Linux/WebKitGTK only**. Windows
 This version bump synchronizes the Rust workspace, excluded Desktop and provider crates, both Cargo lockfiles, Tauri package metadata, and Fabric mod version. It does **not** create a signed production release or a `v0.5.1` tag. Production tagging remains subject to the repository's exact-SHA validation and signing/notarization requirements.
 
 Implemented and reviewed in [PR #88](https://github.com/MousaXD/swarmcraft/pull/88); issue [#82](https://github.com/MousaXD/swarmcraft/issues/82) and [#83](https://github.com/MousaXD/swarmcraft/issues/83) are closed.
+
+## Security and discovery hardening
+
+- Updated the root Rust lock graph to Hickory DNS `0.26.3`, remediating 17 RustSec DNS advisories and avoiding upstream `0.26.2` regressions in DNSSEC/QUIC server behavior.
+- Updated root `rustix` to `1.1.6` to address memory-safety advisory RUSTSEC-2026-0486.
+- Includes the bounded explicitly requested provider discovery retry after a lost QUIC response only **if** the separately tested discovery fix PR #116 is promoted to the release baseline before tagging; do not claim that improvement on an unmerged baseline.
+- Includes an opt-in manual three-machine certification harness; adding the harness is not evidence of successful independent-device Minecraft failover.
+
+These changes must pass exact-source RustSec audits, released-version coherence, and both required workflows on the final release tree. This draft does **not** activate signed V2 hosting policy, switch the shipping frontend to Svelte, guarantee universal NAT traversal, or approve a production signed tag.

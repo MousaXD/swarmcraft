@@ -35,7 +35,10 @@ use swarm_protocol::{
     RecoveryCertificateV1, RecoveryVoteV1, SleepRecordV1, SnapshotManifestV1, TransferPhase, WorldDescriptorV1,
     WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
-use swarm_storage::{DurableMembershipPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage};
+use swarm_storage::{
+    DurableMembershipPromiseV1, DurableRecoveryPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage,
+    StorageError,
+};
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
@@ -347,10 +350,19 @@ fn maintain_authority_leases(
             }
             continue;
         }
-        if let Ok(promise) = storage.load_membership_promise(world) {
+        let membership_promise = match load_optional_membership_promise(storage, world) {
+            Ok(promise) => promise,
+            Err(error) => {
+                warn!(%world, %error, "corrupt or unreadable membership prepare blocks authority");
+                clear_permit(paths, world)?;
+                runtime.permit_heartbeats.remove(&world);
+                continue;
+            }
+        };
+        if let Some(promise) = membership_promise.as_ref() {
             clear_permit(paths, world)?;
             runtime.permit_heartbeats.remove(&world);
-            maintain_membership_transition(storage, identity, node, outbound, runtime, &promise)?;
+            maintain_membership_transition(storage, identity, node, outbound, runtime, promise)?;
             continue;
         }
 
@@ -524,6 +536,51 @@ struct RecoveryAttempt<'a> {
     wake: bool,
 }
 
+/// Only a genuinely missing canonical promise is the absence of a durable vote.
+/// Decoding, metadata, and permission errors must fence recovery instead.
+fn load_optional_recovery_promise(storage: &Storage, world: WorldId) -> Result<Option<DurableRecoveryPromiseV1>> {
+    match storage.load_recovery_promise(world) {
+        Ok(promise) => {
+            verify_recovery_ballot_signature(&promise.ballot)?;
+            verify_recovery_vote_signature(&promise.vote)?;
+            Ok(Some(promise))
+        }
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A corrupt accepted epoch is never a bootstrap epoch. Recovery and ordinary
+/// epoch handlers must check this before writing ancillary control records.
+fn load_optional_epoch_record(storage: &Storage, world: WorldId) -> Result<Option<EpochRecordV1>> {
+    match storage.load_epoch_record(world) {
+        Ok(epoch) => Ok(Some(epoch)),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn ensure_active_recovery_promise(storage: &Storage, ballot: &RecoveryBallotV1) -> Result<()> {
+    let durable = load_optional_recovery_promise(storage, ballot.world_id)?
+        .context("cached recovery ballot has no readable canonical durable promise")?;
+    if durable.ballot.ballot_hash()? != ballot.ballot_hash()? {
+        return Err(anyhow!("cached recovery ballot differs from its durable promise"));
+    }
+    Ok(())
+}
+
+fn ensure_local_recovery_promise_allows_certificate(storage: &Storage, ballot: &RecoveryBallotV1) -> Result<()> {
+    if let Some(promise) = load_optional_recovery_promise(storage, ballot.world_id)? {
+        if promise.ballot.round > ballot.round {
+            return Err(anyhow!("certified recovery epoch is stale relative to a newer durable promise"));
+        }
+        if promise.ballot.round == ballot.round && promise.ballot.ballot_hash()? != ballot.ballot_hash()? {
+            return Err(anyhow!("certified recovery epoch conflicts with this peer's durable same-round promise"));
+        }
+    }
+    Ok(())
+}
+
 fn drive_recovery_ballot(
     attempt: RecoveryAttempt<'_>,
     node: &mut SwarmNode,
@@ -546,7 +603,7 @@ fn drive_recovery_ballot(
     let membership = storage.load_membership_record(world)?;
     verify_membership_signature(&membership)?;
     let membership_hash = membership.record_hash()?;
-    let durable_round = storage.load_recovery_promise(world).map_or(0, |promise| promise.ballot.round);
+    let durable_round = load_optional_recovery_promise(storage, world)?.map_or(0, |promise| promise.ballot.round);
     let floor = runtime.recovery_round_floor.get(&world).copied().unwrap_or(0).max(durable_round);
     let active_is_usable = runtime.recovery_ballots.get(&world).is_some_and(|ballot| {
         ballot.base_epoch == previous.epoch_number
@@ -638,6 +695,10 @@ fn drive_recovery_ballot(
     for vote in &certificate.votes {
         verify_recovery_vote_signature(vote)?;
     }
+
+    // An in-memory ballot is not a substitute for its canonical durable promise.
+    // Recheck after collecting quorum votes, immediately before any promotion write.
+    ensure_active_recovery_promise(storage, &ballot)?;
 
     // Persist the quorum proof before the epoch. A crash between these writes can
     // safely retry promotion; the proof itself never grants an older round power.
@@ -1475,7 +1536,7 @@ fn handle_request(
                 )?;
                 return Ok(());
             }
-            if let Ok(promise) = storage.load_membership_promise(world) {
+            if let Some(promise) = load_optional_membership_promise(storage, world)? {
                 let proposed_member = promise
                     .proposal
                     .proposed
@@ -1567,7 +1628,7 @@ fn handle_request(
             if leaving.banned || leaving.public_key != request.leaving_public_key {
                 return Err(anyhow!("leaving peer key does not match current membership"));
             }
-            if let Ok(promise) = storage.load_membership_promise(request.world_id) {
+            if let Some(promise) = load_optional_membership_promise(storage, request.world_id)? {
                 let absent =
                     promise.proposal.proposed.members.iter().all(|member| member.peer_id != request.leaving_peer_id);
                 if promise.proposal.previous.record_hash()? == current.record_hash()? && absent {
@@ -1729,7 +1790,7 @@ fn handle_request(
         WireRequest::Membership(record) => {
             verify_membership_signature(&record)?;
             authorize_member(storage, record.world_id, record.authority_peer_id)?;
-            if let Ok(epoch) = storage.load_epoch_record(record.world_id) {
+            if let Some(epoch) = load_optional_epoch_record(storage, record.world_id)? {
                 if record.epoch > epoch.epoch_number {
                     return Err(anyhow!("membership cannot advance before its authority epoch is accepted"));
                 }
@@ -1928,7 +1989,8 @@ fn handle_request(
             let certificate = *certificate;
             ensure_no_membership_prepare(storage, record.world_id)?;
             validate_recovery_epoch(storage, application_peer, &record, &certificate)?;
-            if let Ok(current) = storage.load_epoch_record(record.world_id) {
+            ensure_local_recovery_promise_allows_certificate(storage, &certificate.ballot)?;
+            if let Some(current) = load_optional_epoch_record(storage, record.world_id)? {
                 if record == current {
                     storage.save_recovery_certificate(&certificate)?;
                     storage.clear_sleep_record(record.world_id)?;
@@ -1951,18 +2013,6 @@ fn handle_request(
                     return Err(anyhow!("certified recovery epoch does not directly extend the accepted epoch"));
                 }
             }
-            if let Ok(promise) = storage.load_recovery_promise(record.world_id) {
-                if promise.ballot.round > certificate.ballot.round {
-                    return Err(anyhow!("certified recovery epoch is stale relative to a newer durable promise"));
-                }
-                if promise.ballot.round == certificate.ballot.round
-                    && promise.ballot.ballot_hash()? != certificate.ballot.ballot_hash()?
-                {
-                    return Err(anyhow!(
-                        "certified recovery epoch conflicts with this peer's durable same-round promise"
-                    ));
-                }
-            }
             storage.save_recovery_certificate(&certificate)?;
             storage.save_epoch_record(&record)?;
             storage.clear_sleep_record(record.world_id)?;
@@ -1980,7 +2030,7 @@ fn handle_request(
                 return Err(anyhow!("recovery epoch requires a durable quorum certificate"));
             }
             authorize_epoch(storage, application_peer, &record)?;
-            if let Ok(current) = storage.load_epoch_record(record.world_id) {
+            if let Some(current) = load_optional_epoch_record(storage, record.world_id)? {
                 if record == current {
                     node.respond(
                         channel,
@@ -2269,7 +2319,7 @@ fn handle_response(
         ) => {
             let vote = *vote;
             verify_membership_vote_signature(&vote)?;
-            let Ok(promise) = storage.load_membership_promise(world) else {
+            let Some(promise) = load_optional_membership_promise(storage, world)? else {
                 // A certificate may have committed and cleared the durable prepare
                 // while this response was in flight. Late votes are then stale, not fatal.
                 return Ok(());
@@ -2337,8 +2387,16 @@ fn verify_membership_vote_signature(vote: &MembershipVoteV1) -> Result<()> {
     Ok(())
 }
 
+fn load_optional_membership_promise(storage: &Storage, world: WorldId) -> Result<Option<DurableMembershipPromiseV1>> {
+    match storage.load_membership_promise(world) {
+        Ok(promise) => Ok(Some(promise)),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn ensure_no_membership_prepare(storage: &Storage, world: WorldId) -> Result<()> {
-    if storage.load_membership_promise(world).is_ok() {
+    if load_optional_membership_promise(storage, world)?.is_some() {
         return Err(anyhow!("authority/recovery transition is fenced by a durable membership prepare"));
     }
     Ok(())
@@ -2416,7 +2474,7 @@ fn validate_membership_certificate_for_local(
     } else {
         validate_membership_proposal_for_local(storage, identity, proposal)?;
     }
-    if let Ok(promise) = storage.load_membership_promise(world) {
+    if let Some(promise) = load_optional_membership_promise(storage, world)? {
         if promise.proposal.proposal_hash()? != proposal.proposal_hash()? {
             return Err(anyhow!("membership certificate conflicts with this peer's durable prepare"));
         }
@@ -2616,7 +2674,7 @@ fn authorize_world_config_current_authority(
     if sender != config.authority_peer_id {
         return Err(anyhow!("world config sender does not match its signed authority"));
     }
-    if let Ok(epoch) = storage.load_epoch_record(config.world_id) {
+    if let Some(epoch) = load_optional_epoch_record(storage, config.world_id)? {
         if config.authority_peer_id != epoch.authority_peer_id
             || config.authority_public_key != epoch.authority_public_key
         {
@@ -2646,7 +2704,7 @@ fn authorize_manifest(storage: &Storage, sender: PeerId, manifest: &SnapshotMani
     }
     verify_snapshot_signature(manifest)?;
     storage.validate_replica_history(manifest)?;
-    if let Ok(epoch) = storage.load_epoch_record(manifest.world_id) {
+    if let Some(epoch) = load_optional_epoch_record(storage, manifest.world_id)? {
         if manifest.epoch != epoch.epoch_number
             || manifest.authority_peer_id != epoch.authority_peer_id
             || manifest.authority_public_key != epoch.authority_public_key
@@ -2783,7 +2841,7 @@ fn validate_transfer(storage: &Storage, transfer: &swarm_protocol::AuthorityTran
     if latest.manifest_hash()? != transfer.base_snapshot_hash {
         return Err(anyhow!("transfer does not reference the exact latest snapshot"));
     }
-    if let Ok(epoch) = storage.load_epoch_record(transfer.world_id) {
+    if let Some(epoch) = load_optional_epoch_record(storage, transfer.world_id)? {
         let expected = AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token }
             .checked_next()
             .context("accepted authority generation is exhausted")?;
@@ -2791,7 +2849,12 @@ fn validate_transfer(storage: &Storage, transfer: &swarm_protocol::AuthorityTran
             return Err(anyhow!("transfer generation does not advance the accepted epoch exactly once"));
         }
     }
-    if let Ok(previous) = storage.load_transfer_record(transfer.world_id) {
+    let previous = match storage.load_transfer_record(transfer.world_id) {
+        Ok(previous) => Some(previous),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(previous) = previous {
         let valid_progression = matches!(
             (previous.phase, transfer.phase),
             (TransferPhase::Prepared, TransferPhase::Accepted) | (TransferPhase::Accepted, TransferPhase::Committed)
