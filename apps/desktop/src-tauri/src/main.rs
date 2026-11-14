@@ -5,6 +5,10 @@ mod canonical_world_commands;
 mod catalog_commands;
 mod curseforge;
 mod launcher_commands;
+// Staged input/typed-backend contract only; no production command is registered
+// until Agent 03's Rust consent API is present on an approved integration base.
+#[cfg(test)]
+mod hosting_contribution_commands;
 mod modrinth_commands;
 mod runtime;
 mod runtime_commands;
