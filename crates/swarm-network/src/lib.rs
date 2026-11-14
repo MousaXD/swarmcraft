@@ -1,6 +1,7 @@
 //! Encrypted peer transport, discovery, authentication, and bounded replication messages.
 
 mod admission;
+pub mod authority_capability;
 mod diagnostics;
 mod discovery;
 mod invite_connectivity;
