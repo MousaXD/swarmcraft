@@ -37,6 +37,7 @@ function setActivity(message, label) {
   if (!output) return;
   const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const entry = `${stamp}  ${label}\n${message}`;
+  if (window.__swarmcraftSvelteActivity?.append(entry) === true) return;
   output.textContent = output.textContent.trim() === 'SwarmCraft is ready.' || output.textContent.trim() === 'Activity cleared.'
     ? entry
     : `${output.textContent.trim()}\n\n${entry}`;
