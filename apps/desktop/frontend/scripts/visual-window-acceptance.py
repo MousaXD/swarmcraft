@@ -392,6 +392,47 @@ def run(binary: Path, artifacts: Path):
         assert selected['leaveSelectionVisible'], (
             "World selection was lost before the real leave-cancellation journey"
         )
+        # The established player-experience layout moves the native
+        # membership disclosure INSIDE collapsed Advanced world controls.
+        # A hidden child cannot be reached by scrollIntoView alone: open its
+        # actual parent summary first using native WebDriver, not JS .open=true.
+        outer = app.execute("""
+          const parent = document.getElementById('advancedWorldTools');
+          const child = document.querySelector('#selectionContent details.danger-zone');
+          return {
+            advancedToolsPresent: !!parent && !!child && parent.contains(child),
+            advancedToolsOpen: parent?.open === true,
+          };
+        """)
+        record_ui(outer)
+        assert outer['advancedToolsPresent'], (
+            "Membership and recovery must remain within the visible advanced-controls journey"
+        )
+        if not outer['advancedToolsOpen']:
+            summary = app.execute("""
+              const target = document.querySelector('#advancedWorldTools > summary');
+              if (target) target.scrollIntoView({ behavior: 'auto', block: 'center' });
+              const rect = target?.getBoundingClientRect();
+              return {
+                advancedSummaryOnScreen: !!rect && rect.width > 0 && rect.height > 0
+                  && rect.left >= 0 && rect.top >= 0
+                  && rect.right <= window.innerWidth + 2
+                  && rect.bottom <= window.innerHeight + 2,
+              };
+            """)
+            record_ui(summary)
+            assert summary['advancedSummaryOnScreen'], (
+                "Advanced controls summary is not reachable via installed-app scrolling"
+            )
+            app.click("#advancedWorldTools > summary")
+        parent_opened = app.execute("""
+          const parent = document.getElementById('advancedWorldTools');
+          return { advancedToolsOpen: parent?.open === true };
+        """)
+        record_ui(parent_opened)
+        assert parent_opened['advancedToolsOpen'], (
+            "Native click did not expand Advanced world controls"
+        )
         # Leave world is intentionally inside a collapsed danger-zone <details>.
         # Open its real summary through native WebDriver rather than synthesizing
         # a click on a hidden destructive action or weakening the visibility gate.
