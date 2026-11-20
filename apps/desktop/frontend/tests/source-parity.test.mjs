@@ -516,3 +516,36 @@ test('native connectivity diagnostics use typed Rust IPC, Svelte owns display, a
   assert.ok(native.includes("'connectivityNativeConfirmed'"));
   assert.ok(native.includes("'connectivityVerified'"));
 });
+
+
+test('Svelte native daemon start/stop are explicit commands with no legacy duplicate or stale connected badge', async () => {
+  const [view, root, app, bridge, types, state] = await Promise.all([
+    source('../src/components/DiagnosticsView.svelte'),
+    source('../src/App.svelte'),
+    source('../../src/app.js'),
+    source('../src/lib/native-bridge.ts'),
+    source('../src/vite-env.d.ts'),
+    source('../src/lib/connectivity-state.ts'),
+  ]);
+  assert.ok(view.includes("nativeBridge().invoke('ensure_daemon_running', { listen })"));
+  assert.ok(view.includes("nativeBridge().invoke('stop_daemon', {})"));
+  assert.ok(bridge.includes('ensure_daemon_running: { args: { listen: string }; result: number }'));
+  assert.ok(bridge.includes('stop_daemon: { args: Record<string, never>; result: void }'));
+  assert.ok(view.includes('onclick={startNetworking}') && view.includes('onclick={stopNetworking}'));
+  assert.ok(view.includes('disabled={serviceBusy}') && view.includes('boundedService('));
+  assert.ok(view.includes("window.__swarmcraftAfterSvelteNetworkingChange('stopped')"));
+  assert.ok(view.includes("window.__swarmcraftAfterSvelteNetworkingChange('started')"));
+  assert.ok(view.includes('connectivityController.invalidate('));
+  assert.ok(root.includes('window.__swarmcraftSvelteNetworkingOwned = true;'));
+  assert.ok(root.includes('window.__swarmcraftSvelteNetworkingOwned = previousNetworkingOwner;'));
+  assert.ok(types.includes('__swarmcraftSvelteNetworkingOwned?: boolean;'));
+  assert.ok(app.includes("id === 'startDaemon' || id === 'stopDaemon'"));
+  assert.ok(app.includes('window.__swarmcraftSvelteNetworkingOwned === true'));
+  assert.ok(app.includes('networkStoppedBySvelte = true;'));
+  assert.ok(app.includes('readGeneration !== connectivityGeneration'));
+  assert.ok(app.includes("structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });"));
+  assert.ok(state.includes('if (version !== generation) return;'));
+  assert.ok(state.includes('inflight = null;'));
+  assert.doesNotMatch(view, /serviceError\s*=\s*String\(error\)|serviceError\s*=\s*error\.message/,
+    'Sensitive process errors must not render as service status');
+});
