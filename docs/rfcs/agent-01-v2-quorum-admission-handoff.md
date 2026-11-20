@@ -2,7 +2,7 @@
 
 **Status: partial, inert consensus prerequisite. NOT live V2 authority admission.**
 
-Implementation is isolated to `swarm-consensus::v2_migration_quorum` and the consensus crate's Ed25519 dependency. It is based on the existing signed V2 protocol types from Agent 02 and the inert negative gates from Agent 11. V1 authority/lease, wire, persistence and Minecraft launch paths are intentionally unchanged.
+Implementation is isolated to `swarm-consensus::v2_migration_quorum`, the consensus crate's Ed25519 dependency, and a session-bound V2 action verifier in `swarm-network::authority_capability`. It is based on the existing signed V2 protocol types from Agent 02 and the inert negative gates from Agent 11. V1 authority/lease, wire, persistence and Minecraft launch paths are intentionally unchanged.
 
 ## Verified checks
 
@@ -12,6 +12,7 @@ Implementation is isolated to `swarm-consensus::v2_migration_quorum` and the con
 - Quorum counts **all active V1 voters**, including player-only and storage-only members, not only authority-eligible hosting candidates.
 - A pending old/new membership transition is explicitly blocked until an independently certified joint quorum can be checked. No silent reduction of the voter universe.
 - Stale source hashes, snapshots, epochs, invalid target fencing, corrupted membership signatures and forged proposals fail closed.
+- A fresh cryptographically verified `VerifiedAuthorityFeatureSession` must bind a signed V2 action to the exact target realm, candidate, committed policy/migration/membership/snapshot, epoch, fencing, consent revision and selected heap. Action kind, expected signer and unpredictable nonce must match trusted expectations. An action nonce must be atomically consumed once after signature verification. Expired sessions, tampered actions, policy mismatch, revoked/stale revision and replay are rejected. This remains proof binding only.
 
 ## Non-negotiable missing dependencies
 
