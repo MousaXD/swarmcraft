@@ -457,3 +457,26 @@ test('installed Svelte leave-cancel exercises the real membership disclosure bef
   assert.ok(nativeAcceptance.includes('app.click("#cancelLeave")'),
     'native cancellation must remain a real click, not a programmatic dialog close');
 });
+
+
+test('installed native leave cancellation follows both visible disclosures without bypassing membership', async () => {
+  const [script, experience] = await Promise.all([
+    source('../scripts/visual-window-acceptance.py'),
+    source('../../src/player-experience.js'),
+  ]);
+  assert.ok(experience.includes("details.id = 'advancedWorldTools'"));
+  assert.ok(experience.includes("document.querySelector('.danger-zone')"));
+  assert.ok(script.includes('advancedToolsPresent:'));
+  assert.ok(script.includes('advancedSummaryOnScreen:'));
+  assert.ok(script.includes('app.click("#advancedWorldTools > summary")'));
+  assert.ok(script.includes('app.click("#selectionContent details.danger-zone > summary")'));
+  assert.ok(script.includes('app.click("#leaveWorld")'));
+  assert.ok(script.includes('app.click("#cancelLeave")'));
+  assert.ok(script.indexOf('app.click("#advancedWorldTools > summary")') <
+    script.indexOf('app.click("#selectionContent details.danger-zone > summary")'),
+    'Must use actual native parent-summary click before opening hidden membership details');
+  assert.ok(script.indexOf('app.click("#selectionContent details.danger-zone > summary")') <
+    script.indexOf('app.click("#leaveWorld")'));
+  assert.doesNotMatch(script, /parent\.open\s*=\s*true|child\.open\s*=\s*true/,
+    'Never bypass the visible disclosure using synthetic JavaScript state');
+});
