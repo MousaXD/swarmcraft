@@ -236,7 +236,9 @@ test('frontend source and Tauri config preserve the global bridge contract', asy
   assert.match(app, /window\.__TAURI__\?\.core\?\.invoke/);
   assert.match(app, /document\.hidden/);
   assert.match(app, /setInterval\(refreshVisibleMigration, MIGRATION_REFRESH_MS\)/);
-  assert.match(app, /renderMigration\(\{ detail: `Could not read host migration state:/);
+  // Keep the failed read bound to the requested world so a stale or absent
+  // status cannot be shown as the selected world's verified successor.
+  assert.match(app, /renderMigration\(\{ world_id: requestedWorldId, phase: 'status_unavailable', detail: `Could not read host migration state:/);
   assert.match(app, /Automatic networking service could not start/);
   assert.equal(tauri.app.withGlobalTauri, true);
 });
