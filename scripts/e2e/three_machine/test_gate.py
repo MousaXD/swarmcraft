@@ -369,6 +369,7 @@ class TestFailClosed(unittest.TestCase):
             c = fixtures(out)
             check = gate.load_json(out / "transport_disrupted.json")
             check["nodes"]["carol"]["minecraft_server_process_observed"] = True
+            check["nodes"]["carol"]["world_server_process_count"] = 1
             gate.save(out / "transport_disrupted.json", check)
             with self.assertRaisesRegex(gate.Blocked, "carol_player_only_role_violated_transport_disrupted"):
                 gate.verify(c, out)
@@ -535,6 +536,7 @@ class TestFailClosed(unittest.TestCase):
             c = fixtures(out)
             record = gate.load_json(out / "bob_withdrawn.json")
             record["nodes"]["bob"]["minecraft_server_process_observed"] = True
+            record["nodes"]["bob"]["world_server_process_count"] = 1
             gate.save(out / "bob_withdrawn.json", record)
             with self.assertRaisesRegex(gate.Blocked, "unconsented_runtime_or_missing_successor"):
                 gate.verify(c, out)
@@ -555,6 +557,7 @@ class TestFailClosed(unittest.TestCase):
             c = fixtures(out)
             record = gate.load_json(out / "carol_denied.json")
             record["nodes"]["carol"]["minecraft_server_process_observed"] = True
+            record["nodes"]["carol"]["world_server_process_count"] = 1
             gate.save(out / "carol_denied.json", record)
             with self.assertRaisesRegex(gate.Blocked, "carol_player_only_role_violated_carol_denied"):
                 gate.verify(c, out)
