@@ -129,8 +129,8 @@ export function clientContinuityFromMigration(status, expectedWorldId, safety) {
     }
     return outcome(
       'manual_reconnect_required',
-      'Minecraft client reconnection required',
-      'This device reports a ready Fabric server for the selected world and generation. SwarmCraft cannot yet authenticate a client-reachable game address or automatically reconnect Minecraft. Obtain the current host address through a trusted channel and verify the world before joining; never reuse a stale address.',
+      'Minecraft reconnection is not verified',
+      'The last local runtime report reached Ready for this world and generation, but the report can remain after a crash and does not prove the server is still running. SwarmCraft has no authenticated, client-reachable game route or automatic Minecraft reconnect. Do not reuse an old address or join an unverified successor.',
     );
   }
   if ([
