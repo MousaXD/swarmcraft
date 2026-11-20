@@ -121,6 +121,20 @@ class TestRealCliCaptureContract(unittest.TestCase):
 class TestWorldBoundJvmInventory(unittest.TestCase):
     WORLD = "ab" * 32
 
+    def test_uppercase_world_id_is_canonical_before_jvm_inventory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = type("CaptureArgs", (), {"world": self.WORLD.upper(), "data_dir": temp})()
+            # Stop at the inventory preflight without running CLI or Minecraft.
+            # Every runtime path, identity fingerprint and observation must use
+            # the same normalized world ID regardless of GUI input casing.
+            with patch.object(Path, "read_text", return_value="fake-machine-id"), patch.object(
+                    node, "world_server_inventory", return_value=None) as inventory:
+                with self.assertRaises(SystemExit) as failed:
+                    node.capture(args)
+            self.assertEqual(failed.exception.code, 2)
+            self.assertEqual(args.world, self.WORLD)
+            inventory.assert_called_once_with(str(Path(temp).resolve()), self.WORLD)
+
     def test_server_inventory_must_remain_stable_across_capture(self):
         self.assertTrue(node.stable_world_server_inventory([], []))
         self.assertTrue(node.stable_world_server_inventory([111, 222], [222, 111]))
