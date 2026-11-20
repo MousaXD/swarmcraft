@@ -365,7 +365,10 @@ mod tests {
             vote
         }
 
-        fn verify(&self, votes: &[SignedHostingMigrationVoteV2]) -> Result<VerifiedV2MigrationVoteSet, V2MigrationQuorumError> {
+        fn verify(
+            &self,
+            votes: &[SignedHostingMigrationVoteV2],
+        ) -> Result<VerifiedV2MigrationVoteSet, V2MigrationQuorumError> {
             verify_v2_migration_votes(self.pins, &self.membership, &self.proposal, &self.policy, votes)
         }
     }
