@@ -218,6 +218,8 @@ python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$O
 # via installed software, explicitly choosing player-only 0 MiB.
 # Observe Bob's JVM stopped, Alice's JVM -Xmx within her own consent,
 # all three clients still connected, and Bob's consent revision increased.
+# Then deliberately request hosting on Bob's installed UI/CLI with revoked
+# consent: the real action must be refused and no Bob JVM may start.
 # If safe handoff or withdrawal cannot be completed, STOP and report BLOCKED.
 # Refresh PIDS with Alice's new server PID before capture.
 python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage bob_withdrawn --world "$WORLD_ID" --pids "$PIDS"
@@ -268,7 +270,8 @@ Bob's recovery, a NEW canonical checkpoint copied to all three peers, Alice
 as sole active server with her own allowed JVM heap, and Bob's per-world
 consent revoked to 0 MiB with a strictly increased revision. Bob and Carol
 must continue playing as real Minecraft clients, and no unauthorized JVM
-may appear. An unsuccessful or unavailable safe transfer is a **BLOCKER**,
+may appear. Deliberately attempt to rehost on Bob after revocation and
+capture a genuine refusal in the reviewed media. An unsuccessful or unavailable safe transfer is a **BLOCKER**,
 not permission to downgrade the policy or mark the test successful.
 
 At `carol_denied`, deliberately request a host/authority action for Carol
@@ -283,7 +286,8 @@ checkpoint continues replicating correctly.
 Both phases require fresh role-specific media entries named
 `hosting_withdrawal` (Bob) and `player_only_denial` (Carol), and explicit
 independent-review flags
-`bob_withdrawal_and_safe_handoff_observed` and
+`bob_withdrawal_and_safe_handoff_observed`,
+`bob_rehost_attempt_denied_after_withdrawal` and
 `carol_player_only_host_denial_observed`. The hash verifier alone cannot
 inspect pixels or establish that a rejected command was genuine. The reviewer
 must verify the actual installed-software behavior, redaction and timings.
@@ -303,9 +307,9 @@ revocation/0-MiB player-only record. The verifier checks that Alice's running
 Minecraft server process has a real `-Xmx` flag equal to Alice's allowed
 heap and Bob's recovered Java process uses Bob's independently chosen limit.
 Carol may never become a Java authority while remaining player-only.
-Consent snapshots and revision are rechecked after Bob's takeover and after
-his subsequent opt-out; this
-does not replace authenticated quorum or signed recovery.
+Consent snapshots and revisions are rechecked after Bob's takeover and
+his subsequent opt-out. These observations do not replace authenticated
+quorum or signed recovery.
 
 The `-Xmx` JVM argument is a **heap** limit only, not a guaranteed total
 RSS/cgroup limit. Real runtime memory pressure and OS-level process cap
@@ -424,7 +428,8 @@ Required evidence categories:
 - `disconnect_reconnect` for Bob after network disruption.
 - `alice_crash` and `alice_fenced` for Alice.
 - `hosting_withdrawal` for Bob, showing real persisted zero-budget revocation,
-  increased revision, safe transfer to Alice and continuous player access.
+  increased revision, safe transfer to Alice, denied rehosting, and continuous
+  player access.
 - `player_only_denial` for Carol, showing a genuine rejected attempt to host,
   with 0 MiB consent, no server JVM and unchanged signed authority.
 
