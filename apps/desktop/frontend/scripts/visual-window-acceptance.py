@@ -32,6 +32,8 @@ SAFE_BOOL_KEYS = frozenset({
     'identityNavDisplayVisible', 'identityNavHasGeometry', 'identityNavInsideViewport',
     'leaveSelectionVisible', 'leaveDisclosureOpen', 'leaveButtonVisible', 'leaveSummaryOnScreen',
     'identityToolsPresent', 'identityToolsOpen',
+    'connectivityOwned', 'connectivityFinished', 'connectivityNativeConfirmed',
+    'connectivityVerified', 'connectivityNoAuthorityClaim',
 })
 SAFE_INT_KEYS = frozenset({
     'width', 'height', 'rootScrollWidth', 'paneScrollWidth',
@@ -239,6 +241,57 @@ def run(binary: Path, artifacts: Path):
                 break
             time.sleep(0.2)
         assert all(identity_check.values()), "Native Svelte identity refresh did not complete a new verified Rust read"
+        # The Svelte Diagnostics connectivity status is explicitly read-only:
+        # require a fresh real Rust IPC diagnostic, not old legacy DOM labels.
+        # Only allowlisted booleans enter native evidence, not network addresses.
+        mark_stage('native-connectivity-refresh')
+        owner = app.execute("""
+          return {
+            connectivityOwned: window.__swarmcraftSvelteConnectivityOwned === true
+              && typeof window.__swarmcraftSvelteConnectivity?.refresh === 'function',
+          };
+        """)
+        record_ui(owner)
+        assert owner['connectivityOwned'], "Native connectivity display is not Svelte-owned"
+        # Entering Diagnostics requests a first read. Do not click a disabled
+        # control or bypass the pending native request programmatically.
+        control = None
+        for _ in range(75):
+            control = app.execute("""
+              return { connectivityFinished:
+                document.getElementById('refreshNativeConnectivity')?.disabled === false };
+            """)
+            record_ui(control)
+            if control['connectivityFinished']:
+                break
+            time.sleep(0.2)
+        assert control['connectivityFinished'], "First native connectivity read remained indefinitely busy"
+        network_before = app.execute("""
+          return Number(document.getElementById('diagnosticConnectivity')?.dataset.nativeVerifiedCount ?? -1);
+        """)
+        assert type(network_before) is int and network_before >= 0, "No native connectivity counter"
+        app.click("#refreshNativeConnectivity")
+        network_check = None
+        for _ in range(75):
+            network_check = app.execute("""
+              const badge = document.getElementById('diagnosticConnectivity');
+              const button = document.getElementById('refreshNativeConnectivity');
+              return {
+                connectivityFinished: !!button && !button.disabled,
+                connectivityVerified: badge?.dataset.nativeConnectionPhase === 'checked',
+                connectivityNativeConfirmed:
+                  Number(badge?.dataset.nativeVerifiedCount ?? -1) > arguments[0],
+                connectivityNoAuthorityClaim:
+                  !/authority eligible|ready to host|hosting permitted/i.test(badge?.textContent || ''),
+              };
+            """, [network_before])
+            record_ui(network_check)
+            if all(network_check.values()):
+                break
+            time.sleep(0.2)
+        assert all(network_check.values()), (
+            "Installed native Svelte network check did not verify a fresh Rust diagnostic"
+        )
         app.click("#navWorlds")
         # Exercise the new Svelte signed-invite form in an installed app.
         # No invite is sent to Rust here; an empty form must fail locally,
