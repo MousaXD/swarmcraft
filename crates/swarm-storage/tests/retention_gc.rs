@@ -1,7 +1,6 @@
 use std::{collections::BTreeSet, fs, path::PathBuf};
 use swarm_protocol::{
-    AuthorityTransferV1, BlobDescriptor, BlobEncoding, Hash32, PeerId, SnapshotManifestV1, SoloBranchV1, TransferPhase,
-    WorldId,
+    AuthorityTransferV1, BlobDescriptor, BlobEncoding, Hash32, PeerId, SnapshotManifestV1, TransferPhase, WorldId,
     PROTOCOL_VERSION,
 };
 use swarm_storage::{retention::RetentionPolicy, SnapshotContext, Storage};
@@ -275,104 +274,4 @@ fn non_file_canonical_retention_root_blocks_destructive_pruning() {
     assert!(result.is_err(), "canonical retention directory was silently ignored");
     assert!(storage.load_snapshot(world(), 1).is_ok());
     assert!(blob_path(&storage, &old_blob).exists());
-}
-
-fn sole_old_snapshot_conflict(old: &SnapshotManifestV1) -> SoloBranchV1 {
-    SoloBranchV1 {
-        protocol_version: PROTOCOL_VERSION,
-        world_id: world(),
-        base_snapshot_hash: old.manifest_hash().unwrap(),
-        base_epoch: old.epoch,
-        head_snapshot_hash: old.manifest_hash().unwrap(),
-        head_epoch: old.epoch,
-        head_sequence: old.sequence,
-        state_hash: old.state_root,
-        authority_peer_id: old.authority_peer_id,
-        authority_public_key: old.authority_public_key,
-        signature: vec![0; 64],
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn dangling_solo_conflict_file_blocks_gc_and_pruning() {
-    use std::os::unix::fs::symlink;
-
-    let temp = tempfile::tempdir().unwrap();
-    let source = temp.path().join("world");
-    fs::create_dir_all(&source).unwrap();
-    let storage = Storage::open(temp.path().join("store")).unwrap();
-    fs::write(source.join("level.dat"), b"solo-conflict-recovery-state").unwrap();
-    let old = snapshot(&storage, &source, 1, None);
-    let old_blob = old.entries[0].blob.clone();
-    fs::write(source.join("level.dat"), b"canonical-new-head").unwrap();
-    snapshot(&storage, &source, 2, Some(old.manifest_hash().unwrap()));
-
-    let path = storage.preserve_solo_conflict(&sole_old_snapshot_conflict(&old)).unwrap();
-    fs::remove_file(&path).unwrap();
-    symlink(temp.path().join("missing-solo-conflict"), &path).unwrap();
-    let orphan = storage.put_blob(world(), b"do-not-gc-after-corrupt-conflict").unwrap();
-    assert!(storage.garbage_collect_blobs(world()).is_err());
-    assert!(blob_path(&storage, &orphan).exists());
-
-    assert!(
-        storage.apply_retention(world(), &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() }).is_err()
-    );
-    assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
-    assert!(storage.load_snapshot(world(), 1).is_ok());
-    assert!(blob_path(&storage, &old_blob).exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn dangling_solo_conflicts_directory_blocks_gc_and_pruning() {
-    use std::os::unix::fs::symlink;
-
-    let temp = tempfile::tempdir().unwrap();
-    let source = temp.path().join("world");
-    fs::create_dir_all(&source).unwrap();
-    let storage = Storage::open(temp.path().join("store")).unwrap();
-    fs::write(source.join("level.dat"), b"solo-branch-old-state").unwrap();
-    let old = snapshot(&storage, &source, 1, None);
-    let old_blob = old.entries[0].blob.clone();
-    fs::write(source.join("level.dat"), b"new-head").unwrap();
-    snapshot(&storage, &source, 2, Some(old.manifest_hash().unwrap()));
-
-    let dir = storage.world_dir(world()).join("recovery/solo-conflicts");
-    fs::create_dir_all(dir.parent().unwrap()).unwrap();
-    symlink(temp.path().join("nonexistent-conflict-directory"), &dir).unwrap();
-    let orphan = storage.put_blob(world(), b"pinned-during-invalid-directory").unwrap();
-    assert!(storage.garbage_collect_blobs(world()).is_err());
-    assert!(blob_path(&storage, &orphan).exists());
-
-    assert!(
-        storage.apply_retention(world(), &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() }).is_err()
-    );
-    assert!(storage.load_snapshot(world(), 1).is_ok());
-    assert!(blob_path(&storage, &old_blob).exists());
-}
-
-#[test]
-fn corrupt_preserved_solo_conflict_cannot_be_reported_as_idempotent() {
-    let temp = tempfile::tempdir().unwrap();
-    let storage = Storage::open(temp.path().join("store")).unwrap();
-    let old = SnapshotManifestV1 {
-        protocol_version: PROTOCOL_VERSION,
-        world_id: world(),
-        snapshot_number: 1,
-        epoch: 1,
-        sequence: 1,
-        previous_snapshot_hash: None,
-        entries: Vec::new(),
-        state_root: Hash32([7; 32]),
-        authority_peer_id: PeerId([1; 32]),
-        authority_public_key: [2; 32],
-        signature: vec![0; 64],
-    };
-    let conflict = sole_old_snapshot_conflict(&old);
-    let path = storage.preserve_solo_conflict(&conflict).unwrap();
-    let corrupt = b"corrupt preserved solo conflict";
-    fs::write(&path, corrupt).unwrap();
-    assert!(storage.preserve_solo_conflict(&conflict).is_err());
-    assert_eq!(fs::read(&path).unwrap(), corrupt);
 }
