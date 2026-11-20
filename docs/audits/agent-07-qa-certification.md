@@ -587,3 +587,51 @@ Original run logs were inspected for the Rust security audits, real installed Li
 **Reviews posted:** [#89 limited preview GO](https://github.com/MousaXD/swarmcraft/pull/89#pullrequestreview-5992741022); [#115 feature NO-GO](https://github.com/MousaXD/swarmcraft/pull/115#pullrequestreview-5992741390).
 
 **Independent release conclusion:** **0.5.1 preview merge: conditional GO**, subject to no source/main drift and ongoing required status success; **signed production release: NO-GO**; **#115 new hosting/Svelte/V2 product merge: NO-GO**. Agent 00 alone controls integration/merge/tag. Do not self-certify V2, 3-machine gameplay or signing from automated source/package results. Gate rows marked NOT TESTED must not be promoted to PASS by assertion.
+
+
+---
+
+## Agent 07 post-merge continuation — 20 November 2026: main 0.5.1 and new specialist PRs
+
+### Repo drift and release state (observed 2026-11-20)
+
+- Protected main changed from `badcbc6e73b42f37a4287c2c2e03e72e50e832ce` to **`1ef18fcc373d0e61c0c3fbe1bdb92e1ff264a945`**, merging reviewed PR #89. PRs #116 and #118 were also marked merged as their histories were subsumed by the integrated patch. **Do not infer standalone #116/#118 heads independently passed; earlier mandatory failures remain part of history.**
+- Directly inspected current main `Cargo.lock`: Hickory net/proto/resolver **0.26.3**, rustix **1.1.6**. Current main Tauri application **0.5.1**, `frontendDist: "../src"` (legacy shipping frontend). This is V1 technical preview only.
+- New post-merge **main-push** [Required Validation #44739196696](https://github.com/MousaXD/swarmcraft/actions/runs/44739196696) and [Main Desktop Installers #44739196890](https://github.com/MousaXD/swarmcraft/actions/runs/44739196890) were **QUEUED**, no final green on the *new main SHA*. Earlier #89 synthetic PR-merge success is genuine historical evidence, not a substitute for these main-push conclusions.
+- GitHub releases inspected: only prior `main-latest` prerelease (published 2026-11-11) targeting `682c78f522aff53a59720de6c864e4e536eea778`; **no signed `v0.5.1` publication evidence** observed.
+
+### QA-REL-001: active rolling-publication defect — publication HOLD
+
+Current main `.github/workflows/main-installers.yml` **hard-codes** `SwarmCraft_0.5.0_${{ matrix.arch }}.dmg` although main Tauri metadata is now **0.5.1**. Its `publish` step uses `download-artifact merge-multiple: true` and verifies merely that at least one file exists, without independently verifying each exact-run platform group or each package's downloaded SHA-256 sidecar. For a passing upcoming main-push job, this leaves a genuine mislabelled-preview asset risk and fails the intended complete publication provenance rule. **QA veto: hold next `main-latest` publication until independently checked fix is integrated.** QA has not cancelled workflows or mutated code.
+
+[Agent 08 draft PR #127](https://github.com/MousaXD/swarmcraft/pull/127) head `d9e7d7910d08286819292f82ea3b2c780f2e7309` directly addresses both deficiencies: version-derived macOS DMG naming, separate expected groups, SHA-sidecar/version/arch/filename/symlink checks, release identity negative fixtures. Independent QA [review #5993014199](https://github.com/MousaXD/swarmcraft/pull/127#pullrequestreview-5993014199). Exact-head Required [44738296811](https://github.com/MousaXD/swarmcraft/actions/runs/44738296811) and Installers [44738297309](https://github.com/MousaXD/swarmcraft/actions/runs/44738297309) were **PENDING**. Require real artifact-format compatibility after rebase to new 0.5.1 main. Check signing/status verification separately: status-file presence is not a production Authenticode/Apple signature proof. The publisher deletes the prior rolling release before creating the replacement; assess failure rollback independently.
+
+### New independent specialist ledger
+
+The following are **source-reviewed** heads, with **zero independently certified terminal current-head workflow pairs** at initial audit. Old baseline and superseded SHA results cannot be transferred to a new tip. New reviews are COMMENT reviews, not APPROVE or production merge action.
+
+| PR | Observed SHA (when source-reviewed) | Source conclusion / blocker | QA review |
+| --- | --- | --- | --- |
+| #119 tests-only pre-fix | `857b6615646de226c0c85298ae76a7a98e630434` | **INTENTIONAL RED / NOT TESTED** until original test-specific CI failure proves missing GC protection; DO NOT MERGE | Source/body audit |
+| #121 cgroup admission | `7487199ec91f2a5dd77fe3b8e2d2a5e76e1955bc` | **BLOCKED**: process/ancestor cgroup-v2 memory.max/current and memory.high throttle safe admission; source fixture coverage only, no real constrained JVM, total RSS, or full authority/revocation integration | [#5993039556](https://github.com/MousaXD/swarmcraft/pull/121#pullrequestreview-5993039556) |
+| #122 signed V2 consensus | `bf01ba1851c21244f6822a737f518fc9708cecfd` | **BLOCKED**: signed stable-source quorum + one-use scoped challenge book are inert, no canonical accepted-root or V2 wire/admission; reconcile #125's predecessor/joint voter semantics | [#5993040064](https://github.com/MousaXD/swarmcraft/pull/122#pullrequestreview-5993040064) |
+| #123 storage repair | `acb9bbbece0304c9c8a5b057a871e80469d4a469` | **BLOCKED**: source demonstrates symlink/dangling pin and solo conflict checks; need red-before-green actual logs, full same-head gates, current-main rebase and race review | [#5993038460](https://github.com/MousaXD/swarmcraft/pull/123#pullrequestreview-5993038460) |
+| #124 independent adversarial RED | `56778341d62264619b633fc987d6955bd8938290` | **RED TEST INTENT / NOT TESTED** until executed live replication-lease dangling-pin test; must fail before #123 fix and pass after; no production fix here | Source/body audit |
+| #125 V2 protocol quorum envelope | `b1b38c20914bcb45a8d4c3ea265181bed5318edb` | **BLOCKED**: signed 1,024-vote bounded quorum proof is non-authorizing; dual acceptance paths with #122 would be unsafe; needs common semantics, accepted source, durable one-use target root | [#5993040551](https://github.com/MousaXD/swarmcraft/pull/125#pullrequestreview-5993040551) |
+| #126 Minecraft client presentation | `23b87e0d4dea05ae89437a0dbd81b225dd42f862` then advanced again | **NOT TESTED on latest**: truthful stale `Ready`/no-game-route guidance; no signed TCP target, client proxy/mod, auto reconnect or 3-machine real Minecraft evidence. Latest branch moves require new SHA recheck | Source file audit |
+| #127 artifact publishing verifier | `d9e7d7910d08286819292f82ea3b2c780f2e7309` | **BLOCKED** until real current-main workflow/assets prove corrected 0.5.1 preview and production artifact policy | [#5993014199](https://github.com/MousaXD/swarmcraft/pull/127#pullrequestreview-5993014199) |
+| #128 discovery exact resolve | `9ae8cb30f9b254c22444954038e90af3db5f1b01` | **NOT TESTED**: source adds true authenticated QUIC disconnect/failure injection and correlated outbound request/peer response enforcement, browse + exact retry; current-head CI and repeated cross-platform runs pending | [#5993039070](https://github.com/MousaXD/swarmcraft/pull/128#pullrequestreview-5993039070) |
+
+**Cross-agent V2 safety requirement:** current/proposed quorum proofs cannot be two independent positive authorizers. #122's accepted stable-source voter majority differs from #125's immediate-predecessor joint-majority requirement whenever V1 membership sequence >1. Define one canonical completed-vs-pending membership rule and independently verify source ancestry, immutable chosen snapshot, migration replay ledger, atomic durable accepted V2 cutover, legacy V1 isolation, live mandated V2 transport, and local consent/race guards before any authority lease or JVM startup. All remains **BLOCKED**, not merely awaiting CI.
+
+**Minecraft field certification remains NOT TESTED:** merged #117 is a guarded manual field *harness*, not an executed 3-device/3-network Java client test. PR #126 client outcome presentation explicitly does not provide a verified game TCP endpoint or reconnect. Windows/macOS genuinely installed GUI remains **NOT TESTED**, despite package-building success.
+
+### QA release position
+
+- **Current V1 0.5.1 source merged:** confirmed, but *new main-push exact-SHA CI still queued*.
+- **Upcoming `main-latest` rolling preview:** **HOLD / NO-GO pending QA-REL-001**.
+- **Signed versioned `v0.5.1` release:** **NO-GO** pending independent signing/notarization and exact-tag approval.
+- **Full #115 + #121/#122/#125 hosting/V2/Svelte feature integration:** **NO-GO**; no positive real V2 authority, Svelte shipping installed GUI, or multi-machine Minecraft proof.
+- **#102 storage and #113 discovery follow-up:** potential scoped fixes exist; actual current SHA automated + red-before-green negative evidence must determine merge readiness.
+
+**QA authority:** no source/CI edits, direct protected-main pushes, merges, issue closure, workflow cancellation or release publication by Agent 07. Reviews are independent comments and may veto product claims; Agent 00 owns integration, release sequencing and field-test provisioning.
