@@ -265,6 +265,34 @@ mod tests {
         assert!(storage.load_recovery_certificate(world).is_ok());
     }
 
+    #[test]
+    fn interrupted_next_epoch_promotion_does_not_erase_current_accepted_certificate() {
+        let (_temp, storage, world) = fixture();
+        let current = certificate(world);
+        storage.save_recovery_certificate(&current).unwrap();
+        storage.save_epoch_record(&accepted_epoch_for(&current)).unwrap();
+
+        let mut next = current.clone();
+        next.ballot.base_epoch = current.ballot.target_epoch;
+        next.ballot.base_fencing_token = current.ballot.target_fencing_token;
+        next.ballot.target_epoch += 1;
+        next.ballot.target_fencing_token += 1;
+        next.ballot.round += 1;
+
+        // A successor has accumulated a quorum and attempts to persist its
+        // certificate before the next epoch write. Simulate process death
+        // immediately after that first storage call, regardless of whether
+        // this storage API rejects or safely stages the new certificate.
+        let _ = storage.save_recovery_certificate(&next);
+        drop(storage);
+
+        let reopened = Storage::open(_temp.path()).unwrap();
+        assert_eq!(reopened.load_epoch_record(world).unwrap().epoch_number, current.ballot.target_epoch);
+        // The authority at the still-accepted generation must retain its
+        // original durable quorum evidence until promotion commits.
+        assert_eq!(reopened.load_recovery_certificate(world).unwrap(), current);
+    }
+
     fn accepted_epoch_for(certificate: &RecoveryCertificateV1) -> EpochRecordV1 {
         let ballot = &certificate.ballot;
         EpochRecordV1 {
