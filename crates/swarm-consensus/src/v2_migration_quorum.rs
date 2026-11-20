@@ -396,8 +396,9 @@ mod tests {
         f.proposal.signature[0] ^= 1;
         assert_eq!(f.verify(&[f.vote(0), f.vote(1)]), Err(V2MigrationQuorumError::InvalidSourceSignature));
         let mut f = Fixture::new();
+        let votes = [f.vote(0), f.vote(1)];
         f.proposal.activation_fencing_token = f.pins.fencing_token;
-        assert_eq!(f.verify(&[f.vote(0), f.vote(1)]), Err(V2MigrationQuorumError::InvalidProposal));
+        assert_eq!(f.verify(&votes), Err(V2MigrationQuorumError::InvalidProposal));
     }
 
     #[test]
@@ -423,12 +424,14 @@ mod tests {
         f.membership.signature = f.keys[0].sign(&f.membership.signing_bytes().unwrap()).to_bytes().to_vec();
         f.pins.membership_hash = f.membership.record_hash().unwrap();
         f.proposal.realm_genesis.source.source_membership_hash = f.pins.membership_hash;
+        f.proposal.target_realm_id = f.proposal.realm_genesis.realm_id().unwrap();
         f.proposal.signature = f.keys[0].sign(&f.proposal.signing_bytes().unwrap()).to_bytes().to_vec();
         assert_eq!(f.verify(&[f.vote(0), f.vote(1)]), Err(V2MigrationQuorumError::InvalidVoter));
         let mut f = Fixture::new();
         f.membership.signature[0] ^= 1;
         f.pins.membership_hash = f.membership.record_hash().unwrap();
         f.proposal.realm_genesis.source.source_membership_hash = f.pins.membership_hash;
+        f.proposal.target_realm_id = f.proposal.realm_genesis.realm_id().unwrap();
         f.proposal.signature = f.keys[0].sign(&f.proposal.signing_bytes().unwrap()).to_bytes().to_vec();
         assert_eq!(
             f.verify(&[f.vote(0), f.vote(1)]),
