@@ -630,7 +630,9 @@ fn v2_postcard_decode_rejects_oversized_and_missing_signature_bytes() {
 
     let mut proposal = f.proposal.clone();
     proposal.signature = vec![8; 4096];
-    assert!(postcard::from_bytes::<SignedHostingMigrationProposalV2>(&postcard::to_allocvec(&proposal).unwrap()).is_err());
+    assert!(
+        postcard::from_bytes::<SignedHostingMigrationProposalV2>(&postcard::to_allocvec(&proposal).unwrap()).is_err()
+    );
 
     let mut action = f.action();
     action.signature = vec![10; 4096];

@@ -7,6 +7,14 @@
 
 ## Agent 11 signed quorum verification (draft PR #125)
 
+**Untrusted postcard decoding:** The V2 quorum vote Vec uses a custom
+max-1,024-entry sequence deserializer; all four V2 Ed25519 signed record
+formats now reject signatures not exactly 64 bytes *while decoding*, without
+attacker-controlled signature-buffer reservations. The serializer/signing
+transcripts and all V1 signed bytes are unchanged. Input must still pass
+cryptographic and canonical-state checks; successfully decoding a record
+does not authorize a server or establish a durable one-use migration.
+
 `SignedHostingMigrationQuorumV2::verify_for_accepted_source` is a new,
 **inert** verification boundary layered on the original Agent 02 V2
 proposal/vote records. It verifies the source V1 config and membership
