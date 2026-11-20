@@ -608,3 +608,31 @@ fn signed_v2_migration_quorum_rejects_banned_voters_and_unbounded_envelopes() {
         )
         .is_err());
 }
+
+#[test]
+fn v2_postcard_decode_rejects_oversized_and_missing_signature_bytes() {
+    let f = Fixture::new();
+    let vote = f.vote();
+    let valid_bytes = postcard::to_allocvec(&vote).unwrap();
+    assert_eq!(postcard::from_bytes::<SignedHostingMigrationVoteV2>(&valid_bytes).unwrap(), vote);
+
+    let mut invalid_vote = vote.clone();
+    invalid_vote.signature = vec![9; 4096];
+    let huge_vote = postcard::to_allocvec(&invalid_vote).unwrap();
+    assert!(postcard::from_bytes::<SignedHostingMigrationVoteV2>(&huge_vote).is_err());
+    invalid_vote.signature.clear();
+    let unsigned_vote = postcard::to_allocvec(&invalid_vote).unwrap();
+    assert!(postcard::from_bytes::<SignedHostingMigrationVoteV2>(&unsigned_vote).is_err());
+
+    let mut policy = f.policy.clone();
+    policy.signature = vec![7; 4096];
+    assert!(postcard::from_bytes::<SignedRealmHostingPolicyV2>(&postcard::to_allocvec(&policy).unwrap()).is_err());
+
+    let mut proposal = f.proposal.clone();
+    proposal.signature = vec![8; 4096];
+    assert!(postcard::from_bytes::<SignedHostingMigrationProposalV2>(&postcard::to_allocvec(&proposal).unwrap()).is_err());
+
+    let mut action = f.action();
+    action.signature = vec![10; 4096];
+    assert!(postcard::from_bytes::<SignedHostingAuthorityActionV2>(&postcard::to_allocvec(&action).unwrap()).is_err());
+}
