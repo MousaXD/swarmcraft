@@ -275,3 +275,155 @@ fn non_file_canonical_retention_root_blocks_destructive_pruning() {
     assert!(storage.load_snapshot(world(), 1).is_ok());
     assert!(blob_path(&storage, &old_blob).exists());
 }
+
+/// Solo-conflict history is also a mandatory recovery root. Malformed
+/// canonical conflict paths must not be interpreted as an empty conflict set.
+#[cfg(unix)]
+#[test]
+fn malformed_solo_conflict_roots_never_authorize_snapshot_or_blob_deletion() {
+    use std::os::unix::fs::symlink;
+
+    for shape in ["dangling-directory", "symlinked-directory", "dangling-entry", "directory-entry"] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("world");
+        fs::create_dir_all(&source).unwrap();
+        let storage = Storage::open(temp.path().join("store")).unwrap();
+
+        fs::write(source.join("level.dat"), b"old-conflict-recovery-base").unwrap();
+        let old = snapshot(&storage, &source, 1, None);
+        let old_blob = old.entries[0].blob.clone();
+        fs::write(source.join("level.dat"), b"latest-snapshot").unwrap();
+        snapshot(&storage, &source, 2, Some(old.manifest_hash().unwrap()));
+        let orphan = storage.put_blob(world(), b"orphan-before-conflict-check").unwrap();
+
+        let conflict_dir = storage.world_dir(world()).join("recovery/solo-conflicts");
+        fs::create_dir_all(conflict_dir.parent().unwrap()).unwrap();
+        let conflict_entry = conflict_dir.join(format!("{}.postcard", "a".repeat(64)));
+        match shape {
+            "dangling-directory" => {
+                symlink(temp.path().join("missing-conflict-root"), &conflict_dir).unwrap();
+            }
+            "symlinked-directory" => {
+                let target = temp.path().join("external-conflict-root");
+                fs::create_dir_all(&target).unwrap();
+                symlink(target, &conflict_dir).unwrap();
+            }
+            "dangling-entry" => {
+                fs::create_dir_all(&conflict_dir).unwrap();
+                symlink(temp.path().join("missing-conflict-record"), &conflict_entry).unwrap();
+            }
+            "directory-entry" => {
+                fs::create_dir_all(&conflict_entry).unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        assert!(
+            storage.list_solo_conflicts(world()).is_err(),
+            "{shape}: invalid canonical conflict root was reported as empty"
+        );
+        assert!(
+            storage.garbage_collect_blobs(world()).is_err(),
+            "{shape}: direct blob GC ignored invalid conflict evidence"
+        );
+        assert!(blob_path(&storage, &orphan).exists(), "{shape}: GC removed orphan before validation");
+        assert!(
+            storage
+                .apply_retention(world(), &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() })
+                .is_err(),
+            "{shape}: retention proceeded after invalid conflict evidence"
+        );
+        assert!(storage.load_snapshot(world(), 1).is_ok(), "{shape}: old recovery snapshot deleted");
+        assert!(blob_path(&storage, &old_blob).exists(), "{shape}: pinned recovery blob deleted");
+
+        // Repair the damaged canonical path: genuine absence must restore
+        // normal cleanup without erasing previously protected evidence early.
+        match shape {
+            "dangling-directory" | "symlinked-directory" => {
+                fs::remove_file(&conflict_dir).unwrap();
+            }
+            "dangling-entry" => {
+                fs::remove_file(&conflict_entry).unwrap();
+            }
+            "directory-entry" => {
+                fs::remove_dir(&conflict_entry).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(storage.list_solo_conflicts(world()).unwrap().is_empty());
+        let result = storage
+            .apply_retention(world(), &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() })
+            .unwrap();
+        assert_eq!(result.removed_snapshots, vec![1], "{shape}: repaired retention did not resume");
+    }
+}
+
+/// The GC pin namespaces are durable roots for replication and unfinished
+/// snapshot publication. Invalid path types cannot be confused with no pins.
+#[cfg(unix)]
+#[test]
+fn malformed_gc_pin_roots_cannot_collect_complete_in_flight_blobs() {
+    use std::os::unix::fs::symlink;
+
+    for shape in [
+        "replication-root",
+        "publication-root",
+        "replication-entry",
+        "publication-entry",
+        "publication-child",
+        "publication-owner",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(temp.path().join("store")).unwrap();
+        let blob = storage.put_blob(world(), b"complete-but-still-in-flight").unwrap();
+        let root = storage.world_dir(world());
+        let replication = root.join(".replication-pins");
+        let publication = root.join(".snapshot-publication-pins");
+        let mut damaged_path = match shape {
+            "replication-root" => replication.clone(),
+            "replication-entry" => replication.join("missing.pin"),
+            _ => publication.clone(),
+        };
+
+        match shape {
+            "replication-root" | "publication-root" => {
+                symlink(temp.path().join("missing-pin-root"), &damaged_path).unwrap();
+            }
+            "replication-entry" => {
+                fs::create_dir_all(&replication).unwrap();
+                symlink(temp.path().join("missing-pin"), &damaged_path).unwrap();
+            }
+            "publication-entry" => {
+                let child = publication.join("pending-transaction");
+                fs::create_dir_all(&child).unwrap();
+                damaged_path = child.join("missing.pin");
+                symlink(temp.path().join("missing-pin"), &damaged_path).unwrap();
+            }
+            "publication-child" => {
+                fs::create_dir_all(&publication).unwrap();
+                damaged_path = publication.join("pending-transaction");
+                let external = temp.path().join("other-publication");
+                fs::create_dir_all(&external).unwrap();
+                symlink(external, &damaged_path).unwrap();
+            }
+            "publication-owner" => {
+                let child = publication.join("pending-transaction");
+                fs::create_dir_all(&child).unwrap();
+                damaged_path = child.join("owner.lock");
+                let external = temp.path().join("other-owner");
+                fs::write(&external, b"").unwrap();
+                symlink(external, &damaged_path).unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        assert!(
+            storage.garbage_collect_blobs(world()).is_err(),
+            "{shape}: invalid durable pin metadata was silently skipped"
+        );
+        assert!(blob_path(&storage, &blob).exists(), "{shape}: GC deleted uncommitted data");
+        fs::remove_file(&damaged_path).unwrap();
+        assert_eq!(storage.garbage_collect_blobs(world()).unwrap().removed_blobs, 1);
+        assert!(!blob_path(&storage, &blob).exists(), "{shape}: clean GC failed to resume");
+    }
+}
