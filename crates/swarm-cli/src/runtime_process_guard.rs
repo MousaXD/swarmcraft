@@ -59,6 +59,78 @@ impl Drop for RuntimeProcessGuard {
     }
 }
 
+/// Deny a new JVM admission while an earlier controller may have left an
+/// unaccounted Minecraft process alive in *any* world under this data root.
+///
+/// Call only while holding hosting-active-memory.lock. A hard-killed controller
+/// releases that advisory lock but does not necessarily terminate Java; checking
+/// solely the new world's process record would miss an orphan in another world.
+pub fn refuse_unaccounted_runtimes(paths: &DataPaths) -> Result<()> {
+    let control = paths.root.join("control");
+    if let Ok(meta) = fs::symlink_metadata(&control) {
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            bail!("hosting control root is not a real directory; JVM admission denied");
+        }
+    }
+    let entries = match fs::read_dir(&control) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("cannot enumerate {}", control.display())),
+    };
+    for entry in entries {
+        let entry = entry.context("cannot enumerate hosting process records")?;
+        let kind = entry.file_type().context("cannot inspect hosting control entry type")?;
+        if kind.is_symlink() {
+            bail!("hosting control directory contains an untrusted symlink; JVM admission denied");
+        }
+        if !kind.is_dir() {
+            continue;
+        }
+        let record_path = entry.path().join("runtime-process.json");
+        // A dangling symlink would otherwise look like an absent record and
+        // bypass the safety check while an orphan JVM might still exist.
+        match fs::symlink_metadata(&record_path) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+                bail!("untrusted hosting process record {}; JVM admission denied", record_path.display());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot inspect {}", record_path.display()));
+            }
+        }
+        // Once a record was observed, deletion or replacement between
+        // metadata inspection and read must not become "no record".
+        let bytes = fs::read(&record_path)
+            .with_context(|| format!("cannot read observed hosting process record {}", record_path.display()))?;
+        let record: RuntimeProcessRecord = serde_json::from_slice(&bytes).with_context(|| {
+            format!("unreadable hosting process record at {}; new JVM denied", record_path.display())
+        })?;
+        if record.version != RUNTIME_PROCESS_RECORD_VERSION {
+            bail!("unsupported hosting process record at {}; new JVM denied", record_path.display());
+        }
+        match record.java_pid {
+            Some(pid) => {
+                if process_alive(pid)
+                    .with_context(|| format!("cannot verify residual Java PID {pid} in {}", record_path.display()))?
+                {
+                    bail!(
+                        "unaccounted Minecraft process PID {pid} remains alive in {}; refusing additional JVM admission",
+                        record_path.display()
+                    );
+                }
+            }
+            None => {
+                bail!(
+                    "ambiguous prior Minecraft launch at {}; refusing additional JVM admission",
+                    record_path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn inspect_previous_record(path: &PathBuf) -> Result<()> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
@@ -182,6 +254,72 @@ mod tests {
 
     fn world() -> WorldId {
         WorldId([0x66; 32])
+    }
+
+    #[test]
+    fn live_orphan_in_another_world_blocks_new_jvm_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().to_path_buf());
+        let prior_world = world();
+        let path = record_path(&paths, prior_world);
+        atomic_write(
+            &path,
+            &RuntimeProcessRecord {
+                version: RUNTIME_PROCESS_RECORD_VERSION,
+                controller_pid: 1,
+                java_pid: Some(std::process::id()),
+            },
+        )
+        .unwrap();
+        let err = refuse_unaccounted_runtimes(&paths).unwrap_err();
+        assert!(err.to_string().contains("unaccounted Minecraft process"));
+    }
+
+    #[test]
+    fn ambiguous_or_corrupt_or_symlinked_process_records_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().to_path_buf());
+        let path = record_path(&paths, world());
+        atomic_write(
+            &path,
+            &RuntimeProcessRecord { version: RUNTIME_PROCESS_RECORD_VERSION, controller_pid: 1, java_pid: None },
+        )
+        .unwrap();
+        assert!(refuse_unaccounted_runtimes(&paths)
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous prior Minecraft launch"));
+        fs::write(&path, b"{not-json").unwrap();
+        assert!(refuse_unaccounted_runtimes(&paths).is_err());
+
+        fs::remove_file(&path).unwrap();
+        assert!(refuse_unaccounted_runtimes(&paths).is_ok());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let link = paths.root.join("control").join("untrusted-link");
+            symlink(temp.path(), &link).unwrap();
+            assert!(refuse_unaccounted_runtimes(&paths).unwrap_err().to_string().contains("untrusted symlink"));
+            fs::remove_file(link).unwrap();
+
+            let dangling = temp.path().join("missing-runtime-record");
+            symlink(dangling, &path).unwrap();
+            assert!(refuse_unaccounted_runtimes(&paths)
+                .unwrap_err()
+                .to_string()
+                .contains("untrusted hosting process record"));
+            fs::remove_file(&path).unwrap();
+
+            let control_root = paths.root.join("control");
+            let original = paths.root.join("original-control");
+            fs::rename(&control_root, &original).unwrap();
+            symlink(&original, &control_root).unwrap();
+            assert!(refuse_unaccounted_runtimes(&paths)
+                .unwrap_err()
+                .to_string()
+                .contains("hosting control root is not a real directory"));
+        }
     }
 
     #[test]

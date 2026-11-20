@@ -11,7 +11,7 @@ use std::{
 };
 use swarm_core::{DataPaths, PeerIdentity};
 
-use crate::host_readiness;
+use crate::{host_readiness, runtime_process_guard};
 use swarm_protocol::{PeerId, WorldId};
 
 const SCHEMA_VERSION: u16 = 1;
@@ -260,6 +260,10 @@ pub fn admit(paths: &DataPaths, world: WorldId) -> Result<HostingAdmission> {
     lock.try_lock_exclusive().context(
         "another Minecraft hosting admission is active on this device; concurrent memory reservations are denied",
     )?;
+    // The OS releases the advisory lock when the Rust controller crashes,
+    // but Java can survive as an orphan with an unconsumed heap reservation.
+    // Protect *all worlds* in this data root, not just the new world's slot.
+    runtime_process_guard::refuse_unaccounted_runtimes(paths)?;
     let consent = require_contribution(paths, world)?;
     Ok(HostingAdmission { _exclusive_memory_lock: lock, consent })
 }
@@ -377,6 +381,106 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
 }
 
 #[cfg(target_os = "linux")]
+fn require_visible_cgroup_v2_mount(mountinfo: &str) -> Result<()> {
+    // Bind mounts of a nested cgroup may hide ancestor limits. Do not use
+    // /proc/meminfo as an authority in an opaque mount layout.
+    for line in mountinfo.lines() {
+        let Some((mount, fs_info)) = line.split_once(" - ") else {
+            continue;
+        };
+        let fields = mount.split_whitespace().collect::<Vec<_>>();
+        if fields.get(4).copied() != Some("/sys/fs/cgroup") {
+            continue;
+        }
+        if fields.get(3).copied() != Some("/") || fs_info.split_whitespace().next() != Some("cgroup2") {
+            bail!("the cgroup-v2 mount hides memory-controller ancestry; hosting denied");
+        }
+        return Ok(());
+    }
+    bail!("cannot verify the cgroup-v2 mount layout; hosting denied")
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_v2_memory_snapshot(mount: &Path, membership: &str, mut memory: AvailableMemory) -> Result<AvailableMemory> {
+    // A systemd service or container may have a much smaller memory.max than
+    // the cgroup mount root. Only the process's own subtree and its ancestors
+    // are relevant; never trust a root-only cgroup reading as available RAM.
+    let relative = membership
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .context("cannot identify the process's unified Linux cgroup")?;
+    let path = Path::new(relative);
+    if !path.is_absolute() {
+        bail!("Linux cgroup membership is not absolute");
+    }
+    let mut safe_relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(value) => safe_relative.push(value),
+            _ => bail!("Linux cgroup membership contains an invalid path component"),
+        }
+    }
+
+    let mut current = mount.join(safe_relative);
+    if !current.is_dir() {
+        // A nonstandard cgroup mount layout is not evidence that the host
+        // has unrestricted RAM. Deny hosting instead of guessing.
+        bail!("cannot locate the running process's cgroup-v2 memory controller");
+    }
+    loop {
+        let max_path = current.join("memory.max");
+        let hard_limit = match fs::read_to_string(&max_path) {
+            Ok(value) => value,
+            // Linux's actual unified hierarchy root intentionally has no
+            // memory.max; only non-root cgroups expose that limit.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && current == mount => "max".into(),
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read cgroup memory limit {}", max_path.display()));
+            }
+        };
+        // memory.high is a reclaim/throttling boundary, not a hard limit.
+        // Respecting it during admission avoids deliberately starting a
+        // heap that immediately triggers sustained pressure in its service.
+        let high_path = current.join("memory.high");
+        let throttle_limit = match fs::read_to_string(&high_path) {
+            Ok(value) => Some(value),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read cgroup memory high {}", high_path.display()));
+            }
+        };
+        let mut finite_limit: Option<u64> = None;
+        for (kind, value) in [("memory.max", Some(hard_limit.as_str())), ("memory.high", throttle_limit.as_deref())] {
+            let Some(raw) = value else {
+                continue;
+            };
+            if raw.trim() == "max" {
+                continue;
+            }
+            let parsed: u64 = raw.trim().parse().with_context(|| format!("invalid cgroup {kind}"))?;
+            finite_limit = Some(finite_limit.map_or(parsed, |existing| existing.min(parsed)));
+        }
+        if let Some(limit_bytes) = finite_limit {
+            let usage_path = current.join("memory.current");
+            let used_bytes: u64 = fs::read_to_string(&usage_path)
+                .with_context(|| format!("cannot read cgroup memory usage {}", usage_path.display()))?
+                .trim()
+                .parse()
+                .context("invalid cgroup memory.current")?;
+            memory.physical_mib = memory.physical_mib.min(limit_bytes / (1024 * 1024));
+            memory.available_mib = memory.available_mib.min(limit_bytes.saturating_sub(used_bytes) / (1024 * 1024));
+        }
+        if current == mount {
+            break;
+        }
+        current = current.parent().context("Linux cgroup path escaped its mount")?.to_path_buf();
+    }
+    memory.available_mib = memory.available_mib.min(memory.physical_mib);
+    Ok(memory)
+}
+
+#[cfg(target_os = "linux")]
 pub fn memory_snapshot() -> Result<AvailableMemory> {
     let text = fs::read_to_string("/proc/meminfo").context("cannot read Linux /proc/meminfo")?;
     fn mib(text: &str, name: &str) -> Result<u64> {
@@ -387,25 +491,30 @@ pub fn memory_snapshot() -> Result<AvailableMemory> {
         let kb: u64 = line.split_whitespace().nth(1).context("missing KiB count")?.parse()?;
         Ok(kb / 1_024)
     }
-    let mut physical = mib(&text, "MemTotal:")?;
-    let mut available = mib(&text, "MemAvailable:")?;
-    let max_file = Path::new("/sys/fs/cgroup/memory.max");
-    let current_file = Path::new("/sys/fs/cgroup/memory.current");
-    if max_file.exists() {
-        let raw = fs::read_to_string(max_file).context("cannot read cgroup memory.max")?;
-        let raw = raw.trim();
-        if raw != "max" {
-            let limit_bytes: u64 = raw.parse().context("invalid cgroup memory.max")?;
-            let used_bytes: u64 =
-                fs::read_to_string(current_file).context("cannot read cgroup memory.current")?.trim().parse()?;
-            let limit_mib = limit_bytes / (1024 * 1024);
-            physical = physical.min(limit_mib);
-            available = available.min(limit_bytes.saturating_sub(used_bytes) / (1024 * 1024));
+    let memory =
+        AvailableMemory { physical_mib: mib(&text, "MemTotal:")?, available_mib: mib(&text, "MemAvailable:")? };
+    let membership = fs::read_to_string("/proc/self/cgroup").context("cannot read Linux cgroup membership")?;
+    let mount = Path::new("/sys/fs/cgroup");
+    if membership.lines().any(|line| line.starts_with("0::")) {
+        if !mount.join("cgroup.controllers").is_file() {
+            bail!("unified Linux cgroup memory controller is unavailable; hosting denied");
         }
+        let mountinfo = fs::read_to_string("/proc/self/mountinfo").context("cannot read Linux cgroup mount layout")?;
+        require_visible_cgroup_v2_mount(&mountinfo)?;
+        cgroup_v2_memory_snapshot(mount, &membership, memory)
+    } else {
+        // Memory-capped cgroup-v1 containers must not be admitted based only
+        // on /proc/meminfo, which can expose the host's unconstrained RAM.
+        if membership.lines().any(|line| {
+            line.split(':')
+                .nth(1)
+                .is_some_and(|controllers| controllers.split(',').any(|controller| controller == "memory"))
+        }) {
+            bail!("cgroup-v1 memory limits cannot be safely measured; hosting denied");
+        }
+        Ok(AvailableMemory { available_mib: memory.available_mib.min(memory.physical_mib), ..memory })
     }
-    Ok(AvailableMemory { physical_mib: physical, available_mib: available.min(physical) })
 }
-
 #[cfg(windows)]
 pub fn memory_snapshot() -> Result<AvailableMemory> {
     #[repr(C)]
@@ -491,6 +600,113 @@ mod tests {
     fn memory(total: u64, available: u64) -> AvailableMemory {
         AvailableMemory { physical_mib: total, available_mib: available }
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn throttled_cgroup_rejects_hosting_even_when_hard_limit_is_unbounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        let child = mount.join("system.slice/swarmcraft.service");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(mount.join("memory.max"), b"max\n").unwrap();
+        fs::write(mount.join("system.slice/memory.max"), b"max\n").unwrap();
+        fs::write(child.join("memory.max"), b"max\n").unwrap();
+        fs::write(child.join("memory.high"), b"4294967296\n").unwrap();
+        fs::write(child.join("memory.current"), b"3221225472\n").unwrap();
+
+        let measured =
+            cgroup_v2_memory_snapshot(mount, "0::/system.slice/swarmcraft.service\n", memory(32_768, 25_000)).unwrap();
+        assert_eq!(measured, memory(4096, 1024));
+        assert!(check_budget(512, measured).is_err());
+
+        fs::write(child.join("memory.high"), b"not-a-number\n").unwrap();
+        assert!(
+            cgroup_v2_memory_snapshot(mount, "0::/system.slice/swarmcraft.service\n", memory(32_768, 25_000)).is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_v2_opaque_or_inaccessible_mount_never_authorizes_host_memory() {
+        assert!(require_visible_cgroup_v2_mount("59 55 0:24 / /sys/fs/cgroup ro,nosuid,nodev - cgroup2 cgroup2 rw\n")
+            .is_ok());
+        assert!(require_visible_cgroup_v2_mount("59 55 0:24 /system.slice /sys/fs/cgroup ro - cgroup2 cgroup2 rw\n")
+            .is_err());
+        assert!(require_visible_cgroup_v2_mount("59 55 0:24 / /sys/fs/cgroup ro - tmpfs tmpfs rw\n").is_err());
+        assert!(require_visible_cgroup_v2_mount("unrelated mount only\n").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nested_cgroup_limits_override_large_host_ram() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        let nested = mount.join("system.slice/swarmcraft.service");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(mount.join("memory.max"), b"max\n").unwrap();
+        fs::write(mount.join("system.slice/memory.max"), b"8589934592\n").unwrap();
+        fs::write(mount.join("system.slice/memory.current"), b"2147483648\n").unwrap();
+        fs::write(nested.join("memory.max"), b"4294967296\n").unwrap();
+        fs::write(nested.join("memory.current"), b"3221225472\n").unwrap();
+        let measured =
+            cgroup_v2_memory_snapshot(mount, "0::/system.slice/swarmcraft.service\n", memory(32_768, 25_000)).unwrap();
+        assert_eq!(measured, memory(4_096, 1_024));
+        assert!(check_budget(512, measured).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ancestor_memory_pressure_is_not_ignored_when_leaf_is_unlimited() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        let nested = mount.join("system.slice/daemon.service");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(mount.join("memory.max"), b"max\n").unwrap();
+        fs::write(mount.join("system.slice/memory.max"), b"4294967296\n").unwrap();
+        fs::write(mount.join("system.slice/memory.current"), b"3758096384\n").unwrap();
+        fs::write(nested.join("memory.max"), b"max\n").unwrap();
+        let measured =
+            cgroup_v2_memory_snapshot(mount, "0::/system.slice/daemon.service\n", memory(32_768, 20_000)).unwrap();
+        assert_eq!(measured, memory(4_096, 512));
+        assert!(check_budget(512, measured).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_root_cgroup_without_memory_max_preserves_host_memory_probe() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        // Linux root cgroups intentionally omit memory.max and memory.high.
+        let measured = cgroup_v2_memory_snapshot(mount, "0::/\n", memory(32_768, 20_000)).unwrap();
+        assert_eq!(measured, memory(32_768, 20_000));
+        assert!(check_budget(4_096, measured).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_root_missing_memory_max_does_not_fall_back_to_root_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        fs::create_dir_all(mount.join("system.slice")).unwrap();
+        assert!(cgroup_v2_memory_snapshot(mount, "0::/system.slice\n", memory(32_768, 20_000)).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unreadable_or_invalid_nested_cgroup_never_falls_back_to_host_ram() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        fs::create_dir_all(mount.join("user.slice")).unwrap();
+        fs::write(mount.join("memory.max"), b"max\n").unwrap();
+        let host = memory(32_768, 24_000);
+        assert!(cgroup_v2_memory_snapshot(mount, "0::/user.slice\n", host).is_err());
+        assert!(cgroup_v2_memory_snapshot(mount, "0::/../../escape\n", host).is_err());
+        assert!(cgroup_v2_memory_snapshot(mount, "0::relative\n", host).is_err());
+        fs::write(mount.join("user.slice/memory.max"), b"invalid\n").unwrap();
+        assert!(cgroup_v2_memory_snapshot(mount, "0::/user.slice\n", host).is_err());
+        fs::write(mount.join("user.slice/memory.max"), b"1073741824\n").unwrap();
+        assert!(cgroup_v2_memory_snapshot(mount, "0::/user.slice\n", host).is_err());
+    }
+
     #[test]
     fn zero_is_not_a_host_budget() {
         assert!(check_budget(0, memory(32_768, 20_000)).is_err());
@@ -516,6 +732,34 @@ mod tests {
         assert_eq!(load_consent(&paths, world).unwrap(), Some(revoked));
         assert!(require_contribution(&paths, world).is_err());
     }
+    #[test]
+    fn every_withdrawal_invalidates_cached_runtime_and_host_readiness() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let world = WorldId([0x52; 32]);
+        let directory = control_path(&paths).join(world.to_hex());
+        fs::create_dir_all(&directory).unwrap();
+        let runtime = directory.join("runtime-verified.json");
+        let readiness = directory.join("host-readiness.json");
+
+        for path in [&runtime, &readiness] {
+            fs::write(path, b"stale proof").unwrap();
+        }
+        let first = set_contribution(&paths, world, 0).unwrap();
+        assert!(!runtime.exists());
+        assert!(!readiness.exists());
+
+        // A repeated explicit 0-MiB withdrawal also creates a fresh revision
+        // and must never leave behind any formerly green readiness cache.
+        for path in [&runtime, &readiness] {
+            fs::write(path, b"stale proof").unwrap();
+        }
+        let second = set_contribution(&paths, world, 0).unwrap();
+        assert!(second.revision > first.revision);
+        assert!(!runtime.exists());
+        assert!(!readiness.exists());
+    }
+
     #[test]
     fn readiness_revision_is_atomic_with_consent_and_json_safe() {
         let temp = tempfile::tempdir().unwrap();
