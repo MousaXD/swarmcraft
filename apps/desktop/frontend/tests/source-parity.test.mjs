@@ -20,7 +20,19 @@ test('Svelte component split retains every legacy DOM binding and every view', a
   assert.ok(expected.length >= 150);
   assert.equal(new Set(expected).size, expected.length, 'legacy IDs must be unique');
   assert.equal(new Set(actual).size, actual.length, 'component IDs must be unique');
-  assert.deepEqual(new Set(actual), new Set(expected), 'every existing native/UI binding must survive');
+  const expectedIds = new Set(expected);
+  const actualIds = new Set(actual);
+  const additional = actual.filter(id => !expectedIds.has(id)).sort();
+  assert.deepEqual(
+    additional,
+    ['networkServiceError', 'networkServiceNotice', 'refreshNativeConnectivity'],
+    'Every new Svelte-only control must be explicitly reviewed; legacy IDs cannot silently disappear',
+  );
+  assert.deepEqual(
+    expected.filter(id => !actualIds.has(id)),
+    [],
+    'Every existing native/UI binding must survive Svelte migration',
+  );
   for (const view of ['worlds', 'create', 'import', 'join', 'activity', 'diagnostics']) {
     assert.ok(parts.join('\n').includes('data-view-panel="' + view + '"'), 'Missing view ' + view);
   }
