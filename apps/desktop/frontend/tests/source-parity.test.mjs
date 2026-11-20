@@ -624,6 +624,8 @@ test('Svelte owns native Rust world browsing and selected-row presentation witho
   assert.ok(native.includes('app.click("#refresh")'));
   assert.ok(native.includes('worldListNativeConfirmed:'));
   assert.ok(native.includes('worldListSelectionVerified:'));
+  assert.ok(native.includes('worldSelectedMetadataVerified:'));
+  assert.ok(native.includes('worldSelectedSafetyVerified:'));
   assert.ok(native.includes("'worldListNativeConfirmed'"));
   assert.ok(native.includes("'worldListSelectionVerified'"));
   assert.ok(native.indexOf('app.click("#refresh")') < native.indexOf('app.click("#worldCards .world-row")'),
