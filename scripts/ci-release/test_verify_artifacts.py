@@ -7,6 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import tomllib
 import unittest
 
 MODULE = Path(__file__).with_name("verify_artifacts.py")
@@ -16,13 +17,14 @@ assert spec.loader is not None
 spec.loader.exec_module(verify_artifacts)
 
 SHA = "a" * 40
-VERSION = "0.5.0"
+with (MODULE.parents[2] / "Cargo.toml").open("rb") as _root_cargo:
+    VERSION = tomllib.load(_root_cargo)["workspace"]["package"]["version"]
 PACKAGES = {
-    "linux": ("swarmcraft-desktop_0.5.0_amd64.deb",),
-    "windows": ("SwarmCraft_0.5.0_x64-setup.exe",),
-    "macos-arm64": ("SwarmCraft_0.5.0_aarch64.dmg",),
-    "macos-x86_64": ("SwarmCraft_0.5.0_x64.dmg",),
-    "fabric": ("swarmcraft-fabric-0.5.0.jar",),
+    "linux": (f"SwarmCraft_{VERSION}_amd64.deb",),
+    "windows": (f"SwarmCraft_{VERSION}_x64-setup.exe",),
+    "macos-arm64": (f"SwarmCraft_{VERSION}_arm64.dmg",),
+    "macos-x86_64": (f"SwarmCraft_{VERSION}_x86_64.dmg",),
+    "fabric": (f"swarmcraft-fabric-{VERSION}.jar",),
 }
 
 
@@ -40,7 +42,7 @@ class PublicationBoundaryTest(unittest.TestCase):
             dest.mkdir(parents=True, exist_ok=True)
             packages = list(PACKAGES[platform])
             if channel == "production" and platform == "linux":
-                packages.append("swarmcraft-desktop_0.5.0_amd64.AppImage")
+                packages.append(f"SwarmCraft_{VERSION}_amd64.AppImage")
             for name in packages:
                 data = f"fixture:{platform}:{name}".encode()
                 (dest / name).write_bytes(data)
@@ -68,6 +70,23 @@ class PublicationBoundaryTest(unittest.TestCase):
     def test_production_requires_appimage_and_status_files(self):
         self.make_artifacts("production")
         self.assertEqual(len(self.verify("production")), 6)
+
+
+    def test_missing_production_appimage_fails_closed(self):
+        self.make_artifacts("production")
+        linux = self.source / verify_artifacts.expected_groups("production", SHA)["linux"]
+        appimage = linux / f"SwarmCraft_{VERSION}_amd64.AppImage"
+        appimage.unlink()
+        (linux / f"{appimage.name}.sha256").unlink()
+        with self.assertRaisesRegex(ValueError, "requires exactly one .AppImage"):
+            self.verify("production")
+
+    def test_malformed_sha256_sidecar_fails_closed(self):
+        self.make_artifacts()
+        folder = self.source / verify_artifacts.expected_groups("preview", SHA)["linux"]
+        (folder / f"{PACKAGES['linux'][0]}.sha256").write_text("not a checksum")
+        with self.assertRaisesRegex(ValueError, "malformed SHA-256"):
+            self.verify()
 
     def test_corrupted_package_is_fatal_and_not_published(self):
         self.make_artifacts()
@@ -105,14 +124,14 @@ class PublicationBoundaryTest(unittest.TestCase):
     def test_mismatched_version_is_rejected(self):
         self.make_artifacts()
         with self.assertRaisesRegex(ValueError, "package version differs"):
-            verify_artifacts.verify(self.source, self.out, "preview", SHA, "0.5.1")
+            verify_artifacts.verify(self.source, self.out, "preview", SHA, "999.999.999")
 
     def test_macos_architecture_must_match_its_artifact_group(self):
         self.make_artifacts()
         arm = self.source / verify_artifacts.expected_groups("preview", SHA)["macos-arm64"]
         for file in arm.iterdir():
             file.unlink()
-        name = "SwarmCraft_0.5.0_x64.dmg"
+        name = f"SwarmCraft_{VERSION}_x64.dmg"
         data = b"mislabelled-arm"
         (arm / name).write_bytes(data)
         (arm / f"{name}.sha256").write_text(hashlib.sha256(data).hexdigest() + f"  {name}\n")
