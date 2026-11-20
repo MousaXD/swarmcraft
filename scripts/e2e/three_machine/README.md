@@ -142,8 +142,16 @@ must have the expected world-bound runtime working directory and a genuine
 Java executable with a -jar command. This prevents unrelated processes from
 standing in as player/host proof.
 
-Update process IDs after a restart or takeover; false, missing or wrong PIDs
-must fail. Each Minecraft client PID is now checked against its actual Java
+Update process IDs after a restart or takeover (including Bob's recovered
+server and Alice's post-withdrawal handoff server). False, missing or wrong
+PIDs must fail. The remote probe also independently inventories same-user
+Java processes with their working directory bound to the exact disposable
+world runtime, and the verifier requires that count to match positive supplied
+server-PID evidence. Thus omitting Bob's or Carol's server PID cannot silently
+make a running world-bound JVM appear absent. Unreadable Java process state,
+multiple bound JVMs or inconsistent counts BLOCK the field test. This is a
+test-user /proc check, **not** a claim to inspect root-owned or other-user
+processes. Independent OS/process review remains mandatory. Each Minecraft client PID is now checked against its actual Java
 executable and a supported Fabric launch entrypoint (KnotClient or a
 Fabric-loader-backed PrismLauncher entrypoint). A process merely named
 `minecraft` or a Java server cannot masquerade as a third player. Unsupported
