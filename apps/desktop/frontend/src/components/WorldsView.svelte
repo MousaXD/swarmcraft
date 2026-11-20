@@ -1,18 +1,101 @@
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { nativeBridge } from '../lib/native-bridge';
+  import { createNativeWorldListController, worldSafetyTone } from '../lib/world-list-state';
+
+  const worldsController = createNativeWorldListController({
+    listWorlds: () => nativeBridge().invoke('list_worlds', {}),
+    worldStatus: world => nativeBridge().invoke('world_status', { world }),
+    worldCompatibility: world => nativeBridge().invoke('world_compatibility', { world }),
+  });
+  const worldState = worldsController.state;
+  let selectedId = $state('');
+  let connectivityLabel = $state('Checking connectivity');
+  let selectionError = $state('');
+
+  function selectWorld(id: string) {
+    if ($worldState.busy) return;
+    if (typeof window.__swarmcraftSelectWorldFromSvelte !== 'function') {
+      selectionError = 'World selection is not available. Restart the desktop app.';
+      return;
+    }
+    selectionError = '';
+    window.__swarmcraftSelectWorldFromSvelte(id);
+  }
+
+  function refreshWorlds() {
+    if (typeof window.__swarmcraftRefreshWorldsFromSvelte !== 'function') {
+      selectionError = 'World refresh is not initialized. Restart the desktop app.';
+      return;
+    }
+    selectionError = '';
+    void window.__swarmcraftRefreshWorldsFromSvelte();
+  }
+
+  onMount(() => {
+    const old = window.__swarmcraftSvelteWorlds;
+    const bridge = {
+      refresh: () => worldsController.refresh(),
+      setSelected: (id: string) => { selectedId = id; },
+      setConnectivity: (label: string) => {
+        connectivityLabel = label.trim() || 'Connectivity not verified';
+      },
+    };
+    window.__swarmcraftSvelteWorlds = bridge;
+    return () => {
+      if (window.__swarmcraftSvelteWorlds === bridge) {
+        window.__swarmcraftSvelteWorlds = old;
+      }
+    };
+  });
+</script>
+
 <section id="worldsView" class="view is-active" data-view-panel="worlds" aria-labelledby="viewTitle">
-          <div id="worldLoadError" class="page-notice notice-danger" role="alert" hidden></div>
+          <div id="worldLoadError" class="page-notice notice-danger" role="alert" hidden={!$worldState.error}>{$worldState.error}</div>
+          <p class="form-error" role="alert" hidden={!selectionError}>{selectionError}</p>
           <div class="worlds-layout">
             <section class="world-list-pane" aria-label="Your worlds">
               <div class="pane-head">
                 <div>
                   <h2>Your worlds</h2>
-                  <p id="worldCount" class="meta-text">Loading…</p>
+                  <p id="worldCount" class="meta-text">{#if $worldState.busy}Loading…{:else if $worldState.phase === 'unavailable'}Could not read local worlds{:else if !$worldState.worlds.length}No local worlds{:else}{$worldState.worlds.length} {$worldState.worlds.length === 1 ? 'world' : 'worlds'}{/if}</p>
                 </div>
-                <button id="refresh" class="icon-button" type="button" aria-label="Refresh worlds" title="Refresh worlds">↻</button>
+                <button id="refresh" class="icon-button" type="button" aria-label="Refresh worlds" title="Refresh worlds" onclick={refreshWorlds} disabled={$worldState.busy} aria-busy={$worldState.busy}>↻</button>
               </div>
-              <div id="worldCards" class="world-list" aria-live="polite" aria-busy="true">
-                <div class="loading-list" aria-hidden="true">
-                  <span></span><span></span><span></span>
-                </div>
+              <div id="worldCards" class="world-list" aria-live="polite" aria-busy={$worldState.busy}>
+                {#if $worldState.busy && !$worldState.worlds.length}
+                  <div class="loading-list" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </div>
+                {:else if !$worldState.busy && $worldState.phase === 'ready' && !$worldState.worlds.length}
+                  <div class="empty-state">
+                    <div class="empty-mark" aria-hidden="true">▦</div>
+                    <h2>No worlds yet</h2>
+                    <p>Create a world, import an existing Minecraft save, or join with a signed invite.</p>
+                    <div class="compact-actions">
+                      <button class="button button-primary" type="button" onclick={() => document.getElementById('quickCreate')?.click()}>Create world</button>
+                      <button class="button button-secondary" type="button" onclick={() => document.getElementById('quickImport')?.click()}>Import existing world</button>
+                      <button class="button button-secondary" type="button" onclick={() => document.getElementById('quickJoin')?.click()}>Join with invite</button>
+                    </div>
+                  </div>
+                {:else}
+                  {#each $worldState.worlds as world (world.id)}
+                    <button type="button" class="world-row" class:is-selected={selectedId === world.id}
+                      data-world-id={world.id} aria-pressed={selectedId === world.id}
+                      disabled={$worldState.busy} onclick={() => selectWorld(world.id)}>
+                      <span class="world-row-title">
+                        <strong>{world.name}</strong>
+                        <span class="world-row-id">{world.id}</span>
+                      </span>
+                      <span class={`status-badge ${worldSafetyTone(world.status.Safety)}`}>{world.status.Safety || 'Unknown'}</span>
+                      <span class="world-row-meta">
+                        <span>Minecraft {world.status.Minecraft || 'unknown'}</span>
+                        <span>{world.status.Authority ? `Host ${world.status.Authority}` : 'Host not reported'}</span>
+                        <span class="world-row-connectivity">{connectivityLabel}</span>
+                      </span>
+                    </button>
+                  {/each}
+                {/if}
               </div>
               <div class="list-footer">
                 <button id="quickCreate" class="button button-secondary button-small" type="button">Create world</button>
