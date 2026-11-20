@@ -680,3 +680,88 @@ async fn simultaneous_bidirectional_dials_converge_on_one_authenticated_connecti
     assert!(left.is_authenticated(&right_peer));
     assert!(right.is_authenticated(&left_peer));
 }
+
+
+/// Exercise the real authenticated QUIC request/response transport, not a
+/// fabricated application event. The provider receives the request but exits
+/// without replying; libp2p must surface the outbound stream loss for the
+/// exact request ID on both discovery request variants.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn authenticated_quic_stream_drop_is_observable_for_browse_and_exact_resolve() {
+    for (index, request) in [
+        WireRequest::DiscoveryPublic { filter: swarm_protocol::DiscoveryFilterV1::default() },
+        WireRequest::DiscoveryResolve { world_id: swarm_protocol::WorldId([94; 32]) },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (_, mut provider, address, _) = make_node([94 + index as u8; 32]).await;
+        let (_, mut client, _, _) = make_node([97 + index as u8; 32]).await;
+        let (inbound_tx, mut inbound_rx) = tokio::sync::oneshot::channel();
+        let mut inbound_tx = Some(inbound_tx);
+        let provider_task = tokio::spawn(async move {
+            loop {
+                if let DiscoveryNetworkEvent::InboundRequest { .. } =
+                    provider.next_event().await.expect("provider discovery event")
+                {
+                    inbound_tx.take().expect("only one injected request").send(()).unwrap();
+                    // Hold the response channel open until the provider is
+                    // deliberately killed, so the client sees stream loss.
+                    std::future::pending::<()>().await;
+                }
+            }
+        });
+        let provider_peer = client.add_bootstrap_address(address.parse().unwrap()).unwrap();
+        timeout(Duration::from_secs(10), async {
+            while !client.is_authenticated(&provider_peer) {
+                client.next_event().await.expect("client should authenticate provider");
+            }
+        })
+        .await
+        .expect("provider must authenticate before injecting a failure");
+        assert!(client.is_authenticated(&provider_peer));
+        let request_id = client.send_request(&provider_peer, request).unwrap();
+        timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    receipt = &mut inbound_rx => {
+                        receipt.expect("injected request must reach live provider");
+                        break;
+                    }
+                    event = client.next_event() => {
+                        event.expect("client discovery event while awaiting injected request");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("provider must receive the authenticated outbound request");
+
+        provider_task.abort();
+        assert!(provider_task.await.is_err_and(|error| error.is_cancelled()));
+
+        let failure = timeout(Duration::from_secs(10), async {
+            loop {
+                match client.next_event().await.expect("client event after provider shutdown") {
+                    DiscoveryNetworkEvent::OutboundFailure {
+                        transport_peer,
+                        request_id: observed,
+                        error,
+                    } if transport_peer == provider_peer && observed == request_id => break error,
+                    DiscoveryNetworkEvent::Response {
+                        transport_peer,
+                        request_id: observed,
+                        ..
+                    } if transport_peer == provider_peer && observed == request_id => {
+                        panic!("aborted provider must not produce a successful response")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("authenticated stream loss must surface as outbound failure");
+        assert!(!failure.is_empty(), "transport failure must be diagnosable");
+        eprintln!("injected authenticated QUIC stream loss ({index}): {failure}");
+    }
+}
