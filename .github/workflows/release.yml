@@ -298,16 +298,15 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: '*-release-${{ github.sha }}'
-          path: dist
-          merge-multiple: true
-      - name: Collect release assets
+          path: release-downloads
+          merge-multiple: false
+      - name: Verify exact-tag platform artifacts and their SHA-256 before publication
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p release-assets
-          find dist -type f -exec cp {} release-assets/ \;
-          test -n "$(find release-assets -maxdepth 1 -type f -print -quit)"
-          ls -la release-assets
+          python3 scripts/ci-release/verify_artifacts.py \
+            --source release-downloads --output release-assets \
+            --channel production --commit "$GITHUB_SHA"
       - name: Publish exact validated production release
         env:
           GH_TOKEN: ${{ github.token }}
