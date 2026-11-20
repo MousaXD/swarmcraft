@@ -15,9 +15,9 @@ use swarm_protocol::{Hash32, PeerId, WorldId};
 use thiserror::Error;
 
 use crate::authority_capability::{
-    verify_authority_feature_session, AuthorityCapabilityError, ExpectedAuthorityFeatureV2,
-    SignedAuthorityFeatureV2, VerifiedAuthorityFeatureSession, MAX_AUTHORITY_SESSION_AGE_MS,
-    MAX_AUTHORITY_TRANSPORT_ID_BYTES, MAX_V2_AUTHORITY_HEAP_MIB, MIN_V2_AUTHORITY_HEAP_MIB,
+    verify_authority_feature_session, AuthorityCapabilityError, ExpectedAuthorityFeatureV2, SignedAuthorityFeatureV2,
+    VerifiedAuthorityFeatureSession, MAX_AUTHORITY_SESSION_AGE_MS, MAX_AUTHORITY_TRANSPORT_ID_BYTES,
+    MAX_V2_AUTHORITY_HEAP_MIB, MIN_V2_AUTHORITY_HEAP_MIB,
 };
 
 /// Bound independently of libp2p's request limits. A connected peer can hold
@@ -109,19 +109,14 @@ impl V2AuthorityChallengeBook {
     /// remote timestamp. A backwards clock value does not extend issuance.
     pub fn expire(&mut self, now: Instant) {
         self.outstanding.retain(|_, entry| {
-            now.checked_duration_since(entry.issued_at)
-                .is_some_and(|age| age <= CHALLENGE_LIFETIME)
+            now.checked_duration_since(entry.issued_at).is_some_and(|age| age <= CHALLENGE_LIFETIME)
         });
     }
 
     /// Issue a verifier-owned unpredictable challenge. A replacement request
     /// for the same connection and realm removes any prior unconsumed value.
     /// Repeated issuance must not accumulate challenges for one connection.
-    pub fn issue(
-        &mut self,
-        scope: V2ChallengeScope,
-        now: Instant,
-    ) -> Result<[u8; 32], V2ChallengeError> {
+    pub fn issue(&mut self, scope: V2ChallengeScope, now: Instant) -> Result<[u8; 32], V2ChallengeError> {
         if !scope.validate() {
             return Err(V2ChallengeError::InvalidScope);
         }
@@ -144,26 +139,19 @@ impl V2AuthorityChallengeBook {
     /// Consume the exact outstanding challenge ONCE, after signature
     /// verification. Incorrect scope also consumes the nonce to prevent
     /// repeated authentication attempts with an exposed challenge.
-    pub fn consume(
-        &mut self,
-        challenge: &[u8; 32],
-        expected_scope: &V2ChallengeScope,
-        now: Instant,
-    ) -> bool {
+    pub fn consume(&mut self, challenge: &[u8; 32], expected_scope: &V2ChallengeScope, now: Instant) -> bool {
         let Some(entry) = self.outstanding.remove(challenge) else {
             return false;
         };
         expected_scope.validate()
             && &entry.scope == expected_scope
-            && now.checked_duration_since(entry.issued_at)
-                .is_some_and(|age| age <= CHALLENGE_LIFETIME)
+            && now.checked_duration_since(entry.issued_at).is_some_and(|age| age <= CHALLENGE_LIFETIME)
     }
 
     /// Invoke on every transport disconnection, connection replacement or
     /// authenticated application identity change. No nonce may cross routes.
     pub fn invalidate_connection(&mut self, connection_generation: u64) {
-        self.outstanding
-            .retain(|_, entry| entry.scope.connection_generation != connection_generation);
+        self.outstanding.retain(|_, entry| entry.scope.connection_generation != connection_generation);
     }
 
     /// Invoke when an accepted realm, membership, policy, fencing generation
