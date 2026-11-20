@@ -9,11 +9,59 @@ impl Storage {
         let world = certificate.ballot.world_id;
         let _guard = self.lock_world_transaction(world)?;
         self.load_world(world)?;
+        validate_stored_certificate(certificate, world)?;
         let path = self.world_dir(world).join("metadata").join("recovery-certificate.postcard");
-        // Preserve unreadable canonical evidence instead of overwriting it.
-        // Only genuine absence permits a first certificate write.
-        if canonical_file_exists(&path)? {
-            self.load_recovery_certificate(world)?;
+
+        // A present but corrupt/unreadable canonical record cannot be silently
+        // overwritten. Only genuine NotFound is an absent certificate.
+        let existing = if canonical_file_exists(&path)? { Some(self.load_recovery_certificate(world)?) } else { None };
+        let proposed_generation = (certificate.ballot.target_epoch, certificate.ballot.target_fencing_token);
+        let accepted = match self.load_epoch_record(world) {
+            Ok(epoch) => Some(epoch),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(epoch) = &accepted {
+            let accepted_generation = (epoch.epoch_number, epoch.fencing_token);
+            if proposed_generation < accepted_generation {
+                // An old certificate must never replace the current recovery
+                // proof after this world has advanced its accepted generation.
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+            if proposed_generation == accepted_generation {
+                // Once the epoch is durable, its recovery ballot is immutable.
+                // A new vote subset for the same ballot is still idempotent.
+                if epoch.mode != swarm_protocol::EpochMode::Recovery
+                    || epoch.authority_peer_id != certificate.ballot.candidate_peer_id
+                    || epoch.authority_public_key != certificate.ballot.candidate_public_key
+                    || epoch.base_state_hash != certificate.ballot.base_state_hash
+                {
+                    return Err(StorageError::WorldMetadataMismatch);
+                }
+                if let Some(previous) = &existing {
+                    if previous.ballot.ballot_hash()? != certificate.ballot.ballot_hash()? {
+                        return Err(StorageError::WorldMetadataMismatch);
+                    }
+                }
+            }
+        }
+        if let Some(previous) = &existing {
+            let prior_generation = (previous.ballot.target_epoch, previous.ballot.target_fencing_token);
+            if proposed_generation < prior_generation {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+            if proposed_generation == prior_generation {
+                // Before an epoch is accepted, a strictly higher ballot round
+                // may supersede a failed candidate's earlier certificate.
+                // Never roll back to an older round or replace a same-round
+                // ballot with conflicting durable canonical evidence.
+                if certificate.ballot.round < previous.ballot.round
+                    || (certificate.ballot.round == previous.ballot.round
+                        && certificate.ballot.ballot_hash()? != previous.ballot.ballot_hash()?)
+                {
+                    return Err(StorageError::WorldMetadataMismatch);
+                }
+            }
         }
         durable_atomic_write(&path, &postcard::to_allocvec(certificate)?)
     }
@@ -22,9 +70,7 @@ impl Storage {
         let path = self.world_dir(world).join("metadata").join("recovery-certificate.postcard");
         let bytes = read_canonical_file(&path)?;
         let certificate: RecoveryCertificateV1 = postcard::from_bytes(&bytes)?;
-        if certificate.ballot.world_id != world {
-            return Err(StorageError::WorldMetadataMismatch);
-        }
+        validate_stored_certificate(&certificate, world)?;
         Ok(certificate)
     }
 
@@ -34,6 +80,21 @@ impl Storage {
         durable_remove(&path)?;
         Ok(())
     }
+}
+
+
+fn validate_stored_certificate(certificate: &RecoveryCertificateV1, world: WorldId) -> Result<(), StorageError> {
+    if certificate.ballot.world_id != world {
+        return Err(StorageError::WorldMetadataMismatch);
+    }
+    certificate.ballot.validate_semantics()?;
+    for vote in &certificate.votes {
+        vote.validate_semantics()?;
+        if vote.world_id != world || !vote.matches_ballot(&certificate.ballot)? {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
