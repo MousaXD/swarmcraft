@@ -38,6 +38,7 @@ SAFE_BOOL_KEYS = frozenset({
     'daemonStopFinished', 'daemonStaleStatusCleared', 'daemonErrorHidden',
     'worldListOwned', 'worldListNativeConfirmed', 'worldListRefreshed',
     'worldListHasRows', 'worldListSelectionVerified',
+    'worldSelectedMetadataVerified', 'worldSelectedSafetyVerified',
 })
 SAFE_INT_KEYS = frozenset({
     'width', 'height', 'rootScrollWidth', 'paneScrollWidth',
@@ -187,16 +188,27 @@ def run(binary: Path, artifacts: Path):
         selected_world = app.execute("""
           const row = document.querySelector('#worldCards .world-row.is-selected');
           const details = document.getElementById('selectionContent');
+          const selectedName = document.getElementById('selectedName');
+          const selectedSafety = document.getElementById('selectedSafety');
+          const selectedId = document.getElementById('selectedWorldId');
+          const rowName = row?.querySelector('.world-row-title strong');
+          const rowSafety = row?.querySelector('.status-badge');
           return {
             worldListSelectionVerified: !!row && row.getAttribute('aria-pressed') === 'true'
               && !!details && !details.hidden
               && !!document.getElementById('world')?.value
               && document.getElementById('world').value === row.dataset.worldId,
+            worldSelectedMetadataVerified: !!row && !!rowName && !!selectedName
+              && !!selectedId && selectedName.textContent === rowName.textContent
+              && selectedId.textContent === row.dataset.worldId,
+            worldSelectedSafetyVerified: !!rowSafety && !!selectedSafety
+              && selectedSafety.textContent === rowSafety.textContent
+              && selectedSafety.className === rowSafety.className,
           };
         """)
         record_ui(selected_world)
-        assert selected_world['worldListSelectionVerified'], (
-            "Native selected-world detail did not follow the real Svelte row click"
+        assert all(selected_world.values()), (
+            "Native Svelte selection metadata did not match the verified Rust world row"
         )
         for width, height in ((980, 760), (720, 560)):
             mark_stage(f'layout-{width}x{height}')
