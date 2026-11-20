@@ -565,20 +565,25 @@ async function openModsFolder() {
 function selectWorld(world, { focusDetail = false } = {}) {
   selectedWorldId = world.id;
   $('world').value = world.id;
-  $('selectedName').textContent = world.name;
-  $('selectedWorldId').textContent = world.id;
-  $('selectedAuthority').textContent = world.status.Authority || 'Not reported';
-  $('selectedMembers').textContent = world.status['Authorized peers'] || 'Unknown';
-  $('selectedMinecraft').textContent = world.status.Minecraft || 'Unknown';
-  $('selectedCheckpoint').textContent = world.status['Latest snapshot'] || (world.snapshots ? `${world.snapshots} stored` : 'None');
-  $('selectedCompatibility').textContent = world.compatibility['Authority eligibility'] || 'Not synchronized';
+  // The candidate now renders read-only selected-world metadata directly
+  // from Svelte's current native Rust world-list response. Preserve legacy
+  // updates in the shipping frontend and keep all action gates in Rust.
+  if (window.__swarmcraftSvelteWorldsOwned !== true) {
+    $('selectedName').textContent = world.name;
+    $('selectedWorldId').textContent = world.id;
+    $('selectedAuthority').textContent = world.status.Authority || 'Not reported';
+    $('selectedMembers').textContent = world.status['Authorized peers'] || 'Unknown';
+    $('selectedMinecraft').textContent = world.status.Minecraft || 'Unknown';
+    $('selectedCheckpoint').textContent = world.status['Latest snapshot'] || (world.snapshots ? `${world.snapshots} stored` : 'None');
+    $('selectedCompatibility').textContent = world.compatibility['Authority eligibility'] || 'Not synchronized';
 
-  const safety = world.status.Safety || 'Unknown';
-  const kind = safetyKind(safety);
-  $('selectedSafety').textContent = safety;
-  $('selectedSafety').className = `status-badge ${kind}`;
-  $('safetyPanel').className = `safety-panel ${kind}`;
-  $('selectedSummary').textContent = safetySummary(world);
+    const safety = world.status.Safety || 'Unknown';
+    const kind = safetyKind(safety);
+    $('selectedSafety').textContent = safety;
+    $('selectedSafety').className = `status-badge ${kind}`;
+    $('safetyPanel').className = `safety-panel ${kind}`;
+    $('selectedSummary').textContent = safetySummary(world);
+  }
 
   $('noSelection').hidden = true;
   $('selectionContent').hidden = false;
