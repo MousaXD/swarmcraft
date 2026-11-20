@@ -434,6 +434,7 @@ def verify(c, output, review_file=None):
                 "alice_hard_crash_and_bob_client_reconnection", "alice_return_fenced",
                 "screenshots_redacted", "real_world_network_classes_verified",
                 "bob_withdrawal_and_safe_handoff_observed",
+                "bob_rehost_attempt_denied_after_withdrawal",
                 "carol_player_only_host_denial_observed")
     require(all(review.get(k) is True for k in required), "real_player_or_network_review_incomplete")
     require(isinstance(review.get("reviewer"), str) and len(review["reviewer"].strip()) >= 3,
