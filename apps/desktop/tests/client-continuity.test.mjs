@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { clientContinuityFromMigration } from '../src/client-continuity.js';
+import { clientContinuityFromMigration, ensureClientContinuityPanel } from '../src/client-continuity.js';
 
 const WORLD = 'scworld:alice';
 const READY = Object.freeze({
@@ -98,8 +98,9 @@ test('Desktop surfaces an accessible connection-status result bound to selected 
   const app = await readFile(new URL('app.js', root), 'utf8');
   const html = await readFile(new URL('index.html', root), 'utf8');
   assert.match(app, /clientContinuityFromMigration\(state, selectedWorldId, selectedWorld\(\)\?\.status\?\.Safety\)/);
-  assert.match(app, /\$\('clientContinuityTitle'\)\.textContent/);
-  assert.match(app, /\$\('clientContinuityDetail'\)\.textContent/);
+  assert.match(app, /ensureClientContinuityPanel\(document\)/);
+  assert.match(app, /targets\.title\.textContent/);
+  assert.match(app, /targets\.detail\.textContent/);
   assert.match(app, /renderMigration\(null\);[\s\S]*?refreshMigrationState\(world\)/);
   assert.match(app, /migration\.available \? 'warning' : 'neutral'/);
   assert.doesNotMatch(app, /localServerReady \? 'safe'/);
@@ -107,4 +108,73 @@ test('Desktop surfaces an accessible connection-status result bound to selected 
   assert.match(app, /phase: 'status_unavailable'/);
   assert.match(html, /id="clientContinuityTitle"/);
   assert.match(html, /id="clientContinuityDetail"[^>]*role="status"[^>]*aria-live="polite"/);
+});
+
+function fakePanelDocument({ existing = false, partial = false, migrationCard = true } = {}) {
+  const nodes = new Map();
+  const created = [];
+  const parent = {
+    children: [],
+    insertBefore(element, before) {
+      this.children.splice(Math.max(this.children.indexOf(before), 0), 0, element);
+      element.parentNode = this;
+    },
+  };
+  const actions = { parentNode: parent };
+  parent.children.push(actions);
+  const doc = {
+    getElementById(id) { return nodes.get(id) ?? null; },
+    createElement(tagName) {
+      const element = {
+        tagName,
+        className: '',
+        textContent: '',
+        attributes: {},
+        children: [],
+        append(...children) { this.children.push(...children); },
+        setAttribute(name, value) { this.attributes[name] = value; },
+        get id() { return this._id; },
+        set id(value) { this._id = value; nodes.set(value, this); },
+      };
+      created.push(element);
+      return element;
+    },
+  };
+  if (migrationCard) nodes.set('migrationCard', { querySelector: (selector) => selector === '.compact-actions' ? actions : null });
+  if (existing || partial) {
+    const title = doc.createElement('h4'); title.id = 'clientContinuityTitle';
+    if (existing) {
+      const detail = doc.createElement('p'); detail.id = 'clientContinuityDetail';
+    }
+  }
+  return { doc, nodes, created, parent, actions };
+}
+
+test('Svelte candidate receives one accessible continuity panel when legacy IDs are absent', () => {
+  const fixture = fakePanelDocument();
+  const result = ensureClientContinuityPanel(fixture.doc);
+  assert.ok(result);
+  assert.equal(result.title.id, 'clientContinuityTitle');
+  assert.equal(result.detail.id, 'clientContinuityDetail');
+  assert.equal(result.detail.attributes.role, 'status');
+  assert.equal(result.detail.attributes['aria-live'], 'polite');
+  assert.equal(fixture.parent.children.length, 2);
+  assert.equal(fixture.parent.children[1], fixture.actions);
+  assert.equal(ensureClientContinuityPanel(fixture.doc).title, result.title);
+  assert.equal(fixture.parent.children.length, 2, 'the panel must never duplicate on subsequent polls');
+});
+
+test('legacy panel stays owned by its markup; incomplete and absent panels fail closed', () => {
+  const existing = fakePanelDocument({ existing: true });
+  const created = existing.created.length;
+  const result = ensureClientContinuityPanel(existing.doc);
+  assert.equal(result.title, existing.nodes.get('clientContinuityTitle'));
+  assert.equal(result.detail, existing.nodes.get('clientContinuityDetail'));
+  assert.equal(existing.created.length, created);
+  assert.equal(existing.parent.children.length, 1);
+  const partial = fakePanelDocument({ partial: true });
+  assert.equal(ensureClientContinuityPanel(partial.doc), null);
+  assert.equal(partial.parent.children.length, 1);
+  const absent = fakePanelDocument({ migrationCard: false });
+  assert.equal(ensureClientContinuityPanel(absent.doc), null);
 });
