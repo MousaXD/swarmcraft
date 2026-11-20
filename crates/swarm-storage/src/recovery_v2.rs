@@ -82,7 +82,6 @@ impl Storage {
     }
 }
 
-
 fn validate_stored_certificate(certificate: &RecoveryCertificateV1, world: WorldId) -> Result<(), StorageError> {
     if certificate.ballot.world_id != world {
         return Err(StorageError::WorldMetadataMismatch);
@@ -100,11 +99,10 @@ fn validate_stored_certificate(certificate: &RecoveryCertificateV1, world: World
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use crate::WorldMetadataV1;
-    use swarm_protocol::{EpochMode, EpochRecordV1};
+    use std::fs;
     use swarm_protocol::{
-        peer_id_from_public_key, Hash32, RecoveryBallotV1, WorldGenesisV1, PROTOCOL_VERSION,
+        peer_id_from_public_key, EpochMode, EpochRecordV1, Hash32, RecoveryBallotV1, WorldGenesisV1, PROTOCOL_VERSION,
         STORAGE_SCHEMA_VERSION,
     };
 
