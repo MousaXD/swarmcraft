@@ -42,6 +42,14 @@ const migrationLabels = {
 
 function setStatus(message, tone = 'neutral') {
   if (window.__swarmcraftStartup?.failed) return;
+  // A candidate-specific daemon stop or uncertain side effect must not be
+  // repainted as green Ready by an unrelated world-list refresh or action.
+  // Shipping legacy semantics remain unchanged without Svelte ownership.
+  if (window.__swarmcraftSvelteNetworkingOwned === true && message === 'Ready'
+      && (networkStoppedBySvelte || serviceWarning)) {
+    message = 'Networking needs attention';
+    tone = 'warning';
+  }
   $('status').textContent = message;
   $('statusDot').className = `status-dot ${tone}`;
 }
