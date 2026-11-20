@@ -362,7 +362,7 @@ export function normalizeMigrationState(raw) {
   const progress = knownPhase === 'failed'
     ? Math.max(0, Math.min(100, Number(source.progress || 0)))
     : knownPhase === 'ready'
-      ? 100
+      ? (runtimeReady ? 100 : 0)
       : index >= 0
         ? Math.round((index / (MIGRATION_PHASES.length - 2)) * 100)
         : 0;
@@ -375,7 +375,9 @@ export function normalizeMigrationState(raw) {
   return {
     available: Boolean(knownPhase),
     phase: knownPhase,
-    label: knownPhase ? MIGRATION_LABELS[knownPhase] : 'Migration state unavailable',
+    label: knownPhase === 'ready' && !runtimeReady
+      ? 'Server readiness unverified'
+      : knownPhase ? MIGRATION_LABELS[knownPhase] : 'Migration state unavailable',
     detail,
     progress,
     blocked: false,
