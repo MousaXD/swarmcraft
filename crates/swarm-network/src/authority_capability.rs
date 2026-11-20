@@ -575,7 +575,11 @@ mod tests {
             Err(AuthorityCapabilityError::InvalidTranscript)
         );
     }
-    fn signed_action(v: &SignedAuthorityFeatureV2, key: &SigningKey) -> (SignedHostingAuthorityActionV2, ExpectedHostingAuthorityHeadV2) {
+
+    fn signed_action(
+        v: &SignedAuthorityFeatureV2,
+        key: &SigningKey,
+    ) -> (SignedHostingAuthorityActionV2, ExpectedHostingAuthorityHeadV2) {
         let mut action = SignedHostingAuthorityActionV2 {
             format_version: swarm_protocol::HOSTING_REALM_FORMAT_VERSION_V2,
             operation: HostingAuthorityOperationV2::LeaseGrant,
@@ -616,15 +620,21 @@ mod tests {
     #[test]
     fn valid_v2_signed_operation_is_session_bound_and_single_use() {
         let (claim, key) = claim();
-        let session = verify_authority_feature_session(
-            MANDATORY_AUTHORITY_WIRE_PROTOCOL, &claim, &expected(&claim), || true
-        ).unwrap();
+        let session =
+            verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &claim, &expected(&claim), || true)
+                .unwrap();
         let (action, expected_head) = signed_action(&claim, &key);
         let used = Cell::new(false);
-        let verify = || verify_v2_authority_action_session(
-            session, &action, &expected_head, 105_000,
-            |nonce| if *nonce != action.nonce || used.get() { false } else { used.set(true); true }
-        );
+        let verify = || {
+            verify_v2_authority_action_session(session, &action, &expected_head, 105_000, |nonce| {
+                if *nonce != action.nonce || used.get() {
+                    false
+                } else {
+                    used.set(true);
+                    true
+                }
+            })
+        };
         assert_eq!(verify(), Ok(()));
         assert_eq!(verify(), Err(V2AuthorityActionError::ReplayOrUnknownAction));
     }
@@ -632,9 +642,9 @@ mod tests {
     #[test]
     fn stale_wrong_policy_operation_and_forged_signature_are_denied() {
         let (claim, key) = claim();
-        let session = verify_authority_feature_session(
-            MANDATORY_AUTHORITY_WIRE_PROTOCOL, &claim, &expected(&claim), || true
-        ).unwrap();
+        let session =
+            verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &claim, &expected(&claim), || true)
+                .unwrap();
         let (action, mut expected_head) = signed_action(&claim, &key);
         let verify = |action: &SignedHostingAuthorityActionV2, expected: &ExpectedHostingAuthorityHeadV2, now| {
             verify_v2_authority_action_session(session, action, expected, now, |_| true)
@@ -651,10 +661,15 @@ mod tests {
         assert_eq!(verify(&forged, &expected_head, 105_000), Err(V2AuthorityActionError::InvalidAction));
         let mut wrong_policy = action.clone();
         wrong_policy.committed_policy_hash = Hash32([99; 32]);
-        assert_eq!(verify(&wrong_policy, &expected_head, 105_000), Err(V2AuthorityActionError::WrongSessionOrHead));
+        assert_eq!(
+            verify(&wrong_policy, &expected_head, 105_000),
+            Err(V2AuthorityActionError::WrongSessionOrHead)
+        );
         let mut revoked = action.clone();
         revoked.consent_revision += 1;
-        assert_eq!(verify(&revoked, &expected_head, 105_000), Err(V2AuthorityActionError::WrongSessionOrHead));
+        assert_eq!(
+            verify(&revoked, &expected_head, 105_000),
+            Err(V2AuthorityActionError::WrongSessionOrHead)
+        );
     }
-
 }
