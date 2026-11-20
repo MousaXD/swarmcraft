@@ -48,7 +48,7 @@ test('wrong-world and incomplete generation reports fail closed even when ready 
 });
 
 test('current-looking runtime cannot override conflicting or reduced-safety world history', () => {
-  for (const safety of ['Conflict', 'Divergent', 'SoloUnreplicated', 'DegradedSafety']) {
+  for (const safety of ['Conflict', 'Divergent', 'SoloUnreplicated', 'DegradedSafety', 'Unknown', '']) {
     const state = classify(READY, safety);
     assert.notEqual(state.state, 'manual_reconnect_required');
     assert.equal(state.connectionTarget, null);
