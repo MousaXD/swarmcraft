@@ -674,7 +674,6 @@ mod tests {
         assert_eq!(fs::read_link(&recovery).unwrap(), external);
     }
 
-
     #[test]
     fn restored_durable_recovery_promise_resumes_without_losing_previous_ballot() {
         let temp = tempfile::tempdir().unwrap();
@@ -733,7 +732,7 @@ mod tests {
 
         assert_eq!(results.iter().filter(|result| **result == RecoveryPromiseResult::Accepted).count(), 1);
         assert_eq!(
-            results.iter().filter(|result| matches!(result, RecoveryPromiseResult::Rejected { .. })).count(),
+            results.iter().filter(|result| matches!(**result, RecoveryPromiseResult::Rejected { .. })).count(),
             1
         );
         let reopened = Storage::open(root).unwrap();
