@@ -430,6 +430,39 @@ mod tests {
     }
 
     #[test]
+    fn unsigned_replayed_or_mismatched_initial_policy_is_rejected() {
+        let mut f = Fixture::new();
+        let votes = [f.vote(0), f.vote(1)];
+        f.policy.signature[0] ^= 1;
+        assert_eq!(f.verify(&votes), Err(V2MigrationQuorumError::InvalidPolicy));
+
+        let mut f = Fixture::new();
+        let votes = [f.vote(0), f.vote(1)];
+        f.proposal.initial_policy_hash = Hash32([89; 32]);
+        f.proposal.signature = f.keys[0].sign(&f.proposal.signing_bytes().unwrap()).to_bytes().to_vec();
+        assert_eq!(f.verify(&votes), Err(V2MigrationQuorumError::InvalidPolicy));
+
+        let mut f = Fixture::new();
+        let votes = [f.vote(0), f.vote(1)];
+        f.policy.sequence = 2;
+        f.policy.previous_policy_hash = Some(Hash32([9; 32]));
+        assert_eq!(f.verify(&votes), Err(V2MigrationQuorumError::InvalidPolicy));
+    }
+
+    #[test]
+    fn stale_v1_realm_or_unsupported_v2_feature_is_rejected() {
+        let mut f = Fixture::new();
+        let votes = [f.vote(0), f.vote(1)];
+        f.proposal.target_realm_id = f.pins.world_id;
+        assert_eq!(f.verify(&votes), Err(V2MigrationQuorumError::InvalidProposal));
+
+        let mut f = Fixture::new();
+        let votes = [f.vote(0), f.vote(1)];
+        f.proposal.realm_genesis.required_authority_feature_version = 1;
+        assert_eq!(f.verify(&votes), Err(V2MigrationQuorumError::InvalidProposal));
+    }
+
+    #[test]
     fn corrupted_or_foreign_voter_signature_is_rejected() {
         let f = Fixture::new();
         let mut forged = f.vote(0);
