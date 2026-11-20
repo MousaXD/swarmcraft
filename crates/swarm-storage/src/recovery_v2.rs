@@ -221,6 +221,52 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), invalid_bytes);
     }
 
+    #[test]
+    fn corrupt_accepted_epoch_cannot_be_ignored_during_certificate_replacement() {
+        let (_temp, storage, world) = fixture();
+        let original = certificate(world);
+        storage.save_recovery_certificate(&original).unwrap();
+        let certificate_path = storage.world_dir(world).join("metadata/recovery-certificate.postcard");
+        let prior = fs::read(&certificate_path).unwrap();
+        let epoch_path = storage.world_dir(world).join("metadata/epoch.postcard");
+        fs::write(&epoch_path, b"invalid-durable-accepted-epoch").unwrap();
+
+        let mut newer = original;
+        newer.ballot.round += 1;
+        assert!(storage.save_recovery_certificate(&newer).is_err());
+        assert_eq!(fs::read(&certificate_path).unwrap(), prior);
+        assert_eq!(fs::read(&epoch_path).unwrap(), b"invalid-durable-accepted-epoch");
+    }
+
+    #[test]
+    fn competing_same_round_certificates_cannot_both_overwrite_durable_history() {
+        use std::sync::{Arc, Barrier};
+
+        let (_temp, storage, world) = fixture();
+        let root = storage.root().to_path_buf();
+        let barrier = Arc::new(Barrier::new(2));
+        let accepted = std::thread::scope(|scope| {
+            let handles = [10_u8, 11_u8]
+                .into_iter()
+                .map(|byte| {
+                    let barrier = Arc::clone(&barrier);
+                    let root = &root;
+                    scope.spawn(move || {
+                        let storage = Storage::open(root).unwrap();
+                        let mut candidate = certificate(world);
+                        candidate.ballot.base_snapshot_hash = Hash32([byte; 32]);
+                        barrier.wait();
+                        storage.save_recovery_certificate(&candidate).is_ok()
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+        });
+
+        assert_eq!(accepted.iter().filter(|value| **value).count(), 1);
+        assert!(storage.load_recovery_certificate(world).is_ok());
+    }
+
     fn accepted_epoch_for(certificate: &RecoveryCertificateV1) -> EpochRecordV1 {
         let ballot = &certificate.ballot;
         EpochRecordV1 {
