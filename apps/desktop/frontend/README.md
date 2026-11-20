@@ -75,3 +75,12 @@ are written to evidence artifacts.
 - Run source/TypeScript/Vitest, real installed Linux/WebKitGTK positive and negative controls, and Windows/macOS packaging on the **exact final feature-branch SHA**. There is no claim of successful native certification for this follow-up until those Actions finish.
 
 The migration is still a hybrid compatibility candidate with delegated world-list, managed Minecraft, provider/mod, replication, and migration/recovery flows. Keep `frontendDist` on the legacy shipping UI until Agent 00 and independent installed-app QA approve complete parity.
+
+
+### 2026-11-20 Native Svelte world browsing candidate (Agent 04)
+
+- The Svelte `WorldsView` now invokes existing registered Rust `list_worlds`, `world_status`, and `world_compatibility` commands directly. Native parser validation prevents invented or duplicated worlds; failed/missing per-world metadata is presented as unknown, never permission to host.
+- The list, keyboard-operable world rows, native Refresh, selection styling, initial skeleton, empty state actions and visible error/retry are Svelte-owned. The rich selected-world detail panel still delegates to the original Rust-backed `app.js` controller through a narrow candidate-only handoff. The shipping `frontendDist` is unchanged.
+- At most four worlds' metadata are loaded concurrently. Individual native reads are bounded to 18 seconds and the whole refresh to 36 seconds with late-response fencing. A confirmed or uncertain network stop cannot be repainted as green Ready by the new list.
+- Vitest validates native line parsing, malformed/duplicate identifiers, partial offline worlds, dangerous inherited properties, coalescing, a hung sidecar, whole-refresh timeout and no false readiness. The installed Linux Tauri/WebKitGTK test must perform a real native world read, press Refresh to increase a native-only successful-read counter, and click a Svelte row to select the same actual world. The original four native sidecars and negative bootstrap/sidecar cases remain mandatory.
+- **Certification and shipping are blocked** until candidate source checks, genuine installed Linux evidence, Windows/macOS packages/interaction, full feature parity, and Agent 00 acceptance at the exact candidate SHA are independently confirmed. PR #115 does not automatically include changes to the Agent 04 source branch.
