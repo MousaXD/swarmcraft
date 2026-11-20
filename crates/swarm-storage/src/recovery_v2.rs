@@ -31,3 +31,111 @@ impl Storage {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::WorldMetadataV1;
+    use swarm_protocol::{
+        peer_id_from_public_key, Hash32, RecoveryBallotV1, WorldGenesisV1, PROTOCOL_VERSION,
+        STORAGE_SCHEMA_VERSION,
+    };
+
+    fn fixture() -> (tempfile::TempDir, Storage, WorldId) {
+        let temp = tempfile::tempdir().unwrap();
+        let genesis = WorldGenesisV1 {
+            protocol_version: PROTOCOL_VERSION,
+            minecraft_version: "1.21.8".into(),
+            fabric_loader_version: "0.17.2".into(),
+            compatibility_fingerprint: Hash32([9; 32]),
+            creation_nonce: [8; 32],
+            creator_public_key: [7; 32],
+            initial_membership: vec![peer_id_from_public_key(&[6; 32])],
+        };
+        let world = genesis.world_id().unwrap();
+        let storage = Storage::open(temp.path()).unwrap();
+        storage
+            .create_world(&WorldMetadataV1 {
+                storage_schema_version: STORAGE_SCHEMA_VERSION,
+                display_name: "certificate-integrity".into(),
+                world_id: world,
+                genesis,
+            })
+            .unwrap();
+        (temp, storage, world)
+    }
+
+    // These fixtures exercise the canonical storage boundary, not quorum or
+    // cryptographic validation (both belong to the caller).
+    fn certificate(world: WorldId) -> RecoveryCertificateV1 {
+        RecoveryCertificateV1 {
+            ballot: RecoveryBallotV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id: world,
+                base_epoch: 1,
+                base_fencing_token: 1,
+                target_epoch: 2,
+                target_fencing_token: 2,
+                round: 1,
+                candidate_peer_id: peer_id_from_public_key(&[9; 32]),
+                candidate_public_key: [9; 32],
+                base_snapshot_hash: Hash32([3; 32]),
+                base_state_hash: Hash32([4; 32]),
+                membership_hash: Hash32([5; 32]),
+                signature: Vec::new(),
+            },
+            votes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn corrupt_durable_certificate_must_not_be_overwritten() {
+        let (_temp, storage, world) = fixture();
+        let certificate = certificate(world);
+        storage.save_recovery_certificate(&certificate).unwrap();
+        let path = storage.world_dir(world).join("metadata/recovery-certificate.postcard");
+        let corrupted = b"unreadable durable recovery certificate";
+        fs::write(&path, corrupted).unwrap();
+
+        assert!(storage.save_recovery_certificate(&certificate).is_err());
+        assert_eq!(fs::read(&path).unwrap(), corrupted);
+
+        fs::write(&path, postcard::to_allocvec(&certificate).unwrap()).unwrap();
+        assert_eq!(storage.load_recovery_certificate(world).unwrap(), certificate);
+        storage.save_recovery_certificate(&certificate).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_certificate_must_not_be_read_or_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let (temp, storage, world) = fixture();
+        let certificate = certificate(world);
+        let path = storage.world_dir(world).join("metadata/recovery-certificate.postcard");
+        let external = temp.path().join("outside-canonical-certificate.postcard");
+        let original = postcard::to_allocvec(&certificate).unwrap();
+        fs::write(&external, &original).unwrap();
+        symlink(&external, &path).unwrap();
+
+        assert!(storage.load_recovery_certificate(world).is_err());
+        assert!(storage.save_recovery_certificate(&certificate).is_err());
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&external).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_certificate_symlink_must_not_be_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let (temp, storage, world) = fixture();
+        let certificate = certificate(world);
+        let path = storage.world_dir(world).join("metadata/recovery-certificate.postcard");
+        symlink(temp.path().join("missing-certificate"), &path).unwrap();
+
+        assert!(storage.load_recovery_certificate(world).is_err());
+        assert!(storage.save_recovery_certificate(&certificate).is_err());
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+    }
+}
