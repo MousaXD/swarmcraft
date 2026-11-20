@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { nativeBridge } from '../lib/native-bridge';
   import { createNativeWorldListController, worldSafetyTone, nativeWorldSafetySummary } from '../lib/world-list-state';
+  import { createNativeHostReadinessController } from '../lib/host-readiness-state';
 
   const worldsController = createNativeWorldListController({
     listWorlds: () => nativeBridge().invoke('list_worlds', {}),
@@ -9,6 +10,10 @@
     worldCompatibility: world => nativeBridge().invoke('world_compatibility', { world }),
   });
   const worldState = worldsController.state;
+  const readinessController = createNativeHostReadinessController(
+    world => nativeBridge().invoke('host_readiness', { world }),
+  );
+  const readinessState = readinessController.state;
   let selectedId = $state('');
   const selectedEntry = $derived($worldState.worlds.find(world => world.id === selectedId));
   let connectivityLabel = $state('Checking connectivity');
@@ -37,6 +42,12 @@
 
   onMount(() => {
     const old = window.__swarmcraftSvelteWorlds;
+    const oldReadiness = window.__swarmcraftSvelteReadiness;
+    const readinessBridge = {
+      select: (world: string) => readinessController.select(world),
+      clear: () => readinessController.clear(),
+    };
+    window.__swarmcraftSvelteReadiness = readinessBridge;
     const bridge = {
       refresh: () => worldsController.refresh(),
       setSelected: (id: string) => { selectedId = id; },
@@ -48,6 +59,9 @@
     return () => {
       if (window.__swarmcraftSvelteWorlds === bridge) {
         window.__swarmcraftSvelteWorlds = old;
+      }
+      if (window.__swarmcraftSvelteReadiness === readinessBridge) {
+        window.__swarmcraftSvelteReadiness = oldReadiness;
       }
     };
   });
@@ -165,11 +179,11 @@
                   <button id="worldConflicts" class="text-button world-required" type="button">Review conflicts</button>
                 </section>
 
-                <section id="hostReadinessPanel" class="safety-panel neutral" aria-labelledby="hostReadinessQuestion">
+                <section id="hostReadinessPanel" class={`safety-panel ${$readinessState.tone}`} data-native-readiness-phase={$readinessState.phase} data-native-readiness-verified-count={$readinessState.verifiedReadCount} aria-busy={$readinessState.busy} aria-labelledby="hostReadinessQuestion">
                   <div>
                     <span id="hostReadinessQuestion" class="section-label">Can I turn off this PC?</span>
-                    <h3 id="hostReadinessTitle">Checking shutdown safety…</h3>
-                    <p id="hostReadinessDetail">SwarmCraft is checking whether another device can safely keep this world available.</p>
+                    <h3 id="hostReadinessTitle">{$readinessState.title}</h3>
+                    <p id="hostReadinessDetail" aria-live="polite">{$readinessState.detail}</p>
                   </div>
                 </section>
 
