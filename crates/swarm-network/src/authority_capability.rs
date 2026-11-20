@@ -7,7 +7,10 @@
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use swarm_protocol::{peer_id_from_public_key, Hash32, PeerId, WorldId};
+use swarm_protocol::{
+    peer_id_from_public_key, ExpectedHostingAuthorityHeadV2, Hash32, HostingAuthorityOperationV2,
+    PeerId, SignedHostingAuthorityActionV2, WorldId,
+};
 use thiserror::Error;
 
 /// This MUST be negotiated as a real independent wire protocol and must not
@@ -265,6 +268,71 @@ pub fn verify_authority_feature_session(
     })
 }
 
+/// This verifies a signed operation against an ALREADY VERIFIED V2 session.
+/// It does not mint a lease, a canonical realm, or a Minecraft hosting permit.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum V2AuthorityActionError {
+    #[error("the signed V2 authority session has expired or is not yet valid")]
+    ExpiredSession,
+    #[error("V2 authority operation is not bound to the authenticated session and canonical head")]
+    WrongSessionOrHead,
+    #[error("V2 authority operation's signature, identity or context is invalid")]
+    InvalidAction,
+    #[error("authority action nonce was already consumed or was never issued")]
+    ReplayOrUnknownAction,
+}
+
+/// Second stage of a genuine V2-only network authority exchange.
+///
+/// The expected action and permitted signer MUST be derived from independently
+/// accepted, durable canonical V2 policy/membership, not from a remote claim,
+/// world membership, replica availability, or hosting preference. The verified
+/// session must come from a real /hosting-authority/2 stream; legacy V1 stream
+/// advertisement alone cannot produce one. The caller atomically consumes an
+/// independently issued action nonce only after signature verification.
+///
+/// A success is solely an authenticated *action binding* and MUST be followed
+/// by durable policy/lease, fresh local opt-in, resource and fencing checks.
+pub fn verify_v2_authority_action_session(
+    session: VerifiedAuthorityFeatureSession,
+    action: &SignedHostingAuthorityActionV2,
+    expected: &ExpectedHostingAuthorityHeadV2,
+    now_unix_ms: u64,
+    consume_action_nonce: impl FnOnce() -> bool,
+) -> Result<(), V2AuthorityActionError> {
+    if !session.valid_at(now_unix_ms) {
+        return Err(V2AuthorityActionError::ExpiredSession);
+    }
+    if action.realm_id != session.world_id()
+        || action.candidate_peer_id != session.peer_id()
+        || action.committed_policy_hash != session.policy_hash()
+        || action.committed_migration_hash != session.migration_hash()
+        || action.accepted_membership_hash != session.membership_hash()
+        || action.snapshot_hash != session.snapshot_hash()
+        || action.epoch != session.epoch()
+        || action.fencing_token != session.fencing_token()
+        || action.consent_revision != session.consent_revision()
+        || action.selected_heap_mib != session.selected_heap_mib()
+    {
+        return Err(V2AuthorityActionError::WrongSessionOrHead);
+    }
+    action
+        .verify_for_head(expected, |public_key, bytes, signature| {
+            let Ok(key) = VerifyingKey::from_bytes(public_key) else {
+                return false;
+            };
+            let Ok(signature) = Signature::from_slice(signature) else {
+                return false;
+            };
+            key.verify(bytes, &signature).is_ok()
+        })
+        .map_err(|_| V2AuthorityActionError::InvalidAction)?;
+    if !consume_action_nonce() {
+        return Err(V2AuthorityActionError::ReplayOrUnknownAction);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,4 +574,86 @@ mod tests {
             Err(AuthorityCapabilityError::InvalidTranscript)
         );
     }
+    fn signed_action(v: &SignedAuthorityFeatureV2, key: &SigningKey) -> (SignedHostingAuthorityActionV2, ExpectedHostingAuthorityHeadV2) {
+        let mut action = SignedHostingAuthorityActionV2 {
+            format_version: swarm_protocol::HOSTING_REALM_FORMAT_VERSION_V2,
+            operation: HostingAuthorityOperationV2::LeaseGrant,
+            realm_id: v.world_id,
+            committed_policy_hash: v.committed_policy_hash,
+            committed_migration_hash: v.committed_migration_hash,
+            accepted_membership_hash: v.accepted_membership_hash,
+            epoch: v.epoch,
+            fencing_token: v.fencing_token,
+            snapshot_hash: v.snapshot_hash,
+            candidate_peer_id: v.peer_id,
+            consent_revision: v.consent_revision,
+            selected_heap_mib: v.selected_heap_mib,
+            signer_peer_id: v.peer_id,
+            signer_public_key: key.verifying_key().to_bytes(),
+            nonce: [77; 32],
+            signature: Vec::new(),
+        };
+        action.signature = key.sign(&action.signing_bytes().unwrap()).to_bytes().to_vec();
+        let expected = ExpectedHostingAuthorityHeadV2 {
+            operation: action.operation,
+            realm_id: action.realm_id,
+            committed_policy_hash: action.committed_policy_hash,
+            committed_migration_hash: action.committed_migration_hash,
+            accepted_membership_hash: action.accepted_membership_hash,
+            epoch: action.epoch,
+            fencing_token: action.fencing_token,
+            snapshot_hash: action.snapshot_hash,
+            candidate_peer_id: action.candidate_peer_id,
+            expected_consent_revision: action.consent_revision,
+            expected_selected_heap_mib: action.selected_heap_mib,
+            expected_signer_peer_id: action.signer_peer_id,
+            expected_nonce: action.nonce,
+        };
+        (action, expected)
+    }
+
+    #[test]
+    fn valid_v2_signed_operation_is_session_bound_and_single_use() {
+        let (claim, key) = claim();
+        let session = verify_authority_feature_session(
+            MANDATORY_AUTHORITY_WIRE_PROTOCOL, &claim, &expected(&claim), || true
+        ).unwrap();
+        let (action, expected_head) = signed_action(&claim, &key);
+        let used = Cell::new(false);
+        let verify = || verify_v2_authority_action_session(
+            session, &action, &expected_head, 105_000,
+            || if used.get() { false } else { used.set(true); true }
+        );
+        assert_eq!(verify(), Ok(()));
+        assert_eq!(verify(), Err(V2AuthorityActionError::ReplayOrUnknownAction));
+    }
+
+    #[test]
+    fn stale_wrong_policy_operation_and_forged_signature_are_denied() {
+        let (claim, key) = claim();
+        let session = verify_authority_feature_session(
+            MANDATORY_AUTHORITY_WIRE_PROTOCOL, &claim, &expected(&claim), || true
+        ).unwrap();
+        let (action, mut expected_head) = signed_action(&claim, &key);
+        let verify = |action: &SignedHostingAuthorityActionV2, expected: &ExpectedHostingAuthorityHeadV2, now| {
+            verify_v2_authority_action_session(session, action, expected, now, || true)
+        };
+        assert_eq!(verify(&action, &expected_head, 110_001), Err(V2AuthorityActionError::ExpiredSession));
+        expected_head.operation = HostingAuthorityOperationV2::Wake;
+        assert_eq!(verify(&action, &expected_head, 105_000), Err(V2AuthorityActionError::InvalidAction));
+        expected_head.operation = HostingAuthorityOperationV2::LeaseGrant;
+        expected_head.expected_nonce = [55; 32];
+        assert_eq!(verify(&action, &expected_head, 105_000), Err(V2AuthorityActionError::InvalidAction));
+        expected_head.expected_nonce = action.nonce;
+        let mut forged = action.clone();
+        forged.signature[0] ^= 1;
+        assert_eq!(verify(&forged, &expected_head, 105_000), Err(V2AuthorityActionError::InvalidAction));
+        let mut wrong_policy = action.clone();
+        wrong_policy.committed_policy_hash = Hash32([99; 32]);
+        assert_eq!(verify(&wrong_policy, &expected_head, 105_000), Err(V2AuthorityActionError::WrongSessionOrHead));
+        let mut revoked = action.clone();
+        revoked.consent_revision += 1;
+        assert_eq!(verify(&revoked, &expected_head, 105_000), Err(V2AuthorityActionError::WrongSessionOrHead));
+    }
+
 }
