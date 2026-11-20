@@ -311,6 +311,9 @@ function clearSelection() {
   }
   showInline('worldNotice', '');
   showInline('runtimeNotice', '');
+  if (window.__swarmcraftSvelteReadinessOwned === true) {
+    window.__swarmcraftSvelteReadiness?.clear();
+  }
   updateWorldSpecificControls();
   updateDiagnosticsContext();
 }
@@ -429,6 +432,13 @@ function renderHostReadiness(readiness) {
 }
 
 async function refreshHostReadiness(world) {
+  if (window.__swarmcraftSvelteReadinessOwned === true) {
+    // Candidate view uses only the actual Rust host_readiness command.
+    // No duplicate legacy command, legacy DOM overwrite or renderer grant.
+    if (!world) window.__swarmcraftSvelteReadiness?.clear();
+    else await window.__swarmcraftSvelteReadiness?.select(world.id);
+    return;
+  }
   if (!world) {
     renderHostReadiness(null);
     return;
