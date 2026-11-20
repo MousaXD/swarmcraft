@@ -548,6 +548,30 @@ class TestFailClosed(unittest.TestCase):
             with self.assertRaisesRegex(gate.Blocked, "bob_withdrawal_not_persisted"):
                 gate.verify(c, out)
 
+    def test_missing_negative_human_review_flags_block_ready(self):
+        # Synthetic records are deliberately rejected before media inspection.
+        # They cannot establish a genuine installed-app denial.
+        for missing in ("bob_withdrawal_and_safe_handoff_observed",
+                        "bob_rehost_attempt_denied_after_withdrawal",
+                        "carol_player_only_host_denial_observed"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temp:
+                out = Path(temp)
+                c = fixtures(out)
+                review = gate.load_json(gate.HERE / "review.example.json")
+                review["commit"] = COMMIT
+                review["package_sha256"] = SHA
+                review["reviewer"] = "Independent QA tester"
+                review["evidence_url"] = "https://github.com/MousaXD/swarmcraft/actions/runs/1"
+                review["observations_sha256"] = gate.observations_sha256(out)
+                for key, value in review.items():
+                    if type(value) is bool:
+                        review[key] = True
+                review[missing] = False
+                reviewed = out / "review.json"
+                gate.save(reviewed, review)
+                with self.assertRaisesRegex(gate.Blocked, "real_player_or_network_review_incomplete"):
+                    gate.verify(c, out, reviewed)
+
     def test_rejects_real_client_not_observed(self):
         with tempfile.TemporaryDirectory() as temp:
             out = Path(temp)
