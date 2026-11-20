@@ -126,6 +126,36 @@ mod tests {
     }
 
 
+    #[test]
+    fn equal_round_conflicting_unaccepted_certificate_cannot_replace_durable_history() {
+        let (_temp, storage, world) = fixture();
+        let original = certificate(world);
+        storage.save_recovery_certificate(&original).unwrap();
+        let path = storage.world_dir(world).join("metadata/recovery-certificate.postcard");
+        let prior_bytes = fs::read(&path).unwrap();
+
+        let mut conflict = original.clone();
+        conflict.ballot.base_snapshot_hash = Hash32([99; 32]);
+        assert!(storage.save_recovery_certificate(&conflict).is_err());
+        assert_eq!(fs::read(&path).unwrap(), prior_bytes);
+    }
+
+    #[test]
+    fn semantically_invalid_durable_certificate_is_not_readable_or_replaceable() {
+        let (_temp, storage, world) = fixture();
+        let valid = certificate(world);
+        storage.save_recovery_certificate(&valid).unwrap();
+        let mut invalid = valid.clone();
+        invalid.ballot.protocol_version = 0;
+        let path = storage.world_dir(world).join("metadata/recovery-certificate.postcard");
+        let invalid_bytes = postcard::to_allocvec(&invalid).unwrap();
+        fs::write(&path, &invalid_bytes).unwrap();
+
+        assert!(storage.load_recovery_certificate(world).is_err());
+        assert!(storage.save_recovery_certificate(&valid).is_err());
+        assert_eq!(fs::read(&path).unwrap(), invalid_bytes);
+    }
+
     fn accepted_epoch_for(certificate: &RecoveryCertificateV1) -> EpochRecordV1 {
         let ballot = &certificate.ballot;
         EpochRecordV1 {
