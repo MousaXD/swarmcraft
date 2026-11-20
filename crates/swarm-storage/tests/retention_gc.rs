@@ -276,7 +276,6 @@ fn non_file_canonical_retention_root_blocks_destructive_pruning() {
     assert!(blob_path(&storage, &old_blob).exists());
 }
 
-
 /// Solo-conflict history is also a mandatory recovery root. Malformed
 /// canonical conflict paths must not be interpreted as an empty conflict set.
 #[cfg(unix)]
