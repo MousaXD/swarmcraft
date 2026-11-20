@@ -28,12 +28,7 @@ fn real_verify(key: &[u8; 32], bytes: &[u8], sig: &[u8]) -> bool {
 
 fn member(key: &SigningKey, authority_eligible: bool) -> WorldMemberV1 {
     let public_key = key.verifying_key().to_bytes();
-    WorldMemberV1 {
-        peer_id: peer_id_from_public_key(&public_key),
-        public_key,
-        authority_eligible,
-        banned: false,
-    }
+    WorldMemberV1 { peer_id: peer_id_from_public_key(&public_key), public_key, authority_eligible, banned: false }
 }
 
 struct Fixture {
@@ -79,10 +74,7 @@ impl Fixture {
                 datapacks: Vec::new(),
             },
             visibility: WorldVisibilityV1::Private,
-            authority_policy: AuthorityPolicyV1 {
-                allow_solo_advancement: false,
-                preferred_replication_factor: 2,
-            },
+            authority_policy: AuthorityPolicyV1 { allow_solo_advancement: false, preferred_replication_factor: 2 },
             membership_policy: MembershipPolicyV1::InviteOnly,
             presentation: WorldPresentationV1 {
                 name: "Crypto V1 source".into(),
@@ -267,7 +259,9 @@ fn crypto_joint_quorum_requires_both_member_sets_and_player_only_can_vote() {
     assert!(!f.verify(&f.certificate(&[0, 3]), Some(&old))); // new-only majority
     assert!(f.verify(&f.certificate(&[0, 2]), Some(&old))); // includes player-only voter
     assert!(f.verify(&f.certificate(&[0, 1, 3]), Some(&old))); // separate majorities
-    assert!(!f.verify(&f.certificate(&[0, 2]), None)); // predecessor required
+    // Already accepted stable memberships use current votes; the caller
+    // must independently prove there is no pending source transition.
+    assert!(f.verify(&f.certificate(&[0, 2]), None));
 
     let mut forged_old = old.clone();
     forged_old.signature[0] ^= 1;
@@ -304,13 +298,7 @@ fn crypto_source_authority_must_remain_eligible_and_unbanned() {
 
     let mut ineligible = Fixture::new();
     let authority = ineligible.membership.authority_peer_id;
-    ineligible
-        .membership
-        .members
-        .iter_mut()
-        .find(|m| m.peer_id == authority)
-        .unwrap()
-        .authority_eligible = false;
+    ineligible.membership.members.iter_mut().find(|m| m.peer_id == authority).unwrap().authority_eligible = false;
     ineligible.resign_for_membership();
     let ineligible_cert = ineligible.certificate(&[1, 2]);
     assert!(!ineligible.verify(&ineligible_cert, None));

@@ -116,11 +116,7 @@ fn require_membership_signatures(
     if config.signature.len() != 64
         || !verify_ed25519(&config.authority_public_key, &config.signing_bytes()?, &config.signature)
         || current.signature.len() != 64
-        || !verify_ed25519(
-            &current.authority_public_key,
-            &current.signing_bytes()?,
-            &current.signature,
-        )
+        || !verify_ed25519(&current.authority_public_key, &current.signing_bytes()?, &current.signature)
     {
         return Err(HostingRealmV2Error::InvalidSignature);
     }
@@ -133,9 +129,7 @@ fn require_membership_signatures(
     }
 
     match previous {
-        None
-            if current.sequence > 0
-                && (current.sequence == 1) == current.previous_membership_hash.is_none() => {}
+        None if current.sequence > 0 && (current.sequence == 1) == current.previous_membership_hash.is_none() => {}
         Some(old)
             if old.world_id == current.world_id
                 && old.epoch == current.epoch
@@ -151,9 +145,7 @@ fn require_membership_signatures(
             }
         }
         _ => {
-            return Err(HostingRealmV2Error::Invalid(
-                "missing, malformed or non-contiguous V1 predecessor membership",
-            ));
+            return Err(HostingRealmV2Error::Invalid("missing, malformed or non-contiguous V1 predecessor membership"));
         }
     }
     Ok(())
@@ -190,14 +182,7 @@ impl SignedHostingMigrationQuorumV2 {
         source: &HostingMigrationSourceContextV2<'_>,
         verify_ed25519: impl Fn(&[u8; 32], &[u8], &[u8]) -> bool,
     ) -> Result<(), HostingRealmV2Error> {
-        let HostingMigrationSourceContextV2 {
-            genesis,
-            config,
-            current,
-            voter_set,
-            initial_policy,
-            proposal,
-        } = *source;
+        let HostingMigrationSourceContextV2 { genesis, config, current, voter_set, initial_policy, proposal } = *source;
         let previous = match voter_set {
             HostingMigrationVoterSetV2::AcceptedStable => None,
             HostingMigrationVoterSetV2::PendingJoint { previous } => Some(previous),
@@ -262,5 +247,4 @@ impl SignedHostingMigrationQuorumV2 {
         }
         Ok(())
     }
-
 }

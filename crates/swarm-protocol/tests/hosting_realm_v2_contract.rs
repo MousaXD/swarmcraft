@@ -415,7 +415,6 @@ fn verifier_owned_expectations_cannot_be_replaced_by_claimed_values() {
     assert!(bad.signing_bytes().is_err());
 }
 
-
 fn quorum_vote_for(f: &Fixture, member: &WorldMemberV1) -> SignedHostingMigrationVoteV2 {
     let mut vote = f.vote();
     vote.voter_peer_id = member.peer_id;
@@ -567,7 +566,6 @@ fn signed_v2_migration_quorum_rejects_missing_or_forged_source_membership() {
         )
         .is_err());
 }
-
 
 #[test]
 fn signed_v2_migration_quorum_rejects_banned_voters_and_unbounded_envelopes() {
