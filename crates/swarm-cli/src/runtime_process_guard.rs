@@ -268,11 +268,7 @@ mod tests {
         let path = record_path(&paths, world());
         atomic_write(
             &path,
-            &RuntimeProcessRecord {
-                version: RUNTIME_PROCESS_RECORD_VERSION,
-                controller_pid: 1,
-                java_pid: None,
-            },
+            &RuntimeProcessRecord { version: RUNTIME_PROCESS_RECORD_VERSION, controller_pid: 1, java_pid: None },
         )
         .unwrap();
         assert!(refuse_unaccounted_runtimes(&paths)
@@ -290,10 +286,7 @@ mod tests {
             use std::os::unix::fs::symlink;
             let link = paths.root.join("control").join("untrusted-link");
             symlink(temp.path(), &link).unwrap();
-            assert!(refuse_unaccounted_runtimes(&paths)
-                .unwrap_err()
-                .to_string()
-                .contains("untrusted symlink"));
+            assert!(refuse_unaccounted_runtimes(&paths).unwrap_err().to_string().contains("untrusted symlink"));
         }
     }
 
