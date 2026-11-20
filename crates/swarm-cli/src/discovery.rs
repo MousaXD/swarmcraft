@@ -1101,9 +1101,15 @@ pub async fn resolve_world(
     // Exact resolve also treats explicit bootstraps only as untrusted locators.
     let mut providers = bootstrap_peers.clone();
     let mut requested = HashSet::new();
+    // Keep the exact outbound request/peer pairing so a late or unsolicited
+    // response cannot consume a legitimate retry slot.
+    let mut pending = HashMap::<String, TransportPeerId>::new();
+    let mut retry_attempts = HashMap::<TransportPeerId, u8>::new();
     for transport_peer in bootstrap_order.iter().copied() {
         if node.application_peer(&transport_peer).is_some() && requested.insert(transport_peer) {
-            node.send_request(&transport_peer, WireRequest::DiscoveryResolve { world_id: world })?;
+            let request_id =
+                node.send_request(&transport_peer, WireRequest::DiscoveryResolve { world_id: world })?;
+            pending.insert(format!("{request_id:?}"), transport_peer);
         }
     }
     if !bootstrap_order.is_empty() {
@@ -1115,6 +1121,7 @@ pub async fn resolve_world(
     let mut invalid = false;
     let mut stale = false;
     let mut detail = None;
+    let mut query_finished = false;
 
     let run = timeout(DISCOVERY_QUERY_TIMEOUT, async {
         loop {
@@ -1125,41 +1132,81 @@ pub async fn resolve_world(
                         let _ = node.dial_peer(peer);
                     }
                 }
-                DiscoveryNetworkEvent::ProvidersFinished { query_id } if query_id == query && providers.is_empty() => {
-                    break
+                DiscoveryNetworkEvent::ProvidersFinished { query_id } if query_id == query => {
+                    query_finished = true;
+                    if providers.is_empty() {
+                        break;
+                    }
                 }
                 DiscoveryNetworkEvent::ProvidersFailed { query_id, error } if query_id == query => {
                     detail = Some(error);
+                    query_finished = true;
                     if providers.is_empty() {
                         break;
                     }
                 }
                 DiscoveryNetworkEvent::Authenticated { transport_peer, .. } if providers.contains(&transport_peer) => {
                     if requested.insert(transport_peer) {
-                        node.send_request(&transport_peer, WireRequest::DiscoveryResolve { world_id: world })?;
+                        let request_id =
+                            node.send_request(&transport_peer, WireRequest::DiscoveryResolve { world_id: world })?;
+                        pending.insert(format!("{request_id:?}"), transport_peer);
                     }
                 }
-                DiscoveryNetworkEvent::Response { response: WireResponse::DiscoveryResolved(Some(value)), .. } => {
-                    if value.world_id != world || matches!(value.visibility, WorldVisibilityV1::Private) {
-                        invalid = true;
+                DiscoveryNetworkEvent::Response { transport_peer, request_id, response } => {
+                    let key = format!("{request_id:?}");
+                    // Do not accept unsolicited, wrong-peer, duplicated or
+                    // delayed results from a previous failed request.
+                    if pending.get(&key) != Some(&transport_peer) {
                         continue;
                     }
-                    match verify_world_announcement(&value, unix_millis()?) {
-                        Ok(()) => {
-                            let value = *value;
-                            let hash = value.announcement_hash()?;
-                            if candidates.iter().all(|existing| existing.announcement_hash().ok() != Some(hash)) {
-                                candidates.push(value);
-                            }
+                    pending.remove(&key);
+                    if let WireResponse::DiscoveryResolved(Some(value)) = response {
+                        if value.world_id != world || matches!(value.visibility, WorldVisibilityV1::Private) {
+                            invalid = true;
+                            continue;
                         }
-                        Err(DiscoveryRecordError::Expired) => stale = true,
-                        Err(_) => invalid = true,
+                        match verify_world_announcement(&value, unix_millis()?) {
+                            Ok(()) => {
+                                let value = *value;
+                                let hash = value.announcement_hash()?;
+                                if candidates.iter().all(|existing| existing.announcement_hash().ok() != Some(hash)) {
+                                    candidates.push(value);
+                                }
+                            }
+                            Err(DiscoveryRecordError::Expired) => stale = true,
+                            Err(_) => invalid = true,
+                        }
                     }
                 }
-                DiscoveryNetworkEvent::OutboundFailure { error, .. } => {
+                DiscoveryNetworkEvent::OutboundFailure { transport_peer, request_id, error } => {
                     detail.get_or_insert(error);
+                    let key = format!("{request_id:?}");
+                    // Retry only an actual pending request to an explicit
+                    // locator. DHT-only results and duplicate failures cannot
+                    // trigger redial amplification.
+                    if pending.get(&key) == Some(&transport_peer) {
+                        pending.remove(&key);
+                        if bootstrap_peers.contains(&transport_peer)
+                            && reserve_explicit_browse_retry(retry_attempts.entry(transport_peer).or_default())
+                        {
+                            requested.remove(&transport_peer);
+                            if node.is_authenticated(&transport_peer) {
+                                let next = node.send_request(
+                                    &transport_peer,
+                                    WireRequest::DiscoveryResolve { world_id: world },
+                                )?;
+                                pending.insert(format!("{next:?}"), transport_peer);
+                                requested.insert(transport_peer);
+                            } else if let Err(dial_error) = node.dial_peer(transport_peer) {
+                                debug!(%dial_error, %transport_peer, "discovery exact-resolve retry dial failed");
+                            }
+                        }
+                    }
                 }
                 _ => {}
+            }
+            if query_finished && !providers.is_empty() && requested.len() == providers.len() && pending.is_empty() {
+                break;
             }
         }
         Ok::<(), anyhow::Error>(())
