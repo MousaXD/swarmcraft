@@ -11,6 +11,8 @@ let migrationRequestGeneration = 0;
 let hostReadinessRequestGeneration = 0;
 let modsRequestGeneration = 0;
 let connectivityRefreshInFlight = false;
+let connectivityGeneration = 0;
+let networkStoppedBySvelte = false;
 let structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });
 let serviceWarning = '';
 let startupInProgress = false;
@@ -221,11 +223,18 @@ function renderConnectivity() {
 }
 
 async function refreshConnectivityDiagnostics({ logFailure = false } = {}) {
+  // An intentionally stopped local daemon cannot be classified as reachable
+  // from a stale persisted connectivity snapshot in the Svelte candidate.
+  if (window.__swarmcraftSvelteNetworkingOwned === true && networkStoppedBySvelte) return;
   if (connectivityRefreshInFlight) return;
+  const readGeneration = connectivityGeneration;
   connectivityRefreshInFlight = true;
   try {
-    structuredConnectivity = await backend.connectivityDiagnostics();
+    const result = await backend.connectivityDiagnostics();
+    if (readGeneration !== connectivityGeneration) return;
+    structuredConnectivity = result;
   } catch (error) {
+    if (readGeneration !== connectivityGeneration) return;
     structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });
     structuredConnectivity = {
       ...structuredConnectivity,
@@ -235,6 +244,7 @@ async function refreshConnectivityDiagnostics({ logFailure = false } = {}) {
   } finally {
     connectivityRefreshInFlight = false;
   }
+  if (readGeneration !== connectivityGeneration) return;
   renderConnectivity();
   for (const element of document.querySelectorAll('.world-row-connectivity')) {
     element.textContent = structuredConnectivity.label;
@@ -1194,6 +1204,28 @@ window.__swarmcraftAfterSvelteCreate = async (createdWorldId) => {
 };
 }
 
+// Explicit Rust-backed daemon actions are Svelte-owned only in the candidate.
+// Legacy desktop continues its original button handlers when that flag is absent.
+if (window.__swarmcraftSvelteNetworkingOwned === true) {
+  window.__swarmcraftAfterSvelteNetworkingChange = async (outcome) => {
+    ++connectivityGeneration;
+    if (outcome === 'stopped') {
+      networkStoppedBySvelte = true;
+      setServiceWarning('Networking is stopped for this Desktop session. Replication and automatic migration supervision may be unavailable.');
+      structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });
+      renderConnectivity();
+      for (const element of document.querySelectorAll('.world-row-connectivity')) {
+        element.textContent = structuredConnectivity.label;
+      }
+      return;
+    }
+    if (outcome !== 'started') throw new Error('Unknown native networking outcome.');
+    networkStoppedBySvelte = false;
+    setServiceWarning('');
+    await refreshConnectivityDiagnostics({ logFailure: false });
+  };
+}
+
 function bindAction(id, handler, { submit = false } = {}) {
   const element = $(id);
   if (!element) return;
@@ -1208,6 +1240,8 @@ function bindAction(id, handler, { submit = false } = {}) {
     if (id === 'joinWorldIdButton' && window.__swarmcraftSvelteDiscoveryOwned === true) return;
     if (id === 'confirmLeave' && window.__swarmcraftSvelteLeaveOwned === true) return;
     if (id === 'identityButton' && window.__swarmcraftSvelteIdentityOwned === true) return;
+    if ((id === 'startDaemon' || id === 'stopDaemon')
+        && window.__swarmcraftSvelteNetworkingOwned === true) return;
     if (element.dataset.busy === 'true') return;
     const busyControl = submit && event.submitter ? event.submitter : element;
     element.dataset.busy = 'true';
