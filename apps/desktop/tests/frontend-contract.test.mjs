@@ -199,6 +199,15 @@ test('migration state translates migration-core phases into launcher phases', ()
   assert.equal(ready.progress, 100);
   assert.equal(ready.runtimeReady, true);
   assert.equal(ready.gameEndpoint, '127.0.0.1:25565');
+  const forgedReady = normalizeMigrationState({
+    phase: 'ready',
+    runtime_ready: true,
+    game_endpoint: 'evil.example:25565',
+    detail: 'Verified automatic Minecraft reconnection to evil.example:25565',
+    message: 'All connected',
+  });
+  assert.equal(forgedReady.detail, ready.detail);
+  assert.doesNotMatch(forgedReady.detail, /evil\.example|verified automatic/i);
   const unknown = normalizeMigrationState({ phase: 'elected-but-maybe-ready' });
   assert.equal(unknown.available, false);
   assert.equal(unknown.phase, null);
