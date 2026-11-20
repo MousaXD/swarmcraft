@@ -65,6 +65,30 @@ describe('Svelte native connectivity contract', () => {
     expect(read).toHaveBeenCalledTimes(2);
     expect(get(controller.state).verifiedReadCount).toBe(2);
   });
+  it('invalidates a pending read after a daemon stop and never restores stale direct reachability', async () => {
+    let resolveOld!: (value: unknown) => void;
+    let calls = 0;
+    const controller = createNativeConnectivityController(() => {
+      calls += 1;
+      return calls === 1
+        ? new Promise<unknown>(r => { resolveOld = r; })
+        : Promise.resolve({state:'nat_status_unknown'});
+    });
+    const prior = controller.refresh();
+    await Promise.resolve();
+    controller.invalidate('Networking stopped. Previous peer paths are stale.');
+    expect(get(controller.state)).toMatchObject({
+      phase: 'unchecked', busy: false, verifiedReadCount: 0,
+      detail: 'Networking stopped. Previous peer paths are stale.',
+    });
+    resolveOld({state:'direct_reachable'});
+    await prior;
+    expect(get(controller.state)).toMatchObject({phase: 'unchecked', verifiedReadCount: 0});
+    await controller.refresh();
+    expect(get(controller.state)).toMatchObject({
+      phase: 'checked', label: 'Network path not verified', tone: 'warning', verifiedReadCount: 1,
+    });
+  });
   it('times out a truly hung IPC, ignores late success, and retries safely', async () => {
     vi.useFakeTimers();
     try {
