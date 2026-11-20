@@ -11,7 +11,15 @@
   );
   const nativeConnectivity = connectivityController.state;
 
+  let networkStatusUnverified = $state(false);
+
   async function refreshNativeConnectivity() {
+    // A stopped or uncertain daemon can leave an old signed-off snapshot file.
+    // Never re-label that persisted snapshot as current peer connectivity.
+    if (networkStatusUnverified) {
+      connectivityController.invalidate('Start networking to check current peer connectivity.');
+      return;
+    }
     await connectivityController.refresh();
   }
 
@@ -51,10 +59,16 @@
     serviceError = '';
     let nativeAccepted = false;
     try {
+      if (action === 'stop') {
+        networkStatusUnverified = true;
+        connectivityController.invalidate('Stopping networking. Earlier peer paths are now unverified.');
+        await window.__swarmcraftAfterSvelteNetworkingChange('unknown');
+      }
       if (action === 'start') {
         const pid = await boundedService(() => nativeBridge().invoke('ensure_daemon_running', { listen }));
         if (!Number.isInteger(pid) || pid <= 0) throw new Error('Daemon PID not verified');
         nativeAccepted = true;
+        networkStatusUnverified = false;
         connectivityController.invalidate();
         serviceMessage = 'Networking started. Native connectivity may still be unavailable.';
         await window.__swarmcraftAfterSvelteNetworkingChange('started');
@@ -69,6 +83,8 @@
         await window.__swarmcraftAfterSvelteNetworkingChange('stopped');
       }
     } catch {
+      networkStatusUnverified = true;
+      try { await window.__swarmcraftAfterSvelteNetworkingChange('unknown'); } catch { /* keep unknown */ }
       // A side effect may have completed even when its IPC acknowledgment,
       // follow-up legacy view refresh, or status check failed. Never assert
       // the daemon stopped or started on a timed-out or ambiguous operation.
@@ -141,7 +157,7 @@
                 </div>
                 <p id="diagnosticConnectivityDetail" class="helper" aria-live="polite">{$nativeConnectivity.detail}</p>
                 <div class="compact-actions">
-                  <button id="refreshNativeConnectivity" class="button button-subtle" type="button" onclick={refreshNativeConnectivity} aria-busy={$nativeConnectivity.busy} disabled={$nativeConnectivity.busy}>Check native connection</button>
+                  <button id="refreshNativeConnectivity" class="button button-subtle" type="button" onclick={refreshNativeConnectivity} aria-busy={$nativeConnectivity.busy} disabled={$nativeConnectivity.busy || networkStatusUnverified}>Check native connection</button>
                 </div>
                 <div class="field">
                   <label for="daemonListen">Listen multiaddress</label>
