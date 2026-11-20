@@ -188,6 +188,15 @@ impl DiscoveryNode {
         self.established_connections.get(transport_peer).map_or(0, HashSet::len)
     }
 
+    /// Actively closes the current peer connection. Useful to test recovery
+    /// when a still-listening authenticated provider loses its QUIC stream.
+    /// This does not change membership, authorization or provider records.
+    pub fn disconnect_peer(&mut self, transport_peer: TransportPeerId) -> Result<()> {
+        self.swarm
+            .disconnect_peer_id(transport_peer)
+            .map_err(|_| anyhow!("discovery peer is not connected"))
+    }
+
     pub fn add_peer_address(&mut self, peer: TransportPeerId, address: Multiaddr) {
         self.swarm.behaviour_mut().kad.add_address(&peer, address);
     }
