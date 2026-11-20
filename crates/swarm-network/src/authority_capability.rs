@@ -8,8 +8,7 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use swarm_protocol::{
-    peer_id_from_public_key, ExpectedHostingAuthorityHeadV2, Hash32, PeerId,
-    SignedHostingAuthorityActionV2, WorldId,
+    peer_id_from_public_key, ExpectedHostingAuthorityHeadV2, Hash32, PeerId, SignedHostingAuthorityActionV2, WorldId,
 };
 use thiserror::Error;
 
@@ -661,15 +660,9 @@ mod tests {
         assert_eq!(verify(&forged, &expected_head, 105_000), Err(V2AuthorityActionError::InvalidAction));
         let mut wrong_policy = action.clone();
         wrong_policy.committed_policy_hash = Hash32([99; 32]);
-        assert_eq!(
-            verify(&wrong_policy, &expected_head, 105_000),
-            Err(V2AuthorityActionError::WrongSessionOrHead)
-        );
+        assert_eq!(verify(&wrong_policy, &expected_head, 105_000), Err(V2AuthorityActionError::WrongSessionOrHead));
         let mut revoked = action.clone();
         revoked.consent_revision += 1;
-        assert_eq!(
-            verify(&revoked, &expected_head, 105_000),
-            Err(V2AuthorityActionError::WrongSessionOrHead)
-        );
+        assert_eq!(verify(&revoked, &expected_head, 105_000), Err(V2AuthorityActionError::WrongSessionOrHead));
     }
 }
