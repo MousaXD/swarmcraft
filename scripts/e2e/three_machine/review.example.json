@@ -18,6 +18,7 @@
   "screenshots_redacted": false,
   "real_world_network_classes_verified": false,
   "bob_withdrawal_and_safe_handoff_observed": false,
+  "bob_rehost_attempt_denied_after_withdrawal": false,
   "carol_player_only_host_denial_observed": false,
   "artifacts": [],
   "observations_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
