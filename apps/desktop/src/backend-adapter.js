@@ -362,21 +362,22 @@ export function normalizeMigrationState(raw) {
   const progress = knownPhase === 'failed'
     ? Math.max(0, Math.min(100, Number(source.progress || 0)))
     : knownPhase === 'ready'
-      ? 100
+      ? (runtimeReady ? 100 : 0)
       : index >= 0
         ? Math.round((index / (MIGRATION_PHASES.length - 2)) * 100)
         : 0;
-  const detail = String(
-    source.detail
-      || source.message
-      || failureReason
-      || (runtimeReady && gameEndpoint ? `Minecraft is ready at ${gameEndpoint}.` : ''),
-  ).trim();
+  // A machine-local Ready record can survive a crash and can carry arbitrary
+  // descriptive text. Never let it advertise a trusted or live Minecraft route.
+  const detail = backendPhase === 'ready'
+    ? 'The last local runtime report reached Ready; current server availability and Minecraft client access are unverified.'
+    : String(source.detail || source.message || failureReason || '').trim();
 
   return {
     available: Boolean(knownPhase),
     phase: knownPhase,
-    label: knownPhase ? MIGRATION_LABELS[knownPhase] : 'Migration state unavailable',
+    label: knownPhase === 'ready' && !runtimeReady
+      ? 'Server readiness unverified'
+      : knownPhase ? MIGRATION_LABELS[knownPhase] : 'Migration state unavailable',
     detail,
     progress,
     blocked: false,
