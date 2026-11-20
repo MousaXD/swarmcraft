@@ -371,7 +371,7 @@ export function normalizeMigrationState(raw) {
       || source.message
       || failureReason
       || (backendPhase === 'ready' && runtimeReady
-        ? 'Minecraft server runtime reports ready; Minecraft client access is not verified.'
+        ? 'The last local runtime report reached Ready; current server availability and Minecraft client access are unverified.'
         : ''),
   ).trim();
 
