@@ -701,13 +701,15 @@ async fn authenticated_quic_stream_drop_is_observable_for_browse_and_exact_resol
         let mut inbound_tx = Some(inbound_tx);
         let provider_task = tokio::spawn(async move {
             loop {
-                if let DiscoveryNetworkEvent::InboundRequest { .. } =
+                if let DiscoveryNetworkEvent::InboundRequest { channel, .. } =
                     provider.next_event().await.expect("provider discovery event")
                 {
                     inbound_tx.take().expect("only one injected request").send(()).unwrap();
-                    // Hold the response channel open until the provider is
-                    // deliberately killed, so the client sees stream loss.
+                    // Keep the response channel alive; the abort must destroy
+                    // the authenticated QUIC stream, not just drop a reply.
+                    let pending_channel = channel;
                     std::future::pending::<()>().await;
+                    drop(pending_channel);
                 }
             }
         });
