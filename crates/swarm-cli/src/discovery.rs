@@ -1049,8 +1049,14 @@ pub async fn search_public_worlds(
     })
     .await;
 
-    if let Ok(result) = run {
-        result?;
+    match run {
+        Ok(result) => result?,
+        Err(_) => {
+            // An unresponsive but known locator is not proof of an empty
+            // directory. The request/collection phase has a hard deadline;
+            // distinguish expiry from a completed empty response.
+            network_error.get_or_insert_with(|| "public discovery query deadline exceeded".into());
+        }
     }
 
     for candidate in candidates {
@@ -1236,8 +1242,11 @@ pub async fn resolve_world(
         Ok::<(), anyhow::Error>(())
     })
     .await;
-    if let Ok(value) = run {
-        value?;
+    match run {
+        Ok(value) => value?,
+        Err(_) => {
+            detail.get_or_insert_with(|| "exact discovery query deadline exceeded".into());
+        }
     }
     for candidate in candidates {
         match prove_candidate_freshness(&mut node, &identity, &candidate, &bootstrap_peers).await {
