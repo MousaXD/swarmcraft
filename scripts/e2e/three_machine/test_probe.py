@@ -96,7 +96,8 @@ class TestRealCliCaptureContract(unittest.TestCase):
         })()
         outputs = list(map(completed, (status, identity, "OK snapshot #8\n",
                                        migration, readiness)))
-        with patch.object(node, "run", side_effect=outputs):
+        with patch.object(node, "run", side_effect=outputs), patch.object(
+                node, "world_server_inventory", return_value=[124]):
             with patch.object(node, "canonical_head_digest", return_value="44" * 32):
                 with patch.object(node, "hosting_consent", return_value={"available": True}):
                     with patch.object(node, "isolated_process", return_value=True):
@@ -115,6 +116,43 @@ class TestRealCliCaptureContract(unittest.TestCase):
         self.assertEqual(report["identity_fingerprint"], node.fp(args.salt, "scpeer:" + self.PEER))
         self.assertEqual(report["world_fingerprint"], node.fp(args.salt, self.WORLD))
         self.assertTrue(report["minecraft_client_process_observed"])
+
+
+class TestWorldBoundJvmInventory(unittest.TestCase):
+    WORLD = "ab" * 32
+
+    def test_detects_unlisted_server_jvm_even_with_no_operator_pid(self):
+        # Synthetic /proc fixture tests only the read-only inventory. It is
+        # NOT a stand-in for real three-machine Minecraft certification.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "data"
+            world_runtime = root / "runtime" / self.WORLD
+            world_runtime.mkdir(parents=True)
+            other_runtime = root / "runtime" / ("cd" * 32)
+            other_runtime.mkdir()
+            fake_java = Path(temp) / "java"
+            fake_java.write_bytes(b"test-java")
+            proc = Path(temp) / "proc"
+            proc.mkdir()
+            for pid, cwd in (("123", world_runtime), ("124", other_runtime)):
+                process = proc / pid
+                process.mkdir()
+                (process / "exe").symlink_to(fake_java)
+                (process / "cwd").symlink_to(cwd)
+            self.assertEqual(node.world_server_inventory(root, self.WORLD, proc), [123])
+
+    def test_unreadable_java_workdir_is_not_silent_zero(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "data"
+            fake_java = Path(temp) / "java"
+            fake_java.write_bytes(b"test-java")
+            proc = Path(temp) / "proc"
+            process = proc / "123"
+            process.mkdir(parents=True)
+            (process / "exe").symlink_to(fake_java)
+            # Missing /proc/PID/cwd while the same-user PID is present must
+            # block an assertion that the world has no server JVM.
+            self.assertIsNone(node.world_server_inventory(root, self.WORLD, proc))
 
 
 class TestDebianPackageMetadata(unittest.TestCase):
