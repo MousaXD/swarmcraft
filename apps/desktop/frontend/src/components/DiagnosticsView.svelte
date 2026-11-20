@@ -71,7 +71,7 @@
         networkStatusUnverified = false;
         connectivityController.invalidate();
         serviceMessage = 'Networking started. Native connectivity may still be unavailable.';
-        await window.__swarmcraftAfterSvelteNetworkingChange('started');
+        await boundedService(() => window.__swarmcraftAfterSvelteNetworkingChange!('started'));
         await connectivityController.refresh();
       } else {
         await boundedService(() => nativeBridge().invoke('stop_daemon', {}));
