@@ -8,8 +8,8 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use swarm_protocol::{
-    peer_id_from_public_key, ExpectedHostingAuthorityHeadV2, Hash32, HostingAuthorityOperationV2,
-    PeerId, SignedHostingAuthorityActionV2, WorldId,
+    peer_id_from_public_key, ExpectedHostingAuthorityHeadV2, Hash32, PeerId,
+    SignedHostingAuthorityActionV2, WorldId,
 };
 use thiserror::Error;
 
@@ -337,6 +337,7 @@ pub fn verify_v2_authority_action_session(
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use swarm_protocol::HostingAuthorityOperationV2;
 
     fn claim() -> (SignedAuthorityFeatureV2, SigningKey) {
         let key = SigningKey::from_bytes(&[7; 32]);
