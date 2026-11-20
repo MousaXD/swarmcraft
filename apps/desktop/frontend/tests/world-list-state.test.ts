@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import {
-  createNativeWorldListController, parseNativeWorldList, worldSafetyTone,
+  createNativeWorldListController, parseNativeWorldList, worldSafetyTone, nativeWorldSafetySummary,
   type NativeWorldListBackend,
 } from '../src/lib/world-list-state';
 
@@ -141,6 +141,15 @@ describe('Svelte world browsing and native list contracts', () => {
       });
     } finally {
       vi.useRealTimers();
+    }
+  });
+  it('renders only source-reported read-only world safety and never implies admission', () => {
+    expect(nativeWorldSafetySummary('history conflict')).toMatch(/Divergent history/);
+    expect(nativeWorldSafetySummary('solo degraded')).toMatch(/reduced safety guarantees/);
+    expect(nativeWorldSafetySummary('canonical quorum')).toMatch(/Canonical world history/);
+    expect(nativeWorldSafetySummary('')).toMatch(/not available yet/);
+    for (const safety of ['', 'Solo', 'Canonical', 'Conflict']) {
+      expect(nativeWorldSafetySummary(safety)).not.toMatch(/host approved|ready to play|admitted/i);
     }
   });
   it('maps safety only from Rust fields; does not treat unknown as safe', () => {
