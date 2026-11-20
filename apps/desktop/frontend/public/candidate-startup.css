@@ -1,0 +1,41 @@
+/* Independently loaded if the Svelte module or compiled CSS cannot run. */
+html { background: #101713; }
+body { margin: 0; }
+#bootstrapFallback {
+  box-sizing: border-box;
+  min-height: 100vh;
+  padding: 26px;
+  display: grid;
+  place-items: center;
+  background: #101713;
+  color: #eff5f0;
+  text-align: center;
+  font: 600 16px/1.5 system-ui, -apple-system, sans-serif;
+}
+#bootstrapFallback[hidden] { display: none; }
+html[data-swarmcraft-startup="failed"] #bootstrapFallback {
+  min-height: 60vh;
+  color: #ffcac7;
+}
+#startupFailure {
+  box-sizing: border-box;
+  margin: 20px;
+  padding: 16px;
+  border: 1px solid #b85e58;
+  border-radius: 8px;
+  background: #321d1d;
+  color: #ffdddd;
+  font: 14px/1.5 system-ui, -apple-system, sans-serif;
+}
+#startupFailure[hidden] { display: none; }
+#startupFailure #retryStartup {
+  cursor: pointer;
+  margin: 10px 0 0 10px;
+  padding: 8px 12px;
+  border: 1px solid #d4aaa6;
+  border-radius: 6px;
+  background: #412626;
+  color: #fff4f2;
+  font: inherit;
+}
+#startupFailure #retryStartup:focus-visible { outline: 3px solid #e9c777; outline-offset: 2px; }
