@@ -20,7 +20,9 @@
       return;
     }
     selectionError = '';
-    window.__swarmcraftSelectWorldFromSvelte(id);
+    if (!window.__swarmcraftSelectWorldFromSvelte(id)) {
+      selectionError = 'This world is no longer in the verified list. Refresh Worlds and try again.';
+    }
   }
 
   function refreshWorlds() {
