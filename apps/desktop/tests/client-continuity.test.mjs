@@ -22,7 +22,7 @@ function classify(status, safety = 'Canonical') {
 
 test('ready local Fabric report never becomes a trusted Minecraft endpoint or automatic join', () => {
   const state = classify(READY);
-  assert.equal(state.state, 'manual_reconnect_required');
+  assert.equal(state.state, 'route_unverified');
   assert.equal(state.automaticReconnect, false);
   assert.equal(state.connectionTarget, null);
   assert.match(state.detail, /report can remain after a crash/i);
@@ -42,7 +42,7 @@ test('wrong-world and incomplete generation reports fail closed even when ready 
     { ...READY, runtime_ready: false },
   ]) {
     const state = classify(invalid);
-    assert.notEqual(state.state, 'manual_reconnect_required');
+    assert.notEqual(state.state, 'route_unverified');
     assert.equal(state.connectionTarget, null);
     assert.equal(state.automaticReconnect, false);
   }
@@ -51,7 +51,7 @@ test('wrong-world and incomplete generation reports fail closed even when ready 
 test('current-looking runtime cannot override conflicting or reduced-safety world history', () => {
   for (const safety of ['Conflict', 'Divergent', 'SoloUnreplicated', 'DegradedSafety', 'Unknown', '']) {
     const state = classify(READY, safety);
-    assert.notEqual(state.state, 'manual_reconnect_required');
+    assert.notEqual(state.state, 'route_unverified');
     assert.equal(state.connectionTarget, null);
   }
 });
