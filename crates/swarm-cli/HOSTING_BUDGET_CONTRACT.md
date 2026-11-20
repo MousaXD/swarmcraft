@@ -23,10 +23,12 @@ The Java command receives `-Xmx<heap_mib>m` **before** `-jar`. This bounds JVM J
 
 | Platform | Physical/available probe | Current enforcement | Guaranteed whole-process cap |
 | --- | --- | --- | --- |
-| Linux | `/proc/meminfo` and cgroup-v2 `memory.max/current` when present | Conservative admission + serialized launch + `-Xmx` + periodic pressure recheck | **No** — delegated cgroup memory.max placement/lifecycle is not yet implemented |
+| Linux | `/proc/meminfo`, `/proc/self/cgroup`, and each accessible cgroup-v2 `memory.max/current` from the daemon's cgroup through its ancestors | Conservative admission + serialized launch + `-Xmx` + periodic pressure recheck; malformed/unreachable nested cgroups and detected cgroup-v1 memory controllers are denied | **No** — delegated cgroup memory.max placement/lifecycle is not yet implemented |
 | Windows | `GlobalMemoryStatusEx` | Conservative admission + serialized launch + `-Xmx` | **No** — Job Object process memory enforcement is not yet implemented |
 | macOS | `sysctl hw.memsize` and conservative `vm_stat` free/inactive pages | Conservative admission + serialized launch + `-Xmx` | **No** — reliable OS-level process cap not yet implemented |
 | Others | Unsupported: probe returns error | Hosting denied | **No** |
+
+On Linux with cgroup v2, the resource probe must walk the daemon's own cgroup and every parent to the mounted root, taking the minimum of each finite limit and its current remaining memory. A limited nested systemd service/container can otherwise appear to have the host's unrestricted RAM. Unsupported mount namespaces, unreadable files and detected cgroup-v1 memory controllers fail closed rather than treating `/proc/meminfo` as sufficient proof. This is conservative **admission measurement**, not cgroup placement of the launched Java process or a hard JVM RSS guarantee. Parser tests use isolated filesystem fixtures; they are not a substitute for actual cgroup-constrained Java/Fabric runtime certification.
 
 No automatic opt-in from a signed world policy; world permission is not device permission. If strict whole-process limiting becomes a product promise, gate it on a tested OS enforcement mechanism (such as delegated Linux cgroups or Windows Job Objects) rather than silently falling back to `-Xmx`.
 
