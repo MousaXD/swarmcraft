@@ -1,8 +1,7 @@
 use crate::{
-    transaction::{durable_atomic_write, durable_remove},
+    transaction::{canonical_file_exists, durable_atomic_write, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
-use std::fs;
 use swarm_protocol::{RecoveryCertificateV1, WorldId};
 
 impl Storage {
@@ -11,12 +10,17 @@ impl Storage {
         let _guard = self.lock_world_transaction(world)?;
         self.load_world(world)?;
         let path = self.world_dir(world).join("metadata").join("recovery-certificate.postcard");
+        // Preserve unreadable canonical evidence instead of overwriting it.
+        // Only genuine absence permits a first certificate write.
+        if canonical_file_exists(&path)? {
+            self.load_recovery_certificate(world)?;
+        }
         durable_atomic_write(&path, &postcard::to_allocvec(certificate)?)
     }
 
     pub fn load_recovery_certificate(&self, world: WorldId) -> Result<RecoveryCertificateV1, StorageError> {
         let path = self.world_dir(world).join("metadata").join("recovery-certificate.postcard");
-        let bytes = fs::read(&path).map_err(|source| StorageError::Io { path: path.clone(), source })?;
+        let bytes = read_canonical_file(&path)?;
         let certificate: RecoveryCertificateV1 = postcard::from_bytes(&bytes)?;
         if certificate.ballot.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -35,6 +39,7 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use crate::WorldMetadataV1;
     use swarm_protocol::{
         peer_id_from_public_key, Hash32, RecoveryBallotV1, WorldGenesisV1, PROTOCOL_VERSION,
