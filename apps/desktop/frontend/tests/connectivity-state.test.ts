@@ -24,6 +24,11 @@ describe('Svelte native connectivity contract', () => {
       tone: 'warning', label: 'Unknown native network state',
     });
     expect(JSON.stringify(parseNativeConnectivity({ state: 'future', error: 'private-key-secret' }))).not.toContain('private-key-secret');
+    for (const state of ['constructor', 'toString', '__proto__']) {
+      expect(parseNativeConnectivity({ state })).toMatchObject({
+        tone: 'warning', label: 'Unknown native network state',
+      });
+    }
   });
   it('rejects a malformed native payload and exposes a generic, retryable error', async () => {
     const read = vi.fn(async () => 'not-json /private/path scinvite:secret');
