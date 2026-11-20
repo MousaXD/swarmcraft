@@ -1029,9 +1029,9 @@ pub async fn search_public_worlds(
                         requested.remove(&transport_peer);
                         if node.application_peer(&transport_peer).is_some() {
                             let next = node.send_request(
-                                    &transport_peer,
-                                    WireRequest::DiscoveryPublic { filter: filter.clone() },
-                                )?;
+                                &transport_peer,
+                                WireRequest::DiscoveryPublic { filter: filter.clone() },
+                            )?;
                             pending.insert(format!("{next:?}"), transport_peer);
                             requested.insert(transport_peer);
                         } else if let Err(dial_error) = node.dial_peer(transport_peer) {
@@ -1215,9 +1215,9 @@ pub async fn resolve_world(
                         requested.remove(&transport_peer);
                         if node.is_authenticated(&transport_peer) {
                             let next = node.send_request(
-                                    &transport_peer,
-                                    WireRequest::DiscoveryResolve { world_id: world },
-                                )?;
+                                &transport_peer,
+                                WireRequest::DiscoveryResolve { world_id: world },
+                            )?;
                             pending.insert(format!("{next:?}"), transport_peer);
                             requested.insert(transport_peer);
                         } else if let Err(dial_error) = node.dial_peer(transport_peer) {
