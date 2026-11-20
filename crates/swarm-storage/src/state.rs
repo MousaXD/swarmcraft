@@ -3,7 +3,7 @@ use crate::{
     Storage, StorageError,
 };
 use serde::{Deserialize, Serialize};
-use std::{fs, path::{Path, PathBuf}};
+use std::{fs, path::PathBuf};
 use swarm_protocol::{peer_id_from_public_key, RecoveryBallotV1, RecoveryVoteV1, SoloBranchV1, WorldConfigV1, WorldId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,11 +265,9 @@ impl Storage {
 
 /// Only a genuinely absent directory is an absent conflict namespace.
 /// Paths of other types could conceal recovery roots that must stop GC.
-fn checked_solo_conflict_directory_present(path: &Path) -> Result<bool, StorageError> {
+fn checked_solo_conflict_directory_present(path: &std::path::Path) -> Result<bool, StorageError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            Err(StorageError::SymlinkUnsupported(path.to_path_buf()))
-        }
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StorageError::SymlinkUnsupported(path.to_path_buf())),
         Ok(metadata) if metadata.is_dir() => Ok(true),
         Ok(_) => Err(StorageError::WorldMetadataMismatch),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -606,5 +604,73 @@ mod tests {
         assert!(!store.background_seeding_enabled(world).unwrap());
         store.set_background_seeding(world, true).unwrap();
         assert!(store.background_seeding_enabled(world).unwrap());
+    }
+
+    #[test]
+    fn solo_conflict_persistence_rejects_corrupt_existing_evidence_and_recovers_after_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, world) = test_world();
+        let store = Storage::open(temp.path()).unwrap();
+        let branch = SoloBranchV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            base_snapshot_hash: Hash32([1; 32]),
+            base_epoch: 4,
+            head_snapshot_hash: Hash32([2; 32]),
+            head_epoch: 5,
+            head_sequence: 9,
+            state_hash: Hash32([3; 32]),
+            authority_peer_id: PeerId([4; 32]),
+            authority_public_key: [4; 32],
+            signature: vec![4; 64],
+        };
+
+        let path = store.preserve_solo_conflict(&branch).unwrap();
+        assert_eq!(store.preserve_solo_conflict(&branch).unwrap(), path);
+        let corrupted = b"not-a-durable-solo-conflict";
+        fs::write(&path, corrupted).unwrap();
+        assert!(store.preserve_solo_conflict(&branch).is_err());
+        assert!(store.list_solo_conflicts(world).is_err());
+        assert_eq!(fs::read(&path).unwrap(), corrupted);
+
+        fs::remove_file(&path).unwrap();
+        assert_eq!(store.preserve_solo_conflict(&branch).unwrap(), path);
+        assert_eq!(store.list_solo_conflicts(world).unwrap(), vec![branch]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_solo_conflict_recovery_parent_rejects_reads_and_writes() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let (_, world) = test_world();
+        let store = Storage::open(temp.path().join("store")).unwrap();
+        let recovery = store.world_dir(world).join("recovery");
+        fs::create_dir_all(recovery.parent().unwrap()).unwrap();
+        let external = temp.path().join("elsewhere");
+        fs::create_dir_all(&external).unwrap();
+        symlink(&external, &recovery).unwrap();
+
+        assert!(matches!(
+            store.list_solo_conflicts(world),
+            Err(StorageError::SymlinkUnsupported(path)) if path == recovery
+        ));
+        let branch = SoloBranchV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            base_snapshot_hash: Hash32([1; 32]),
+            base_epoch: 4,
+            head_snapshot_hash: Hash32([2; 32]),
+            head_epoch: 5,
+            head_sequence: 9,
+            state_hash: Hash32([3; 32]),
+            authority_peer_id: PeerId([4; 32]),
+            authority_public_key: [4; 32],
+            signature: vec![4; 64],
+        };
+        assert!(store.preserve_solo_conflict(&branch).is_err());
+        assert!(!external.join("solo-conflicts").exists());
+        assert_eq!(fs::read_link(&recovery).unwrap(), external);
     }
 }
