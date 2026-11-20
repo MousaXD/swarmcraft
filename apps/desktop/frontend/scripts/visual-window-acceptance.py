@@ -36,6 +36,8 @@ SAFE_BOOL_KEYS = frozenset({
     'connectivityVerified', 'connectivityNoAuthorityClaim',
     'daemonOwned', 'daemonStarted', 'daemonStartFinished', 'daemonStopConfirmed',
     'daemonStopFinished', 'daemonStaleStatusCleared', 'daemonErrorHidden',
+    'worldListOwned', 'worldListNativeConfirmed', 'worldListRefreshed',
+    'worldListHasRows', 'worldListSelectionVerified',
 })
 SAFE_INT_KEYS = frozenset({
     'width', 'height', 'rootScrollWidth', 'paneScrollWidth',
@@ -136,8 +138,66 @@ def run(binary: Path, artifacts: Path):
                 and create_owner["bridge"]), (
             "Svelte native Create World ownership/handoff not active in installed app"
         )
+        mark_stage('native-svelte-world-list')
+        worlds_owner = app.execute("""
+          const list = document.getElementById('worldCards');
+          return {
+            worldListOwned: window.__swarmcraftSvelteWorldsOwned === true
+              && typeof window.__swarmcraftSvelteWorlds?.refresh === 'function',
+            worldListHasRows: !!list && list.querySelectorAll('.world-row').length > 0,
+            worldListRefreshed: list?.dataset.worldListPhase === 'ready'
+              && list?.getAttribute('aria-busy') === 'false',
+          };
+        """)
+        record_ui(worlds_owner)
+        assert all(worlds_owner.values()), (
+            "Installed Svelte world list must display real native Rust worlds"
+        )
+        native_worlds_before = app.execute("""
+          return Number(document.getElementById('worldCards')?.dataset.nativeVerifiedReadCount ?? -1);
+        """)
+        assert type(native_worlds_before) is int and native_worlds_before > 0, (
+            "Initial installed world list did not complete a genuine Rust read"
+        )
+        # The actual user Refresh button must reach list_worlds again and
+        # repaint the Svelte list, rather than fall through the old DOM renderer.
         app.click("#navWorlds")
+        app.click("#refresh")
+        world_refresh = None
+        for _ in range(80):
+            world_refresh = app.execute("""
+              const list = document.getElementById('worldCards');
+              const refresh = document.getElementById('refresh');
+              return {
+                worldListRefreshed: !!refresh && !refresh.disabled
+                  && list?.dataset.worldListPhase === 'ready',
+                worldListNativeConfirmed:
+                  Number(list?.dataset.nativeVerifiedReadCount ?? -1) > arguments[0],
+                worldListHasRows: !!list && list.querySelectorAll('.world-row').length > 0,
+              };
+            """, [native_worlds_before])
+            record_ui(world_refresh)
+            if all(world_refresh.values()):
+                break
+            time.sleep(0.2)
+        assert all(world_refresh.values()), (
+            "Installed Svelte Refresh Worlds did not complete another Rust read"
+        )
         app.click("#worldCards .world-row")
+        selected_world = app.execute("""
+          const row = document.querySelector('#worldCards .world-row.is-selected');
+          const details = document.getElementById('selectionContent');
+          return {
+            worldListSelectionVerified: !!row && row.getAttribute('aria-pressed') === 'true'
+              && !!details && !details.hidden
+              && !!document.getElementById('world')?.value
+              && document.getElementById('world').value === row.dataset.worldId,
+          };
+        """)
+        record_ui(selected_world)
+        assert selected_world['worldListSelectionVerified'], (
+            "Native selected-world detail did not follow the real Svelte row click"
+        )
         for width, height in ((980, 760), (720, 560)):
             mark_stage(f'layout-{width}x{height}')
             result = inspect_layout(app, width, height)
