@@ -1,5 +1,5 @@
 {
-  "_instructions": "Review native Minecraft/GUI/media/transport evidence; record output of run.py observations-digest and 23 distinct media SHA-256s. Changing a previously reviewed observation invalidates this digest. This alone does not prove real gameplay.",
+  "_instructions": "Review native Minecraft/GUI/media/transport evidence; record output of run.py observations-digest and 25 distinct media SHA-256s. Changing a previously reviewed observation invalidates this digest. This alone does not prove real gameplay.",
   "commit": "0000000000000000000000000000000000000000",
   "package_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "reviewer": "",
@@ -17,6 +17,9 @@
   "alice_return_fenced": false,
   "screenshots_redacted": false,
   "real_world_network_classes_verified": false,
+  "bob_withdrawal_and_safe_handoff_observed": false,
+  "bob_rehost_attempt_denied_after_withdrawal": false,
+  "carol_player_only_host_denial_observed": false,
   "artifacts": [],
   "observations_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
 }

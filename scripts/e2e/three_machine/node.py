@@ -368,15 +368,86 @@ def java_runtime_version(pid, root, world, binary, cli):
         return None
 
 
+def world_server_inventory(root, world, proc_root=Path("/proc")):
+    """Enumerate same-user Java processes bound to this exact test world.
+
+    A missing operator-supplied server PID is NOT evidence that no JVM runs.
+    The read-only /proc scan publishes only a count; unreadable same-user
+    process state is uncertainty and blocks certification. This checks the
+    dedicated test user, not arbitrary other-user or root-owned processes.
+    """
+    expected = Path(root) / "runtime" / world
+    matching = []
+    try:
+        entries = list(Path(proc_root).iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.name.isdecimal():
+            continue
+        try:
+            owner = entry.stat().st_uid
+        except FileNotFoundError:
+            continue  # process exited while enumerating
+        except OSError:
+            return None
+        if owner != os.geteuid():
+            continue
+        try:
+            executable = (entry / "exe").resolve(strict=True)
+        except FileNotFoundError:
+            if not entry.exists():
+                continue
+            # A proven exited zombie has no listeners/authority and cannot
+            # start hosting again. Unreadable or ambiguous state still blocks.
+            try:
+                stat_line = (entry / "stat").read_text(encoding="ascii")
+                state = stat_line.rsplit(") ", 1)[1].split(" ", 1)[0]
+            except (OSError, IndexError, UnicodeError):
+                return None
+            if state in ("Z", "X"):
+                continue
+            return None  # same-user live process identity is unknown
+        except OSError:
+            return None
+        if executable.name.lower() not in ("java", "javaw"):
+            continue
+        try:
+            cwd = (entry / "cwd").resolve(strict=True)
+        except FileNotFoundError:
+            if not entry.exists():
+                continue
+            return None
+        except OSError:
+            return None
+        if cwd == expected:
+            matching.append(int(entry.name))
+    return matching
+
+
+def stable_world_server_inventory(before, after):
+    """Reject unavailable, nonnumeric or changed server PID observations."""
+    return (isinstance(before, list) and isinstance(after, list) and
+            all(type(pid) is int and pid > 1 for pid in (*before, *after)) and
+            len(set(before)) == len(before) and len(set(after)) == len(after) and
+            set(before) == set(after))
+
+
 def capture(a):
-    if not re.fullmatch("[a-fA-F0-9]{64}", a.world):
+    if not isinstance(a.world, str) or not re.fullmatch("[a-fA-F0-9]{64}", a.world):
         fail("world_id_invalid")
+    # CLI accepts upper/lowercase hex, but storage paths and salted stage
+    # fingerprints must always bind to the SAME canonical lowercase world ID.
+    a.world = a.world.lower()
     # Every phase must originate on the same machine that passed preflight.
     # SSH host-key trust alone cannot detect a changed target or copied data.
     machine_id = Path("/etc/machine-id").read_text(encoding="utf-8").strip()
     if not machine_id:
         fail("machine_id_missing")
     root = str(Path(a.data_dir).resolve(strict=True))
+    server_inventory = world_server_inventory(root, a.world)
+    if server_inventory is None:
+        fail("world_server_inventory_unavailable")
     cli = str(Path(a.cli).resolve(strict=True))
     cmd = [cli, "--data-dir", root]
     status = run(cmd + ["world", "status", a.world])
@@ -403,7 +474,7 @@ def capture(a):
         fail("backend_authority_missing")
     successor = canonical_peer_id(r.get("successor_peer_id"))
     snapshot = m.get("snapshot_hash")
-    return {
+    report = {
         "machine_fingerprint": fp(a.salt, machine_id),
         "world_fingerprint": fp(a.salt, a.world),
         "identity_fingerprint": fp(a.salt, peer),
@@ -434,9 +505,11 @@ def capture(a):
             a.desktop_pid, "desktop", Path(root), a.world,
             Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True)),
         "minecraft_client_process_observed": fabric_client_process(a.client_pid, a.server_pid),
-        "minecraft_server_process_observed": isolated_process(
-            a.server_pid, "server", Path(root), a.world,
-            Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True)),
+        "minecraft_server_process_observed": (
+            a.server_pid in server_inventory and isolated_process(
+                a.server_pid, "server", Path(root), a.world,
+                Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True))),
+        "world_server_process_count": len(server_inventory),
         "hosting_consent": hosting_consent(root, a.world, peer),
         "java_runtime_version": java_runtime_version(
             a.server_pid, Path(root), a.world,
@@ -447,6 +520,10 @@ def capture(a):
         "test_profile_log_digests": log_digests(root),
         "connectivity_diagnostics": connectivity_summary(root),
     }
+    after_inventory = world_server_inventory(root, a.world)
+    if not stable_world_server_inventory(server_inventory, after_inventory):
+        fail("world_server_inventory_changed_during_capture")
+    return report
 
 
 def process_command(pid):
