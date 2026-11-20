@@ -430,8 +430,15 @@ fn cgroup_v2_memory_snapshot(
     }
     loop {
         let max_path = current.join("memory.max");
-        let hard_limit = fs::read_to_string(&max_path)
-            .with_context(|| format!("cannot read cgroup memory limit {}", max_path.display()))?;
+        let hard_limit = match fs::read_to_string(&max_path) {
+            Ok(value) => value,
+            // Linux's actual unified hierarchy root intentionally has no
+            // memory.max; only non-root cgroups expose that limit.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && current == mount => "max".into(),
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read cgroup memory limit {}", max_path.display()));
+            }
+        };
         // memory.high is a reclaim/throttling boundary, not a hard limit.
         // Respecting it during admission avoids deliberately starting a
         // heap that immediately triggers sustained pressure in its service.
@@ -675,13 +682,22 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn unbounded_cgroup_preserves_host_memory_probe() {
+    fn real_root_cgroup_without_memory_max_preserves_host_memory_probe() {
         let temp = tempfile::tempdir().unwrap();
         let mount = temp.path();
-        fs::write(mount.join("memory.max"), b"max\n").unwrap();
+        // Linux root cgroups intentionally omit memory.max and memory.high.
         let measured = cgroup_v2_memory_snapshot(mount, "0::/\n", memory(32_768, 20_000)).unwrap();
         assert_eq!(measured, memory(32_768, 20_000));
         assert!(check_budget(4_096, measured).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_root_missing_memory_max_does_not_fall_back_to_root_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        fs::create_dir_all(mount.join("system.slice")).unwrap();
+        assert!(cgroup_v2_memory_snapshot(mount, "0::/system.slice\n", memory(32_768, 20_000)).is_err());
     }
 
     #[cfg(target_os = "linux")]
