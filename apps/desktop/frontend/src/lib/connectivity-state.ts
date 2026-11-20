@@ -13,6 +13,7 @@ export interface NativeConnectivityState {
 export interface NativeConnectivityController {
   state: Readable<NativeConnectivityState>;
   refresh(): Promise<void>;
+  invalidate(detail?: string): void;
 }
 
 const labels: Record<string, { label: string; detail: string; tone: NativeConnectivityTone }> = {
@@ -56,10 +57,20 @@ export function createNativeConnectivityController(
   });
   let inflight: Promise<void> | null = null;
   let verifiedReadCount = 0;
+  let generation = 0;
   return {
     state: { subscribe: state.subscribe },
+    invalidate(detail = 'The previous network status may be stale. Check native connectivity again.') {
+      ++generation;
+      inflight = null;
+      state.set({
+        phase: 'unchecked', label: 'Not checked',
+        detail, tone: 'neutral', busy: false, verifiedReadCount,
+      });
+    },
     refresh() {
       if (inflight) return inflight;
+      const version = ++generation;
       state.set({
         phase: 'checking', label: 'Checking native network…',
         detail: 'Reading the local Rust connectivity diagnostic.',
@@ -73,9 +84,11 @@ export function createNativeConnectivityController(
         }),
       ]).then(raw => {
         const view = parseNativeConnectivity(raw);
+        if (version !== generation) return;
         verifiedReadCount += 1;
         state.set({ phase: 'checked', ...view, busy: false, verifiedReadCount });
       }).catch(() => {
+        if (version !== generation) return;
         state.set({
           phase: 'unavailable', label: 'Native diagnostics unavailable',
           detail: 'The Rust network diagnostic could not complete. Check networking and retry.',
