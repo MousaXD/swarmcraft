@@ -18,7 +18,7 @@ declare global {
     __swarmcraftSvelteConnectivityOwned?: boolean;
     __swarmcraftSvelteConnectivity?: { refresh(): Promise<void> };
     __swarmcraftSvelteNetworkingOwned?: boolean;
-    __swarmcraftAfterSvelteNetworkingChange?: (outcome: 'started' | 'stopped') => Promise<void>;
+    __swarmcraftAfterSvelteNetworkingChange?: (outcome: 'started' | 'stopped' | 'unknown') => Promise<void>;
     __swarmcraftSvelteIdentity?: { publish(value: string, source?: import('./lib/device-identity').IdentitySource): boolean };
     __swarmcraftResetSvelteLeave?: () => void;
     __swarmcraftAfterSvelteLeave?: () => Promise<void>;
