@@ -199,6 +199,10 @@ test('migration state translates migration-core phases into launcher phases', ()
   assert.equal(ready.progress, 100);
   assert.equal(ready.runtimeReady, true);
   assert.equal(ready.gameEndpoint, '127.0.0.1:25565');
+  const reportedReadyButNotRunning = normalizeMigrationState({ phase: 'ready', runtime_ready: false });
+  assert.equal(reportedReadyButNotRunning.label, 'Server readiness unverified');
+  assert.equal(reportedReadyButNotRunning.progress, 0);
+  assert.equal(reportedReadyButNotRunning.runtimeReady, false);
   const forgedReady = normalizeMigrationState({
     phase: 'ready',
     runtime_ready: true,
