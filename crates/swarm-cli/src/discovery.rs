@@ -1084,12 +1084,14 @@ pub async fn search_public_worlds(
             "provider_unavailable"
         }
     } else if cards.is_empty() {
-        if rejected_invalid > 0 || rejected_stale > 0 {
+        // Failed explicit providers are not proof that no public worlds
+        // exist. Report incomplete discovery rather than a false empty set.
+        if rejected_invalid > 0 || rejected_stale > 0 || network_error.is_some() {
             "partial"
         } else {
             "empty"
         }
-    } else if rejected_invalid > 0 || rejected_stale > 0 {
+    } else if rejected_invalid > 0 || rejected_stale > 0 || network_error.is_some() {
         "partial"
     } else {
         "ok"
@@ -1254,12 +1256,12 @@ pub async fn resolve_world(
         "stale"
     } else if invalid {
         "invalid"
+    } else if detail.is_some() {
+        // A failed explicit request or provider lookup is not evidence that
+        // this world does not exist, even when DHT peers were discovered.
+        "network_unavailable"
     } else if providers.is_empty() {
-        if detail.is_some() {
-            "network_unavailable"
-        } else {
-            "provider_unavailable"
-        }
+        "provider_unavailable"
     } else {
         "not_found"
     };
@@ -1644,9 +1646,9 @@ mod tests {
         // This is the same state transition invoked by both real event loops.
         // Synthetic fault injection complements the authenticated QUIC
         // connection-loss test in discovery_network_freshness.rs.
-        let canonical = TransportPeerId::random();
-        let impostor = TransportPeerId::random();
-        let dht_only = TransportPeerId::random();
+        let canonical = generate_transport_key().public().to_peer_id();
+        let impostor = generate_transport_key().public().to_peer_id();
+        let dht_only = generate_transport_key().public().to_peer_id();
         let explicit_peers = HashSet::from([canonical, impostor]);
         let mut pending = HashMap::new();
         let mut attempts = HashMap::new();
