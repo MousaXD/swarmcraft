@@ -566,3 +566,48 @@ test('Svelte native daemon start/stop are explicit commands with no legacy dupli
   assert.doesNotMatch(view, /serviceError\s*=\s*String\(error\)|serviceError\s*=\s*error\.message/,
     'Sensitive process errors must not render as service status');
 });
+
+
+test('Svelte owns native Rust world browsing and selected-row presentation without duplicate legacy renderer', async () => {
+  const [view, state, root, app, types, native] = await Promise.all([
+    source('../src/components/WorldsView.svelte'),
+    source('../src/lib/world-list-state.ts'),
+    source('../src/App.svelte'),
+    source('../../src/app.js'),
+    source('../src/vite-env.d.ts'),
+    source('../scripts/visual-window-acceptance.py'),
+  ]);
+  for (const cmd of ["'list_worlds', {}", "'world_status', { world }", "'world_compatibility', { world }"]) {
+    assert.ok(view.includes(cmd), 'world browsing must call registered Rust commands');
+  }
+  assert.ok(view.includes('data-native-verified-read-count={$worldState.verifiedReadCount}'));
+  assert.ok(view.includes('aria-busy={$worldState.busy}'));
+  assert.ok(view.includes('onclick={refreshWorlds}'));
+  assert.ok(view.includes('onclick={() => selectWorld(world.id)}'));
+  assert.ok(view.includes('aria-pressed={selectedId === world.id}'));
+  assert.ok(view.includes('hidden={!$worldState.error}'), 'world-list failures must be visible');
+  assert.ok(view.includes("window.__swarmcraftSelectWorldFromSvelte(id)"));
+  assert.ok(state.includes('const LIMIT = 256;'));
+  assert.ok(state.includes('Math.min(4, entries.length)'), 'world status requests must not storm CLI sidecars');
+  assert.ok(state.includes('const error = \'Could not read local worlds.'));
+  assert.ok(state.includes('throw new Error(error);'), 'startup must fail when native list read cannot be verified');
+  assert.ok(root.includes('window.__swarmcraftSvelteWorldsOwned = true;'));
+  assert.ok(root.includes('window.__swarmcraftSvelteWorldsOwned = previousWorldsOwner;'));
+  assert.ok(types.includes('__swarmcraftSvelteWorldsOwned?: boolean;'));
+  assert.ok(app.includes("if (window.__swarmcraftSvelteWorldsOwned === true) {"));
+  assert.ok(app.includes("const entries = await owner.refresh();"));
+  assert.ok(app.includes("window.__swarmcraftSvelteWorlds?.setSelected(world.id);"));
+  assert.ok(app.includes("window.__swarmcraftSvelteWorlds?.setSelected('');"));
+  assert.ok(app.includes("window.__swarmcraftSvelteWorlds?.setConnectivity(connectivity.label);"));
+  assert.ok(app.includes("id === 'refresh' && window.__swarmcraftSvelteWorldsOwned === true"));
+  assert.ok(app.includes('window.__swarmcraftSelectWorldFromSvelte = (id) =>'));
+  assert.ok(app.includes('container.append(renderWorld(model));'), 'unchanged legacy shipping fallback is required');
+  assert.ok(native.includes("mark_stage('native-svelte-world-list')"));
+  assert.ok(native.includes('app.click("#refresh")'));
+  assert.ok(native.includes('worldListNativeConfirmed:'));
+  assert.ok(native.includes('worldListSelectionVerified:'));
+  assert.ok(native.includes("'worldListNativeConfirmed'"));
+  assert.ok(native.includes("'worldListSelectionVerified'"));
+  assert.ok(native.indexOf('app.click("#refresh")') < native.indexOf('app.click("#worldCards .world-row")'),
+    'installed GUI must refresh through Svelte before selecting a real row');
+});
