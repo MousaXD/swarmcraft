@@ -328,10 +328,11 @@ function renderMigration(state) {
   $('clientContinuityDetail').textContent = continuity.detail;
   $('clientContinuityDetail').dataset.tone = continuity.tone;
   $('migrationBadge').textContent = migration.label;
-  const localServerReady = migration.phase === 'ready' && migration.runtimeReady && continuity.state === 'manual_reconnect_required';
-  $('migrationBadge').className = `status-badge ${migration.failed ? 'danger' : localServerReady ? 'safe' : migration.available ? 'warning' : 'neutral'}`;
+  // The persisted Ready phase can survive a hard crash. It is not a live
+  // Minecraft process check or a signed client route, so never paint it green.
+  $('migrationBadge').className = `status-badge ${migration.failed ? 'danger' : migration.available ? 'warning' : 'neutral'}`;
   $('migrationSummary').textContent = migration.detail || (migration.available ? migration.label : 'No host migration is active.');
-  $('migrationProgress').hidden = !migration.available || migration.failed || migration.blocked;
+  $('migrationProgress').hidden = !migration.available || migration.failed || migration.blocked || migration.phase === 'ready';
   $('migrationProgressBar').style.width = `${migration.progress}%`;
   runtimeSetupActionButton().hidden = migration.action !== 'runtime-setup';
 
@@ -362,7 +363,7 @@ async function refreshMigrationState(world) {
     if (selectedWorldId === requestedWorldId && requestGeneration === migrationRequestGeneration) renderMigration(state);
   } catch (error) {
     if (selectedWorldId === requestedWorldId && requestGeneration === migrationRequestGeneration) {
-      renderMigration({ detail: `Could not read host migration state: ${String(error)}` });
+      renderMigration({ world_id: requestedWorldId, phase: 'status_unavailable', detail: `Could not read host migration state: ${String(error)}` });
     }
   }
 }
