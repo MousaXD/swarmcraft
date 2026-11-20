@@ -130,7 +130,13 @@ function showView(name, { focus = true } = {}) {
   $('viewContext').textContent = context;
   if (name === 'diagnostics') {
     updateDiagnosticsContext();
-    refreshConnectivityDiagnostics({ logFailure: false }).catch(() => {});
+    // Svelte candidate owns the Diagnostics network display. Shipping legacy
+    // keeps the exact existing backend refresh when that owner is absent.
+    if (window.__swarmcraftSvelteConnectivityOwned === true) {
+      void window.__swarmcraftSvelteConnectivity?.refresh();
+    } else {
+      refreshConnectivityDiagnostics({ logFailure: false }).catch(() => {});
+    }
   }
   if (focus) {
     const panel = document.querySelector(`[data-view-panel="${name}"]`);
@@ -207,9 +213,11 @@ function renderConnectivity() {
   const connectivity = structuredConnectivity;
   $('selectedConnectivity').textContent = connectivity.label;
   $('selectedConnectivityDetail').textContent = connectivity.detail;
-  $('diagnosticConnectivity').textContent = connectivity.label;
-  $('diagnosticConnectivity').className = `status-badge ${connectivity.kind}`;
-  $('diagnosticConnectivityDetail').textContent = connectivity.diagnosticDetail;
+  if (window.__swarmcraftSvelteConnectivityOwned !== true) {
+    $('diagnosticConnectivity').textContent = connectivity.label;
+    $('diagnosticConnectivity').className = `status-badge ${connectivity.kind}`;
+    $('diagnosticConnectivityDetail').textContent = connectivity.diagnosticDetail;
+  }
 }
 
 async function refreshConnectivityDiagnostics({ logFailure = false } = {}) {
