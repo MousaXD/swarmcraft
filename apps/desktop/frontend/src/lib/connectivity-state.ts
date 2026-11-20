@@ -38,7 +38,7 @@ export function parseNativeConnectivity(raw: unknown): Pick<NativeConnectivitySt
   const normalized = state.trim().toLowerCase().replace(/[\s-]+/g, '_');
   // Render only allowlisted status labels. Raw JSON may contain peer addresses,
   // filesystem paths, token-like error text or diagnostic arguments.
-  return labels[normalized] ?? {
+  return Object.prototype.hasOwnProperty.call(labels, normalized) ? labels[normalized] : {
     label: 'Unknown native network state',
     detail: 'Rust returned an unsupported state. Retry or inspect sanitized diagnostics.',
     tone: 'warning',
