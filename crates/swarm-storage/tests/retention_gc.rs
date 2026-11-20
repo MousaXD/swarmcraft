@@ -427,3 +427,45 @@ fn malformed_gc_pin_roots_cannot_collect_complete_in_flight_blobs() {
         assert!(!blob_path(&storage, &blob).exists(), "{shape}: clean GC failed to resume");
     }
 }
+
+/// All five canonical recovery roots must decode before any blob/manifest sweep.
+#[test]
+fn corrupt_canonical_recovery_roots_preserve_snapshot_and_blob_evidence() {
+    for name in [
+        "transfer.postcard",
+        "sleep.postcard",
+        "recovery-promise.postcard",
+        "recovery-certificate.postcard",
+        "solo-branch.postcard",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("world");
+        fs::create_dir_all(&source).unwrap();
+        let storage = Storage::open(temp.path().join("store")).unwrap();
+        fs::write(source.join("level.dat"), b"required-earlier-state").unwrap();
+        let first = snapshot(&storage, &source, 1, None);
+        let protected_blob = first.entries[0].blob.clone();
+        fs::write(source.join("level.dat"), b"latest-state").unwrap();
+        snapshot(&storage, &source, 2, Some(first.manifest_hash().unwrap()));
+        let orphan = storage.put_blob(world(), b"uncommitted-complete-blob").unwrap();
+
+        let path = storage.world_dir(world()).join("metadata").join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"corrupt-canonical-recovery-root").unwrap();
+
+        assert!(storage.garbage_collect_blobs(world()).is_err(), "{name}: direct GC did not fail closed");
+        assert!(blob_path(&storage, &orphan).exists(), "{name}: GC removed data after corruption");
+        assert!(
+            storage
+                .apply_retention(world(), &RetentionPolicy { keep_latest: 1, protected_snapshots: BTreeSet::new() })
+                .is_err(),
+            "{name}: retention did not fail closed"
+        );
+        assert!(storage.load_snapshot(world(), 1).is_ok(), "{name}: removed older snapshot");
+        assert!(blob_path(&storage, &protected_blob).exists(), "{name}: removed recovery blob");
+        assert_eq!(fs::read(&path).unwrap(), b"corrupt-canonical-recovery-root");
+
+        fs::remove_file(&path).unwrap();
+        assert!(storage.apply_retention(world(), &RetentionPolicy::default()).is_ok());
+    }
+}
