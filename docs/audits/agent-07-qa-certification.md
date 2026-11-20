@@ -535,3 +535,55 @@ Any later commits supersede the specific source references above and require a f
 PR [#99](https://github.com/MousaXD/swarmcraft/pull/99) advanced from `8b2b81c8638504926e44757589d678586953cfe3` to **`b20eacced03259f0e8120006ec27d73c475d9bcd`** during review. Diff comprises a more rigorous isolated real-runtime **two-negative-world** fixture: absence and explicit zero-MiB consent must each deny actual Java/Fabric launch after proper EULA/runtime install and must not advance either world's canonical snapshot. This avoids negative test cases interfering via failed-state bookkeeping. Documentation accurately still calls for wiring a real public CLI command and a genuine positive launch on the integrated base. Exact-head [Required Validation #42860359820](https://github.com/MousaXD/swarmcraft/actions/runs/42860359820) was pending when inspected; standalone fixture changes are not compiled public CLI evidence. Agent 07 posted [independent COMMENT review #5846025981](https://github.com/MousaXD/swarmcraft/pull/99#pullrequestreview-5846025981). **Verdict: BLOCKED, no release.**
 
 **Late-check current PRs:** #90 `e8092dd4`, #91 QA `fd1fb23f` before this addendum, #92 `6a7e910b`, #93 `a847cce7`, #94 `8fea9ca0`, #95 `598c1a28`, #96 `e1fc58af`, #98 `6966e1ae`, #99 `b20eacce`, #100 `5aa12deb`, #101 `e77eff82`. All remained open; #95 was non-draft research while other listed PRs were drafts. The scoped #98 merge GO is not a shipping release decision. **No integrated release candidate exists at this checkpoint; RELEASE NO-GO persists.**
+
+
+---
+
+## Agent 07 follow-up — 20 November 2026: 0.5.1 vs integrated hosting
+
+**Independent QA review; no source-code or CI mutations.** Branch baseline main `badcbc6e73b42f37a4287c2c2e03e72e50e832ce` (merged #117 field harness). This section supersedes earlier pending results for the exact PR heads below, not historical citations.
+
+### Exact heads, original workflow jobs and inspected artifact ZIPs
+
+| Candidate | Source PR HEAD | GitHub checkout / tested PR merge tree | Required Validation | Main Desktop Installers | Limited verdict |
+| --- | --- | --- | --- | --- | --- |
+| [#89 0.5.1 patch](https://github.com/MousaXD/swarmcraft/pull/89) | `88d69a5c029041567da9ee16e4c5645dd7ef7498` | `a303090a9781c5ffe4691a0720d4e23a4ec0de67` | [43290219717](https://github.com/MousaXD/swarmcraft/actions/runs/43290219717) SUCCESS | [43290219799](https://github.com/MousaXD/swarmcraft/actions/runs/43290219799) SUCCESS | **GO for technical-preview merge ONLY if inputs unchanged; NOT production-tag GO** |
+| [#115 combined candidate](https://github.com/MousaXD/swarmcraft/pull/115) | `02f990e2c1113156f463c3bd101947a847cee8f6` | `0930a051db5567e75401fda90eb7484ae0553080` | [43271791533](https://github.com/MousaXD/swarmcraft/actions/runs/43271791533) SUCCESS | [43271791953](https://github.com/MousaXD/swarmcraft/actions/runs/43271791953) SUCCESS | **NO-GO for full new-feature merge or release; retain DRAFT** |
+
+The pull_request workflows checked out **synthetic GitHub merge SHA** into the recorded main baseline; they did not checkout the literal source head. No source/base changes were present when reviewed. If either moves or a different merge tree is made, re-verify exact effective candidate and gates.
+
+Original run logs were inspected for the Rust security audits, real installed Linux GUI, managed Java/Fabric, release metadata, Rust cross-platform gates and 2 GiB network soak. Downloaded actual GitHub Actions artifact ZIPs were independently opened:
+
+- #89 native [artifact 13978823562](https://github.com/MousaXD/swarmcraft/actions/runs/43290219799/artifacts/13978823562): `commit.txt=a303090...`, captured SHA256 of `SwarmCraft_0.5.1_amd64.deb`, positive first-run/create/relaunch screenshot and JSON, and genuine missing-bundled-CLI negative control (`startup=failed`, visible Retry). Native job #131453703901 SUCCESS; its *intentional* negative assertion failure is expected.
+- #115 legacy-native [artifact 13973510354](https://github.com/MousaXD/swarmcraft/actions/runs/43271791953/artifacts/13973510354): `commit.txt=0930a051...`, `SwarmCraft_0.5.0_amd64.deb` package SHA256, real positive/negative installed WebKitGTK evidence. It does **not** exercise Svelte production assets.
+- #89 soak [artifact 13979176396](https://github.com/MousaXD/swarmcraft/actions/runs/43290219799/artifacts/13979176396): metadata records `a303090...`, transfer 2 GiB, network qdisc delay/loss/rate limit; log confirms 2,147,483,648 bytes, seven sender restarts, 63 rate-limit events and passing actual soak.
+- Root `cargo audit` scanned 440 locked dependencies: no advisory vulnerability failures and two allowed informational/unmaintained warnings. Desktop `cargo audit` scanned 532 dependencies: no advisory vulnerability failures, eight allowed warnings. Lockfiles in both candidates contain Hickory 0.26.3 and rustix 1.1.6; **main** at the audited baseline contains Hickory 0.26.1 and rustix 1.1.4. Future advisory data must be re-checked, not inferred from these historical passes.
+- #89 release metadata job reported version 0.5.1, protocol 1; an intentionally mismatched tag and absent signing secrets failed as negative controls. Test-only signing credentials passing does **not** certify real production certificate possession/signing/notarization.
+- #89 live player-journey job #131438143152 produced `CLEAN_MACHINE_LIVE_PASS`, managed Java/Fabric setup, two actual server launch/stop cycles and canonical snapshots. This is **server lifecycle**, NOT three independent Minecraft clients/field failover.
+
+### Gate ledger — exact effective PR merge trees above
+
+| Gate | #89 0.5.1 preview | #115 hosting + Svelte + inert V2 | Interpretation / remaining proof |
+| --- | --- | --- | --- |
+| Security | **PASS** | **PASS** (automated audit) | Both locked graphs audited at recorded runs; unmaintained warnings do not imply universal supply-chain safety |
+| V2 authorization | **NOT TESTED** | **BLOCKED** | #89 deliberately V1; #115 provides inert separate-realm gates, not joint-quorum signed canonical activation, accepted durable root or legacy V1 exclusion |
+| Hosting resources | **NOT TESTED** for new consent contract | **BLOCKED** for complete release contract | #115 positive real Java/Fabric CLI consent exists (512 MiB) and negative source coverage; shipping GUI path and all recovery/wake/withdrawal scenarios, whole-process RSS enforcement unproven |
+| Native desktop | **PASS** legacy Linux packaged | **PASS** legacy Linux packaged; **NOT TESTED** Svelte | #115 production Tauri `frontendDist: ../src`; Svelte candidate native run 42924683823 FAILED at older `d4e6beee...`, and no native Svelte proof on current head found |
+| Linux/Windows/macOS | **PASS** packages and multi-OS Rust; **NOT TESTED** Windows/macOS GUI | **PASS** packages and multi-OS Rust; **NOT TESTED** Windows/macOS GUI | macOS two architectures, Windows NSIS and Linux Debian package jobs succeed; native installed GUI observed only on Linux legacy |
+| Network recovery | **PASS** deterministic/process/QUIC soak | **PASS** deterministic/process/QUIC soak | Not evidence for real multi-network Minecraft client continuity |
+| Minecraft gameplay | **PASS** real managed server lifecycle; **NOT TESTED** multiple real clients | **PASS** real managed server lifecycle; **NOT TESTED** multiple real clients | Fabric EULA/runtime/two-stop acceptance does not show Alice/Bob/Carol playing together |
+| Three-machine failover | **NOT TESTED** | **NOT TESTED** | #117 merged guarded harness; no executed physical three-peer network/client failover with canonical recovery proof (see issue #85) |
+| Installer integrity | **PASS** build/artifact/installed Linux/package SHA evidence | **PASS** build/artifact/installed legacy Linux/package SHA evidence | Windows and macOS native install/use, signed distributor artifacts are not certified |
+| Release governance | **PASS** preview PR CI and version tests; **BLOCKED** signed production release | **BLOCKED** feature-release claim despite green automated validation | No production release tag/signing, no permission to ship incomplete #84/#85/#87 |
+
+### Specialist PR and feature sequencing
+
+- #118 latest source `4f939d7b8b604f5915e0e07908cdaee60ed49cc6`: standalone Required Validation #43290164237 **FAIL**, installer #43290164258 SUCCESS. The narrowed root security remediation is incorporated in green combined #89, but isolated #118 is NOT independently merge-approved.
+- #116 latest source `baca6fd9aa98ee4189a40f17fb669717f998336e`: standalone Required #43266518445 **FAIL** and installer #43266518275 **FAIL**; bounded explicit-locator discovery retry exists on green combined #89. Do not waive prior standalone failures or infer a deterministic reproduction of the disconnect bug from retry-count tests alone.
+- #115 is a draft, not production Svelte. Source-native old Svelte run [42924683823](https://github.com/MousaXD/swarmcraft/actions/runs/42924683823) FAILED at `d4e6beee...`; older Svelte source [42924683858](https://github.com/MousaXD/swarmcraft/actions/runs/42924683858) and platform-package [42924684009](https://github.com/MousaXD/swarmcraft/actions/runs/42924684009) succeeded only at that older source. Do not transfer those outcomes to `02f990e2...`.
+- V2 file `crates/swarm-consensus/src/hosting_policy_migration.rs` explicitly states candidate checks are inert and not wired to production daemon; its test-only same-identity helpers cannot grant signed migration authority. Genuine durable realm admission/legacy exclusion remains BLOCKED.
+- No real Alice/Bob/Carol installed-app field proof exists. Issue #85 stays open. Two-voter crash recovery may safely remain blocked without quorum; never label that a regression.
+
+**Reviews posted:** [#89 limited preview GO](https://github.com/MousaXD/swarmcraft/pull/89#pullrequestreview-5992741022); [#115 feature NO-GO](https://github.com/MousaXD/swarmcraft/pull/115#pullrequestreview-5992741390).
+
+**Independent release conclusion:** **0.5.1 preview merge: conditional GO**, subject to no source/main drift and ongoing required status success; **signed production release: NO-GO**; **#115 new hosting/Svelte/V2 product merge: NO-GO**. Agent 00 alone controls integration/merge/tag. Do not self-certify V2, 3-machine gameplay or signing from automated source/package results. Gate rows marked NOT TESTED must not be promoted to PASS by assertion.
