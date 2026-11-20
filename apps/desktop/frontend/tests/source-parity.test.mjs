@@ -544,6 +544,8 @@ test('Svelte native daemon start/stop are explicit commands with no legacy dupli
   assert.ok(app.includes("id === 'startDaemon' || id === 'stopDaemon'"));
   assert.ok(app.includes('window.__swarmcraftSvelteNetworkingOwned === true'));
   assert.ok(app.includes('networkStoppedBySvelte = true;'));
+  assert.ok(app.includes("message === 'Ready'") && app.includes("(networkStoppedBySvelte || serviceWarning)"),
+    'World refresh must not turn intentionally stopped networking into a false green Ready');
   assert.ok(app.includes("outcome === 'stopped' || outcome === 'unknown'"),
     'Ambiguous native effects must revoke previous connected presentation');
   assert.ok(view.includes("window.__swarmcraftAfterSvelteNetworkingChange('unknown')"),
