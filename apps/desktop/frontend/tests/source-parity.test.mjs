@@ -659,3 +659,41 @@ test('selected-world read-only header and safety panel derive solely from curren
   assert.ok(legacy.includes("refreshHostReadiness(world);"), 'Host readiness must remain a separate Rust-backed decision');
   assert.ok(legacy.includes("refreshWorldMods(world);"), 'Mods must not be invented by renderer');
 });
+
+
+test('Svelte host-readiness is native Rust-only, bounded, and cannot invent a safe shutdown', async () => {
+  const [view, model, bridge, app, root, types, native] = await Promise.all([
+    source('../src/components/WorldsView.svelte'),
+    source('../src/lib/host-readiness-state.ts'),
+    source('../src/lib/native-bridge.ts'),
+    source('../../src/app.js'),
+    source('../src/App.svelte'),
+    source('../src/vite-env.d.ts'),
+    source('../scripts/visual-window-acceptance.py'),
+  ]);
+  assert.ok(view.includes("nativeBridge().invoke('host_readiness', { world })"));
+  assert.ok(bridge.includes("host_readiness: { args: { world: string }; result: string }"));
+  assert.ok(view.includes('data-native-readiness-phase={$readinessState.phase}'));
+  assert.ok(view.includes('data-native-readiness-verified-count={$readinessState.verifiedReadCount}'));
+  assert.ok(view.includes('{$readinessState.title}'));
+  assert.ok(view.includes('{$readinessState.detail}'));
+  assert.ok(root.includes('window.__swarmcraftSvelteReadinessOwned = true;'));
+  assert.ok(root.includes('window.__swarmcraftSvelteReadinessOwned = previousReadinessOwner;'));
+  assert.ok(types.includes('__swarmcraftSvelteReadinessOwned?: boolean;'));
+  assert.ok(types.includes('select(world: string): Promise<void>;'));
+  assert.ok(app.includes("if (window.__swarmcraftSvelteReadinessOwned === true) {"));
+  assert.ok(app.includes('window.__swarmcraftSvelteReadiness?.clear();'));
+  assert.ok(app.includes('window.__swarmcraftSvelteReadiness?.select(world.id);'));
+  assert.ok(app.includes("const readiness = await backend.hostReadiness(requestedWorldId);"),
+    'The original Rust-backed read must remain the shipping legacy fallback');
+  assert.ok(model.includes('body.safe_to_shutdown !== true'));
+  assert.ok(model.includes('epoch !== version || selectedWorld !== world'));
+  assert.ok(model.includes('timeoutMs = 12_000'));
+  assert.doesNotMatch(model, /detail:\s*String\(error\)|detail:\s*error\.message/,
+    'Never expose arbitrary Rust errors, private peer addresses or paths');
+  assert.ok(native.includes("mark_stage('native-svelte-host-readiness')"));
+  assert.ok(native.includes('readinessNativeConfirmed:'));
+  assert.ok(native.includes('readinessNoFalseGreen:'));
+  assert.ok(native.includes("'readinessNativeConfirmed'"));
+  assert.ok(native.includes("'readinessNoFalseGreen'"));
+});
