@@ -115,6 +115,34 @@ describe('Svelte world browsing and native list contracts', () => {
       vi.useRealTimers();
     }
   });
+  it('caps overall refresh and ignores late queued metadata so startup never stays Loading', async () => {
+    vi.useFakeTimers();
+    try {
+      let started = 0;
+      const controller = createNativeWorldListController(native({
+        listWorlds: async () => Array.from({length: 12}, (_, i) =>
+          `scworld:id${i} World ${i} snapshots=0`).join('\n'),
+        worldStatus: () => { started += 1; return new Promise<string>(() => {}); },
+      }), 30);
+      const task = controller.refresh();
+      // At most four different world statuses should be launched at once.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(started).toBe(4);
+      await vi.advanceTimersByTimeAsync(61);
+      await expect(task).rejects.toThrow(/Could not read local worlds/);
+      expect(get(controller.state)).toMatchObject({
+        phase: 'unavailable', busy: false, verifiedReadCount: 0, worlds: [],
+      });
+      const atTimeout = started;
+      await vi.advanceTimersByTimeAsync(100);
+      expect(started).toBe(atTimeout);
+      expect(get(controller.state)).toMatchObject({
+        phase: 'unavailable', busy: false, verifiedReadCount: 0,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it('maps safety only from Rust fields; does not treat unknown as safe', () => {
     expect(worldSafetyTone('canonical quorum')).toBe('safe');
     expect(worldSafetyTone('history conflict')).toBe('danger');
