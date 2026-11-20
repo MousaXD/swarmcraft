@@ -7,11 +7,11 @@ Implementation is isolated to `swarm-consensus::v2_migration_quorum`, the consen
 ## Verified checks
 
 - The distinct V2 realm proposal must extend explicit independently pinned accepted V1 world/config/membership/snapshot/epoch/fencing values. The proposed identity must not equal the source world.
-- The source canonical membership itself and migration proposal must have valid Ed25519 signatures by the active canonical source authority. Source member key identities, sorted membership and non-banned authority eligibility are checked.
+- The source canonical membership, initial V2 realm-hosting policy and migration proposal must have valid Ed25519 signatures by the active canonical source authority. The initial policy must be sequence 1, have no predecessor, and match the proposed realm and exact migration policy hash. Source member key identities, sorted membership and non-banned authority eligibility are checked.
 - Each migration vote must be a valid domain-separated signed V2 vote from an unbanned canonical member, with the exact proposal hash and accepted source membership hash. Unknown, mismatched, duplicated, mutated and insufficient votes fail closed.
 - Quorum counts **all active V1 voters**, including player-only and storage-only members, not only authority-eligible hosting candidates.
 - A pending old/new membership transition is explicitly blocked until an independently certified joint quorum can be checked. No silent reduction of the voter universe.
-- Stale source hashes, snapshots, epochs, invalid target fencing, corrupted membership signatures and forged proposals fail closed.
+- Stale source hashes, snapshots, epochs, invalid target fencing, corrupted membership signatures, substituted/unsigned initial policies, and forged proposals fail closed.
 - A fresh cryptographically verified `VerifiedAuthorityFeatureSession` must bind a signed V2 action to the exact target realm, candidate, committed policy/migration/membership/snapshot, epoch, fencing, consent revision and selected heap. Action kind, expected signer and unpredictable nonce must match trusted expectations. An action nonce must be atomically consumed once after signature verification. Expired sessions, tampered actions, policy mismatch, revoked/stale revision and replay are rejected. This remains proof binding only.
 
 ## Non-negotiable missing dependencies
