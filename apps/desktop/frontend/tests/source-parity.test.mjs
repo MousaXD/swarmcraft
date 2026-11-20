@@ -497,7 +497,8 @@ test('native connectivity diagnostics use typed Rust IPC, Svelte owns display, a
   assert.ok(bridge.includes("connectivity_diagnostics: { args: Record<string, never>; result: string }"));
   assert.ok(view.includes('onclick={refreshNativeConnectivity}'));
   assert.ok(view.includes('data-native-verified-count={$nativeConnectivity.verifiedReadCount}'));
-  assert.ok(view.includes('disabled={$nativeConnectivity.busy}'));
+  assert.ok(view.includes('disabled={$nativeConnectivity.busy || networkStatusUnverified}'),
+    'A stopped or uncertain local daemon must not let cached snapshots claim live reachability');
   assert.ok(root.includes('window.__swarmcraftSvelteConnectivityOwned = true;'));
   assert.ok(root.includes('window.__swarmcraftSvelteConnectivityOwned = previousConnectivityOwner;'));
   assert.ok(app.includes("window.__swarmcraftSvelteConnectivityOwned === true"));
@@ -542,6 +543,11 @@ test('Svelte native daemon start/stop are explicit commands with no legacy dupli
   assert.ok(app.includes("id === 'startDaemon' || id === 'stopDaemon'"));
   assert.ok(app.includes('window.__swarmcraftSvelteNetworkingOwned === true'));
   assert.ok(app.includes('networkStoppedBySvelte = true;'));
+  assert.ok(app.includes("outcome === 'stopped' || outcome === 'unknown'"),
+    'Ambiguous native effects must revoke previous connected presentation');
+  assert.ok(view.includes("window.__swarmcraftAfterSvelteNetworkingChange('unknown')"),
+    'Native stop must invalidate old connectivity before side effects');
+  assert.ok(view.includes('networkStatusUnverified = true;'));
   assert.ok(app.includes('readGeneration !== connectivityGeneration'));
   assert.ok(app.includes("structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });"));
   assert.ok(state.includes('if (version !== generation) return;'));
