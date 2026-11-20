@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use swarm_protocol::{
     peer_id_from_public_key, Hash32, MembershipRecordV1, PeerId, SignedHostingMigrationProposalV2,
-    SignedHostingMigrationVoteV2, WorldId,
+    SignedHostingMigrationVoteV2, SignedRealmHostingPolicyV2, WorldId,
 };
 use thiserror::Error;
 
@@ -30,6 +30,8 @@ pub enum V2MigrationQuorumError {
     InvalidSourceSignature,
     #[error("migration proposal is malformed, stale or uses the source world identity")]
     InvalidProposal,
+    #[error("initial V2 hosting policy is unsigned, stale, invalid or not bound to the proposal")]
+    InvalidPolicy,
     #[error("migration vote set is empty, oversized, or contains a duplicate voter")]
     InvalidVoterSet,
     #[error("migration vote is not from a canonical active voter")]
@@ -110,6 +112,7 @@ pub fn verify_v2_migration_votes(
     accepted_source: AcceptedSourceV1Pins,
     accepted_membership: &MembershipRecordV1,
     proposal: &SignedHostingMigrationProposalV2,
+    initial_policy: &SignedRealmHostingPolicyV2,
     votes: &[SignedHostingMigrationVoteV2],
 ) -> Result<VerifiedV2MigrationVoteSet, V2MigrationQuorumError> {
     if accepted_source.pending_membership_transition {
@@ -178,6 +181,15 @@ pub fn verify_v2_migration_votes(
     if proposal.target_realm_id == accepted_source.world_id {
         return Err(V2MigrationQuorumError::InvalidProposal);
     }
+    if initial_policy.sequence != 1
+        || initial_policy.previous_policy_hash.is_some()
+        || initial_policy.record_hash().ok() != Some(proposal.initial_policy_hash)
+        || initial_policy
+            .verify_for_realm(&proposal.realm_genesis, proposal.source_authority_peer_id, verify_signature)
+            .is_err()
+    {
+        return Err(V2MigrationQuorumError::InvalidPolicy);
+    }
     if !verify_signature(
         &proposal.source_authority_public_key,
         &proposal
@@ -233,14 +245,15 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use swarm_protocol::{
-        ProposedHostingRealmGenesisV2, SourceHistoryAnchorV2, WorldMemberV1,
-        HOSTING_REALM_FORMAT_VERSION_V2, HOSTING_REALM_REQUIRED_AUTHORITY_FEATURE_V2,
+        ProposedHostingRealmGenesisV2, SourceHistoryAnchorV2, WorldHostingPolicyV1, WorldMemberV1,
+        HOSTING_POLICY_FORMAT_VERSION, HOSTING_REALM_FORMAT_VERSION_V2, HOSTING_REALM_REQUIRED_AUTHORITY_FEATURE_V2,
         PROTOCOL_VERSION,
     };
 
     struct Fixture {
         pins: AcceptedSourceV1Pins,
         membership: MembershipRecordV1,
+        policy: SignedRealmHostingPolicyV2,
         proposal: SignedHostingMigrationProposalV2,
         keys: Vec<SigningKey>,
     }
@@ -306,11 +319,26 @@ mod tests {
                 migration_nonce: [17; 32],
                 required_authority_feature_version: HOSTING_REALM_REQUIRED_AUTHORITY_FEATURE_V2,
             };
+            let mut policy = SignedRealmHostingPolicyV2 {
+                format_version: HOSTING_REALM_FORMAT_VERSION_V2,
+                realm_id: realm_genesis.realm_id().unwrap(),
+                sequence: 1,
+                previous_policy_hash: None,
+                policy: WorldHostingPolicyV1 {
+                    format_version: HOSTING_POLICY_FORMAT_VERSION,
+                    allow_member_contributions: true,
+                    minimum_server_heap_mib: 1024,
+                },
+                signer_peer_id: authority_id,
+                signer_public_key: authority_pub,
+                signature: Vec::new(),
+            };
+            policy.signature = authority_key.sign(&policy.signing_bytes().unwrap()).to_bytes().to_vec();
             let mut proposal = SignedHostingMigrationProposalV2 {
                 format_version: HOSTING_REALM_FORMAT_VERSION_V2,
                 target_realm_id: realm_genesis.realm_id().unwrap(),
                 realm_genesis,
-                initial_policy_hash: Hash32([6; 32]),
+                initial_policy_hash: policy.record_hash().unwrap(),
                 activation_epoch: 7,
                 activation_fencing_token: 10,
                 source_authority_peer_id: authority_id,
@@ -318,7 +346,7 @@ mod tests {
                 signature: Vec::new(),
             };
             proposal.signature = authority_key.sign(&proposal.signing_bytes().unwrap()).to_bytes().to_vec();
-            Self { pins, membership, proposal, keys }
+            Self { pins, membership, policy, proposal, keys }
         }
 
         fn vote(&self, index: usize) -> SignedHostingMigrationVoteV2 {
@@ -338,7 +366,7 @@ mod tests {
         }
 
         fn verify(&self, votes: &[SignedHostingMigrationVoteV2]) -> Result<VerifiedV2MigrationVoteSet, V2MigrationQuorumError> {
-            verify_v2_migration_votes(self.pins, &self.membership, &self.proposal, votes)
+            verify_v2_migration_votes(self.pins, &self.membership, &self.proposal, &self.policy, votes)
         }
     }
 
@@ -373,19 +401,19 @@ mod tests {
         let mut pins = f.pins;
         pins.epoch += 1;
         assert_eq!(
-            verify_v2_migration_votes(pins, &f.membership, &f.proposal, &[f.vote(0), f.vote(1)]),
+            verify_v2_migration_votes(pins, &f.membership, &f.proposal, &f.policy, &[f.vote(0), f.vote(1)]),
             Err(V2MigrationQuorumError::UntrustedSourceHead)
         );
         let mut pins = f.pins;
         pins.snapshot_hash = Hash32([88; 32]);
         assert_eq!(
-            verify_v2_migration_votes(pins, &f.membership, &f.proposal, &[f.vote(0), f.vote(1)]),
+            verify_v2_migration_votes(pins, &f.membership, &f.proposal, &f.policy, &[f.vote(0), f.vote(1)]),
             Err(V2MigrationQuorumError::UntrustedSourceHead)
         );
         let mut pins = f.pins;
         pins.pending_membership_transition = true;
         assert_eq!(
-            verify_v2_migration_votes(pins, &f.membership, &f.proposal, &[f.vote(0), f.vote(1)]),
+            verify_v2_migration_votes(pins, &f.membership, &f.proposal, &f.policy, &[f.vote(0), f.vote(1)]),
             Err(V2MigrationQuorumError::PendingMembershipTransition)
         );
     }
@@ -425,6 +453,9 @@ mod tests {
         f.pins.membership_hash = f.membership.record_hash().unwrap();
         f.proposal.realm_genesis.source.source_membership_hash = f.pins.membership_hash;
         f.proposal.target_realm_id = f.proposal.realm_genesis.realm_id().unwrap();
+        f.policy.realm_id = f.proposal.target_realm_id;
+        f.policy.signature = f.keys[0].sign(&f.policy.signing_bytes().unwrap()).to_bytes().to_vec();
+        f.proposal.initial_policy_hash = f.policy.record_hash().unwrap();
         f.proposal.signature = f.keys[0].sign(&f.proposal.signing_bytes().unwrap()).to_bytes().to_vec();
         assert_eq!(f.verify(&[f.vote(0), f.vote(1)]), Err(V2MigrationQuorumError::InvalidVoter));
         let mut f = Fixture::new();
@@ -432,6 +463,9 @@ mod tests {
         f.pins.membership_hash = f.membership.record_hash().unwrap();
         f.proposal.realm_genesis.source.source_membership_hash = f.pins.membership_hash;
         f.proposal.target_realm_id = f.proposal.realm_genesis.realm_id().unwrap();
+        f.policy.realm_id = f.proposal.target_realm_id;
+        f.policy.signature = f.keys[0].sign(&f.policy.signing_bytes().unwrap()).to_bytes().to_vec();
+        f.proposal.initial_policy_hash = f.policy.record_hash().unwrap();
         f.proposal.signature = f.keys[0].sign(&f.proposal.signing_bytes().unwrap()).to_bytes().to_vec();
         assert_eq!(
             f.verify(&[f.vote(0), f.vote(1)]),
