@@ -24,9 +24,7 @@ pub const MAX_HOSTING_MIGRATION_VOTES_V2: usize = 1024;
 /// Deserialize a signed vote sequence without an attacker-controlled Vec
 /// reservation. The signed envelope must be checked before consumption even
 /// after bounded decoding; this bound is not a quorum proof.
-fn deserialize_bounded_migration_votes<'de, D>(
-    deserializer: D,
-) -> Result<Vec<SignedHostingMigrationVoteV2>, D::Error>
+fn deserialize_bounded_migration_votes<'de, D>(deserializer: D) -> Result<Vec<SignedHostingMigrationVoteV2>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -174,7 +172,8 @@ fn matches_voter(record: &MembershipRecordV1, vote: &SignedHostingMigrationVoteV
 }
 
 impl SignedHostingMigrationQuorumV2 {
-    /// Verify the V2 signed proposal and *both* required V1 voter majorities.
+    /// Verify source-bound V2 signatures and either a stable voter majority
+    /// or separately signed old/new majorities for a certified transition.
     ///
     /// The supplied V1 records MUST be independently proven canonical and the
     /// snapshot/fence MUST be authenticated by the storage/consensus layer.
