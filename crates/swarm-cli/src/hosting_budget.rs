@@ -605,6 +605,7 @@ mod tests {
         let child = mount.join("system.slice/swarmcraft.service");
         fs::create_dir_all(&child).unwrap();
         fs::write(mount.join("memory.max"), b"max\n").unwrap();
+        fs::write(mount.join("system.slice/memory.max"), b"max\n").unwrap();
         fs::write(child.join("memory.max"), b"max\n").unwrap();
         fs::write(child.join("memory.high"), b"4294967296\n").unwrap();
         fs::write(child.join("memory.current"), b"3221225472\n").unwrap();
