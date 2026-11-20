@@ -508,6 +508,26 @@ class TestFailClosed(unittest.TestCase):
             with self.assertRaisesRegex(gate.Blocked, "withdrawal_handoff_not_new_fenced_generation"):
                 gate.verify(c, out)
 
+    def test_rejects_missing_signed_handoff_generation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "bob_withdrawn.json")
+            record["nodes"]["alice"]["epoch"] = None
+            gate.save(out / "bob_withdrawn.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "withdrawal_handoff_generation_missing"):
+                gate.verify(c, out)
+
+    def test_rejects_withdrawn_bob_consent_unbound_from_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "bob_withdrawn.json")
+            record["nodes"]["bob"]["hosting_consent"]["identity_bound"] = False
+            gate.save(out / "bob_withdrawn.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "bob_withdrawal_not_persisted"):
+                gate.verify(c, out)
+
     def test_rejects_bob_server_after_host_withdrawal(self):
         with tempfile.TemporaryDirectory() as temp:
             out = Path(temp)
