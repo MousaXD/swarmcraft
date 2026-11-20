@@ -67,6 +67,11 @@ impl Drop for RuntimeProcessGuard {
 /// solely the new world's process record would miss an orphan in another world.
 pub fn refuse_unaccounted_runtimes(paths: &DataPaths) -> Result<()> {
     let control = paths.root.join("control");
+    if let Ok(meta) = fs::symlink_metadata(&control) {
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            bail!("hosting control root is not a real directory; JVM admission denied");
+        }
+    }
     let entries = match fs::read_dir(&control) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -82,6 +87,18 @@ pub fn refuse_unaccounted_runtimes(paths: &DataPaths) -> Result<()> {
             continue;
         }
         let record_path = entry.path().join("runtime-process.json");
+        // A dangling symlink would otherwise look like an absent record and
+        // bypass the safety check while an orphan JVM might still exist.
+        match fs::symlink_metadata(&record_path) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+                bail!("untrusted hosting process record {}; JVM admission denied", record_path.display());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot inspect {}", record_path.display()));
+            }
+        }
         let bytes = match fs::read(&record_path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -287,6 +304,24 @@ mod tests {
             let link = paths.root.join("control").join("untrusted-link");
             symlink(temp.path(), &link).unwrap();
             assert!(refuse_unaccounted_runtimes(&paths).unwrap_err().to_string().contains("untrusted symlink"));
+            fs::remove_file(link).unwrap();
+
+            let dangling = temp.path().join("missing-runtime-record");
+            symlink(dangling, &path).unwrap();
+            assert!(refuse_unaccounted_runtimes(&paths)
+                .unwrap_err()
+                .to_string()
+                .contains("untrusted hosting process record"));
+            fs::remove_file(&path).unwrap();
+
+            let control_root = paths.root.join("control");
+            let original = paths.root.join("original-control");
+            fs::rename(&control_root, &original).unwrap();
+            symlink(&original, &control_root).unwrap();
+            assert!(refuse_unaccounted_runtimes(&paths)
+                .unwrap_err()
+                .to_string()
+                .contains("hosting control root is not a real directory"));
         }
     }
 
