@@ -109,6 +109,17 @@ def require_validation_dependency(path: Path, builder_jobs: tuple[str, ...]) -> 
     publish = blocks.get("publish", "")
     if "contents: write" not in publish:
         fail(f"{path.name}: final publisher must declare its narrowly scoped contents: write permission")
+    # Prevent an otherwise-green validation from publishing a missing platform,
+    # stale artifact group, tampered package, or unverified SHA-256 sidecar.
+    channel = "preview" if path.name == "main-installers.yml" else "production"
+    if "scripts/ci-release/verify_artifacts.py" not in publish:
+        fail(f"{path.name}: publisher must invoke the release-artifact verifier")
+    if f"--channel {channel}" not in publish or '--commit "$GITHUB_SHA"' not in publish:
+        fail(f"{path.name}: publisher must bind artifact verification to its SHA and channel")
+    if "merge-multiple: false" not in publish or "path: release-downloads" not in publish:
+        fail(f"{path.name}: retain exact-run artifact source group boundaries")
+    if "release-assets/*" not in publish:
+        fail(f"{path.name}: publisher must use only verified staged assets")
 
 
 def main() -> None:
