@@ -546,6 +546,16 @@ test('Svelte native daemon start/stop are explicit commands with no legacy dupli
   assert.ok(app.includes("structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });"));
   assert.ok(state.includes('if (version !== generation) return;'));
   assert.ok(state.includes('inflight = null;'));
+  const nativeAcceptance = await source('../scripts/visual-window-acceptance.py');
+  assert.ok(nativeAcceptance.includes("mark_stage('native-daemon-start')"));
+  assert.ok(nativeAcceptance.includes('app.click("#startDaemon")'));
+  assert.ok(nativeAcceptance.includes('daemonStarted:'));
+  assert.ok(nativeAcceptance.includes("mark_stage('native-daemon-stop')"));
+  assert.ok(nativeAcceptance.includes('app.click("#stopDaemon")'));
+  assert.ok(nativeAcceptance.includes('daemonStaleStatusCleared:'));
+  assert.ok(nativeAcceptance.indexOf('app.click("#cancelLeave")') <
+    nativeAcceptance.indexOf('app.click("#stopDaemon")'),
+    'Destructive network stop must run after all signed-world acceptance checks');
   assert.doesNotMatch(view, /serviceError\s*=\s*String\(error\)|serviceError\s*=\s*error\.message/,
     'Sensitive process errors must not render as service status');
 });
