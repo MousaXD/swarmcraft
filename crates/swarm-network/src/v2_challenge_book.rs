@@ -15,8 +15,9 @@ use swarm_protocol::{Hash32, PeerId, WorldId};
 use thiserror::Error;
 
 use crate::authority_capability::{
-    MAX_AUTHORITY_SESSION_AGE_MS, MAX_AUTHORITY_TRANSPORT_ID_BYTES, MAX_V2_AUTHORITY_HEAP_MIB,
-    MIN_V2_AUTHORITY_HEAP_MIB,
+    verify_authority_feature_session, AuthorityCapabilityError, ExpectedAuthorityFeatureV2,
+    SignedAuthorityFeatureV2, VerifiedAuthorityFeatureSession, MAX_AUTHORITY_SESSION_AGE_MS,
+    MAX_AUTHORITY_TRANSPORT_ID_BYTES, MAX_V2_AUTHORITY_HEAP_MIB, MIN_V2_AUTHORITY_HEAP_MIB,
 };
 
 /// Bound independently of libp2p's request limits. A connected peer can hold
@@ -173,6 +174,42 @@ impl V2AuthorityChallengeBook {
     }
 }
 
+/// Verify a genuinely negotiated V2 capability exchange with a challenge
+/// bound to its canonical expected context AND the local connection generation.
+///
+/// The scope is reconstituted from trusted caller expectations: remote claims
+/// never choose the accepted root, runtime budget, or current consent revision.
+/// The caller must derive these expectations from independently verified
+/// storage and current authenticated transport state. This helper never grants
+/// an authority lease or a JVM process permit.
+pub fn verify_registered_v2_session(
+    book: &mut V2AuthorityChallengeBook,
+    connection_generation: u64,
+    negotiated_wire_protocol: &str,
+    claim: &SignedAuthorityFeatureV2,
+    expected: &ExpectedAuthorityFeatureV2<'_>,
+    monotonic_now: Instant,
+) -> Result<VerifiedAuthorityFeatureSession, AuthorityCapabilityError> {
+    let expected_scope = V2ChallengeScope {
+        realm_id: expected.world_id,
+        claimant_peer_id: expected.peer_id,
+        claimant_transport_peer: expected.claimant_transport_peer.to_vec(),
+        verifier_transport_peer: expected.verifier_transport_peer.to_vec(),
+        connection_generation,
+        committed_policy_hash: expected.policy_hash,
+        committed_migration_hash: expected.migration_hash,
+        accepted_membership_hash: expected.membership_hash,
+        snapshot_hash: expected.snapshot_hash,
+        selected_heap_mib: expected.selected_heap_mib,
+        epoch: expected.epoch,
+        fencing_token: expected.fencing_token,
+        consent_revision: expected.consent_revision,
+    };
+    verify_authority_feature_session(negotiated_wire_protocol, claim, expected, || {
+        book.consume(&expected.challenge, &expected_scope, monotonic_now)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +318,90 @@ mod tests {
         store.invalidate_realm(scope().realm_id);
         assert!(!store.consume(&one, &scope(), now));
         assert!(store.consume(&two, &other, now));
+    }
+
+    #[test]
+    fn registered_v2_session_uses_signature_then_atomic_connection_bound_challenge() {
+        use ed25519_dalek::SigningKey;
+        use swarm_protocol::peer_id_from_public_key;
+
+        let now = Instant::now();
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let mut scope = scope();
+        scope.claimant_peer_id = peer_id_from_public_key(&key.verifying_key().to_bytes());
+        let mut book = V2AuthorityChallengeBook::new();
+        let challenge = book.issue(scope.clone(), now).unwrap();
+
+        let mut claim = SignedAuthorityFeatureV2 {
+            feature_version: crate::authority_capability::MANDATORY_AUTHORITY_FEATURE_VERSION,
+            world_id: scope.realm_id,
+            peer_id: scope.claimant_peer_id,
+            public_key: key.verifying_key().to_bytes(),
+            committed_policy_hash: scope.committed_policy_hash,
+            committed_migration_hash: scope.committed_migration_hash,
+            accepted_membership_hash: scope.accepted_membership_hash,
+            snapshot_hash: scope.snapshot_hash,
+            selected_heap_mib: scope.selected_heap_mib,
+            epoch: scope.epoch,
+            fencing_token: scope.fencing_token,
+            consent_revision: scope.consent_revision,
+            challenge,
+            claimant_transport_peer: scope.claimant_transport_peer.clone(),
+            verifier_transport_peer: scope.verifier_transport_peer.clone(),
+            issued_unix_ms: 100_000,
+            expires_unix_ms: 110_000,
+            signature: Vec::new(),
+        };
+        claim.sign(&key).unwrap();
+        let expected = ExpectedAuthorityFeatureV2 {
+            world_id: scope.realm_id,
+            peer_id: scope.claimant_peer_id,
+            policy_hash: scope.committed_policy_hash,
+            migration_hash: scope.committed_migration_hash,
+            membership_hash: scope.accepted_membership_hash,
+            snapshot_hash: scope.snapshot_hash,
+            selected_heap_mib: scope.selected_heap_mib,
+            epoch: scope.epoch,
+            fencing_token: scope.fencing_token,
+            consent_revision: scope.consent_revision,
+            challenge,
+            claimant_transport_peer: &scope.claimant_transport_peer,
+            verifier_transport_peer: &scope.verifier_transport_peer,
+            now_unix_ms: 105_000,
+        };
+        let wire = crate::authority_capability::MANDATORY_AUTHORITY_WIRE_PROTOCOL;
+
+        assert_eq!(
+            verify_registered_v2_session(&mut book, 7, "/swarmcraft/1", &claim, &expected, now),
+            Err(AuthorityCapabilityError::UnsupportedTransport)
+        );
+        assert_eq!(book.outstanding_count(), 1);
+
+        let mut forged = claim.clone();
+        forged.signature[0] ^= 1;
+        assert_eq!(
+            verify_registered_v2_session(&mut book, 7, wire, &forged, &expected, now),
+            Err(AuthorityCapabilityError::InvalidSignature)
+        );
+        assert_eq!(book.outstanding_count(), 1);
+
+        assert_eq!(
+            verify_registered_v2_session(&mut book, 8, wire, &claim, &expected, now),
+            Err(AuthorityCapabilityError::ReplayOrUnknownChallenge)
+        );
+        assert_eq!(book.outstanding_count(), 0);
+
+        let challenge = book.issue(scope.clone(), now).unwrap();
+        claim.challenge = challenge;
+        claim.sign(&key).unwrap();
+        let expected = ExpectedAuthorityFeatureV2 { challenge, ..expected };
+        let verified = verify_registered_v2_session(&mut book, 7, wire, &claim, &expected, now).unwrap();
+        assert_eq!(verified.peer_id(), scope.claimant_peer_id);
+        assert_eq!(verified.policy_hash(), scope.committed_policy_hash);
+        assert_eq!(
+            verify_registered_v2_session(&mut book, 7, wire, &claim, &expected, now),
+            Err(AuthorityCapabilityError::ReplayOrUnknownChallenge)
+        );
     }
 
     #[test]
