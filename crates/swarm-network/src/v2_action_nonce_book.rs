@@ -310,7 +310,11 @@ mod tests {
         }
     }
 
-    fn sign_action(scope: V2AuthorityActionScope, nonce: [u8; 32], key: &SigningKey) -> SignedHostingAuthorityActionV2 {
+    fn sign_action(
+        scope: V2AuthorityActionScope,
+        nonce: [u8; 32],
+        key: &SigningKey,
+    ) -> SignedHostingAuthorityActionV2 {
         let mut action = SignedHostingAuthorityActionV2 {
             format_version: HOSTING_REALM_FORMAT_VERSION_V2,
             operation: scope.operation,
@@ -390,7 +394,13 @@ mod tests {
             Err(V2AuthorityActionNonceError::ConcurrentSuccessor)
         );
         assert_eq!(
-            book.verify_action(session, alternate, &sign_action(original, nonce, &SigningKey::from_bytes(&[7; 32])), 105_000, now),
+            book.verify_action(
+                session,
+                alternate,
+                &sign_action(original, nonce, &SigningKey::from_bytes(&[7; 32])),
+                105_000,
+                now,
+            ),
             Err(V2AuthorityActionNonceError::UnknownOrStaleNonce)
         );
         book.invalidate_connection(original.connection_generation);
@@ -419,7 +429,13 @@ mod tests {
             Err(V2AuthorityActionNonceError::InvalidScopeOrSession)
         );
         assert_eq!(
-            book.verify_action(session, original, &action, 105_000, now + ACTION_NONCE_LIFETIME + Duration::from_millis(1)),
+            book.verify_action(
+                session,
+                original,
+                &action,
+                105_000,
+                now + ACTION_NONCE_LIFETIME + Duration::from_millis(1),
+            ),
             Err(V2AuthorityActionNonceError::UnknownOrStaleNonce)
         );
         assert_eq!(
