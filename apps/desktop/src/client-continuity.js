@@ -57,22 +57,6 @@ export function clientContinuityFromMigration(status, expectedWorldId, safety) {
       'danger',
     );
   }
-  if (/degraded|solo/i.test(String(safety || ''))) {
-    return outcome(
-      'reduced_safety',
-      'World safety is reduced',
-      'SwarmCraft has not established normal canonical safety. Do not treat a previously used server address as a safe failover destination.',
-    );
-  }
-
-  if (!/^canonical$/i.test(String(safety || '').trim())) {
-    return outcome(
-      'safety_unverified',
-      'World authority safety not verified',
-      'SwarmCraft has not confirmed the selected world has canonical history. Do not use an old server address as a failover destination.',
-    );
-  }
-
   if (!status || typeof status !== 'object' || Array.isArray(status)) return UNKNOWN;
   if (status.world_id !== expectedWorldId) {
     return outcome(
@@ -118,6 +102,22 @@ export function clientContinuityFromMigration(status, expectedWorldId, safety) {
       'The world is not accepting Minecraft connections. Request a safe wake through SwarmCraft rather than reusing an old server address.',
     );
   }
+  if (/degraded|solo/i.test(String(safety || ''))) {
+    return outcome(
+      'reduced_safety',
+      'World safety is reduced',
+      'SwarmCraft has not established normal canonical safety. Do not treat a previously used server address as a safe failover destination.',
+    );
+  }
+
+  if (!/^canonical$/i.test(String(safety || '').trim())) {
+    return outcome(
+      'safety_unverified',
+      'World authority safety not verified',
+      'SwarmCraft has not confirmed the selected world has canonical history. Do not use an old server address as a failover destination.',
+    );
+  }
+
   if (phase === 'ready') {
     if (status.runtime_ready !== true || !isLocalRuntimeReportBoundToWorld(status, expectedWorldId)) {
       return outcome(
