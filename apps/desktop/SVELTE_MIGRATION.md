@@ -197,3 +197,14 @@ records the count *before* clicking `#identityButton` and requires it to
 increase, in addition to Ready, nonempty identity and non-busy state. Unit and
 source-parity regressions enforce this native-only distinction. **This
 hardening is not certified until fresh exact-head CI passes.**
+
+
+## 2026-11-20: bounded native identity refresh (Agent 04 continuation)
+
+At the pre-change Agent 04 head `75b2e0170a1c33db0df993875f4605540ff815b2`, the Svelte-owned Diagnostics **Refresh identity** button could remain busy indefinitely if `node_identity` never settled (e.g. wedged native IPC). The existing candidate guarded initial bootstrap but did not bound this user-triggered native read.
+
+The candidate now bounds that **read-only** invocation to 15 seconds, clears the busy state with a generic non-secret failure message, permits explicit retry, and prevents a late successful native response from changing an already failed result or inflating `nativeVerifiedRefreshCount`. A newer identity observation from the existing legacy startup bridge also supersedes the pending read immediately; it does not block another explicit refresh behind a stale IPC promise.
+
+Two Vitest fake-timer regressions exercise a truly never-settling IPC, delayed success after timeout, subsequent successful retry, and supersession by the existing startup bridge. No Rust/consensus/hosting behavior, signed identity, frontendDist, package security setting, or shipping legacy controller is changed.
+
+**Evidence limit:** Source changes and tests are committed to the original Agent 04 feature branch. They require a new exact-head Svelte source/TypeScript/Vitest run, installed Linux WebKitGTK native positive and negative tests, and Windows/macOS packaging checks. The candidate remains **NOT READY TO MERGE**. This narrow fix does not solve the still-delegated runtime, mods, world-list, transfer, host readiness and recovery feature-parity gaps.
