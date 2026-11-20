@@ -126,14 +126,21 @@ class PublicationBoundaryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing/unknown"):
             self.verify("production")
 
-    def test_duplicate_names_are_rejected_before_staging(self):
+    def test_symlink_package_is_rejected(self):
         self.make_artifacts()
-        arm = self.source / verify_artifacts.expected_groups("preview", SHA)["macos-arm64"]
-        intel = self.source / verify_artifacts.expected_groups("preview", SHA)["macos-x86_64"]
-        # A single name cannot satisfy both arch-group checks, so exercise
-        # the shared-file collision guard with non-package ancillary files.
-        self.assertNotEqual(arm.name, intel.name)
-        self.assertFalse(self.out.exists())
+        folder = self.source / verify_artifacts.expected_groups("preview", SHA)["linux"]
+        target = folder / PACKAGES["linux"][0]
+        target.unlink()
+        target.symlink_to(folder / f"{PACKAGES['linux'][0]}.sha256")
+        with self.assertRaisesRegex(ValueError, "symlinks"):
+            self.verify()
+
+    def test_nonempty_publication_staging_is_rejected(self):
+        self.make_artifacts()
+        self.out.mkdir()
+        (self.out / "stale.exe").write_bytes(b"stale")
+        with self.assertRaisesRegex(ValueError, "must be empty"):
+            self.verify()
 
 
 if __name__ == "__main__":
