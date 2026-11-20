@@ -885,12 +885,29 @@ pub fn list_friends(paths: &DataPaths) -> Result<Vec<FriendCardV1>> {
         .collect()
 }
 
-fn reserve_explicit_browse_retry(attempts: &mut u8) -> bool {
+fn reserve_explicit_provider_retry(attempts: &mut u8) -> bool {
     if *attempts >= DISCOVERY_EXPLICIT_BROWSE_RETRIES {
         return false;
     }
     *attempts += 1;
     true
+}
+
+
+fn reserve_matching_explicit_provider_retry(
+    pending: &mut HashMap<String, TransportPeerId>,
+    retry_attempts: &mut HashMap<TransportPeerId, u8>,
+    transport_peer: TransportPeerId,
+    request_id: impl std::fmt::Debug,
+    explicit_peers: &HashSet<TransportPeerId>,
+) -> bool {
+    let key = format!("{request_id:?}");
+    if pending.get(&key) != Some(&transport_peer) {
+        return false;
+    }
+    pending.remove(&key);
+    explicit_peers.contains(&transport_peer)
+        && reserve_explicit_provider_retry(retry_attempts.entry(transport_peer).or_default())
 }
 
 pub async fn search_public_worlds(
@@ -915,13 +932,13 @@ pub async fn search_public_worlds(
     // provider discovery augments this set; neither source conveys authority.
     let mut providers = bootstrap_peers.clone();
     let mut requested = HashSet::new();
-    let mut pending = HashSet::new();
+    let mut pending = HashMap::<String, TransportPeerId>::new();
     let mut retry_attempts = HashMap::<TransportPeerId, u8>::new();
     for transport_peer in bootstrap_order.iter().copied() {
         if node.application_peer(&transport_peer).is_some() && requested.insert(transport_peer) {
             let request_id =
                 node.send_request(&transport_peer, WireRequest::DiscoveryPublic { filter: filter.clone() })?;
-            pending.insert(format!("{request_id:?}"));
+            pending.insert(format!("{request_id:?}"), transport_peer);
         }
     }
     if !bootstrap_order.is_empty() {
@@ -966,11 +983,15 @@ pub async fn search_public_worlds(
                     if requested.insert(transport_peer) {
                         let request_id = node
                             .send_request(&transport_peer, WireRequest::DiscoveryPublic { filter: filter.clone() })?;
-                        pending.insert(format!("{request_id:?}"));
+                        pending.insert(format!("{request_id:?}"), transport_peer);
                     }
                 }
-                DiscoveryNetworkEvent::Response { request_id, response, .. } => {
-                    pending.remove(&format!("{request_id:?}"));
+                DiscoveryNetworkEvent::Response { transport_peer, request_id, response } => {
+                    let key = format!("{request_id:?}");
+                    if pending.get(&key) != Some(&transport_peer) {
+                        continue;
+                    }
+                    pending.remove(&key);
                     if let WireResponse::DiscoveryWorlds(values) = response {
                         for value in values {
                             if !matches!(value.visibility, WorldVisibilityV1::Public)
@@ -994,27 +1015,29 @@ pub async fn search_public_worlds(
                     }
                 }
                 DiscoveryNetworkEvent::OutboundFailure { transport_peer, request_id, error } => {
-                    let was_pending = pending.remove(&format!("{request_id:?}"));
                     network_error.get_or_insert(error);
                     // Only retry a request we actually issued to a caller-
                     // specified locator. DHT-discovered peers and unsolicited
                     // failures receive no retry budget. Signature, membership
                     // and freshness quorum verification below are unchanged.
-                    if was_pending && bootstrap_peers.contains(&transport_peer) {
-                        let attempts = retry_attempts.entry(transport_peer).or_default();
-                        if reserve_explicit_browse_retry(attempts) {
+                    if reserve_matching_explicit_provider_retry(
+                        &mut pending,
+                        &mut retry_attempts,
+                        transport_peer,
+                        request_id,
+                        &bootstrap_peers,
+                    ) {
                             requested.remove(&transport_peer);
                             if node.application_peer(&transport_peer).is_some() {
                                 let next = node.send_request(
                                     &transport_peer,
                                     WireRequest::DiscoveryPublic { filter: filter.clone() },
                                 )?;
-                                pending.insert(format!("{next:?}"));
+                                pending.insert(format!("{next:?}"), transport_peer);
                                 requested.insert(transport_peer);
                             } else if let Err(dial_error) = node.dial_peer(transport_peer) {
                                 debug!(%dial_error, %transport_peer, "discovery provider retry dial failed");
                             }
-                        }
                     }
                 }
                 _ => {}
@@ -1184,11 +1207,13 @@ pub async fn resolve_world(
                     // Retry only an actual pending request to an explicit
                     // locator. DHT-only results and duplicate failures cannot
                     // trigger redial amplification.
-                    if pending.get(&key) == Some(&transport_peer) {
-                        pending.remove(&key);
-                        if bootstrap_peers.contains(&transport_peer)
-                            && reserve_explicit_browse_retry(retry_attempts.entry(transport_peer).or_default())
-                        {
+                    if reserve_matching_explicit_provider_retry(
+                        &mut pending,
+                        &mut retry_attempts,
+                        transport_peer,
+                        request_id,
+                        &bootstrap_peers,
+                    ) {
                             requested.remove(&transport_peer);
                             if node.is_authenticated(&transport_peer) {
                                 let next = node.send_request(
@@ -1200,7 +1225,6 @@ pub async fn resolve_world(
                             } else if let Err(dial_error) = node.dial_peer(transport_peer) {
                                 debug!(%dial_error, %transport_peer, "discovery exact-resolve retry dial failed");
                             }
-                        }
                     }
                 }
                 _ => {}
@@ -1611,10 +1635,50 @@ mod tests {
     #[test]
     fn transient_public_provider_retry_budget_is_bounded() {
         let mut retries = 0;
-        assert!(reserve_explicit_browse_retry(&mut retries));
-        assert!(reserve_explicit_browse_retry(&mut retries));
-        assert!(!reserve_explicit_browse_retry(&mut retries));
+        assert!(reserve_explicit_provider_retry(&mut retries));
+        assert!(reserve_explicit_provider_retry(&mut retries));
+        assert!(!reserve_explicit_provider_retry(&mut retries));
         assert_eq!(retries, DISCOVERY_EXPLICIT_BROWSE_RETRIES);
+    }
+
+    #[test]
+    fn discovery_retry_fault_injection_rejects_duplicate_wrong_peer_and_dht_failures() {
+        // This is the same state transition invoked by both real event loops.
+        // Synthetic fault injection complements the authenticated QUIC
+        // connection-loss test in discovery_network_freshness.rs.
+        let canonical = TransportPeerId::random();
+        let impostor = TransportPeerId::random();
+        let dht_only = TransportPeerId::random();
+        let explicit_peers = HashSet::from([canonical, impostor]);
+        let mut pending = HashMap::new();
+        let mut attempts = HashMap::new();
+
+        pending.insert(format!("{:?}", "req-1"), canonical);
+        assert!(!reserve_matching_explicit_provider_retry(
+            &mut pending, &mut attempts, impostor, "req-1", &explicit_peers
+        ));
+        assert!(reserve_matching_explicit_provider_retry(
+            &mut pending, &mut attempts, canonical, "req-1", &explicit_peers
+        ));
+        assert!(!reserve_matching_explicit_provider_retry(
+            &mut pending, &mut attempts, canonical, "req-1", &explicit_peers
+        ));
+        pending.insert(format!("{:?}", "req-2"), canonical);
+        assert!(reserve_matching_explicit_provider_retry(
+            &mut pending, &mut attempts, canonical, "req-2", &explicit_peers
+        ));
+        pending.insert(format!("{:?}", "req-3"), canonical);
+        assert!(!reserve_matching_explicit_provider_retry(
+            &mut pending, &mut attempts, canonical, "req-3", &explicit_peers
+        ));
+        assert_eq!(attempts[&canonical], DISCOVERY_EXPLICIT_BROWSE_RETRIES);
+
+        pending.insert(format!("{:?}", "dht-1"), dht_only);
+        assert!(!reserve_matching_explicit_provider_retry(
+            &mut pending, &mut attempts, dht_only, "dht-1", &explicit_peers
+        ));
+        assert!(!attempts.contains_key(&dht_only));
+        assert!(pending.is_empty());
     }
     use swarm_core::{sign_recovery_ballot, sign_recovery_vote, sign_world_config, PeerIdentity};
     use swarm_protocol::{
