@@ -1027,7 +1027,7 @@ pub async fn search_public_worlds(
                         &bootstrap_peers,
                     ) {
                         requested.remove(&transport_peer);
-                        if node.application_peer(&transport_peer).is_some() {
+                        if node.is_authenticated(&transport_peer) {
                             let next = node.send_request(
                                 &transport_peer,
                                 WireRequest::DiscoveryPublic { filter: filter.clone() },
@@ -1653,27 +1653,51 @@ mod tests {
 
         pending.insert(format!("{:?}", "req-1"), canonical);
         assert!(!reserve_matching_explicit_provider_retry(
-            &mut pending, &mut attempts, impostor, "req-1", &explicit_peers
+            &mut pending,
+            &mut attempts,
+            impostor,
+            "req-1",
+            &explicit_peers,
         ));
         assert!(reserve_matching_explicit_provider_retry(
-            &mut pending, &mut attempts, canonical, "req-1", &explicit_peers
+            &mut pending,
+            &mut attempts,
+            canonical,
+            "req-1",
+            &explicit_peers,
         ));
         assert!(!reserve_matching_explicit_provider_retry(
-            &mut pending, &mut attempts, canonical, "req-1", &explicit_peers
+            &mut pending,
+            &mut attempts,
+            canonical,
+            "req-1",
+            &explicit_peers,
         ));
         pending.insert(format!("{:?}", "req-2"), canonical);
         assert!(reserve_matching_explicit_provider_retry(
-            &mut pending, &mut attempts, canonical, "req-2", &explicit_peers
+            &mut pending,
+            &mut attempts,
+            canonical,
+            "req-2",
+            &explicit_peers,
         ));
         pending.insert(format!("{:?}", "req-3"), canonical);
         assert!(!reserve_matching_explicit_provider_retry(
-            &mut pending, &mut attempts, canonical, "req-3", &explicit_peers
+            &mut pending,
+            &mut attempts,
+            canonical,
+            "req-3",
+            &explicit_peers,
         ));
         assert_eq!(attempts[&canonical], DISCOVERY_EXPLICIT_PROVIDER_RETRIES);
 
         pending.insert(format!("{:?}", "dht-1"), dht_only);
         assert!(!reserve_matching_explicit_provider_retry(
-            &mut pending, &mut attempts, dht_only, "dht-1", &explicit_peers
+            &mut pending,
+            &mut attempts,
+            dht_only,
+            "dht-1",
+            &explicit_peers,
         ));
         assert!(!attempts.contains_key(&dht_only));
         assert!(pending.is_empty());
