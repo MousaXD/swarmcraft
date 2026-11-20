@@ -1,5 +1,6 @@
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
 import { createImportRequest, parseImportResult } from './import-flow.js';
+import { clientContinuityFromMigration } from './client-continuity.js';
 
 const $ = (id) => document.getElementById(id);
 const invoke = window.__TAURI__?.core?.invoke;
@@ -279,6 +280,7 @@ function clearSelection() {
   showInline('runtimeNotice', '');
   updateWorldSpecificControls();
   updateDiagnosticsContext();
+  renderMigration(null);
 }
 
 function updateDiagnosticsContext() {
@@ -317,7 +319,14 @@ function runtimeSetupActionButton() {
 }
 
 function renderMigration(state) {
-  const migration = normalizeMigrationState(state);
+  const mismatched = Boolean(state && typeof state === 'object' && 'phase' in state && state.world_id !== selectedWorldId);
+  const migration = normalizeMigrationState(mismatched
+    ? { phase: 'blocked', failure_reason: 'Host status was not bound to the selected world.' }
+    : state);
+  const continuity = clientContinuityFromMigration(state, selectedWorldId, selectedWorld()?.status?.Safety);
+  $('clientContinuityTitle').textContent = continuity.title;
+  $('clientContinuityDetail').textContent = continuity.detail;
+  $('clientContinuityDetail').dataset.tone = continuity.tone;
   $('migrationBadge').textContent = migration.label;
   $('migrationBadge').className = `status-badge ${migration.failed ? 'danger' : migration.phase === 'ready' ? 'safe' : migration.available ? 'warning' : 'neutral'}`;
   $('migrationSummary').textContent = migration.detail || (migration.available ? migration.label : 'No host migration is active.');
@@ -558,6 +567,7 @@ function selectWorld(world, { focusDetail = false } = {}) {
   renderConnectivity();
   updatePlayState(world);
   updateDiagnosticsContext();
+  renderMigration(null);
   refreshMigrationState(world);
   refreshHostReadiness(world);
   refreshWorldMods(world);
