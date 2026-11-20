@@ -141,6 +141,26 @@ class TestWorldBoundJvmInventory(unittest.TestCase):
                 (process / "cwd").symlink_to(cwd)
             self.assertEqual(node.world_server_inventory(root, self.WORLD, proc), [123])
 
+    def test_proven_exited_zombie_does_not_block_world_inventory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "data"
+            proc = Path(temp) / "proc"
+            zombie = proc / "123"
+            zombie.mkdir(parents=True)
+            (zombie / "stat").write_text("123 (java test) Z 1 1 1 0 0\n")
+            # No exe symlink is normal for an exited zombie; this process
+            # cannot hold a server socket or regain authority.
+            self.assertEqual(node.world_server_inventory(root, self.WORLD, proc), [])
+
+    def test_unknown_live_process_without_executable_blocks_inventory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "data"
+            proc = Path(temp) / "proc"
+            process = proc / "123"
+            process.mkdir(parents=True)
+            (process / "stat").write_text("123 (java test) S 1 1 1 0 0\n")
+            self.assertIsNone(node.world_server_inventory(root, self.WORLD, proc))
+
     def test_unreadable_java_workdir_is_not_silent_zero(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "data"
