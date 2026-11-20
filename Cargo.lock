@@ -3394,6 +3394,7 @@ dependencies = [
 name = "swarm-consensus"
 version = "0.5.0"
 dependencies = [
+ "ed25519-dalek 2.2.0",
  "swarm-protocol",
  "thiserror 2.0.20",
 ]
