@@ -1,9 +1,9 @@
 use crate::{
-    transaction::{durable_atomic_write, durable_remove, read_canonical_file},
+    transaction::{canonical_file_exists, durable_atomic_write, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{fs, path::{Path, PathBuf}};
 use swarm_protocol::{peer_id_from_public_key, RecoveryBallotV1, RecoveryVoteV1, SoloBranchV1, WorldConfigV1, WorldId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,34 +197,47 @@ impl Storage {
         let _guard = self.lock_world_transaction(branch.world_id)?;
         branch.validate_semantics()?;
         let hash = branch.branch_hash()?;
-        let path = self
-            .world_dir(branch.world_id)
-            .join("recovery")
-            .join("solo-conflicts")
-            .join(format!("{}.postcard", hash.to_hex()));
-        if !path.exists() {
+        let recovery_dir = self.world_dir(branch.world_id).join("recovery");
+        // A symlinked ancestor can redirect conflict history outside this world.
+        checked_solo_conflict_directory_present(&recovery_dir)?;
+        let conflicts_dir = recovery_dir.join("solo-conflicts");
+        checked_solo_conflict_directory_present(&conflicts_dir)?;
+        let path = conflicts_dir.join(format!("{}.postcard", hash.to_hex()));
+        if canonical_file_exists(&path)? {
+            // A present but corrupt or conflicting record must never masquerade
+            // as an already-durable idempotent conflict.
+            let existing: SoloBranchV1 = postcard::from_bytes(&read_canonical_file(&path)?)?;
+            existing.validate_semantics()?;
+            if existing != *branch {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+        } else {
             durable_atomic_write(&path, &postcard::to_allocvec(branch)?)?;
         }
         Ok(path)
     }
 
     pub fn list_solo_conflicts(&self, world: WorldId) -> Result<Vec<SoloBranchV1>, StorageError> {
-        let dir = self.world_dir(world).join("recovery").join("solo-conflicts");
-        if !dir.exists() {
+        let recovery_dir = self.world_dir(world).join("recovery");
+        if !checked_solo_conflict_directory_present(&recovery_dir)? {
+            return Ok(Vec::new());
+        }
+        let dir = recovery_dir.join("solo-conflicts");
+        if !checked_solo_conflict_directory_present(&dir)? {
             return Ok(Vec::new());
         }
         let mut branches = Vec::new();
         for entry in fs::read_dir(&dir).map_err(|error| io_error(&dir, error))? {
             let entry = entry.map_err(|error| io_error(&dir, error))?;
-            if !entry.file_type().map_err(|error| io_error(entry.path(), error))?.is_file() {
-                continue;
-            }
-            let bytes = fs::read(entry.path()).map_err(|error| io_error(entry.path(), error))?;
+            // Do not silently skip symlink, directory, or invalid record
+            // entries: any of them could conceal a mandatory retention root.
+            let bytes = read_canonical_file(&entry.path())?;
             let branch: SoloBranchV1 = postcard::from_bytes(&bytes)?;
-            if branch.world_id == world {
-                branch.validate_semantics()?;
-                branches.push(branch);
+            if branch.world_id != world {
+                return Err(StorageError::WorldMetadataMismatch);
             }
+            branch.validate_semantics()?;
+            branches.push(branch);
         }
         branches.sort_by_key(|branch| (branch.head_epoch, branch.head_sequence, branch.head_snapshot_hash));
         Ok(branches)
@@ -247,6 +260,20 @@ impl Storage {
 
     fn control_path_v2(&self, world: WorldId, name: &str) -> PathBuf {
         self.world_dir(world).join("metadata").join(name)
+    }
+}
+
+/// Only a genuinely absent directory is an absent conflict namespace.
+/// Paths of other types could conceal recovery roots that must stop GC.
+fn checked_solo_conflict_directory_present(path: &Path) -> Result<bool, StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(StorageError::SymlinkUnsupported(path.to_path_buf()))
+        }
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(StorageError::WorldMetadataMismatch),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io_error(path, source)),
     }
 }
 
