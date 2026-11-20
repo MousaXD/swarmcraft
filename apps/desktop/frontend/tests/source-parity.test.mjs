@@ -535,7 +535,8 @@ test('Svelte native daemon start/stop are explicit commands with no legacy dupli
   assert.ok(view.includes('onclick={startNetworking}') && view.includes('onclick={stopNetworking}'));
   assert.ok(view.includes('disabled={serviceBusy}') && view.includes('boundedService('));
   assert.ok(view.includes("window.__swarmcraftAfterSvelteNetworkingChange('stopped')"));
-  assert.ok(view.includes("window.__swarmcraftAfterSvelteNetworkingChange('started')"));
+  assert.ok(view.includes("boundedService(() => window.__swarmcraftAfterSvelteNetworkingChange!('started'))"),
+    'Legacy view reconciliation must also be bounded after a real native start');
   assert.ok(view.includes('connectivityController.invalidate('));
   assert.ok(root.includes('window.__swarmcraftSvelteNetworkingOwned = true;'));
   assert.ok(root.includes('window.__swarmcraftSvelteNetworkingOwned = previousNetworkingOwner;'));
