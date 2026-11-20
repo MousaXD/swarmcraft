@@ -398,7 +398,16 @@ def world_server_inventory(root, world, proc_root=Path("/proc")):
         except FileNotFoundError:
             if not entry.exists():
                 continue
-            return None  # same-user process exists but identity is unknown
+            # A proven exited zombie has no listeners/authority and cannot
+            # start hosting again. Unreadable or ambiguous state still blocks.
+            try:
+                stat_line = (entry / "stat").read_text(encoding="ascii")
+                state = stat_line.rsplit(") ", 1)[1].split(" ", 1)[0]
+            except (OSError, IndexError, UnicodeError):
+                return None
+            if state in ("Z", "X"):
+                continue
+            return None  # same-user live process identity is unknown
         except OSError:
             return None
         if executable.name.lower() not in ("java", "javaw"):
