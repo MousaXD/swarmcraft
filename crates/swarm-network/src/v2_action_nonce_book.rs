@@ -155,18 +155,12 @@ impl V2AuthorityActionNonceBook {
             return Err(V2AuthorityActionNonceError::InvalidScopeOrSession);
         }
         self.expire(now);
+        // One unresolved action per realm. Distinct operations, signer keys,
+        // candidates or fenced generations must serialize through the
+        // accepted-root coordinator; allowing multiple pending actions would
+        // hide transfer/recovery or successor conflicts.
         if self.pending.values().any(|entry| {
-            entry.scope.realm_id == scope.realm_id
-                && (entry.scope.candidate_peer_id != scope.candidate_peer_id
-                    || entry.scope.connection_generation != scope.connection_generation
-                    || entry.scope.epoch != scope.epoch
-                    || entry.scope.fencing_token != scope.fencing_token
-                    || entry.scope.committed_policy_hash != scope.committed_policy_hash
-                    || entry.scope.committed_migration_hash != scope.committed_migration_hash
-                    || entry.scope.accepted_membership_hash != scope.accepted_membership_hash
-                    || entry.scope.snapshot_hash != scope.snapshot_hash
-                    || entry.scope.consent_revision != scope.consent_revision
-                    || entry.scope.selected_heap_mib != scope.selected_heap_mib)
+            entry.scope.realm_id == scope.realm_id && entry.scope != scope
         }) {
             return Err(V2AuthorityActionNonceError::ConcurrentSuccessor);
         }
@@ -391,6 +385,12 @@ mod tests {
         alternate.connection_generation += 1;
         assert_eq!(
             book.issue(session, alternate, 105_000, now),
+            Err(V2AuthorityActionNonceError::ConcurrentSuccessor)
+        );
+        let mut other_operation = original;
+        other_operation.operation = HostingAuthorityOperationV2::TransferCommit;
+        assert_eq!(
+            book.issue(session, other_operation, 105_000, now),
             Err(V2AuthorityActionNonceError::ConcurrentSuccessor)
         );
         assert_eq!(
