@@ -855,7 +855,10 @@ async fn permanently_disconnecting_explicit_provider_is_bounded_and_fails_closed
     .await
     .expect("bounded public browse should terminate")
     .expect("browse should produce a structured failure report");
-    assert_eq!(browse.state, "partial", "transport failure must not be reported as a successful empty result: {browse:?}");
+    assert_eq!(
+        browse.state, "partial",
+        "transport failure must not be reported as a successful empty result: {browse:?}"
+    );
     assert!(browse.results.is_empty(), "failed network discovery must not invent a canonical world");
 
     let exact = timeout(
@@ -865,14 +868,23 @@ async fn permanently_disconnecting_explicit_provider_is_bounded_and_fails_closed
     .await
     .expect("bounded exact resolve should terminate")
     .expect("exact resolve should produce a structured failure report");
-    assert_eq!(exact.state, "network_unavailable", "network failure must not be reported as world not found: {exact:?}");
+    assert_eq!(
+        exact.state, "network_unavailable",
+        "network failure must not be reported as world not found: {exact:?}"
+    );
     assert!(exact.world.is_none(), "unreachable provider must never confer authority");
 
     let attempts = received.lock().unwrap();
     let browse_attempts = attempts.iter().filter(|kind| **kind == "browse").count();
     let resolve_attempts = attempts.iter().filter(|kind| **kind == "resolve").count();
-    assert!((1..=3).contains(&browse_attempts), "public browse exceeded its bounded retry budget: {attempts:?}");
-    assert!((1..=3).contains(&resolve_attempts), "exact resolve exceeded its bounded retry budget: {attempts:?}");
+    assert!(
+        (1..=3).contains(&browse_attempts),
+        "public browse exceeded its bounded retry budget: {attempts:?}"
+    );
+    assert!(
+        (1..=3).contains(&resolve_attempts),
+        "exact resolve exceeded its bounded retry budget: {attempts:?}"
+    );
     drop(attempts);
 
     provider_task.abort();
