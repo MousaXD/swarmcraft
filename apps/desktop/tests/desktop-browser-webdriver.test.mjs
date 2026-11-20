@@ -169,19 +169,28 @@ async function executeAsync(port, sessionId, script, args = []) {
 }
 
 async function setViewport(port, sessionId, width, height) {
-  await webdriverRequest(port, `/session/${sessionId}/window/rect`, {
-    method: 'POST',
-    body: { x: 0, y: 0, width, height },
-  });
-  let metrics = await execute(port, sessionId, 'return { innerWidth, innerHeight, outerWidth, outerHeight };');
-  const chromeWidth = Math.max(0, metrics.outerWidth - metrics.innerWidth);
-  const chromeHeight = Math.max(0, metrics.outerHeight - metrics.innerHeight);
-  if (metrics.innerWidth !== width || metrics.innerHeight !== height) {
+  let outerWidth = width;
+  let outerHeight = height;
+  let metrics;
+
+  // ChromeDriver's window rect and inner viewport can settle at different times
+  // under Linux CI load. Calibrate against the measured inner viewport, not a
+  // possibly stale outer-minus-inner decoration estimate. Exact size is still
+  // mandatory: never pass a responsive-layout check with the wrong viewport.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
     await webdriverRequest(port, `/session/${sessionId}/window/rect`, {
       method: 'POST',
-      body: { x: 0, y: 0, width: width + chromeWidth, height: height + chromeHeight },
+      body: { x: 0, y: 0, width: outerWidth, height: outerHeight },
     });
-    metrics = await execute(port, sessionId, 'return { innerWidth, innerHeight, outerWidth, outerHeight };');
+    for (let settle = 0; settle < 5; settle += 1) {
+      metrics = await execute(port, sessionId, 'return { innerWidth, innerHeight, outerWidth, outerHeight };');
+      if (metrics.innerWidth === width && metrics.innerHeight === height) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    }
+    outerWidth = Math.max(1, outerWidth + width - metrics.innerWidth);
+    outerHeight = Math.max(1, outerHeight + height - metrics.innerHeight);
   }
   assert.deepEqual(
     { width: metrics.innerWidth, height: metrics.innerHeight },
