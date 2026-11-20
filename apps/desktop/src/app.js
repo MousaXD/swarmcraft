@@ -215,6 +215,7 @@ function renderConnectivity() {
   const connectivity = structuredConnectivity;
   $('selectedConnectivity').textContent = connectivity.label;
   $('selectedConnectivityDetail').textContent = connectivity.detail;
+  window.__swarmcraftSvelteWorlds?.setConnectivity(connectivity.label);
   if (window.__swarmcraftSvelteConnectivityOwned !== true) {
     $('diagnosticConnectivity').textContent = connectivity.label;
     $('diagnosticConnectivity').className = `status-badge ${connectivity.kind}`;
@@ -292,9 +293,13 @@ function clearSelection() {
   $('world').value = '';
   $('selectionContent').hidden = true;
   $('noSelection').hidden = false;
-  for (const row of document.querySelectorAll('.world-row')) {
-    row.classList.remove('is-selected');
-    row.setAttribute('aria-pressed', 'false');
+  if (window.__swarmcraftSvelteWorldsOwned === true) {
+    window.__swarmcraftSvelteWorlds?.setSelected('');
+  } else {
+    for (const row of document.querySelectorAll('.world-row')) {
+      row.classList.remove('is-selected');
+      row.setAttribute('aria-pressed', 'false');
+    }
   }
   showInline('worldNotice', '');
   showInline('runtimeNotice', '');
@@ -571,10 +576,14 @@ function selectWorld(world, { focusDetail = false } = {}) {
   $('selectionContent').hidden = false;
   showInline('worldNotice', '');
   showInline('runtimeNotice', '');
-  for (const row of document.querySelectorAll('.world-row')) {
-    const selected = row.dataset.worldId === world.id;
-    row.classList.toggle('is-selected', selected);
-    row.setAttribute('aria-pressed', selected ? 'true' : 'false');
+  if (window.__swarmcraftSvelteWorldsOwned === true) {
+    window.__swarmcraftSvelteWorlds?.setSelected(world.id);
+  } else {
+    for (const row of document.querySelectorAll('.world-row')) {
+      const selected = row.dataset.worldId === world.id;
+      row.classList.toggle('is-selected', selected);
+      row.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    }
   }
   renderConnectivity();
   updatePlayState(world);
@@ -662,6 +671,34 @@ function renderEmptyWorlds() {
 
 async function refreshWorlds() {
   lastWorldError = null;
+  if (window.__swarmcraftSvelteWorldsOwned === true) {
+    // The installed candidate reads the exact existing Rust list/status/
+    // compatibility commands through Svelte. Never render a second legacy
+    // DOM list, double-fetch, or infer membership from cached display text.
+    setStatus('Reading worlds…');
+    try {
+      const owner = window.__swarmcraftSvelteWorlds;
+      if (!owner) throw new Error('Svelte world controller not mounted');
+      const entries = await owner.refresh();
+      if (!Array.isArray(entries)) throw new Error('Native world list was not verified');
+      const preferred = selectedWorldId;
+      worldCache.clear();
+      for (const entry of entries) worldCache.set(entry.id, entry);
+      const next = worldCache.get(preferred) || worldCache.values().next().value;
+      if (next) selectWorld(next);
+      else clearSelection();
+      // Updating connectivity is independent of canonical world-list reads;
+      // don't hold startup indefinitely behind a network diagnostic.
+      void refreshConnectivityDiagnostics({ logFailure: false });
+      if (!startupInProgress) setStatus('Ready', 'safe');
+    } catch {
+      lastWorldError = new Error('Native world list unavailable');
+      worldCache.clear();
+      clearSelection();
+      setStatus('Worlds unavailable', 'danger');
+    }
+    return;
+  }
   $('worldCards').setAttribute('aria-busy', 'true');
   showInline('worldLoadError', '');
   setStatus('Reading worlds…');
@@ -1228,6 +1265,18 @@ if (window.__swarmcraftSvelteNetworkingOwned === true) {
   };
 }
 
+// Candidate-only selection/refresh handoff. Rust data originates in Svelte;
+// the rich selected-world panel remains legacy until its separate migration.
+if (window.__swarmcraftSvelteWorldsOwned === true) {
+  window.__swarmcraftRefreshWorldsFromSvelte = refreshWorlds;
+  window.__swarmcraftSelectWorldFromSvelte = (id) => {
+    const model = typeof id === 'string' ? worldCache.get(id) : null;
+    if (!model) return false;
+    selectWorld(model, { focusDetail: true });
+    return true;
+  };
+}
+
 function bindAction(id, handler, { submit = false } = {}) {
   const element = $(id);
   if (!element) return;
@@ -1241,6 +1290,7 @@ function bindAction(id, handler, { submit = false } = {}) {
     if (id === 'createInvite' && window.__swarmcraftSvelteInviteOwned === true) return;
     if (id === 'joinWorldIdButton' && window.__swarmcraftSvelteDiscoveryOwned === true) return;
     if (id === 'confirmLeave' && window.__swarmcraftSvelteLeaveOwned === true) return;
+    if (id === 'refresh' && window.__swarmcraftSvelteWorldsOwned === true) return;
     if (id === 'identityButton' && window.__swarmcraftSvelteIdentityOwned === true) return;
     if ((id === 'startDaemon' || id === 'stopDaemon')
         && window.__swarmcraftSvelteNetworkingOwned === true) return;
