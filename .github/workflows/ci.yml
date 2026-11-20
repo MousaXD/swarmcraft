@@ -320,9 +320,21 @@ jobs:
       - name: Unit-check native WebDriver startup-error fallback
         run: python3 -m unittest discover -s scripts/acceptance -p 'test_packaged_desktop_webdriver.py'
       - name: Install actual WebKitGTK WebDriver and headless window server
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y webkit2gtk-driver xvfb libwebkit2gtk-4.1-0 libayatana-appindicator3-1
+          # Ubuntu 26.04 renamed webkit2gtk-driver to webkitgtk-webdriver.
+          # Probe real apt metadata, refusing to pass if no supported driver exists.
+          if apt-cache show webkitgtk-webdriver >/dev/null 2>&1; then
+            driver_package=webkitgtk-webdriver
+          elif apt-cache show webkit2gtk-driver >/dev/null 2>&1; then
+            driver_package=webkit2gtk-driver
+          else
+            echo 'No supported WebKitGTK WebDriver package found' >&2
+            exit 1
+          fi
+          sudo apt-get install -y "$driver_package" xvfb libwebkit2gtk-4.1-0 libayatana-appindicator3-1
           command -v WebKitWebDriver
       - name: Install Tauri WebDriver bridge
         run: cargo install tauri-driver --version 2.1.0 --locked
