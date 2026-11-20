@@ -10,10 +10,12 @@ SwarmCraft's authenticated QUIC/libp2p sessions are **control-plane/replication 
 
 - The Desktop Host handoff panel provides an explicit **Minecraft client connection** outcome instead of conflating runtime readiness with client rejoin.
 - Every client-facing outcome has `automaticReconnect=false` and `connectionTarget=null`. The unsafe `game_endpoint` field cannot become a Connect button or suggested destination.
-- Ready report display is bound to the currently selected world ID, authority identity, epoch, fencing generation, snapshot identification and `runtime_ready=true`. These fields are **local report context, not independent cryptographic proof**. Even when complete, the player is told that manual reconnection is required and that no trusted client route has been published.
+- Ready report display is scoped to the currently selected world ID, authority identity, epoch, fencing generation, snapshot identification and `runtime_ready=true`. These are **untrusted-to-the-client local report fields**, not independent cryptographic proof. The persisted `Ready` report can survive a process hard crash. It therefore never produces a green/live client-connectivity badge, automatic reconnect, or suggested address; current server availability remains unverified.
 - Conflict, reduced/solo safety, blocked quorum, stale/superseded authority, failed recovery, sleep, unknown status and in-progress migration never show a positive reconnect state.
 - Selecting a new world clears the prior migration result immediately, in addition to the existing generation-based asynchronous response guard. The status uses text content and accessible live updates.
 - The Desktop migration-summary fallback no longer prints `Minecraft is ready at ${gameEndpoint}`, since that string was never verified for client access.
+- Both shipping legacy Desktop markup and the in-flight Svelte candidate (which currently reuses the legacy controller but has different markup) are handled. A DOM helper creates the accessible status panel only when required, without duplicating existing IDs; no new Svelte-specific authority logic is introduced.
+- Distinct blocked-quorum, failed-recovery and stale-authority warnings take precedence over unknown or reduced safety labels, while known conflicting history remains a hard stop.
 
 ## What is NOT implemented or certified
 
