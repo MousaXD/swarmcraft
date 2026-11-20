@@ -3,6 +3,7 @@ import { render } from 'svelte/server';
 import App from '../src/App.svelte';
 import WorldsView from '../src/components/WorldsView.svelte';
 import Dialogs from '../src/components/Dialogs.svelte';
+import DiagnosticsView from '../src/components/DiagnosticsView.svelte';
 
 describe('Svelte component rendering and accessibility', () => {
   it('renders the whole desktop shell and six real task views', () => {
@@ -30,6 +31,23 @@ describe('Svelte component rendering and accessibility', () => {
     expect(html).toContain('Stop this world?');
     expect(html).toContain('Leave this world?');
   });
+  it('renders real native daemon controls in an initially unverified accessible state', () => {
+    const html = render(DiagnosticsView).body;
+    for (const id of [
+      'diagnosticConnectivity', 'diagnosticConnectivityDetail',
+      'refreshNativeConnectivity', 'startDaemon', 'stopDaemon',
+      'networkServiceNotice', 'networkServiceError',
+    ]) {
+      expect(html).toContain('id="' + id + '"');
+    }
+    expect(html).toContain('Not checked');
+    expect(html).toContain('Check native connection');
+    expect(html).toContain('Start networking');
+    expect(html).toContain('Stop networking');
+    expect(html).toContain('role="alert"');
+    expect(html).not.toMatch(/Connected through relay|Ready to host/i);
+  });
+
   it('makes activity output keyboard-readable and explicitly read-only', () => {
     const html = render(App).body;
     expect(html).toContain('id="output"');
