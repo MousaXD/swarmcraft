@@ -219,9 +219,9 @@ fn spawn_peer(
             };
             if let Some(kind) = fault {
                 lifecycle.lock().unwrap().push(format!("injected:{kind}"));
-                plan.node.disconnect_peer(transport_peer).map_err(|error| {
-                    format!("failed to inject {kind} authenticated QUIC disconnect: {error:#}")
-                })?;
+                plan.node
+                    .disconnect_peer(transport_peer)
+                    .map_err(|error| format!("failed to inject {kind} authenticated QUIC disconnect: {error:#}"))?;
                 drop(channel);
                 continue;
             }
@@ -723,7 +723,6 @@ async fn simultaneous_bidirectional_dials_converge_on_one_authenticated_connecti
     assert!(right.is_authenticated(&left_peer));
 }
 
-
 /// Exercise the real authenticated QUIC request/response transport, not a
 /// fabricated application event. The provider receives the request but exits
 /// without replying; libp2p must surface the outbound stream loss for the
@@ -787,16 +786,14 @@ async fn authenticated_quic_stream_drop_is_observable_for_browse_and_exact_resol
         let failure = timeout(Duration::from_secs(10), async {
             loop {
                 match client.next_event().await.expect("client event after provider shutdown") {
-                    DiscoveryNetworkEvent::OutboundFailure {
-                        transport_peer,
-                        request_id: observed,
-                        error,
-                    } if transport_peer == provider_peer && observed == request_id => break error,
-                    DiscoveryNetworkEvent::Response {
-                        transport_peer,
-                        request_id: observed,
-                        ..
-                    } if transport_peer == provider_peer && observed == request_id => {
+                    DiscoveryNetworkEvent::OutboundFailure { transport_peer, request_id: observed, error }
+                        if transport_peer == provider_peer && observed == request_id =>
+                    {
+                        break error
+                    }
+                    DiscoveryNetworkEvent::Response { transport_peer, request_id: observed, .. }
+                        if transport_peer == provider_peer && observed == request_id =>
+                    {
                         panic!("aborted provider must not produce a successful response")
                     }
                     _ => {}
@@ -810,7 +807,6 @@ async fn authenticated_quic_stream_drop_is_observable_for_browse_and_exact_resol
     }
 }
 
-
 /// A provider that repeatedly drops an authenticated QUIC stream must not
 /// create a false successful browse or a false "world not found" conclusion.
 /// Even persistent adversarial transport failure receives at most two
@@ -822,12 +818,8 @@ async fn permanently_disconnecting_explicit_provider_is_bounded_and_fails_closed
     let received_for_task = received.clone();
     let provider_task = tokio::spawn(async move {
         loop {
-            if let DiscoveryNetworkEvent::InboundRequest {
-                transport_peer,
-                request,
-                channel,
-                ..
-            } = provider.next_event().await.expect("blackhole discovery provider event")
+            if let DiscoveryNetworkEvent::InboundRequest { transport_peer, request, channel, .. } =
+                provider.next_event().await.expect("blackhole discovery provider event")
             {
                 let kind = match request {
                     WireRequest::DiscoveryPublic { .. } => "browse",
@@ -848,26 +840,22 @@ async fn permanently_disconnecting_explicit_provider_is_bounded_and_fails_closed
     let paths = DataPaths::from_root(temp.path());
     let bootstraps = [address];
 
-    let browse = timeout(
-        Duration::from_secs(25),
-        search_public_worlds(&paths, DiscoverySearchInputV1::default(), &bootstraps),
-    )
-    .await
-    .expect("bounded public browse should terminate")
-    .expect("browse should produce a structured failure report");
+    let browse =
+        timeout(Duration::from_secs(25), search_public_worlds(&paths, DiscoverySearchInputV1::default(), &bootstraps))
+            .await
+            .expect("bounded public browse should terminate")
+            .expect("browse should produce a structured failure report");
     assert_eq!(
         browse.state, "partial",
         "transport failure must not be reported as a successful empty result: {browse:?}"
     );
     assert!(browse.results.is_empty(), "failed network discovery must not invent a canonical world");
 
-    let exact = timeout(
-        Duration::from_secs(25),
-        resolve_world(&paths, swarm_protocol::WorldId([105; 32]), &bootstraps),
-    )
-    .await
-    .expect("bounded exact resolve should terminate")
-    .expect("exact resolve should produce a structured failure report");
+    let exact =
+        timeout(Duration::from_secs(25), resolve_world(&paths, swarm_protocol::WorldId([105; 32]), &bootstraps))
+            .await
+            .expect("bounded exact resolve should terminate")
+            .expect("exact resolve should produce a structured failure report");
     assert_eq!(
         exact.state, "network_unavailable",
         "network failure must not be reported as world not found: {exact:?}"
@@ -877,14 +865,8 @@ async fn permanently_disconnecting_explicit_provider_is_bounded_and_fails_closed
     let attempts = received.lock().unwrap();
     let browse_attempts = attempts.iter().filter(|kind| **kind == "browse").count();
     let resolve_attempts = attempts.iter().filter(|kind| **kind == "resolve").count();
-    assert!(
-        (1..=3).contains(&browse_attempts),
-        "public browse exceeded its bounded retry budget: {attempts:?}"
-    );
-    assert!(
-        (1..=3).contains(&resolve_attempts),
-        "exact resolve exceeded its bounded retry budget: {attempts:?}"
-    );
+    assert!((1..=3).contains(&browse_attempts), "public browse exceeded its bounded retry budget: {attempts:?}");
+    assert!((1..=3).contains(&resolve_attempts), "exact resolve exceeded its bounded retry budget: {attempts:?}");
     drop(attempts);
 
     provider_task.abort();
