@@ -143,6 +143,21 @@ def main() -> None:
         fail("release.yml must bind the exact tag name into release identity validation")
     if "python3 scripts/check_release_credentials.py" not in release:
         fail("release.yml must fail closed through the production credential policy")
+    # Presence of credentials alone does not certify the produced binaries.
+    # Verify Authenticode and Apple's developer identity/stapled tickets
+    # *after* signing/notarization and before artifact publication.
+    if release.count("verify /pa /all") < 2:
+        fail("release.yml must independently verify signed Windows sidecars and installer")
+    for required in (
+        "codesign --verify --deep --strict",
+        "Authority=Developer ID Application:",
+        'xcrun stapler validate "$app"',
+        'xcrun stapler validate "${dmg[0]}"',
+        "spctl --assess --type execute",
+    ):
+        if required not in release:
+            fail(f"release.yml must prove macOS notarization/signing: {required}")
+
 
     gradle = (ROOT / "minecraft/fabric/gradle.properties").read_text(encoding="utf-8")
     if re.search(r"(?im)^loom_version=.*snapshot", gradle):
