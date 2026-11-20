@@ -7,6 +7,8 @@ mod discovery;
 mod invite_connectivity;
 mod node;
 mod transport;
+pub mod v2_action_nonce_book;
+pub mod v2_challenge_book;
 pub mod wire;
 
 pub use diagnostics::{

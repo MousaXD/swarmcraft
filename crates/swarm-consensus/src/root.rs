@@ -8,6 +8,7 @@ pub mod migration;
 pub mod recovery;
 pub mod simulator;
 pub mod solo;
+pub mod v2_migration_quorum;
 
 pub use membership::*;
 pub use recovery::*;
