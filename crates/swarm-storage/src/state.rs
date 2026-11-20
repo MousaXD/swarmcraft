@@ -680,10 +680,7 @@ mod tests {
         let (_, world) = test_world();
         let storage = Storage::open(temp.path()).unwrap();
         let first = ballot(world, 2, 7);
-        assert_eq!(
-            storage.promise_recovery_ballot(&first, &vote(&first, 6)).unwrap(),
-            RecoveryPromiseResult::Accepted
-        );
+        assert_eq!(storage.promise_recovery_ballot(&first, &vote(&first, 6)).unwrap(), RecoveryPromiseResult::Accepted);
         let original = storage.load_recovery_promise(world).unwrap();
         let original_bytes = postcard::to_allocvec(&original).unwrap();
         let path = storage.control_path_v2(world, "recovery-promise.postcard");
@@ -697,10 +694,7 @@ mod tests {
         // A caller must repair the original evidence, not silently bootstrap.
         fs::write(&path, original_bytes).unwrap();
         assert_eq!(storage.load_recovery_promise(world).unwrap(), original);
-        assert_eq!(
-            storage.promise_recovery_ballot(&next, &vote(&next, 6)).unwrap(),
-            RecoveryPromiseResult::Accepted
-        );
+        assert_eq!(storage.promise_recovery_ballot(&next, &vote(&next, 6)).unwrap(), RecoveryPromiseResult::Accepted);
         assert_eq!(storage.load_recovery_promise(world).unwrap().ballot.round, 8);
     }
 
