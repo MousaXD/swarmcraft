@@ -371,8 +371,15 @@ def verify(c, output, review_file=None):
     withdrawal = stages["bob_withdrawn"]
     denied = stages["carol_denied"]
     old_bob_consent = returned["bob"].get("hosting_consent")
-    require(isinstance(old_bob_consent, dict) and old_bob_consent.get("enabled") is True,
+    require(isinstance(old_bob_consent, dict) and old_bob_consent.get("enabled") is True and
+            old_bob_consent.get("identity_bound") is True and
+            old_bob_consent.get("world_bound") is True and
+            type(old_bob_consent.get("revision")) is int and
+            old_bob_consent["revision"] > 0,
             "bob_prior_active_host_consent_missing")
+    require(type(withdrawal["alice"]["epoch"]) is int and
+            type(withdrawal["alice"]["fencing_token"]) is int,
+            "withdrawal_handoff_generation_missing")
     require(withdrawal["alice"]["epoch"] > rb["epoch"] and
             withdrawal["alice"]["fencing_token"] > rb["fencing_token"],
             "withdrawal_handoff_not_new_fenced_generation")
@@ -396,6 +403,8 @@ def verify(c, output, review_file=None):
                 "negative_case_replication_or_snapshot_invalid_" + name)
         consent_bob = bob.get("hosting_consent")
         require(isinstance(consent_bob, dict) and consent_bob.get("available") is True and
+                consent_bob.get("identity_bound") is True and
+                consent_bob.get("world_bound") is True and
                 consent_bob.get("enabled") is False and consent_bob.get("heap_mib") == 0 and
                 type(consent_bob.get("revision")) is int and
                 consent_bob["revision"] > old_bob_consent["revision"] and
@@ -403,6 +412,8 @@ def verify(c, output, review_file=None):
                 "bob_withdrawal_not_persisted_or_revision_not_advanced_" + name)
         consent_alice = alice.get("hosting_consent")
         require(isinstance(consent_alice, dict) and consent_alice.get("available") is True and
+                consent_alice.get("identity_bound") is True and
+                consent_alice.get("world_bound") is True and
                 consent_alice.get("enabled") is True and
                 type(consent_alice.get("heap_mib")) is int and
                 consent_alice["heap_mib"] >= 512 and
