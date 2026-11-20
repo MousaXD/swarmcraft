@@ -21,7 +21,27 @@ export interface IdentityController {
  * Renderer-only identity presentation. Rust is authoritative for node identity
  * and initialization. Never print raw native errors (they may contain secrets).
  */
-export function createIdentityController(readNative: () => Promise<string>): IdentityController {
+/** A missing sidecar or wedged IPC must not leave an infinite refresh spinner. */
+const DEFAULT_NATIVE_IDENTITY_TIMEOUT_MS = 15_000;
+
+function boundedIdentityRead(readNative: () => Promise<string>, timeoutMs: number): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    // Schedule the native call asynchronously so synchronous throws are caught,
+    // and a late completion cannot change a timed-out request's result.
+    Promise.resolve().then(readNative),
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Native identity request timed out.')), timeoutMs);
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+export function createIdentityController(
+  readNative: () => Promise<string>,
+  timeoutMs = DEFAULT_NATIVE_IDENTITY_TIMEOUT_MS,
+): IdentityController {
   const state = writable<IdentityState>({
     phase: 'checking', text: 'Checking identity…', busy: false, error: '',
     nativeVerifiedRefreshCount: 0,
@@ -46,6 +66,9 @@ export function createIdentityController(readNative: () => Promise<string>): Ide
     state: { subscribe: state.subscribe },
     publishLegacy(value, source = 'identity') {
       ++generation;
+      // A newer legacy startup/identity observation supersedes an old read.
+      // Do not make Retry wait for an IPC call that may never settle.
+      request = null;
       // initialize_node can produce setup text, not a verified node_identity.
       if (source === 'setup') {
         state.set({ phase: 'checking', text: String(value || 'Device setup complete. Reading identity…'), busy: false, error: '', nativeVerifiedRefreshCount });
@@ -60,7 +83,7 @@ export function createIdentityController(readNative: () => Promise<string>): Ide
       if (request) return request;
       const version = ++generation;
       state.update(s => ({ ...s, busy: true, error: '' }));
-      const task = Promise.resolve().then(readNative).then(value => {
+      const task = boundedIdentityRead(readNative, timeoutMs).then(value => {
         if (version === generation) state.set(present(value, true));
       }).catch(() => {
         if (version !== generation) return;
