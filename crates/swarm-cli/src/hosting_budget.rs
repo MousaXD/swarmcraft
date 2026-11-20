@@ -401,11 +401,7 @@ fn require_visible_cgroup_v2_mount(mountinfo: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn cgroup_v2_memory_snapshot(
-    mount: &Path,
-    membership: &str,
-    mut memory: AvailableMemory,
-) -> Result<AvailableMemory> {
+fn cgroup_v2_memory_snapshot(mount: &Path, membership: &str, mut memory: AvailableMemory) -> Result<AvailableMemory> {
     // A systemd service or container may have a much smaller memory.max than
     // the cgroup mount root. Only the process's own subtree and its ancestors
     // are relevant; never trust a root-only cgroup reading as available RAM.
@@ -451,8 +447,7 @@ fn cgroup_v2_memory_snapshot(
             Ok(value) => Some(value),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("cannot read cgroup memory high {}", high_path.display()));
+                return Err(error).with_context(|| format!("cannot read cgroup memory high {}", high_path.display()));
             }
         };
         let mut finite_limit: Option<u64> = None;
@@ -474,8 +469,7 @@ fn cgroup_v2_memory_snapshot(
                 .parse()
                 .context("invalid cgroup memory.current")?;
             memory.physical_mib = memory.physical_mib.min(limit_bytes / (1024 * 1024));
-            memory.available_mib =
-                memory.available_mib.min(limit_bytes.saturating_sub(used_bytes) / (1024 * 1024));
+            memory.available_mib = memory.available_mib.min(limit_bytes.saturating_sub(used_bytes) / (1024 * 1024));
         }
         if current == mount {
             break;
@@ -497,10 +491,8 @@ pub fn memory_snapshot() -> Result<AvailableMemory> {
         let kb: u64 = line.split_whitespace().nth(1).context("missing KiB count")?.parse()?;
         Ok(kb / 1_024)
     }
-    let memory = AvailableMemory {
-        physical_mib: mib(&text, "MemTotal:")?,
-        available_mib: mib(&text, "MemAvailable:")?,
-    };
+    let memory =
+        AvailableMemory { physical_mib: mib(&text, "MemTotal:")?, available_mib: mib(&text, "MemAvailable:")? };
     let membership = fs::read_to_string("/proc/self/cgroup").context("cannot read Linux cgroup membership")?;
     let mount = Path::new("/sys/fs/cgroup");
     if membership.lines().any(|line| line.starts_with("0::")) {
@@ -622,27 +614,23 @@ mod tests {
         fs::write(child.join("memory.current"), b"3221225472\n").unwrap();
 
         let measured =
-            cgroup_v2_memory_snapshot(mount, "0::/system.slice/swarmcraft.service\n", memory(32_768, 25_000))
-                .unwrap();
+            cgroup_v2_memory_snapshot(mount, "0::/system.slice/swarmcraft.service\n", memory(32_768, 25_000)).unwrap();
         assert_eq!(measured, memory(4096, 1024));
         assert!(check_budget(512, measured).is_err());
 
         fs::write(child.join("memory.high"), b"not-a-number\n").unwrap();
-        assert!(cgroup_v2_memory_snapshot(mount, "0::/system.slice/swarmcraft.service\n", memory(32_768, 25_000))
-            .is_err());
+        assert!(
+            cgroup_v2_memory_snapshot(mount, "0::/system.slice/swarmcraft.service\n", memory(32_768, 25_000)).is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn cgroup_v2_opaque_or_inaccessible_mount_never_authorizes_host_memory() {
-        assert!(require_visible_cgroup_v2_mount(
-            "59 55 0:24 / /sys/fs/cgroup ro,nosuid,nodev - cgroup2 cgroup2 rw\n"
-        )
-        .is_ok());
-        assert!(require_visible_cgroup_v2_mount(
-            "59 55 0:24 /system.slice /sys/fs/cgroup ro - cgroup2 cgroup2 rw\n"
-        )
-        .is_err());
+        assert!(require_visible_cgroup_v2_mount("59 55 0:24 / /sys/fs/cgroup ro,nosuid,nodev - cgroup2 cgroup2 rw\n")
+            .is_ok());
+        assert!(require_visible_cgroup_v2_mount("59 55 0:24 /system.slice /sys/fs/cgroup ro - cgroup2 cgroup2 rw\n")
+            .is_err());
         assert!(require_visible_cgroup_v2_mount("59 55 0:24 / /sys/fs/cgroup ro - tmpfs tmpfs rw\n").is_err());
         assert!(require_visible_cgroup_v2_mount("unrelated mount only\n").is_err());
     }
@@ -660,8 +648,7 @@ mod tests {
         fs::write(nested.join("memory.max"), b"4294967296\n").unwrap();
         fs::write(nested.join("memory.current"), b"3221225472\n").unwrap();
         let measured =
-            cgroup_v2_memory_snapshot(mount, "0::/system.slice/swarmcraft.service\n", memory(32_768, 25_000))
-                .unwrap();
+            cgroup_v2_memory_snapshot(mount, "0::/system.slice/swarmcraft.service\n", memory(32_768, 25_000)).unwrap();
         assert_eq!(measured, memory(4_096, 1_024));
         assert!(check_budget(512, measured).is_err());
     }
@@ -678,8 +665,7 @@ mod tests {
         fs::write(mount.join("system.slice/memory.current"), b"3758096384\n").unwrap();
         fs::write(nested.join("memory.max"), b"max\n").unwrap();
         let measured =
-            cgroup_v2_memory_snapshot(mount, "0::/system.slice/daemon.service\n", memory(32_768, 20_000))
-                .unwrap();
+            cgroup_v2_memory_snapshot(mount, "0::/system.slice/daemon.service\n", memory(32_768, 20_000)).unwrap();
         assert_eq!(measured, memory(4_096, 512));
         assert!(check_budget(512, measured).is_err());
     }
