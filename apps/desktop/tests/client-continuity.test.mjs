@@ -104,6 +104,7 @@ test('Desktop surfaces an accessible connection-status result bound to selected 
   assert.match(app, /targets\.title\.textContent/);
   assert.match(app, /targets\.detail\.textContent/);
   assert.match(app, /renderMigration\(null\);[\s\S]*?refreshMigrationState\(world\)/);
+  assert.match(app, /continuity\.tone === 'danger'/);
   assert.match(app, /migration\.available \? 'warning' : 'neutral'/);
   assert.doesNotMatch(app, /localServerReady \? 'safe'/);
   assert.match(app, /migration\.phase === 'ready'/);
