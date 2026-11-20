@@ -29,7 +29,7 @@ The long-term goal is a Minecraft world with **no permanent host** and **no perm
 
 ## Project status
 
-**Current application version: 0.4.0 technical preview.** Wire protocol version remains `1`.
+**Current application version: 0.5.1 technical preview.** Wire protocol version remains `1`.
 
 SwarmCraft is no longer only an architecture prototype. The repository contains an executable Rust core, authenticated peer networking, snapshot replication, authority/recovery logic, a Fabric lifecycle bridge, a Tauri desktop application, managed Minecraft runtime preparation, existing-world import, and cross-platform packaging workflows.
 
@@ -58,7 +58,7 @@ SwarmCraft is no longer only an architecture prototype. The repository contains 
 
 ### Not complete yet
 
-SwarmCraft 0.4.0 is still a technical preview, not a claim of universal production readiness or a completely invisible multiplayer handoff.
+SwarmCraft 0.5.1 is still a technical preview, not a claim of universal production readiness or a completely invisible multiplayer handoff.
 
 Important remaining work includes:
 
@@ -290,7 +290,7 @@ The repository implements and permanently tests the storage, replication, fencin
 
 ## Current Minecraft target
 
-The 0.4.0 preview currently targets:
+The 0.5.1 preview currently targets:
 
 - Minecraft Java `26.1.2`;
 - Fabric Loader `0.19.3`;

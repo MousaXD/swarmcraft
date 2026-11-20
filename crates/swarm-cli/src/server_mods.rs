@@ -801,9 +801,9 @@ impl Huffman {
             bail!("DEFLATE Huffman tree has no symbols");
         }
         let mut code = 0u32;
-        for length in 1..=self.max_len {
+        for (length, candidates) in self.codes.iter().enumerate().take(self.max_len + 1).skip(1) {
             code |= reader.read_bits(1)? << (length - 1);
-            if let Some((_, symbol)) = self.codes[length].iter().find(|(candidate, _)| *candidate == code) {
+            if let Some((_, symbol)) = candidates.iter().find(|(candidate, _)| *candidate == code) {
                 return Ok(*symbol);
             }
         }
