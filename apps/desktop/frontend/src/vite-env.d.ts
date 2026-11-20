@@ -19,6 +19,11 @@ declare global {
     __swarmcraftSvelteConnectivity?: { refresh(): Promise<void> };
     __swarmcraftSvelteNetworkingOwned?: boolean;
     __swarmcraftSvelteWorldsOwned?: boolean;
+    __swarmcraftSvelteReadinessOwned?: boolean;
+    __swarmcraftSvelteReadiness?: {
+      select(world: string): Promise<void>;
+      clear(): void;
+    };
     __swarmcraftSvelteWorlds?: {
       refresh(): Promise<import('./lib/world-list-state').NativeWorldEntry[]>;
       setSelected(id: string): void;
