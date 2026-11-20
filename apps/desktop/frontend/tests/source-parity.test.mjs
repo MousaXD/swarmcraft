@@ -480,3 +480,39 @@ test('installed native leave cancellation follows both visible disclosures witho
   assert.doesNotMatch(script, /parent\.open\s*=\s*true|child\.open\s*=\s*true/,
     'Never bypass the visible disclosure using synthetic JavaScript state');
 });
+
+
+test('native connectivity diagnostics use typed Rust IPC, Svelte owns display, and installed acceptance proves a real read', async () => {
+  const [view, bridge, model, root, app, types, native] = await Promise.all([
+    source('../src/components/DiagnosticsView.svelte'),
+    source('../src/lib/native-bridge.ts'),
+    source('../src/lib/connectivity-state.ts'),
+    source('../src/App.svelte'),
+    source('../../src/app.js'),
+    source('../src/vite-env.d.ts'),
+    source('../scripts/visual-window-acceptance.py'),
+  ]);
+  assert.ok(view.includes("nativeBridge().invoke('connectivity_diagnostics', {})"),
+    'Native command must be the real registered Rust diagnostic');
+  assert.ok(bridge.includes("connectivity_diagnostics: { args: Record<string, never>; result: string }"));
+  assert.ok(view.includes('onclick={refreshNativeConnectivity}'));
+  assert.ok(view.includes('data-native-verified-count={$nativeConnectivity.verifiedReadCount}'));
+  assert.ok(view.includes('disabled={$nativeConnectivity.busy}'));
+  assert.ok(root.includes('window.__swarmcraftSvelteConnectivityOwned = true;'));
+  assert.ok(root.includes('window.__swarmcraftSvelteConnectivityOwned = previousConnectivityOwner;'));
+  assert.ok(app.includes("window.__swarmcraftSvelteConnectivityOwned === true"));
+  assert.ok(app.includes("window.__swarmcraftSvelteConnectivity?.refresh()"));
+  assert.ok(app.includes("window.__swarmcraftSvelteConnectivityOwned !== true"));
+  assert.ok(types.includes('__swarmcraftSvelteConnectivityOwned?: boolean;'));
+  assert.ok(model.includes('if (inflight) return inflight;'), 'Duplicate native connectivity requests must coalesce');
+  assert.ok(model.includes('timeoutMs = 12_000'), 'Native IPC must not leave the check spinner indefinitely');
+  assert.ok(model.includes('verifiedReadCount += 1;'), 'A genuine current native read must increase the counter');
+  assert.doesNotMatch(model, /detail:\s*String\(error\)|detail:\s*error\.message/,
+    'Never leak arbitrary native error detail to UI');
+  assert.ok(native.includes("mark_stage('native-connectivity-refresh')"));
+  assert.ok(native.includes('app.click("#refreshNativeConnectivity")'));
+  assert.ok(native.includes('connectivityNativeConfirmed:'));
+  assert.ok(native.includes('connectivityVerified:'));
+  assert.ok(native.includes("'connectivityNativeConfirmed'"));
+  assert.ok(native.includes("'connectivityVerified'"));
+});
