@@ -11,7 +11,7 @@ use std::{
 };
 use swarm_core::{DataPaths, PeerIdentity};
 
-use crate::host_readiness;
+use crate::{host_readiness, runtime_process_guard};
 use swarm_protocol::{PeerId, WorldId};
 
 const SCHEMA_VERSION: u16 = 1;
@@ -260,6 +260,10 @@ pub fn admit(paths: &DataPaths, world: WorldId) -> Result<HostingAdmission> {
     lock.try_lock_exclusive().context(
         "another Minecraft hosting admission is active on this device; concurrent memory reservations are denied",
     )?;
+    // The OS releases the advisory lock when the Rust controller crashes,
+    // but Java can survive as an orphan with an unconsumed heap reservation.
+    // Protect *all worlds* in this data root, not just the new world's slot.
+    runtime_process_guard::refuse_unaccounted_runtimes(paths)?;
     let consent = require_contribution(paths, world)?;
     Ok(HostingAdmission { _exclusive_memory_lock: lock, consent })
 }
