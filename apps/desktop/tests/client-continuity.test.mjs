@@ -25,7 +25,8 @@ test('ready local Fabric report never becomes a trusted Minecraft endpoint or au
   assert.equal(state.state, 'manual_reconnect_required');
   assert.equal(state.automaticReconnect, false);
   assert.equal(state.connectionTarget, null);
-  assert.match(state.detail, /cannot yet authenticate a client-reachable game address/i);
+  assert.match(state.detail, /report can remain after a crash/i);
+  assert.match(state.detail, /no authenticated, client-reachable game route/i);
   assert.doesNotMatch(JSON.stringify(state), /stale\.host\.example/);
 });
 
@@ -100,6 +101,10 @@ test('Desktop surfaces an accessible connection-status result bound to selected 
   assert.match(app, /\$\('clientContinuityTitle'\)\.textContent/);
   assert.match(app, /\$\('clientContinuityDetail'\)\.textContent/);
   assert.match(app, /renderMigration\(null\);[\s\S]*?refreshMigrationState\(world\)/);
+  assert.match(app, /migration\.available \? 'warning' : 'neutral'/);
+  assert.doesNotMatch(app, /localServerReady \? 'safe'/);
+  assert.match(app, /migration\.phase === 'ready'/);
+  assert.match(app, /phase: 'status_unavailable'/);
   assert.match(html, /id="clientContinuityTitle"/);
   assert.match(html, /id="clientContinuityDetail"[^>]*role="status"[^>]*aria-live="polite"/);
 });
