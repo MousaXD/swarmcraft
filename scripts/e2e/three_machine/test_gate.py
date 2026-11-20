@@ -63,6 +63,7 @@ def node(role, stage):
         "desktop_process_observed": True,
         "minecraft_client_process_observed": True,
         "minecraft_server_process_observed": role == ("alice" if authority == ALICE else "bob"),
+        "world_server_process_count": 1 if role == ("alice" if authority == ALICE else "bob") else 0,
         "hosting_consent": {
             "available": True, "enabled": role != "carol" and not withdrawn_bob,
             "heap_mib": 0 if withdrawn_bob else {"alice": 2048, "bob": 4096, "carol": 0}[role],
@@ -566,6 +567,37 @@ class TestFailClosed(unittest.TestCase):
             record["nodes"]["bob"]["hosting_consent"]["revision"] = 125
             gate.save(out / "carol_denied.json", record)
             with self.assertRaisesRegex(gate.Blocked, "bob_withdrawal_not_persisted"):
+                gate.verify(c, out)
+
+    def test_rejects_unlisted_bob_world_jvm_after_withdrawal(self):
+        # An omitted server PID must not be treated as proof of no JVM.
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "bob_withdrawn.json")
+            record["nodes"]["bob"]["world_server_process_count"] = 1
+            gate.save(out / "bob_withdrawn.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "world_server_process_inventory_disagrees_bob_withdrawn_bob"):
+                gate.verify(c, out)
+
+    def test_rejects_hidden_carol_world_jvm_with_no_supplied_pid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "carol_denied.json")
+            record["nodes"]["carol"]["world_server_process_count"] = 1
+            gate.save(out / "carol_denied.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "world_server_process_inventory_disagrees_carol_denied_carol"):
+                gate.verify(c, out)
+
+    def test_rejects_unavailable_world_jvm_inventory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "checkpoint.json")
+            record["nodes"]["alice"]["world_server_process_count"] = None
+            gate.save(out / "checkpoint.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "world_server_process_inventory_disagrees_checkpoint_alice"):
                 gate.verify(c, out)
 
     def test_missing_negative_human_review_flags_block_ready(self):
