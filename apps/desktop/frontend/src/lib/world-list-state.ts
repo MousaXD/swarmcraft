@@ -145,10 +145,16 @@ export function createNativeWorldListController(
 }
 
 export function worldSafetyTone(value: unknown): 'safe' | 'warning' | 'danger' | 'neutral' {
-  const safety = String(value ?? '').toLowerCase();
-  if (safety.includes('conflict')) return 'danger';
-  if (safety.includes('solo') || safety.includes('degraded')) return 'warning';
-  if (safety.includes('canonical') || safety.includes('quorum')) return 'safe';
+  const safety = String(value ?? '').trim().toLowerCase();
+  if (/conflict|divergen/.test(safety)) return 'danger';
+  if (/solo|degraded/.test(safety)) return 'warning';
+  // Only a leading, positive Rust status marker is safe. Substrings such as
+  // 'noncanonical', 'not canonical', or 'quorum unavailable' MUST NOT turn
+  // an unrecognized native status into a green badge.
+  if (/^(?:canonical|quorum)(?:$|[\s(,:;])/.test(safety)
+      && !/\b(?:no|not|unavailable|unsafe|unknown|unverified|lost|missing)\b/.test(safety)) {
+    return 'safe';
+  }
   return 'neutral';
 }
 
