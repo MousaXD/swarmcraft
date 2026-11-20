@@ -32,15 +32,25 @@ const PUBLIC_DIRECTORY_KEY: &[u8] = b"swarmcraft/discovery/public/v1";
 const WORLD_KEY_PREFIX: &[u8] = b"swarmcraft/discovery/world/v1\0";
 const FRIEND_KEY_PREFIX: &[u8] = b"swarmcraft/discovery/friend/v2\0";
 
-#[derive(NetworkBehaviour)]
-struct DiscoveryBehaviour {
-    request_response: cbor::Behaviour<WireRequest, WireResponse>,
-    mdns: mdns::tokio::Behaviour,
-    identify: identify::Behaviour,
-    ping: ping::Behaviour,
-    kad: kad::Behaviour<MemoryStore>,
-    limits: connection_limits::Behaviour,
+// libp2p-swarm-derive 0.36.0 emits unreachable code for an uninhabited
+// connection_limits event on Rust 1.100. Only the generated behaviour lives
+// under this lint scope; all actual transport/discovery logic remains subject
+// to strict workspace Clippy (-D warnings).
+#[allow(unreachable_code)]
+mod generated_behaviour {
+    use super::*;
+
+    #[derive(NetworkBehaviour)]
+    pub(super) struct DiscoveryBehaviour {
+        pub(super) request_response: cbor::Behaviour<WireRequest, WireResponse>,
+        pub(super) mdns: mdns::tokio::Behaviour,
+        pub(super) identify: identify::Behaviour,
+        pub(super) ping: ping::Behaviour,
+        pub(super) kad: kad::Behaviour<MemoryStore>,
+        pub(super) limits: connection_limits::Behaviour,
+    }
 }
+use generated_behaviour::{DiscoveryBehaviour, DiscoveryBehaviourEvent};
 
 #[derive(Debug)]
 pub enum DiscoveryNetworkEvent {
@@ -192,9 +202,7 @@ impl DiscoveryNode {
     /// when a still-listening authenticated provider loses its QUIC stream.
     /// This does not change membership, authorization or provider records.
     pub fn disconnect_peer(&mut self, transport_peer: TransportPeerId) -> Result<()> {
-        self.swarm
-            .disconnect_peer_id(transport_peer)
-            .map_err(|_| anyhow!("discovery peer is not connected"))
+        self.swarm.disconnect_peer_id(transport_peer).map_err(|_| anyhow!("discovery peer is not connected"))
     }
 
     pub fn add_peer_address(&mut self, peer: TransportPeerId, address: Multiaddr) {
