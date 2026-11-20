@@ -368,6 +368,54 @@ def java_runtime_version(pid, root, world, binary, cli):
         return None
 
 
+def world_server_inventory(root, world, proc_root=Path("/proc")):
+    """Enumerate same-user Java processes bound to this exact test world.
+
+    A missing operator-supplied server PID is NOT evidence that no JVM runs.
+    The read-only /proc scan publishes only a count; unreadable same-user
+    process state is uncertainty and blocks certification. This checks the
+    dedicated test user, not arbitrary other-user or root-owned processes.
+    """
+    expected = Path(root) / "runtime" / world
+    matching = []
+    try:
+        entries = list(Path(proc_root).iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.name.isdecimal():
+            continue
+        try:
+            owner = entry.stat().st_uid
+        except FileNotFoundError:
+            continue  # process exited while enumerating
+        except OSError:
+            return None
+        if owner != os.geteuid():
+            continue
+        try:
+            executable = (entry / "exe").resolve(strict=True)
+        except FileNotFoundError:
+            if not entry.exists():
+                continue
+            return None  # same-user process exists but identity is unknown
+        except OSError:
+            return None
+        if executable.name.lower() not in ("java", "javaw"):
+            continue
+        try:
+            cwd = (entry / "cwd").resolve(strict=True)
+        except FileNotFoundError:
+            if not entry.exists():
+                continue
+            return None
+        except OSError:
+            return None
+        if cwd == expected:
+            matching.append(int(entry.name))
+    return matching
+
+
 def capture(a):
     if not re.fullmatch("[a-fA-F0-9]{64}", a.world):
         fail("world_id_invalid")
@@ -377,6 +425,9 @@ def capture(a):
     if not machine_id:
         fail("machine_id_missing")
     root = str(Path(a.data_dir).resolve(strict=True))
+    server_inventory = world_server_inventory(root, a.world)
+    if server_inventory is None:
+        fail("world_server_inventory_unavailable")
     cli = str(Path(a.cli).resolve(strict=True))
     cmd = [cli, "--data-dir", root]
     status = run(cmd + ["world", "status", a.world])
@@ -434,9 +485,11 @@ def capture(a):
             a.desktop_pid, "desktop", Path(root), a.world,
             Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True)),
         "minecraft_client_process_observed": fabric_client_process(a.client_pid, a.server_pid),
-        "minecraft_server_process_observed": isolated_process(
-            a.server_pid, "server", Path(root), a.world,
-            Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True)),
+        "minecraft_server_process_observed": (
+            a.server_pid in server_inventory and isolated_process(
+                a.server_pid, "server", Path(root), a.world,
+                Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True))),
+        "world_server_process_count": len(server_inventory),
         "hosting_consent": hosting_consent(root, a.world, peer),
         "java_runtime_version": java_runtime_version(
             a.server_pid, Path(root), a.world,
