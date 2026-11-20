@@ -23,6 +23,8 @@ This changes **only discovery request recovery**:
 
 The `discovery_network_freshness` integration test `authenticated_quic_stream_drop_is_observable_for_browse_and_exact_resolve` uses real loopback QUIC and signed application authentication. It intentionally destroys the provider while holding an outbound response stream, asserting an outbound failure for the **same original request ID** for both public browse and exact resolve. This establishes a reproducible transport failure event but does **not**, by itself, prove canonical re-availability after reconnect.
 
+The existing `malicious_and_stale_providers_cannot_win_browse_or_exact_resolve` integration scenario now also makes the live canonical provider deliberately disconnect once during **each** query path without stopping its listener. Both paths must still find that provider after redial/re-authentication while excluding forged and stale announcements. A small `DiscoveryNode::disconnect_peer` method supplies the controlled transport fault.
+
 The `discovery_retry_fault_injection_rejects_duplicate_wrong_peer_and_dht_failures` unit test exercises the same retry state transition used in the production event loops: a wrong transport peer may not consume the retry, a duplicate failure cannot trigger a new dial, an explicit peer can retry at most twice, and a DHT-only peer cannot spend explicit retry credit.
 
 Run and retain full, unedited logs on all three operating systems:
@@ -40,7 +42,8 @@ Also require exact final-head Required Validation, Main Desktop Installers, nati
 
 ## Explicit outstanding release gates
 
-- End-to-end **positive recovery** of a reachable canonical provider after controlled disconnect and reauthentication, for both public browse and exact resolve, needs an additional full-fidelity test.
+- The positive recovery integration test is now present for both paths; it remains **unverified until exact-head CI passes**. Do not substitute source inspection or another commit's passing run.
 - Repeated Linux/Windows/macOS fault-injection and impaired-network runs are required.
+- Confirm the injected provider disconnects actually occurred in both phases and that the legitimate canonical result passed the full freshness quorum. Catch any 8-second overall-query timeouts or repeated-disconnect regressions.
 - NAT/CGNAT, UDP-blocked networks and deployed relay fallback remain **field validation**, not certified by loopback QUIC.
 - No release, V2 authority activation, acceptance of a nonquorum proof or closure of issue #113 follows from this scoped patch alone.
