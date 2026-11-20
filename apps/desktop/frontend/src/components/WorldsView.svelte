@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { nativeBridge } from '../lib/native-bridge';
-  import { createNativeWorldListController, worldSafetyTone } from '../lib/world-list-state';
+  import { createNativeWorldListController, worldSafetyTone, nativeWorldSafetySummary } from '../lib/world-list-state';
 
   const worldsController = createNativeWorldListController({
     listWorlds: () => nativeBridge().invoke('list_worlds', {}),
@@ -10,6 +10,7 @@
   });
   const worldState = worldsController.state;
   let selectedId = $state('');
+  const selectedEntry = $derived($worldState.worlds.find(world => world.id === selectedId));
   let connectivityLabel = $state('Checking connectivity');
   let selectionError = $state('');
 
@@ -118,11 +119,11 @@
                 <header class="world-hero">
                   <div class="world-heading">
                     <div class="title-line">
-                      <h2 id="selectedName">World</h2>
-                      <span id="selectedSafety" class="status-badge neutral">Unknown</span>
+                      <h2 id="selectedName">{selectedEntry?.name || 'World'}</h2>
+                      <span id="selectedSafety" class={`status-badge ${worldSafetyTone(selectedEntry?.status.Safety)}`}>{selectedEntry?.status.Safety || 'Unknown'}</span>
                     </div>
                     <button id="copyWorldId" class="machine-button" type="button" title="Copy World ID">
-                      <span id="selectedWorldId" class="machine-line"></span>
+                      <span id="selectedWorldId" class="machine-line">{selectedEntry?.id || ''}</span>
                       <span aria-hidden="true">⧉</span>
                     </button>
                   </div>
@@ -139,7 +140,7 @@
                 <div class="world-state-grid" aria-label="World summary">
                   <div class="state-cell">
                     <span class="state-label">Host</span>
-                    <strong id="selectedAuthority">Not reported</strong>
+                    <strong id="selectedAuthority">{selectedEntry?.status.Authority || 'Not reported'}</strong>
                   </div>
                   <div class="state-cell">
                     <span class="state-label">Connectivity</span>
@@ -148,18 +149,18 @@
                   </div>
                   <div class="state-cell">
                     <span class="state-label">Members</span>
-                    <strong id="selectedMembers">Unknown</strong>
+                    <strong id="selectedMembers">{selectedEntry?.status['Authorized peers'] || 'Unknown'}</strong>
                   </div>
                   <div class="state-cell">
                     <span class="state-label">Latest checkpoint</span>
-                    <strong id="selectedCheckpoint">None</strong>
+                    <strong id="selectedCheckpoint">{selectedEntry?.status['Latest snapshot'] || (selectedEntry?.snapshots ? `${selectedEntry.snapshots} stored` : 'None')}</strong>
                   </div>
                 </div>
 
-                <section id="safetyPanel" class="safety-panel neutral" aria-labelledby="safetyTitle">
+                <section id="safetyPanel" class={`safety-panel ${worldSafetyTone(selectedEntry?.status.Safety)}`} aria-labelledby="safetyTitle">
                   <div>
                     <span id="safetyTitle" class="section-label">World safety</span>
-                    <p id="selectedSummary">Safety state is unavailable.</p>
+                    <p id="selectedSummary">{nativeWorldSafetySummary(selectedEntry?.status.Safety)}</p>
                   </div>
                   <button id="worldConflicts" class="text-button world-required" type="button">Review conflicts</button>
                 </section>
@@ -251,8 +252,8 @@
                 <details class="details-panel">
                   <summary>World details</summary>
                   <div class="details-grid">
-                    <div class="detail-row"><span>Minecraft</span><strong id="selectedMinecraft">Unknown</strong></div>
-                    <div class="detail-row"><span>Compatibility</span><strong id="selectedCompatibility">Not synchronized</strong></div>
+                    <div class="detail-row"><span>Minecraft</span><strong id="selectedMinecraft">{selectedEntry?.status.Minecraft || 'Unknown'}</strong></div>
+                    <div class="detail-row"><span>Compatibility</span><strong id="selectedCompatibility">{selectedEntry?.compatibility['Authority eligibility'] || 'Not synchronized'}</strong></div>
                   </div>
                   <div class="compact-actions">
                     <button id="worldPeers" class="button button-subtle world-required" type="button">Members</button>
