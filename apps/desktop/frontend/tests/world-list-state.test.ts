@@ -162,5 +162,12 @@ describe('Svelte world browsing and native list contracts', () => {
     expect(worldSafetyTone('history conflict')).toBe('danger');
     expect(worldSafetyTone('solo degraded')).toBe('warning');
     expect(worldSafetyTone('')).toBe('neutral');
+    for (const unsafe of [
+      'noncanonical', 'not canonical', 'quorum unavailable', 'canonical but unverified',
+      'unknown canonical', 'missing quorum', 'canonical unsafe',
+    ]) {
+      expect(worldSafetyTone(unsafe)).not.toBe('safe');
+      expect(nativeWorldSafetySummary(unsafe)).not.toMatch(/Canonical world history is available/);
+    }
   });
 });
