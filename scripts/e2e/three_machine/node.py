@@ -463,7 +463,7 @@ def capture(a):
         fail("backend_authority_missing")
     successor = canonical_peer_id(r.get("successor_peer_id"))
     snapshot = m.get("snapshot_hash")
-    return {
+    report = {
         "machine_fingerprint": fp(a.salt, machine_id),
         "world_fingerprint": fp(a.salt, a.world),
         "identity_fingerprint": fp(a.salt, peer),
@@ -509,6 +509,10 @@ def capture(a):
         "test_profile_log_digests": log_digests(root),
         "connectivity_diagnostics": connectivity_summary(root),
     }
+    after_inventory = world_server_inventory(root, a.world)
+    if after_inventory is None or sorted(server_inventory) != sorted(after_inventory):
+        fail("world_server_inventory_changed_during_capture")
+    return report
 
 
 def process_command(pid):
