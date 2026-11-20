@@ -12,8 +12,8 @@ use std::{
 
 use rand_core::{OsRng, RngCore};
 use swarm_protocol::{
-    ExpectedHostingAuthorityHeadV2, Hash32, HostingAuthorityOperationV2, PeerId,
-    SignedHostingAuthorityActionV2, WorldId,
+    ExpectedHostingAuthorityHeadV2, Hash32, HostingAuthorityOperationV2, PeerId, SignedHostingAuthorityActionV2,
+    WorldId,
 };
 use thiserror::Error;
 
@@ -135,8 +135,7 @@ impl V2AuthorityActionNonceBook {
 
     pub fn expire(&mut self, now: Instant) {
         self.pending.retain(|_, entry| {
-            now.checked_duration_since(entry.issued_at)
-                .is_some_and(|age| age <= ACTION_NONCE_LIFETIME)
+            now.checked_duration_since(entry.issued_at).is_some_and(|age| age <= ACTION_NONCE_LIFETIME)
         });
     }
 
@@ -159,16 +158,12 @@ impl V2AuthorityActionNonceBook {
         // candidates or fenced generations must serialize through the
         // accepted-root coordinator; allowing multiple pending actions would
         // hide transfer/recovery or successor conflicts.
-        if self.pending.values().any(|entry| {
-            entry.scope.realm_id == scope.realm_id && entry.scope != scope
-        }) {
+        if self.pending.values().any(|entry| entry.scope.realm_id == scope.realm_id && entry.scope != scope) {
             return Err(V2AuthorityActionNonceError::ConcurrentSuccessor);
         }
         // Reissuing one exact operation on one connection invalidates its
         // predecessor, rather than allowing duplicate signed completions.
-        self.pending.retain(|_, entry| {
-            entry.scope != scope
-        });
+        self.pending.retain(|_, entry| entry.scope != scope);
         if self.pending.len() >= MAX_PENDING_V2_AUTHORITY_ACTIONS {
             return Err(V2AuthorityActionNonceError::CapacityExceeded);
         }
@@ -202,8 +197,7 @@ impl V2AuthorityActionNonceBook {
             return Err(V2AuthorityActionNonceError::UnknownOrStaleNonce);
         };
         if pending.scope != scope
-            || !now.checked_duration_since(pending.issued_at)
-                .is_some_and(|age| age <= ACTION_NONCE_LIFETIME)
+            || !now.checked_duration_since(pending.issued_at).is_some_and(|age| age <= ACTION_NONCE_LIFETIME)
         {
             self.pending.remove(&nonce);
             return Err(V2AuthorityActionNonceError::UnknownOrStaleNonce);
@@ -232,9 +226,7 @@ impl V2AuthorityActionNonceBook {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
-    use swarm_protocol::{
-        peer_id_from_public_key, SignedHostingAuthorityActionV2, HOSTING_REALM_FORMAT_VERSION_V2,
-    };
+    use swarm_protocol::{peer_id_from_public_key, SignedHostingAuthorityActionV2, HOSTING_REALM_FORMAT_VERSION_V2};
 
     fn session() -> (VerifiedAuthorityFeatureSession, SigningKey) {
         use crate::authority_capability::{
@@ -280,9 +272,8 @@ mod tests {
             verifier_transport_peer: &claim.verifier_transport_peer,
             now_unix_ms: 105_000,
         };
-        let verified = verify_authority_feature_session(
-            MANDATORY_AUTHORITY_WIRE_PROTOCOL, &claim, &expected, || true,
-        ).unwrap();
+        let verified =
+            verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &claim, &expected, || true).unwrap();
         (verified, key)
     }
 
@@ -304,11 +295,7 @@ mod tests {
         }
     }
 
-    fn sign_action(
-        scope: V2AuthorityActionScope,
-        nonce: [u8; 32],
-        key: &SigningKey,
-    ) -> SignedHostingAuthorityActionV2 {
+    fn sign_action(scope: V2AuthorityActionScope, nonce: [u8; 32], key: &SigningKey) -> SignedHostingAuthorityActionV2 {
         let mut action = SignedHostingAuthorityActionV2 {
             format_version: HOSTING_REALM_FORMAT_VERSION_V2,
             operation: scope.operation,
@@ -368,10 +355,7 @@ mod tests {
             Err(V2AuthorityActionNonceError::InvalidSignedAction(V2AuthorityActionError::InvalidAction))
         );
         assert_eq!(book.pending_count(), 1);
-        assert_eq!(
-            book.verify_action(session, scope, &sign_action(scope, nonce, &key), 105_000, now),
-            Ok(())
-        );
+        assert_eq!(book.verify_action(session, scope, &sign_action(scope, nonce, &key), 105_000, now), Ok(()));
     }
 
     #[test]
@@ -383,10 +367,7 @@ mod tests {
         let nonce = book.issue(session, original, 105_000, now).unwrap();
         let mut alternate = original;
         alternate.connection_generation += 1;
-        assert_eq!(
-            book.issue(session, alternate, 105_000, now),
-            Err(V2AuthorityActionNonceError::ConcurrentSuccessor)
-        );
+        assert_eq!(book.issue(session, alternate, 105_000, now), Err(V2AuthorityActionNonceError::ConcurrentSuccessor));
         let mut other_operation = original;
         other_operation.operation = HostingAuthorityOperationV2::TransferCommit;
         assert_eq!(
