@@ -430,10 +430,32 @@ fn cgroup_v2_memory_snapshot(
     }
     loop {
         let max_path = current.join("memory.max");
-        let limit = fs::read_to_string(&max_path)
+        let hard_limit = fs::read_to_string(&max_path)
             .with_context(|| format!("cannot read cgroup memory limit {}", max_path.display()))?;
-        if limit.trim() != "max" {
-            let limit_bytes: u64 = limit.trim().parse().context("invalid cgroup memory.max")?;
+        // memory.high is a reclaim/throttling boundary, not a hard limit.
+        // Respecting it during admission avoids deliberately starting a
+        // heap that immediately triggers sustained pressure in its service.
+        let high_path = current.join("memory.high");
+        let throttle_limit = match fs::read_to_string(&high_path) {
+            Ok(value) => Some(value),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("cannot read cgroup memory high {}", high_path.display()));
+            }
+        };
+        let mut finite_limit: Option<u64> = None;
+        for (kind, value) in [("memory.max", Some(hard_limit.as_str())), ("memory.high", throttle_limit.as_deref())] {
+            let Some(raw) = value else {
+                continue;
+            };
+            if raw.trim() == "max" {
+                continue;
+            }
+            let parsed: u64 = raw.trim().parse().with_context(|| format!("invalid cgroup {kind}"))?;
+            finite_limit = Some(finite_limit.map_or(parsed, |existing| existing.min(parsed)));
+        }
+        if let Some(limit_bytes) = finite_limit {
             let usage_path = current.join("memory.current");
             let used_bytes: u64 = fs::read_to_string(&usage_path)
                 .with_context(|| format!("cannot read cgroup memory usage {}", usage_path.display()))?
@@ -575,6 +597,29 @@ mod tests {
     fn memory(total: u64, available: u64) -> AvailableMemory {
         AvailableMemory { physical_mib: total, available_mib: available }
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn throttled_cgroup_rejects_hosting_even_when_hard_limit_is_unbounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        let child = mount.join("system.slice/swarmcraft.service");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(mount.join("memory.max"), b"max\n").unwrap();
+        fs::write(child.join("memory.max"), b"max\n").unwrap();
+        fs::write(child.join("memory.high"), b"4294967296\n").unwrap();
+        fs::write(child.join("memory.current"), b"3221225472\n").unwrap();
+
+        let measured =
+            cgroup_v2_memory_snapshot(mount, "0::/system.slice/swarmcraft.service\n", memory(32_768, 25_000))
+                .unwrap();
+        assert_eq!(measured, memory(4096, 1024));
+        assert!(check_budget(512, measured).is_err());
+
+        fs::write(child.join("memory.high"), b"not-a-number\n").unwrap();
+        assert!(cgroup_v2_memory_snapshot(mount, "0::/system.slice/swarmcraft.service\n", memory(32_768, 25_000))
+            .is_err());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn cgroup_v2_opaque_or_inaccessible_mount_never_authorizes_host_memory() {
