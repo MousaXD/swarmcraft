@@ -366,14 +366,11 @@ export function normalizeMigrationState(raw) {
       : index >= 0
         ? Math.round((index / (MIGRATION_PHASES.length - 2)) * 100)
         : 0;
-  const detail = String(
-    source.detail
-      || source.message
-      || failureReason
-      || (backendPhase === 'ready' && runtimeReady
-        ? 'The last local runtime report reached Ready; current server availability and Minecraft client access are unverified.'
-        : ''),
-  ).trim();
+  // A machine-local Ready record can survive a crash and can carry arbitrary
+  // descriptive text. Never let it advertise a trusted or live Minecraft route.
+  const detail = backendPhase === 'ready'
+    ? 'The last local runtime report reached Ready; current server availability and Minecraft client access are unverified.'
+    : String(source.detail || source.message || failureReason || '').trim();
 
   return {
     available: Boolean(knownPhase),
