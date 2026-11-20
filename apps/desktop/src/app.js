@@ -333,7 +333,7 @@ function renderMigration(state) {
   $('migrationBadge').textContent = migration.label;
   // The persisted Ready phase can survive a hard crash. It is not a live
   // Minecraft process check or a signed client route, so never paint it green.
-  $('migrationBadge').className = `status-badge ${migration.failed ? 'danger' : migration.available ? 'warning' : 'neutral'}`;
+  $('migrationBadge').className = `status-badge ${migration.failed || continuity.tone === 'danger' ? 'danger' : migration.available ? 'warning' : 'neutral'}`;
   $('migrationSummary').textContent = migration.detail || (migration.available ? migration.label : 'No host migration is active.');
   $('migrationProgress').hidden = !migration.available || migration.failed || migration.blocked || migration.phase === 'ready';
   $('migrationProgressBar').style.width = `${migration.progress}%`;
