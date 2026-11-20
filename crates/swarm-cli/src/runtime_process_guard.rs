@@ -99,13 +99,10 @@ pub fn refuse_unaccounted_runtimes(paths: &DataPaths) -> Result<()> {
                 return Err(error).with_context(|| format!("cannot inspect {}", record_path.display()));
             }
         }
-        let bytes = match fs::read(&record_path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error).with_context(|| format!("cannot inspect {}", record_path.display()));
-            }
-        };
+        // Once a record was observed, deletion or replacement between
+        // metadata inspection and read must not become "no record".
+        let bytes = fs::read(&record_path)
+            .with_context(|| format!("cannot read observed hosting process record {}", record_path.display()))?;
         let record: RuntimeProcessRecord = serde_json::from_slice(&bytes).with_context(|| {
             format!("unreadable hosting process record at {}; new JVM denied", record_path.display())
         })?;
