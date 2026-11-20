@@ -46,6 +46,26 @@ jobs:
           SWARMCRAFT_ACCEPTANCE_LOG_DIR: ${{ runner.temp }}/swarmcraft-clean-machine-logs
         run: |
           set -euo pipefail
+          # The build step installs Java 25, and current GitHub runners also expose
+          # a compatible /usr/bin/java. Unsetting JAVA_HOME alone no longer forces
+          # the player to acquire a managed JVM. Mask *only* the system Java command
+          # while leaving curl/tar/python/bash available to the real installer.
+          # The runtime's Java probe must fail, install an official managed JVM,
+          # and subsequently launch real Minecraft with that managed executable.
+          java_mask="$RUNNER_TEMP/swarmcraft-no-system-java"
+          mkdir -p "$java_mask"
+          cat > "$java_mask/java" <<'SH'
+          #!/bin/sh
+          echo 'CI: system Java intentionally hidden from runtime discovery' >&2
+          exit 127
+          SH
+          chmod 0755 "$java_mask/java"
+          base_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          actual_java="$(env -u JAVA_HOME PATH="$java_mask:$base_path" sh -c 'command -v java')"
+          test "$actual_java" = "$java_mask/java" || {
+            echo "Managed Java isolation failed: detected $actual_java" >&2
+            exit 1
+          }
           # Each attempt MUST start from a genuinely empty data directory and
           # install the official managed Java/Minecraft/Fabric artifacts itself.
           # Never retry a product assertion, checksum failure or other non-504
@@ -57,7 +77,7 @@ jobs:
             console="$logs/console.log"
             echo "Live player journey attempt $attempt/4 (fresh state)"
             if env -u JAVA_HOME \
-                PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+                PATH="$java_mask:$base_path" \
                 SWARMCRAFT_FABRIC_MOD_JAR="$SWARMCRAFT_FABRIC_MOD_JAR" \
                 SWARMCRAFT_ACCEPTANCE_KEEP_DATA=1 \
                 SWARMCRAFT_ACCEPTANCE_DATA_DIR="$data" \
