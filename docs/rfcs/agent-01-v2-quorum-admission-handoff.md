@@ -1,0 +1,27 @@
+# Agent 01 — signed V2 migration quorum admission (2026-11-20)
+
+**Status: partial, inert consensus prerequisite. NOT live V2 authority admission.**
+
+Implementation is isolated to `swarm-consensus::v2_migration_quorum` and the consensus crate's Ed25519 dependency. It is based on the existing signed V2 protocol types from Agent 02 and the inert negative gates from Agent 11. V1 authority/lease, wire, persistence and Minecraft launch paths are intentionally unchanged.
+
+## Verified checks
+
+- The distinct V2 realm proposal must extend explicit independently pinned accepted V1 world/config/membership/snapshot/epoch/fencing values. The proposed identity must not equal the source world.
+- The source canonical membership itself and migration proposal must have valid Ed25519 signatures by the active canonical source authority. Source member key identities, sorted membership and non-banned authority eligibility are checked.
+- Each migration vote must be a valid domain-separated signed V2 vote from an unbanned canonical member, with the exact proposal hash and accepted source membership hash. Unknown, mismatched, duplicated, mutated and insufficient votes fail closed.
+- Quorum counts **all active V1 voters**, including player-only and storage-only members, not only authority-eligible hosting candidates.
+- A pending old/new membership transition is explicitly blocked until an independently certified joint quorum can be checked. No silent reduction of the voter universe.
+- Stale source hashes, snapshots, epochs, invalid target fencing, corrupted membership signatures and forged proposals fail closed.
+
+## Non-negotiable missing dependencies
+
+1. **Trusted source history** — the caller of the quorum checker must obtain accepted V1 history pins from independently verified canonical storage, validate the full signed V1 history and latest snapshot/epoch, prove the absence of an outstanding pending membership transition, and check the current accepted authority fence/lease. A caller cannot mint trustworthy pins by copying fields from a remote proposal.
+2. **Joint consensus** — verify pending old/new voter-set transition certificates and require both authentic majorities where a change is pending. The current stable-voter verifier returns an error instead.
+3. **Canonical durable activation** — implement atomic compare-and-swap of the uniquely accepted V2 realm and immutable accepted roots, crash-safe replay detection, conflicting successor prevention, policy chain and rollback/downgrade rejection. `VerifiedV2MigrationVoteSet` has no conversion to an active policy/authority state.
+4. **Network isolation** — negotiate a genuinely distinct `/swarmcraft/hosting-authority/2` transport with challenge bound to the live connection and source-validated committed migration hash. The legacy `/swarmcraft/1` transport, V1 PeerHello strings or replication/membership must never authorize V2 authority. Agent 11 owns protocol representation.
+5. **Runtime routes and resource admission** — integrate the durable accepted-root policy and signed action/session verification into *every* direct launch, recovery, transfer, wake, lease grant, and renewal path. Agent 03 owns atomic local consent and resource budget proofs; only current verified local runtime state can prove heap/headroom.
+6. **Independent certification** — exact-head Required Validation + Main Desktop Installers, adversarial mixed-version/partition/crash and three real machines, Agent 07 independent review and Agent 00 merge governance.
+
+## Security disposition
+
+Do **not** activate V2, merge into main, close #84 or treat this vote-set predicate as a certificate of canonical migration. The old V1 quorum/fencing rules remain authoritative for existing V1 worlds. If the source history cannot be independently certified and legacy authorities cannot be excluded, V2 hosting must remain fail-closed.
