@@ -34,6 +34,8 @@ SAFE_BOOL_KEYS = frozenset({
     'identityToolsPresent', 'identityToolsOpen',
     'connectivityOwned', 'connectivityFinished', 'connectivityNativeConfirmed',
     'connectivityVerified', 'connectivityNoAuthorityClaim',
+    'daemonOwned', 'daemonStarted', 'daemonStartFinished', 'daemonStopConfirmed',
+    'daemonStopFinished', 'daemonStaleStatusCleared', 'daemonErrorHidden',
 })
 SAFE_INT_KEYS = frozenset({
     'width', 'height', 'rootScrollWidth', 'paneScrollWidth',
@@ -292,6 +294,35 @@ def run(binary: Path, artifacts: Path):
         assert all(network_check.values()), (
             "Installed native Svelte network check did not verify a fresh Rust diagnostic"
         )
+        mark_stage('native-daemon-start')
+        daemon_owner = app.execute("""
+          return {
+            daemonOwned: window.__swarmcraftSvelteNetworkingOwned === true &&
+              typeof window.__swarmcraftAfterSvelteNetworkingChange === 'function',
+          };
+        """)
+        record_ui(daemon_owner)
+        assert daemon_owner['daemonOwned'], "Start Networking must be Svelte-owned"
+        app.click("#startDaemon")
+        start_result = None
+        for _ in range(100):
+            start_result = app.execute("""
+              const notice = document.getElementById('networkServiceNotice');
+              const error = document.getElementById('networkServiceError');
+              const start = document.getElementById('startDaemon');
+              return {
+                daemonStarted: !!notice && !notice.hidden && /started/i.test(notice.textContent || ''),
+                daemonStartFinished: !!start && !start.disabled,
+                daemonErrorHidden: !error || error.hidden,
+              };
+            """)
+            record_ui(start_result)
+            if all(start_result.values()):
+                break
+            time.sleep(0.2)
+        assert all(start_result.values()), (
+            "Installed Start Networking did not complete the real Rust IPC"
+        )
         app.click("#navWorlds")
         # Exercise the new Svelte signed-invite form in an installed app.
         # No invite is sent to Rust here; an empty form must fail locally,
@@ -547,6 +578,40 @@ def run(binary: Path, artifacts: Path):
         """)
         record_ui(leave_cancelled)
         assert all(leave_cancelled.values()), "Cancelling leave changed canonical membership"
+        # Run Stop Networking LAST: it deliberately changes the actual bundled
+        # daemon state and must never compromise preceding membership tests.
+        mark_stage('native-daemon-stop')
+        tools_open = app.execute("""
+          return document.getElementById('advancedNavigation')?.open === true;
+        """)
+        if not tools_open:
+            app.click("#advancedNavigation > summary")
+        app.click("#navDiagnostics")
+        app.click("#stopDaemon")
+        stop_result = None
+        for _ in range(100):
+            stop_result = app.execute("""
+              const notice = document.getElementById('networkServiceNotice');
+              const error = document.getElementById('networkServiceError');
+              const stop = document.getElementById('stopDaemon');
+              const badge = document.getElementById('diagnosticConnectivity');
+              const selection = document.getElementById('selectedConnectivity');
+              return {
+                daemonStopConfirmed: !!notice && !notice.hidden && /stopped/i.test(notice.textContent || ''),
+                daemonStopFinished: !!stop && !stop.disabled,
+                daemonErrorHidden: !error || error.hidden,
+                daemonStaleStatusCleared:
+                  badge?.dataset.nativeConnectionPhase === 'unchecked' &&
+                  !!selection && !/direct connection|connected through relay/i.test(selection.textContent || ''),
+              };
+            """)
+            record_ui(stop_result)
+            if all(stop_result.values()):
+                break
+            time.sleep(0.2)
+        assert all(stop_result.values()), (
+            "Installed Stop Networking failed to revoke stale connected presentation"
+        )
         # Restore configured default for follow-up screenshots.
         native.request(f"/session/{app.session}/window/rect", "POST", {
             "width": 980, "height": 760
