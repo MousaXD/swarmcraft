@@ -128,7 +128,7 @@ export function clientContinuityFromMigration(status, expectedWorldId, safety) {
       );
     }
     return outcome(
-      'manual_reconnect_required',
+      'route_unverified',
       'Minecraft reconnection is not verified',
       'The last local runtime report reached Ready for this world and generation, but the report can remain after a crash and does not prove the server is still running. SwarmCraft has no authenticated, client-reachable game route or automatic Minecraft reconnect. Do not reuse an old address or join an unverified successor.',
     );
