@@ -39,7 +39,7 @@ const DISCOVERY_FRESHNESS_TIMEOUT: Duration = Duration::from_secs(5);
 // A transient QUIC stream loss must not permanently hide a signed canonical
 // provider. Limit retries to the caller's explicit locators and the existing
 // overall discovery deadline; retries never bypass authentication or quorum.
-const DISCOVERY_EXPLICIT_BROWSE_RETRIES: u8 = 2;
+const DISCOVERY_EXPLICIT_PROVIDER_RETRIES: u8 = 2;
 const FRIENDS_FILE_VERSION: u16 = 1;
 const MAX_FRIEND_LABEL_BYTES: usize = 96;
 
@@ -886,13 +886,12 @@ pub fn list_friends(paths: &DataPaths) -> Result<Vec<FriendCardV1>> {
 }
 
 fn reserve_explicit_provider_retry(attempts: &mut u8) -> bool {
-    if *attempts >= DISCOVERY_EXPLICIT_BROWSE_RETRIES {
+    if *attempts >= DISCOVERY_EXPLICIT_PROVIDER_RETRIES {
         return false;
     }
     *attempts += 1;
     true
 }
-
 
 fn reserve_matching_explicit_provider_retry(
     pending: &mut HashMap<String, TransportPeerId>,
@@ -1027,17 +1026,17 @@ pub async fn search_public_worlds(
                         request_id,
                         &bootstrap_peers,
                     ) {
-                            requested.remove(&transport_peer);
-                            if node.application_peer(&transport_peer).is_some() {
-                                let next = node.send_request(
+                        requested.remove(&transport_peer);
+                        if node.application_peer(&transport_peer).is_some() {
+                            let next = node.send_request(
                                     &transport_peer,
                                     WireRequest::DiscoveryPublic { filter: filter.clone() },
                                 )?;
-                                pending.insert(format!("{next:?}"), transport_peer);
-                                requested.insert(transport_peer);
-                            } else if let Err(dial_error) = node.dial_peer(transport_peer) {
-                                debug!(%dial_error, %transport_peer, "discovery provider retry dial failed");
-                            }
+                            pending.insert(format!("{next:?}"), transport_peer);
+                            requested.insert(transport_peer);
+                        } else if let Err(dial_error) = node.dial_peer(transport_peer) {
+                            debug!(%dial_error, %transport_peer, "discovery provider retry dial failed");
+                        }
                     }
                 }
                 _ => {}
@@ -1203,7 +1202,6 @@ pub async fn resolve_world(
                 }
                 DiscoveryNetworkEvent::OutboundFailure { transport_peer, request_id, error } => {
                     detail.get_or_insert(error);
-                    let key = format!("{request_id:?}");
                     // Retry only an actual pending request to an explicit
                     // locator. DHT-only results and duplicate failures cannot
                     // trigger redial amplification.
@@ -1214,17 +1212,17 @@ pub async fn resolve_world(
                         request_id,
                         &bootstrap_peers,
                     ) {
-                            requested.remove(&transport_peer);
-                            if node.is_authenticated(&transport_peer) {
-                                let next = node.send_request(
+                        requested.remove(&transport_peer);
+                        if node.is_authenticated(&transport_peer) {
+                            let next = node.send_request(
                                     &transport_peer,
                                     WireRequest::DiscoveryResolve { world_id: world },
                                 )?;
-                                pending.insert(format!("{next:?}"), transport_peer);
-                                requested.insert(transport_peer);
-                            } else if let Err(dial_error) = node.dial_peer(transport_peer) {
-                                debug!(%dial_error, %transport_peer, "discovery exact-resolve retry dial failed");
-                            }
+                            pending.insert(format!("{next:?}"), transport_peer);
+                            requested.insert(transport_peer);
+                        } else if let Err(dial_error) = node.dial_peer(transport_peer) {
+                            debug!(%dial_error, %transport_peer, "discovery exact-resolve retry dial failed");
+                        }
                     }
                 }
                 _ => {}
@@ -1638,7 +1636,7 @@ mod tests {
         assert!(reserve_explicit_provider_retry(&mut retries));
         assert!(reserve_explicit_provider_retry(&mut retries));
         assert!(!reserve_explicit_provider_retry(&mut retries));
-        assert_eq!(retries, DISCOVERY_EXPLICIT_BROWSE_RETRIES);
+        assert_eq!(retries, DISCOVERY_EXPLICIT_PROVIDER_RETRIES);
     }
 
     #[test]
@@ -1671,7 +1669,7 @@ mod tests {
         assert!(!reserve_matching_explicit_provider_retry(
             &mut pending, &mut attempts, canonical, "req-3", &explicit_peers
         ));
-        assert_eq!(attempts[&canonical], DISCOVERY_EXPLICIT_BROWSE_RETRIES);
+        assert_eq!(attempts[&canonical], DISCOVERY_EXPLICIT_PROVIDER_RETRIES);
 
         pending.insert(format!("{:?}", "dht-1"), dht_only);
         assert!(!reserve_matching_explicit_provider_retry(
