@@ -1,5 +1,5 @@
 use crate::{
-    transaction::{canonical_file_exists, durable_atomic_write, durable_remove, read_canonical_file},
+    transaction::{durable_atomic_write, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
 use serde::{Deserialize, Serialize};
@@ -17,17 +17,6 @@ pub enum RecoveryPromiseResult {
     Accepted,
     Idempotent,
     Rejected { highest_round: u64 },
-}
-
-
-fn solo_conflicts_directory_present(path: &std::path::Path) -> Result<bool, StorageError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(StorageError::SymlinkUnsupported(path.to_path_buf())),
-        Ok(metadata) if metadata.is_dir() => Ok(true),
-        Ok(_) => Err(StorageError::WorldMetadataMismatch),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(io_error(path, source)),
-    }
 }
 
 impl Storage {
@@ -208,20 +197,12 @@ impl Storage {
         let _guard = self.lock_world_transaction(branch.world_id)?;
         branch.validate_semantics()?;
         let hash = branch.branch_hash()?;
-        let dir = self.world_dir(branch.world_id).join("recovery").join("solo-conflicts");
-        solo_conflicts_directory_present(&dir)?;
-        let path = dir.join(format!("{}.postcard", hash.to_hex()));
-        if canonical_file_exists(&path)? {
-            // The filename is derived from the signed content, not the
-            // signature bytes. Never mistake unreadable or differing durable
-            // evidence for an idempotent previously preserved conflict.
-            let bytes = read_canonical_file(&path)?;
-            let existing: SoloBranchV1 = postcard::from_bytes(&bytes)?;
-            existing.validate_semantics()?;
-            if existing != *branch {
-                return Err(StorageError::WorldMetadataMismatch);
-            }
-        } else {
+        let path = self
+            .world_dir(branch.world_id)
+            .join("recovery")
+            .join("solo-conflicts")
+            .join(format!("{}.postcard", hash.to_hex()));
+        if !path.exists() {
             durable_atomic_write(&path, &postcard::to_allocvec(branch)?)?;
         }
         Ok(path)
@@ -229,27 +210,21 @@ impl Storage {
 
     pub fn list_solo_conflicts(&self, world: WorldId) -> Result<Vec<SoloBranchV1>, StorageError> {
         let dir = self.world_dir(world).join("recovery").join("solo-conflicts");
-        if !solo_conflicts_directory_present(&dir)? {
+        if !dir.exists() {
             return Ok(Vec::new());
         }
         let mut branches = Vec::new();
         for entry in fs::read_dir(&dir).map_err(|error| io_error(&dir, error))? {
             let entry = entry.map_err(|error| io_error(&dir, error))?;
-            let path = entry.path();
-            // Temporary files left by interrupted atomic publication are not
-            // canonical records. Every *.postcard entry is mandatory evidence:
-            // reject a symlink, invalid path type, unreadable or malformed data.
-            if path.extension().and_then(|value| value.to_str()) != Some("postcard") {
+            if !entry.file_type().map_err(|error| io_error(entry.path(), error))?.is_file() {
                 continue;
             }
-            let bytes = read_canonical_file(&path)?;
+            let bytes = fs::read(entry.path()).map_err(|error| io_error(entry.path(), error))?;
             let branch: SoloBranchV1 = postcard::from_bytes(&bytes)?;
-            branch.validate_semantics()?;
-            let expected_name = format!("{}.postcard", branch.branch_hash()?.to_hex());
-            if branch.world_id != world || entry.file_name().to_str() != Some(expected_name.as_str()) {
-                return Err(StorageError::WorldMetadataMismatch);
+            if branch.world_id == world {
+                branch.validate_semantics()?;
+                branches.push(branch);
             }
-            branches.push(branch);
         }
         branches.sort_by_key(|branch| (branch.head_epoch, branch.head_sequence, branch.head_snapshot_hash));
         Ok(branches)
