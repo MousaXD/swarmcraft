@@ -629,3 +629,31 @@ test('Svelte owns native Rust world browsing and selected-row presentation witho
   assert.ok(native.indexOf('app.click("#refresh")') < native.indexOf('app.click("#worldCards .world-row")'),
     'installed GUI must refresh through Svelte before selecting a real row');
 });
+
+
+test('selected-world read-only header and safety panel derive solely from current native Svelte state', async () => {
+  const [view, state, legacy] = await Promise.all([
+    source('../src/components/WorldsView.svelte'),
+    source('../src/lib/world-list-state.ts'),
+    source('../../src/app.js'),
+  ]);
+  assert.ok(view.includes('const selectedEntry = $derived($worldState.worlds.find(world => world.id === selectedId));'));
+  for (const binding of [
+    "{selectedEntry?.name || 'World'}",
+    "{selectedEntry?.id || ''}",
+    "{selectedEntry?.status.Authority || 'Not reported'}",
+    "{selectedEntry?.status['Authorized peers'] || 'Unknown'}",
+    "{selectedEntry?.status.Minecraft || 'Unknown'}",
+    "{selectedEntry?.compatibility['Authority eligibility'] || 'Not synchronized'}",
+    'nativeWorldSafetySummary(selectedEntry?.status.Safety)',
+    'worldSafetyTone(selectedEntry?.status.Safety)',
+  ]) {
+    assert.ok(view.includes(binding), 'missing reactive native metadata: ' + binding);
+  }
+  assert.ok(state.includes('export function nativeWorldSafetySummary(safety: unknown)'));
+  assert.ok(legacy.includes('if (window.__swarmcraftSvelteWorldsOwned !== true) {'),
+    'legacy should not overwrite Svelte-owned selected header');
+  assert.ok(legacy.includes("updatePlayState(world);"), 'Play remains guarded by existing Rust readiness');
+  assert.ok(legacy.includes("refreshHostReadiness(world);"), 'Host readiness must remain a separate Rust-backed decision');
+  assert.ok(legacy.includes("refreshWorldMods(world);"), 'Mods must not be invented by renderer');
+});
