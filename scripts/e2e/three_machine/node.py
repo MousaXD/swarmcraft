@@ -434,8 +434,11 @@ def stable_world_server_inventory(before, after):
 
 
 def capture(a):
-    if not re.fullmatch("[a-fA-F0-9]{64}", a.world):
+    if not isinstance(a.world, str) or not re.fullmatch("[a-fA-F0-9]{64}", a.world):
         fail("world_id_invalid")
+    # CLI accepts upper/lowercase hex, but storage paths and salted stage
+    # fingerprints must always bind to the SAME canonical lowercase world ID.
+    a.world = a.world.lower()
     # Every phase must originate on the same machine that passed preflight.
     # SSH host-key trust alone cannot detect a changed target or copied data.
     machine_id = Path("/etc/machine-id").read_text(encoding="utf-8").strip()
