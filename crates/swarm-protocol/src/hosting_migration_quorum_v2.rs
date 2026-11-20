@@ -21,6 +21,42 @@ use super::{
 /// a separately reviewed wire/storage resource contract.
 pub const MAX_HOSTING_MIGRATION_VOTES_V2: usize = 1024;
 
+/// Deserialize a signed vote sequence without an attacker-controlled Vec
+/// reservation. The signed envelope must be checked before consumption even
+/// after bounded decoding; this bound is not a quorum proof.
+fn deserialize_bounded_migration_votes<'de, D>(
+    deserializer: D,
+) -> Result<Vec<SignedHostingMigrationVoteV2>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct BoundedMigrationVotes;
+
+    impl<'de> serde::de::Visitor<'de> for BoundedMigrationVotes {
+        type Value = Vec<SignedHostingMigrationVoteV2>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("at most 1024 signed hosting migration votes")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut votes = Vec::new();
+            while let Some(vote) = seq.next_element::<SignedHostingMigrationVoteV2>()? {
+                if votes.len() >= MAX_HOSTING_MIGRATION_VOTES_V2 {
+                    return Err(serde::de::Error::custom("too many signed hosting migration votes"));
+                }
+                votes.push(vote);
+            }
+            Ok(votes)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedMigrationVotes)
+}
+
 /// A set of individual signed V2 votes, NOT a canonical cutover certificate.
 /// Sorting and unique signers are mandatory to prevent vote amplification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +64,7 @@ pub struct SignedHostingMigrationQuorumV2 {
     pub format_version: u16,
     pub migration_proposal_hash: Hash32,
     pub source_membership_hash: Hash32,
+    #[serde(deserialize_with = "deserialize_bounded_migration_votes")]
     pub votes: Vec<SignedHostingMigrationVoteV2>,
 }
 

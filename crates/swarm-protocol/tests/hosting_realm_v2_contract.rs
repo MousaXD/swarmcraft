@@ -584,6 +584,10 @@ fn signed_v2_migration_quorum_rejects_banned_voters_and_unbounded_envelopes() {
     cert = signed_quorum_for(&f, &f.membership.members[..2]);
     cert.votes = vec![cert.votes[0].clone(); MAX_HOSTING_MIGRATION_VOTES_V2 + 1];
     assert!(!check_quorum(&f, &cert));
+    // Reject before allocating an arbitrary-sized Vec on the untrusted
+    // postcard input path, rather than relying on post-deserialize verify.
+    let oversized_bytes = postcard::to_allocvec(&cert).unwrap();
+    assert!(postcard::from_bytes::<SignedHostingMigrationQuorumV2>(&oversized_bytes).is_err());
 
     // This source is deliberately noncanonical because the banned change
     // is not signed again. Even under a permissive signature stub, a vote
