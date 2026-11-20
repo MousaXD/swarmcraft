@@ -64,7 +64,7 @@
                 </div>
                 <button id="refresh" class="icon-button" type="button" aria-label="Refresh worlds" title="Refresh worlds" onclick={refreshWorlds} disabled={$worldState.busy} aria-busy={$worldState.busy}>↻</button>
               </div>
-              <div id="worldCards" class="world-list" aria-live="polite" aria-busy={$worldState.busy}>
+              <div id="worldCards" class="world-list" aria-live="polite" aria-busy={$worldState.busy} data-world-list-phase={$worldState.phase} data-native-verified-read-count={$worldState.verifiedReadCount}>
                 {#if $worldState.busy && !$worldState.worlds.length}
                   <div class="loading-list" aria-hidden="true">
                     <span></span><span></span><span></span>
