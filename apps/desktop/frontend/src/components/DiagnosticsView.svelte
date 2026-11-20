@@ -15,6 +15,77 @@
     await connectivityController.refresh();
   }
 
+  let listenInput: HTMLInputElement | undefined;
+  let serviceBusy = $state(false);
+  let serviceMessage = $state('');
+  let serviceError = $state('');
+
+  async function boundedService<T>(operation: () => Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        Promise.resolve().then(operation),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Daemon IPC timed out')), 30_000);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  async function changeNetworking(action: 'start' | 'stop') {
+    if (serviceBusy) return;
+    if (typeof window.__swarmcraftAfterSvelteNetworkingChange !== 'function') {
+      serviceError = 'Desktop initialization has not finished. Retry after setup.';
+      return;
+    }
+    const listen = String(listenInput?.value ?? '').trim();
+    if (action === 'start' && !listen) {
+      serviceError = 'Enter a listen multiaddress before starting networking.';
+      listenInput?.focus();
+      return;
+    }
+    serviceBusy = true;
+    serviceMessage = '';
+    serviceError = '';
+    let nativeAccepted = false;
+    try {
+      if (action === 'start') {
+        const pid = await boundedService(() => nativeBridge().invoke('ensure_daemon_running', { listen }));
+        if (!Number.isInteger(pid) || pid <= 0) throw new Error('Daemon PID not verified');
+        nativeAccepted = true;
+        connectivityController.invalidate();
+        serviceMessage = 'Networking started. Native connectivity may still be unavailable.';
+        await window.__swarmcraftAfterSvelteNetworkingChange('started');
+        await connectivityController.refresh();
+      } else {
+        await boundedService(() => nativeBridge().invoke('stop_daemon', {}));
+        nativeAccepted = true;
+        connectivityController.invalidate(
+          'Networking was stopped on this device. Previously reported paths may no longer be available.',
+        );
+        serviceMessage = 'Desktop networking stopped. Replication and migration supervision may be interrupted.';
+        await window.__swarmcraftAfterSvelteNetworkingChange('stopped');
+      }
+    } catch {
+      // A side effect may have completed even when its IPC acknowledgment,
+      // follow-up legacy view refresh, or status check failed. Never assert
+      // the daemon stopped or started on a timed-out or ambiguous operation.
+      connectivityController.invalidate(
+        'Networking outcome is not verified. Check native connectivity before relying on earlier paths.',
+      );
+      serviceError = nativeAccepted
+        ? 'The networking command completed, but status refresh failed. Check native connectivity before repeating it.'
+        : 'The networking change could not be confirmed. Check native diagnostics before retrying.';
+    } finally {
+      serviceBusy = false;
+    }
+  }
+
+  async function startNetworking() { await changeNetworking('start'); }
+  async function stopNetworking() { await changeNetworking('stop'); }
+
   // A named method avoids optional TypeScript arrow parameters in the
   // component's SSR transform while preserving the typed legacy bridge.
   function publishIdentity(value: string, source: IdentitySource = 'identity'): boolean {
@@ -74,12 +145,14 @@
                 </div>
                 <div class="field">
                   <label for="daemonListen">Listen multiaddress</label>
-                  <input id="daemonListen" class="machine-input" value="/ip4/0.0.0.0/udp/0/quic-v1" />
+                  <input id="daemonListen" bind:this={listenInput} class="machine-input" value="/ip4/0.0.0.0/udp/0/quic-v1" />
                 </div>
                 <div class="compact-actions">
-                  <button id="startDaemon" class="button button-secondary" type="button">Start networking</button>
-                  <button id="stopDaemon" class="button button-subtle" type="button">Stop networking</button>
+                  <button id="startDaemon" class="button button-secondary" type="button" onclick={startNetworking} disabled={serviceBusy} aria-busy={serviceBusy}>Start networking</button>
+                  <button id="stopDaemon" class="button button-subtle" type="button" onclick={stopNetworking} disabled={serviceBusy} aria-busy={serviceBusy}>Stop networking</button>
                 </div>
+                <p id="networkServiceNotice" class="helper" role="status" aria-live="polite" hidden={!serviceMessage}>{serviceMessage}</p>
+                <p id="networkServiceError" class="form-error" role="alert" hidden={!serviceError}>{serviceError}</p>
                 <p class="helper">Relay transport can provide connectivity, but it does not make a peer the canonical host.</p>
               </section>
 
