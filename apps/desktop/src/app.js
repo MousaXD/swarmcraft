@@ -328,7 +328,8 @@ function renderMigration(state) {
   $('clientContinuityDetail').textContent = continuity.detail;
   $('clientContinuityDetail').dataset.tone = continuity.tone;
   $('migrationBadge').textContent = migration.label;
-  $('migrationBadge').className = `status-badge ${migration.failed ? 'danger' : migration.phase === 'ready' ? 'safe' : migration.available ? 'warning' : 'neutral'}`;
+  const localServerReady = migration.phase === 'ready' && migration.runtimeReady && continuity.state === 'manual_reconnect_required';
+  $('migrationBadge').className = `status-badge ${migration.failed ? 'danger' : localServerReady ? 'safe' : migration.available ? 'warning' : 'neutral'}`;
   $('migrationSummary').textContent = migration.detail || (migration.available ? migration.label : 'No host migration is active.');
   $('migrationProgress').hidden = !migration.available || migration.failed || migration.blocked;
   $('migrationProgressBar').style.width = `${migration.progress}%`;
