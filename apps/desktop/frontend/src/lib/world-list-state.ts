@@ -151,3 +151,21 @@ export function worldSafetyTone(value: unknown): 'safe' | 'warning' | 'danger' |
   if (safety.includes('canonical') || safety.includes('quorum')) return 'safe';
   return 'neutral';
 }
+
+/**
+ * Presentation only: never infer host admission, quorum permission or Play
+ * availability from a label or an unverified local status string.
+ */
+export function nativeWorldSafetySummary(safety: unknown): string {
+  const tone = worldSafetyTone(safety);
+  if (tone === 'danger') {
+    return 'Divergent history is preserved. Review conflicts before hosting or recovering this world.';
+  }
+  if (tone === 'warning') {
+    return 'This world has reduced safety guarantees while solo or degraded history is active.';
+  }
+  if (tone === 'safe') {
+    return 'Canonical world history is available. Connectivity and replica availability are tracked separately.';
+  }
+  return 'Safety state is not available yet. Refresh before making recovery or hosting decisions.';
+}
