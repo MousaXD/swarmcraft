@@ -809,3 +809,72 @@ async fn authenticated_quic_stream_drop_is_observable_for_browse_and_exact_resol
         eprintln!("injected authenticated QUIC stream loss ({index}): {failure}");
     }
 }
+
+
+/// A provider that repeatedly drops an authenticated QUIC stream must not
+/// create a false successful browse or a false "world not found" conclusion.
+/// Even persistent adversarial transport failure receives at most two
+/// additional explicit-provider requests per query.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn permanently_disconnecting_explicit_provider_is_bounded_and_fails_closed() {
+    let (_, mut provider, address, _) = make_node([103; 32]).await;
+    let received = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    let received_for_task = received.clone();
+    let provider_task = tokio::spawn(async move {
+        loop {
+            if let DiscoveryNetworkEvent::InboundRequest {
+                transport_peer,
+                request,
+                channel,
+                ..
+            } = provider.next_event().await.expect("blackhole discovery provider event")
+            {
+                let kind = match request {
+                    WireRequest::DiscoveryPublic { .. } => "browse",
+                    WireRequest::DiscoveryResolve { .. } => "resolve",
+                    _ => {
+                        drop(channel);
+                        continue;
+                    }
+                };
+                received_for_task.lock().unwrap().push(kind);
+                provider.disconnect_peer(transport_peer).expect("terminate active authenticated QUIC connection");
+                drop(channel);
+            }
+        }
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let paths = DataPaths::from_root(temp.path());
+    let bootstraps = [address];
+
+    let browse = timeout(
+        Duration::from_secs(25),
+        search_public_worlds(&paths, DiscoverySearchInputV1::default(), &bootstraps),
+    )
+    .await
+    .expect("bounded public browse should terminate")
+    .expect("browse should produce a structured failure report");
+    assert_eq!(browse.state, "partial", "transport failure must not be reported as a successful empty result: {browse:?}");
+    assert!(browse.results.is_empty(), "failed network discovery must not invent a canonical world");
+
+    let exact = timeout(
+        Duration::from_secs(25),
+        resolve_world(&paths, swarm_protocol::WorldId([105; 32]), &bootstraps),
+    )
+    .await
+    .expect("bounded exact resolve should terminate")
+    .expect("exact resolve should produce a structured failure report");
+    assert_eq!(exact.state, "network_unavailable", "network failure must not be reported as world not found: {exact:?}");
+    assert!(exact.world.is_none(), "unreachable provider must never confer authority");
+
+    let attempts = received.lock().unwrap();
+    let browse_attempts = attempts.iter().filter(|kind| **kind == "browse").count();
+    let resolve_attempts = attempts.iter().filter(|kind| **kind == "resolve").count();
+    assert!((1..=3).contains(&browse_attempts), "public browse exceeded its bounded retry budget: {attempts:?}");
+    assert!((1..=3).contains(&resolve_attempts), "exact resolve exceeded its bounded retry budget: {attempts:?}");
+    drop(attempts);
+
+    provider_task.abort();
+    assert!(provider_task.await.is_err_and(|error| error.is_cancelled()));
+}
