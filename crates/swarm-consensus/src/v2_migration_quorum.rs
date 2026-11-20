@@ -141,21 +141,18 @@ pub fn verify_v2_migration_votes(
         return Err(V2MigrationQuorumError::UntrustedSourceHead);
     }
 
-    accepted_membership
-        .validate_semantics()
-        .map_err(|_| V2MigrationQuorumError::InvalidMembership)?;
+    accepted_membership.validate_semantics().map_err(|_| V2MigrationQuorumError::InvalidMembership)?;
     if accepted_membership.members.len() > MAX_MIGRATION_VOTERS
-        || accepted_membership.members.iter().any(|member| {
-            member.peer_id != peer_id_from_public_key(&member.public_key)
-        })
+        || accepted_membership
+            .members
+            .iter()
+            .any(|member| member.peer_id != peer_id_from_public_key(&member.public_key))
     {
         return Err(V2MigrationQuorumError::InvalidMembership);
     }
 
-    let source_authority = accepted_membership
-        .members
-        .iter()
-        .find(|member| member.peer_id == accepted_membership.authority_peer_id);
+    let source_authority =
+        accepted_membership.members.iter().find(|member| member.peer_id == accepted_membership.authority_peer_id);
     if source_authority.is_none_or(|member| {
         member.banned
             || !member.authority_eligible
@@ -167,17 +164,13 @@ pub fn verify_v2_migration_votes(
     }
     if !verify_signature(
         &accepted_membership.authority_public_key,
-        &accepted_membership
-            .signing_bytes()
-            .map_err(|_| V2MigrationQuorumError::InvalidMembership)?,
+        &accepted_membership.signing_bytes().map_err(|_| V2MigrationQuorumError::InvalidMembership)?,
         &accepted_membership.signature,
     ) {
         return Err(V2MigrationQuorumError::InvalidSourceSignature);
     }
 
-    proposal
-        .validate_shape()
-        .map_err(|_| V2MigrationQuorumError::InvalidProposal)?;
+    proposal.validate_shape().map_err(|_| V2MigrationQuorumError::InvalidProposal)?;
     if proposal.target_realm_id == accepted_source.world_id {
         return Err(V2MigrationQuorumError::InvalidProposal);
     }
@@ -192,15 +185,12 @@ pub fn verify_v2_migration_votes(
     }
     if !verify_signature(
         &proposal.source_authority_public_key,
-        &proposal
-            .signing_bytes()
-            .map_err(|_| V2MigrationQuorumError::InvalidProposal)?,
+        &proposal.signing_bytes().map_err(|_| V2MigrationQuorumError::InvalidProposal)?,
         &proposal.signature,
     ) {
         return Err(V2MigrationQuorumError::InvalidSourceSignature);
     }
-    let migration_proposal_hash =
-        proposal.proposal_hash().map_err(|_| V2MigrationQuorumError::InvalidProposal)?;
+    let migration_proposal_hash = proposal.proposal_hash().map_err(|_| V2MigrationQuorumError::InvalidProposal)?;
 
     if votes.is_empty() || votes.len() > MAX_MIGRATION_VOTERS {
         return Err(V2MigrationQuorumError::InvalidVoterSet);
@@ -211,9 +201,7 @@ pub fn verify_v2_migration_votes(
             return Err(V2MigrationQuorumError::InvalidVoterSet);
         }
         if !accepted_membership.members.iter().any(|member| {
-            !member.banned
-                && member.peer_id == vote.voter_peer_id
-                && member.public_key == vote.voter_public_key
+            !member.banned && member.peer_id == vote.voter_peer_id && member.public_key == vote.voter_public_key
         }) {
             return Err(V2MigrationQuorumError::InvalidVoter);
         }
@@ -260,10 +248,7 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let keys: Vec<_> = [1_u8, 2, 3]
-                .iter()
-                .map(|byte| SigningKey::from_bytes(&[*byte; 32]))
-                .collect();
+            let keys: Vec<_> = [1_u8, 2, 3].iter().map(|byte| SigningKey::from_bytes(&[*byte; 32])).collect();
             let mut members: Vec<_> = keys
                 .iter()
                 .map(|key| {
@@ -383,19 +368,13 @@ mod tests {
         assert_eq!(proof.source_membership_hash(), f.pins.membership_hash);
         assert_eq!(proof.activation_epoch(), 7);
         assert_eq!(proof.activation_fencing_token(), 10);
-        assert_eq!(
-            f.verify(&[f.vote(0)]),
-            Err(V2MigrationQuorumError::NoQuorum { votes: 1, required: 2 })
-        );
+        assert_eq!(f.verify(&[f.vote(0)]), Err(V2MigrationQuorumError::NoQuorum { votes: 1, required: 2 }));
     }
 
     #[test]
     fn duplicate_voters_cannot_manufacture_quorum() {
         let f = Fixture::new();
-        assert_eq!(
-            f.verify(&[f.vote(0), f.vote(0)]),
-            Err(V2MigrationQuorumError::InvalidVoterSet)
-        );
+        assert_eq!(f.verify(&[f.vote(0), f.vote(0)]), Err(V2MigrationQuorumError::InvalidVoterSet));
     }
 
     #[test]
@@ -470,10 +449,7 @@ mod tests {
         let f = Fixture::new();
         let mut forged = f.vote(0);
         forged.signature[0] ^= 1;
-        assert_eq!(
-            f.verify(&[forged, f.vote(1)]),
-            Err(V2MigrationQuorumError::InvalidVoteSignature)
-        );
+        assert_eq!(f.verify(&[forged, f.vote(1)]), Err(V2MigrationQuorumError::InvalidVoteSignature));
         let mut foreign = f.vote(0);
         foreign.voter_peer_id = PeerId([99; 32]);
         assert_eq!(f.verify(&[foreign, f.vote(1)]), Err(V2MigrationQuorumError::InvalidVoter));
@@ -503,9 +479,6 @@ mod tests {
         f.policy.signature = f.keys[0].sign(&f.policy.signing_bytes().unwrap()).to_bytes().to_vec();
         f.proposal.initial_policy_hash = f.policy.record_hash().unwrap();
         f.proposal.signature = f.keys[0].sign(&f.proposal.signing_bytes().unwrap()).to_bytes().to_vec();
-        assert_eq!(
-            f.verify(&[f.vote(0), f.vote(1)]),
-            Err(V2MigrationQuorumError::InvalidSourceSignature)
-        );
+        assert_eq!(f.verify(&[f.vote(0), f.vote(1)]), Err(V2MigrationQuorumError::InvalidSourceSignature));
     }
 }
