@@ -86,11 +86,13 @@ export function createNativeWorldListController(
   });
   let request: Promise<NativeWorldEntry[]> | null = null;
   let verifiedReadCount = 0;
+  let generation = 0;
 
   return {
     state: { subscribe: state.subscribe },
     refresh() {
       if (request) return request;
+      const version = ++generation;
       state.update(s => ({ ...s, busy: true, error: '' }));
       const work = async (): Promise<NativeWorldEntry[]> => {
         const entries = parseNativeWorldList(await bounded(() => backend.listWorlds(), timeoutMs));
@@ -102,6 +104,7 @@ export function createNativeWorldListController(
         let nextIndex = 0;
         await Promise.all(Array.from({ length: Math.min(4, entries.length) }, async () => {
           for (;;) {
+            if (version !== generation) return;
             const index = nextIndex++;
             if (index >= entries.length) return;
             const entry = entries[index];
@@ -116,11 +119,17 @@ export function createNativeWorldListController(
             };
           }
         }));
-        verifiedReadCount += 1;
-        state.set({ phase: 'ready', worlds: detailed, busy: false, error: '', verifiedReadCount });
+        if (version === generation) {
+          verifiedReadCount += 1;
+          state.set({ phase: 'ready', worlds: detailed, busy: false, error: '', verifiedReadCount });
+        }
         return detailed;
       };
-      const task = work().catch(() => {
+      // Bound the entire refresh too: 256 local worlds could otherwise
+      // queue bounded per-item metadata reads for much longer than startup.
+      // A late Rust callback must never turn a timed-out list into Ready.
+      const task = bounded(work, timeoutMs * 2).catch(() => {
+        ++generation;
         const error = 'Could not read local worlds. Check the SwarmCraft installation and try Refresh.';
         // Sidecar errors may include local paths or private data: never expose them.
         state.set({ phase: 'unavailable', worlds: [], busy: false, error, verifiedReadCount });
