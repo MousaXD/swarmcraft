@@ -96,16 +96,25 @@ export function createNativeWorldListController(
         const entries = parseNativeWorldList(await bounded(() => backend.listWorlds(), timeoutMs));
         // Do not serially block startup on every status read. Either Rust
         // source can independently be unavailable for one offline replica.
-        const detailed = await Promise.all(entries.map(async entry => {
-          const [status, compatibility] = await Promise.allSettled([
-            bounded(() => backend.worldStatus(entry.id), timeoutMs),
-            bounded(() => backend.worldCompatibility(entry.id), timeoutMs),
-          ]);
-          return {
-            ...entry,
-            status: status.status === 'fulfilled' ? parseFields(status.value) : Object.create(null),
-            compatibility: compatibility.status === 'fulfilled' ? parseFields(compatibility.value) : Object.create(null),
-          };
+        // Limit spawned Rust/CLI reads to four worlds at once. Unbounded
+        // Promise.all over imported libraries could open hundreds of sidecars.
+        const detailed: NativeWorldEntry[] = new Array(entries.length);
+        let nextIndex = 0;
+        await Promise.all(Array.from({ length: Math.min(4, entries.length) }, async () => {
+          for (;;) {
+            const index = nextIndex++;
+            if (index >= entries.length) return;
+            const entry = entries[index];
+            const [status, compatibility] = await Promise.allSettled([
+              bounded(() => backend.worldStatus(entry.id), timeoutMs),
+              bounded(() => backend.worldCompatibility(entry.id), timeoutMs),
+            ]);
+            detailed[index] = {
+              ...entry,
+              status: status.status === 'fulfilled' ? parseFields(status.value) : Object.create(null),
+              compatibility: compatibility.status === 'fulfilled' ? parseFields(compatibility.value) : Object.create(null),
+            };
+          }
         }));
         verifiedReadCount += 1;
         state.set({ phase: 'ready', worlds: detailed, busy: false, error: '', verifiedReadCount });
