@@ -5,6 +5,45 @@
 **Implementation branch:** `agent-11/hosting-authority-policy-migration`  
 **Approval:** Agent 00 + independent Agent 07 required **before activation**
 
+## Agent 11 signed quorum verification (draft PR #125)
+
+`SignedHostingMigrationQuorumV2::verify_for_accepted_source` is a new,
+**inert** verification boundary layered on the original Agent 02 V2
+proposal/vote records. It verifies the source V1 config and membership
+Ed25519 signatures, the source-bound signed V2 proposal and first policy,
+unique ordered individually signed migration votes and a strict majority
+of non-banned V1 voters. When the source is independently proven stable, a fully completed historical
+membership change does not re-enable a previous voter set: only the current
+signed unbanned majority counts. An independently certified in-progress
+membership change is represented by `HostingMigrationVoterSetV2::PendingJoint`,
+which requires a signed contiguous predecessor and separate old/new majorities.
+The caller must independently prove the transition state; enum selection
+alone is not an authority certificate.
+Host eligibility and per-device hosting consent do not limit membership
+voting. Real Ed25519 positive/negative tests live in `swarm-core`.
+
+**Not an activation certificate:** Signed V1 records can be internally valid
+without being the actual canonical chain. Caller must independently verify
+all V1 ancestry and accepted config/membership transition certificates,
+the complete signed snapshot/checkpoint, V1 source epoch/fence and absence
+of conflicting durable promises. `verify_for_accepted_source` does not
+establish these facts and cannot check source uniqueness across a partition.
+It does not check wall-clock expiry or provide a nonce-replay table;
+the migration nonce is transcript-bound, but only a durable transactional
+single-use cutover (owned by Agent 01/storage) prevents reuse. Nothing
+in this PR creates a V2 root, a lease, a network admission capability or
+JVM start permission. Do not construct an active authority from an `Ok`
+result. Unsupported source memberships or missing historical records
+must fail closed, not be repaired by fallback to a single latest quorum.
+
+Agent 01 interface: provide independently validated source checkpoint
+and accepted V1 ancestry, call the protocol verifier with genuine Ed25519
+verification, then independently enforce durable unique target root,
+V2-only authenticated authority session, current consent/heap and fencing.
+Agent 10 should review transition-set membership, mixed-version V1/V2
+isolation, partial-cutover replay and malformed postcard decoding.
+Do not merge or activate while these independent gates are missing.
+
 ## Decision
 
 **NO-GO for in-place live V1 activation.** The current code does not have a

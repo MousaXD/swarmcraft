@@ -14,6 +14,9 @@ pub use hosting_policy::*;
 mod hosting_realm_v2;
 pub use hosting_realm_v2::*;
 
+mod hosting_migration_quorum_v2;
+pub use hosting_migration_quorum_v2::*;
+
 mod v2;
 pub use v2::*;
 
