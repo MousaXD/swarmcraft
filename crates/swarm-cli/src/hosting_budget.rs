@@ -377,6 +377,63 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
 }
 
 #[cfg(target_os = "linux")]
+fn cgroup_v2_memory_snapshot(
+    mount: &Path,
+    membership: &str,
+    mut memory: AvailableMemory,
+) -> Result<AvailableMemory> {
+    // A systemd service or container may have a much smaller memory.max than
+    // the cgroup mount root. Only the process's own subtree and its ancestors
+    // are relevant; never trust a root-only cgroup reading as available RAM.
+    let relative = membership
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .context("cannot identify the process's unified Linux cgroup")?;
+    let path = Path::new(relative);
+    if !path.is_absolute() {
+        bail!("Linux cgroup membership is not absolute");
+    }
+    let mut safe_relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(value) => safe_relative.push(value),
+            _ => bail!("Linux cgroup membership contains an invalid path component"),
+        }
+    }
+
+    let mut current = mount.join(safe_relative);
+    if !current.is_dir() {
+        // A nonstandard cgroup mount layout is not evidence that the host
+        // has unrestricted RAM. Deny hosting instead of guessing.
+        bail!("cannot locate the running process's cgroup-v2 memory controller");
+    }
+    loop {
+        let max_path = current.join("memory.max");
+        let limit = fs::read_to_string(&max_path)
+            .with_context(|| format!("cannot read cgroup memory limit {}", max_path.display()))?;
+        if limit.trim() != "max" {
+            let limit_bytes: u64 = limit.trim().parse().context("invalid cgroup memory.max")?;
+            let usage_path = current.join("memory.current");
+            let used_bytes: u64 = fs::read_to_string(&usage_path)
+                .with_context(|| format!("cannot read cgroup memory usage {}", usage_path.display()))?
+                .trim()
+                .parse()
+                .context("invalid cgroup memory.current")?;
+            memory.physical_mib = memory.physical_mib.min(limit_bytes / (1024 * 1024));
+            memory.available_mib =
+                memory.available_mib.min(limit_bytes.saturating_sub(used_bytes) / (1024 * 1024));
+        }
+        if current == mount {
+            break;
+        }
+        current = current.parent().context("Linux cgroup path escaped its mount")?.to_path_buf();
+    }
+    memory.available_mib = memory.available_mib.min(memory.physical_mib);
+    Ok(memory)
+}
+
+#[cfg(target_os = "linux")]
 pub fn memory_snapshot() -> Result<AvailableMemory> {
     let text = fs::read_to_string("/proc/meminfo").context("cannot read Linux /proc/meminfo")?;
     fn mib(text: &str, name: &str) -> Result<u64> {
@@ -387,25 +444,27 @@ pub fn memory_snapshot() -> Result<AvailableMemory> {
         let kb: u64 = line.split_whitespace().nth(1).context("missing KiB count")?.parse()?;
         Ok(kb / 1_024)
     }
-    let mut physical = mib(&text, "MemTotal:")?;
-    let mut available = mib(&text, "MemAvailable:")?;
-    let max_file = Path::new("/sys/fs/cgroup/memory.max");
-    let current_file = Path::new("/sys/fs/cgroup/memory.current");
-    if max_file.exists() {
-        let raw = fs::read_to_string(max_file).context("cannot read cgroup memory.max")?;
-        let raw = raw.trim();
-        if raw != "max" {
-            let limit_bytes: u64 = raw.parse().context("invalid cgroup memory.max")?;
-            let used_bytes: u64 =
-                fs::read_to_string(current_file).context("cannot read cgroup memory.current")?.trim().parse()?;
-            let limit_mib = limit_bytes / (1024 * 1024);
-            physical = physical.min(limit_mib);
-            available = available.min(limit_bytes.saturating_sub(used_bytes) / (1024 * 1024));
+    let memory = AvailableMemory {
+        physical_mib: mib(&text, "MemTotal:")?,
+        available_mib: mib(&text, "MemAvailable:")?,
+    };
+    let membership = fs::read_to_string("/proc/self/cgroup").context("cannot read Linux cgroup membership")?;
+    let mount = Path::new("/sys/fs/cgroup");
+    if mount.join("cgroup.controllers").exists() {
+        cgroup_v2_memory_snapshot(mount, &membership, memory)
+    } else {
+        // Memory-capped cgroup-v1 containers must not be admitted based only
+        // on /proc/meminfo, which can expose the host's unconstrained RAM.
+        if membership.lines().any(|line| {
+            line.split(':')
+                .nth(1)
+                .is_some_and(|controllers| controllers.split(',').any(|controller| controller == "memory"))
+        }) {
+            bail!("cgroup-v1 memory limits cannot be safely measured; hosting denied");
         }
+        Ok(AvailableMemory { available_mib: memory.available_mib.min(memory.physical_mib), ..memory })
     }
-    Ok(AvailableMemory { physical_mib: physical, available_mib: available.min(physical) })
 }
-
 #[cfg(windows)]
 pub fn memory_snapshot() -> Result<AvailableMemory> {
     #[repr(C)]
@@ -491,6 +550,71 @@ mod tests {
     fn memory(total: u64, available: u64) -> AvailableMemory {
         AvailableMemory { physical_mib: total, available_mib: available }
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nested_cgroup_limits_override_large_host_ram() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        let nested = mount.join("system.slice/swarmcraft.service");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(mount.join("memory.max"), b"max\n").unwrap();
+        fs::write(mount.join("system.slice/memory.max"), b"8589934592\n").unwrap();
+        fs::write(mount.join("system.slice/memory.current"), b"2147483648\n").unwrap();
+        fs::write(nested.join("memory.max"), b"4294967296\n").unwrap();
+        fs::write(nested.join("memory.current"), b"3221225472\n").unwrap();
+        let measured =
+            cgroup_v2_memory_snapshot(mount, "0::/system.slice/swarmcraft.service\n", memory(32_768, 25_000))
+                .unwrap();
+        assert_eq!(measured, memory(4_096, 1_024));
+        assert!(check_budget(512, measured).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ancestor_memory_pressure_is_not_ignored_when_leaf_is_unlimited() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        let nested = mount.join("system.slice/daemon.service");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(mount.join("memory.max"), b"max\n").unwrap();
+        fs::write(mount.join("system.slice/memory.max"), b"4294967296\n").unwrap();
+        fs::write(mount.join("system.slice/memory.current"), b"3758096384\n").unwrap();
+        fs::write(nested.join("memory.max"), b"max\n").unwrap();
+        let measured =
+            cgroup_v2_memory_snapshot(mount, "0::/system.slice/daemon.service\n", memory(32_768, 20_000))
+                .unwrap();
+        assert_eq!(measured, memory(4_096, 512));
+        assert!(check_budget(512, measured).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unbounded_cgroup_preserves_host_memory_probe() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        fs::write(mount.join("memory.max"), b"max\n").unwrap();
+        let measured = cgroup_v2_memory_snapshot(mount, "0::/\n", memory(32_768, 20_000)).unwrap();
+        assert_eq!(measured, memory(32_768, 20_000));
+        assert!(check_budget(4_096, measured).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unreadable_or_invalid_nested_cgroup_never_falls_back_to_host_ram() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        fs::create_dir_all(mount.join("user.slice")).unwrap();
+        fs::write(mount.join("memory.max"), b"max\n").unwrap();
+        let host = memory(32_768, 24_000);
+        assert!(cgroup_v2_memory_snapshot(mount, "0::/user.slice\n", host).is_err());
+        assert!(cgroup_v2_memory_snapshot(mount, "0::/../../escape\n", host).is_err());
+        assert!(cgroup_v2_memory_snapshot(mount, "0::relative\n", host).is_err());
+        fs::write(mount.join("user.slice/memory.max"), b"invalid\n").unwrap();
+        assert!(cgroup_v2_memory_snapshot(mount, "0::/user.slice\n", host).is_err());
+        fs::write(mount.join("user.slice/memory.max"), b"1073741824\n").unwrap();
+        assert!(cgroup_v2_memory_snapshot(mount, "0::/user.slice\n", host).is_err());
+    }
+
     #[test]
     fn zero_is_not_a_host_budget() {
         assert!(check_budget(0, memory(32_768, 20_000)).is_err());
