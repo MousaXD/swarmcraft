@@ -8,6 +8,7 @@ mod invite_connectivity;
 mod node;
 mod transport;
 pub mod wire;
+pub mod v2_challenge_book;
 
 pub use diagnostics::{
     ConnectivityDiagnosticsV1, ConnectivityIssueKindV1, ConnectivityIssueV1, ConnectivityStateV1, HolePunchStateV1,
