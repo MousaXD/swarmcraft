@@ -185,7 +185,7 @@ jobs:
           app="apps/desktop/src-tauri/target/release/bundle/macos/SwarmCraft.app"
           out_dir="apps/desktop/src-tauri/target/release/bundle/dmg"
           # The validated workspace version determines the preview filename.
-          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          version="$(awk '/^\[workspace.package\]$/ { found=1; next } found && /^\[/ { exit } found && /^version = "/ { gsub(/"/, "", $3); print $3; exit }' Cargo.toml)"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid workspace version" >&2; exit 1; }
           dmg="$out_dir/SwarmCraft_${version}_${{ matrix.arch }}.dmg"
           test -d "$app"
