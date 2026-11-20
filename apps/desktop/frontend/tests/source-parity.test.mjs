@@ -589,6 +589,10 @@ test('Svelte owns native Rust world browsing and selected-row presentation witho
   assert.ok(view.includes("window.__swarmcraftSelectWorldFromSvelte(id)"));
   assert.ok(state.includes('const LIMIT = 256;'));
   assert.ok(state.includes('Math.min(4, entries.length)'), 'world status requests must not storm CLI sidecars');
+  assert.ok(state.includes('const task = bounded(work, timeoutMs * 2)'),
+    'Whole world-list refresh must fail before the 45s native startup limit');
+  assert.ok(state.includes('if (version === generation) {'),
+    'Late native reads must not overwrite timed-out Svelte error state');
   assert.ok(state.includes('const error = \'Could not read local worlds.'));
   assert.ok(state.includes('throw new Error(error);'), 'startup must fail when native list read cannot be verified');
   assert.ok(root.includes('window.__swarmcraftSvelteWorldsOwned = true;'));
