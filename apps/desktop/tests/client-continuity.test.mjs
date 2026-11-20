@@ -65,6 +65,8 @@ test('stale host, failed recovery and missing quorum have explicit failure instr
   const blocked = classify({ ...READY, phase: 'blocked', failure_reason: 'missing majority quorum' });
   assert.equal(blocked.state, 'quorum_unavailable');
   assert.match(blocked.title, /quorum/i);
+  assert.equal(classify({ ...READY, phase: 'blocked', failure_reason: 'quorum unavailable' }, 'Unknown').state, 'quorum_unavailable');
+  assert.equal(classify({ ...READY, phase: 'superseded' }, 'SoloUnreplicated').state, 'superseded');
   for (const state of [stale, failed, blocked]) {
     assert.equal(state.automaticReconnect, false);
     assert.equal(state.connectionTarget, null);
