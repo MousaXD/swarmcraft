@@ -1209,9 +1209,11 @@ window.__swarmcraftAfterSvelteCreate = async (createdWorldId) => {
 if (window.__swarmcraftSvelteNetworkingOwned === true) {
   window.__swarmcraftAfterSvelteNetworkingChange = async (outcome) => {
     ++connectivityGeneration;
-    if (outcome === 'stopped') {
+    if (outcome === 'stopped' || outcome === 'unknown') {
       networkStoppedBySvelte = true;
-      setServiceWarning('Networking is stopped for this Desktop session. Replication and automatic migration supervision may be unavailable.');
+      setServiceWarning(outcome === 'stopped'
+        ? 'Networking is stopped for this Desktop session. Replication and automatic migration supervision may be unavailable.'
+        : 'Networking outcome is unverified. Previous connectivity paths must not be treated as current.');
       structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });
       renderConnectivity();
       for (const element of document.querySelectorAll('.world-row-connectivity')) {
