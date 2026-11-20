@@ -209,6 +209,13 @@ def verify(c, output, review_file=None):
             require(node.get("machine_fingerprint") ==
                     pre["nodes"][role]["machine_fingerprint"],
                     "capture_machine_changed_" + stage + "_" + role)
+            # Read-only same-user /proc enumeration must agree with the
+            # supplied positive PID, including ABSENCE for player-only peers.
+            # Missing PID by itself cannot conceal an active world-bound JVM.
+            count = node.get("world_server_process_count")
+            require(type(count) is int and count in (0, 1) and
+                    bool(node.get("minecraft_server_process_observed")) == (count == 1),
+                    "world_server_process_inventory_disagrees_" + stage + "_" + role)
             require(node["snapshot_verify_passed"], "unsigned_or_conflicted_" + stage + "_" + role)
             if stage in ("alice_created", "bob_joined", "carol_joined"):
                 # Genuine first host can be solo until a signed multi-member
