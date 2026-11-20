@@ -298,7 +298,7 @@ pub fn verify_v2_authority_action_session(
     action: &SignedHostingAuthorityActionV2,
     expected: &ExpectedHostingAuthorityHeadV2,
     now_unix_ms: u64,
-    consume_action_nonce: impl FnOnce() -> bool,
+    consume_action_nonce: impl FnOnce(&[u8; 32]) -> bool,
 ) -> Result<(), V2AuthorityActionError> {
     if !session.valid_at(now_unix_ms) {
         return Err(V2AuthorityActionError::ExpiredSession);
@@ -327,7 +327,7 @@ pub fn verify_v2_authority_action_session(
             key.verify(bytes, &signature).is_ok()
         })
         .map_err(|_| V2AuthorityActionError::InvalidAction)?;
-    if !consume_action_nonce() {
+    if !consume_action_nonce(&action.nonce) {
         return Err(V2AuthorityActionError::ReplayOrUnknownAction);
     }
     Ok(())
@@ -623,7 +623,7 @@ mod tests {
         let used = Cell::new(false);
         let verify = || verify_v2_authority_action_session(
             session, &action, &expected_head, 105_000,
-            || if used.get() { false } else { used.set(true); true }
+            |nonce| if *nonce != action.nonce || used.get() { false } else { used.set(true); true }
         );
         assert_eq!(verify(), Ok(()));
         assert_eq!(verify(), Err(V2AuthorityActionError::ReplayOrUnknownAction));
@@ -637,7 +637,7 @@ mod tests {
         ).unwrap();
         let (action, mut expected_head) = signed_action(&claim, &key);
         let verify = |action: &SignedHostingAuthorityActionV2, expected: &ExpectedHostingAuthorityHeadV2, now| {
-            verify_v2_authority_action_session(session, action, expected, now, || true)
+            verify_v2_authority_action_session(session, action, expected, now, |_| true)
         };
         assert_eq!(verify(&action, &expected_head, 110_001), Err(V2AuthorityActionError::ExpiredSession));
         expected_head.operation = HostingAuthorityOperationV2::Wake;
