@@ -146,3 +146,39 @@ export function clientContinuityFromMigration(status, expectedWorldId, safety) {
   }
   return UNKNOWN;
 }
+
+/**
+ * Svelte compatibility: the candidate app mounts legacy Rust-backed controls
+ * but may not have the legacy continuity-panel markup yet. Preserve the
+ * visible fail-closed message without assuming either frontend owns the DOM.
+ */
+export function ensureClientContinuityPanel(doc) {
+  const existingTitle = doc.getElementById('clientContinuityTitle');
+  const existingDetail = doc.getElementById('clientContinuityDetail');
+  if (existingTitle && existingDetail) return { title: existingTitle, detail: existingDetail };
+  // Never manufacture a second element when only one target ID exists.
+  if (existingTitle || existingDetail) return null;
+
+  const actions = doc.getElementById('migrationCard')?.querySelector('.compact-actions');
+  if (!actions?.parentNode) return null;
+
+  const panel = doc.createElement('section');
+  panel.className = 'safety-panel neutral';
+  panel.setAttribute('aria-labelledby', 'clientContinuityTitle');
+  const content = doc.createElement('div');
+  const sectionLabel = doc.createElement('span');
+  sectionLabel.className = 'section-label';
+  sectionLabel.textContent = 'Minecraft client connection';
+  const title = doc.createElement('h4');
+  title.id = 'clientContinuityTitle';
+  title.textContent = 'Minecraft connection not verified';
+  const detail = doc.createElement('p');
+  detail.id = 'clientContinuityDetail';
+  detail.setAttribute('role', 'status');
+  detail.setAttribute('aria-live', 'polite');
+  detail.textContent = 'SwarmCraft cannot yet verify a Minecraft client connection.';
+  content.append(sectionLabel, title, detail);
+  panel.append(content);
+  actions.parentNode.insertBefore(panel, actions);
+  return { title, detail };
+}
