@@ -67,8 +67,9 @@ describe('Svelte world browsing and native list contracts', () => {
     const first = controller.refresh();
     const second = controller.refresh();
     expect(first).toBe(second);
-    await Promise.resolve();
-    expect(reads).toBe(1);
+    // The whole-refresh bound and per-command bound each schedule a microtask.
+    // Wait for the actual invocation, not an assumed fixed promise depth.
+    await vi.waitFor(() => expect(reads).toBe(1));
     complete(raw);
     await first;
     expect(get(controller.state).verifiedReadCount).toBe(1);
@@ -87,8 +88,11 @@ describe('Svelte world browsing and native list contracts', () => {
         },
       }), 25);
       const pending = controller.refresh();
+      // Attach the rejection observer before advancing fake timers so a
+      // deliberate fail-closed timeout does not become an unhandled rejection.
+      const failed = expect(pending).rejects.toThrow(/Could not read local worlds/);
       await vi.advanceTimersByTimeAsync(26);
-      await expect(pending).rejects.toThrow(/Could not read local worlds/);
+      await failed;
       expect(get(controller.state)).toMatchObject({phase:'unavailable',busy:false,worlds:[]});
       await controller.refresh();
       expect(calls).toBe(2);
@@ -125,11 +129,12 @@ describe('Svelte world browsing and native list contracts', () => {
         worldStatus: () => { started += 1; return new Promise<string>(() => {}); },
       }), 30);
       const task = controller.refresh();
+      const failed = expect(task).rejects.toThrow(/Could not read local worlds/);
       // At most four different world statuses should be launched at once.
       await vi.advanceTimersByTimeAsync(1);
       expect(started).toBe(4);
       await vi.advanceTimersByTimeAsync(61);
-      await expect(task).rejects.toThrow(/Could not read local worlds/);
+      await failed;
       expect(get(controller.state)).toMatchObject({
         phase: 'unavailable', busy: false, verifiedReadCount: 0, worlds: [],
       });
