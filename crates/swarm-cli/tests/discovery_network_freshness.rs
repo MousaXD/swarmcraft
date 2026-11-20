@@ -147,6 +147,8 @@ struct PeerPlan {
     vote_state: Option<(WorldAnnouncementV1, DiscoveryMembershipProofV1)>,
     malformed_context: bool,
     delay_ms: u64,
+    drop_first_browse: bool,
+    drop_first_resolve: bool,
 }
 
 async fn make_node(secret: [u8; 32]) -> (PeerIdentity, DiscoveryNode, String, String) {
@@ -198,7 +200,31 @@ fn spawn_peer(
                     return Err(message);
                 }
             };
-            let DiscoveryNetworkEvent::InboundRequest { request, channel, .. } = event else { continue };
+            let DiscoveryNetworkEvent::InboundRequest { transport_peer, request, channel, .. } = event else {
+                continue;
+            };
+            // Fail exactly one canonical request per query variant by
+            // disconnecting the live authenticated peer while it continues
+            // listening on the same QUIC address.
+            let fault = match &request {
+                WireRequest::DiscoveryPublic { .. } if plan.drop_first_browse => {
+                    plan.drop_first_browse = false;
+                    Some("public")
+                }
+                WireRequest::DiscoveryResolve { .. } if plan.drop_first_resolve => {
+                    plan.drop_first_resolve = false;
+                    Some("resolve")
+                }
+                _ => None,
+            };
+            if let Some(kind) = fault {
+                lifecycle.lock().unwrap().push(format!("injected:{kind}"));
+                plan.node.disconnect_peer(transport_peer).map_err(|error| {
+                    format!("failed to inject {kind} authenticated QUIC disconnect: {error:#}")
+                })?;
+                drop(channel);
+                continue;
+            }
             match request {
                 WireRequest::DiscoveryPublic { .. } => {
                     if plan.delay_ms > 0 {
@@ -369,6 +395,8 @@ async fn malicious_and_stale_providers_cannot_win_browse_or_exact_resolve() {
                 vote_state: Some((current_announcement.clone(), current_proof.clone())),
                 malformed_context: false,
                 delay_ms: 0,
+                drop_first_browse: true,
+                drop_first_resolve: true,
             },
             order.clone(),
             lifecycle.clone(),
@@ -383,6 +411,8 @@ async fn malicious_and_stale_providers_cannot_win_browse_or_exact_resolve() {
                 vote_state: Some((current_announcement.clone(), current_proof.clone())),
                 malformed_context: false,
                 delay_ms: 0,
+                drop_first_browse: false,
+                drop_first_resolve: false,
             },
             order.clone(),
             lifecycle.clone(),
@@ -397,6 +427,8 @@ async fn malicious_and_stale_providers_cannot_win_browse_or_exact_resolve() {
                 vote_state: Some((stale_announcement, stale_proof)),
                 malformed_context: false,
                 delay_ms: 0,
+                drop_first_browse: false,
+                drop_first_resolve: false,
             },
             order.clone(),
             lifecycle.clone(),
@@ -411,6 +443,8 @@ async fn malicious_and_stale_providers_cannot_win_browse_or_exact_resolve() {
                 vote_state: None,
                 malformed_context: true,
                 delay_ms: 10,
+                drop_first_browse: false,
+                drop_first_resolve: false,
             },
             order.clone(),
             lifecycle.clone(),
@@ -440,6 +474,10 @@ async fn malicious_and_stale_providers_cannot_win_browse_or_exact_resolve() {
     assert_eq!(report.results.len(), 1, "only the live canonical proof may survive browse: {report:?}");
     assert_eq!(report.results[0].announcer_peer_id, b_record_id.peer_id().to_string());
     assert!(
+        lifecycle.lock().unwrap().iter().any(|event| event == "injected:public"),
+        "canonical browse must recover after the injected authenticated stream loss"
+    );
+    assert!(
         report.providers_seen >= 4,
         "all explicit hostile/current locators must be part of the bounded provider topology: {report:?}"
     );
@@ -460,6 +498,10 @@ async fn malicious_and_stale_providers_cannot_win_browse_or_exact_resolve() {
     );
     let card = resolved.world.expect("current world card");
     assert_eq!(card.announcer_peer_id, b_record_id.peer_id().to_string());
+    assert!(
+        lifecycle.lock().unwrap().iter().any(|event| event == "injected:resolve"),
+        "exact resolve must recover after the injected authenticated stream loss"
+    );
     assert!(!resolve_order.is_empty(), "exact resolve must exercise at least one configured locator");
 
     for task in tasks {
