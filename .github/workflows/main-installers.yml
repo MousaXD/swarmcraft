@@ -10,6 +10,7 @@ on:
       - 'scripts/check_release_version.py'
       - 'scripts/check_release_credentials.py'
       - 'scripts/check_workflow_policy.py'
+      - 'scripts/ci-release/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'crates/**'
