@@ -673,4 +673,70 @@ mod tests {
         assert!(!external.join("solo-conflicts").exists());
         assert_eq!(fs::read_link(&recovery).unwrap(), external);
     }
+
+
+    #[test]
+    fn restored_durable_recovery_promise_resumes_without_losing_previous_ballot() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, world) = test_world();
+        let storage = Storage::open(temp.path()).unwrap();
+        let first = ballot(world, 2, 7);
+        assert_eq!(
+            storage.promise_recovery_ballot(&first, &vote(&first, 6)).unwrap(),
+            RecoveryPromiseResult::Accepted
+        );
+        let original = storage.load_recovery_promise(world).unwrap();
+        let original_bytes = postcard::to_allocvec(&original).unwrap();
+        let path = storage.control_path_v2(world, "recovery-promise.postcard");
+        fs::write(&path, b"corrupt-interrupted-promise").unwrap();
+
+        let next = ballot(world, 2, 8);
+        assert!(storage.promise_recovery_ballot(&next, &vote(&next, 6)).is_err());
+        assert!(storage.clear_recovery_promise_after_epoch_advance(world, 5).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"corrupt-interrupted-promise");
+
+        // A caller must repair the original evidence, not silently bootstrap.
+        fs::write(&path, original_bytes).unwrap();
+        assert_eq!(storage.load_recovery_promise(world).unwrap(), original);
+        assert_eq!(
+            storage.promise_recovery_ballot(&next, &vote(&next, 6)).unwrap(),
+            RecoveryPromiseResult::Accepted
+        );
+        assert_eq!(storage.load_recovery_promise(world).unwrap().ballot.round, 8);
+    }
+
+    #[test]
+    fn simultaneous_durable_recovery_promises_cannot_both_win_one_round() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("store");
+        let (_, world) = test_world();
+        let barrier = Arc::new(Barrier::new(2));
+        let results = std::thread::scope(|scope| {
+            let handles = [2_u8, 3_u8]
+                .into_iter()
+                .map(|candidate| {
+                    let barrier = Arc::clone(&barrier);
+                    let root = &root;
+                    scope.spawn(move || {
+                        let storage = Storage::open(root).unwrap();
+                        let ballot = ballot(world, candidate, 9);
+                        let vote = vote(&ballot, 6);
+                        barrier.wait();
+                        storage.promise_recovery_ballot(&ballot, &vote).unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+        });
+
+        assert_eq!(results.iter().filter(|result| **result == RecoveryPromiseResult::Accepted).count(), 1);
+        assert_eq!(
+            results.iter().filter(|result| matches!(result, RecoveryPromiseResult::Rejected { .. })).count(),
+            1
+        );
+        let reopened = Storage::open(root).unwrap();
+        assert_eq!(reopened.load_recovery_promise(world).unwrap().ballot.round, 9);
+    }
 }
