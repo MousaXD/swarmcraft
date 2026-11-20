@@ -2,9 +2,18 @@
   import { onMount } from 'svelte';
   import { nativeBridge } from '../lib/native-bridge';
   import { createIdentityController, type IdentitySource } from '../lib/device-identity';
+  import { createNativeConnectivityController } from '../lib/connectivity-state';
 
   const controller = createIdentityController(() => nativeBridge().invoke('node_identity', {}));
   const identityState = controller.state;
+  const connectivityController = createNativeConnectivityController(
+    () => nativeBridge().invoke('connectivity_diagnostics', {}),
+  );
+  const nativeConnectivity = connectivityController.state;
+
+  async function refreshNativeConnectivity() {
+    await connectivityController.refresh();
+  }
 
   // A named method avoids optional TypeScript arrow parameters in the
   // component's SSR transform while preserving the typed legacy bridge.
@@ -14,11 +23,17 @@
 
   onMount(() => {
     const original = window.__swarmcraftSvelteIdentity;
+    const oldConnectivity = window.__swarmcraftSvelteConnectivity;
     const bridge = { publish: publishIdentity };
+    const connectivityBridge = { refresh: refreshNativeConnectivity };
     window.__swarmcraftSvelteIdentity = bridge;
+    window.__swarmcraftSvelteConnectivity = connectivityBridge;
     return () => {
       if (window.__swarmcraftSvelteIdentity === bridge) {
         window.__swarmcraftSvelteIdentity = original;
+      }
+      if (window.__swarmcraftSvelteConnectivity === connectivityBridge) {
+        window.__swarmcraftSvelteConnectivity = oldConnectivity;
       }
     };
   });
@@ -51,9 +66,12 @@
               <section class="diagnostic-section" id="connectivitySection">
                 <div class="section-title-row">
                   <div><h3>Connectivity</h3><p>Player-facing path summary plus daemon controls.</p></div>
-                  <span id="diagnosticConnectivity" class="status-badge neutral">Not reported</span>
+                  <span id="diagnosticConnectivity" class={`status-badge ${$nativeConnectivity.tone}`} data-native-connection-phase={$nativeConnectivity.phase} data-native-verified-count={$nativeConnectivity.verifiedReadCount} aria-busy={$nativeConnectivity.busy}>{$nativeConnectivity.label}</span>
                 </div>
-                <p id="diagnosticConnectivityDetail" class="helper">The current backend does not expose structured connectivity for this world.</p>
+                <p id="diagnosticConnectivityDetail" class="helper" aria-live="polite">{$nativeConnectivity.detail}</p>
+                <div class="compact-actions">
+                  <button id="refreshNativeConnectivity" class="button button-subtle" type="button" onclick={refreshNativeConnectivity} aria-busy={$nativeConnectivity.busy} disabled={$nativeConnectivity.busy}>Check native connection</button>
+                </div>
                 <div class="field">
                   <label for="daemonListen">Listen multiaddress</label>
                   <input id="daemonListen" class="machine-input" value="/ip4/0.0.0.0/udp/0/quic-v1" />
