@@ -48,7 +48,18 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libwebkit2gtk-4.1-0 libayatana-appindicator3-dev librsvg2-dev patchelf webkit2gtk-driver xvfb
+          # Ubuntu 26.04 renamed webkit2gtk-driver to webkitgtk-webdriver.
+          # Detect the actual package from apt metadata; never skip real
+          # WebKitWebDriver installation or replace it with mocked IPC.
+          if apt-cache show webkitgtk-webdriver >/dev/null 2>&1; then
+            driver_package=webkitgtk-webdriver
+          elif apt-cache show webkit2gtk-driver >/dev/null 2>&1; then
+            driver_package=webkit2gtk-driver
+          else
+            echo 'No supported WebKitGTK WebDriver package found' >&2
+            exit 1
+          fi
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libwebkit2gtk-4.1-0 libayatana-appindicator3-dev librsvg2-dev patchelf "$driver_package" xvfb
           command -v WebKitWebDriver
       - name: Reject accidental production configuration override
         shell: bash
