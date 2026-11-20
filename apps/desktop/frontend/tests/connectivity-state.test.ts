@@ -37,7 +37,13 @@ describe('Svelte native connectivity contract', () => {
   });
   it('coalesces duplicate real Rust reads and allows explicit new refresh', async () => {
     let resolve!: (value: unknown) => void;
-    const read = vi.fn(() => new Promise<unknown>(r => { resolve = r; }));
+    let calls = 0;
+    const read = vi.fn(() => {
+      calls += 1;
+      return calls === 1
+        ? new Promise<unknown>(r => { resolve = r; })
+        : Promise.resolve({state:'relay_required'});
+    });
     const controller = createNativeConnectivityController(read);
     const a = controller.refresh();
     const b = controller.refresh();
