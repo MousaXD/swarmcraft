@@ -7,7 +7,7 @@
 #[cfg(unix)]
 mod unix {
     use std::{fs, os::unix::fs::symlink};
-    use swarm_protocol::WorldId;
+    use swarm_protocol::{BlobEncoding, WorldId};
     use swarm_storage::Storage;
 
     #[test]
@@ -16,9 +16,10 @@ mod unix {
         let world = WorldId([0xa7; 32]);
         let storage = Storage::open(temp.path().join("store")).unwrap();
         let blob = storage.put_blob(world, b"in-flight-authority-recovery-state").unwrap();
+        let suffix = match blob.encoding { BlobEncoding::Raw => "raw", BlobEncoding::Zstd => "zst" };
         let blob_path = storage.world_dir(world)
             .join("blobs")
-            .join(format!("{}.raw", blob.hash.to_hex()));
+            .join(format!("{}.{}", blob.hash.to_hex(), suffix));
         assert!(blob_path.is_file(), "the complete blob must exist before corruption");
 
         // A live replication lease promises that complete uncommitted data is
