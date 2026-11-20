@@ -66,3 +66,12 @@ to increase after its native click. That count changes only when the real
 a pre-existing identity from first boot, a failed native call, a stale reply,
 or an inert button cannot satisfy the installed-GUI gate. No identity bytes
 are written to evidence artifacts.
+
+
+### 2026-11-20 Agent 04 native-recovery and acceptance follow-up
+
+- The Svelte Diagnostics `node_identity` refresh now has a 15-second UI-bound read timeout and can retry after an unresolved native IPC request. A stale callback cannot overwrite newer identity state or falsely increment the verified native-read counter. The Rust command and the shipping startup controller are unchanged.
+- Real Linux installed-app evidence from run `42917948627` identified a candidate test navigation blocker: the Leave World membership disclosure is nested inside collapsed **Advanced world controls**. The candidate WebDriver test now opens both real summaries in order and still requires the actual Cancel action to preserve the selected canonical world.
+- Run source/TypeScript/Vitest, real installed Linux/WebKitGTK positive and negative controls, and Windows/macOS packaging on the **exact final feature-branch SHA**. There is no claim of successful native certification for this follow-up until those Actions finish.
+
+The migration is still a hybrid compatibility candidate with delegated world-list, managed Minecraft, provider/mod, replication, and migration/recovery flows. Keep `frontendDist` on the legacy shipping UI until Agent 00 and independent installed-app QA approve complete parity.
