@@ -377,6 +377,26 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
 }
 
 #[cfg(target_os = "linux")]
+fn require_visible_cgroup_v2_mount(mountinfo: &str) -> Result<()> {
+    // Bind mounts of a nested cgroup may hide ancestor limits. Do not use
+    // /proc/meminfo as an authority in an opaque mount layout.
+    for line in mountinfo.lines() {
+        let Some((mount, fs_info)) = line.split_once(" - ") else {
+            continue;
+        };
+        let fields = mount.split_whitespace().collect::<Vec<_>>();
+        if fields.get(4).copied() != Some("/sys/fs/cgroup") {
+            continue;
+        }
+        if fields.get(3).copied() != Some("/") || fs_info.split_whitespace().next() != Some("cgroup2") {
+            bail!("the cgroup-v2 mount hides memory-controller ancestry; hosting denied");
+        }
+        return Ok(());
+    }
+    bail!("cannot verify the cgroup-v2 mount layout; hosting denied")
+}
+
+#[cfg(target_os = "linux")]
 fn cgroup_v2_memory_snapshot(
     mount: &Path,
     membership: &str,
@@ -450,7 +470,12 @@ pub fn memory_snapshot() -> Result<AvailableMemory> {
     };
     let membership = fs::read_to_string("/proc/self/cgroup").context("cannot read Linux cgroup membership")?;
     let mount = Path::new("/sys/fs/cgroup");
-    if mount.join("cgroup.controllers").exists() {
+    if membership.lines().any(|line| line.starts_with("0::")) {
+        if !mount.join("cgroup.controllers").is_file() {
+            bail!("unified Linux cgroup memory controller is unavailable; hosting denied");
+        }
+        let mountinfo = fs::read_to_string("/proc/self/mountinfo").context("cannot read Linux cgroup mount layout")?;
+        require_visible_cgroup_v2_mount(&mountinfo)?;
         cgroup_v2_memory_snapshot(mount, &membership, memory)
     } else {
         // Memory-capped cgroup-v1 containers must not be admitted based only
@@ -550,6 +575,21 @@ mod tests {
     fn memory(total: u64, available: u64) -> AvailableMemory {
         AvailableMemory { physical_mib: total, available_mib: available }
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_v2_opaque_or_inaccessible_mount_never_authorizes_host_memory() {
+        assert!(require_visible_cgroup_v2_mount(
+            "59 55 0:24 / /sys/fs/cgroup ro,nosuid,nodev - cgroup2 cgroup2 rw\n"
+        )
+        .is_ok());
+        assert!(require_visible_cgroup_v2_mount(
+            "59 55 0:24 /system.slice /sys/fs/cgroup ro - cgroup2 cgroup2 rw\n"
+        )
+        .is_err());
+        assert!(require_visible_cgroup_v2_mount("59 55 0:24 / /sys/fs/cgroup ro - tmpfs tmpfs rw\n").is_err());
+        assert!(require_visible_cgroup_v2_mount("unrelated mount only\n").is_err());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn nested_cgroup_limits_override_large_host_ram() {
