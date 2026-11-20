@@ -65,6 +65,14 @@ export function clientContinuityFromMigration(status, expectedWorldId, safety) {
     );
   }
 
+  if (!/^canonical$/i.test(String(safety || '').trim())) {
+    return outcome(
+      'safety_unverified',
+      'World authority safety not verified',
+      'SwarmCraft has not confirmed the selected world has canonical history. Do not use an old server address as a failover destination.',
+    );
+  }
+
   if (!status || typeof status !== 'object' || Array.isArray(status)) return UNKNOWN;
   if (status.world_id !== expectedWorldId) {
     return outcome(
