@@ -19,8 +19,7 @@ mod unix {
             BlobEncoding::Raw => "raw",
             BlobEncoding::Zstd => "zst",
         };
-        let blob_path =
-            storage.world_dir(world).join("blobs").join(format!("{}.{}", blob.hash.to_hex(), suffix));
+        let blob_path = storage.world_dir(world).join("blobs").join(format!("{}.{}", blob.hash.to_hex(), suffix));
         assert!(blob_path.is_file(), "the complete blob must exist before corruption");
 
         // A live replication lease promises that complete uncommitted data is
