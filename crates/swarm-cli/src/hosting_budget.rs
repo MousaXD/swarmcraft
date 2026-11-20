@@ -743,6 +743,34 @@ mod tests {
         assert!(require_contribution(&paths, world).is_err());
     }
     #[test]
+    fn every_withdrawal_invalidates_cached_runtime_and_host_readiness() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let world = WorldId([0x52; 32]);
+        let directory = control_path(&paths).join(world.to_hex());
+        fs::create_dir_all(&directory).unwrap();
+        let runtime = directory.join("runtime-verified.json");
+        let readiness = directory.join("host-readiness.json");
+
+        for path in [&runtime, &readiness] {
+            fs::write(path, b"stale proof").unwrap();
+        }
+        let first = set_contribution(&paths, world, 0).unwrap();
+        assert!(!runtime.exists());
+        assert!(!readiness.exists());
+
+        // A repeated explicit 0-MiB withdrawal also creates a fresh revision
+        // and must never leave behind any formerly green readiness cache.
+        for path in [&runtime, &readiness] {
+            fs::write(path, b"stale proof").unwrap();
+        }
+        let second = set_contribution(&paths, world, 0).unwrap();
+        assert!(second.revision > first.revision);
+        assert!(!runtime.exists());
+        assert!(!readiness.exists());
+    }
+
+    #[test]
     fn readiness_revision_is_atomic_with_consent_and_json_safe() {
         let temp = tempfile::tempdir().unwrap();
         let paths = DataPaths::from_root(temp.path().join("data"));
