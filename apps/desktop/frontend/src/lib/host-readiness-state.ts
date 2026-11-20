@@ -74,17 +74,19 @@ export function createNativeHostReadinessController(
   let pending: Promise<void> | null = null;
   let verifiedReadCount = 0;
 
+  function clearState() {
+    version += 1;
+    selectedWorld = '';
+    pending = null;
+    state.set({ ...initial(), verifiedReadCount });
+  }
+
   return {
     state: { subscribe: state.subscribe },
-    clear() {
-      version += 1;
-      selectedWorld = '';
-      pending = null;
-      state.set({ ...initial(), verifiedReadCount });
-    },
+    clear: clearState,
     select(world) {
       if (!/^scworld:[^\s]+$/.test(world)) {
-        this.clear();
+        clearState();
         return Promise.resolve();
       }
       if (world === selectedWorld && pending) return pending;
