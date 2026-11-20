@@ -36,6 +36,7 @@ impl Storage {
 mod tests {
     use super::*;
     use crate::WorldMetadataV1;
+    use swarm_protocol::{EpochMode, EpochRecordV1};
     use swarm_protocol::{
         peer_id_from_public_key, Hash32, RecoveryBallotV1, WorldGenesisV1, PROTOCOL_VERSION,
         STORAGE_SCHEMA_VERSION,
@@ -122,6 +123,72 @@ mod tests {
         assert!(storage.save_recovery_certificate(&certificate).is_err());
         assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
         assert_eq!(fs::read(&external).unwrap(), original);
+    }
+
+
+    fn accepted_epoch_for(certificate: &RecoveryCertificateV1) -> EpochRecordV1 {
+        let ballot = &certificate.ballot;
+        EpochRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: ballot.world_id,
+            epoch_number: ballot.target_epoch,
+            previous_epoch_hash: None,
+            base_state_hash: ballot.base_state_hash,
+            authority_peer_id: ballot.candidate_peer_id,
+            authority_public_key: ballot.candidate_public_key,
+            mode: EpochMode::Recovery,
+            fencing_token: ballot.target_fencing_token,
+            reason: "storage certification test".into(),
+            signature: vec![0; 64],
+        }
+    }
+
+    #[test]
+    fn accepted_epoch_cannot_have_its_durable_certificate_ballot_replaced() {
+        let (_temp, storage, world) = fixture();
+        let original = certificate(world);
+        storage.save_recovery_certificate(&original).unwrap();
+        storage.save_epoch_record(&accepted_epoch_for(&original)).unwrap();
+        let path = storage.world_dir(world).join("metadata/recovery-certificate.postcard");
+        let bytes = fs::read(&path).unwrap();
+
+        let mut conflict = original.clone();
+        conflict.ballot.round += 1;
+        assert!(storage.save_recovery_certificate(&conflict).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(storage.load_recovery_certificate(world).unwrap(), original);
+    }
+
+    #[test]
+    fn a_higher_ballot_round_can_replace_an_unaccepted_certificate() {
+        let (_temp, storage, world) = fixture();
+        let original = certificate(world);
+        storage.save_recovery_certificate(&original).unwrap();
+        let mut newer = original;
+        newer.ballot.round += 1;
+
+        storage.save_recovery_certificate(&newer).unwrap();
+        assert_eq!(storage.load_recovery_certificate(world).unwrap(), newer);
+    }
+
+    #[test]
+    fn an_older_certificate_cannot_replace_a_newer_accepted_generation() {
+        let (_temp, storage, world) = fixture();
+        let old = certificate(world);
+        storage.save_recovery_certificate(&old).unwrap();
+        let mut newer = old.clone();
+        newer.ballot.base_epoch += 1;
+        newer.ballot.target_epoch += 1;
+        newer.ballot.base_fencing_token += 1;
+        newer.ballot.target_fencing_token += 1;
+        storage.save_recovery_certificate(&newer).unwrap();
+        storage.save_epoch_record(&accepted_epoch_for(&newer)).unwrap();
+
+        let path = storage.world_dir(world).join("metadata/recovery-certificate.postcard");
+        let before = fs::read(&path).unwrap();
+        assert!(storage.save_recovery_certificate(&old).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(storage.load_recovery_certificate(world).unwrap(), newer);
     }
 
     #[cfg(unix)]
