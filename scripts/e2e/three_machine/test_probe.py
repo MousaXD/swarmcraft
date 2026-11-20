@@ -121,6 +121,21 @@ class TestRealCliCaptureContract(unittest.TestCase):
 class TestWorldBoundJvmInventory(unittest.TestCase):
     WORLD = "ab" * 32
 
+    def test_server_inventory_must_remain_stable_across_capture(self):
+        self.assertTrue(node.stable_world_server_inventory([], []))
+        self.assertTrue(node.stable_world_server_inventory([111, 222], [222, 111]))
+        for before, after in (
+            ([111], []),
+            ([], [111]),
+            ([111], [112]),
+            ([111], None),
+            (None, [111]),
+            ([111], [111, 111]),
+            ([111], [True]),
+        ):
+            with self.subTest(before=before, after=after):
+                self.assertFalse(node.stable_world_server_inventory(before, after))
+
     def test_detects_unlisted_server_jvm_even_with_no_operator_pid(self):
         # Synthetic /proc fixture tests only the read-only inventory. It is
         # NOT a stand-in for real three-machine Minecraft certification.
