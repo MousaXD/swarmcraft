@@ -39,6 +39,7 @@ SAFE_BOOL_KEYS = frozenset({
     'worldListOwned', 'worldListNativeConfirmed', 'worldListRefreshed',
     'worldListHasRows', 'worldListSelectionVerified',
     'worldSelectedMetadataVerified', 'worldSelectedSafetyVerified',
+    'readinessOwned', 'readinessNativeConfirmed', 'readinessNotBusy', 'readinessNoFalseGreen',
 })
 SAFE_INT_KEYS = frozenset({
     'width', 'height', 'rootScrollWidth', 'paneScrollWidth',
@@ -209,6 +210,31 @@ def run(binary: Path, artifacts: Path):
         record_ui(selected_world)
         assert all(selected_world.values()), (
             "Native Svelte selection metadata did not match the verified Rust world row"
+        )
+        mark_stage('native-svelte-host-readiness')
+        readiness_result = None
+        for _ in range(80):
+            readiness_result = app.execute("""
+              const panel = document.getElementById('hostReadinessPanel');
+              const title = document.getElementById('hostReadinessTitle');
+              return {
+                readinessOwned: window.__swarmcraftSvelteReadinessOwned === true
+                  && typeof window.__swarmcraftSvelteReadiness?.select === 'function',
+                readinessNativeConfirmed: !!panel
+                  && Number(panel.dataset.nativeReadinessVerifiedCount ?? -1) > 0
+                  && panel.dataset.nativeReadinessPhase === 'ready',
+                readinessNotBusy: !!panel && panel.getAttribute('aria-busy') === 'false',
+                readinessNoFalseGreen: !!panel && !!title
+                  && (panel.className !== 'safety-panel safe'
+                    || title.textContent === 'Safe to shut down this PC'),
+              };
+            """)
+            record_ui(readiness_result)
+            if all(readiness_result.values()):
+                break
+            time.sleep(0.2)
+        assert all(readiness_result.values()), (
+            "Installed selected-world shutdown status did not complete a real Rust read"
         )
         for width, height in ((980, 760), (720, 560)):
             mark_stage(f'layout-{width}x{height}')
