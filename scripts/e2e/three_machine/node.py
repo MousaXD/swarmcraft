@@ -425,6 +425,14 @@ def world_server_inventory(root, world, proc_root=Path("/proc")):
     return matching
 
 
+def stable_world_server_inventory(before, after):
+    """Reject unavailable, nonnumeric or changed server PID observations."""
+    return (isinstance(before, list) and isinstance(after, list) and
+            all(type(pid) is int and pid > 1 for pid in (*before, *after)) and
+            len(set(before)) == len(before) and len(set(after)) == len(after) and
+            set(before) == set(after))
+
+
 def capture(a):
     if not re.fullmatch("[a-fA-F0-9]{64}", a.world):
         fail("world_id_invalid")
@@ -510,7 +518,7 @@ def capture(a):
         "connectivity_diagnostics": connectivity_summary(root),
     }
     after_inventory = world_server_inventory(root, a.world)
-    if after_inventory is None or sorted(server_inventory) != sorted(after_inventory):
+    if not stable_world_server_inventory(server_inventory, after_inventory):
         fail("world_server_inventory_changed_during_capture")
     return report
 
