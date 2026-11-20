@@ -550,20 +550,30 @@ fn write_hash_pins(pins_dir: &Path, hashes: impl IntoIterator<Item = Hash32>) ->
     Ok(paths)
 }
 
+/// GC may sweep only after it can prove the pin directory is genuinely absent
+/// or a regular directory. Dangling/symlinked pin roots are not absence.
+fn checked_gc_pin_directory_present(path: &Path) -> Result<bool, StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StorageError::SymlinkUnsupported(path.to_path_buf())),
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(io_error(path, io::Error::new(io::ErrorKind::InvalidData, "GC pin root is not a directory"))),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io_error(path, source)),
+    }
+}
+
 fn read_hash_pins(pins_dir: &Path) -> Result<BTreeSet<Hash32>, RetentionError> {
-    if !pins_dir.exists() {
+    if !checked_gc_pin_directory_present(pins_dir)? {
         return Ok(BTreeSet::new());
     }
     let mut hashes = BTreeSet::new();
     for entry in fs::read_dir(pins_dir).map_err(|source| io_error(pins_dir, source))? {
         let entry = entry.map_err(|source| io_error(pins_dir, source))?;
-        if !entry.file_type().map_err(|source| io_error(entry.path(), source))?.is_file() {
-            continue;
-        }
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("pin") {
             continue;
         }
+        // A symlink or invalid .pin entry could conceal a live in-flight blob.
         hashes.insert(read_pin_hash(&path)?);
     }
     Ok(hashes)
@@ -574,7 +584,7 @@ fn read_hash_pins(pins_dir: &Path) -> Result<BTreeSet<Hash32>, RetentionError> {
 /// Caller must hold the world GC lock.
 fn read_live_snapshot_publication_hashes(world_dir: &Path) -> Result<BTreeSet<Hash32>, StorageError> {
     let root = snapshot_publication_pins_dir(world_dir);
-    if !root.exists() {
+    if !checked_gc_pin_directory_present(&root)? {
         return Ok(BTreeSet::new());
     }
 
@@ -583,12 +593,17 @@ fn read_live_snapshot_publication_hashes(world_dir: &Path) -> Result<BTreeSet<Ha
     for entry in fs::read_dir(&root).map_err(|source| io_error(&root, source))? {
         let entry = entry.map_err(|source| io_error(&root, source))?;
         let publication_dir = entry.path();
-        if !entry.file_type().map_err(|source| io_error(&publication_dir, source))?.is_dir() {
+        let entry_type = entry.file_type().map_err(|source| io_error(&publication_dir, source))?;
+        if entry_type.is_symlink() {
+            return Err(StorageError::SymlinkUnsupported(publication_dir));
+        }
+        if !entry_type.is_dir() {
+            // Legacy flat .pin files are read by read_hash_pins above.
             continue;
         }
 
         let owner_path = publication_owner_lock_path(&publication_dir);
-        if !owner_path.is_file() {
+        if !crate::transaction::canonical_file_exists(&owner_path)? {
             // No ownership proof means no cleanup. Retain any readable pins in
             // this malformed directory rather than risk deleting live data.
             live.extend(read_pin_files_in_publication(&publication_dir)?);
@@ -620,9 +635,7 @@ fn read_pin_files_in_publication(publication_dir: &Path) -> Result<BTreeSet<Hash
     for entry in fs::read_dir(publication_dir).map_err(|source| io_error(publication_dir, source))? {
         let entry = entry.map_err(|source| io_error(publication_dir, source))?;
         let path = entry.path();
-        if !entry.file_type().map_err(|source| io_error(&path, source))?.is_file()
-            || path.extension().and_then(|value| value.to_str()) != Some("pin")
-        {
+        if path.extension().and_then(|value| value.to_str()) != Some("pin") {
             continue;
         }
         hashes.insert(read_pin_hash(&path)?);
@@ -631,7 +644,7 @@ fn read_pin_files_in_publication(publication_dir: &Path) -> Result<BTreeSet<Hash
 }
 
 fn read_pin_hash(path: &Path) -> Result<Hash32, StorageError> {
-    let bytes = fs::read(path).map_err(|source| io_error(path, source))?;
+    let bytes = crate::transaction::read_canonical_file(path)?;
     let value = std::str::from_utf8(&bytes)
         .map_err(|_| io_error(path, std::io::Error::new(std::io::ErrorKind::InvalidData, "GC pin is not UTF-8")))?;
     Hash32::from_str(value.trim()).map_err(StorageError::from)
