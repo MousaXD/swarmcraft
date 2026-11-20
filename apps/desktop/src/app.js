@@ -318,15 +318,49 @@ function runtimeSetupActionButton() {
   return button;
 }
 
+// The in-flight Svelte candidate still mounts the legacy Rust-backed
+// controller while rendering its own WorldsView markup. Add this panel only
+// when that candidate has not yet copied the legacy continuity anchors.
+function clientContinuityTargets() {
+  let title = $('clientContinuityTitle');
+  let detail = $('clientContinuityDetail');
+  if (title && detail) return { title, detail };
+
+  const actions = $('migrationCard')?.querySelector('.compact-actions');
+  if (!actions) return null;
+  const panel = document.createElement('section');
+  panel.className = 'safety-panel neutral';
+  panel.setAttribute('aria-labelledby', 'clientContinuityTitle');
+  const content = document.createElement('div');
+  const sectionLabel = document.createElement('span');
+  sectionLabel.className = 'section-label';
+  sectionLabel.textContent = 'Minecraft client connection';
+  title = document.createElement('h4');
+  title.id = 'clientContinuityTitle';
+  title.textContent = 'Minecraft connection not verified';
+  detail = document.createElement('p');
+  detail.id = 'clientContinuityDetail';
+  detail.setAttribute('role', 'status');
+  detail.setAttribute('aria-live', 'polite');
+  detail.textContent = 'SwarmCraft cannot yet verify a Minecraft client connection.';
+  content.append(sectionLabel, title, detail);
+  panel.append(content);
+  actions.parentNode.insertBefore(panel, actions);
+  return { title, detail };
+}
+
 function renderMigration(state) {
   const mismatched = Boolean(state && typeof state === 'object' && 'phase' in state && state.world_id !== selectedWorldId);
   const migration = normalizeMigrationState(mismatched
     ? { phase: 'blocked', failure_reason: 'Host status was not bound to the selected world.' }
     : state);
   const continuity = clientContinuityFromMigration(state, selectedWorldId, selectedWorld()?.status?.Safety);
-  $('clientContinuityTitle').textContent = continuity.title;
-  $('clientContinuityDetail').textContent = continuity.detail;
-  $('clientContinuityDetail').dataset.tone = continuity.tone;
+  const targets = clientContinuityTargets();
+  if (targets) {
+    targets.title.textContent = continuity.title;
+    targets.detail.textContent = continuity.detail;
+    targets.detail.dataset.tone = continuity.tone;
+  }
   $('migrationBadge').textContent = migration.label;
   // The persisted Ready phase can survive a hard crash. It is not a live
   // Minecraft process check or a signed client route, so never paint it green.
