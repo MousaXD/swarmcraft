@@ -370,7 +370,9 @@ export function normalizeMigrationState(raw) {
     source.detail
       || source.message
       || failureReason
-      || (runtimeReady && gameEndpoint ? `Minecraft is ready at ${gameEndpoint}.` : ''),
+      || (backendPhase === 'ready' && runtimeReady
+        ? 'Minecraft server runtime reports ready; Minecraft client access is not verified.'
+        : ''),
   ).trim();
 
   return {
