@@ -149,6 +149,10 @@ pub fn set_contribution(paths: &DataPaths, world: WorldId, heap_mib: u64) -> Res
             AvailableMemory { physical_mib: memory.physical_mib, available_mib: memory.physical_mib },
         )?;
     }
+    persist_contribution(paths, world, heap_mib)
+}
+
+fn persist_contribution(paths: &DataPaths, world: WorldId, heap_mib: u64) -> Result<HostingConsentV1> {
     let lock = open_lock(&control_path(paths).join("hosting-consent-write.lock"))?;
     lock.lock_exclusive().context("cannot serialize hosting consent updates")?;
     let previous = load_consent(paths, world)?;
@@ -844,17 +848,16 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = DataPaths::from_root(temp.path().join("data"));
         let world = WorldId([37; 32]);
-        let first = set_contribution(&paths, world, 512).unwrap();
-        // The consent revision check is deterministic regardless of free RAM
-        // on a heavily loaded CI machine. A real admit() must still reject
-        // insufficient free RAM, which is tested in check_budget().
+        // Exercise consent revision independently of the runner's memory controller.
+        let first = persist_contribution(&paths, world, 512).unwrap();
         let lock = open_lock(&control_path(&paths).join("hosting-active-memory.lock")).unwrap();
         lock.try_lock_exclusive().unwrap();
         let admission = HostingAdmission { _exclusive_memory_lock: lock, consent: first.clone() };
         assert_eq!(first, *admission.consent());
         set_contribution(&paths, world, 0).unwrap();
         assert!(with_consent_guarded_spawn(&paths, world, &admission, || Ok(())).is_err());
-        assert!(revalidate_admission(&paths, world, &admission).is_err());
+        let error = revalidate_admission(&paths, world, &admission).unwrap_err();
+        assert!(error.to_string().contains("hosting consent or heap changed"));
         assert!(runtime_withdrawal(&paths, world, admission.consent()).unwrap().is_some());
         drop(admission);
         assert!(admit(&paths, world).is_err());
@@ -864,13 +867,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = DataPaths::from_root(temp.path().join("data"));
         let world = WorldId([38; 32]);
-        let first = set_contribution(&paths, world, 512).unwrap();
+        let first = persist_contribution(&paths, world, 512).unwrap();
         let lock = open_lock(&control_path(&paths).join("hosting-active-memory.lock")).unwrap();
         lock.try_lock_exclusive().unwrap();
         let admission = HostingAdmission { _exclusive_memory_lock: lock, consent: first.clone() };
 
         let revoked = set_contribution(&paths, world, 0).unwrap();
-        let reauthorized = set_contribution(&paths, world, 512).unwrap();
+        let reauthorized = persist_contribution(&paths, world, 512).unwrap();
         assert!(first.revision < revoked.revision);
         assert!(revoked.revision < reauthorized.revision);
         assert!(reauthorized.enabled);
@@ -882,7 +885,7 @@ mod tests {
             transition_ran.set(true);
             Ok(())
         });
-        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("hosting consent or heap changed"));
         assert!(!transition_ran.get());
     }
 

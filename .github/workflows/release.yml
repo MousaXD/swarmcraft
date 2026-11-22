@@ -156,6 +156,8 @@ jobs:
           foreach ($target in $targets) {
             & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $target
             if ($LASTEXITCODE -ne 0) { throw "signtool failed for $target" }
+            & $signtool.FullName verify /pa /all $target
+            if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed for $target" }
           }
       - name: Build native Windows installer
         working-directory: apps/desktop
@@ -175,6 +177,8 @@ jobs:
           Get-ChildItem dist -File -Filter *.exe | ForEach-Object {
             & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $_.FullName
             if ($LASTEXITCODE -ne 0) { throw "signtool failed for $($_.FullName)" }
+            & $signtool.FullName verify /pa /all $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed for $($_.FullName)" }
           }
           'Authenticode signed with the required production release certificate.' | Set-Content dist/SIGNING_STATUS_WINDOWS.txt
           Remove-Item $pfx -Force
@@ -231,6 +235,20 @@ jobs:
       - name: Build Developer ID signed and notarized macOS installer
         working-directory: apps/desktop
         run: cargo tauri build --bundles dmg --ci
+      - name: Independently verify Developer ID signature and stapled notarization tickets
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="apps/desktop/src-tauri/target/release/bundle/macos/SwarmCraft.app"
+          test -d "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv --verbose=4 "$app" 2>&1 | grep -F "Authority=Developer ID Application:"
+          xcrun stapler validate "$app"
+          spctl --assess --type execute --verbose=2 "$app"
+          shopt -s nullglob
+          dmg=(apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg)
+          test "${#dmg[@]}" -eq 1
+          xcrun stapler validate "${dmg[0]}"
       - name: Stage macOS package and signing status
         shell: bash
         run: |
@@ -298,16 +316,15 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: '*-release-${{ github.sha }}'
-          path: dist
-          merge-multiple: true
-      - name: Collect release assets
+          path: release-downloads
+          merge-multiple: false
+      - name: Verify exact-tag platform artifacts and their SHA-256 before publication
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p release-assets
-          find dist -type f -exec cp {} release-assets/ \;
-          test -n "$(find release-assets -maxdepth 1 -type f -print -quit)"
-          ls -la release-assets
+          python3 scripts/ci-release/verify_artifacts.py \
+            --source release-downloads --output release-assets \
+            --channel production --commit "$GITHUB_SHA"
       - name: Publish exact validated production release
         env:
           GH_TOKEN: ${{ github.token }}

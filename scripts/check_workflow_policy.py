@@ -109,6 +109,17 @@ def require_validation_dependency(path: Path, builder_jobs: tuple[str, ...]) -> 
     publish = blocks.get("publish", "")
     if "contents: write" not in publish:
         fail(f"{path.name}: final publisher must declare its narrowly scoped contents: write permission")
+    # Prevent an otherwise-green validation from publishing a missing platform,
+    # stale artifact group, tampered package, or unverified SHA-256 sidecar.
+    channel = "preview" if path.name == "main-installers.yml" else "production"
+    if "scripts/ci-release/verify_artifacts.py" not in publish:
+        fail(f"{path.name}: publisher must invoke the release-artifact verifier")
+    if f"--channel {channel}" not in publish or '--commit "$GITHUB_SHA"' not in publish:
+        fail(f"{path.name}: publisher must bind artifact verification to its SHA and channel")
+    if "merge-multiple: false" not in publish or "path: release-downloads" not in publish:
+        fail(f"{path.name}: retain exact-run artifact source group boundaries")
+    if "release-assets/*" not in publish:
+        fail(f"{path.name}: publisher must use only verified staged assets")
 
 
 def main() -> None:
@@ -132,6 +143,21 @@ def main() -> None:
         fail("release.yml must bind the exact tag name into release identity validation")
     if "python3 scripts/check_release_credentials.py" not in release:
         fail("release.yml must fail closed through the production credential policy")
+    # Presence of credentials alone does not certify the produced binaries.
+    # Verify Authenticode and Apple's developer identity/stapled tickets
+    # *after* signing/notarization and before artifact publication.
+    if release.count("verify /pa /all") < 2:
+        fail("release.yml must independently verify signed Windows sidecars and installer")
+    for required in (
+        "codesign --verify --deep --strict",
+        "Authority=Developer ID Application:",
+        'xcrun stapler validate "$app"',
+        'xcrun stapler validate "${dmg[0]}"',
+        "spctl --assess --type execute",
+    ):
+        if required not in release:
+            fail(f"release.yml must prove macOS notarization/signing: {required}")
+
 
     gradle = (ROOT / "minecraft/fabric/gradle.properties").read_text(encoding="utf-8")
     if re.search(r"(?im)^loom_version=.*snapshot", gradle):
