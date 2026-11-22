@@ -7,6 +7,9 @@ on:
     branches:
       - agent-04/svelte-typescript-desktop
     paths:
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'apps/desktop/src-tauri/**'
       - 'apps/desktop/frontend/**'
       - 'apps/desktop/src/**'
       - 'apps/desktop/tests/**'

@@ -7,6 +7,7 @@ on:
     branches:
       - agent-04/svelte-typescript-desktop
     paths:
+      - 'apps/desktop/src-tauri/src/**'
       - 'apps/desktop/frontend/**'
       - 'apps/desktop/src/**'
       - 'apps/desktop/tests/svelte-migration-parity.test.mjs'

@@ -1,5 +1,5 @@
 use crate::{
-    transaction::{durable_atomic_write, durable_create_once, durable_remove},
+    transaction::{durable_atomic_write, durable_create_once, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,14 @@ impl Storage {
         if !proposal.validate_shape()? || !vote.matches_proposal(proposal)? {
             return Ok(MembershipPromiseResult::Rejected);
         }
-        if let Ok(existing) = self.load_membership_promise(proposal.proposed.world_id) {
+        // A durable promise cannot be discarded simply because its on-disk
+        // representation is corrupt or unreadable. Only NotFound is absence.
+        let existing = match self.load_membership_promise(proposal.proposed.world_id) {
+            Ok(promise) => Some(promise),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(existing) = existing.as_ref() {
             if existing.proposal.proposal_hash()? == proposal.proposal_hash()? {
                 return Ok(MembershipPromiseResult::Idempotent);
             }
@@ -45,7 +52,7 @@ impl Storage {
 
     pub fn load_membership_promise(&self, world: WorldId) -> Result<DurableMembershipPromiseV1, StorageError> {
         let path = self.world_dir(world).join("metadata/membership-promise.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let promise: DurableMembershipPromiseV1 = postcard::from_bytes(&bytes)?;
         if promise.proposal.proposed.world_id != world || !promise.vote.matches_proposal(&promise.proposal)? {
             return Err(StorageError::WorldMetadataMismatch);
@@ -102,7 +109,7 @@ impl Storage {
         paths.sort();
         let mut certificates = Vec::with_capacity(paths.len());
         for path in paths {
-            let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+            let bytes = read_canonical_file(&path)?;
             let certificate: MembershipCertificateV1 = postcard::from_bytes(&bytes)?;
             if certificate.proposal.proposed.world_id != world {
                 return Err(StorageError::WorldMetadataMismatch);
@@ -119,7 +126,7 @@ impl Storage {
 
     pub fn load_membership_certificate(&self, world: WorldId) -> Result<MembershipCertificateV1, StorageError> {
         let path = self.world_dir(world).join("metadata/membership-certificate.postcard");
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = read_canonical_file(&path)?;
         let certificate: MembershipCertificateV1 = postcard::from_bytes(&bytes)?;
         if certificate.proposal.proposed.world_id != world {
             return Err(StorageError::WorldMetadataMismatch);
@@ -178,6 +185,47 @@ mod tests {
             voter_public_key: [1; 32],
             signature: vec![3],
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_membership_promise_cannot_be_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([8; 32]);
+        let path = store.world_dir(world).join("metadata/membership-promise.postcard");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let missing = path.with_extension("missing");
+        symlink(&missing, &path).unwrap();
+
+        let attempt = proposal(world, 2);
+        assert!(matches!(
+            store.promise_membership_proposal(&attempt, &vote(&attempt)),
+            Err(StorageError::SymlinkUnsupported(actual)) if actual == path
+        ));
+        assert_eq!(fs::read_link(&path).unwrap(), missing);
+    }
+
+    #[test]
+    fn corrupt_membership_promise_cannot_be_overwritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([8; 32]);
+        let first = proposal(world, 2);
+        assert_eq!(
+            store.promise_membership_proposal(&first, &vote(&first)).unwrap(),
+            MembershipPromiseResult::Accepted
+        );
+
+        let path = store.world_dir(world).join("metadata/membership-promise.postcard");
+        let corrupted = b"invalid durable membership promise";
+        fs::write(&path, corrupted).unwrap();
+
+        let competing = proposal(world, 3);
+        assert!(store.promise_membership_proposal(&competing, &vote(&competing)).is_err());
+        assert_eq!(fs::read(&path).unwrap(), corrupted);
     }
 
     #[test]

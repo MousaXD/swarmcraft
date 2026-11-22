@@ -9,7 +9,7 @@ use crate::{Storage, StorageError};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{self, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
@@ -329,6 +329,18 @@ impl Storage {
         // local publication create their pins while holding the same lock, so
         // GC either sees a durable pin or wins before complete publication.
         let snapshots = self.list_snapshots(world)?;
+        let required_hashes = canonical_snapshot_retention_hashes(self, world)?;
+        if !required_hashes.is_empty() {
+            let manifest_hashes = snapshots
+                .iter()
+                .map(|manifest| manifest.manifest_hash().map_err(StorageError::from))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            for hash in required_hashes {
+                if !manifest_hashes.contains(&hash) {
+                    return Err(RetentionError::MissingRequiredSnapshot(hash));
+                }
+            }
+        }
         let mut live = referenced_blob_hashes(&snapshots);
         live.extend(read_hash_pins(&replication_pins_dir(&world_dir))?);
 
@@ -403,6 +415,49 @@ impl Storage {
     }
 }
 
+/// Canonical retention records are destructive-operation guards. A dangling
+/// symlink, directory, or unreadable entry must never look like a missing root.
+fn canonical_retention_root_present(path: &Path) -> Result<bool, StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(io_error(
+            path,
+            io::Error::new(io::ErrorKind::InvalidData, "canonical retention root is not a regular file"),
+        )),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io_error(path, source)),
+    }
+}
+
+/// Resolve all mandatory recovery roots before any destructive snapshot or
+/// blob operation, including direct garbage-collection calls.
+fn canonical_snapshot_retention_hashes(storage: &Storage, world: WorldId) -> Result<BTreeSet<Hash32>, StorageError> {
+    let metadata_dir = storage.world_dir(world).join("metadata");
+    let mut required_hashes = BTreeSet::new();
+    if canonical_retention_root_present(&metadata_dir.join("transfer.postcard"))? {
+        required_hashes.insert(storage.load_transfer_record(world)?.base_snapshot_hash);
+    }
+    if canonical_retention_root_present(&metadata_dir.join("sleep.postcard"))? {
+        required_hashes.insert(storage.load_sleep_record(world)?.latest_snapshot_hash);
+    }
+    if canonical_retention_root_present(&metadata_dir.join("recovery-promise.postcard"))? {
+        required_hashes.insert(storage.load_recovery_promise(world)?.ballot.base_snapshot_hash);
+    }
+    if canonical_retention_root_present(&metadata_dir.join("recovery-certificate.postcard"))? {
+        required_hashes.insert(storage.load_recovery_certificate(world)?.ballot.base_snapshot_hash);
+    }
+    if canonical_retention_root_present(&metadata_dir.join("solo-branch.postcard"))? {
+        let branch = storage.load_solo_branch(world)?;
+        required_hashes.insert(branch.base_snapshot_hash);
+        required_hashes.insert(branch.head_snapshot_hash);
+    }
+    for branch in storage.list_solo_conflicts(world)? {
+        required_hashes.insert(branch.base_snapshot_hash);
+        required_hashes.insert(branch.head_snapshot_hash);
+    }
+    Ok(required_hashes)
+}
+
 fn retention_roots(
     storage: &Storage,
     world: WorldId,
@@ -417,29 +472,7 @@ fn retention_roots(
         retained.insert(manifest.snapshot_number);
     }
 
-    let metadata_dir = storage.world_dir(world).join("metadata");
-    let mut required_hashes = BTreeSet::new();
-    if metadata_dir.join("transfer.postcard").exists() {
-        required_hashes.insert(storage.load_transfer_record(world)?.base_snapshot_hash);
-    }
-    if metadata_dir.join("sleep.postcard").exists() {
-        required_hashes.insert(storage.load_sleep_record(world)?.latest_snapshot_hash);
-    }
-    if metadata_dir.join("recovery-promise.postcard").exists() {
-        required_hashes.insert(storage.load_recovery_promise(world)?.ballot.base_snapshot_hash);
-    }
-    if metadata_dir.join("recovery-certificate.postcard").exists() {
-        required_hashes.insert(storage.load_recovery_certificate(world)?.ballot.base_snapshot_hash);
-    }
-    if metadata_dir.join("solo-branch.postcard").exists() {
-        let branch = storage.load_solo_branch(world)?;
-        required_hashes.insert(branch.base_snapshot_hash);
-        required_hashes.insert(branch.head_snapshot_hash);
-    }
-    for branch in storage.list_solo_conflicts(world)? {
-        required_hashes.insert(branch.base_snapshot_hash);
-        required_hashes.insert(branch.head_snapshot_hash);
-    }
+    let required_hashes = canonical_snapshot_retention_hashes(storage, world)?;
 
     if !required_hashes.is_empty() {
         let mut by_hash = BTreeMap::new();

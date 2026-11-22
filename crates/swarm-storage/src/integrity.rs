@@ -3,7 +3,10 @@ use crate::{
     Storage, StorageError,
 };
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use swarm_protocol::{Hash32, SnapshotManifestV1, WorldId};
 
 const HEAD_FILE: &str = "canonical-snapshot-head.postcard";
@@ -69,7 +72,8 @@ impl Storage {
         validate_direct_extension(previous, manifest)?;
 
         let epoch_path = self.world_dir(manifest.world_id).join("metadata").join("epoch.postcard");
-        let current_epoch = if epoch_path.exists() { Some(self.load_epoch_record(manifest.world_id)?) } else { None };
+        let current_epoch =
+            if path_exists_checked(&epoch_path)? { Some(self.load_epoch_record(manifest.world_id)?) } else { None };
         if let Some(epoch) = current_epoch.as_ref() {
             if epoch.epoch_number != manifest.epoch
                 || epoch.authority_peer_id != manifest.authority_peer_id
@@ -142,14 +146,14 @@ impl Storage {
         let required_path = self.head_required_path(world);
         let intent_path = self.commit_intent_path(world);
 
-        if intent_path.exists() {
+        if path_exists_checked(&intent_path)? {
             let bytes =
                 fs::read(&intent_path).map_err(|source| StorageError::Io { path: intent_path.clone(), source })?;
             let intent: SnapshotCommitIntentV1 = postcard::from_bytes(&bytes)?;
             if intent.world_id != world {
                 return Err(StorageError::WorldMetadataMismatch);
             }
-            if head_path.exists() {
+            if path_exists_checked(&head_path)? {
                 let head = self.read_head_file(world, &head_path)?;
                 if head.head == Some(intent.next_head) {
                     self.validate_head_target_locked(world, head.head)?;
@@ -164,14 +168,14 @@ impl Storage {
             });
         }
 
-        if head_path.exists() {
+        if path_exists_checked(&head_path)? {
             let head = self.read_head_file(world, &head_path)?;
             self.validate_head_target_locked(world, head.head)?;
             durable_create_once(&required_path, HEAD_REQUIRED_BYTES)?;
             return Ok(head);
         }
 
-        if required_path.exists() {
+        if path_exists_checked(&required_path)? {
             return Err(StorageError::MissingCanonicalHead(world));
         }
 
@@ -240,7 +244,7 @@ impl Storage {
 
     pub(crate) fn raw_snapshot_manifests(&self, world: WorldId) -> Result<Vec<SnapshotManifestV1>, StorageError> {
         let dir = self.world_dir(world).join("snapshots");
-        if !dir.exists() {
+        if !path_exists_checked(&dir)? {
             return Ok(Vec::new());
         }
         let mut manifests = Vec::new();
@@ -268,7 +272,7 @@ impl Storage {
         number: u64,
     ) -> Result<SnapshotManifestV1, StorageError> {
         let path = self.world_dir(world).join("snapshots").join(format!("{number:020}.postcard"));
-        if !path.exists() {
+        if !path_exists_checked(&path)? {
             return Err(StorageError::SnapshotNotFound(number));
         }
         let bytes = fs::read(&path).map_err(|source| StorageError::Io { path: path.clone(), source })?;
@@ -289,6 +293,17 @@ impl Storage {
 
     fn commit_intent_path(&self, world: WorldId) -> PathBuf {
         self.world_dir(world).join("metadata").join(COMMIT_INTENT_FILE)
+    }
+}
+
+/// Presence of a canonical file is a security decision: unreadable files
+/// and symlinks are never equivalent to a missing record.
+fn path_exists_checked(path: &Path) -> Result<bool, StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StorageError::SymlinkUnsupported(path.to_path_buf())),
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(StorageError::Io { path: path.to_path_buf(), source }),
     }
 }
 
@@ -324,4 +339,42 @@ fn validate_direct_extension(
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod filesystem_presence_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn dangling_canonical_head_marker_cannot_be_treated_as_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0x72; 32]);
+        let metadata = storage.world_dir(world).join("metadata");
+        fs::create_dir_all(&metadata).unwrap();
+        let required_path = metadata.join(HEAD_REQUIRED_FILE);
+        symlink(metadata.join("nonexistent-marker"), &required_path).unwrap();
+
+        assert!(matches!(
+            storage.canonical_snapshot_head(world),
+            Err(StorageError::SymlinkUnsupported(path)) if path == required_path
+        ));
+        assert!(!metadata.join(HEAD_FILE).exists());
+    }
+
+    #[test]
+    fn dangling_snapshot_directory_is_not_empty_legacy_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0x73; 32]);
+        let snapshots = storage.world_dir(world).join("snapshots");
+        fs::create_dir_all(snapshots.parent().unwrap()).unwrap();
+        symlink(storage.world_dir(world).join("missing-snapshots"), &snapshots).unwrap();
+
+        assert!(matches!(
+            storage.canonical_snapshot_head(world),
+            Err(StorageError::SymlinkUnsupported(path)) if path == snapshots
+        ));
+    }
 }

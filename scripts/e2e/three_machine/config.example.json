@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "commit": "0000000000000000000000000000000000000000",
+  "package_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "fingerprint_salt": "0000000000000000000000000000000000000000000000000000000000000000",
+  "nodes": {
+    "alice": {
+      "ssh": "e2e-alice",
+      "network_class": "home_nat",
+      "package": "/opt/swarmcraft-e2e/candidate.deb",
+      "binary": "/usr/bin/swarmcraft-desktop",
+      "cli": "/usr/bin/swarmcraft",
+      "data_dir": "/home/e2e/.local/share/swarmcraft-e2e"
+    },
+    "bob": {
+      "ssh": "e2e-bob",
+      "network_class": "cgnat",
+      "package": "/opt/swarmcraft-e2e/candidate.deb",
+      "binary": "/usr/bin/swarmcraft-desktop",
+      "cli": "/usr/bin/swarmcraft",
+      "data_dir": "/home/e2e/.local/share/swarmcraft-e2e"
+    },
+    "carol": {
+      "ssh": "e2e-carol",
+      "network_class": "mobile",
+      "package": "/opt/swarmcraft-e2e/candidate.deb",
+      "binary": "/usr/bin/swarmcraft-desktop",
+      "cli": "/usr/bin/swarmcraft",
+      "data_dir": "/home/e2e/.local/share/swarmcraft-e2e"
+    }
+  }
+}

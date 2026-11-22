@@ -25,7 +25,7 @@ use swarm_protocol::{
     DiscoveryFreshnessChallengeV1, DiscoveryFreshnessVoteV1, DiscoveryMembershipProofV1, FriendPresenceV1,
     MembershipPolicyV1, PeerId, WorldAnnouncementV1, WorldId, WorldVisibilityV1, PROTOCOL_VERSION,
 };
-use swarm_storage::Storage;
+use swarm_storage::{Storage, StorageError};
 use tokio::time::{timeout, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
@@ -36,6 +36,10 @@ pub const FRIEND_PRESENCE_TTL_MS: u64 = 30 * 1_000;
 const DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const DISCOVERY_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 const DISCOVERY_FRESHNESS_TIMEOUT: Duration = Duration::from_secs(5);
+// A transient QUIC stream loss must not permanently hide a signed canonical
+// provider. Limit retries to the caller's explicit locators and the existing
+// overall discovery deadline; retries never bypass authentication or quorum.
+const DISCOVERY_EXPLICIT_BROWSE_RETRIES: u8 = 2;
 const FRIENDS_FILE_VERSION: u16 = 1;
 const MAX_FRIEND_LABEL_BYTES: usize = 96;
 
@@ -264,8 +268,16 @@ fn refresh_publications(
         let local_is_current = membership.members.iter().any(|member| {
             member.peer_id == identity.peer_id() && member.public_key == identity.public_key() && !member.banned
         });
-        let local_is_pending = storage.load_membership_promise(world).ok().is_some_and(|promise| {
-            promise.proposal.proposed.members.iter().any(|member| {
+        let pending_membership = match storage.load_membership_promise(world) {
+            Ok(promise) => Some(promise.proposal),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                warn!(world = %world, %error, "refusing discovery publication with unreadable membership promise");
+                continue;
+            }
+        };
+        let local_is_pending = pending_membership.as_ref().is_some_and(|proposal| {
+            proposal.proposed.members.iter().any(|member| {
                 member.peer_id == identity.peer_id() && member.public_key == identity.public_key() && !member.banned
             })
         });
@@ -490,7 +502,11 @@ fn build_discovery_membership_proof(storage: &Storage, world: WorldId) -> Result
         .first()
         .map(|certificate| certificate.proposal.previous.clone())
         .unwrap_or_else(|| current.clone());
-    let pending = storage.load_membership_promise(world).ok().map(|promise| promise.proposal);
+    let pending = match storage.load_membership_promise(world) {
+        Ok(promise) => Some(promise.proposal),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     let proof = DiscoveryMembershipProofV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
@@ -502,6 +518,23 @@ fn build_discovery_membership_proof(storage: &Storage, world: WorldId) -> Result
     };
     validate_discovery_membership_proof_shape(&proof).map_err(|error| anyhow!(error))?;
     Ok(proof)
+}
+
+/// A corrupt or unreadable durable ballot cannot certify a fresh discovery
+/// response. A genuinely missing promise has no higher-round constraint.
+fn canonical_recovery_promise_allows_freshness(
+    storage: &Storage,
+    world: WorldId,
+    authority_epoch: u64,
+    fencing_token: u64,
+) -> bool {
+    match storage.load_recovery_promise(world) {
+        Ok(promise) => {
+            (promise.ballot.target_epoch, promise.ballot.target_fencing_token) <= (authority_epoch, fencing_token)
+        }
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
 }
 
 fn local_state_matches_freshness_challenge(
@@ -518,10 +551,8 @@ fn local_state_matches_freshness_challenge(
     if membership.sequence != challenge.membership_sequence || membership.record_hash()? != challenge.membership_hash {
         return Ok(false);
     }
-    if storage.load_recovery_promise(world).ok().is_some_and(|promise| {
-        (promise.ballot.target_epoch, promise.ballot.target_fencing_token)
-            > (challenge.authority_epoch, challenge.fencing_token)
-    }) {
+    if !canonical_recovery_promise_allows_freshness(storage, world, challenge.authority_epoch, challenge.fencing_token)
+    {
         return Ok(false);
     }
     let epoch = match storage.load_epoch_record(world) {
@@ -554,7 +585,11 @@ fn local_state_matches_freshness_challenge(
     if head != challenge.canonical_head {
         return Ok(false);
     }
-    let pending = storage.load_membership_promise(world).ok().map(|promise| promise.proposal);
+    let pending = match storage.load_membership_promise(world) {
+        Ok(promise) => Some(promise.proposal),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Ok(false),
+    };
     let pending_hash = pending.as_ref().map(|proposal| proposal.proposal_hash()).transpose()?;
     if pending_hash != challenge.pending_membership_proposal_hash {
         return Ok(false);
@@ -850,6 +885,14 @@ pub fn list_friends(paths: &DataPaths) -> Result<Vec<FriendCardV1>> {
         .collect()
 }
 
+fn reserve_explicit_browse_retry(attempts: &mut u8) -> bool {
+    if *attempts >= DISCOVERY_EXPLICIT_BROWSE_RETRIES {
+        return false;
+    }
+    *attempts += 1;
+    true
+}
+
 pub async fn search_public_worlds(
     paths: &DataPaths,
     input: DiscoverySearchInputV1,
@@ -873,6 +916,7 @@ pub async fn search_public_worlds(
     let mut providers = bootstrap_peers.clone();
     let mut requested = HashSet::new();
     let mut pending = HashSet::new();
+    let mut retry_attempts = HashMap::<TransportPeerId, u8>::new();
     for transport_peer in bootstrap_order.iter().copied() {
         if node.application_peer(&transport_peer).is_some() && requested.insert(transport_peer) {
             let request_id =
@@ -949,9 +993,29 @@ pub async fn search_public_worlds(
                         }
                     }
                 }
-                DiscoveryNetworkEvent::OutboundFailure { request_id, error, .. } => {
-                    pending.remove(&format!("{request_id:?}"));
+                DiscoveryNetworkEvent::OutboundFailure { transport_peer, request_id, error } => {
+                    let was_pending = pending.remove(&format!("{request_id:?}"));
                     network_error.get_or_insert(error);
+                    // Only retry a request we actually issued to a caller-
+                    // specified locator. DHT-discovered peers and unsolicited
+                    // failures receive no retry budget. Signature, membership
+                    // and freshness quorum verification below are unchanged.
+                    if was_pending && bootstrap_peers.contains(&transport_peer) {
+                        let attempts = retry_attempts.entry(transport_peer).or_default();
+                        if reserve_explicit_browse_retry(attempts) {
+                            requested.remove(&transport_peer);
+                            if node.application_peer(&transport_peer).is_some() {
+                                let next = node.send_request(
+                                    &transport_peer,
+                                    WireRequest::DiscoveryPublic { filter: filter.clone() },
+                                )?;
+                                pending.insert(format!("{next:?}"));
+                                requested.insert(transport_peer);
+                            } else if let Err(dial_error) = node.dial_peer(transport_peer) {
+                                debug!(%dial_error, %transport_peer, "discovery provider retry dial failed");
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -1496,6 +1560,15 @@ fn unix_millis() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_public_provider_retry_budget_is_bounded() {
+        let mut retries = 0;
+        assert!(reserve_explicit_browse_retry(&mut retries));
+        assert!(reserve_explicit_browse_retry(&mut retries));
+        assert!(!reserve_explicit_browse_retry(&mut retries));
+        assert_eq!(retries, DISCOVERY_EXPLICIT_BROWSE_RETRIES);
+    }
     use swarm_core::{sign_recovery_ballot, sign_recovery_vote, sign_world_config, PeerIdentity};
     use swarm_protocol::{
         AuthorityPolicyV1, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, RecoveryBallotV1, RecoveryVoteV1,
@@ -1878,5 +1951,44 @@ mod tests {
                 signature: Vec::new(),
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod recovery_freshness_fail_closed_tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_promise_cannot_prove_discovery_freshness() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0xb1; 32]);
+        assert!(canonical_recovery_promise_allows_freshness(&storage, world, 1, 1));
+
+        let metadata = storage.world_dir(world).join("metadata");
+        fs::create_dir_all(&metadata).unwrap();
+        let path = metadata.join("recovery-promise.postcard");
+        let corrupt = b"unreadable higher-round durable promise";
+        fs::write(&path, corrupt).unwrap();
+
+        assert!(!canonical_recovery_promise_allows_freshness(&storage, world, 1, 1));
+        assert_eq!(fs::read(&path).unwrap(), corrupt);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_promise_symlink_cannot_prove_discovery_freshness() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0xb2; 32]);
+        let metadata = storage.world_dir(world).join("metadata");
+        fs::create_dir_all(&metadata).unwrap();
+        let path = metadata.join("recovery-promise.postcard");
+        symlink(temp.path().join("missing-durable-vote"), &path).unwrap();
+
+        assert!(!canonical_recovery_promise_allows_freshness(&storage, world, 1, 1));
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
     }
 }

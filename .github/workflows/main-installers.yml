@@ -10,6 +10,7 @@ on:
       - 'scripts/check_release_version.py'
       - 'scripts/check_release_credentials.py'
       - 'scripts/check_workflow_policy.py'
+      - 'scripts/ci-release/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'crates/**'
@@ -92,6 +93,16 @@ jobs:
       - name: Verify Desktop lockfile is current
         shell: bash
         run: cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --format-version 1 > /dev/null
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.temp }}/swarmcraft-artifact-cache
+          key: swarmcraft-ci-artifact-v1-${{ runner.os }}-x64-${{ hashFiles('scripts/ci-artifacts/acquire.py') }}
+      - name: Verify and preseed pinned Windows installer tools
+        shell: bash
+        run: python scripts/ci-artifacts/acquire.py --target windows --source-cache "${{ runner.temp }}/swarmcraft-artifact-cache"
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version 2.11.4 --locked
       - name: Build Rust runtimes
@@ -106,21 +117,9 @@ jobs:
           Copy-Item target/release/swarmcraft-host.exe "apps/desktop/src-tauri/binaries/swarmcraft-host-$target.exe"
           Copy-Item target/release/swarmcraft-runtime.exe "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target.exe"
           Copy-Item target/release/swarmcraft-import.exe "apps/desktop/src-tauri/binaries/swarmcraft-import-$target.exe"
-      - name: Build Windows installer with bounded tool-download retry
+      - name: Build Windows installer with verified NSIS inputs
         working-directory: apps/desktop
-        shell: bash
-        run: |
-          for attempt in 1 2 3; do
-            if cargo tauri build --bundles nsis --ci; then
-              exit 0
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "Windows installer build failed after $attempt attempts."
-              exit 1
-            fi
-            echo "Windows installer attempt $attempt failed; retrying transient NSIS/tool download."
-            sleep $((attempt * 5))
-          done
+        run: cargo tauri build --bundles nsis --ci
       - name: Stage Windows artifact
         shell: pwsh
         run: |
@@ -186,7 +185,10 @@ jobs:
           set -euo pipefail
           app="apps/desktop/src-tauri/target/release/bundle/macos/SwarmCraft.app"
           out_dir="apps/desktop/src-tauri/target/release/bundle/dmg"
-          dmg="$out_dir/SwarmCraft_0.5.0_${{ matrix.arch }}.dmg"
+          # The validated workspace version determines the preview filename.
+          version="$(awk '/^\[workspace.package\]$/ { found=1; next } found && /^\[/ { exit } found && /^version = "/ { gsub(/"/, "", $3); print $3; exit }' Cargo.toml)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid workspace version" >&2; exit 1; }
+          dmg="$out_dir/SwarmCraft_${version}_${{ matrix.arch }}.dmg"
           test -d "$app"
           rm -rf "$out_dir"
           mkdir -p "$out_dir"
@@ -281,13 +283,15 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: swarmcraft-*-${{ github.sha }}
-          path: release-assets
-          merge-multiple: true
-      - name: List release assets
+          path: release-downloads
+          merge-multiple: false
+      - name: Verify exact-run platform artifacts and their SHA-256 before publication
+        shell: bash
         run: |
           set -euo pipefail
-          find release-assets -maxdepth 1 -type f -print
-          test -n "$(find release-assets -maxdepth 1 -type f -print -quit)"
+          python3 scripts/ci-release/verify_artifacts.py \
+            --source release-downloads --output release-assets \
+            --channel preview --commit "$GITHUB_SHA"
       - name: Publish validated SwarmCraft Main Snapshot
         env:
           GH_TOKEN: ${{ github.token }}
