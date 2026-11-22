@@ -862,12 +862,13 @@ async fn permanently_disconnecting_explicit_provider_is_bounded_and_fails_closed
     );
     assert!(exact.world.is_none(), "unreachable provider must never confer authority");
 
-    let attempts = received.lock().unwrap();
-    let browse_attempts = attempts.iter().filter(|kind| **kind == "browse").count();
-    let resolve_attempts = attempts.iter().filter(|kind| **kind == "resolve").count();
-    assert!((1..=3).contains(&browse_attempts), "public browse exceeded its bounded retry budget: {attempts:?}");
-    assert!((1..=3).contains(&resolve_attempts), "exact resolve exceeded its bounded retry budget: {attempts:?}");
-    drop(attempts);
+    {
+        let attempts = received.lock().unwrap();
+        let browse_attempts = attempts.iter().filter(|kind| **kind == "browse").count();
+        let resolve_attempts = attempts.iter().filter(|kind| **kind == "resolve").count();
+        assert!((1..=3).contains(&browse_attempts), "public browse exceeded its bounded retry budget: {attempts:?}");
+        assert!((1..=3).contains(&resolve_attempts), "exact resolve exceeded its bounded retry budget: {attempts:?}");
+    }
 
     provider_task.abort();
     assert!(provider_task.await.is_err_and(|error| error.is_cancelled()));
