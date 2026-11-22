@@ -1,5 +1,5 @@
 use crate::{
-    transaction::{durable_atomic_write, durable_remove, read_canonical_file},
+    transaction::{canonical_file_exists, durable_atomic_write, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
 use serde::{Deserialize, Serialize};
@@ -197,34 +197,47 @@ impl Storage {
         let _guard = self.lock_world_transaction(branch.world_id)?;
         branch.validate_semantics()?;
         let hash = branch.branch_hash()?;
-        let path = self
-            .world_dir(branch.world_id)
-            .join("recovery")
-            .join("solo-conflicts")
-            .join(format!("{}.postcard", hash.to_hex()));
-        if !path.exists() {
+        let recovery_dir = self.world_dir(branch.world_id).join("recovery");
+        // A symlinked ancestor can redirect conflict history outside this world.
+        checked_solo_conflict_directory_present(&recovery_dir)?;
+        let conflicts_dir = recovery_dir.join("solo-conflicts");
+        checked_solo_conflict_directory_present(&conflicts_dir)?;
+        let path = conflicts_dir.join(format!("{}.postcard", hash.to_hex()));
+        if canonical_file_exists(&path)? {
+            // A present but corrupt or conflicting record must never masquerade
+            // as an already-durable idempotent conflict.
+            let existing: SoloBranchV1 = postcard::from_bytes(&read_canonical_file(&path)?)?;
+            existing.validate_semantics()?;
+            if existing != *branch {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+        } else {
             durable_atomic_write(&path, &postcard::to_allocvec(branch)?)?;
         }
         Ok(path)
     }
 
     pub fn list_solo_conflicts(&self, world: WorldId) -> Result<Vec<SoloBranchV1>, StorageError> {
-        let dir = self.world_dir(world).join("recovery").join("solo-conflicts");
-        if !dir.exists() {
+        let recovery_dir = self.world_dir(world).join("recovery");
+        if !checked_solo_conflict_directory_present(&recovery_dir)? {
+            return Ok(Vec::new());
+        }
+        let dir = recovery_dir.join("solo-conflicts");
+        if !checked_solo_conflict_directory_present(&dir)? {
             return Ok(Vec::new());
         }
         let mut branches = Vec::new();
         for entry in fs::read_dir(&dir).map_err(|error| io_error(&dir, error))? {
             let entry = entry.map_err(|error| io_error(&dir, error))?;
-            if !entry.file_type().map_err(|error| io_error(entry.path(), error))?.is_file() {
-                continue;
-            }
-            let bytes = fs::read(entry.path()).map_err(|error| io_error(entry.path(), error))?;
+            // Do not silently skip symlink, directory, or invalid record
+            // entries: any of them could conceal a mandatory retention root.
+            let bytes = read_canonical_file(&entry.path())?;
             let branch: SoloBranchV1 = postcard::from_bytes(&bytes)?;
-            if branch.world_id == world {
-                branch.validate_semantics()?;
-                branches.push(branch);
+            if branch.world_id != world {
+                return Err(StorageError::WorldMetadataMismatch);
             }
+            branch.validate_semantics()?;
+            branches.push(branch);
         }
         branches.sort_by_key(|branch| (branch.head_epoch, branch.head_sequence, branch.head_snapshot_hash));
         Ok(branches)
@@ -247,6 +260,18 @@ impl Storage {
 
     fn control_path_v2(&self, world: WorldId, name: &str) -> PathBuf {
         self.world_dir(world).join("metadata").join(name)
+    }
+}
+
+/// Only a genuinely absent directory is an absent conflict namespace.
+/// Paths of other types could conceal recovery roots that must stop GC.
+fn checked_solo_conflict_directory_present(path: &std::path::Path) -> Result<bool, StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StorageError::SymlinkUnsupported(path.to_path_buf())),
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(StorageError::WorldMetadataMismatch),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io_error(path, source)),
     }
 }
 
@@ -579,5 +604,132 @@ mod tests {
         assert!(!store.background_seeding_enabled(world).unwrap());
         store.set_background_seeding(world, true).unwrap();
         assert!(store.background_seeding_enabled(world).unwrap());
+    }
+
+    #[test]
+    fn solo_conflict_persistence_rejects_corrupt_existing_evidence_and_recovers_after_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, world) = test_world();
+        let store = Storage::open(temp.path()).unwrap();
+        let branch = SoloBranchV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            base_snapshot_hash: Hash32([1; 32]),
+            base_epoch: 4,
+            head_snapshot_hash: Hash32([2; 32]),
+            head_epoch: 5,
+            head_sequence: 9,
+            state_hash: Hash32([3; 32]),
+            authority_peer_id: PeerId([4; 32]),
+            authority_public_key: [4; 32],
+            signature: vec![4; 64],
+        };
+
+        let path = store.preserve_solo_conflict(&branch).unwrap();
+        assert_eq!(store.preserve_solo_conflict(&branch).unwrap(), path);
+        let corrupted = b"not-a-durable-solo-conflict";
+        fs::write(&path, corrupted).unwrap();
+        assert!(store.preserve_solo_conflict(&branch).is_err());
+        assert!(store.list_solo_conflicts(world).is_err());
+        assert_eq!(fs::read(&path).unwrap(), corrupted);
+
+        fs::remove_file(&path).unwrap();
+        assert_eq!(store.preserve_solo_conflict(&branch).unwrap(), path);
+        assert_eq!(store.list_solo_conflicts(world).unwrap(), vec![branch]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_solo_conflict_recovery_parent_rejects_reads_and_writes() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let (_, world) = test_world();
+        let store = Storage::open(temp.path().join("store")).unwrap();
+        let recovery = store.world_dir(world).join("recovery");
+        fs::create_dir_all(recovery.parent().unwrap()).unwrap();
+        let external = temp.path().join("elsewhere");
+        fs::create_dir_all(&external).unwrap();
+        symlink(&external, &recovery).unwrap();
+
+        assert!(matches!(
+            store.list_solo_conflicts(world),
+            Err(StorageError::SymlinkUnsupported(path)) if path == recovery
+        ));
+        let branch = SoloBranchV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            base_snapshot_hash: Hash32([1; 32]),
+            base_epoch: 4,
+            head_snapshot_hash: Hash32([2; 32]),
+            head_epoch: 5,
+            head_sequence: 9,
+            state_hash: Hash32([3; 32]),
+            authority_peer_id: PeerId([4; 32]),
+            authority_public_key: [4; 32],
+            signature: vec![4; 64],
+        };
+        assert!(store.preserve_solo_conflict(&branch).is_err());
+        assert!(!external.join("solo-conflicts").exists());
+        assert_eq!(fs::read_link(&recovery).unwrap(), external);
+    }
+
+    #[test]
+    fn restored_durable_recovery_promise_resumes_without_losing_previous_ballot() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, world) = test_world();
+        let storage = Storage::open(temp.path()).unwrap();
+        let first = ballot(world, 2, 7);
+        assert_eq!(storage.promise_recovery_ballot(&first, &vote(&first, 6)).unwrap(), RecoveryPromiseResult::Accepted);
+        let original = storage.load_recovery_promise(world).unwrap();
+        let original_bytes = postcard::to_allocvec(&original).unwrap();
+        let path = storage.control_path_v2(world, "recovery-promise.postcard");
+        fs::write(&path, b"corrupt-interrupted-promise").unwrap();
+
+        let next = ballot(world, 2, 8);
+        assert!(storage.promise_recovery_ballot(&next, &vote(&next, 6)).is_err());
+        assert!(storage.clear_recovery_promise_after_epoch_advance(world, 5).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"corrupt-interrupted-promise");
+
+        // A caller must repair the original evidence, not silently bootstrap.
+        fs::write(&path, original_bytes).unwrap();
+        assert_eq!(storage.load_recovery_promise(world).unwrap(), original);
+        assert_eq!(storage.promise_recovery_ballot(&next, &vote(&next, 6)).unwrap(), RecoveryPromiseResult::Accepted);
+        assert_eq!(storage.load_recovery_promise(world).unwrap().ballot.round, 8);
+    }
+
+    #[test]
+    fn simultaneous_durable_recovery_promises_cannot_both_win_one_round() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("store");
+        let (_, world) = test_world();
+        let barrier = Arc::new(Barrier::new(2));
+        let results = std::thread::scope(|scope| {
+            let handles = [2_u8, 3_u8]
+                .into_iter()
+                .map(|candidate| {
+                    let barrier = Arc::clone(&barrier);
+                    let root = &root;
+                    scope.spawn(move || {
+                        let storage = Storage::open(root).unwrap();
+                        let ballot = ballot(world, candidate, 9);
+                        let vote = vote(&ballot, 6);
+                        barrier.wait();
+                        storage.promise_recovery_ballot(&ballot, &vote).unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+        });
+
+        assert_eq!(results.iter().filter(|result| **result == RecoveryPromiseResult::Accepted).count(), 1);
+        assert_eq!(
+            results.iter().filter(|result| matches!(**result, RecoveryPromiseResult::Rejected { .. })).count(),
+            1
+        );
+        let reopened = Storage::open(root).unwrap();
+        assert_eq!(reopened.load_recovery_promise(world).unwrap().ballot.round, 9);
     }
 }

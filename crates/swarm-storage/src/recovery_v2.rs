@@ -1,8 +1,12 @@
 use crate::{
-    transaction::{canonical_file_exists, durable_atomic_write, durable_remove, read_canonical_file},
+    transaction::{canonical_file_exists, durable_atomic_write, durable_remove, io_error, read_canonical_file},
     Storage, StorageError,
 };
-use swarm_protocol::{RecoveryCertificateV1, WorldId};
+use std::io;
+use swarm_protocol::{EpochMode, EpochRecordV1, RecoveryCertificateV1, WorldId};
+
+const CERTIFICATE: &str = "recovery-certificate.postcard";
+const PENDING_CERTIFICATE: &str = "recovery-certificate-pending.postcard";
 
 impl Storage {
     pub fn save_recovery_certificate(&self, certificate: &RecoveryCertificateV1) -> Result<(), StorageError> {
@@ -10,17 +14,13 @@ impl Storage {
         let _guard = self.lock_world_transaction(world)?;
         self.load_world(world)?;
         validate_stored_certificate(certificate, world)?;
-        let path = self.world_dir(world).join("metadata").join("recovery-certificate.postcard");
-
-        // A present but corrupt/unreadable canonical record cannot be silently
-        // overwritten. Only genuine NotFound is an absent certificate.
-        let existing = if canonical_file_exists(&path)? { Some(self.load_recovery_certificate(world)?) } else { None };
-        let proposed_generation = (certificate.ballot.target_epoch, certificate.ballot.target_fencing_token);
-        let accepted = match self.load_epoch_record(world) {
-            Ok(epoch) => Some(epoch),
-            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        };
+        let metadata = self.world_dir(world).join("metadata");
+        let accepted_path = metadata.join(CERTIFICATE);
+        let pending_path = metadata.join(PENDING_CERTIFICATE);
+        let certificates = self.load_recovery_certificates(world)?;
+        let proposed_generation = certificate_generation(certificate);
+        let accepted = optional_epoch(self, world)?;
+        let mut accepted_proof = None;
         if let Some(epoch) = &accepted {
             let accepted_generation = (epoch.epoch_number, epoch.fencing_token);
             if proposed_generation < accepted_generation {
@@ -28,25 +28,28 @@ impl Storage {
                 // proof after this world has advanced its accepted generation.
                 return Err(StorageError::WorldMetadataMismatch);
             }
+            if epoch.mode == EpochMode::Recovery {
+                accepted_proof = certificate_for_epoch(&certificates, epoch)?;
+            }
             if proposed_generation == accepted_generation {
-                // Once the epoch is durable, its recovery ballot is immutable.
-                // A new vote subset for the same ballot is still idempotent.
-                if epoch.mode != swarm_protocol::EpochMode::Recovery
-                    || epoch.authority_peer_id != certificate.ballot.candidate_peer_id
-                    || epoch.authority_public_key != certificate.ballot.candidate_public_key
-                    || epoch.base_state_hash != certificate.ballot.base_state_hash
-                {
+                if !matches_recovery_epoch(certificate, epoch) {
                     return Err(StorageError::WorldMetadataMismatch);
                 }
-                if let Some(previous) = &existing {
+                if let Some(previous) = accepted_proof {
                     if previous.ballot.ballot_hash()? != certificate.ballot.ballot_hash()? {
                         return Err(StorageError::WorldMetadataMismatch);
                     }
+                    // Retain the original proof and any future pending certificate.
+                    return Ok(());
                 }
+                return durable_atomic_write(&accepted_path, &postcard::to_allocvec(certificate)?);
+            }
+            if epoch.mode == EpochMode::Recovery && accepted_proof.is_none() {
+                return Err(StorageError::WorldMetadataMismatch);
             }
         }
-        if let Some(previous) = &existing {
-            let prior_generation = (previous.ballot.target_epoch, previous.ballot.target_fencing_token);
+        if let Some(previous) = latest_certificate(&certificates) {
+            let prior_generation = certificate_generation(previous);
             if proposed_generation < prior_generation {
                 return Err(StorageError::WorldMetadataMismatch);
             }
@@ -63,23 +66,98 @@ impl Storage {
                 }
             }
         }
+        let path = if let Some(proof) = accepted_proof {
+            // A prior promotion may have made the pending proof authoritative.
+            // Persist it separately before reusing the pending slot.
+            if certificates[0].as_ref() != Some(proof) {
+                durable_atomic_write(&accepted_path, &postcard::to_allocvec(proof)?)?;
+            }
+            pending_path
+        } else if certificates[1].is_some() {
+            pending_path
+        } else {
+            accepted_path
+        };
         durable_atomic_write(&path, &postcard::to_allocvec(certificate)?)
     }
 
     pub fn load_recovery_certificate(&self, world: WorldId) -> Result<RecoveryCertificateV1, StorageError> {
-        let path = self.world_dir(world).join("metadata").join("recovery-certificate.postcard");
-        let bytes = read_canonical_file(&path)?;
-        let certificate: RecoveryCertificateV1 = postcard::from_bytes(&bytes)?;
-        validate_stored_certificate(&certificate, world)?;
-        Ok(certificate)
+        let epoch = optional_epoch(self, world)?;
+        let certificates = self.load_recovery_certificates(world)?;
+        if let Some(epoch) = epoch.filter(|epoch| epoch.mode == EpochMode::Recovery) {
+            return certificate_for_epoch(&certificates, &epoch)?.cloned().ok_or(StorageError::WorldMetadataMismatch);
+        }
+        latest_certificate(&certificates).cloned().ok_or_else(|| {
+            io_error(self.world_dir(world).join("metadata").join(CERTIFICATE), io::ErrorKind::NotFound.into())
+        })
+    }
+
+    pub(crate) fn load_recovery_certificates(
+        &self,
+        world: WorldId,
+    ) -> Result<[Option<RecoveryCertificateV1>; 2], StorageError> {
+        let metadata = self.world_dir(world).join("metadata");
+        let read = |name| -> Result<_, StorageError> {
+            let path = metadata.join(name);
+            if !canonical_file_exists(&path)? {
+                return Ok(None);
+            }
+            let certificate = postcard::from_bytes(&read_canonical_file(&path)?)?;
+            validate_stored_certificate(&certificate, world)?;
+            Ok(Some(certificate))
+        };
+        Ok([read(CERTIFICATE)?, read(PENDING_CERTIFICATE)?])
     }
 
     pub fn clear_recovery_certificate(&self, world: WorldId) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(world)?;
-        let path = self.world_dir(world).join("metadata").join("recovery-certificate.postcard");
-        durable_remove(&path)?;
+        let metadata = self.world_dir(world).join("metadata");
+        durable_remove(&metadata.join(PENDING_CERTIFICATE))?;
+        durable_remove(&metadata.join(CERTIFICATE))?;
         Ok(())
     }
+}
+
+fn optional_epoch(storage: &Storage, world: WorldId) -> Result<Option<EpochRecordV1>, StorageError> {
+    match storage.load_epoch_record(world) {
+        Ok(epoch) => Ok(Some(epoch)),
+        Err(StorageError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn certificate_generation(certificate: &RecoveryCertificateV1) -> (u64, u64) {
+    (certificate.ballot.target_epoch, certificate.ballot.target_fencing_token)
+}
+
+fn latest_certificate(certificates: &[Option<RecoveryCertificateV1>]) -> Option<&RecoveryCertificateV1> {
+    certificates
+        .iter()
+        .flatten()
+        .max_by_key(|certificate| (certificate_generation(certificate), certificate.ballot.round))
+}
+
+fn matches_recovery_epoch(certificate: &RecoveryCertificateV1, epoch: &EpochRecordV1) -> bool {
+    epoch.mode == EpochMode::Recovery
+        && certificate_generation(certificate) == (epoch.epoch_number, epoch.fencing_token)
+        && epoch.authority_peer_id == certificate.ballot.candidate_peer_id
+        && epoch.authority_public_key == certificate.ballot.candidate_public_key
+        && epoch.base_state_hash == certificate.ballot.base_state_hash
+}
+
+fn certificate_for_epoch<'a>(
+    certificates: &'a [Option<RecoveryCertificateV1>],
+    epoch: &EpochRecordV1,
+) -> Result<Option<&'a RecoveryCertificateV1>, StorageError> {
+    let mut matching = certificates
+        .iter()
+        .flatten()
+        .filter(|proof| certificate_generation(proof) == (epoch.epoch_number, epoch.fencing_token));
+    let Some(proof) = matching.next() else { return Ok(None) };
+    if !matches_recovery_epoch(proof, epoch) || matching.any(|other| other != proof) {
+        return Err(StorageError::WorldMetadataMismatch);
+    }
+    Ok(Some(proof))
 }
 
 fn validate_stored_certificate(certificate: &RecoveryCertificateV1, world: WorldId) -> Result<(), StorageError> {
@@ -102,8 +180,7 @@ mod tests {
     use crate::WorldMetadataV1;
     use std::fs;
     use swarm_protocol::{
-        peer_id_from_public_key, EpochMode, EpochRecordV1, Hash32, RecoveryBallotV1, WorldGenesisV1, PROTOCOL_VERSION,
-        STORAGE_SCHEMA_VERSION,
+        peer_id_from_public_key, Hash32, RecoveryBallotV1, WorldGenesisV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
     };
 
     fn fixture() -> (tempfile::TempDir, Storage, WorldId) {
@@ -263,6 +340,98 @@ mod tests {
 
         assert_eq!(accepted.iter().filter(|value| **value).count(), 1);
         assert!(storage.load_recovery_certificate(world).is_ok());
+    }
+
+    #[test]
+    fn interrupted_next_epoch_promotion_does_not_erase_current_accepted_certificate() {
+        let (temp, storage, world) = fixture();
+        let current = certificate(world);
+        storage.save_recovery_certificate(&current).unwrap();
+        storage.save_epoch_record(&accepted_epoch_for(&current)).unwrap();
+
+        let mut next = current.clone();
+        next.ballot.base_epoch = current.ballot.target_epoch;
+        next.ballot.base_fencing_token = current.ballot.target_fencing_token;
+        next.ballot.target_epoch += 1;
+        next.ballot.target_fencing_token += 1;
+        next.ballot.round += 1;
+        next.ballot.base_snapshot_hash = Hash32([6; 32]);
+
+        // Restart after persisting the successor's proof but before saving its epoch.
+        storage.save_recovery_certificate(&next).unwrap();
+        drop(storage);
+
+        let reopened = Storage::open(temp.path()).unwrap();
+        assert_eq!(reopened.load_epoch_record(world).unwrap().epoch_number, current.ballot.target_epoch);
+        // The authority at the still-accepted generation must retain its
+        // original durable quorum evidence until promotion commits.
+        assert_eq!(reopened.load_recovery_certificate(world).unwrap(), current);
+        assert_eq!(reopened.load_recovery_certificates(world).unwrap(), [Some(current.clone()), Some(next.clone())]);
+        reopened.save_recovery_certificate(&current).unwrap();
+        reopened.save_epoch_record(&accepted_epoch_for(&next)).unwrap();
+        drop(reopened);
+
+        let reopened = Storage::open(temp.path()).unwrap();
+        assert_eq!(reopened.load_recovery_certificate(world).unwrap(), next);
+        let mut third = next.clone();
+        third.ballot.base_epoch += 1;
+        third.ballot.base_fencing_token += 1;
+        third.ballot.target_epoch += 1;
+        third.ballot.target_fencing_token += 1;
+        reopened.save_recovery_certificate(&third).unwrap();
+        assert_eq!(reopened.load_recovery_certificate(world).unwrap(), next);
+        assert_eq!(reopened.load_recovery_certificates(world).unwrap(), [Some(next), Some(third)]);
+    }
+
+    #[test]
+    fn retention_keeps_accepted_and_pending_recovery_snapshot_roots() {
+        use crate::{retention::RetentionPolicy, SnapshotContext};
+
+        let (_temp, storage, world) = fixture();
+        let source = tempfile::tempdir().unwrap();
+        let mut current = certificate(world);
+        let mut previous = None;
+        let mut hashes = Vec::new();
+        for number in 1..=3 {
+            fs::write(source.path().join("level.dat"), number.to_string()).unwrap();
+            let mut snapshot = storage
+                .snapshot_directory(
+                    source.path(),
+                    SnapshotContext {
+                        world,
+                        snapshot_number: number,
+                        epoch: 1,
+                        sequence: number,
+                        previous_snapshot_hash: previous,
+                        authority_peer_id: current.ballot.candidate_peer_id,
+                        authority_public_key: current.ballot.candidate_public_key,
+                    },
+                )
+                .unwrap();
+            snapshot.signature = vec![0; 64];
+            storage.commit_snapshot(&snapshot).unwrap();
+            let hash = snapshot.manifest_hash().unwrap();
+            hashes.push(hash);
+            previous = Some(hash);
+        }
+        current.ballot.base_snapshot_hash = hashes[0];
+        storage.save_recovery_certificate(&current).unwrap();
+        storage.save_epoch_record(&accepted_epoch_for(&current)).unwrap();
+        let mut pending = current;
+        pending.ballot.base_epoch += 1;
+        pending.ballot.base_fencing_token += 1;
+        pending.ballot.target_epoch += 1;
+        pending.ballot.target_fencing_token += 1;
+        pending.ballot.base_snapshot_hash = hashes[1];
+        storage.save_recovery_certificate(&pending).unwrap();
+
+        let report = storage
+            .apply_retention(world, &RetentionPolicy { keep_latest: 1, protected_snapshots: Default::default() })
+            .unwrap();
+        assert_eq!(report.retained_snapshots, vec![1, 2, 3]);
+        for number in 1..=3 {
+            storage.verify_snapshot(&storage.load_snapshot(world, number).unwrap()).unwrap();
+        }
     }
 
     fn accepted_epoch_for(certificate: &RecoveryCertificateV1) -> EpochRecordV1 {
