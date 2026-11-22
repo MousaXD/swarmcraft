@@ -113,7 +113,7 @@ Automatic mode only resolves artifacts from fixed trusted HTTPS origins:
 - Eclipse Adoptium for managed Java and its SHA-256;
 - the official `MousaXD/swarmcraft` GitHub releases for the SwarmCraft Fabric bridge and its release SHA-256.
 
-For the SwarmCraft bridge, Runtime Installer prefers the immutable release tag `vX.Y.Z`. For a just-published technical-preview `main` before its immutable tag exists, it may fall back to `main-latest` only if that release contains the exact requested `swarmcraft-fabric-X.Y.Z.jar` and matching `.sha256` asset. A later rolling release with a different versioned JAR cannot satisfy the request.
+The Runtime Installer in a published preview uses the `main-snapshot-<commit>` tag embedded at build time. Other builds prefer `vX.Y.Z` and can fall back to the legacy `main-latest` release. Every source must supply the exact requested `swarmcraft-fabric-X.Y.Z.jar` and matching `.sha256` asset.
 
 `SWARMCRAFT_FABRIC_MOD_JAR` is a local-file development/acceptance override. It is never interpreted as a URL.
 
@@ -150,9 +150,7 @@ swarmcraft-fabric-X.Y.Z.jar
 swarmcraft-fabric-X.Y.Z.jar.sha256
 ```
 
-The rolling `main-latest` release exists to prevent a fresh-main bootstrap gap. The immutable `vX.Y.Z` release remains the preferred source whenever it exists.
-
-The exact asset name and checksum are part of the resolution rule. `main-latest` is not treated as an unversioned "whatever is newest" trust source.
+Each installed preview resolves the bridge from its own commit-pinned release, so a later preview cannot change the bridge selected by an earlier installer.
 
 ## EULA
 

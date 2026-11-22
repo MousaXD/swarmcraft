@@ -118,7 +118,12 @@ def require_validation_dependency(path: Path, builder_jobs: tuple[str, ...]) -> 
         fail(f"{path.name}: publisher must bind artifact verification to its SHA and channel")
     if "merge-multiple: false" not in publish or "path: release-downloads" not in publish:
         fail(f"{path.name}: retain exact-run artifact source group boundaries")
-    if "release-assets/*" not in publish:
+    if channel == "preview":
+        if "scripts/ci-release/publish_preview.py" not in publish or "--assets release-assets" not in publish:
+            fail(f"{path.name}: preview publisher must stage and verify its uploads before publication")
+        if re.search(r"gh\s+release\s+(?:delete|create|edit|upload)\b", publish):
+            fail(f"{path.name}: preview must use the staged publisher for release changes")
+    elif "release-assets/*" not in publish:
         fail(f"{path.name}: publisher must use only verified staged assets")
 
 

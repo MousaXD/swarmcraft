@@ -133,7 +133,7 @@ One important safety limitation is intentional: a two-voter world cannot automat
 - Official Mojang/Fabric metadata resolution and artifact hashing.
 - Fabric API preparation.
 - SwarmCraft Fabric bridge resolution with exact version and checksum verification.
-- Immutable `vX.Y.Z` release assets are preferred; the rolling `main-latest` snapshot is accepted only if it contains the exact requested versioned bridge JAR and checksum.
+- Published previews use their commit-pinned release for the bridge JAR and checksum. Other builds prefer `vX.Y.Z`, with a legacy `main-latest` fallback for the exact requested JAR and checksum.
 - OS-backed runtime install locking so crashed setup processes do not permanently wedge a world while concurrent live installers remain excluded.
 - Rollback-safe artifact replacement.
 - Explicit Minecraft server EULA acceptance; no implicit or automatic acceptance.
@@ -224,7 +224,7 @@ One important safety limitation is intentional: a two-voter world cannot automat
 - Multi-gigabyte interrupted QUIC soak on networking/storage pull requests and matching `main` changes, plus weekly and manual profiles.
 - Fabric server-mod build plus embedded Fabric API verification.
 - Native Desktop package builds for Linux `.deb` + AppImage, Windows NSIS, macOS ARM64 `.dmg`, and macOS x86_64 `.dmg`.
-- Rolling `main-latest` development snapshot workflow.
+- Commit-pinned development snapshots with verified draft uploads before publication.
 - Tagged release workflow support for checksums, versioned Fabric artifacts and optional platform signing credentials.
 - Main and tagged Desktop packaging stage the same four required runtime sidecars.
 

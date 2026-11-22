@@ -21,6 +21,9 @@ on:
 permissions:
   contents: read
 
+env:
+  SWARMCRAFT_PREVIEW_COMMIT: ${{ github.ref == 'refs/heads/main' && github.sha || '' }}
+
 concurrency:
   group: main-desktop-installers-${{ github.ref }}
   cancel-in-progress: true
@@ -268,7 +271,7 @@ jobs:
           retention-days: 14
 
   publish:
-    name: Publish rolling main release
+    name: Publish immutable main snapshot
     if: ${{ github.ref == 'refs/heads/main' }}
     needs: [validation, linux, windows, macos, fabric]
     runs-on: ubuntu-latest
@@ -298,9 +301,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view main-latest >/dev/null 2>&1; then
-            gh release delete main-latest --cleanup-tag --yes
-          fi
           cat > release-notes.md <<EOF
           Automated preview snapshot from \`main\` after the exact commit passed Required Validation, including the release-candidate network soak.
 
@@ -319,10 +319,8 @@ jobs:
           - Windows: unsigned development snapshot
           - macOS: ad-hoc signed development snapshot, not notarized
 
-          This rolling preview release may be replaced by the next validated push to \`main\`.
+          This preview is pinned to the commit above. New previews are published separately.
           EOF
-          gh release create main-latest release-assets/* \
-            --target "$GITHUB_SHA" \
-            --title "SwarmCraft Main Snapshot" \
-            --notes-file release-notes.md \
-            --prerelease
+          python3 scripts/ci-release/publish_preview.py \
+            --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" \
+            --assets release-assets --notes release-notes.md
