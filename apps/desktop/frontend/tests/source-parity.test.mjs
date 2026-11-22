@@ -8,6 +8,7 @@ const ids = (value) => [...value.matchAll(/\bid=["']([^"']+)["']/g)].map((match)
 const componentNames = [
   'Sidebar', 'Topbar', 'WorldsView', 'CreateWorldView', 'ImportWorldView',
   'JoinWorldView', 'ActivityView', 'DiagnosticsView', 'Dialogs', 'Workspace',
+  'HostingContributionPanel',
 ];
 
 test('Svelte component split retains every legacy DOM binding and every view', async () => {
@@ -20,7 +21,25 @@ test('Svelte component split retains every legacy DOM binding and every view', a
   assert.ok(expected.length >= 150);
   assert.equal(new Set(expected).size, expected.length, 'legacy IDs must be unique');
   assert.equal(new Set(actual).size, actual.length, 'component IDs must be unique');
-  assert.deepEqual(new Set(actual), new Set(expected), 'every existing native/UI binding must survive');
+  const expectedIds = new Set(expected);
+  const actualIds = new Set(actual);
+  const additional = actual.filter(id => !expectedIds.has(id)).sort();
+  assert.deepEqual(
+    additional,
+    [
+      'hostingContributionConfirm', 'hostingContributionError', 'hostingContributionForm',
+      'hostingContributionHeap', 'hostingContributionNotice', 'hostingContributionOptIn',
+      'hostingContributionPanel', 'hostingContributionReason', 'hostingContributionRefresh',
+      'hostingContributionStatus', 'hostingContributionTitle', 'hostingContributionWithdraw',
+      'networkServiceError', 'networkServiceNotice', 'refreshNativeConnectivity',
+    ],
+    'Every new Svelte-only control must be explicitly reviewed; legacy IDs cannot silently disappear',
+  );
+  assert.deepEqual(
+    expected.filter(id => !actualIds.has(id)),
+    [],
+    'Every existing native/UI binding must survive Svelte migration',
+  );
   for (const view of ['worlds', 'create', 'import', 'join', 'activity', 'diagnostics']) {
     assert.ok(parts.join('\n').includes('data-view-panel="' + view + '"'), 'Missing view ' + view);
   }
@@ -56,13 +75,11 @@ test('typed frontend IPC table exactly matches every Rust Tauri-registered comma
   const table = bridge.match(/export interface NativeCommandTable \{([\s\S]*?)\n\}/);
   assert.ok(table, 'Native command table must be present');
   const typed = [...table[1].matchAll(/^\s+([a-z_]+): \{ args:/gm)].map(x => x[1]);
-  assert.equal(commands.length, 63, 'Every Rust registry addition requires deliberate typed contract review');
-  assert.ok(commands.includes('hosting_contribution_get'), 'Rust must register a real hosting status command');
-  assert.ok(commands.includes('hosting_contribution_set'), 'Rust must register an explicit hosting consent mutation command');
-  assert.match(bridge, /hosting_contribution_get:\s*\{\s*args:\s*\{\s*world:\s*string\s*\}/,
-    'Typed host status must accept the Rust world identifier');
-  assert.match(bridge, /hosting_contribution_set:\s*\{\s*args:\s*\{\s*world:\s*string;\s*heapMib:\s*number\s*\}/,
-    'Typed host consent must preserve the actual Rust camelCase heapMib argument');
+  assert.equal(commands.length, 63, 'A Rust registry addition requires deliberate typed contract review');
+  assert.ok(commands.includes('hosting_contribution_get'));
+  assert.ok(commands.includes('hosting_contribution_set'));
+  assert.match(bridge, /hosting_contribution_get:\s*\{\s*args:\s*\{\s*world:\s*string\s*\}/);
+  assert.match(bridge, /hosting_contribution_set:\s*\{\s*args:\s*\{\s*world:\s*string;\s*heapMib:\s*number\s*\}/);
   assert.deepEqual(new Set(typed), new Set(commands));
   assert.equal(new Set(typed).size, typed.length, 'No duplicate command definitions');
 });
@@ -462,4 +479,232 @@ test('installed Svelte leave-cancel exercises the real membership disclosure bef
     'native test must not mask losing selected world before leave');
   assert.ok(nativeAcceptance.includes('app.click("#cancelLeave")'),
     'native cancellation must remain a real click, not a programmatic dialog close');
+});
+
+
+test('installed native leave cancellation follows both visible disclosures without bypassing membership', async () => {
+  const [script, experience] = await Promise.all([
+    source('../scripts/visual-window-acceptance.py'),
+    source('../../src/player-experience.js'),
+  ]);
+  assert.ok(experience.includes("details.id = 'advancedWorldTools'"));
+  assert.ok(experience.includes("document.querySelector('.danger-zone')"));
+  assert.ok(script.includes('advancedToolsPresent:'));
+  assert.ok(script.includes('advancedSummaryOnScreen:'));
+  assert.ok(script.includes('app.click("#advancedWorldTools > summary")'));
+  assert.ok(script.includes('app.click("#selectionContent details.danger-zone > summary")'));
+  assert.ok(script.includes('app.click("#leaveWorld")'));
+  assert.ok(script.includes('app.click("#cancelLeave")'));
+  assert.ok(script.indexOf('app.click("#advancedWorldTools > summary")') <
+    script.indexOf('app.click("#selectionContent details.danger-zone > summary")'),
+    'Must use actual native parent-summary click before opening hidden membership details');
+  assert.ok(script.indexOf('app.click("#selectionContent details.danger-zone > summary")') <
+    script.indexOf('app.click("#leaveWorld")'));
+  assert.doesNotMatch(script, /parent\.open\s*=\s*true|child\.open\s*=\s*true/,
+    'Never bypass the visible disclosure using synthetic JavaScript state');
+});
+
+
+test('native connectivity diagnostics use typed Rust IPC, Svelte owns display, and installed acceptance proves a real read', async () => {
+  const [view, bridge, model, root, app, types, native] = await Promise.all([
+    source('../src/components/DiagnosticsView.svelte'),
+    source('../src/lib/native-bridge.ts'),
+    source('../src/lib/connectivity-state.ts'),
+    source('../src/App.svelte'),
+    source('../../src/app.js'),
+    source('../src/vite-env.d.ts'),
+    source('../scripts/visual-window-acceptance.py'),
+  ]);
+  assert.ok(view.includes("nativeBridge().invoke('connectivity_diagnostics', {})"),
+    'Native command must be the real registered Rust diagnostic');
+  assert.ok(bridge.includes("connectivity_diagnostics: { args: Record<string, never>; result: string }"));
+  assert.ok(view.includes('onclick={refreshNativeConnectivity}'));
+  assert.ok(view.includes('data-native-verified-count={$nativeConnectivity.verifiedReadCount}'));
+  assert.ok(view.includes('disabled={$nativeConnectivity.busy || networkStatusUnverified}'),
+    'A stopped or uncertain local daemon must not let cached snapshots claim live reachability');
+  assert.ok(root.includes('window.__swarmcraftSvelteConnectivityOwned = true;'));
+  assert.ok(root.includes('window.__swarmcraftSvelteConnectivityOwned = previousConnectivityOwner;'));
+  assert.ok(app.includes("window.__swarmcraftSvelteConnectivityOwned === true"));
+  assert.ok(app.includes("window.__swarmcraftSvelteConnectivity?.refresh()"));
+  assert.ok(app.includes("window.__swarmcraftSvelteConnectivityOwned !== true"));
+  assert.ok(types.includes('__swarmcraftSvelteConnectivityOwned?: boolean;'));
+  assert.ok(model.includes('if (inflight) return inflight;'), 'Duplicate native connectivity requests must coalesce');
+  assert.ok(model.includes('timeoutMs = 12_000'), 'Native IPC must not leave the check spinner indefinitely');
+  assert.ok(model.includes('verifiedReadCount += 1;'), 'A genuine current native read must increase the counter');
+  assert.doesNotMatch(model, /detail:\s*String\(error\)|detail:\s*error\.message/,
+    'Never leak arbitrary native error detail to UI');
+  assert.ok(native.includes("mark_stage('native-connectivity-refresh')"));
+  assert.ok(native.includes('app.click("#refreshNativeConnectivity")'));
+  assert.ok(native.includes('connectivityNativeConfirmed:'));
+  assert.ok(native.includes('connectivityVerified:'));
+  assert.ok(native.includes("'connectivityNativeConfirmed'"));
+  assert.ok(native.includes("'connectivityVerified'"));
+});
+
+
+test('Svelte native daemon start/stop are explicit commands with no legacy duplicate or stale connected badge', async () => {
+  const [view, root, app, bridge, types, state] = await Promise.all([
+    source('../src/components/DiagnosticsView.svelte'),
+    source('../src/App.svelte'),
+    source('../../src/app.js'),
+    source('../src/lib/native-bridge.ts'),
+    source('../src/vite-env.d.ts'),
+    source('../src/lib/connectivity-state.ts'),
+  ]);
+  assert.ok(view.includes("nativeBridge().invoke('ensure_daemon_running', { listen })"));
+  assert.ok(view.includes("nativeBridge().invoke('stop_daemon', {})"));
+  assert.ok(bridge.includes('ensure_daemon_running: { args: { listen: string }; result: number }'));
+  assert.ok(bridge.includes('stop_daemon: { args: Record<string, never>; result: void }'));
+  assert.ok(view.includes('onclick={startNetworking}') && view.includes('onclick={stopNetworking}'));
+  assert.ok(view.includes('disabled={serviceBusy}') && view.includes('boundedService('));
+  assert.ok(view.includes("window.__swarmcraftAfterSvelteNetworkingChange('stopped')"));
+  assert.ok(view.includes("boundedService(() => window.__swarmcraftAfterSvelteNetworkingChange!('started'))"),
+    'Legacy view reconciliation must also be bounded after a real native start');
+  assert.ok(view.includes('connectivityController.invalidate('));
+  assert.ok(root.includes('window.__swarmcraftSvelteNetworkingOwned = true;'));
+  assert.ok(root.includes('window.__swarmcraftSvelteNetworkingOwned = previousNetworkingOwner;'));
+  assert.ok(types.includes('__swarmcraftSvelteNetworkingOwned?: boolean;'));
+  assert.ok(app.includes("id === 'startDaemon' || id === 'stopDaemon'"));
+  assert.ok(app.includes('window.__swarmcraftSvelteNetworkingOwned === true'));
+  assert.ok(app.includes('networkStoppedBySvelte = true;'));
+  assert.ok(app.includes("message === 'Ready'") && app.includes("(networkStoppedBySvelte || serviceWarning)"),
+    'World refresh must not turn intentionally stopped networking into a false green Ready');
+  assert.ok(app.includes("outcome === 'stopped' || outcome === 'unknown'"),
+    'Ambiguous native effects must revoke previous connected presentation');
+  assert.ok(view.includes("window.__swarmcraftAfterSvelteNetworkingChange('unknown')"),
+    'Native stop must invalidate old connectivity before side effects');
+  assert.ok(view.includes('networkStatusUnverified = true;'));
+  assert.ok(app.includes('readGeneration !== connectivityGeneration'));
+  assert.ok(app.includes("structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });"));
+  assert.ok(state.includes('if (version !== generation) return;'));
+  assert.ok(state.includes('inflight = null;'));
+  const nativeAcceptance = await source('../scripts/visual-window-acceptance.py');
+  assert.ok(nativeAcceptance.includes("mark_stage('native-daemon-start')"));
+  assert.ok(nativeAcceptance.includes('app.click("#startDaemon")'));
+  assert.ok(nativeAcceptance.includes('daemonStarted:'));
+  assert.ok(nativeAcceptance.includes("mark_stage('native-daemon-stop')"));
+  assert.ok(nativeAcceptance.includes('app.click("#stopDaemon")'));
+  assert.ok(nativeAcceptance.includes('daemonStaleStatusCleared:'));
+  assert.ok(nativeAcceptance.indexOf('app.click("#cancelLeave")') <
+    nativeAcceptance.indexOf('app.click("#stopDaemon")'),
+    'Destructive network stop must run after all signed-world acceptance checks');
+  assert.doesNotMatch(view, /serviceError\s*=\s*String\(error\)|serviceError\s*=\s*error\.message/,
+    'Sensitive process errors must not render as service status');
+});
+
+
+test('Svelte owns native Rust world browsing and selected-row presentation without duplicate legacy renderer', async () => {
+  const [view, state, root, app, types, native] = await Promise.all([
+    source('../src/components/WorldsView.svelte'),
+    source('../src/lib/world-list-state.ts'),
+    source('../src/App.svelte'),
+    source('../../src/app.js'),
+    source('../src/vite-env.d.ts'),
+    source('../scripts/visual-window-acceptance.py'),
+  ]);
+  for (const cmd of ["'list_worlds', {}", "'world_status', { world }", "'world_compatibility', { world }"]) {
+    assert.ok(view.includes(cmd), 'world browsing must call registered Rust commands');
+  }
+  assert.ok(view.includes('data-native-verified-read-count={$worldState.verifiedReadCount}'));
+  assert.ok(view.includes('aria-busy={$worldState.busy}'));
+  assert.ok(view.includes('onclick={refreshWorlds}'));
+  assert.ok(view.includes('onclick={() => selectWorld(world.id)}'));
+  assert.ok(view.includes('aria-pressed={selectedId === world.id}'));
+  assert.ok(view.includes('hidden={!$worldState.error}'), 'world-list failures must be visible');
+  assert.ok(view.includes("window.__swarmcraftSelectWorldFromSvelte(id)"));
+  assert.ok(state.includes('const LIMIT = 256;'));
+  assert.ok(state.includes('Math.min(4, entries.length)'), 'world status requests must not storm CLI sidecars');
+  assert.ok(state.includes('const task = bounded(work, timeoutMs * 2)'),
+    'Whole world-list refresh must fail before the 45s native startup limit');
+  assert.ok(state.includes('if (version === generation) {'),
+    'Late native reads must not overwrite timed-out Svelte error state');
+  assert.ok(state.includes('const error = \'Could not read local worlds.'));
+  assert.ok(state.includes('throw new Error(error);'), 'startup must fail when native list read cannot be verified');
+  assert.ok(root.includes('window.__swarmcraftSvelteWorldsOwned = true;'));
+  assert.ok(root.includes('window.__swarmcraftSvelteWorldsOwned = previousWorldsOwner;'));
+  assert.ok(types.includes('__swarmcraftSvelteWorldsOwned?: boolean;'));
+  assert.ok(app.includes("if (window.__swarmcraftSvelteWorldsOwned === true) {"));
+  assert.ok(app.includes("const entries = await owner.refresh();"));
+  assert.ok(app.includes("window.__swarmcraftSvelteWorlds?.setSelected(world.id);"));
+  assert.ok(app.includes("window.__swarmcraftSvelteWorlds?.setSelected('');"));
+  assert.ok(app.includes("window.__swarmcraftSvelteWorlds?.setConnectivity(connectivity.label);"));
+  assert.ok(app.includes("id === 'refresh' && window.__swarmcraftSvelteWorldsOwned === true"));
+  assert.ok(app.includes('window.__swarmcraftSelectWorldFromSvelte = (id) =>'));
+  assert.ok(app.includes('container.append(renderWorld(model));'), 'unchanged legacy shipping fallback is required');
+  assert.ok(native.includes("mark_stage('native-svelte-world-list')"));
+  assert.ok(native.includes('app.click("#refresh")'));
+  assert.ok(native.includes('worldListNativeConfirmed:'));
+  assert.ok(native.includes('worldListSelectionVerified:'));
+  assert.ok(native.includes('worldSelectedMetadataVerified:'));
+  assert.ok(native.includes('worldSelectedSafetyVerified:'));
+  assert.ok(native.includes("'worldListNativeConfirmed'"));
+  assert.ok(native.includes("'worldListSelectionVerified'"));
+  assert.ok(native.indexOf('app.click("#refresh")') < native.indexOf('app.click("#worldCards .world-row")'),
+    'installed GUI must refresh through Svelte before selecting a real row');
+});
+
+
+test('selected-world read-only header and safety panel derive solely from current native Svelte state', async () => {
+  const [view, state, legacy] = await Promise.all([
+    source('../src/components/WorldsView.svelte'),
+    source('../src/lib/world-list-state.ts'),
+    source('../../src/app.js'),
+  ]);
+  assert.ok(view.includes('const selectedEntry = $derived($worldState.worlds.find(world => world.id === selectedId));'));
+  for (const binding of [
+    "{selectedEntry?.name || 'World'}",
+    "{selectedEntry?.id || ''}",
+    "{selectedEntry?.status.Authority || 'Not reported'}",
+    "{selectedEntry?.status['Authorized peers'] || 'Unknown'}",
+    "{selectedEntry?.status.Minecraft || 'Unknown'}",
+    "{selectedEntry?.compatibility['Authority eligibility'] || 'Not synchronized'}",
+    'nativeWorldSafetySummary(selectedEntry?.status.Safety)',
+    'worldSafetyTone(selectedEntry?.status.Safety)',
+  ]) {
+    assert.ok(view.includes(binding), 'missing reactive native metadata: ' + binding);
+  }
+  assert.ok(state.includes('export function nativeWorldSafetySummary(safety: unknown)'));
+  assert.ok(legacy.includes('if (window.__swarmcraftSvelteWorldsOwned !== true) {'),
+    'legacy should not overwrite Svelte-owned selected header');
+  assert.ok(legacy.includes("updatePlayState(world);"), 'Play remains guarded by existing Rust readiness');
+  assert.ok(legacy.includes("refreshHostReadiness(world);"), 'Host readiness must remain a separate Rust-backed decision');
+  assert.ok(legacy.includes("refreshWorldMods(world);"), 'Mods must not be invented by renderer');
+});
+
+
+test('Svelte host-readiness is native Rust-only, bounded, and cannot invent a safe shutdown', async () => {
+  const [view, model, bridge, app, root, types, native] = await Promise.all([
+    source('../src/components/WorldsView.svelte'),
+    source('../src/lib/host-readiness-state.ts'),
+    source('../src/lib/native-bridge.ts'),
+    source('../../src/app.js'),
+    source('../src/App.svelte'),
+    source('../src/vite-env.d.ts'),
+    source('../scripts/visual-window-acceptance.py'),
+  ]);
+  assert.ok(view.includes("nativeBridge().invoke('host_readiness', { world })"));
+  assert.ok(bridge.includes("host_readiness: { args: { world: string }; result: string }"));
+  assert.ok(view.includes('data-native-readiness-phase={$readinessState.phase}'));
+  assert.ok(view.includes('data-native-readiness-verified-count={$readinessState.verifiedReadCount}'));
+  assert.ok(view.includes('{$readinessState.title}'));
+  assert.ok(view.includes('{$readinessState.detail}'));
+  assert.ok(root.includes('window.__swarmcraftSvelteReadinessOwned = true;'));
+  assert.ok(root.includes('window.__swarmcraftSvelteReadinessOwned = previousReadinessOwner;'));
+  assert.ok(types.includes('__swarmcraftSvelteReadinessOwned?: boolean;'));
+  assert.ok(types.includes('select(world: string): Promise<void>;'));
+  assert.ok(app.includes("if (window.__swarmcraftSvelteReadinessOwned === true) {"));
+  assert.ok(app.includes('window.__swarmcraftSvelteReadiness?.clear();'));
+  assert.ok(app.includes('window.__swarmcraftSvelteReadiness?.select(world.id);'));
+  assert.ok(app.includes("const readiness = await backend.hostReadiness(requestedWorldId);"),
+    'The original Rust-backed read must remain the shipping legacy fallback');
+  assert.ok(model.includes('body.safe_to_shutdown !== true'));
+  assert.ok(model.includes('epoch !== version || selectedWorld !== world'));
+  assert.ok(model.includes('timeoutMs = 12_000'));
+  assert.doesNotMatch(model, /detail:\s*String\(error\)|detail:\s*error\.message/,
+    'Never expose arbitrary Rust errors, private peer addresses or paths');
+  assert.ok(native.includes("mark_stage('native-svelte-host-readiness')"));
+  assert.ok(native.includes('readinessNativeConfirmed:'));
+  assert.ok(native.includes('readinessNoFalseGreen:'));
+  assert.ok(native.includes("'readinessNativeConfirmed'"));
+  assert.ok(native.includes("'readinessNoFalseGreen'"));
 });

@@ -19,4 +19,3 @@
     <DiagnosticsView />
   </div>
 </main>
-

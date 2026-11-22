@@ -79,3 +79,70 @@ describe('Svelte native identity presentation', () => {
     expect(get(identity.state).nativeVerifiedRefreshCount).toBe(1);
   });
 });
+
+
+describe('bounded native identity refresh', () => {
+  it('bounds a wedged native identity, clears the busy state, and ignores late success', async () => {
+    vi.useFakeTimers();
+    try {
+      let finishStale!: (value: string) => void;
+      let calls = 0;
+      const identity = createIdentityController(() => {
+        calls += 1;
+        return calls === 1
+          ? new Promise<string>(resolve => { finishStale = resolve; })
+          : Promise.resolve('Peer ID: scpeer:recovered');
+      }, 25);
+      const pending = identity.refresh();
+      await vi.advanceTimersByTimeAsync(26);
+      await pending;
+      expect(get(identity.state)).toMatchObject({
+        phase: 'unavailable',
+        busy: false,
+        nativeVerifiedRefreshCount: 0,
+      });
+      finishStale('Peer ID: scpeer:old');
+      await Promise.resolve();
+      expect(get(identity.state).nativeVerifiedRefreshCount).toBe(0);
+      await identity.refresh();
+      expect(get(identity.state)).toMatchObject({
+        phase: 'ready',
+        busy: false,
+        text: 'Peer ID: scpeer:recovered',
+        nativeVerifiedRefreshCount: 1,
+      });
+      expect(calls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('permits a new read when current legacy identity supersedes a hanging IPC call', async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const identity = createIdentityController(() => {
+        calls += 1;
+        return calls === 1
+          ? new Promise<string>(() => {})
+          : Promise.resolve('Peer ID: scpeer:new');
+      }, 100);
+      const stale = identity.refresh();
+      await Promise.resolve();
+      identity.publishLegacy('Peer ID: scpeer:startup', 'identity');
+      expect(get(identity.state).busy).toBe(false);
+      await identity.refresh();
+      expect(get(identity.state)).toMatchObject({
+        phase: 'ready',
+        text: 'Peer ID: scpeer:new',
+        nativeVerifiedRefreshCount: 1,
+      });
+      await vi.advanceTimersByTimeAsync(101);
+      await stale;
+      expect(get(identity.state).nativeVerifiedRefreshCount).toBe(1);
+      expect(calls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

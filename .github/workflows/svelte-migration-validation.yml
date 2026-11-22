@@ -9,6 +9,7 @@ on:
       - integration/svelte-hosting-ui-20261111
       - integration/main-safety-hosting-svelte-v2-20261111
     paths:
+      - 'apps/desktop/src-tauri/src/**'
       - 'apps/desktop/frontend/**'
       - 'apps/desktop/src/**'
       - 'apps/desktop/tests/svelte-migration-parity.test.mjs'

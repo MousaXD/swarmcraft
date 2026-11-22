@@ -2,9 +2,105 @@
   import { onMount } from 'svelte';
   import { nativeBridge } from '../lib/native-bridge';
   import { createIdentityController, type IdentitySource } from '../lib/device-identity';
+  import { createNativeConnectivityController } from '../lib/connectivity-state';
 
   const controller = createIdentityController(() => nativeBridge().invoke('node_identity', {}));
   const identityState = controller.state;
+  const connectivityController = createNativeConnectivityController(
+    () => nativeBridge().invoke('connectivity_diagnostics', {}),
+  );
+  const nativeConnectivity = connectivityController.state;
+
+  let networkStatusUnverified = $state(false);
+
+  async function refreshNativeConnectivity() {
+    // A stopped or uncertain daemon can leave an old signed-off snapshot file.
+    // Never re-label that persisted snapshot as current peer connectivity.
+    if (networkStatusUnverified) {
+      connectivityController.invalidate('Start networking to check current peer connectivity.');
+      return;
+    }
+    await connectivityController.refresh();
+  }
+
+  let listenInput: HTMLInputElement | undefined;
+  let serviceBusy = $state(false);
+  let serviceMessage = $state('');
+  let serviceError = $state('');
+
+  async function boundedService<T>(operation: () => Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        Promise.resolve().then(operation),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Daemon IPC timed out')), 30_000);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  async function changeNetworking(action: 'start' | 'stop') {
+    if (serviceBusy) return;
+    if (typeof window.__swarmcraftAfterSvelteNetworkingChange !== 'function') {
+      serviceError = 'Desktop initialization has not finished. Retry after setup.';
+      return;
+    }
+    const listen = String(listenInput?.value ?? '').trim();
+    if (action === 'start' && !listen) {
+      serviceError = 'Enter a listen multiaddress before starting networking.';
+      listenInput?.focus();
+      return;
+    }
+    serviceBusy = true;
+    serviceMessage = '';
+    serviceError = '';
+    let nativeAccepted = false;
+    try {
+      if (action === 'stop') {
+        networkStatusUnverified = true;
+        connectivityController.invalidate('Stopping networking. Earlier peer paths are now unverified.');
+        await window.__swarmcraftAfterSvelteNetworkingChange('unknown');
+      }
+      if (action === 'start') {
+        const pid = await boundedService(() => nativeBridge().invoke('ensure_daemon_running', { listen }));
+        if (!Number.isInteger(pid) || pid <= 0) throw new Error('Daemon PID not verified');
+        nativeAccepted = true;
+        networkStatusUnverified = false;
+        connectivityController.invalidate();
+        serviceMessage = 'Networking started. Native connectivity may still be unavailable.';
+        await boundedService(() => window.__swarmcraftAfterSvelteNetworkingChange!('started'));
+        await connectivityController.refresh();
+      } else {
+        await boundedService(() => nativeBridge().invoke('stop_daemon', {}));
+        nativeAccepted = true;
+        connectivityController.invalidate(
+          'Networking was stopped on this device. Previously reported paths may no longer be available.',
+        );
+        serviceMessage = 'Desktop networking stopped. Replication and migration supervision may be interrupted.';
+        await window.__swarmcraftAfterSvelteNetworkingChange('stopped');
+      }
+    } catch {
+      networkStatusUnverified = true;
+      try { await window.__swarmcraftAfterSvelteNetworkingChange('unknown'); } catch { /* keep unknown */ }
+      // A side effect may have completed even when its IPC acknowledgment,
+      // follow-up legacy view refresh, or status check failed. Never assert
+      // the daemon stopped or started on a timed-out or ambiguous operation.
+      connectivityController.invalidate(
+        'Networking outcome is not verified. Check native connectivity before relying on earlier paths.',
+      );
+      serviceError = nativeAccepted
+        ? 'The networking command completed, but status refresh failed. Check native connectivity before repeating it.'
+        : 'The networking change could not be confirmed. Check native diagnostics before retrying.';
+    } finally {
+      serviceBusy = false;
+    }
+  }
+
+  async function startNetworking() { await changeNetworking('start'); }
+  async function stopNetworking() { await changeNetworking('stop'); }
 
   // A named method avoids optional TypeScript arrow parameters in the
   // component's SSR transform while preserving the typed legacy bridge.
@@ -14,11 +110,17 @@
 
   onMount(() => {
     const original = window.__swarmcraftSvelteIdentity;
+    const oldConnectivity = window.__swarmcraftSvelteConnectivity;
     const bridge = { publish: publishIdentity };
+    const connectivityBridge = { refresh: refreshNativeConnectivity };
     window.__swarmcraftSvelteIdentity = bridge;
+    window.__swarmcraftSvelteConnectivity = connectivityBridge;
     return () => {
       if (window.__swarmcraftSvelteIdentity === bridge) {
         window.__swarmcraftSvelteIdentity = original;
+      }
+      if (window.__swarmcraftSvelteConnectivity === connectivityBridge) {
+        window.__swarmcraftSvelteConnectivity = oldConnectivity;
       }
     };
   });
@@ -51,17 +153,22 @@
               <section class="diagnostic-section" id="connectivitySection">
                 <div class="section-title-row">
                   <div><h3>Connectivity</h3><p>Player-facing path summary plus daemon controls.</p></div>
-                  <span id="diagnosticConnectivity" class="status-badge neutral">Not reported</span>
+                  <span id="diagnosticConnectivity" class={`status-badge ${$nativeConnectivity.tone}`} data-native-connection-phase={$nativeConnectivity.phase} data-native-verified-count={$nativeConnectivity.verifiedReadCount} aria-busy={$nativeConnectivity.busy}>{$nativeConnectivity.label}</span>
                 </div>
-                <p id="diagnosticConnectivityDetail" class="helper">The current backend does not expose structured connectivity for this world.</p>
+                <p id="diagnosticConnectivityDetail" class="helper" aria-live="polite">{$nativeConnectivity.detail}</p>
+                <div class="compact-actions">
+                  <button id="refreshNativeConnectivity" class="button button-subtle" type="button" onclick={refreshNativeConnectivity} aria-busy={$nativeConnectivity.busy} disabled={$nativeConnectivity.busy || networkStatusUnverified}>Check native connection</button>
+                </div>
                 <div class="field">
                   <label for="daemonListen">Listen multiaddress</label>
-                  <input id="daemonListen" class="machine-input" value="/ip4/0.0.0.0/udp/0/quic-v1" />
+                  <input id="daemonListen" bind:this={listenInput} class="machine-input" value="/ip4/0.0.0.0/udp/0/quic-v1" />
                 </div>
                 <div class="compact-actions">
-                  <button id="startDaemon" class="button button-secondary" type="button">Start networking</button>
-                  <button id="stopDaemon" class="button button-subtle" type="button">Stop networking</button>
+                  <button id="startDaemon" class="button button-secondary" type="button" onclick={startNetworking} disabled={serviceBusy} aria-busy={serviceBusy}>Start networking</button>
+                  <button id="stopDaemon" class="button button-subtle" type="button" onclick={stopNetworking} disabled={serviceBusy} aria-busy={serviceBusy}>Stop networking</button>
                 </div>
+                <p id="networkServiceNotice" class="helper" role="status" aria-live="polite" hidden={!serviceMessage}>{serviceMessage}</p>
+                <p id="networkServiceError" class="form-error" role="alert" hidden={!serviceError}>{serviceError}</p>
                 <p class="helper">Relay transport can provide connectivity, but it does not make a peer the canonical host.</p>
               </section>
 

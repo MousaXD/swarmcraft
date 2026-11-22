@@ -9,6 +9,9 @@ on:
       - integration/svelte-hosting-ui-20261111
       - integration/main-safety-hosting-svelte-v2-20261111
     paths:
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'apps/desktop/src-tauri/**'
       - 'apps/desktop/frontend/**'
       - 'apps/desktop/src/**'
       - '.github/workflows/svelte-candidate-platform-builds.yml'

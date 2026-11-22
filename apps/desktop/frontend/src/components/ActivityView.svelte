@@ -2,7 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { activityText, clearActivity } from '../lib/activity';
 
-  let output: HTMLPreElement | undefined;
+  let output: HTMLTextAreaElement | undefined;
 
   onMount(() => {
     const unsubscribe = activityText.subscribe(async () => {
@@ -28,6 +28,7 @@
       </div>
       <button id="clearActivity" class="button button-subtle button-small" type="button" onclick={clear}>Clear</button>
     </div>
-    <pre id="output" bind:this={output} class="activity-console" role="textbox" aria-readonly="true" aria-multiline="true" tabindex="0" aria-label="Activity log">{$activityText}</pre>
+    <textarea id="output" bind:this={output} class="activity-console"
+      aria-label="Activity log" readonly value={$activityText} style:resize="none"></textarea>
   </div>
 </section>

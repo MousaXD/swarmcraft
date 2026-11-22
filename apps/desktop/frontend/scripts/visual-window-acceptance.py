@@ -31,9 +31,16 @@ SAFE_BOOL_KEYS = frozenset({
     'identityNavigationVisible', 'identityNativeConfirmed',
     'identityNavDisplayVisible', 'identityNavHasGeometry', 'identityNavInsideViewport',
     'leaveSelectionVisible', 'leaveDisclosureOpen', 'leaveButtonVisible', 'leaveSummaryOnScreen',
-    'advancedWorldToolsPresent', 'advancedWorldToolsOpen', 'advancedWorldSummaryOnScreen',
-    'hostingPanelPresent', 'hostingPlayerOnly', 'hostingOptInDisabled', 'hostingWithdrawDisabled',
     'identityToolsPresent', 'identityToolsOpen',
+    'connectivityOwned', 'connectivityFinished', 'connectivityNativeConfirmed',
+    'connectivityVerified', 'connectivityNoAuthorityClaim',
+    'daemonOwned', 'daemonStarted', 'daemonStartFinished', 'daemonStopConfirmed',
+    'daemonStopFinished', 'daemonStaleStatusCleared', 'daemonErrorHidden',
+    'worldListOwned', 'worldListNativeConfirmed', 'worldListRefreshed',
+    'worldListHasRows', 'worldListSelectionVerified',
+    'worldSelectedMetadataVerified', 'worldSelectedSafetyVerified',
+    'readinessOwned', 'readinessNativeConfirmed', 'readinessNotBusy', 'readinessNoFalseGreen',
+    'hostingPanelPresent', 'hostingExpectedPreference', 'hostingOptInDisabled', 'hostingWithdrawDisabled',
 })
 SAFE_INT_KEYS = frozenset({
     'width', 'height', 'rootScrollWidth', 'paneScrollWidth',
@@ -107,6 +114,30 @@ def inspect_layout(app, width, height):
     """)
 
 
+def verify_hosting_preference(app, expected: str) -> None:
+    for _ in range(80):
+        observed = app.execute("""
+          const panel = document.getElementById('hostingContributionPanel');
+          const optIn = document.getElementById('hostingContributionOptIn');
+          const withdraw = document.getElementById('hostingContributionWithdraw');
+          return {
+            hostingPanelPresent: !!panel,
+            hostingExpectedPreference: panel?.dataset.consentState === arguments[0],
+            hostingOptInDisabled: !!optIn && optIn.disabled,
+            hostingWithdrawDisabled: !!withdraw && withdraw.disabled,
+          };
+        """, [expected])
+        record_ui(observed)
+        if (
+            observed['hostingPanelPresent'] and observed['hostingExpectedPreference']
+            and observed['hostingOptInDisabled']
+            and observed['hostingWithdrawDisabled'] == (expected == 'player-only')
+        ):
+            return
+        time.sleep(0.2)
+    raise AssertionError(f"Installed hosting preference did not confirm {expected} through Rust IPC")
+
+
 def run(binary: Path, artifacts: Path):
     if not binary.is_file() or not os.access(binary, os.X_OK):
         raise AssertionError("Candidate binary is missing or non-executable")
@@ -134,32 +165,104 @@ def run(binary: Path, artifacts: Path):
                 and create_owner["bridge"]), (
             "Svelte native Create World ownership/handoff not active in installed app"
         )
+        mark_stage('native-svelte-world-list')
+        worlds_owner = app.execute("""
+          const list = document.getElementById('worldCards');
+          return {
+            worldListOwned: window.__swarmcraftSvelteWorldsOwned === true
+              && typeof window.__swarmcraftSvelteWorlds?.refresh === 'function',
+            worldListHasRows: !!list && list.querySelectorAll('.world-row').length > 0,
+            worldListRefreshed: list?.dataset.worldListPhase === 'ready'
+              && list?.getAttribute('aria-busy') === 'false',
+          };
+        """)
+        record_ui(worlds_owner)
+        assert all(worlds_owner.values()), (
+            "Installed Svelte world list must display real native Rust worlds"
+        )
+        native_worlds_before = app.execute("""
+          return Number(document.getElementById('worldCards')?.dataset.nativeVerifiedReadCount ?? -1);
+        """)
+        assert type(native_worlds_before) is int and native_worlds_before > 0, (
+            "Initial installed world list did not complete a genuine Rust read"
+        )
+        # The actual user Refresh button must reach list_worlds again and
+        # repaint the Svelte list, rather than fall through the old DOM renderer.
         app.click("#navWorlds")
-        app.click("#worldCards .world-row")
-        # This combined stack registers real Tauri hosting-contribution
-        # commands. The Svelte UI must start player-only based on a verified
-        # Rust read, not static text, a browser preference, or auto-consent.
-        mark_stage('hosting-default-player-only')
-        hosting = None
+        app.click("#refresh")
+        world_refresh = None
         for _ in range(80):
-            hosting = app.execute("""
-              const panel = document.getElementById('hostingContributionPanel');
-              const optIn = document.getElementById('hostingContributionOptIn');
-              const withdraw = document.getElementById('hostingContributionWithdraw');
+            world_refresh = app.execute("""
+              const list = document.getElementById('worldCards');
+              const refresh = document.getElementById('refresh');
               return {
-                hostingPanelPresent: !!panel,
-                hostingPlayerOnly: panel?.dataset.consentState === 'player-only',
-                hostingOptInDisabled: !!optIn && optIn.disabled,
-                hostingWithdrawDisabled: !!withdraw && withdraw.disabled,
+                worldListRefreshed: !!refresh && !refresh.disabled
+                  && list?.dataset.worldListPhase === 'ready',
+                worldListNativeConfirmed:
+                  Number(list?.dataset.nativeVerifiedReadCount ?? -1) > arguments[0],
+                worldListHasRows: !!list && list.querySelectorAll('.world-row').length > 0,
               };
-            """)
-            record_ui(hosting)
-            if hosting['hostingPlayerOnly']:
+            """, [native_worlds_before])
+            record_ui(world_refresh)
+            if all(world_refresh.values()):
                 break
             time.sleep(0.2)
-        assert all(hosting.values()), (
-            "Installed Rust-backed consent must show default-zero player-only with no automatic opt-in"
+        assert all(world_refresh.values()), (
+            "Installed Svelte Refresh Worlds did not complete another Rust read"
         )
+        app.click("#worldCards .world-row")
+        selected_world = app.execute("""
+          const row = document.querySelector('#worldCards .world-row.is-selected');
+          const details = document.getElementById('selectionContent');
+          const selectedName = document.getElementById('selectedName');
+          const selectedSafety = document.getElementById('selectedSafety');
+          const selectedId = document.getElementById('selectedWorldId');
+          const rowName = row?.querySelector('.world-row-title strong');
+          const rowSafety = row?.querySelector('.status-badge');
+          return {
+            worldListSelectionVerified: !!row && row.getAttribute('aria-pressed') === 'true'
+              && !!details && !details.hidden
+              && !!document.getElementById('world')?.value
+              && document.getElementById('world').value === row.dataset.worldId,
+            worldSelectedMetadataVerified: !!row && !!rowName && !!selectedName
+              && !!selectedId && selectedName.textContent === rowName.textContent
+              && selectedId.textContent === row.dataset.worldId,
+            worldSelectedSafetyVerified: !!rowSafety && !!selectedSafety
+              && selectedSafety.textContent === rowSafety.textContent
+              && selectedSafety.className === rowSafety.className,
+          };
+        """)
+        record_ui(selected_world)
+        assert all(selected_world.values()), (
+            "Native Svelte selection metadata did not match the verified Rust world row"
+        )
+        mark_stage('native-svelte-host-readiness')
+        readiness_result = None
+        for _ in range(80):
+            readiness_result = app.execute("""
+              const panel = document.getElementById('hostReadinessPanel');
+              const title = document.getElementById('hostReadinessTitle');
+              return {
+                readinessOwned: window.__swarmcraftSvelteReadinessOwned === true
+                  && typeof window.__swarmcraftSvelteReadiness?.select === 'function',
+                readinessNativeConfirmed: !!panel
+                  && Number(panel.dataset.nativeReadinessVerifiedCount ?? -1) > 0
+                  && panel.dataset.nativeReadinessPhase === 'ready',
+                readinessNotBusy: !!panel && panel.getAttribute('aria-busy') === 'false',
+                readinessNoFalseGreen: !!panel && !!title
+                  && (panel.className !== 'safety-panel safe'
+                    || title.textContent === 'Safe to shut down this PC'),
+              };
+            """)
+            record_ui(readiness_result)
+            if all(readiness_result.values()):
+                break
+            time.sleep(0.2)
+        assert all(readiness_result.values()), (
+            "Installed selected-world shutdown status did not complete a real Rust read"
+        )
+        mark_stage('hosting-default-player-only')
+        verify_hosting_preference(app, 'player-only')
         for width, height in ((980, 760), (720, 560)):
             mark_stage(f'layout-{width}x{height}')
             result = inspect_layout(app, width, height)
@@ -265,6 +368,86 @@ def run(binary: Path, artifacts: Path):
                 break
             time.sleep(0.2)
         assert all(identity_check.values()), "Native Svelte identity refresh did not complete a new verified Rust read"
+        # The Svelte Diagnostics connectivity status is explicitly read-only:
+        # require a fresh real Rust IPC diagnostic, not old legacy DOM labels.
+        # Only allowlisted booleans enter native evidence, not network addresses.
+        mark_stage('native-connectivity-refresh')
+        owner = app.execute("""
+          return {
+            connectivityOwned: window.__swarmcraftSvelteConnectivityOwned === true
+              && typeof window.__swarmcraftSvelteConnectivity?.refresh === 'function',
+          };
+        """)
+        record_ui(owner)
+        assert owner['connectivityOwned'], "Native connectivity display is not Svelte-owned"
+        # Entering Diagnostics requests a first read. Do not click a disabled
+        # control or bypass the pending native request programmatically.
+        control = None
+        for _ in range(75):
+            control = app.execute("""
+              return { connectivityFinished:
+                document.getElementById('refreshNativeConnectivity')?.disabled === false };
+            """)
+            record_ui(control)
+            if control['connectivityFinished']:
+                break
+            time.sleep(0.2)
+        assert control['connectivityFinished'], "First native connectivity read remained indefinitely busy"
+        network_before = app.execute("""
+          return Number(document.getElementById('diagnosticConnectivity')?.dataset.nativeVerifiedCount ?? -1);
+        """)
+        assert type(network_before) is int and network_before >= 0, "No native connectivity counter"
+        app.click("#refreshNativeConnectivity")
+        network_check = None
+        for _ in range(75):
+            network_check = app.execute("""
+              const badge = document.getElementById('diagnosticConnectivity');
+              const button = document.getElementById('refreshNativeConnectivity');
+              return {
+                connectivityFinished: !!button && !button.disabled,
+                connectivityVerified: badge?.dataset.nativeConnectionPhase === 'checked',
+                connectivityNativeConfirmed:
+                  Number(badge?.dataset.nativeVerifiedCount ?? -1) > arguments[0],
+                connectivityNoAuthorityClaim:
+                  !/authority eligible|ready to host|hosting permitted/i.test(badge?.textContent || ''),
+              };
+            """, [network_before])
+            record_ui(network_check)
+            if all(network_check.values()):
+                break
+            time.sleep(0.2)
+        assert all(network_check.values()), (
+            "Installed native Svelte network check did not verify a fresh Rust diagnostic"
+        )
+        mark_stage('native-daemon-start')
+        daemon_owner = app.execute("""
+          return {
+            daemonOwned: window.__swarmcraftSvelteNetworkingOwned === true &&
+              typeof window.__swarmcraftAfterSvelteNetworkingChange === 'function',
+          };
+        """)
+        record_ui(daemon_owner)
+        assert daemon_owner['daemonOwned'], "Start Networking must be Svelte-owned"
+        app.click("#startDaemon")
+        start_result = None
+        for _ in range(100):
+            start_result = app.execute("""
+              const notice = document.getElementById('networkServiceNotice');
+              const error = document.getElementById('networkServiceError');
+              const start = document.getElementById('startDaemon');
+              return {
+                daemonStarted: !!notice && !notice.hidden && /started/i.test(notice.textContent || ''),
+                daemonStartFinished: !!start && !start.disabled,
+                daemonErrorHidden: !error || error.hidden,
+              };
+            """)
+            record_ui(start_result)
+            if all(start_result.values()):
+                break
+            time.sleep(0.2)
+        assert all(start_result.values()), (
+            "Installed Start Networking did not complete the real Rust IPC"
+        )
         app.click("#navWorlds")
         # Exercise the new Svelte signed-invite form in an installed app.
         # No invite is sent to Rust here; an empty form must fail locally,
@@ -418,52 +601,48 @@ def run(binary: Path, artifacts: Path):
         assert selected['leaveSelectionVisible'], (
             "World selection was lost before the real leave-cancellation journey"
         )
-        # The actual player-first layout moves the Leave disclosure inside
-        # #advancedWorldTools. A closed ancestor makes its nested summary
-        # invisible even after scrollIntoView. Open the visible parent via a
-        # native user click first; do not bypass either disclosure with JS.
-        advanced = app.execute("""
-          const section = document.getElementById('advancedWorldTools');
+        # The established player-experience layout moves the native
+        # membership disclosure INSIDE collapsed Advanced world controls.
+        # A hidden child cannot be reached by scrollIntoView alone: open its
+        # actual parent summary first using native WebDriver, not JS .open=true.
+        outer = app.execute("""
+          const parent = document.getElementById('advancedWorldTools');
+          const child = document.querySelector('#selectionContent details.danger-zone');
           return {
-            advancedWorldToolsPresent: section?.tagName === 'DETAILS',
-            advancedWorldToolsOpen: section?.open === true,
+            advancedToolsPresent: !!parent && !!child && parent.contains(child),
+            advancedToolsOpen: parent?.open === true,
           };
         """)
-        record_ui(advanced)
-        assert advanced['advancedWorldToolsPresent'], (
-            "Installed world controls must retain their Advanced disclosure"
+        record_ui(outer)
+        assert outer['advancedToolsPresent'], (
+            "Membership and recovery must remain within the visible advanced-controls journey"
         )
-        if not advanced['advancedWorldToolsOpen']:
-            advanced_summary = None
-            for _ in range(20):
-                advanced_summary = app.execute("""
-                  const summary = document.querySelector('#advancedWorldTools > summary');
-                  summary?.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
-                  const rect = summary?.getBoundingClientRect();
-                  return {
-                    advancedWorldSummaryOnScreen: !!rect && rect.width > 0 && rect.height > 0
-                      && rect.left >= 0 && rect.top >= 0
-                      && rect.right <= window.innerWidth + 2 && rect.bottom <= window.innerHeight + 2,
-                  };
-                """)
-                record_ui(advanced_summary)
-                if advanced_summary['advancedWorldSummaryOnScreen']:
-                    break
-                time.sleep(0.1)
-            assert advanced_summary['advancedWorldSummaryOnScreen'], (
-                "Advanced world controls cannot be reached by scrolling the installed GUI"
+        if not outer['advancedToolsOpen']:
+            summary = app.execute("""
+              const target = document.querySelector('#advancedWorldTools > summary');
+              if (target) target.scrollIntoView({ behavior: 'auto', block: 'center' });
+              const rect = target?.getBoundingClientRect();
+              return {
+                advancedSummaryOnScreen: !!rect && rect.width > 0 && rect.height > 0
+                  && rect.left >= 0 && rect.top >= 0
+                  && rect.right <= window.innerWidth + 2
+                  && rect.bottom <= window.innerHeight + 2,
+              };
+            """)
+            record_ui(summary)
+            assert summary['advancedSummaryOnScreen'], (
+                "Advanced controls summary is not reachable via installed-app scrolling"
             )
             app.click("#advancedWorldTools > summary")
-        advanced_open = app.execute("""
-          return {
-            advancedWorldToolsOpen: document.getElementById('advancedWorldTools')?.open === true,
-          };
+        parent_opened = app.execute("""
+          const parent = document.getElementById('advancedWorldTools');
+          return { advancedToolsOpen: parent?.open === true };
         """)
-        record_ui(advanced_open)
-        assert advanced_open['advancedWorldToolsOpen'], (
+        record_ui(parent_opened)
+        assert parent_opened['advancedToolsOpen'], (
             "Native click did not expand Advanced world controls"
         )
-        # Leave world is intentionally inside a second collapsed danger-zone <details>.
+        # Leave world is intentionally inside a collapsed danger-zone <details>.
         # Open its real summary through native WebDriver rather than synthesizing
         # a click on a hidden destructive action or weakening the visibility gate.
         disclosure = app.execute("""
@@ -475,22 +654,17 @@ def run(binary: Path, artifacts: Path):
             # The danger-zone is below the initial 980x760 right-pane viewport.
             # Scroll its real summary into view before the native WebDriver
             # click; a hidden/programmatic click would mask a broken GUI.
-            summary_on_screen = None
-            for _ in range(20):
-                summary_on_screen = app.execute("""
-                  const summary = document.querySelector('#selectionContent details.danger-zone > summary');
-                  if (summary) summary.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
-                  const rect = summary?.getBoundingClientRect();
-                  return {
-                    leaveSummaryOnScreen: !!rect && rect.width > 0 && rect.height > 0
-                      && rect.left >= 0 && rect.top >= 0
-                      && rect.right <= window.innerWidth + 2 && rect.bottom <= window.innerHeight + 2,
-                  };
-                """)
-                record_ui(summary_on_screen)
-                if summary_on_screen['leaveSummaryOnScreen']:
-                    break
-                time.sleep(0.1)
+            summary_on_screen = app.execute("""
+              const summary = document.querySelector('#selectionContent details.danger-zone > summary');
+              if (summary) summary.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
+              const rect = summary?.getBoundingClientRect();
+              return {
+                leaveSummaryOnScreen: !!rect && rect.width > 0 && rect.height > 0
+                  && rect.left >= 0 && rect.top >= 0
+                  && rect.right <= window.innerWidth + 2 && rect.bottom <= window.innerHeight + 2,
+              };
+            """)
+            record_ui(summary_on_screen)
             assert summary_on_screen['leaveSummaryOnScreen'], (
                 "Membership and recovery disclosure is not reachable after scrolling"
             )
@@ -529,6 +703,52 @@ def run(binary: Path, artifacts: Path):
         """)
         record_ui(leave_cancelled)
         assert all(leave_cancelled.values()), "Cancelling leave changed canonical membership"
+        mark_stage('hosting-explicit-opt-in')
+        app.click("#hostingContributionConfirm")
+        app.click("#hostingContributionOptIn")
+        verify_hosting_preference(app, 'opted-in')
+        app.click("#hostingContributionRefresh")
+        verify_hosting_preference(app, 'opted-in')
+
+        mark_stage('hosting-withdrawal')
+        app.click("#hostingContributionWithdraw")
+        verify_hosting_preference(app, 'player-only')
+        app.click("#hostingContributionRefresh")
+        verify_hosting_preference(app, 'player-only')
+        # Run Stop Networking LAST: it deliberately changes the actual bundled
+        # daemon state and must never compromise preceding membership tests.
+        mark_stage('native-daemon-stop')
+        tools_open = app.execute("""
+          return document.getElementById('advancedNavigation')?.open === true;
+        """)
+        if not tools_open:
+            app.click("#advancedNavigation > summary")
+        app.click("#navDiagnostics")
+        app.click("#stopDaemon")
+        stop_result = None
+        for _ in range(100):
+            stop_result = app.execute("""
+              const notice = document.getElementById('networkServiceNotice');
+              const error = document.getElementById('networkServiceError');
+              const stop = document.getElementById('stopDaemon');
+              const badge = document.getElementById('diagnosticConnectivity');
+              const selection = document.getElementById('selectedConnectivity');
+              return {
+                daemonStopConfirmed: !!notice && !notice.hidden && /stopped/i.test(notice.textContent || ''),
+                daemonStopFinished: !!stop && !stop.disabled,
+                daemonErrorHidden: !error || error.hidden,
+                daemonStaleStatusCleared:
+                  badge?.dataset.nativeConnectionPhase === 'unchecked' &&
+                  !!selection && !/direct connection|connected through relay/i.test(selection.textContent || ''),
+              };
+            """)
+            record_ui(stop_result)
+            if all(stop_result.values()):
+                break
+            time.sleep(0.2)
+        assert all(stop_result.values()), (
+            "Installed Stop Networking failed to revoke stale connected presentation"
+        )
         # Restore configured default for follow-up screenshots.
         native.request(f"/session/{app.session}/window/rect", "POST", {
             "width": 980, "height": 760

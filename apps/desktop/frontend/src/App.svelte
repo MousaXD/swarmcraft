@@ -16,8 +16,16 @@
     const previousDiscoveryOwner = window.__swarmcraftSvelteDiscoveryOwned;
     const previousLeaveOwner = window.__swarmcraftSvelteLeaveOwned;
     const previousIdentityOwner = window.__swarmcraftSvelteIdentityOwned;
+    const previousConnectivityOwner = window.__swarmcraftSvelteConnectivityOwned;
+    const previousNetworkingOwner = window.__swarmcraftSvelteNetworkingOwned;
+    const previousWorldsOwner = window.__swarmcraftSvelteWorldsOwned;
+    const previousReadinessOwner = window.__swarmcraftSvelteReadinessOwned;
     window.__swarmcraftSvelteLeaveOwned = true;
     window.__swarmcraftSvelteIdentityOwned = true;
+    window.__swarmcraftSvelteConnectivityOwned = true;
+    window.__swarmcraftSvelteNetworkingOwned = true;
+    window.__swarmcraftSvelteWorldsOwned = true;
+    window.__swarmcraftSvelteReadinessOwned = true;
     window.__swarmcraftSvelteDiscoveryOwned = true;
     window.__swarmcraftSvelteInviteOwned = true;
     window.__swarmcraftSvelteImportOwned = true;
@@ -38,6 +46,10 @@
       window.__swarmcraftSvelteDiscoveryOwned = previousDiscoveryOwner;
       window.__swarmcraftSvelteLeaveOwned = previousLeaveOwner;
       window.__swarmcraftSvelteIdentityOwned = previousIdentityOwner;
+      window.__swarmcraftSvelteConnectivityOwned = previousConnectivityOwner;
+      window.__swarmcraftSvelteNetworkingOwned = previousNetworkingOwner;
+      window.__swarmcraftSvelteWorldsOwned = previousWorldsOwner;
+      window.__swarmcraftSvelteReadinessOwned = previousReadinessOwner;
       if (window.__swarmcraftSvelteActivity === activityBridge) {
         window.__swarmcraftSvelteActivity = previous;
       }

@@ -66,3 +66,32 @@ to increase after its native click. That count changes only when the real
 a pre-existing identity from first boot, a failed native call, a stale reply,
 or an inert button cannot satisfy the installed-GUI gate. No identity bytes
 are written to evidence artifacts.
+
+
+### 2026-11-20 Agent 04 native-recovery and acceptance follow-up
+
+- The Svelte Diagnostics `node_identity` refresh now has a 15-second UI-bound read timeout and can retry after an unresolved native IPC request. A stale callback cannot overwrite newer identity state or falsely increment the verified native-read counter. The Rust command and the shipping startup controller are unchanged.
+- Real Linux installed-app evidence from run `42917948627` identified a candidate test navigation blocker: the Leave World membership disclosure is nested inside collapsed **Advanced world controls**. The candidate WebDriver test now opens both real summaries in order and still requires the actual Cancel action to preserve the selected canonical world.
+- Run source/TypeScript/Vitest, real installed Linux/WebKitGTK positive and negative controls, and Windows/macOS packaging on the **exact final feature-branch SHA**. There is no claim of successful native certification for this follow-up until those Actions finish.
+
+The migration is still a hybrid compatibility candidate with delegated world-list, managed Minecraft, provider/mod, replication, and migration/recovery flows. Keep `frontendDist` on the legacy shipping UI until Agent 00 and independent installed-app QA approve complete parity.
+
+
+### 2026-11-20 Native Svelte world browsing candidate (Agent 04)
+
+- The Svelte `WorldsView` now invokes existing registered Rust `list_worlds`, `world_status`, and `world_compatibility` commands directly. Native parser validation prevents invented or duplicated worlds; failed/missing per-world metadata is presented as unknown, never permission to host.
+- The list, keyboard-operable world rows, native Refresh, selection styling, initial skeleton, empty state actions and visible error/retry are Svelte-owned. The rich selected-world detail panel still delegates to the original Rust-backed `app.js` controller through a narrow candidate-only handoff. The shipping `frontendDist` is unchanged.
+- At most four worlds' metadata are loaded concurrently. Individual native reads are bounded to 18 seconds and the whole refresh to 36 seconds with late-response fencing. A confirmed or uncertain network stop cannot be repainted as green Ready by the new list.
+- Vitest validates native line parsing, malformed/duplicate identifiers, partial offline worlds, dangerous inherited properties, coalescing, a hung sidecar, whole-refresh timeout and no false readiness. The installed Linux Tauri/WebKitGTK test must perform a real native world read, press Refresh to increase a native-only successful-read counter, and click a Svelte row to select the same actual world. The original four native sidecars and negative bootstrap/sidecar cases remain mandatory.
+- **Certification and shipping are blocked** until candidate source checks, genuine installed Linux evidence, Windows/macOS packages/interaction, full feature parity, and Agent 00 acceptance at the exact candidate SHA are independently confirmed. PR #115 does not automatically include changes to the Agent 04 source branch.
+
+
+### 2026-11-21: Read-only native selection, safety and host-readiness slice
+
+- `WorldsView.svelte` now displays the selected world's **read-only** name, canonical ID, reported authority/members, Minecraft version, checkpoint, compatibility, and source-reported safety from its current Rust-backed Svelte world-list state. Legacy `selectWorld` remains the authoritative controller for all buttons; its selected-header DOM writes are guarded in the candidate, but preserved for the original shipping frontend.
+- `host-readiness-state.ts` owns only the selected world's shutdown-safety presentation. The candidate invokes the existing typed Rust `host_readiness({world})` command, bounds reads to 12 seconds, fences stale results when selection changes, coalesces requests and exposes fixed non-secret copy. Positive green "Safe to shut down" requires **both** Rust `state=safe|sleeping` and an explicit `safe_to_shutdown=true`; missing, contradictory, failed or unsupported responses never grant shutdown/hosting permission.
+- Added Vitest/source-parity regressions for contradictory native readiness, stale-world results, timed-out IPC/retry, unsafe native diagnostic fields and preservation of the legacy host-readiness action path. Real installed Linux acceptance now compares Svelte selected header/safety with the actual selected Rust world row and requires a fresh native shutdown-readiness result without logging any world ID or peer identity.
+- The previous 171-ID equality gate rejected three *new* Svelte diagnostics IDs while all original IDs survived. It now requires every original ID, prohibits duplication and explicitly audits the additions `refreshNativeConnectivity`, `networkServiceNotice`, `networkServiceError`. The first follow-up CI at `9569e2e60ecdc1855c1b190547560109bf5ff40a` proved source parity and Svelte typechecking **PASS**, then identified a Vitest timing/rejection-handler flaw in tests, corrected later on the branch. Latest exact-head native checks, package build and Rust audits remain unverified; no shipping switch.
+
+- Native CI attribution: source-parity and Svelte checks passed at `9569e2e60ecdc1855c1b190547560109bf5ff40a`; the remaining Vitest regression was a **test-only microtask-order expectation** and delayed fake-timer rejection observer. The fixes now synchronize on the actual native invocation and register expected rejections before advancing timers. Re-run the latest candidate SHA to verify.
+- Candidate read-only safety badges now fail closed on negated/unsupported source statuses such as `noncanonical`, `not canonical`, `canonical but unverified`, or `quorum unavailable`; no source status authorizes a host.

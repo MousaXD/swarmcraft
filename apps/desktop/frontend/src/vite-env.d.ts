@@ -15,6 +15,23 @@ declare global {
     __swarmcraftSvelteDiscoveryOwned?: boolean;
     __swarmcraftSvelteLeaveOwned?: boolean;
     __swarmcraftSvelteIdentityOwned?: boolean;
+    __swarmcraftSvelteConnectivityOwned?: boolean;
+    __swarmcraftSvelteConnectivity?: { refresh(): Promise<void> };
+    __swarmcraftSvelteNetworkingOwned?: boolean;
+    __swarmcraftSvelteWorldsOwned?: boolean;
+    __swarmcraftSvelteReadinessOwned?: boolean;
+    __swarmcraftSvelteReadiness?: {
+      select(world: string): Promise<void>;
+      clear(): void;
+    };
+    __swarmcraftSvelteWorlds?: {
+      refresh(): Promise<import('./lib/world-list-state').NativeWorldEntry[]>;
+      setSelected(id: string): void;
+      setConnectivity(label: string): void;
+    };
+    __swarmcraftRefreshWorldsFromSvelte?: () => Promise<void>;
+    __swarmcraftSelectWorldFromSvelte?: (id: string) => boolean;
+    __swarmcraftAfterSvelteNetworkingChange?: (outcome: 'started' | 'stopped' | 'unknown') => Promise<void>;
     __swarmcraftSvelteIdentity?: { publish(value: string, source?: import('./lib/device-identity').IdentitySource): boolean };
     __swarmcraftResetSvelteLeave?: () => void;
     __swarmcraftAfterSvelteLeave?: () => Promise<void>;

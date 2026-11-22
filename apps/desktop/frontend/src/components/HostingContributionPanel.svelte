@@ -3,7 +3,7 @@
   import { readHostingContribution, saveHostingContribution } from '../lib/hosting-contribution';
   import type { HostingContributionReadiness } from '../lib/native-bridge';
 
-  let selectedWorld = $state('');
+  const { world: selectedWorld }: { world: string } = $props();
   let readiness = $state<HostingContributionReadiness | null>(null);
   let checking = $state(false);
   let saving = $state(false);
@@ -38,28 +38,9 @@
     }
   }
 
-  function onSelectionChange(event: Event) {
-    const detail = (event as CustomEvent<{ world?: string }>).detail;
-    selectedWorld = detail?.world ?? '';
-    generation += 1;
-    readiness = null;
-    checking = false;
-    saving = false;
-    explicitConsent = false;
-    heapMib = 1024;
-    error = '';
-    notice = '';
-    if (selectedWorld) void refresh(selectedWorld);
-  }
-
   onMount(() => {
-    window.addEventListener('swarmcraft:world-selected', onSelectionChange);
-    const initial = (document.getElementById('world') as HTMLInputElement | null)?.value ?? '';
-    if (initial) onSelectionChange(new CustomEvent('swarmcraft:world-selected', { detail: { world: initial } }));
-    return () => {
-      window.removeEventListener('swarmcraft:world-selected', onSelectionChange);
-      generation += 1;
-    };
+    void refresh();
+    return () => { generation += 1; };
   });
 
   async function save(event: SubmitEvent) {

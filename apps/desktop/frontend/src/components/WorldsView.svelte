@@ -1,22 +1,119 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { nativeBridge } from '../lib/native-bridge';
+  import { createNativeWorldListController, worldSafetyTone, nativeWorldSafetySummary } from '../lib/world-list-state';
+  import { createNativeHostReadinessController } from '../lib/host-readiness-state';
   import HostingContributionPanel from './HostingContributionPanel.svelte';
+
+  const worldsController = createNativeWorldListController({
+    listWorlds: () => nativeBridge().invoke('list_worlds', {}),
+    worldStatus: world => nativeBridge().invoke('world_status', { world }),
+    worldCompatibility: world => nativeBridge().invoke('world_compatibility', { world }),
+  });
+  const worldState = worldsController.state;
+  const readinessController = createNativeHostReadinessController(
+    world => nativeBridge().invoke('host_readiness', { world }),
+  );
+  const readinessState = readinessController.state;
+  let selectedId = $state('');
+  const selectedEntry = $derived($worldState.worlds.find(world => world.id === selectedId));
+  let connectivityLabel = $state('Checking connectivity');
+  let selectionError = $state('');
+
+  function selectWorld(id: string) {
+    if ($worldState.busy) return;
+    if (typeof window.__swarmcraftSelectWorldFromSvelte !== 'function') {
+      selectionError = 'World selection is not available. Restart the desktop app.';
+      return;
+    }
+    selectionError = '';
+    if (!window.__swarmcraftSelectWorldFromSvelte(id)) {
+      selectionError = 'This world is no longer in the verified list. Refresh Worlds and try again.';
+    }
+  }
+
+  function refreshWorlds() {
+    if (typeof window.__swarmcraftRefreshWorldsFromSvelte !== 'function') {
+      selectionError = 'World refresh is not initialized. Restart the desktop app.';
+      return;
+    }
+    selectionError = '';
+    void window.__swarmcraftRefreshWorldsFromSvelte();
+  }
+
+  onMount(() => {
+    const old = window.__swarmcraftSvelteWorlds;
+    const oldReadiness = window.__swarmcraftSvelteReadiness;
+    const readinessBridge = {
+      select: (world: string) => readinessController.select(world),
+      clear: () => readinessController.clear(),
+    };
+    window.__swarmcraftSvelteReadiness = readinessBridge;
+    const bridge = {
+      refresh: () => worldsController.refresh(),
+      setSelected: (id: string) => { selectedId = id; },
+      setConnectivity: (label: string) => {
+        connectivityLabel = label.trim() || 'Connectivity not verified';
+      },
+    };
+    window.__swarmcraftSvelteWorlds = bridge;
+    return () => {
+      if (window.__swarmcraftSvelteWorlds === bridge) {
+        window.__swarmcraftSvelteWorlds = old;
+      }
+      if (window.__swarmcraftSvelteReadiness === readinessBridge) {
+        window.__swarmcraftSvelteReadiness = oldReadiness;
+      }
+    };
+  });
 </script>
 
 <section id="worldsView" class="view is-active" data-view-panel="worlds" aria-labelledby="viewTitle">
-          <div id="worldLoadError" class="page-notice notice-danger" role="alert" hidden></div>
+          <div id="worldLoadError" class="page-notice notice-danger" role="alert" hidden={!$worldState.error}>{$worldState.error}</div>
+          <p class="form-error" role="alert" hidden={!selectionError}>{selectionError}</p>
           <div class="worlds-layout">
             <section class="world-list-pane" aria-label="Your worlds">
               <div class="pane-head">
                 <div>
                   <h2>Your worlds</h2>
-                  <p id="worldCount" class="meta-text">Loading…</p>
+                  <p id="worldCount" class="meta-text">{#if $worldState.busy}Loading…{:else if $worldState.phase === 'unavailable'}Could not read local worlds{:else if !$worldState.worlds.length}No local worlds{:else}{$worldState.worlds.length} {$worldState.worlds.length === 1 ? 'world' : 'worlds'}{/if}</p>
                 </div>
-                <button id="refresh" class="icon-button" type="button" aria-label="Refresh worlds" title="Refresh worlds">↻</button>
+                <button id="refresh" class="icon-button" type="button" aria-label="Refresh worlds" title="Refresh worlds" onclick={refreshWorlds} disabled={$worldState.busy} aria-busy={$worldState.busy}>↻</button>
               </div>
-              <div id="worldCards" class="world-list" aria-live="polite" aria-busy="true">
-                <div class="loading-list" aria-hidden="true">
-                  <span></span><span></span><span></span>
-                </div>
+              <div id="worldCards" class="world-list" aria-live="polite" aria-busy={$worldState.busy} data-world-list-phase={$worldState.phase} data-native-verified-read-count={$worldState.verifiedReadCount}>
+                {#if $worldState.busy && !$worldState.worlds.length}
+                  <div class="loading-list" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </div>
+                {:else if !$worldState.busy && $worldState.phase === 'ready' && !$worldState.worlds.length}
+                  <div class="empty-state">
+                    <div class="empty-mark" aria-hidden="true">▦</div>
+                    <h2>No worlds yet</h2>
+                    <p>Create a world, import an existing Minecraft save, or join with a signed invite.</p>
+                    <div class="compact-actions">
+                      <button class="button button-primary" type="button" onclick={() => document.getElementById('quickCreate')?.click()}>Create world</button>
+                      <button class="button button-secondary" type="button" onclick={() => document.getElementById('quickImport')?.click()}>Import existing world</button>
+                      <button class="button button-secondary" type="button" onclick={() => document.getElementById('quickJoin')?.click()}>Join with invite</button>
+                    </div>
+                  </div>
+                {:else}
+                  {#each $worldState.worlds as world (world.id)}
+                    <button type="button" class="world-row" class:is-selected={selectedId === world.id}
+                      data-world-id={world.id} aria-pressed={selectedId === world.id}
+                      disabled={$worldState.busy} onclick={() => selectWorld(world.id)}>
+                      <span class="world-row-title">
+                        <strong>{world.name}</strong>
+                        <span class="world-row-id">{world.id}</span>
+                      </span>
+                      <span class={`status-badge ${worldSafetyTone(world.status.Safety)}`}>{world.status.Safety || 'Unknown'}</span>
+                      <span class="world-row-meta">
+                        <span>Minecraft {world.status.Minecraft || 'unknown'}</span>
+                        <span>{world.status.Authority ? `Host ${world.status.Authority}` : 'Host not reported'}</span>
+                        <span class="world-row-connectivity">{connectivityLabel}</span>
+                      </span>
+                    </button>
+                  {/each}
+                {/if}
               </div>
               <div class="list-footer">
                 <button id="quickCreate" class="button button-secondary button-small" type="button">Create world</button>
@@ -37,11 +134,11 @@
                 <header class="world-hero">
                   <div class="world-heading">
                     <div class="title-line">
-                      <h2 id="selectedName">World</h2>
-                      <span id="selectedSafety" class="status-badge neutral">Unknown</span>
+                      <h2 id="selectedName">{selectedEntry?.name || 'World'}</h2>
+                      <span id="selectedSafety" class={`status-badge ${worldSafetyTone(selectedEntry?.status.Safety)}`}>{selectedEntry?.status.Safety || 'Unknown'}</span>
                     </div>
                     <button id="copyWorldId" class="machine-button" type="button" title="Copy World ID">
-                      <span id="selectedWorldId" class="machine-line"></span>
+                      <span id="selectedWorldId" class="machine-line">{selectedEntry?.id || ''}</span>
                       <span aria-hidden="true">⧉</span>
                     </button>
                   </div>
@@ -58,7 +155,7 @@
                 <div class="world-state-grid" aria-label="World summary">
                   <div class="state-cell">
                     <span class="state-label">Host</span>
-                    <strong id="selectedAuthority">Not reported</strong>
+                    <strong id="selectedAuthority">{selectedEntry?.status.Authority || 'Not reported'}</strong>
                   </div>
                   <div class="state-cell">
                     <span class="state-label">Connectivity</span>
@@ -67,31 +164,35 @@
                   </div>
                   <div class="state-cell">
                     <span class="state-label">Members</span>
-                    <strong id="selectedMembers">Unknown</strong>
+                    <strong id="selectedMembers">{selectedEntry?.status['Authorized peers'] || 'Unknown'}</strong>
                   </div>
                   <div class="state-cell">
                     <span class="state-label">Latest checkpoint</span>
-                    <strong id="selectedCheckpoint">None</strong>
+                    <strong id="selectedCheckpoint">{selectedEntry?.status['Latest snapshot'] || (selectedEntry?.snapshots ? `${selectedEntry.snapshots} stored` : 'None')}</strong>
                   </div>
                 </div>
 
-                <section id="safetyPanel" class="safety-panel neutral" aria-labelledby="safetyTitle">
+                <section id="safetyPanel" class={`safety-panel ${worldSafetyTone(selectedEntry?.status.Safety)}`} aria-labelledby="safetyTitle">
                   <div>
                     <span id="safetyTitle" class="section-label">World safety</span>
-                    <p id="selectedSummary">Safety state is unavailable.</p>
+                    <p id="selectedSummary">{nativeWorldSafetySummary(selectedEntry?.status.Safety)}</p>
                   </div>
                   <button id="worldConflicts" class="text-button world-required" type="button">Review conflicts</button>
                 </section>
 
-                <section id="hostReadinessPanel" class="safety-panel neutral" aria-labelledby="hostReadinessQuestion">
+                <section id="hostReadinessPanel" class={`safety-panel ${$readinessState.tone}`} data-native-readiness-phase={$readinessState.phase} data-native-readiness-verified-count={$readinessState.verifiedReadCount} aria-busy={$readinessState.busy} aria-labelledby="hostReadinessQuestion">
                   <div>
                     <span id="hostReadinessQuestion" class="section-label">Can I turn off this PC?</span>
-                    <h3 id="hostReadinessTitle">Checking shutdown safety…</h3>
-                    <p id="hostReadinessDetail">SwarmCraft is checking whether another device can safely keep this world available.</p>
+                    <h3 id="hostReadinessTitle">{$readinessState.title}</h3>
+                    <p id="hostReadinessDetail" aria-live="polite">{$readinessState.detail}</p>
                   </div>
                 </section>
 
-                <HostingContributionPanel />
+                {#if selectedId}
+                  {#key selectedId}
+                    <HostingContributionPanel world={selectedId} />
+                  {/key}
+                {/if}
 
                 <section class="player-section" aria-labelledby="availabilityTitle">
                   <div class="section-heading">
@@ -172,8 +273,8 @@
                 <details class="details-panel">
                   <summary>World details</summary>
                   <div class="details-grid">
-                    <div class="detail-row"><span>Minecraft</span><strong id="selectedMinecraft">Unknown</strong></div>
-                    <div class="detail-row"><span>Compatibility</span><strong id="selectedCompatibility">Not synchronized</strong></div>
+                    <div class="detail-row"><span>Minecraft</span><strong id="selectedMinecraft">{selectedEntry?.status.Minecraft || 'Unknown'}</strong></div>
+                    <div class="detail-row"><span>Compatibility</span><strong id="selectedCompatibility">{selectedEntry?.compatibility['Authority eligibility'] || 'Not synchronized'}</strong></div>
                   </div>
                   <div class="compact-actions">
                     <button id="worldPeers" class="button button-subtle world-required" type="button">Members</button>
