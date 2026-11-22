@@ -26,7 +26,7 @@ use swarm_protocol::{
     MembershipPolicyV1, PeerId, WorldAnnouncementV1, WorldId, WorldVisibilityV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{Storage, StorageError};
-use tokio::time::{timeout, MissedTickBehavior};
+use tokio::time::{timeout, Instant, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 pub const DISCOVERY_CAPABILITY: &str = "discovery-v1";
@@ -40,6 +40,7 @@ const DISCOVERY_FRESHNESS_TIMEOUT: Duration = Duration::from_secs(5);
 // provider. Limit retries to the caller's explicit locators and the existing
 // overall discovery deadline; retries never bypass authentication or quorum.
 const DISCOVERY_EXPLICIT_PROVIDER_RETRIES: u8 = 2;
+const DISCOVERY_RETRY_DELAY: Duration = Duration::from_millis(200);
 const FRIENDS_FILE_VERSION: u16 = 1;
 const MAX_FRIEND_LABEL_BYTES: usize = 96;
 
@@ -909,6 +910,28 @@ fn reserve_matching_explicit_provider_retry(
         && reserve_explicit_provider_retry(retry_attempts.entry(transport_peer).or_default())
 }
 
+fn retry_due_providers(
+    node: &mut DiscoveryNode,
+    queued: &mut HashMap<TransportPeerId, Instant>,
+    requested: &mut HashSet<TransportPeerId>,
+    pending: &mut HashMap<String, TransportPeerId>,
+    request: &WireRequest,
+) -> Result<()> {
+    let now = Instant::now();
+    let due: Vec<_> = queued.iter().filter_map(|(peer, at)| (*at <= now).then_some(*peer)).collect();
+    for peer in due {
+        queued.remove(&peer);
+        if node.is_authenticated(&peer) {
+            let id = node.send_request(&peer, request.clone())?;
+            pending.insert(format!("{id:?}"), peer);
+            requested.insert(peer);
+        } else if let Err(error) = node.dial_peer(peer) {
+            debug!(transport_peer = %peer, %error, "explicit discovery retry dial failed");
+        }
+    }
+    Ok(())
+}
+
 pub async fn search_public_worlds(
     paths: &DataPaths,
     input: DiscoverySearchInputV1,
@@ -933,6 +956,8 @@ pub async fn search_public_worlds(
     let mut requested = HashSet::new();
     let mut pending = HashMap::<String, TransportPeerId>::new();
     let mut retry_attempts = HashMap::<TransportPeerId, u8>::new();
+    let mut queued_retries = HashMap::new();
+    let request = WireRequest::DiscoveryPublic { filter: filter.clone() };
     for transport_peer in bootstrap_order.iter().copied() {
         if node.application_peer(&transport_peer).is_some() && requested.insert(transport_peer) {
             let request_id =
@@ -953,8 +978,16 @@ pub async fn search_public_worlds(
     let mut network_error = None;
 
     let run = timeout(DISCOVERY_QUERY_TIMEOUT, async {
+        let mut retry_tick = tokio::time::interval(DISCOVERY_RETRY_DELAY);
+        retry_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
-            let event = node.next_event().await?;
+            let event = tokio::select! {
+                event = node.next_event() => event?,
+                _ = retry_tick.tick(), if !queued_retries.is_empty() => {
+                    retry_due_providers(&mut node, &mut queued_retries, &mut requested, &mut pending, &request)?;
+                    continue;
+                }
+            };
             match event {
                 DiscoveryNetworkEvent::ProvidersFound { query_id, providers: found } if query_id == query => {
                     for peer in found {
@@ -979,7 +1012,7 @@ pub async fn search_public_worlds(
                     }
                 }
                 DiscoveryNetworkEvent::Authenticated { transport_peer, .. } if providers.contains(&transport_peer) => {
-                    if requested.insert(transport_peer) {
+                    if !queued_retries.contains_key(&transport_peer) && requested.insert(transport_peer) {
                         let request_id = node
                             .send_request(&transport_peer, WireRequest::DiscoveryPublic { filter: filter.clone() })?;
                         pending.insert(format!("{request_id:?}"), transport_peer);
@@ -1027,16 +1060,10 @@ pub async fn search_public_worlds(
                         &bootstrap_peers,
                     ) {
                         requested.remove(&transport_peer);
-                        if node.is_authenticated(&transport_peer) {
-                            let next = node.send_request(
-                                &transport_peer,
-                                WireRequest::DiscoveryPublic { filter: filter.clone() },
-                            )?;
-                            pending.insert(format!("{next:?}"), transport_peer);
-                            requested.insert(transport_peer);
-                        } else if let Err(dial_error) = node.dial_peer(transport_peer) {
-                            debug!(%dial_error, %transport_peer, "discovery provider retry dial failed");
-                        }
+                        // Request failure can arrive before the swarm processes
+                        // the closing connection. Let it advance before sending
+                        // again, so a retry does not attach to that old stream.
+                        queued_retries.insert(transport_peer, Instant::now() + DISCOVERY_RETRY_DELAY);
                     }
                 }
                 _ => {}
@@ -1135,6 +1162,8 @@ pub async fn resolve_world(
     // response cannot consume a legitimate retry slot.
     let mut pending = HashMap::<String, TransportPeerId>::new();
     let mut retry_attempts = HashMap::<TransportPeerId, u8>::new();
+    let mut queued_retries = HashMap::new();
+    let request = WireRequest::DiscoveryResolve { world_id: world };
     for transport_peer in bootstrap_order.iter().copied() {
         if node.application_peer(&transport_peer).is_some() && requested.insert(transport_peer) {
             let request_id = node.send_request(&transport_peer, WireRequest::DiscoveryResolve { world_id: world })?;
@@ -1153,8 +1182,17 @@ pub async fn resolve_world(
     let mut query_finished = false;
 
     let run = timeout(DISCOVERY_QUERY_TIMEOUT, async {
+        let mut retry_tick = tokio::time::interval(DISCOVERY_RETRY_DELAY);
+        retry_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
-            match node.next_event().await? {
+            let event = tokio::select! {
+                event = node.next_event() => event?,
+                _ = retry_tick.tick(), if !queued_retries.is_empty() => {
+                    retry_due_providers(&mut node, &mut queued_retries, &mut requested, &mut pending, &request)?;
+                    continue;
+                }
+            };
+            match event {
                 DiscoveryNetworkEvent::ProvidersFound { query_id, providers: found } if query_id == query => {
                     for peer in found {
                         providers.insert(peer);
@@ -1175,7 +1213,7 @@ pub async fn resolve_world(
                     }
                 }
                 DiscoveryNetworkEvent::Authenticated { transport_peer, .. } if providers.contains(&transport_peer) => {
-                    if requested.insert(transport_peer) {
+                    if !queued_retries.contains_key(&transport_peer) && requested.insert(transport_peer) {
                         let request_id =
                             node.send_request(&transport_peer, WireRequest::DiscoveryResolve { world_id: world })?;
                         pending.insert(format!("{request_id:?}"), transport_peer);
@@ -1220,14 +1258,7 @@ pub async fn resolve_world(
                         &bootstrap_peers,
                     ) {
                         requested.remove(&transport_peer);
-                        if node.is_authenticated(&transport_peer) {
-                            let next =
-                                node.send_request(&transport_peer, WireRequest::DiscoveryResolve { world_id: world })?;
-                            pending.insert(format!("{next:?}"), transport_peer);
-                            requested.insert(transport_peer);
-                        } else if let Err(dial_error) = node.dial_peer(transport_peer) {
-                            debug!(%dial_error, %transport_peer, "discovery exact-resolve retry dial failed");
-                        }
+                        queued_retries.insert(transport_peer, Instant::now() + DISCOVERY_RETRY_DELAY);
                     }
                 }
                 _ => {}

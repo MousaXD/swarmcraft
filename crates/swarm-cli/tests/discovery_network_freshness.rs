@@ -471,7 +471,12 @@ async fn malicious_and_stale_providers_cannot_win_browse_or_exact_resolve() {
             lifecycle.lock().unwrap().clone()
         )
     });
-    assert_eq!(report.results.len(), 1, "only the live canonical proof may survive browse: {report:?}");
+    assert_eq!(
+        report.results.len(),
+        1,
+        "only the live canonical proof may survive browse: {report:?}; order={browse_order:?}; lifecycle={:?}",
+        lifecycle.lock().unwrap().clone()
+    );
     assert_eq!(report.results[0].announcer_peer_id, b_record_id.peer_id().to_string());
     assert!(
         lifecycle.lock().unwrap().iter().any(|event| event == "injected:public"),
