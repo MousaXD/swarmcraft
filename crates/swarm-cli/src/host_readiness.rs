@@ -989,7 +989,6 @@ mod tests {
             game_endpoint: None,
         };
         crate::migration::save_runtime_config(&paths, world, &config).unwrap();
-        hosting_budget::set_contribution(&paths, world, 512).unwrap();
         assert_eq!(
             local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(),
             HostRuntimeReadinessV1::Unverified
