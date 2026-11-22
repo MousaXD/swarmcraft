@@ -275,26 +275,30 @@ pub fn admit(paths: &DataPaths, world: WorldId) -> Result<HostingAdmission> {
 /// Recheck persisted consent and free headroom immediately before spawn,
 /// not only before a potentially slow canonical restore.
 pub fn revalidate_admission(paths: &DataPaths, world: WorldId, admission: &HostingAdmission) -> Result<()> {
-    let current = load_consent(paths, world)?.context("hosting consent disappeared during runtime preparation")?;
-    if current != *admission.consent() {
-        bail!("hosting consent or heap changed during runtime preparation; Java launch denied");
+    revalidate_contribution(paths, world, admission.consent())
+}
+
+fn revalidate_contribution(paths: &DataPaths, world: WorldId, expected: &HostingConsentV1) -> Result<()> {
+    let current = load_consent(paths, world)?.context("hosting consent disappeared before the operation")?;
+    if !current.enabled || current != *expected {
+        bail!("hosting consent or heap changed; hosting operation denied");
     }
-    check_budget(admission.heap_mib(), memory_snapshot()?)
+    check_budget(current.heap_mib, memory_snapshot()?)
 }
 
 /// Serialize short, synchronous authority-changing operations with explicit
 /// local opt-in/opt-out. This closes the admission-to-epoch/Java-spawn race:
 /// a withdrawn or revised consent cannot be accepted just because it passed
 /// an earlier capacity check. Never hold this lock across async waits.
-fn with_consent_guarded_operation<T>(
+pub(crate) fn with_consent_guarded_operation<T>(
     paths: &DataPaths,
     world: WorldId,
-    admission: &HostingAdmission,
+    consent: &HostingConsentV1,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     let lock = open_lock(&control_path(paths).join("hosting-consent-write.lock"))?;
     lock.lock_exclusive().context("cannot serialize final hosting admission with consent updates")?;
-    revalidate_admission(paths, world, admission)?;
+    revalidate_contribution(paths, world, consent)?;
     let result = operation();
     drop(lock);
     result
@@ -309,7 +313,7 @@ pub fn with_consent_guarded_epoch_transition<T>(
     admission: &HostingAdmission,
     transition: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    with_consent_guarded_operation(paths, world, admission, transition)
+    with_consent_guarded_operation(paths, world, admission.consent(), transition)
 }
 
 /// Serialize the final consent check with the synchronous Java spawn. Once
@@ -320,7 +324,7 @@ pub fn with_consent_guarded_spawn<T>(
     admission: &HostingAdmission,
     spawn: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    with_consent_guarded_operation(paths, world, admission, spawn)
+    with_consent_guarded_operation(paths, world, admission.consent(), spawn)
 }
 
 /// Called while serving. Any revision change, revocation or inability to
@@ -887,6 +891,24 @@ mod tests {
         });
         assert!(result.unwrap_err().to_string().contains("hosting consent or heap changed"));
         assert!(!transition_ran.get());
+    }
+
+    #[test]
+    fn revoked_consent_cannot_persist_a_transfer_or_wake_intent() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let world = WorldId([39; 32]);
+        let consent = persist_contribution(&paths, world, 512).unwrap();
+        set_contribution(&paths, world, 0).unwrap();
+        persist_contribution(&paths, world, 512).unwrap();
+
+        let marker = temp.path().join("intent");
+        let result = with_consent_guarded_operation(&paths, world, &consent, || {
+            fs::write(&marker, b"committed")?;
+            Ok(())
+        });
+        assert!(result.unwrap_err().to_string().contains("hosting consent or heap changed"));
+        assert!(!marker.exists());
     }
 
     #[test]
