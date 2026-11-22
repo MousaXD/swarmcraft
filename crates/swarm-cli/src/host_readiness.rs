@@ -15,6 +15,7 @@ use swarm_protocol::{
 };
 use swarm_storage::Storage;
 
+use crate::hosting_budget;
 use crate::migration::{load_runtime_config, RuntimeLaunchConfig};
 use crate::server_mods;
 
@@ -99,6 +100,11 @@ pub fn invalidate_runtime_verification(paths: &DataPaths, world: WorldId) -> Res
     remove_if_present(&runtime_verification_path(paths, world))
 }
 
+/// Local contribution changes invalidate previous shutdown/readiness snapshots.
+pub fn invalidate_cached_readiness(paths: &DataPaths, world: WorldId) -> Result<()> {
+    remove_if_present(&host_readiness_path(paths, world))
+}
+
 pub fn record_runtime_verified(
     paths: &DataPaths,
     world: WorldId,
@@ -181,6 +187,21 @@ pub fn local_host_capability(
 }
 
 pub fn local_runtime_readiness(
+    paths: &DataPaths,
+    world: WorldId,
+    compatibility_fingerprint: Hash32,
+) -> Result<HostRuntimeReadinessV1> {
+    // This peer cannot be an authority successor without live local consent
+    // and capacity, even if an older Fabric runtime verification is still valid.
+    if hosting_budget::require_contribution(paths, world).is_err() {
+        return Ok(HostRuntimeReadinessV1::Unverified);
+    }
+    local_runtime_proof_readiness(paths, world, compatibility_fingerprint)
+}
+
+/// Isolated artifact proof for deterministic tests; budget and permission
+/// checks remain mandatory in the public authority capability producer.
+fn local_runtime_proof_readiness(
     paths: &DataPaths,
     world: WorldId,
     compatibility_fingerprint: Hash32,
@@ -968,16 +989,26 @@ mod tests {
             game_endpoint: None,
         };
         crate::migration::save_runtime_config(&paths, world, &config).unwrap();
-        assert_eq!(local_runtime_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Unverified);
+        hosting_budget::set_contribution(&paths, world, 512).unwrap();
+        assert_eq!(
+            local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(),
+            HostRuntimeReadinessV1::Unverified
+        );
         record_runtime_verified(&paths, world, &config, fingerprint).unwrap();
-        assert_eq!(local_runtime_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Ready);
+        assert_eq!(local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Ready);
 
         fs::write(&server, b"server-v2").unwrap();
-        assert_eq!(local_runtime_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Incompatible);
+        assert_eq!(
+            local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(),
+            HostRuntimeReadinessV1::Incompatible
+        );
 
         fs::write(&server, b"server-v1").unwrap();
         record_runtime_verified(&paths, world, &config, fingerprint).unwrap();
         crate::migration::save_runtime_config(&paths, world, &config).unwrap();
-        assert_eq!(local_runtime_readiness(&paths, world, fingerprint).unwrap(), HostRuntimeReadinessV1::Unverified);
+        assert_eq!(
+            local_runtime_proof_readiness(&paths, world, fingerprint).unwrap(),
+            HostRuntimeReadinessV1::Unverified
+        );
     }
 }

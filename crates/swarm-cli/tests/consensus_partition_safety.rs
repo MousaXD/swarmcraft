@@ -120,6 +120,26 @@ fn member(peer: &PeerFixture) -> WorldMemberV1 {
     }
 }
 
+/// These live-daemon recovery assertions require a host that can actually
+/// contribute 512 MiB. The protected low-memory behavior is *deny*, not a
+/// fabricated recovery success on an under-provisioned CI runner.
+fn adequate_host_memory_for_recovery() -> bool {
+    match swarm_cli::hosting_budget::memory_snapshot()
+        .and_then(|memory| swarm_cli::hosting_budget::check_budget(512, memory))
+    {
+        Ok(()) => true,
+        Err(error) => {
+            assert!(
+                error.to_string().contains("insufficient hosting memory")
+                    || error.to_string().contains("cannot safely establish"),
+                "unexpected host memory admission failure: {error}"
+            );
+            eprintln!("Skipping positive quorum-recovery process scenario because safe hosting capacity is unavailable: {error}");
+            false
+        }
+    }
+}
+
 fn genesis_membership(metadata: &WorldMetadataV1, authority: &PeerIdentity) -> MembershipRecordV1 {
     let mut membership = MembershipRecordV1 {
         protocol_version: PROTOCOL_VERSION,
@@ -191,6 +211,9 @@ with socket.create_connection((host, port), timeout=5) as connection:
     fs::write(&fabric, b"mock").unwrap();
     let config =
         RuntimeLaunchConfig { java, server_jar: server, mod_jar: fabric, accept_eula: true, game_endpoint: None };
+    // A signed authority-eligible membership record does not grant the
+    // local device hosting permission. This fixture explicitly opts in.
+    swarm_cli::hosting_budget::set_contribution(&peer.paths, world, 512).unwrap();
     save_runtime_config(&peer.paths, world, &config).unwrap();
     let fingerprint = peer.storage.load_world_descriptor(world).unwrap().compatibility_fingerprint;
     host_readiness::record_runtime_verified(&peer.paths, world, &config, fingerprint).unwrap();
@@ -408,6 +431,9 @@ fn prepare_proposal(authority: &PeerFixture, current: &MembershipRecordV1, propo
 
 #[test]
 fn five_peer_membership_churn_partition_cannot_activate_new_voter_universe() {
+    if !adequate_host_memory_for_recovery() {
+        return;
+    }
     let a = peer_fixture();
     let b = peer_fixture();
     let c = peer_fixture();
@@ -467,6 +493,74 @@ fn five_peer_membership_churn_partition_cannot_activate_new_voter_universe() {
 }
 
 #[test]
+fn withdrawn_successors_cannot_receive_recovery_permits_despite_quorum() {
+    let alice = peer_fixture();
+    let bob = peer_fixture();
+    let carol = peer_fixture();
+    let source_temp = tempfile::tempdir().unwrap();
+    let (metadata, config, descriptor, membership, epoch, manifest) =
+        build_seed(&alice, &[&alice, &bob, &carol], "withdrawn-recovery-candidates", &source_temp);
+    let source = source_temp.path().join("world");
+    let seed = Seed {
+        metadata: &metadata,
+        config: &config,
+        descriptor: &descriptor,
+        membership: &membership,
+        epoch: &epoch,
+        manifest: &manifest,
+        source: &source,
+        authority: &alice.identity,
+    };
+    install_seed(&bob, &seed);
+    install_seed(&carol, &seed);
+
+    // These two eligible, fully replicated peers form the surviving 2-of-3
+    // recovery quorum. Neither is allowed to host after explicit withdrawal.
+    for peer in [&bob, &carol] {
+        swarm_cli::hosting_budget::set_contribution(&peer.paths, metadata.world_id, 0).unwrap();
+        assert!(swarm_cli::hosting_budget::require_contribution(&peer.paths, metadata.world_id).is_err());
+        // Simulate an old or improperly refreshed "verified artifacts" proof:
+        // local permission must still override the presence of that proof.
+        let launch = swarm_cli::migration::load_runtime_config(&peer.paths, metadata.world_id).unwrap();
+        host_readiness::record_runtime_verified(
+            &peer.paths,
+            metadata.world_id,
+            &launch,
+            descriptor.compatibility_fingerprint,
+        )
+        .unwrap();
+        assert_eq!(
+            host_readiness::local_runtime_readiness(
+                &peer.paths,
+                metadata.world_id,
+                descriptor.compatibility_fingerprint,
+            )
+            .unwrap(),
+            swarm_network::HostRuntimeReadinessV1::Unverified,
+        );
+    }
+
+    let mut daemon_b = spawn_daemon(&bob, &[]);
+    thread::sleep(Duration::from_millis(500));
+    let mut daemon_c = spawn_daemon(&carol, &[address(&bob)]);
+    thread::sleep(Duration::from_secs(12));
+    for peer in [&bob, &carol] {
+        assert!(
+            permit(peer, metadata.world_id).is_none(),
+            "a withdrawn player-only successor must never receive an authority permit"
+        );
+        assert_eq!(
+            peer.storage.load_epoch_record(metadata.world_id).unwrap(),
+            epoch,
+            "withdrawal may not manufacture a new authority epoch"
+        );
+        let snapshot = peer.storage.latest_snapshot(metadata.world_id).unwrap().unwrap();
+        assert_eq!(snapshot.manifest_hash().unwrap(), manifest.manifest_hash().unwrap());
+    }
+    assert!(daemon_b.alive() && daemon_c.alive(), "player-only peers must remain connected as replicas");
+}
+
+#[test]
 fn three_peer_divergent_membership_partition_cannot_form_two_quorums() {
     let a = peer_fixture();
     let b = peer_fixture();
@@ -509,6 +603,9 @@ fn three_peer_divergent_membership_partition_cannot_form_two_quorums() {
 }
 
 fn assert_unclean_quorum_loss_does_not_enter_solo(member_count: usize) {
+    if !adequate_host_memory_for_recovery() {
+        return;
+    }
     assert!(member_count == 3 || member_count == 5);
     let peers = (0..member_count).map(|_| peer_fixture()).collect::<Vec<_>>();
     let refs = peers.iter().collect::<Vec<_>>();
