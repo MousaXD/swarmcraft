@@ -287,13 +287,11 @@ jobs:
           set -euo pipefail
           app="src-tauri/target/release/bundle/macos/SwarmCraft.app"
           out_dir="src-tauri/target/release/bundle/dmg"
-          dmg="$out_dir/SwarmCraft_0.5.0_${{ matrix.label }}.dmg"
-          test -d "$app"
+          version="$(awk '/^\[workspace.package\]$/ { found=1; next } found && /^\[/ { exit } found && /^version = "/ { gsub(/"/, "", $3); print $3; exit }' ../../Cargo.toml)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid workspace version" >&2; exit 1; }
+          dmg="$out_dir/SwarmCraft_${version}_${{ matrix.label }}.dmg"
           rm -rf "$out_dir"
-          mkdir -p "$out_dir"
-          hdiutil create -volname SwarmCraft -srcfolder "$app" -ov -format UDZO "$dmg"
-          hdiutil verify "$dmg"
-          test -s "$dmg"
+          bash ../../scripts/ci-artifacts/create_macos_dmg.sh "$app" "$dmg" SwarmCraft
       - name: Upload native packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -321,8 +319,19 @@ jobs:
         run: python3 -m unittest discover -s scripts/acceptance -p 'test_packaged_desktop_webdriver.py'
       - name: Install actual WebKitGTK WebDriver and headless window server
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y webkit2gtk-driver xvfb libwebkit2gtk-4.1-0 libayatana-appindicator3-1
+          # Ubuntu 26.04 renamed webkit2gtk-driver to webkitgtk-webdriver.
+          # Select the repository-provided native driver; never skip this gate.
+          if apt-cache show webkitgtk-webdriver >/dev/null 2>&1; then
+            driver=webkitgtk-webdriver
+          elif apt-cache show webkit2gtk-driver >/dev/null 2>&1; then
+            driver=webkit2gtk-driver
+          else
+            echo 'No supported native WebKitGTK WebDriver package is available' >&2
+            exit 1
+          fi
+          sudo apt-get install -y "$driver" xvfb libwebkit2gtk-4.1-0 libayatana-appindicator3-1
           command -v WebKitWebDriver
       - name: Install Tauri WebDriver bridge
         run: cargo install tauri-driver --version 2.1.0 --locked

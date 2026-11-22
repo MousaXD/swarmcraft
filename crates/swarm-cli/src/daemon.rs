@@ -7,7 +7,7 @@ use std::{
 use swarm_cli::{
     authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
     host_readiness::{self, PeerReadinessObservation},
-    launch_guard,
+    hosting_budget, launch_guard,
     migration::{clear_world_wake_request, world_wake_requested},
 };
 use swarm_consensus::{
@@ -599,6 +599,13 @@ fn drive_recovery_ballot(
         wake,
     } = attempt;
     let world = descriptor.world_id;
+    let consent = match hosting_budget::require_contribution(paths, world) {
+        Ok(consent) => consent,
+        Err(error) => {
+            tracing::debug!(%world, %error, "local consent or memory no longer allows recovery");
+            return Ok(());
+        }
+    };
     let base_snapshot_hash = latest.manifest_hash()?;
     let membership = storage.load_membership_record(world)?;
     verify_membership_signature(&membership)?;
@@ -698,18 +705,22 @@ fn drive_recovery_ballot(
 
     // An in-memory ballot is not a substitute for its canonical durable promise.
     // Recheck after collecting quorum votes, immediately before any promotion write.
-    ensure_active_recovery_promise(storage, &ballot)?;
-
     // Persist the quorum proof before the epoch. A crash between these writes can
     // safely retry promotion; the proof itself never grants an older round power.
-    storage.save_recovery_certificate(&certificate)?;
+    hosting_budget::with_consent_guarded_operation(paths, world, &consent, || {
+        ensure_active_recovery_promise(storage, &ballot)?;
+        Ok(storage.save_recovery_certificate(&certificate)?)
+    })?;
     #[cfg(debug_assertions)]
     if let Ok(delay_ms) = std::env::var("SWARMCRAFT_TEST_PAUSE_AFTER_RECOVERY_CERTIFICATE_MS") {
         if let Ok(delay_ms) = delay_ms.parse::<u64>() {
             std::thread::sleep(Duration::from_millis(delay_ms));
         }
     }
-    let next = promote_recovery_epoch(storage, identity, previous, latest, wake)?;
+    let next = hosting_budget::with_consent_guarded_operation(paths, world, &consent, || {
+        ensure_active_recovery_promise(storage, &ballot)?;
+        promote_recovery_epoch(storage, identity, previous, latest, wake)
+    })?;
     if wake {
         storage.clear_sleep_record(world)?;
         clear_world_wake_request(paths, world)?;

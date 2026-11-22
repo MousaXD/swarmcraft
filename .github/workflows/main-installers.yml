@@ -10,6 +10,7 @@ on:
       - 'scripts/check_release_version.py'
       - 'scripts/check_release_credentials.py'
       - 'scripts/check_workflow_policy.py'
+      - 'scripts/ci-release/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'crates/**'
@@ -19,6 +20,9 @@ on:
 
 permissions:
   contents: read
+
+env:
+  SWARMCRAFT_PREVIEW_COMMIT: ${{ github.ref == 'refs/heads/main' && github.sha || '' }}
 
 concurrency:
   group: main-desktop-installers-${{ github.ref }}
@@ -184,30 +188,12 @@ jobs:
           set -euo pipefail
           app="apps/desktop/src-tauri/target/release/bundle/macos/SwarmCraft.app"
           out_dir="apps/desktop/src-tauri/target/release/bundle/dmg"
-          dmg="$out_dir/SwarmCraft_0.5.0_${{ matrix.arch }}.dmg"
-          test -d "$app"
+          # The validated workspace version determines the preview filename.
+          version="$(awk '/^\[workspace.package\]$/ { found=1; next } found && /^\[/ { exit } found && /^version = "/ { gsub(/"/, "", $3); print $3; exit }' Cargo.toml)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid workspace version" >&2; exit 1; }
+          dmg="$out_dir/SwarmCraft_${version}_${{ matrix.arch }}.dmg"
           rm -rf "$out_dir"
-          mkdir -p "$out_dir"
-          # macOS DiskImages can transiently report "Resource busy" on shared
-          # runners after a successful app build. Retry only this specific error.
-          attempt_log="$(mktemp)"
-          trap 'rm -f "$attempt_log"' EXIT
-          for attempt in 1 2 3; do
-            if hdiutil create -volname SwarmCraft -srcfolder "$app" -ov -format UDZO "$dmg" >"$attempt_log" 2>&1; then
-              cat "$attempt_log"
-              break
-            fi
-            cat "$attempt_log" >&2
-            if ! grep -qi 'Resource busy' "$attempt_log" || [ "$attempt" -eq 3 ]; then
-              echo "Disk image creation failed on attempt $attempt; aborting." >&2
-              exit 1
-            fi
-            rm -f "$dmg"
-            echo "DiskImages resource busy; retrying in $((attempt * 5)) seconds."
-            sleep "$((attempt * 5))"
-          done
-          hdiutil verify "$dmg"
-          test -s "$dmg"
+          bash scripts/ci-artifacts/create_macos_dmg.sh "$app" "$dmg" SwarmCraft
       - name: Stage macOS artifact
         shell: bash
         run: |
@@ -263,10 +249,40 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  publish:
-    name: Publish rolling main release
-    if: ${{ github.ref == 'refs/heads/main' }}
+  verify-packages:
+    name: Verify all preview packages and checksums
     needs: [validation, linux, windows, macos, fabric]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Download exact-run installer groups
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: swarmcraft-*-${{ github.sha }}
+          path: release-downloads
+          merge-multiple: false
+      - name: Verify the five platform groups against release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci-release/verify_artifacts.py \
+            --source release-downloads --output release-assets \
+            --channel preview --commit "$GITHUB_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preview-provenance-${{ github.sha }}
+          path: release-assets/release-provenance.json
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish immutable main snapshot
+    if: ${{ github.ref == 'refs/heads/main' }}
+    needs: [validation, linux, windows, macos, fabric, verify-packages]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -279,22 +295,21 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: swarmcraft-*-${{ github.sha }}
-          path: release-assets
-          merge-multiple: true
-      - name: List release assets
+          path: release-downloads
+          merge-multiple: false
+      - name: Verify exact-run platform artifacts and their SHA-256 before publication
+        shell: bash
         run: |
           set -euo pipefail
-          find release-assets -maxdepth 1 -type f -print
-          test -n "$(find release-assets -maxdepth 1 -type f -print -quit)"
+          python3 scripts/ci-release/verify_artifacts.py \
+            --source release-downloads --output release-assets \
+            --channel preview --commit "$GITHUB_SHA"
       - name: Publish validated SwarmCraft Main Snapshot
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view main-latest >/dev/null 2>&1; then
-            gh release delete main-latest --cleanup-tag --yes
-          fi
           cat > release-notes.md <<EOF
           Automated preview snapshot from \`main\` after the exact commit passed Required Validation, including the release-candidate network soak.
 
@@ -313,10 +328,8 @@ jobs:
           - Windows: unsigned development snapshot
           - macOS: ad-hoc signed development snapshot, not notarized
 
-          This rolling preview release may be replaced by the next validated push to \`main\`.
+          This preview is pinned to the commit above. New previews are published separately.
           EOF
-          gh release create main-latest release-assets/* \
-            --target "$GITHUB_SHA" \
-            --title "SwarmCraft Main Snapshot" \
-            --notes-file release-notes.md \
-            --prerelease
+          python3 scripts/ci-release/publish_preview.py \
+            --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" \
+            --assets release-assets --notes release-notes.md

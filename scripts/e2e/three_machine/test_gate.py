@@ -32,7 +32,11 @@ def config():
 
 
 def node(role, stage):
-    authority = ALICE if stage not in ("bob_recovered", "alice_returned") else BOB
+    after_withdrawal = stage in ("bob_withdrawn", "carol_denied")
+    authority = BOB if stage in ("bob_recovered", "alice_returned") else ALICE
+    epoch = 3 if after_withdrawal else (2 if authority == BOB else 1)
+    snapshot_number = 5 if after_withdrawal else (4 if stage == "alice_returned" else 3)
+    withdrawn_bob = after_withdrawal and role == "bob"
     return {
         "machine_fingerprint": "host-" + role,
         "world_fingerprint": "world-fp",
@@ -43,26 +47,28 @@ def node(role, stage):
         "minecraft_version": "26.1.2",
         "fabric_loader_version": "0.19.3",
         "java_runtime_version": "25.0.1" if role == ("alice" if authority == ALICE else "bob") else None,
-        "snapshot_number": 4 if stage == "alice_returned" else 3,
-        "snapshot_epoch": 1 if authority == ALICE else 2,
-        "snapshot_hash": "1" * 64 if authority == ALICE else "2" * 64,
-        "canonical_head_sha256": "1" * 64 if authority == ALICE else "2" * 64,
+        "snapshot_number": snapshot_number,
+        "snapshot_epoch": epoch,
+        "snapshot_hash": ("4" if after_withdrawal else "1" if authority == ALICE else "2") * 64,
+        "canonical_head_sha256": ("4" if after_withdrawal else "1" if authority == ALICE else "2") * 64,
         "state_root": "3" * 64,
         "snapshot_verify_passed": True,
         "canonical": stage != "alice_created",
         "safety_level": "SoloUnreplicated" if stage == "alice_created" else "Canonical",
-        "epoch": 1 if authority == ALICE else 2,
-        "fencing_token": 1 if authority == ALICE else 2,
+        "epoch": epoch,
+        "fencing_token": epoch,
         "phase": "ready", "runtime_ready": role == ("alice" if authority == ALICE else "bob"),
         "host_readiness_state": "safe" if role == "alice" else "unknown",
         "safe_to_shutdown": role == "alice",
         "desktop_process_observed": True,
         "minecraft_client_process_observed": True,
         "minecraft_server_process_observed": role == ("alice" if authority == ALICE else "bob"),
+        "world_server_process_count": 1 if role == ("alice" if authority == ALICE else "bob") else 0,
         "hosting_consent": {
-            "available": True, "enabled": role != "carol",
-            "heap_mib": {"alice": 2048, "bob": 4096, "carol": 0}[role],
-            "revision": 123, "world_bound": True, "identity_bound": True,
+            "available": True, "enabled": role != "carol" and not withdrawn_bob,
+            "heap_mib": 0 if withdrawn_bob else {"alice": 2048, "bob": 4096, "carol": 0}[role],
+            "revision": 124 if withdrawn_bob else 123,
+            "world_bound": True, "identity_bound": True,
         },
         "minecraft_server_heap_mib": (
             {"alice": 2048, "bob": 4096}.get(role)
@@ -363,6 +369,7 @@ class TestFailClosed(unittest.TestCase):
             c = fixtures(out)
             check = gate.load_json(out / "transport_disrupted.json")
             check["nodes"]["carol"]["minecraft_server_process_observed"] = True
+            check["nodes"]["carol"]["world_server_process_count"] = 1
             gate.save(out / "transport_disrupted.json", check)
             with self.assertRaisesRegex(gate.Blocked, "carol_player_only_role_violated_transport_disrupted"):
                 gate.verify(c, out)
@@ -460,6 +467,165 @@ class TestFailClosed(unittest.TestCase):
             gate.save(out / "alice_returned.json", check)
             with self.assertRaisesRegex(gate.Blocked, "carol_player_only_role_violated_alice_returned"):
                 gate.verify(c, out)
+
+
+    def test_rejects_missing_withdrawal_phase_instead_of_false_ready(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            (out / "bob_withdrawn.json").unlink()
+            with self.assertRaisesRegex(gate.Blocked, "required_field_stage_missing_bob_withdrawn"):
+                gate.verify(c, out)
+
+    def test_rejects_bob_withdrawal_without_revoked_consent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "bob_withdrawn.json")
+            record["nodes"]["bob"]["hosting_consent"]["enabled"] = True
+            record["nodes"]["bob"]["hosting_consent"]["heap_mib"] = 4096
+            gate.save(out / "bob_withdrawn.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "bob_withdrawal_not_persisted"):
+                gate.verify(c, out)
+
+    def test_rejects_bob_withdrawal_without_revision_advance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "bob_withdrawn.json")
+            record["nodes"]["bob"]["hosting_consent"]["revision"] = 123
+            gate.save(out / "bob_withdrawn.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "bob_withdrawal_not_persisted"):
+                gate.verify(c, out)
+
+    def test_rejects_withdrawal_before_valid_fenced_handoff(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "bob_withdrawn.json")
+            for peer in record["nodes"].values():
+                peer["epoch"] = 2
+                peer["fencing_token"] = 2
+            gate.save(out / "bob_withdrawn.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "withdrawal_handoff_not_new_fenced_generation"):
+                gate.verify(c, out)
+
+    def test_rejects_missing_signed_handoff_generation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "bob_withdrawn.json")
+            record["nodes"]["alice"]["epoch"] = None
+            gate.save(out / "bob_withdrawn.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "withdrawal_handoff_generation_missing"):
+                gate.verify(c, out)
+
+    def test_rejects_withdrawn_bob_consent_unbound_from_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "bob_withdrawn.json")
+            record["nodes"]["bob"]["hosting_consent"]["identity_bound"] = False
+            gate.save(out / "bob_withdrawn.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "bob_withdrawal_not_persisted"):
+                gate.verify(c, out)
+
+    def test_rejects_bob_server_after_host_withdrawal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "bob_withdrawn.json")
+            record["nodes"]["bob"]["minecraft_server_process_observed"] = True
+            record["nodes"]["bob"]["world_server_process_count"] = 1
+            gate.save(out / "bob_withdrawn.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "unconsented_runtime_or_missing_successor"):
+                gate.verify(c, out)
+
+    def test_rejects_carol_authority_after_denied_host_attempt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "carol_denied.json")
+            record["nodes"]["carol"]["authority_fingerprint"] = CAROL
+            gate.save(out / "carol_denied.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "negative_case_canonical_authority_missing_carol_denied"):
+                gate.verify(c, out)
+
+    def test_rejects_carol_server_while_player_only_after_attempt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "carol_denied.json")
+            record["nodes"]["carol"]["minecraft_server_process_observed"] = True
+            record["nodes"]["carol"]["world_server_process_count"] = 1
+            gate.save(out / "carol_denied.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "carol_player_only_role_violated_carol_denied"):
+                gate.verify(c, out)
+
+    def test_rejects_bob_reconsent_between_negative_phases(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "carol_denied.json")
+            record["nodes"]["bob"]["hosting_consent"]["revision"] = 125
+            gate.save(out / "carol_denied.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "bob_withdrawal_not_persisted"):
+                gate.verify(c, out)
+
+    def test_rejects_unlisted_bob_world_jvm_after_withdrawal(self):
+        # An omitted server PID must not be treated as proof of no JVM.
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "bob_withdrawn.json")
+            record["nodes"]["bob"]["world_server_process_count"] = 1
+            gate.save(out / "bob_withdrawn.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "world_server_process_inventory_disagrees_bob_withdrawn_bob"):
+                gate.verify(c, out)
+
+    def test_rejects_hidden_carol_world_jvm_with_no_supplied_pid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "carol_denied.json")
+            record["nodes"]["carol"]["world_server_process_count"] = 1
+            gate.save(out / "carol_denied.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "world_server_process_inventory_disagrees_carol_denied_carol"):
+                gate.verify(c, out)
+
+    def test_rejects_unavailable_world_jvm_inventory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            record = gate.load_json(out / "checkpoint.json")
+            record["nodes"]["alice"]["world_server_process_count"] = None
+            gate.save(out / "checkpoint.json", record)
+            with self.assertRaisesRegex(gate.Blocked, "world_server_process_inventory_disagrees_checkpoint_alice"):
+                gate.verify(c, out)
+
+    def test_missing_negative_human_review_flags_block_ready(self):
+        # Synthetic records are deliberately rejected before media inspection.
+        # They cannot establish a genuine installed-app denial.
+        for missing in ("bob_withdrawal_and_safe_handoff_observed",
+                        "bob_rehost_attempt_denied_after_withdrawal",
+                        "carol_player_only_host_denial_observed"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temp:
+                out = Path(temp)
+                c = fixtures(out)
+                review = gate.load_json(gate.HERE / "review.example.json")
+                review["commit"] = COMMIT
+                review["package_sha256"] = SHA
+                review["reviewer"] = "Independent QA tester"
+                review["evidence_url"] = "https://github.com/MousaXD/swarmcraft/actions/runs/1"
+                review["observations_sha256"] = gate.observations_sha256(out)
+                for key, value in review.items():
+                    if type(value) is bool:
+                        review[key] = True
+                review[missing] = False
+                reviewed = out / "review.json"
+                gate.save(reviewed, review)
+                with self.assertRaisesRegex(gate.Blocked, "real_player_or_network_review_incomplete"):
+                    gate.verify(c, out, reviewed)
 
     def test_rejects_real_client_not_observed(self):
         with tempfile.TemporaryDirectory() as temp:

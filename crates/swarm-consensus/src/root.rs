@@ -2,6 +2,7 @@
 mod base;
 pub use base::*;
 
+pub mod hosting_policy_migration;
 pub mod membership;
 pub mod migration;
 pub mod recovery;

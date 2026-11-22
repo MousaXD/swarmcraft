@@ -38,6 +38,7 @@ async fn migration_supervisor_blocks_corrupt_sleep_state_before_runtime_launch()
             genesis,
         })
         .unwrap();
+    swarm_cli::hosting_budget::set_contribution(&paths, world, 512).unwrap();
     migration::save_runtime_config(
         &paths,
         world,

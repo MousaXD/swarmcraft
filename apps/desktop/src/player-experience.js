@@ -1,4 +1,4 @@
-const READY_WORDS = /ready|direct connection|connected through relay/i;
+const PLAY_READY = /^Ready to (?:play|launch Minecraft)\b/i;
 const ACTION_WORDS = /blocked|missing|failed|unavailable|attention|conflict|could not|no viable path/i;
 const WORKING_WORDS = /checking|preparing|saving|transferring|restoring|starting|waiting|syncing|installing|downloading|verifying/i;
 
@@ -42,11 +42,18 @@ export function deriveJourneyState({
       detail: 'The latest world state is saved. Play will use the normal safe wake path when needed.',
     };
   }
-  if (!playDisabled || READY_WORDS.test(`${playText} ${connectivityText}`)) {
+  if (PLAY_READY.test(playText)) {
     return {
       kind: 'ready',
       label: 'Ready to play',
       detail: playText || 'This world is ready on this device.',
+    };
+  }
+  if (!playDisabled) {
+    return {
+      kind: 'neutral',
+      label: 'Play options',
+      detail: playText || 'Open Play to check Minecraft setup.',
     };
   }
   return {

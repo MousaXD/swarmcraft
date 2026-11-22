@@ -1,5 +1,6 @@
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
 import { createImportRequest, parseImportResult } from './import-flow.js';
+import { clientContinuityFromMigration, ensureClientContinuityPanel } from './client-continuity.js';
 
 const $ = (id) => document.getElementById(id);
 const invoke = window.__TAURI__?.core?.invoke;
@@ -11,6 +12,8 @@ let migrationRequestGeneration = 0;
 let hostReadinessRequestGeneration = 0;
 let modsRequestGeneration = 0;
 let connectivityRefreshInFlight = false;
+let connectivityGeneration = 0;
+let networkStoppedBySvelte = false;
 let structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });
 let serviceWarning = '';
 let startupInProgress = false;
@@ -40,15 +43,26 @@ const migrationLabels = {
 
 function setStatus(message, tone = 'neutral') {
   if (window.__swarmcraftStartup?.failed) return;
+  // A candidate-specific daemon stop or uncertain side effect must not be
+  // repainted as green Ready by an unrelated world-list refresh or action.
+  // Shipping legacy semantics remain unchanged without Svelte ownership.
+  if (window.__swarmcraftSvelteNetworkingOwned === true && message === 'Ready'
+      && (networkStoppedBySvelte || serviceWarning)) {
+    message = 'Networking needs attention';
+    tone = 'warning';
+  }
   $('status').textContent = message;
   $('statusDot').className = `status-dot ${tone}`;
 }
 
 function setOutput(output, label = '') {
-  const console = $('output');
   const text = String(output || 'Done.');
   const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const entry = `${stamp}${label ? `  ${label}` : ''}\n${text}`;
+  // The Svelte migration may own activity state. The unmodified shipping
+  // frontend has no bridge and keeps the original direct DOM behavior.
+  if (window.__swarmcraftSvelteActivity?.append(entry) === true) return;
+  const console = $('output');
   console.textContent = ['SwarmCraft is ready.', 'SwarmCraft is starting.', 'Activity cleared.'].includes(console.textContent.trim())
     ? entry
     : `${console.textContent.trim()}\n\n${entry}`;
@@ -127,7 +141,13 @@ function showView(name, { focus = true } = {}) {
   $('viewContext').textContent = context;
   if (name === 'diagnostics') {
     updateDiagnosticsContext();
-    refreshConnectivityDiagnostics({ logFailure: false }).catch(() => {});
+    // Svelte candidate owns the Diagnostics network display. Shipping legacy
+    // keeps the exact existing backend refresh when that owner is absent.
+    if (window.__swarmcraftSvelteConnectivityOwned === true) {
+      void window.__swarmcraftSvelteConnectivity?.refresh();
+    } else {
+      refreshConnectivityDiagnostics({ logFailure: false }).catch(() => {});
+    }
   }
   if (focus) {
     const panel = document.querySelector(`[data-view-panel="${name}"]`);
@@ -178,7 +198,9 @@ function hostingEligibility(world) {
     return { enabled: false, reason: 'Play is unavailable while divergent history needs review.' };
   }
   const value = String(world.compatibility?.['Authority eligibility'] || '').trim();
-  if (value === 'Compatible') return { enabled: true, reason: 'This device is eligible to host this world.' };
+  if (value === 'Compatible') {
+    return { enabled: true, reason: 'This device is compatible with the world. Local hosting requires opt-in.' };
+  }
   if (value.toLowerCase().includes('not authority eligible') || value.toLowerCase().startsWith('replica only')) {
     return { enabled: false, reason: 'This device can keep a replica, but it is not eligible to host this world.' };
   }
@@ -204,17 +226,27 @@ function renderConnectivity() {
   const connectivity = structuredConnectivity;
   $('selectedConnectivity').textContent = connectivity.label;
   $('selectedConnectivityDetail').textContent = connectivity.detail;
-  $('diagnosticConnectivity').textContent = connectivity.label;
-  $('diagnosticConnectivity').className = `status-badge ${connectivity.kind}`;
-  $('diagnosticConnectivityDetail').textContent = connectivity.diagnosticDetail;
+  window.__swarmcraftSvelteWorlds?.setConnectivity(connectivity.label);
+  if (window.__swarmcraftSvelteConnectivityOwned !== true) {
+    $('diagnosticConnectivity').textContent = connectivity.label;
+    $('diagnosticConnectivity').className = `status-badge ${connectivity.kind}`;
+    $('diagnosticConnectivityDetail').textContent = connectivity.diagnosticDetail;
+  }
 }
 
 async function refreshConnectivityDiagnostics({ logFailure = false } = {}) {
+  // An intentionally stopped local daemon cannot be classified as reachable
+  // from a stale persisted connectivity snapshot in the Svelte candidate.
+  if (window.__swarmcraftSvelteNetworkingOwned === true && networkStoppedBySvelte) return;
   if (connectivityRefreshInFlight) return;
+  const readGeneration = connectivityGeneration;
   connectivityRefreshInFlight = true;
   try {
-    structuredConnectivity = await backend.connectivityDiagnostics();
+    const result = await backend.connectivityDiagnostics();
+    if (readGeneration !== connectivityGeneration) return;
+    structuredConnectivity = result;
   } catch (error) {
+    if (readGeneration !== connectivityGeneration) return;
     structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });
     structuredConnectivity = {
       ...structuredConnectivity,
@@ -224,6 +256,7 @@ async function refreshConnectivityDiagnostics({ logFailure = false } = {}) {
   } finally {
     connectivityRefreshInFlight = false;
   }
+  if (readGeneration !== connectivityGeneration) return;
   renderConnectivity();
   for (const element of document.querySelectorAll('.world-row-connectivity')) {
     element.textContent = structuredConnectivity.label;
@@ -271,14 +304,22 @@ function clearSelection() {
   $('world').value = '';
   $('selectionContent').hidden = true;
   $('noSelection').hidden = false;
-  for (const row of document.querySelectorAll('.world-row')) {
-    row.classList.remove('is-selected');
-    row.setAttribute('aria-pressed', 'false');
+  if (window.__swarmcraftSvelteWorldsOwned === true) {
+    window.__swarmcraftSvelteWorlds?.setSelected('');
+  } else {
+    for (const row of document.querySelectorAll('.world-row')) {
+      row.classList.remove('is-selected');
+      row.setAttribute('aria-pressed', 'false');
+    }
   }
   showInline('worldNotice', '');
   showInline('runtimeNotice', '');
+  if (window.__swarmcraftSvelteReadinessOwned === true) {
+    window.__swarmcraftSvelteReadiness?.clear();
+  }
   updateWorldSpecificControls();
   updateDiagnosticsContext();
+  renderMigration(null);
 }
 
 function updateDiagnosticsContext() {
@@ -317,11 +358,23 @@ function runtimeSetupActionButton() {
 }
 
 function renderMigration(state) {
-  const migration = normalizeMigrationState(state);
+  const mismatched = Boolean(state && typeof state === 'object' && 'phase' in state && state.world_id !== selectedWorldId);
+  const migration = normalizeMigrationState(mismatched
+    ? { phase: 'blocked', failure_reason: 'Host status was not bound to the selected world.' }
+    : state);
+  const continuity = clientContinuityFromMigration(state, selectedWorldId, selectedWorld()?.status?.Safety);
+  const targets = ensureClientContinuityPanel(document);
+  if (targets) {
+    targets.title.textContent = continuity.title;
+    targets.detail.textContent = continuity.detail;
+    targets.detail.dataset.tone = continuity.tone;
+  }
   $('migrationBadge').textContent = migration.label;
-  $('migrationBadge').className = `status-badge ${migration.failed ? 'danger' : migration.phase === 'ready' ? 'safe' : migration.available ? 'warning' : 'neutral'}`;
+  // The persisted Ready phase can survive a hard crash. It is not a live
+  // Minecraft process check or a signed client route, so never paint it green.
+  $('migrationBadge').className = `status-badge ${migration.failed || continuity.tone === 'danger' ? 'danger' : migration.available ? 'warning' : 'neutral'}`;
   $('migrationSummary').textContent = migration.detail || (migration.available ? migration.label : 'No host migration is active.');
-  $('migrationProgress').hidden = !migration.available || migration.failed || migration.blocked;
+  $('migrationProgress').hidden = !migration.available || migration.failed || migration.blocked || migration.phase === 'ready';
   $('migrationProgressBar').style.width = `${migration.progress}%`;
   runtimeSetupActionButton().hidden = migration.action !== 'runtime-setup';
 
@@ -352,7 +405,7 @@ async function refreshMigrationState(world) {
     if (selectedWorldId === requestedWorldId && requestGeneration === migrationRequestGeneration) renderMigration(state);
   } catch (error) {
     if (selectedWorldId === requestedWorldId && requestGeneration === migrationRequestGeneration) {
-      renderMigration({ detail: `Could not read host migration state: ${String(error)}` });
+      renderMigration({ world_id: requestedWorldId, phase: 'status_unavailable', detail: `Could not read host migration state: ${String(error)}` });
     }
   }
 }
@@ -395,6 +448,13 @@ function renderHostReadiness(readiness) {
 }
 
 async function refreshHostReadiness(world) {
+  if (window.__swarmcraftSvelteReadinessOwned === true) {
+    // Candidate view uses only the actual Rust host_readiness command.
+    // No duplicate legacy command, legacy DOM overwrite or renderer grant.
+    if (!world) window.__swarmcraftSvelteReadiness?.clear();
+    else await window.__swarmcraftSvelteReadiness?.select(world.id);
+    return;
+  }
   if (!world) {
     renderHostReadiness(null);
     return;
@@ -531,33 +591,43 @@ async function openModsFolder() {
 function selectWorld(world, { focusDetail = false } = {}) {
   selectedWorldId = world.id;
   $('world').value = world.id;
-  $('selectedName').textContent = world.name;
-  $('selectedWorldId').textContent = world.id;
-  $('selectedAuthority').textContent = world.status.Authority || 'Not reported';
-  $('selectedMembers').textContent = world.status['Authorized peers'] || 'Unknown';
-  $('selectedMinecraft').textContent = world.status.Minecraft || 'Unknown';
-  $('selectedCheckpoint').textContent = world.status['Latest snapshot'] || (world.snapshots ? `${world.snapshots} stored` : 'None');
-  $('selectedCompatibility').textContent = world.compatibility['Authority eligibility'] || 'Not synchronized';
+  // The candidate now renders read-only selected-world metadata directly
+  // from Svelte's current native Rust world-list response. Preserve legacy
+  // updates in the shipping frontend and keep all action gates in Rust.
+  if (window.__swarmcraftSvelteWorldsOwned !== true) {
+    $('selectedName').textContent = world.name;
+    $('selectedWorldId').textContent = world.id;
+    $('selectedAuthority').textContent = world.status.Authority || 'Not reported';
+    $('selectedMembers').textContent = world.status['Authorized peers'] || 'Unknown';
+    $('selectedMinecraft').textContent = world.status.Minecraft || 'Unknown';
+    $('selectedCheckpoint').textContent = world.status['Latest snapshot'] || (world.snapshots ? `${world.snapshots} stored` : 'None');
+    $('selectedCompatibility').textContent = world.compatibility['Authority eligibility'] || 'Not synchronized';
 
-  const safety = world.status.Safety || 'Unknown';
-  const kind = safetyKind(safety);
-  $('selectedSafety').textContent = safety;
-  $('selectedSafety').className = `status-badge ${kind}`;
-  $('safetyPanel').className = `safety-panel ${kind}`;
-  $('selectedSummary').textContent = safetySummary(world);
+    const safety = world.status.Safety || 'Unknown';
+    const kind = safetyKind(safety);
+    $('selectedSafety').textContent = safety;
+    $('selectedSafety').className = `status-badge ${kind}`;
+    $('safetyPanel').className = `safety-panel ${kind}`;
+    $('selectedSummary').textContent = safetySummary(world);
+  }
 
   $('noSelection').hidden = true;
   $('selectionContent').hidden = false;
   showInline('worldNotice', '');
   showInline('runtimeNotice', '');
-  for (const row of document.querySelectorAll('.world-row')) {
-    const selected = row.dataset.worldId === world.id;
-    row.classList.toggle('is-selected', selected);
-    row.setAttribute('aria-pressed', selected ? 'true' : 'false');
+  if (window.__swarmcraftSvelteWorldsOwned === true) {
+    window.__swarmcraftSvelteWorlds?.setSelected(world.id);
+  } else {
+    for (const row of document.querySelectorAll('.world-row')) {
+      const selected = row.dataset.worldId === world.id;
+      row.classList.toggle('is-selected', selected);
+      row.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    }
   }
   renderConnectivity();
   updatePlayState(world);
   updateDiagnosticsContext();
+  renderMigration(null);
   refreshMigrationState(world);
   refreshHostReadiness(world);
   refreshWorldMods(world);
@@ -641,6 +711,34 @@ function renderEmptyWorlds() {
 
 async function refreshWorlds() {
   lastWorldError = null;
+  if (window.__swarmcraftSvelteWorldsOwned === true) {
+    // The installed candidate reads the exact existing Rust list/status/
+    // compatibility commands through Svelte. Never render a second legacy
+    // DOM list, double-fetch, or infer membership from cached display text.
+    setStatus('Reading worlds…');
+    try {
+      const owner = window.__swarmcraftSvelteWorlds;
+      if (!owner) throw new Error('Svelte world controller not mounted');
+      const entries = await owner.refresh();
+      if (!Array.isArray(entries)) throw new Error('Native world list was not verified');
+      const preferred = selectedWorldId;
+      worldCache.clear();
+      for (const entry of entries) worldCache.set(entry.id, entry);
+      const next = worldCache.get(preferred) || worldCache.values().next().value;
+      if (next) selectWorld(next);
+      else clearSelection();
+      // Updating connectivity is independent of canonical world-list reads;
+      // don't hold startup indefinitely behind a network diagnostic.
+      void refreshConnectivityDiagnostics({ logFailure: false });
+      if (!startupInProgress) setStatus('Ready', 'safe');
+    } catch {
+      lastWorldError = new Error('Native world list unavailable');
+      worldCache.clear();
+      clearSelection();
+      setStatus('Worlds unavailable', 'danger');
+    }
+    return;
+  }
   $('worldCards').setAttribute('aria-busy', 'true');
   showInline('worldLoadError', '');
   setStatus('Reading worlds…');
@@ -712,9 +810,16 @@ async function ensureNetworkingService({ quiet = false } = {}) {
   }
 }
 
+// Svelte owns the identity presentation only when its candidate shell is
+// mounted. The shipping legacy HTML retains the original direct-DOM path.
+function publishIdentity(value, source = 'identity') {
+  if (window.__swarmcraftSvelteIdentity?.publish(String(value), source) === true) return;
+  $('identity').textContent = String(value);
+}
+
 async function initialize() {
   const result = await run('Setting up this device…', () => backend.initializeNode());
-  $('identity').textContent = String(result);
+  publishIdentity(result, 'setup');
   setNodeState('Ready', 'safe');
   await ensureNetworkingService({ quiet: true });
   await refreshWorlds();
@@ -745,7 +850,7 @@ async function startup() {
   setNodeState('Checking…');
   try {
     const result = await startupStep('Device setup', () => backend.initializeNode(), 30000);
-    $('identity').textContent = String(result);
+    publishIdentity(result, 'setup');
     setNodeState('Ready', 'safe');
 
     // Local world creation is useful without a network, but never call such a
@@ -780,11 +885,11 @@ async function startup() {
 async function showIdentity({ quiet = false } = {}) {
   try {
     const result = await run('Reading device identity…', () => backend.nodeIdentity(), { quiet });
-    $('identity').textContent = String(result);
+    publishIdentity(result);
     setNodeState('Ready', 'safe');
     return result;
   } catch (error) {
-    $('identity').textContent = quiet ? 'Device is not initialized.' : String(error);
+    publishIdentity(quiet ? 'Device is not initialized.' : String(error), 'unavailable');
     setNodeState(invoke ? 'Not set up' : 'Desktop bridge unavailable', invoke ? 'warning' : 'danger');
     if (!quiet) throw error;
     return null;
@@ -926,6 +1031,7 @@ function openInviteDialog() {
   const world = selectedWorld();
   if (!world) throw new Error('Choose a world first.');
   $('inviteWorldName').textContent = world.name;
+  if (window.__swarmcraftSvelteInviteOwned) window.__swarmcraftResetSvelteInvite?.();
   $('inviteResult').value = '';
   $('inviteResultWrap').hidden = true;
   showInline('inviteError', '');
@@ -1019,6 +1125,7 @@ function openLeaveDialog() {
   const world = selectedWorld();
   if (!world) throw new Error('Choose a world first.');
   $('leaveDialogText').textContent = `This stages a signed leave request for ${world.name}. Local membership changes after the request is accepted.`;
+  if (window.__swarmcraftSvelteLeaveOwned) window.__swarmcraftResetSvelteLeave?.();
   $('leaveDialog').showModal();
 }
 
@@ -1122,11 +1229,111 @@ async function wakeWorld() {
   await refreshMigrationState(selectedWorld());
 }
 
+// The Svelte candidate owns Create World submissions. The installed legacy
+// frontend has no ownership flag and continues using this handler as before.
+// Completion-only callbacks are exposed exclusively in the mounted Svelte
+// candidate. The shipping legacy webview does not receive extra globals.
+if (window.__swarmcraftSvelteCreateOwned === true
+    || window.__swarmcraftSvelteJoinOwned === true
+    || window.__swarmcraftSvelteImportOwned === true
+    || window.__swarmcraftSvelteLeaveOwned === true) {
+window.__swarmcraftAfterSvelteLeave = async () => {
+  $('leaveDialog').close();
+  selectedWorldId = '';
+  migrationRequestGeneration += 1;
+  $('world').value = '';
+  await refreshWorlds();
+  if (lastWorldError) throw new Error('Membership may have changed but Worlds could not be refreshed.');
+};
+
+window.__swarmcraftAfterSvelteImport = async (importedWorldId) => {
+  const id = String(importedWorldId || '').trim();
+  if (!/^scworld:[^\s]+$/.test(id)) throw new Error('Import did not return a canonical World ID.');
+  selectedWorldId = id;
+  await refreshWorlds();
+  if (lastWorldError) throw new Error('Import completed but the updated world list could not be loaded.');
+  showView('worlds');
+  showInline(
+    'worldNotice',
+    'Existing world imported. Minecraft EULA acceptance and this device’s runtime setup were not changed.',
+    'safe',
+  );
+};
+
+window.__swarmcraftAfterSvelteJoin = async (joinedWorldId) => {
+  const id = String(joinedWorldId || '').trim();
+  if (id && !/^scworld:[^\s]+$/.test(id)) throw new Error('Join returned an invalid World ID.');
+  if (id) selectedWorldId = id;
+  await refreshWorlds();
+  if (lastWorldError) throw new Error('Join completed but the updated world list could not be loaded.');
+  showView('worlds');
+};
+
+window.__swarmcraftAfterSvelteCreate = async (createdWorldId) => {
+  const id = String(createdWorldId || '').trim();
+  if (!/^scworld:[^\s]+$/.test(id)) throw new Error('Creation did not return a canonical World ID.');
+  selectedWorldId = id;
+  await refreshWorlds();
+  if (lastWorldError) {
+    throw new Error('World was created but the updated world list could not be loaded.');
+  }
+  showView('worlds');
+};
+}
+
+// Explicit Rust-backed daemon actions are Svelte-owned only in the candidate.
+// Legacy desktop continues its original button handlers when that flag is absent.
+if (window.__swarmcraftSvelteNetworkingOwned === true) {
+  window.__swarmcraftAfterSvelteNetworkingChange = async (outcome) => {
+    ++connectivityGeneration;
+    if (outcome === 'stopped' || outcome === 'unknown') {
+      networkStoppedBySvelte = true;
+      setServiceWarning(outcome === 'stopped'
+        ? 'Networking is stopped for this Desktop session. Replication and automatic migration supervision may be unavailable.'
+        : 'Networking outcome is unverified. Previous connectivity paths must not be treated as current.');
+      structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown' });
+      renderConnectivity();
+      for (const element of document.querySelectorAll('.world-row-connectivity')) {
+        element.textContent = structuredConnectivity.label;
+      }
+      return;
+    }
+    if (outcome !== 'started') throw new Error('Unknown native networking outcome.');
+    networkStoppedBySvelte = false;
+    setServiceWarning('');
+    await refreshConnectivityDiagnostics({ logFailure: false });
+  };
+}
+
+// Candidate-only selection/refresh handoff. Rust data originates in Svelte;
+// the rich selected-world panel remains legacy until its separate migration.
+if (window.__swarmcraftSvelteWorldsOwned === true) {
+  window.__swarmcraftRefreshWorldsFromSvelte = refreshWorlds;
+  window.__swarmcraftSelectWorldFromSvelte = (id) => {
+    const model = typeof id === 'string' ? worldCache.get(id) : null;
+    if (!model) return false;
+    selectWorld(model, { focusDetail: true });
+    return true;
+  };
+}
+
 function bindAction(id, handler, { submit = false } = {}) {
   const element = $(id);
   if (!element) return;
   element.addEventListener(submit ? 'submit' : 'click', async (event) => {
     if (submit) event.preventDefault();
+    // Avoid issuing two native create_world commands when the Svelte handler
+    // owns the form. The original production HTML still uses this listener.
+    if (id === 'createForm' && window.__swarmcraftSvelteCreateOwned === true) return;
+    if (id === 'joinForm' && window.__swarmcraftSvelteJoinOwned === true) return;
+    if (id === 'importForm' && window.__swarmcraftSvelteImportOwned === true) return;
+    if (id === 'createInvite' && window.__swarmcraftSvelteInviteOwned === true) return;
+    if (id === 'joinWorldIdButton' && window.__swarmcraftSvelteDiscoveryOwned === true) return;
+    if (id === 'confirmLeave' && window.__swarmcraftSvelteLeaveOwned === true) return;
+    if (id === 'refresh' && window.__swarmcraftSvelteWorldsOwned === true) return;
+    if (id === 'identityButton' && window.__swarmcraftSvelteIdentityOwned === true) return;
+    if ((id === 'startDaemon' || id === 'stopDaemon')
+        && window.__swarmcraftSvelteNetworkingOwned === true) return;
     if (element.dataset.busy === 'true') return;
     const busyControl = submit && event.submitter ? event.submitter : element;
     element.dataset.busy = 'true';

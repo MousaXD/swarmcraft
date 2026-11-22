@@ -43,6 +43,29 @@ class TestMediaIntegrity(unittest.TestCase):
             review = fixtures(folder)
             self.assertEqual(len(evidence.verify_review_artifacts(review, folder)), 64)
 
+    def test_withdrawal_and_player_only_refusal_are_distinct_required_media(self):
+        self.assertIn(("hosting_withdrawal", "bob"), evidence.REQUIRED)
+        self.assertIn(("player_only_denial", "carol"), evidence.REQUIRED)
+        self.assertEqual(len(evidence.REQUIRED), 25)
+
+    def test_missing_host_withdrawal_media_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            review = fixtures(folder)
+            review["artifacts"] = [record for record in review["artifacts"]
+                                   if (record["kind"], record["role"]) != ("hosting_withdrawal", "bob")]
+            with self.assertRaisesRegex(evidence.EvidenceError, "count_missing"):
+                evidence.verify_review_artifacts(review, folder)
+
+    def test_missing_player_only_denial_media_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            review = fixtures(folder)
+            review["artifacts"] = [record for record in review["artifacts"]
+                                   if (record["kind"], record["role"]) != ("player_only_denial", "carol")]
+            with self.assertRaisesRegex(evidence.EvidenceError, "count_missing"):
+                evidence.verify_review_artifacts(review, folder)
+
     def test_missing_real_player_media_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)

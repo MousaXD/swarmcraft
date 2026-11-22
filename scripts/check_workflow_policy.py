@@ -109,6 +109,30 @@ def require_validation_dependency(path: Path, builder_jobs: tuple[str, ...]) -> 
     publish = blocks.get("publish", "")
     if "contents: write" not in publish:
         fail(f"{path.name}: final publisher must declare its narrowly scoped contents: write permission")
+    # Prevent an otherwise-green validation from publishing a missing platform,
+    # stale artifact group, tampered package, or unverified SHA-256 sidecar.
+    channel = "preview" if path.name == "main-installers.yml" else "production"
+    verify = blocks.get("verify-packages", "")
+    for name, block in (("publish", publish), ("verify-packages", verify)):
+        if name == "verify-packages" and channel != "preview":
+            continue
+        if "scripts/ci-release/verify_artifacts.py" not in block:
+            fail(f"{path.name}: {name} must invoke the release-artifact verifier")
+        if f"--channel {channel}" not in block or '--commit "$GITHUB_SHA"' not in block:
+            fail(f"{path.name}: {name} must bind artifact verification to its SHA and channel")
+        if "merge-multiple: false" not in block or "path: release-downloads" not in block:
+            fail(f"{path.name}: {name} must retain exact-run artifact source group boundaries")
+    if channel == "preview":
+        if "needs: [validation, linux, windows, macos, fabric]" not in verify or "contents: read" not in verify:
+            fail(f"{path.name}: read-only verification must require all preview artifact builders")
+        if "needs: [validation, linux, windows, macos, fabric, verify-packages]" not in publish:
+            fail(f"{path.name}: publisher must wait for all artifact builders and read-only verification")
+        if "scripts/ci-release/publish_preview.py" not in publish or "--assets release-assets" not in publish:
+            fail(f"{path.name}: preview publisher must stage and verify its uploads before publication")
+        if re.search(r"gh\s+release\s+(?:delete|create|edit|upload)\b", publish):
+            fail(f"{path.name}: preview must use the staged publisher for release changes")
+    elif "release-assets/*" not in publish:
+        fail(f"{path.name}: publisher must use only verified staged assets")
 
 
 def main() -> None:
@@ -121,7 +145,7 @@ def main() -> None:
         check_permissions(path, text)
 
     require_validation_dependency(
-        WORKFLOWS / "main-installers.yml", ("linux", "windows", "macos", "fabric", "publish")
+        WORKFLOWS / "main-installers.yml", ("linux", "windows", "macos", "fabric", "verify-packages", "publish")
     )
     require_validation_dependency(
         WORKFLOWS / "release.yml", ("linux", "windows", "macos", "fabric", "publish")
@@ -132,6 +156,21 @@ def main() -> None:
         fail("release.yml must bind the exact tag name into release identity validation")
     if "python3 scripts/check_release_credentials.py" not in release:
         fail("release.yml must fail closed through the production credential policy")
+    # Presence of credentials alone does not certify the produced binaries.
+    # Verify Authenticode and Apple's developer identity/stapled tickets
+    # *after* signing/notarization and before artifact publication.
+    if release.count("verify /pa /all") < 2:
+        fail("release.yml must independently verify signed Windows sidecars and installer")
+    for required in (
+        "codesign --verify --deep --strict",
+        "Authority=Developer ID Application:",
+        'xcrun stapler validate "$app"',
+        'xcrun stapler validate "${dmg[0]}"',
+        "spctl --assess --type execute",
+    ):
+        if required not in release:
+            fail(f"release.yml must prove macOS notarization/signing: {required}")
+
 
     gradle = (ROOT / "minecraft/fabric/gradle.properties").read_text(encoding="utf-8")
     if re.search(r"(?im)^loom_version=.*snapshot", gradle):

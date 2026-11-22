@@ -30,6 +30,8 @@ STAGES = {
     "alice_crashed": ("bob", "carol"),
     "bob_recovered": ("bob", "carol"),
     "alice_returned": ROLES,
+    "bob_withdrawn": ROLES,
+    "carol_denied": ROLES,
 }
 SHA = re.compile(r"^[0-9a-fA-F]{64}$")
 COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -192,6 +194,8 @@ def verify(c, output, review_file=None):
     stages = {}
     stage_times = {}
     for stage, roles in STAGES.items():
+        require((output / (stage + ".json")).is_file(),
+                "required_field_stage_missing_" + stage)
         s = load_json(output / (stage + ".json"))
         require(s["stage"] == stage and s["commit"] == c["commit"] and
                 s["package_sha256"] == c["package_sha256"], "stage_candidate_mismatch_" + stage)
@@ -205,6 +209,13 @@ def verify(c, output, review_file=None):
             require(node.get("machine_fingerprint") ==
                     pre["nodes"][role]["machine_fingerprint"],
                     "capture_machine_changed_" + stage + "_" + role)
+            # Read-only same-user /proc enumeration must agree with the
+            # supplied positive PID, including ABSENCE for player-only peers.
+            # Missing PID by itself cannot conceal an active world-bound JVM.
+            count = node.get("world_server_process_count")
+            require(type(count) is int and count in (0, 1) and
+                    bool(node.get("minecraft_server_process_observed")) == (count == 1),
+                    "world_server_process_inventory_disagrees_" + stage + "_" + role)
             require(node["snapshot_verify_passed"], "unsigned_or_conflicted_" + stage + "_" + role)
             if stage in ("alice_created", "bob_joined", "carol_joined"):
                 # Genuine first host can be solo until a signed multi-member
@@ -360,6 +371,71 @@ def verify(c, output, review_file=None):
     require(all(x["minecraft_client_process_observed"] for x in returned.values()),
             "real_player_reconnection_unobserved")
 
+    # The post-recovery NEGATIVE scenarios are real field observations.
+    # Bob must transfer authority safely to Alice before withdrawing host
+    # consent. Carol must attempt hosting while still player-only, and
+    # independent media review must establish the actual refused action.
+    withdrawal = stages["bob_withdrawn"]
+    denied = stages["carol_denied"]
+    old_bob_consent = returned["bob"].get("hosting_consent")
+    require(isinstance(old_bob_consent, dict) and old_bob_consent.get("enabled") is True and
+            old_bob_consent.get("identity_bound") is True and
+            old_bob_consent.get("world_bound") is True and
+            type(old_bob_consent.get("revision")) is int and
+            old_bob_consent["revision"] > 0,
+            "bob_prior_active_host_consent_missing")
+    require(type(withdrawal["alice"]["epoch"]) is int and
+            type(withdrawal["alice"]["fencing_token"]) is int,
+            "withdrawal_handoff_generation_missing")
+    require(withdrawal["alice"]["epoch"] > rb["epoch"] and
+            withdrawal["alice"]["fencing_token"] > rb["fencing_token"],
+            "withdrawal_handoff_not_new_fenced_generation")
+    require(withdrawal["alice"]["snapshot_number"] > returned["bob"]["snapshot_number"] and
+            withdrawal["alice"]["canonical_head_sha256"] != returned["bob"]["canonical_head_sha256"],
+            "withdrawal_handoff_checkpoint_not_new")
+    for name, observed in (("bob_withdrawn", withdrawal), ("carol_denied", denied)):
+        alice, bob, carol = (observed[role] for role in ROLES)
+        require(all(x["authorized_peers"] == 3 for x in observed.values()) and
+                all(x["authority_fingerprint"] == a["identity_fingerprint"] for x in observed.values()),
+                "negative_case_canonical_authority_missing_" + name)
+        require(len({(x["epoch"], x["fencing_token"]) for x in observed.values()}) == 1 and
+                alice["epoch"] == withdrawal["alice"]["epoch"] and
+                alice["fencing_token"] == withdrawal["alice"]["fencing_token"],
+                "negative_case_authority_changed_" + name)
+        require(all(x["snapshot_epoch"] == alice["epoch"] for x in observed.values()) and
+                len({(x["snapshot_number"], x["snapshot_epoch"]) for x in observed.values()}) == 1 and
+                len({x["canonical_head_sha256"] for x in observed.values()}) == 1 and
+                len({x["state_root"] for x in observed.values()}) == 1 and
+                alice["snapshot_number"] >= withdrawal["alice"]["snapshot_number"],
+                "negative_case_replication_or_snapshot_invalid_" + name)
+        consent_bob = bob.get("hosting_consent")
+        require(isinstance(consent_bob, dict) and consent_bob.get("available") is True and
+                consent_bob.get("identity_bound") is True and
+                consent_bob.get("world_bound") is True and
+                consent_bob.get("enabled") is False and consent_bob.get("heap_mib") == 0 and
+                type(consent_bob.get("revision")) is int and
+                consent_bob["revision"] > old_bob_consent["revision"] and
+                (name != "carol_denied" or consent_bob == withdrawal["bob"]["hosting_consent"]),
+                "bob_withdrawal_not_persisted_or_revision_not_advanced_" + name)
+        consent_alice = alice.get("hosting_consent")
+        require(isinstance(consent_alice, dict) and consent_alice.get("available") is True and
+                consent_alice.get("identity_bound") is True and
+                consent_alice.get("world_bound") is True and
+                consent_alice.get("enabled") is True and
+                type(consent_alice.get("heap_mib")) is int and
+                consent_alice["heap_mib"] >= 512 and
+                alice["runtime_ready"] and alice["minecraft_server_process_observed"] and
+                alice.get("minecraft_server_heap_mib") == consent_alice["heap_mib"] and
+                not bob["minecraft_server_process_observed"] and
+                not carol["minecraft_server_process_observed"],
+                "unconsented_runtime_or_missing_successor_" + name)
+        require(carol.get("hosting_consent") == consent_c and
+                all(x["desktop_process_observed"] and x["minecraft_client_process_observed"]
+                    for x in observed.values()),
+                "player_only_or_client_continuity_failed_" + name)
+
+    # The reviewed denial media is mandatory: merely observing Carol with
+    # zero allocation does not prove an actual negative hosting attempt.
     # Human examination of redacted native GUI, Minecraft-client and network
     # evidence is mandatory; process presence never proves a successful join.
     require(review_file is not None, "independent_player_evidence_review_missing")
@@ -374,7 +450,10 @@ def verify(c, output, review_file=None):
                 "direct_or_hole_punch_transport_observed", "relay_fallback_observed",
                 "measured_packet_loss_disconnect_and_reconnection",
                 "alice_hard_crash_and_bob_client_reconnection", "alice_return_fenced",
-                "screenshots_redacted", "real_world_network_classes_verified")
+                "screenshots_redacted", "real_world_network_classes_verified",
+                "bob_withdrawal_and_safe_handoff_observed",
+                "bob_rehost_attempt_denied_after_withdrawal",
+                "carol_player_only_host_denial_observed")
     require(all(review.get(k) is True for k in required), "real_player_or_network_review_incomplete")
     require(isinstance(review.get("reviewer"), str) and len(review["reviewer"].strip()) >= 3,
             "independent_review_identity_missing")
