@@ -144,11 +144,8 @@ jobs:
           set -euo pipefail
           app=src-tauri/target/release/bundle/macos/SwarmCraft.app
           out_dir=src-tauri/target/release/bundle/dmg
-          mkdir -p "$out_dir"
           dmg="$out_dir/SwarmCraft-Svelte-candidate-${{ matrix.label }}.dmg"
-          hdiutil create -volname 'SwarmCraft Svelte Candidate' -srcfolder "$app" -ov -format UDZO "$dmg"
-          hdiutil verify "$dmg"
-          test -s "$dmg"
+          bash ../../scripts/ci-artifacts/create_macos_dmg.sh "$app" "$dmg" 'SwarmCraft Svelte Candidate'
       - name: Upload exact SHA candidate installers
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
