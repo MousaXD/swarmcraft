@@ -147,6 +147,8 @@ struct PeerPlan {
     vote_state: Option<(WorldAnnouncementV1, DiscoveryMembershipProofV1)>,
     malformed_context: bool,
     delay_ms: u64,
+    drop_first_browse: bool,
+    drop_first_resolve: bool,
 }
 
 async fn make_node(secret: [u8; 32]) -> (PeerIdentity, DiscoveryNode, String, String) {
@@ -198,7 +200,31 @@ fn spawn_peer(
                     return Err(message);
                 }
             };
-            let DiscoveryNetworkEvent::InboundRequest { request, channel, .. } = event else { continue };
+            let DiscoveryNetworkEvent::InboundRequest { transport_peer, request, channel, .. } = event else {
+                continue;
+            };
+            // Fail exactly one canonical request per query variant by
+            // disconnecting the live authenticated peer while it continues
+            // listening on the same QUIC address.
+            let fault = match &request {
+                WireRequest::DiscoveryPublic { .. } if plan.drop_first_browse => {
+                    plan.drop_first_browse = false;
+                    Some("public")
+                }
+                WireRequest::DiscoveryResolve { .. } if plan.drop_first_resolve => {
+                    plan.drop_first_resolve = false;
+                    Some("resolve")
+                }
+                _ => None,
+            };
+            if let Some(kind) = fault {
+                lifecycle.lock().unwrap().push(format!("injected:{kind}"));
+                plan.node
+                    .disconnect_peer(transport_peer)
+                    .map_err(|error| format!("failed to inject {kind} authenticated QUIC disconnect: {error:#}"))?;
+                drop(channel);
+                continue;
+            }
             match request {
                 WireRequest::DiscoveryPublic { .. } => {
                     if plan.delay_ms > 0 {
@@ -369,6 +395,8 @@ async fn malicious_and_stale_providers_cannot_win_browse_or_exact_resolve() {
                 vote_state: Some((current_announcement.clone(), current_proof.clone())),
                 malformed_context: false,
                 delay_ms: 0,
+                drop_first_browse: true,
+                drop_first_resolve: true,
             },
             order.clone(),
             lifecycle.clone(),
@@ -383,6 +411,8 @@ async fn malicious_and_stale_providers_cannot_win_browse_or_exact_resolve() {
                 vote_state: Some((current_announcement.clone(), current_proof.clone())),
                 malformed_context: false,
                 delay_ms: 0,
+                drop_first_browse: false,
+                drop_first_resolve: false,
             },
             order.clone(),
             lifecycle.clone(),
@@ -397,6 +427,8 @@ async fn malicious_and_stale_providers_cannot_win_browse_or_exact_resolve() {
                 vote_state: Some((stale_announcement, stale_proof)),
                 malformed_context: false,
                 delay_ms: 0,
+                drop_first_browse: false,
+                drop_first_resolve: false,
             },
             order.clone(),
             lifecycle.clone(),
@@ -411,6 +443,8 @@ async fn malicious_and_stale_providers_cannot_win_browse_or_exact_resolve() {
                 vote_state: None,
                 malformed_context: true,
                 delay_ms: 10,
+                drop_first_browse: false,
+                drop_first_resolve: false,
             },
             order.clone(),
             lifecycle.clone(),
@@ -437,8 +471,17 @@ async fn malicious_and_stale_providers_cannot_win_browse_or_exact_resolve() {
             lifecycle.lock().unwrap().clone()
         )
     });
-    assert_eq!(report.results.len(), 1, "only the live canonical proof may survive browse: {report:?}");
+    assert_eq!(
+        report.results.len(),
+        1,
+        "only the live canonical proof may survive browse: {report:?}; order={browse_order:?}; lifecycle={:?}",
+        lifecycle.lock().unwrap().clone()
+    );
     assert_eq!(report.results[0].announcer_peer_id, b_record_id.peer_id().to_string());
+    assert!(
+        lifecycle.lock().unwrap().iter().any(|event| event == "injected:public"),
+        "canonical browse must recover after the injected authenticated stream loss"
+    );
     assert!(
         report.providers_seen >= 4,
         "all explicit hostile/current locators must be part of the bounded provider topology: {report:?}"
@@ -460,6 +503,10 @@ async fn malicious_and_stale_providers_cannot_win_browse_or_exact_resolve() {
     );
     let card = resolved.world.expect("current world card");
     assert_eq!(card.announcer_peer_id, b_record_id.peer_id().to_string());
+    assert!(
+        lifecycle.lock().unwrap().iter().any(|event| event == "injected:resolve"),
+        "exact resolve must recover after the injected authenticated stream loss"
+    );
     assert!(!resolve_order.is_empty(), "exact resolve must exercise at least one configured locator");
 
     for task in tasks {
@@ -679,4 +726,155 @@ async fn simultaneous_bidirectional_dials_converge_on_one_authenticated_connecti
     assert_eq!(right.established_connection_count(&left_peer), 1);
     assert!(left.is_authenticated(&right_peer));
     assert!(right.is_authenticated(&left_peer));
+}
+
+/// Exercise the real authenticated QUIC request/response transport, not a
+/// fabricated application event. The provider receives the request but exits
+/// without replying; libp2p must surface the outbound stream loss for the
+/// exact request ID on both discovery request variants.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn authenticated_quic_stream_drop_is_observable_for_browse_and_exact_resolve() {
+    for (index, request) in [
+        WireRequest::DiscoveryPublic { filter: swarm_protocol::DiscoveryFilterV1::default() },
+        WireRequest::DiscoveryResolve { world_id: swarm_protocol::WorldId([94; 32]) },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (_, mut provider, address, _) = make_node([94 + index as u8; 32]).await;
+        let (_, mut client, _, _) = make_node([97 + index as u8; 32]).await;
+        let (inbound_tx, mut inbound_rx) = tokio::sync::oneshot::channel();
+        let mut inbound_tx = Some(inbound_tx);
+        let provider_task = tokio::spawn(async move {
+            loop {
+                if let DiscoveryNetworkEvent::InboundRequest { channel, .. } =
+                    provider.next_event().await.expect("provider discovery event")
+                {
+                    inbound_tx.take().expect("only one injected request").send(()).unwrap();
+                    // Keep the response channel alive; the abort must destroy
+                    // the authenticated QUIC stream, not just drop a reply.
+                    let pending_channel = channel;
+                    std::future::pending::<()>().await;
+                    drop(pending_channel);
+                }
+            }
+        });
+        let provider_peer = client.add_bootstrap_address(address.parse().unwrap()).unwrap();
+        timeout(Duration::from_secs(10), async {
+            while !client.is_authenticated(&provider_peer) {
+                client.next_event().await.expect("client should authenticate provider");
+            }
+        })
+        .await
+        .expect("provider must authenticate before injecting a failure");
+        assert!(client.is_authenticated(&provider_peer));
+        let request_id = client.send_request(&provider_peer, request).unwrap();
+        timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    receipt = &mut inbound_rx => {
+                        receipt.expect("injected request must reach live provider");
+                        break;
+                    }
+                    event = client.next_event() => {
+                        event.expect("client discovery event while awaiting injected request");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("provider must receive the authenticated outbound request");
+
+        provider_task.abort();
+        assert!(provider_task.await.is_err_and(|error| error.is_cancelled()));
+
+        let failure = timeout(Duration::from_secs(10), async {
+            loop {
+                match client.next_event().await.expect("client event after provider shutdown") {
+                    DiscoveryNetworkEvent::OutboundFailure { transport_peer, request_id: observed, error }
+                        if transport_peer == provider_peer && observed == request_id =>
+                    {
+                        break error
+                    }
+                    DiscoveryNetworkEvent::Response { transport_peer, request_id: observed, .. }
+                        if transport_peer == provider_peer && observed == request_id =>
+                    {
+                        panic!("aborted provider must not produce a successful response")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("authenticated stream loss must surface as outbound failure");
+        assert!(!failure.is_empty(), "transport failure must be diagnosable");
+        eprintln!("injected authenticated QUIC stream loss ({index}): {failure}");
+    }
+}
+
+/// A provider that repeatedly drops an authenticated QUIC stream must not
+/// create a false successful browse or a false "world not found" conclusion.
+/// Even persistent adversarial transport failure receives at most two
+/// additional explicit-provider requests per query.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn permanently_disconnecting_explicit_provider_is_bounded_and_fails_closed() {
+    let (_, mut provider, address, _) = make_node([103; 32]).await;
+    let received = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    let received_for_task = received.clone();
+    let provider_task = tokio::spawn(async move {
+        loop {
+            if let DiscoveryNetworkEvent::InboundRequest { transport_peer, request, channel, .. } =
+                provider.next_event().await.expect("blackhole discovery provider event")
+            {
+                let kind = match request {
+                    WireRequest::DiscoveryPublic { .. } => "browse",
+                    WireRequest::DiscoveryResolve { .. } => "resolve",
+                    _ => {
+                        drop(channel);
+                        continue;
+                    }
+                };
+                received_for_task.lock().unwrap().push(kind);
+                provider.disconnect_peer(transport_peer).expect("terminate active authenticated QUIC connection");
+                drop(channel);
+            }
+        }
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let paths = DataPaths::from_root(temp.path());
+    let bootstraps = [address];
+
+    let browse =
+        timeout(Duration::from_secs(25), search_public_worlds(&paths, DiscoverySearchInputV1::default(), &bootstraps))
+            .await
+            .expect("bounded public browse should terminate")
+            .expect("browse should produce a structured failure report");
+    assert_eq!(
+        browse.state, "partial",
+        "transport failure must not be reported as a successful empty result: {browse:?}"
+    );
+    assert!(browse.results.is_empty(), "failed network discovery must not invent a canonical world");
+
+    let exact =
+        timeout(Duration::from_secs(25), resolve_world(&paths, swarm_protocol::WorldId([105; 32]), &bootstraps))
+            .await
+            .expect("bounded exact resolve should terminate")
+            .expect("exact resolve should produce a structured failure report");
+    assert_eq!(
+        exact.state, "network_unavailable",
+        "network failure must not be reported as world not found: {exact:?}"
+    );
+    assert!(exact.world.is_none(), "unreachable provider must never confer authority");
+
+    {
+        let attempts = received.lock().unwrap();
+        let browse_attempts = attempts.iter().filter(|kind| **kind == "browse").count();
+        let resolve_attempts = attempts.iter().filter(|kind| **kind == "resolve").count();
+        assert!((1..=3).contains(&browse_attempts), "public browse exceeded its bounded retry budget: {attempts:?}");
+        assert!((1..=3).contains(&resolve_attempts), "exact resolve exceeded its bounded retry budget: {attempts:?}");
+    }
+
+    provider_task.abort();
+    assert!(provider_task.await.is_err_and(|error| error.is_cancelled()));
 }

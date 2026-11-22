@@ -142,15 +142,23 @@ must have the expected world-bound runtime working directory and a genuine
 Java executable with a -jar command. This prevents unrelated processes from
 standing in as player/host proof.
 
-Update process IDs after a restart or takeover; false, missing or wrong PIDs
-must fail. Each Minecraft client PID is now checked against its actual Java
+Update process IDs after a restart or takeover (including Bob's recovered
+server and Alice's post-withdrawal handoff server). False, missing or wrong
+PIDs must fail. The remote probe also independently inventories same-user
+Java processes with their working directory bound to the exact disposable
+world runtime, and the verifier requires that count to match positive supplied
+server-PID evidence. Thus omitting Bob's or Carol's server PID cannot silently
+make a running world-bound JVM appear absent. Unreadable Java process state,
+multiple bound JVMs or inconsistent counts BLOCK the field test. This is a
+test-user /proc check, **not** a claim to inspect root-owned or other-user
+processes. Independent OS/process review remains mandatory. Each Minecraft client PID is now checked against its actual Java
 executable and a supported Fabric launch entrypoint (KnotClient or a
 Fabric-loader-backed PrismLauncher entrypoint). A process merely named
 `minecraft` or a Java server cannot masquerade as a third player. Unsupported
 launchers fail closed until their real provenance is independently reviewed
 and a narrowly tested adapter is added. Process presence is auxiliary
 evidence, not proof of a successful Minecraft login, join or gameplay.
-All ten phase captures must happen
+All twelve phase captures must happen
 **in their real chronological order**; the harness does not fabricate them.
 
 ```bash
@@ -210,6 +218,28 @@ python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$O
 # Bring Alice back; prove she is nonauthoritative, fully synchronized, fenced.
 python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage alice_returned --world "$WORLD_ID" --pids "$PIDS"
 
+# NEGATIVE CASE 1: while Bob is recovered authority, use the genuine
+# installed GUI/CLI to arrange SAFE, quorum-backed manual transfer to Alice,
+# who still has valid per-world hosting consent and suitable resources.
+# Wait for Alice's higher signed epoch/fencing and new replicated canonical
+# checkpoint. Only THEN withdraw Bob's persisted per-world hosting consent
+# via installed software, explicitly choosing player-only 0 MiB.
+# Observe Bob's JVM stopped, Alice's JVM -Xmx within her own consent,
+# all three clients still connected, and Bob's consent revision increased.
+# Then deliberately request hosting on Bob's installed UI/CLI with revoked
+# consent: the real action must be refused and no Bob JVM may start.
+# If safe handoff or withdrawal cannot be completed, STOP and report BLOCKED.
+# Refresh PIDS with Alice's new server PID before capture.
+python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage bob_withdrawn --world "$WORLD_ID" --pids "$PIDS"
+
+# NEGATIVE CASE 2: Carol, STILL player-only at 0 MiB, deliberately requests
+# hosting through a genuine installed authority/host action in her GUI/CLI.
+# Human reviewer must capture the real denied result, not self-reported JSON.
+# Check Alice remains sole signed authority, no JVM starts on Carol or Bob,
+# and all three real clients remain connected. If there is no supported
+# action or the request succeeds, BLOCK certification; never bypass guards.
+python3 scripts/e2e/three_machine/run.py capture --config "$CONFIG" --output "$OUT" --stage carol_denied --world "$WORLD_ID" --pids "$PIDS"
+
 # Only after independent human review of genuine native desktop, real game
 # client, selected network transport and budget evidence:
 # Produce a digest of all saved observations and the crash receipt, after
@@ -235,6 +265,41 @@ power loss**; literal machine/ISP power-failure field evidence is a separate
 required exercise. It never uses wildcard pkill, unrestricted rm, mocked Java,
 pre-seeded replicas or localhost-only peers.
 
+## Hosting withdrawal and denied player-only hosting (issue #120)
+
+These two post-recovery phases are **mandatory** for a READY verdict. The
+initial ten phases alone do not prove revocable consent or enforcement against
+a player-only host attempt. Run only on dedicated test data: do not forcibly
+kill Bob or migrate authority without a genuine signed quorum, safe snapshot
+barrier and Alice's verified host eligibility.
+
+At `bob_withdrawn`, require a newer signed epoch and fencing token than
+Bob's recovery, a NEW canonical checkpoint copied to all three peers, Alice
+as sole active server with her own allowed JVM heap, and Bob's per-world
+consent revoked to 0 MiB with a strictly increased revision. Bob and Carol
+must continue playing as real Minecraft clients, and no unauthorized JVM
+may appear. Deliberately attempt to rehost on Bob after revocation and
+capture a genuine refusal in the reviewed media. An unsuccessful or unavailable safe transfer is a **BLOCKER**,
+not permission to downgrade the policy or mark the test successful.
+
+At `carol_denied`, deliberately request a host/authority action for Carol
+through installed software while preserving her verified player-only 0-MiB
+state. Record the actual refusal in a separately reviewed screenshot or
+video, along with sanitized backend authority/epoch, consent, server process,
+and client evidence. Refusing to make the attempted request or using only a
+synthetic CLI message is not a PASS. The verifier checks that no authority
+change occurs during this negative attempt and that the last accepted
+checkpoint continues replicating correctly.
+
+Both phases require fresh role-specific media entries named
+`hosting_withdrawal` (Bob) and `player_only_denial` (Carol), and explicit
+independent-review flags
+`bob_withdrawal_and_safe_handoff_observed`,
+`bob_rehost_attempt_denied_after_withdrawal` and
+`carol_player_only_host_denial_observed`. The hash verifier alone cannot
+inspect pixels or establish that a rejected command was genuine. The reviewer
+must verify the actual installed-software behavior, redaction and timings.
+
 ## Host consent and real JVM heap observations (#84 dependency)
 
 The harness expects the eventually integrated Agent 03 local consent contract
@@ -250,8 +315,9 @@ revocation/0-MiB player-only record. The verifier checks that Alice's running
 Minecraft server process has a real `-Xmx` flag equal to Alice's allowed
 heap and Bob's recovered Java process uses Bob's independently chosen limit.
 Carol may never become a Java authority while remaining player-only.
-Consent snapshots and revision are rechecked after Bob's takeover; this
-does not replace authenticated quorum or signed recovery.
+Consent snapshots and revisions are rechecked after Bob's takeover and
+his subsequent opt-out. These observations do not replace authenticated
+quorum or signed recovery.
 
 The `-Xmx` JVM argument is a **heap** limit only, not a guaranteed total
 RSS/cgroup limit. Real runtime memory pressure and OS-level process cap
@@ -301,9 +367,9 @@ digest. Version fields contain no hostnames, private paths or raw log text.
 
 ## Binding reviewed observations to immutable bytes
 
-After all ten phases, run `run.py observations-digest` and place its 64-hex
+After all twelve phases, run `run.py observations-digest` and place its 64-hex
 `observations_sha256` into the reviewer file. The digest covers the sanitized
-preflight JSON, all ten timestamped phase JSON records, and the guarded
+preflight JSON, all twelve timestamped phase JSON records, and the guarded
 application-crash receipt in canonical order. Any edit to a stage record after
 the reviewer signs off invalidates the digest and causes final verification
 to fail closed. Store the source observation JSON and a SHA-pinned copy
@@ -340,7 +406,7 @@ tokens, invitations, keys and account names before publishing artifacts.
 
 ### Mandatory redacted media manifest (role-specific)
 
-The reviewed evidence must now include **23 distinct image/video files** with
+The reviewed evidence must now include **25 distinct image/video files** with
 SHA-256 checksums in the private `$OUT/evidence/` directory. The
 `review.example.json` file includes an `artifacts` array; populate it with
 exactly one object per required `kind` and `role`:
@@ -369,6 +435,11 @@ Required evidence categories:
   actual selected libp2p connection (not simply a configured relay).
 - `disconnect_reconnect` for Bob after network disruption.
 - `alice_crash` and `alice_fenced` for Alice.
+- `hosting_withdrawal` for Bob, showing real persisted zero-budget revocation,
+  increased revision, safe transfer to Alice, denied rehosting, and continuous
+  player access.
+- `player_only_denial` for Carol, showing a genuine rejected attempt to host,
+  with 0 MiB consent, no server JVM and unchanged signed authority.
 
 Images must be PNG/JPEG; videos may be WebM/MP4. Every file must have a
 matching lowercase SHA-256, a correct media signature and a distinct digest.

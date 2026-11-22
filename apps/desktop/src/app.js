@@ -1,5 +1,6 @@
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
 import { createImportRequest, parseImportResult } from './import-flow.js';
+import { clientContinuityFromMigration, ensureClientContinuityPanel } from './client-continuity.js';
 
 const $ = (id) => document.getElementById(id);
 const invoke = window.__TAURI__?.core?.invoke;
@@ -197,7 +198,9 @@ function hostingEligibility(world) {
     return { enabled: false, reason: 'Play is unavailable while divergent history needs review.' };
   }
   const value = String(world.compatibility?.['Authority eligibility'] || '').trim();
-  if (value === 'Compatible') return { enabled: true, reason: 'This device is eligible to host this world.' };
+  if (value === 'Compatible') {
+    return { enabled: true, reason: 'This device is compatible with the world. Local hosting requires opt-in.' };
+  }
   if (value.toLowerCase().includes('not authority eligible') || value.toLowerCase().startsWith('replica only')) {
     return { enabled: false, reason: 'This device can keep a replica, but it is not eligible to host this world.' };
   }
@@ -316,6 +319,7 @@ function clearSelection() {
   }
   updateWorldSpecificControls();
   updateDiagnosticsContext();
+  renderMigration(null);
 }
 
 function updateDiagnosticsContext() {
@@ -354,11 +358,23 @@ function runtimeSetupActionButton() {
 }
 
 function renderMigration(state) {
-  const migration = normalizeMigrationState(state);
+  const mismatched = Boolean(state && typeof state === 'object' && 'phase' in state && state.world_id !== selectedWorldId);
+  const migration = normalizeMigrationState(mismatched
+    ? { phase: 'blocked', failure_reason: 'Host status was not bound to the selected world.' }
+    : state);
+  const continuity = clientContinuityFromMigration(state, selectedWorldId, selectedWorld()?.status?.Safety);
+  const targets = ensureClientContinuityPanel(document);
+  if (targets) {
+    targets.title.textContent = continuity.title;
+    targets.detail.textContent = continuity.detail;
+    targets.detail.dataset.tone = continuity.tone;
+  }
   $('migrationBadge').textContent = migration.label;
-  $('migrationBadge').className = `status-badge ${migration.failed ? 'danger' : migration.phase === 'ready' ? 'safe' : migration.available ? 'warning' : 'neutral'}`;
+  // The persisted Ready phase can survive a hard crash. It is not a live
+  // Minecraft process check or a signed client route, so never paint it green.
+  $('migrationBadge').className = `status-badge ${migration.failed || continuity.tone === 'danger' ? 'danger' : migration.available ? 'warning' : 'neutral'}`;
   $('migrationSummary').textContent = migration.detail || (migration.available ? migration.label : 'No host migration is active.');
-  $('migrationProgress').hidden = !migration.available || migration.failed || migration.blocked;
+  $('migrationProgress').hidden = !migration.available || migration.failed || migration.blocked || migration.phase === 'ready';
   $('migrationProgressBar').style.width = `${migration.progress}%`;
   runtimeSetupActionButton().hidden = migration.action !== 'runtime-setup';
 
@@ -389,7 +405,7 @@ async function refreshMigrationState(world) {
     if (selectedWorldId === requestedWorldId && requestGeneration === migrationRequestGeneration) renderMigration(state);
   } catch (error) {
     if (selectedWorldId === requestedWorldId && requestGeneration === migrationRequestGeneration) {
-      renderMigration({ detail: `Could not read host migration state: ${String(error)}` });
+      renderMigration({ world_id: requestedWorldId, phase: 'status_unavailable', detail: `Could not read host migration state: ${String(error)}` });
     }
   }
 }
@@ -611,6 +627,7 @@ function selectWorld(world, { focusDetail = false } = {}) {
   renderConnectivity();
   updatePlayState(world);
   updateDiagnosticsContext();
+  renderMigration(null);
   refreshMigrationState(world);
   refreshHostReadiness(world);
   refreshWorldMods(world);

@@ -96,7 +96,8 @@ class TestRealCliCaptureContract(unittest.TestCase):
         })()
         outputs = list(map(completed, (status, identity, "OK snapshot #8\n",
                                        migration, readiness)))
-        with patch.object(node, "run", side_effect=outputs):
+        with patch.object(node, "run", side_effect=outputs), patch.object(
+                node, "world_server_inventory", return_value=[124]):
             with patch.object(node, "canonical_head_digest", return_value="44" * 32):
                 with patch.object(node, "hosting_consent", return_value={"available": True}):
                     with patch.object(node, "isolated_process", return_value=True):
@@ -115,6 +116,92 @@ class TestRealCliCaptureContract(unittest.TestCase):
         self.assertEqual(report["identity_fingerprint"], node.fp(args.salt, "scpeer:" + self.PEER))
         self.assertEqual(report["world_fingerprint"], node.fp(args.salt, self.WORLD))
         self.assertTrue(report["minecraft_client_process_observed"])
+
+
+class TestWorldBoundJvmInventory(unittest.TestCase):
+    WORLD = "ab" * 32
+
+    def test_uppercase_world_id_is_canonical_before_jvm_inventory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = type("CaptureArgs", (), {"world": self.WORLD.upper(), "data_dir": temp})()
+            # Stop at the inventory preflight without running CLI or Minecraft.
+            # Every runtime path, identity fingerprint and observation must use
+            # the same normalized world ID regardless of GUI input casing.
+            with patch.object(Path, "read_text", return_value="fake-machine-id"), patch.object(
+                    node, "world_server_inventory", return_value=None) as inventory:
+                with self.assertRaises(SystemExit) as failed:
+                    node.capture(args)
+            self.assertEqual(failed.exception.code, 2)
+            self.assertEqual(args.world, self.WORLD)
+            inventory.assert_called_once_with(str(Path(temp).resolve()), self.WORLD)
+
+    def test_server_inventory_must_remain_stable_across_capture(self):
+        self.assertTrue(node.stable_world_server_inventory([], []))
+        self.assertTrue(node.stable_world_server_inventory([111, 222], [222, 111]))
+        for before, after in (
+            ([111], []),
+            ([], [111]),
+            ([111], [112]),
+            ([111], None),
+            (None, [111]),
+            ([111], [111, 111]),
+            ([111], [True]),
+        ):
+            with self.subTest(before=before, after=after):
+                self.assertFalse(node.stable_world_server_inventory(before, after))
+
+    def test_detects_unlisted_server_jvm_even_with_no_operator_pid(self):
+        # Synthetic /proc fixture tests only the read-only inventory. It is
+        # NOT a stand-in for real three-machine Minecraft certification.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "data"
+            world_runtime = root / "runtime" / self.WORLD
+            world_runtime.mkdir(parents=True)
+            other_runtime = root / "runtime" / ("cd" * 32)
+            other_runtime.mkdir()
+            fake_java = Path(temp) / "java"
+            fake_java.write_bytes(b"test-java")
+            proc = Path(temp) / "proc"
+            proc.mkdir()
+            for pid, cwd in (("123", world_runtime), ("124", other_runtime)):
+                process = proc / pid
+                process.mkdir()
+                (process / "exe").symlink_to(fake_java)
+                (process / "cwd").symlink_to(cwd)
+            self.assertEqual(node.world_server_inventory(root, self.WORLD, proc), [123])
+
+    def test_proven_exited_zombie_does_not_block_world_inventory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "data"
+            proc = Path(temp) / "proc"
+            zombie = proc / "123"
+            zombie.mkdir(parents=True)
+            (zombie / "stat").write_text("123 (java test) Z 1 1 1 0 0\n")
+            # No exe symlink is normal for an exited zombie; this process
+            # cannot hold a server socket or regain authority.
+            self.assertEqual(node.world_server_inventory(root, self.WORLD, proc), [])
+
+    def test_unknown_live_process_without_executable_blocks_inventory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "data"
+            proc = Path(temp) / "proc"
+            process = proc / "123"
+            process.mkdir(parents=True)
+            (process / "stat").write_text("123 (java test) S 1 1 1 0 0\n")
+            self.assertIsNone(node.world_server_inventory(root, self.WORLD, proc))
+
+    def test_unreadable_java_workdir_is_not_silent_zero(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "data"
+            fake_java = Path(temp) / "java"
+            fake_java.write_bytes(b"test-java")
+            proc = Path(temp) / "proc"
+            process = proc / "123"
+            process.mkdir(parents=True)
+            (process / "exe").symlink_to(fake_java)
+            # Missing /proc/PID/cwd while the same-user PID is present must
+            # block an assertion that the world has no server JVM.
+            self.assertIsNone(node.world_server_inventory(root, self.WORLD, proc))
 
 
 class TestDebianPackageMetadata(unittest.TestCase):

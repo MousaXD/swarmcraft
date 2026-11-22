@@ -195,10 +195,23 @@ test('migration state translates migration-core phases into launcher phases', ()
   assert.equal(normalizeMigrationState({ phase: 'awaiting_transfer_acceptance' }).phase, 'transferring-authority');
   assert.equal(normalizeMigrationState({ phase: 'sleeping' }).available, false);
   const ready = normalizeMigrationState({ phase: 'ready', runtime_ready: true, game_endpoint: '127.0.0.1:25565' });
-  assert.equal(ready.detail, 'Minecraft is ready at 127.0.0.1:25565.');
+  assert.equal(ready.detail, 'The last local runtime report reached Ready; current server availability and Minecraft client access are unverified.');
   assert.equal(ready.progress, 100);
   assert.equal(ready.runtimeReady, true);
   assert.equal(ready.gameEndpoint, '127.0.0.1:25565');
+  const reportedReadyButNotRunning = normalizeMigrationState({ phase: 'ready', runtime_ready: false });
+  assert.equal(reportedReadyButNotRunning.label, 'Server readiness unverified');
+  assert.equal(reportedReadyButNotRunning.progress, 0);
+  assert.equal(reportedReadyButNotRunning.runtimeReady, false);
+  const forgedReady = normalizeMigrationState({
+    phase: 'ready',
+    runtime_ready: true,
+    game_endpoint: 'evil.example:25565',
+    detail: 'Verified automatic Minecraft reconnection to evil.example:25565',
+    message: 'All connected',
+  });
+  assert.equal(forgedReady.detail, ready.detail);
+  assert.doesNotMatch(forgedReady.detail, /evil\.example|verified automatic/i);
   const unknown = normalizeMigrationState({ phase: 'elected-but-maybe-ready' });
   assert.equal(unknown.available, false);
   assert.equal(unknown.phase, null);
@@ -236,7 +249,9 @@ test('frontend source and Tauri config preserve the global bridge contract', asy
   assert.match(app, /window\.__TAURI__\?\.core\?\.invoke/);
   assert.match(app, /document\.hidden/);
   assert.match(app, /setInterval\(refreshVisibleMigration, MIGRATION_REFRESH_MS\)/);
-  assert.match(app, /renderMigration\(\{ detail: `Could not read host migration state:/);
+  // Keep the failed read bound to the requested world so a stale or absent
+  // status cannot be shown as the selected world's verified successor.
+  assert.match(app, /renderMigration\(\{ world_id: requestedWorldId, phase: 'status_unavailable', detail: `Could not read host migration state:/);
   assert.match(app, /Automatic networking service could not start/);
   assert.equal(tauri.app.withGlobalTauri, true);
 });

@@ -41,6 +41,7 @@ SAFE_BOOL_KEYS = frozenset({
     'worldSelectedMetadataVerified', 'worldSelectedSafetyVerified',
     'readinessOwned', 'readinessNativeConfirmed', 'readinessNotBusy', 'readinessNoFalseGreen',
     'hostingPanelPresent', 'hostingExpectedPreference', 'hostingOptInDisabled', 'hostingWithdrawDisabled',
+    'hostingPermissionUnclaimed',
 })
 SAFE_INT_KEYS = frozenset({
     'width', 'height', 'rootScrollWidth', 'paneScrollWidth',
@@ -120,17 +121,22 @@ def verify_hosting_preference(app, expected: str) -> None:
           const panel = document.getElementById('hostingContributionPanel');
           const optIn = document.getElementById('hostingContributionOptIn');
           const withdraw = document.getElementById('hostingContributionWithdraw');
+          const play = document.getElementById('playerJourneyTitle');
+          const detail = document.getElementById('playAvailability');
           return {
             hostingPanelPresent: !!panel,
             hostingExpectedPreference: panel?.dataset.consentState === arguments[0],
             hostingOptInDisabled: !!optIn && optIn.disabled,
             hostingWithdrawDisabled: !!withdraw && withdraw.disabled,
+            hostingPermissionUnclaimed: !!play && !!detail
+              && play.textContent !== 'Ready to play'
+              && !/eligible to host|ready to host/i.test(detail.textContent ?? ''),
           };
         """, [expected])
         record_ui(observed)
         if (
             observed['hostingPanelPresent'] and observed['hostingExpectedPreference']
-            and observed['hostingOptInDisabled']
+            and observed['hostingOptInDisabled'] and observed['hostingPermissionUnclaimed']
             and observed['hostingWithdrawDisabled'] == (expected == 'player-only')
         ):
             return

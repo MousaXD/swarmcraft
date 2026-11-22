@@ -32,6 +32,8 @@ REQUIRED = frozenset({
     ("disconnect_reconnect", "bob"),
     ("alice_crash", "alice"),
     ("alice_fenced", "alice"),
+    ("hosting_withdrawal", "bob"),
+    ("player_only_denial", "carol"),
 })
 
 VALID_EXT = frozenset({".png", ".jpg", ".jpeg", ".webm", ".mp4"})

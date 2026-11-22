@@ -21,6 +21,9 @@ on:
 permissions:
   contents: read
 
+env:
+  SWARMCRAFT_PREVIEW_COMMIT: ${{ github.ref == 'refs/heads/main' && github.sha || '' }}
+
 concurrency:
   group: main-desktop-installers-${{ github.ref }}
   cancel-in-progress: true
@@ -267,10 +270,40 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  publish:
-    name: Publish rolling main release
-    if: ${{ github.ref == 'refs/heads/main' }}
+  verify-packages:
+    name: Verify all preview packages and checksums
     needs: [validation, linux, windows, macos, fabric]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Download exact-run installer groups
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: swarmcraft-*-${{ github.sha }}
+          path: release-downloads
+          merge-multiple: false
+      - name: Verify the five platform groups against release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci-release/verify_artifacts.py \
+            --source release-downloads --output release-assets \
+            --channel preview --commit "$GITHUB_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preview-provenance-${{ github.sha }}
+          path: release-assets/release-provenance.json
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish immutable main snapshot
+    if: ${{ github.ref == 'refs/heads/main' }}
+    needs: [validation, linux, windows, macos, fabric, verify-packages]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -298,9 +331,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view main-latest >/dev/null 2>&1; then
-            gh release delete main-latest --cleanup-tag --yes
-          fi
           cat > release-notes.md <<EOF
           Automated preview snapshot from \`main\` after the exact commit passed Required Validation, including the release-candidate network soak.
 
@@ -319,10 +349,8 @@ jobs:
           - Windows: unsigned development snapshot
           - macOS: ad-hoc signed development snapshot, not notarized
 
-          This rolling preview release may be replaced by the next validated push to \`main\`.
+          This preview is pinned to the commit above. New previews are published separately.
           EOF
-          gh release create main-latest release-assets/* \
-            --target "$GITHUB_SHA" \
-            --title "SwarmCraft Main Snapshot" \
-            --notes-file release-notes.md \
-            --prerelease
+          python3 scripts/ci-release/publish_preview.py \
+            --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" \
+            --assets release-assets --notes release-notes.md

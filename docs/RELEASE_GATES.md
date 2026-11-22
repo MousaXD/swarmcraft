@@ -24,17 +24,19 @@ The terminal gate uses `if: always()` and inspects every selected reusable-workf
 
 ## Release publication DAG
 
-### Rolling `main-latest`
+### Commit-pinned preview snapshots
 
 `.github/workflows/main-installers.yml` is a preview channel only.
 
 The order is:
 
-`exact-SHA Required Validation + network soak -> platform/Fabric packages -> publish`
+`exact-SHA Required Validation + network soak -> platform/Fabric packages -> verify -> upload draft -> verify uploads -> publish`
 
-All builder jobs depend on validation. The final publisher depends on validation and every builder. Publication is additionally restricted to `refs/heads/main`.
+All builder jobs depend on validation. The read-only package verification job also runs on pull requests and records the five package groups and their checksums. The publisher depends on successful verification and then checks the same run's artifacts again before staging the draft. Publication is restricted to `refs/heads/main`.
 
-`main-latest` may contain unsigned Windows and ad-hoc macOS development artifacts, but release notes must call them preview/development artifacts. It must never be represented as the production-signed channel.
+Each preview is published under `main-snapshot-<full commit SHA>`. The publisher checks the byte count and SHA-256 digest of every uploaded asset while the release is still a draft, then binds the tag to that commit and publishes the prerelease. An interrupted upload leaves the previous releases available on the GitHub Releases page. A rerun can resume a draft whose existing assets match the verified files. A conflicting draft or tag requires operator review.
+
+The existing `main-latest` release is retained for legacy clients. To roll back, install the previous complete snapshot from the GitHub Releases page. Preview Windows installers are unsigned and macOS disk images are ad-hoc signed development builds.
 
 ### Versioned `vX.Y.Z`
 
@@ -89,7 +91,7 @@ Retention is standardized by evidence class:
 
 - ordinary CI package/build artifacts: **7 days**;
 - live player-journey evidence: **14 days**;
-- rolling/versioned release staging artifacts: **14 days**;
+- preview/versioned release staging artifacts: **14 days**;
 - network-soak logs/metadata/qdisc evidence: **30 days**;
 - published GitHub Release assets: retained as release artifacts until the release itself is intentionally replaced/deleted under channel policy.
 

@@ -41,6 +41,16 @@ test('player journey elevates real play blockers and active host changes', () =>
   assert.equal(moving.label, 'Host change in progress');
 });
 
+test('world compatibility and connectivity do not claim hosting or Minecraft readiness', () => {
+  const state = deriveJourneyState({
+    playDisabled: false,
+    playDetail: 'This device is compatible with the world. Local hosting requires opt-in.',
+    connectivity: 'Direct connection',
+  });
+  assert.equal(state.kind, 'neutral');
+  assert.equal(state.label, 'Play options');
+});
+
 test('player-first layout keeps proven command IDs while moving operator surfaces behind Advanced', async () => {
   const source = await text('player-experience.js');
   for (const id of [

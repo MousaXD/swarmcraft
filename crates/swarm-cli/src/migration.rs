@@ -155,7 +155,7 @@ pub fn request_world_stop(paths: &DataPaths, storage: &Storage, world: WorldId) 
 }
 
 pub fn request_world_wake(paths: &DataPaths, storage: &Storage, world: WorldId) -> Result<()> {
-    hosting_budget::require_contribution(paths, world)?;
+    let consent = hosting_budget::require_contribution(paths, world)?;
     let identity = PeerIdentity::load_or_create(paths)?;
     let sleep_record = storage.load_sleep_record(world).context("world is not durably sleeping")?;
     verify_sleep_record_signature(&sleep_record)?;
@@ -170,7 +170,9 @@ pub fn request_world_wake(paths: &DataPaths, storage: &Storage, world: WorldId) 
     if local.banned || !local.authority_eligible || local.public_key != identity.public_key() {
         bail!("local peer is not eligible to wake this world");
     }
-    atomic_bytes(&wake_intent_path(paths, world), b"wake\n")?;
+    hosting_budget::with_consent_guarded_operation(paths, world, &consent, || {
+        atomic_bytes(&wake_intent_path(paths, world), b"wake\n")
+    })?;
     publish_status(
         paths,
         storage,
@@ -1154,7 +1156,7 @@ pub fn export_transfer(storage: &Storage, world: WorldId) -> Result<String> {
 }
 
 pub fn accept_manual_transfer(paths: &DataPaths, storage: &Storage, world: WorldId, token: &str) -> Result<String> {
-    hosting_budget::require_contribution(paths, world)?;
+    let consent = hosting_budget::require_contribution(paths, world)?;
     let identity = PeerIdentity::load_or_create(paths)?;
     let prepared = decode_transfer(token)?;
     if prepared.world_id != world || prepared.phase != TransferPhase::Prepared {
@@ -1164,19 +1166,25 @@ pub fn accept_manual_transfer(paths: &DataPaths, storage: &Storage, world: World
     if prepared.to_peer_id != identity.peer_id() {
         bail!("only the prepared target may accept this transfer");
     }
-    if let Some(existing) = active_transfer_for_current_generation(storage, world)? {
-        ensure_same_transfer(&existing, &prepared)?;
-        match existing.phase {
-            TransferPhase::Prepared => {}
-            TransferPhase::Accepted => return encode_transfer(&existing),
-            TransferPhase::Committed => bail!("transfer is already committed and cannot be accepted again"),
+    let (accepted, was_saved) = hosting_budget::with_consent_guarded_operation(paths, world, &consent, || {
+        if let Some(existing) = active_transfer_for_current_generation(storage, world)? {
+            ensure_same_transfer(&existing, &prepared)?;
+            match existing.phase {
+                TransferPhase::Prepared => {}
+                TransferPhase::Accepted => return Ok((existing, false)),
+                TransferPhase::Committed => bail!("transfer is already committed and cannot be accepted again"),
+            }
         }
+        let mut accepted = prepared.clone();
+        accepted.phase = TransferPhase::Accepted;
+        identity.sign_transfer(&mut accepted)?;
+        storage.save_transfer_record(&prepared)?;
+        storage.save_transfer_record(&accepted)?;
+        Ok((accepted, true))
+    })?;
+    if !was_saved {
+        return encode_transfer(&accepted);
     }
-    storage.save_transfer_record(&prepared)?;
-    let mut accepted = prepared.clone();
-    accepted.phase = TransferPhase::Accepted;
-    identity.sign_transfer(&mut accepted)?;
-    storage.save_transfer_record(&accepted)?;
     publish_status(
         paths,
         storage,
@@ -1228,7 +1236,7 @@ pub fn commit_manual_transfer(paths: &DataPaths, storage: &Storage, world: World
 }
 
 pub fn activate_manual_transfer(paths: &DataPaths, storage: &Storage, world: WorldId, token: &str) -> Result<String> {
-    hosting_budget::require_contribution(paths, world)?;
+    let consent = hosting_budget::require_contribution(paths, world)?;
     let identity = PeerIdentity::load_or_create(paths)?;
     let committed = decode_transfer(token)?;
     if committed.world_id != world || committed.phase != TransferPhase::Committed {
@@ -1260,7 +1268,6 @@ pub fn activate_manual_transfer(paths: &DataPaths, storage: &Storage, world: Wor
     if latest.manifest_hash()? != committed.base_snapshot_hash {
         bail!("transfer target lacks the exact canonical checkpoint");
     }
-    storage.save_transfer_record(&committed)?;
     let mut next = EpochRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
@@ -1275,8 +1282,12 @@ pub fn activate_manual_transfer(paths: &DataPaths, storage: &Storage, world: Wor
         signature: Vec::new(),
     };
     next.signature = identity.sign(&next.signing_bytes()?);
-    storage.save_epoch_record(&next)?;
-    storage.clear_sleep_record(world)?;
+    hosting_budget::with_consent_guarded_operation(paths, world, &consent, || {
+        storage.save_transfer_record(&committed)?;
+        storage.save_epoch_record(&next)?;
+        storage.clear_sleep_record(world)?;
+        Ok(())
+    })?;
     publish_status(
         paths,
         storage,

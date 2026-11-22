@@ -921,15 +921,18 @@ fn resolve_swarmcraft_fabric(version: &str) -> Result<ResolvedArtifact> {
     })
 }
 
-fn swarmcraft_release_candidates(version: &str) -> [String; 2] {
-    [format!("{SWARMCRAFT_RELEASE_API}/v{version}"), format!("{SWARMCRAFT_RELEASE_API}/main-latest")]
+fn swarmcraft_release_candidates(version: &str, preview_commit: Option<&str>) -> Vec<String> {
+    if let Some(commit) = preview_commit.filter(|commit| !commit.is_empty()) {
+        return vec![format!("{SWARMCRAFT_RELEASE_API}/main-snapshot-{commit}")];
+    }
+    vec![format!("{SWARMCRAFT_RELEASE_API}/v{version}"), format!("{SWARMCRAFT_RELEASE_API}/main-latest")]
 }
 
 fn load_swarmcraft_release(version: &str) -> Result<Value> {
     let jar_name = format!("swarmcraft-fabric-{version}.jar");
     let checksum_name = format!("{jar_name}.sha256");
     let mut failures = Vec::new();
-    for api in swarmcraft_release_candidates(version) {
+    for api in swarmcraft_release_candidates(version, option_env!("SWARMCRAFT_PREVIEW_COMMIT")) {
         match curl_text(&api, &["api.github.com"]) {
             Ok(body) => match serde_json::from_str::<Value>(&body) {
                 Ok(release) => {
@@ -1354,11 +1357,21 @@ mod tests {
     }
 
     #[test]
-    fn release_candidates_prefer_immutable_tag_then_main_snapshot() {
+    fn versioned_release_candidates_keep_legacy_fallback() {
         assert_eq!(
-            swarmcraft_release_candidates("0.4.0"),
+            swarmcraft_release_candidates("0.4.0", None),
             [format!("{SWARMCRAFT_RELEASE_API}/v0.4.0"), format!("{SWARMCRAFT_RELEASE_API}/main-latest"),]
         );
+    }
+
+    #[test]
+    fn preview_resolves_only_its_own_commit_snapshot() {
+        let commit = "1234567890abcdef1234567890abcdef12345678";
+        assert_eq!(
+            swarmcraft_release_candidates("0.5.1", Some(commit)),
+            [format!("{SWARMCRAFT_RELEASE_API}/main-snapshot-{commit}")]
+        );
+        assert_eq!(swarmcraft_release_candidates("0.5.1", Some("")), swarmcraft_release_candidates("0.5.1", None));
     }
 
     #[test]
