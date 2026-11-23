@@ -392,7 +392,8 @@ fn signed_fabric_attestation_binds_consent_world_nonce_and_port() {
 struct NoLiveProof;
 
 impl LiveAuthorityProofProvider for NoLiveProof {
-    fn acquire(&self, _: WorldId, _: PeerId, _: [u8; 32]) -> Result<LiveAuthorityObservation> {
+    fn acquire(&self, _: WorldId, _: PeerId, _: [u8; 32], deadline: Instant) -> Result<LiveAuthorityObservation> {
+        assert!(deadline > Instant::now());
         bail!("no current authenticated quorum or Fabric IPC session")
     }
 }
@@ -412,7 +413,10 @@ fn missing_live_provider_can_never_authorize_game_streams() {
 struct FixedSignedMaterial(Arc<RwLock<LiveAuthorityObservation>>);
 
 impl LiveAuthorityProofProvider for FixedSignedMaterial {
-    fn acquire(&self, _: WorldId, _: PeerId, _: [u8; 32]) -> Result<LiveAuthorityObservation> {
+    fn acquire(&self, _: WorldId, _: PeerId, _: [u8; 32], deadline: Instant) -> Result<LiveAuthorityObservation> {
+        if Instant::now() >= deadline {
+            bail!("proof deadline elapsed during acquisition");
+        }
         Ok(self.0.read().unwrap().clone())
     }
 }

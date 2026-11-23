@@ -245,11 +245,19 @@ pub struct LiveAuthorityObservation {
 
 /// The daemon owner must obtain new signatures over the supplied nonce for
 /// EVERY call. It MUST use authenticated P2P and actual live Fabric IPC (for
-/// host attestation); deadlines/retries are bounded independently. Returning
+/// host attestation). The caller passes an absolute MONOTONIC deadline for
+/// acquisition plus verification, so each blocking network/IPC step MUST use
+/// a bounded timeout within that budget and return before the deadline. This
+/// synchronous trait cannot interrupt a wedged provider by itself. Returning
 /// cached votes fails the nonce check. Returning no material refuses the route.
 pub trait LiveAuthorityProofProvider: Send + Sync {
-    fn acquire(&self, world: WorldId, requester: PeerId, challenge_nonce: [u8; 32])
-        -> Result<LiveAuthorityObservation>;
+    fn acquire(
+        &self,
+        world: WorldId,
+        requester: PeerId,
+        challenge_nonce: [u8; 32],
+        deadline: Instant,
+    ) -> Result<LiveAuthorityObservation>;
 }
 
 /// A fully signed V1 authority proof source; no synthetic Ready fallback.
@@ -602,8 +610,12 @@ impl FreshAuthoritySource for SignedLiveAuthoritySource {
             return Err(GameRouteError::UnverifiedAuthority);
         }
         let started = Instant::now();
-        let observed =
-            self.provider.acquire(world, requester, challenge).map_err(|_| GameRouteError::UnverifiedAuthority)?;
+        let deadline =
+            started.checked_add(Duration::from_millis(MAX_FRESH_PROOF_MS)).ok_or(GameRouteError::StaleAuthority)?;
+        let observed = self
+            .provider
+            .acquire(world, requester, challenge, deadline)
+            .map_err(|_| GameRouteError::UnverifiedAuthority)?;
         require_monotonic_proof_deadline(started)?;
         let verified = self
             .verify_current(world, requester, challenge, &observed)

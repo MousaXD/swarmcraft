@@ -85,6 +85,12 @@ ghost/banned member key does not become acceptable just because the current
 voter set is valid. In addition to the signed and wall-clock freshness limits,
 the full acquire + snapshot/certificate validation pipeline is bounded by a
 monotonic three-second deadline, including the final verification stage.
+The provider API now accepts a monotonic `deadline: Instant` on every
+`acquire(world, requester, nonce, deadline)` call. Agent 3 must enforce this
+deadline on every actual authenticated network/IPC acquisition step; because
+the provider is synchronous, the verifier cannot interrupt a blocked call
+that ignores its deadline. The source rejects a result returned after the
+deadline and never treats blocking or missing proof as an authorized route.
 
 Agent 3 owns the shared CLI module wiring: add
 `pub mod live_fabric_readiness;` and `pub mod live_authority;` to
