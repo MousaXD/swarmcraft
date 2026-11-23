@@ -54,6 +54,9 @@ const REPLICATION_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(11);
 // running outside the mutable libp2p event loop.
 const MAX_IN_FLIGHT_TRANSFER_STEPS: usize = 4;
 const MAX_REMEMBERED_TRANSFER_ACKS: usize = 1024;
+// Snapshot RPC has a 30-second transport deadline; don't start overlapping
+// manifest negotiations for the same peer while one can still be in flight.
+const TRANSFER_MANIFEST_RETRY: Duration = Duration::from_secs(35);
 
 #[derive(Debug, Clone)]
 enum OutboundContext {
@@ -137,6 +140,8 @@ struct LeaseRuntime {
     recovery_replication_sent: HashSet<(WorldId, PeerId)>,
     replications: HashMap<(TransportPeerId, WorldId), ReplicationState>,
     transfer_acks: Vec<TransferDeliveryAck>,
+    transfer_replica_acks: HashMap<(WorldId, PeerId), Hash32>,
+    transfer_manifest_requests: HashMap<(WorldId, PeerId), (Hash32, Instant)>,
 }
 
 struct HandlerContext<'a> {
@@ -214,14 +219,16 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                     Instant::now(),
                 )?;
                 if let Err(error) = drive_staged_transfers(
-                    paths,
-                    storage,
-                    &identity,
+                    TransferDriveContext {
+                        paths,
+                        storage,
+                        identity: &identity,
+                        completed: &transfer_done_tx,
+                        in_flight: &mut transfer_steps_in_flight,
+                    },
                     &mut node,
                     &mut outbound,
-                    &leases,
-                    &transfer_done_tx,
-                    &mut transfer_steps_in_flight,
+                    &mut leases,
                 ) {
                     warn!(%error, "automated transfer tick blocked; preserving signed phase and retrying");
                 }
@@ -348,6 +355,8 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                             leases.peer_status.retain(|(_, peer), _| *peer != application_peer);
                             leases.peer_capability.retain(|(_, peer), _| *peer != application_peer);
                             leases.transfer_acks.retain(|ack| ack.peer != application_peer);
+                            leases.transfer_replica_acks.retain(|(_, peer), _| *peer != application_peer);
+                            leases.transfer_manifest_requests.retain(|(_, peer), _| *peer != application_peer);
                         }
                         leases.replications.retain(|(peer, _), _| *peer != transport_peer);
                         info!(transport = %transport_peer, "peer disconnected");
@@ -450,6 +459,80 @@ fn validate_persisted_transfer(
     Ok(latest.manifest_hash()? == record.base_snapshot_hash)
 }
 
+/// A freshly activated successor must announce its signed epoch to already
+/// connected witnesses. Otherwise their old epoch rejects the successor's
+/// lease, and the new host can never reach a quorum until everyone reconnects.
+/// This match is a *precondition* only: remote voters still validate the
+/// committed transfer, exact old epoch, new fencing token, base checkpoint and
+/// authority signature themselves before accepting WireRequest::Epoch.
+fn activated_epoch_matches_transfer(record: &AuthorityTransferV1, epoch: &EpochRecordV1, local: PeerId) -> bool {
+    record.phase == TransferPhase::Committed
+        && record.to_peer_id == local
+        && epoch.world_id == record.world_id
+        && epoch.mode == EpochMode::Quorum
+        && epoch.authority_peer_id == local
+        && epoch.epoch_number == record.next_epoch
+        && epoch.fencing_token == record.next_fencing_token
+        && epoch.previous_epoch_hash.is_some()
+}
+
+struct ActivatedTransferContext<'a> {
+    paths: &'a DataPaths,
+    storage: &'a Storage,
+    identity: &'a PeerIdentity,
+    descriptor: &'a WorldDescriptorV1,
+    record: &'a AuthorityTransferV1,
+    epoch: &'a EpochRecordV1,
+}
+
+fn announce_activated_transfer_epoch(
+    context: ActivatedTransferContext<'_>,
+    node: &mut SwarmNode,
+    outbound: &mut HashMap<String, OutboundContext>,
+    leases: &LeaseRuntime,
+) -> Result<()> {
+    let ActivatedTransferContext { paths, storage, identity, descriptor, record, epoch } = context;
+    let world = record.world_id;
+    if !activated_epoch_matches_transfer(record, epoch, identity.peer_id())
+        || epoch.authority_public_key != identity.public_key()
+    {
+        return Err(anyhow!("activated transfer is not the locally signed successor"));
+    }
+    ensure_no_membership_prepare(storage, world)?;
+    verify_transfer_signature(record)?;
+    verify_signature(epoch.authority_peer_id, epoch.authority_public_key, &epoch.signing_bytes()?, &epoch.signature)?;
+    let local_member = authorized_descriptor_member(descriptor, identity.peer_id())?;
+    if !local_member.authority_eligible || local_member.public_key != epoch.authority_public_key {
+        return Err(anyhow!("new authority is not eligible in current membership"));
+    }
+    let latest = storage.latest_snapshot(world)?.context("successor lacks the signed canonical checkpoint")?;
+    verify_snapshot_signature(&latest)?;
+    if latest.manifest_hash()? != record.base_snapshot_hash || epoch.base_state_hash != latest.state_root {
+        return Err(anyhow!("successor epoch base differs from the signed transfer checkpoint"));
+    }
+    // A signed epoch does not override local voluntary consent. Its recipients
+    // will independently require fresh majority-backed leases before hosting.
+    hosting_budget::require_contribution(paths, world)?;
+    let generation = AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token };
+    for (transport, member) in &leases.authenticated_peers {
+        if *member == identity.peer_id() || authorized_descriptor_member(descriptor, *member).is_err() {
+            continue;
+        }
+        if leases.epoch_acks.get(&(world, *member)) == Some(&generation)
+            || epoch_request_pending(outbound, world, *member, generation)
+        {
+            continue;
+        }
+        match node.send_request(transport, WireRequest::Epoch(epoch.clone())) {
+            Ok(id) => {
+                outbound.insert(request_key(&id), OutboundContext::Epoch { world, peer: *member, generation });
+            }
+            Err(error) => warn!(%world, peer = %member, %error, "successor epoch publication deferred"),
+        }
+    }
+    Ok(())
+}
+
 fn transfer_request_pending(
     outbound: &HashMap<String, OutboundContext>,
     peer: PeerId,
@@ -458,6 +541,65 @@ fn transfer_request_pending(
     outbound.values().any(
         |context| matches!(context, OutboundContext::Transfer { peer: p, record: r } if *p == peer && *r == *record),
     )
+}
+
+fn transfer_checkpoint_acknowledged(runtime: &LeaseRuntime, record: &AuthorityTransferV1, peer: PeerId) -> bool {
+    runtime.transfer_replica_acks.get(&(record.world_id, peer)) == Some(&record.base_snapshot_hash)
+}
+
+/// The final Fabric save barrier produces a *new* canonical checkpoint. It is
+/// not enough to send a Prepared token to an already-connected peer: the
+/// peer's transfer validator requires the exact verified snapshot. Drive the
+/// existing authenticated blob replication protocol first and only progress
+/// after each active member reports successful replica finalization.
+///
+/// A replica acknowledgement is an authenticated transport report, not a
+/// canonical authority vote. Transfer phases still require the separately
+/// signed source/target transcripts, exact generation and fencing checks.
+fn replicate_transfer_checkpoint(
+    storage: &Storage,
+    node: &mut SwarmNode,
+    outbound: &mut HashMap<String, OutboundContext>,
+    runtime: &mut LeaseRuntime,
+    descriptor: &WorldDescriptorV1,
+    record: &AuthorityTransferV1,
+) -> Result<bool> {
+    let world = record.world_id;
+    let checkpoint = storage.latest_snapshot(world)?.context("prepared transfer lacks a canonical checkpoint")?;
+    verify_snapshot_signature(&checkpoint)?;
+    if checkpoint.manifest_hash()? != record.base_snapshot_hash {
+        return Err(anyhow!("prepared transfer no longer references the exact final checkpoint"));
+    }
+    let mut all_replicated = true;
+    let now = Instant::now();
+    for member in descriptor.members.iter().filter(|member| !member.banned && member.peer_id != record.from_peer_id) {
+        let peer = member.peer_id;
+        if transfer_checkpoint_acknowledged(runtime, record, peer) {
+            continue;
+        }
+        all_replicated = false;
+        let Some((transport, _)) = runtime.authenticated_peers.iter().find(|(_, app)| **app == peer) else {
+            continue; // Offline members are never silently counted as verified replicas.
+        };
+        if runtime.replications.contains_key(&(*transport, world))
+            || runtime.transfer_manifest_requests.get(&(world, peer)).is_some_and(|(hash, when)| {
+                *hash == record.base_snapshot_hash && now.saturating_duration_since(*when) < TRANSFER_MANIFEST_RETRY
+            })
+        {
+            continue;
+        }
+        match node.send_request(transport, WireRequest::SnapshotManifest(checkpoint.clone())) {
+            Ok(id) => {
+                outbound.insert(
+                    request_key(&id),
+                    OutboundContext::Manifest { world, snapshot_number: checkpoint.snapshot_number },
+                );
+                runtime.transfer_manifest_requests.insert((world, peer), (record.base_snapshot_hash, now));
+            }
+            Err(error) => warn!(%world, %peer, %error, "final transfer checkpoint replication deferred"),
+        }
+    }
+    Ok(all_replicated)
 }
 
 fn launch_automated_transfer_step(
@@ -494,16 +636,21 @@ fn launch_automated_transfer_step(
     Ok(())
 }
 
+struct TransferDriveContext<'a> {
+    paths: &'a DataPaths,
+    storage: &'a Storage,
+    identity: &'a PeerIdentity,
+    completed: &'a mpsc::Sender<CompletedTransferStep>,
+    in_flight: &'a mut HashSet<WorldId>,
+}
+
 fn drive_staged_transfers(
-    paths: &DataPaths,
-    storage: &Storage,
-    identity: &PeerIdentity,
+    context: TransferDriveContext<'_>,
     node: &mut SwarmNode,
     outbound: &mut HashMap<String, OutboundContext>,
-    leases: &LeaseRuntime,
-    completed: &mpsc::Sender<CompletedTransferStep>,
-    in_flight: &mut HashSet<WorldId>,
+    leases: &mut LeaseRuntime,
 ) -> Result<()> {
+    let TransferDriveContext { paths, storage, identity, completed, in_flight } = context;
     for metadata in storage.list_worlds()? {
         let world = metadata.world_id;
         let record = match storage.load_transfer_record(world) {
@@ -523,6 +670,33 @@ fn drive_staged_transfers(
                 continue;
             }
         };
+        if record.phase == TransferPhase::Committed && record.to_peer_id == identity.peer_id() {
+            match storage.load_epoch_record(world) {
+                Ok(epoch) if activated_epoch_matches_transfer(&record, &epoch, identity.peer_id()) => {
+                    if let Err(error) = announce_activated_transfer_epoch(
+                        ActivatedTransferContext {
+                            paths,
+                            storage,
+                            identity,
+                            descriptor: &descriptor,
+                            record: &record,
+                            epoch: &epoch,
+                        },
+                        node,
+                        outbound,
+                        leases,
+                    ) {
+                        warn!(%world, %error, "activated successor epoch cannot be announced");
+                    }
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(%world, %error, "cannot establish current epoch for transfer");
+                    continue;
+                }
+            }
+        }
         match validate_persisted_transfer(storage, &descriptor, &record) {
             Ok(true) => {}
             Ok(false) => continue, // Superseded, fenced, or unrelated generation.
@@ -533,6 +707,12 @@ fn drive_staged_transfers(
         }
 
         let local = identity.peer_id();
+        if record.phase == TransferPhase::Prepared
+            && local == record.from_peer_id
+            && !replicate_transfer_checkpoint(storage, node, outbound, leases, &descriptor, &record)?
+        {
+            continue;
+        }
         let witnesses_waiting = pending_transfer_witnesses(&descriptor, &record, &leases.transfer_acks);
         for peer in transfer_recipients(local, &descriptor, &record, &leases.transfer_acks) {
             if transfer_request_pending(outbound, peer, &record) {
@@ -2016,6 +2196,18 @@ fn handle_request(
             if !ack.complete {
                 return Err(anyhow!("incomplete replica acknowledgement rejected"));
             }
+            // Only a completed replica of the currently signed checkpoint
+            // can release transfer staging. An old or unrelated replica ack
+            // remains useful for ordinary replication diagnostics but never
+            // counts as proof of the final transfer barrier.
+            if let Some(current) = storage.latest_snapshot(ack.world_id)? {
+                if current.snapshot_number == ack.snapshot_number
+                    && current.manifest_hash()? == ack.manifest_hash
+                    && current.state_root == ack.state_root
+                {
+                    state.leases.transfer_replica_acks.insert((ack.world_id, application_peer), ack.manifest_hash);
+                }
+            }
             info!(peer = %application_peer, world = %ack.world_id, snapshot = ack.snapshot_number, "replica verified snapshot");
             node.respond(channel, WireResponse::ReplicaAckAccepted)?;
         }
@@ -3490,6 +3682,57 @@ mod automatic_transfer_delivery_tests {
         assert_eq!(transfer_witnesses(&descriptor, &transfer(TransferPhase::Prepared)), vec![peer(3)]);
         descriptor.members[2].banned = true;
         assert!(transfer_witnesses(&descriptor, &transfer(TransferPhase::Prepared)).is_empty());
+    }
+
+    #[test]
+    fn transfer_checkpoint_requires_exact_ack_from_each_authenticated_replica() {
+        let record = transfer(TransferPhase::Prepared);
+        let mut runtime = LeaseRuntime::default();
+        assert!(!transfer_checkpoint_acknowledged(&runtime, &record, peer(2)));
+        runtime.transfer_replica_acks.insert((record.world_id, peer(2)), Hash32([12; 32]));
+        assert!(!transfer_checkpoint_acknowledged(&runtime, &record, peer(2)));
+        runtime.transfer_replica_acks.insert((record.world_id, peer(2)), record.base_snapshot_hash);
+        assert!(transfer_checkpoint_acknowledged(&runtime, &record, peer(2)));
+        assert!(!transfer_checkpoint_acknowledged(&runtime, &record, peer(3)));
+        let newer = AuthorityTransferV1 { base_snapshot_hash: Hash32([13; 32]), ..record };
+        assert!(!transfer_checkpoint_acknowledged(&runtime, &newer, peer(2)));
+    }
+
+    fn successor_epoch() -> EpochRecordV1 {
+        EpochRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: WorldId([7; 32]),
+            epoch_number: 2,
+            previous_epoch_hash: Some(Hash32([4; 32])),
+            base_state_hash: Hash32([6; 32]),
+            authority_peer_id: peer(2),
+            authority_public_key: [2; 32],
+            mode: EpochMode::Quorum,
+            fencing_token: 2,
+            reason: "verified transfer".into(),
+            signature: vec![99; 64],
+        }
+    }
+
+    #[test]
+    fn activated_epoch_publication_requires_exact_committed_successor_generation() {
+        let epoch = successor_epoch();
+        assert!(activated_epoch_matches_transfer(&transfer(TransferPhase::Committed), &epoch, peer(2)));
+        assert!(!activated_epoch_matches_transfer(&transfer(TransferPhase::Accepted), &epoch, peer(2)));
+        assert!(!activated_epoch_matches_transfer(&transfer(TransferPhase::Prepared), &epoch, peer(2)));
+        assert!(!activated_epoch_matches_transfer(&transfer(TransferPhase::Committed), &epoch, peer(1)));
+        let mut fenced = epoch.clone();
+        fenced.fencing_token += 1;
+        assert!(!activated_epoch_matches_transfer(&transfer(TransferPhase::Committed), &fenced, peer(2)));
+        let mut wrong_world = epoch.clone();
+        wrong_world.world_id = WorldId([8; 32]);
+        assert!(!activated_epoch_matches_transfer(&transfer(TransferPhase::Committed), &wrong_world, peer(2)));
+        let mut missing_ancestry = epoch.clone();
+        missing_ancestry.previous_epoch_hash = None;
+        assert!(!activated_epoch_matches_transfer(&transfer(TransferPhase::Committed), &missing_ancestry, peer(2)));
+        let mut solo = epoch;
+        solo.mode = EpochMode::Solo;
+        assert!(!activated_epoch_matches_transfer(&transfer(TransferPhase::Committed), &solo, peer(2)));
     }
 }
 
