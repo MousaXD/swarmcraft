@@ -343,6 +343,10 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
         assert!(resolver.resolve(world).await.is_err());
 
         quorum.quorum_ready.store(true, Ordering::SeqCst);
+        // Previous real sessions and refused joins have consumed the host's
+        // bounded per-peer control-plane request budget. Recovery must wait
+        // for that *existing* 2s admission window, not weaken the limiter.
+        tokio::time::sleep(Duration::from_millis(2_200)).await;
         let mut rejoined = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, stable_port)).await.unwrap();
         rejoined.write_all(b"fresh Java login").await.unwrap();
         let mut reply = [0u8; 16];
