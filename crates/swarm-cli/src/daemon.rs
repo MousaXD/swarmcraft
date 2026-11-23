@@ -885,6 +885,22 @@ fn transfer_request_pending(
     )
 }
 
+/// A valid signature identifies who approved a phase, not who is permitted to
+/// deliver it. In particular, a witness must not replay a signed Prepared or
+/// Committed phase to the target before the source's witness-ack gate.
+fn authorize_transfer_delivery(record: &AuthorityTransferV1, sender: PeerId) -> Result<()> {
+    let allowed = match record.phase {
+        TransferPhase::Prepared | TransferPhase::Committed => sender == record.from_peer_id,
+        // The target sends Accepted to the source; only the source may relay
+        // that already signed phase to other witnesses.
+        TransferPhase::Accepted => sender == record.to_peer_id || sender == record.from_peer_id,
+    };
+    if !allowed {
+        return Err(anyhow!("transfer phase was relayed by an unauthorized authenticated member"));
+    }
+    Ok(())
+}
+
 fn transfer_checkpoint_acknowledged(runtime: &LeaseRuntime, record: &AuthorityTransferV1, peer: PeerId) -> bool {
     runtime.transfer_replica_acks.get(&(record.world_id, peer)) == Some(&record.base_snapshot_hash)
 }
@@ -2252,9 +2268,11 @@ fn push_committed_world_payload(
             node.send_request(transport_peer, WireRequest::Membership(membership))?;
         }
     }
-    if let Ok(transfer) = storage.load_transfer_record(world) {
-        node.send_request(transport_peer, WireRequest::AuthorityTransfer(transfer))?;
-    }
+    // Do NOT broadcast a transfer during generic reconnect/bootstrap sync.
+    // Even a correctly signed Prepared phase can arrive at the target before
+    // the source has replicated its final checkpoint to all active voters or
+    // collected their acknowledgements. The staged transfer driver exclusively
+    // controls phase delivery and retries (including reconnects).
     if let Ok(sleep) = storage.load_sleep_record(world) {
         node.send_request(transport_peer, WireRequest::Sleep(sleep))?;
     }
@@ -2895,6 +2913,7 @@ fn handle_request(
             ensure_no_membership_prepare(storage, transfer.world_id)?;
             verify_transfer_signature(&transfer)?;
             authorize_member(storage, transfer.world_id, transfer.signer_peer_id)?;
+            authorize_transfer_delivery(&transfer, application_peer)?;
             // Lost acknowledgements are common across reconnects. Exact
             // signed replays of the durable phase are safe to acknowledge,
             // but still require the current canonical base and membership.
@@ -4445,6 +4464,35 @@ mod automatic_transfer_delivery_tests {
         assert_eq!(transfer_recipients(peer(2), &descriptor, &accepted, &[]), vec![peer(1)]);
         assert_eq!(transfer_recipients(peer(1), &descriptor, &accepted, &[]), vec![peer(3)]);
         assert!(transfer_recipients(peer(3), &descriptor, &accepted, &[]).is_empty());
+    }
+
+    #[test]
+    fn authenticated_witness_cannot_relay_signed_transfer_phases_out_of_order() {
+        for phase in [TransferPhase::Prepared, TransferPhase::Committed] {
+            let record = transfer(phase);
+            assert!(authorize_transfer_delivery(&record, peer(1)).is_ok());
+            assert!(authorize_transfer_delivery(&record, peer(2)).is_err());
+            assert!(authorize_transfer_delivery(&record, peer(3)).is_err());
+        }
+        let accepted = transfer(TransferPhase::Accepted);
+        // A target can send its own signed acceptance to the source; the
+        // source is the only other authorized relay to the witness set.
+        assert!(authorize_transfer_delivery(&accepted, peer(2)).is_ok());
+        assert!(authorize_transfer_delivery(&accepted, peer(1)).is_ok());
+        assert!(authorize_transfer_delivery(&accepted, peer(3)).is_err());
+    }
+
+    #[test]
+    fn reconnect_without_phase_acks_still_requires_witness_before_target() {
+        let descriptor = descriptor();
+        let committed = transfer(TransferPhase::Committed);
+        // Restart or disconnect destroys volatile delivery acknowledgments.
+        // Reconnect must not treat the previously signed record as its own
+        // delivery receipt or skip the last witness.
+        let acks_after_reconnect = Vec::new();
+        assert_eq!(transfer_recipients(peer(1), &descriptor, &committed, &acks_after_reconnect), vec![peer(3)]);
+        let witness_ack = vec![ack(peer(3), committed.clone())];
+        assert_eq!(transfer_recipients(peer(1), &descriptor, &committed, &witness_ack), vec![peer(2)]);
     }
 
     #[test]

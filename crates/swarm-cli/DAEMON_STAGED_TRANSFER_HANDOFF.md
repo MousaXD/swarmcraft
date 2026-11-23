@@ -74,6 +74,17 @@ members to acknowledge the final checkpoint and relevant transfer stages.
 This is **stricter than quorum**: offline non-banned members may delay a
 planned handoff, never silently lower its authority requirements.
 
+On reconnect, the ordinary world bootstrap now sends only the regular
+signed world/config/epoch/checkpoint payloads, **never** a signed transfer
+phase. Transfer delivery remains exclusively in `drive_staged_transfers`,
+which re-replicates the final checkpoint and reobtains witness ACKs after
+disconnect/restart before delivering Prepared or Committed to the target.
+Inbound signed phases also require an authenticated sender with the correct
+handoff role: the source delivers Prepared/Committed, the target sends
+Accepted to the source, and the source alone may relay Accepted to witnesses.
+A different world member cannot replay a valid signature to bypass the
+source's delivery order.
+
 ## Not implemented / explicit integration dependencies
 
 - The daemon now owns the one-time bounded game-route control subscriber and
@@ -153,7 +164,7 @@ flock -x /tmp/swarmcraft-sabathon-cargo.lock sh -c \
    CARGO_BUILD_JOBS=2 cargo clippy -p swarm-cli --bin swarmcraft --offline --jobs 2 -- -D warnings'
 ```
 
-On 23 Nov 2026 the full `swarmcraft` binary unit suite passed **40/40**
+On 23 Nov 2026 the full `swarmcraft` binary unit suite passed **42/42**
 and strict `swarmcraft` binary Clippy passed on the Agent 3 worktree.
 These tests include phase ordering, witness gate, replay/redelivery,
 checkpoint-ack identity, exact activated successor generation, and the
@@ -165,5 +176,7 @@ records**, including denial to a mismatched requester and after sleep. The
 outbound quorum collector tests cover valid signed replies, wrong peer/key,
 changed nonces, tampered signatures, response refusal, disconnected/expired
 work, and bounded worker requests. They are local scoped tests, not three
-independently installed Minecraft peers.
+independently installed Minecraft peers. The additional reconnect/relay
+tests cover the transfer delivery role for every phase and re-required
+witness acknowledgment after disconnect.
 They are **source/local tests, not a three-machine Minecraft field pass**.
