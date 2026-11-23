@@ -310,8 +310,16 @@ async function launchPreparedWorld(backend, world, status, dialog = null) {
   try {
     const pid = await backend.runtime.launch(world.id);
     dialog?.close();
-    setWorldNotice(`Minecraft started${pid ? ` · PID ${pid}` : ''}.`, 'safe');
-    setActivity(`Minecraft runtime started${pid ? ` with PID ${pid}` : ''}.`, 'Play');
+    if (pid == null) {
+      // The daemon owns multiplayer hosting. A verified gateway is enough
+      // to show manual reconnect instructions, NOT to claim that a local JVM
+      // started or that any Minecraft player actually logged in.
+      setWorldNotice('Authenticated Minecraft route verified. Use the current localhost address under Join current host; connect in Minecraft Java Multiplayer.', 'safe');
+      setActivity('A fresh signed multiplayer route is available. No direct Minecraft server was launched by Desktop.', 'Play');
+    } else {
+      setWorldNotice(`Minecraft server started · PID ${pid}.`, 'safe');
+      setActivity(`Minecraft server runtime started with PID ${pid}.`, 'Play');
+    }
     setTopStatus('Ready', 'safe');
     return pid;
   } catch (error) {

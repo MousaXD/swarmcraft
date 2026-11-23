@@ -44,7 +44,7 @@ fn valid_snapshot_hash(value: &str) -> bool {
 }
 
 fn valid_authority_peer_id(value: &str) -> bool {
-    value.strip_prefix("scpeer:").is_some_and(|hex| valid_snapshot_hash(hex))
+    value.strip_prefix("scpeer:").is_some_and(valid_snapshot_hash)
 }
 
 pub fn decode_game_route_status(

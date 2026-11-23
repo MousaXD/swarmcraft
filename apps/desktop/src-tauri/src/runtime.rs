@@ -136,6 +136,15 @@ impl RuntimeProcesses {
         )
     }
 
+    /// A direct solo host cannot be adopted by the daemon's authenticated
+    /// Fabric IPC registry just because another peer joined the world. Do
+    /// not silently run a second host or claim a new signed route while the
+    /// old Desktop-owned process is still alive.
+    pub fn current_direct_host_pid(&self) -> Result<Option<u32>, String> {
+        let guard = self.host.state.lock().map_err(|_| "Desktop managed-host process state is unavailable")?;
+        Ok(guard.existing_pid(CommandChild::pid))
+    }
+
     pub fn runtime_diagnostics_reference(&self, app: &AppHandle, world: &str) -> Result<String, String> {
         let diagnostic = runtime_diagnostic(app, world)?;
         serde_json::to_string(&serde_json::json!({

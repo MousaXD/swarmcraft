@@ -1,6 +1,6 @@
 # SwarmCraft Sabathon P0 — live integration verification
 
-**Updated: 23 November 2026. Status: NOT CERTIFIED / real three-machine gameplay BLOCKED.**
+**Updated: 24 November 2026. Status: NOT CERTIFIED / real three-machine gameplay BLOCKED.**
 
 Work ONLY on `integration/sabathon-p0-20261123`. Preserve the original
 `docs/SABATHON_SINGLE_AGENT_HANDOFF.md`, the signed integration contracts and
@@ -51,6 +51,34 @@ checks, not a completed release or hypothetical Minecraft sessions.
   git-ignored `apps/desktop/src-tauri/binaries/` directory for native checks.
   This is not an installed, signed or cross-platform package acceptance.
 
+### Desktop Play process-ownership follow-up (24 November)
+
+- **Closed a runtime-ownership hole in Desktop Play dispatch.** Previously,
+  `runtime_launch` always spawned a separate `swarmcraft-runtime launch`
+  sidecar, whose Fabric IPC was not owned by the daemon's live runtime
+  registry. That standalone process cannot supply fresh authenticated Fabric
+  evidence to the multiplayer route signer. The native Desktop now reads the
+  current world descriptor and **signature-verified membership**, checks their
+  exact member sets, local identity and accepted signed epoch, and reserves
+  direct runtime launch only for a verified one-member local solo world.
+- For any multi-member or non-solo accepted generation, Desktop Play starts
+  only the existing daemon/supervisor and selects the world-local loopback
+  gateway; it waits for the daemon's **newly signed, independent, exact-world**
+  game-route status rather than a persisted migration Ready. It does **not**
+  start another Java host or substitute an unverified process PID. If an
+  older Desktop-owned direct host is still running, it refuses with a safe
+  checkpoint/stop instruction rather than competing for the authority slot.
+  The Player-only "Join current host" control remains independent of the
+  server-install/EULA Play wizard.
+- A verified daemon route indicates only that a new Minecraft connection may
+  be attempted through the local gateway. The Play wizard explicitly avoids
+  reporting an independently launched Minecraft JVM or a successful actual
+  Minecraft login when the daemon owns the world.
+- A single-member solo world retains the original standalone runtime path
+  for its existing gameplay behavior; **solo mode cannot produce a quorum-
+  verified multiplayer game route**. This deliberately does not permit
+  stale solo authority to join a multi-member generation.
+
 ## Local verification performed
 
 | Check | Result | Scope |
@@ -61,13 +89,18 @@ checks, not a completed release or hypothetical Minecraft sessions.
 | `cargo test -p swarm-cli --lib` | 126 PASS | Supervisor, permit, signed authority, checkpoint, runtime registry and local IPC |
 | `cargo test -p swarm-cli --bin swarmcraft` | 44 PASS | Signed transfer, recovery, fencing, quorum, gateway selection and failure paths |
 | `cargo test -p swarm-network --lib -- --test-threads=1` | 111 PASS | Signed routes, durable generation floors, real localhost mock byte forwarding and consent loss |
-| `node --test apps/desktop/tests/*.test.mjs` | 128 PASS | Includes real Chrome 157 / matching temporary ChromeDriver smoke at three viewport sizes |
+| `node --test apps/desktop/tests/*.test.mjs` | 129 PASS after Desktop Play follow-up | Includes real Chrome 157 / matching temporary ChromeDriver smoke at three viewport sizes |
 | Three-machine Python `test_*.py` unittest discovery | 112 PASS | Field evidence and acceptance-policy mocks only |
-| Native Linux Desktop `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked` | PASS | Compiles native Tauri app with real staged sidecars, **not** a signed installer or GUI login |
+| Native Linux Desktop `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked` | PASS again after Desktop Play follow-up | Compiles native Tauri app with real staged sidecars, **not** a signed installer or GUI login |
+| Native Linux Desktop `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked -- --test-threads=1` | 57 PASS after Desktop Play follow-up | Full native Tauri suite; includes 3 signed solo/multi-member dispatch and forged-membership refusal tests |
+| Native Linux Desktop `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --bin swarmcraft-desktop --locked -- -D warnings` | PASS | Strict native lint; also replaced a behavior-equivalent pre-existing redundant closure in the game-route decoder |
 | `python3 scripts/e2e/sabathon_local_gateway_smoke.py` | PASS | Disposable genuine daemon + native CLI, double-daemon ownership refusal, durable localhost port after restart, no-quorum/consent TCP refusal, no cached status |
 
 All Cargo work was serialized via `/tmp/swarmcraft-sabathon-cargo.lock`
 with no more than two build jobs, and disk free space was checked throughout.
+After verification, approximately 3.3 GiB of disposable Rust incremental
+compile caches were removed from this worktree (not the real sidecar binaries,
+committed files, or canonical world data), leaving roughly 23 GB free.
 The 111-test network run initially saw three `StaleAuthority` positive-fixture
 expiries under heavy concurrent host load. The **unchanged** three tests passed
 individually, and the complete **unchanged** suite passed serially. No

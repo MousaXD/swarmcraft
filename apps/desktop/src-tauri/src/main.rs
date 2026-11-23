@@ -4,6 +4,7 @@ mod canonical_commands;
 mod canonical_world_commands;
 mod catalog_commands;
 mod curseforge;
+mod desktop_play_route;
 mod game_route_commands;
 mod hosting_contribution_commands;
 mod launcher_commands;
@@ -229,16 +230,10 @@ async fn game_route_select(app: AppHandle, world: String) -> Result<String, Stri
 /// nonce-bound signed route proof. A missing daemon or failed proof never
 /// falls back to migration-status, discovery or a configured game endpoint.
 #[tauri::command]
-async fn game_route_status(
-    app: AppHandle,
-    world: String,
-) -> Result<game_route_commands::GameRouteStatusReply, String> {
+async fn game_route_status(app: AppHandle, world: String) -> Result<game_route_commands::GameRouteStatusReply, String> {
     let world = hosting_contribution_commands::validate_world_id(&world)?;
-    let output = run_cli(
-        &app,
-        vec!["world".into(), "game-route-status".into(), world.to_string(), "--json".into()],
-    )
-    .await?;
+    let output =
+        run_cli(&app, vec!["world".into(), "game-route-status".into(), world.to_string(), "--json".into()]).await?;
     game_route_commands::decode_current_game_route_status(&output, world)
 }
 
@@ -470,8 +465,50 @@ async fn runtime_launch(
     processes: State<'_, RuntimeProcesses>,
     world: String,
 ) -> Result<Option<u32>, String> {
-    let world = require_value(world, "World ID")?;
+    let world_id = hosting_contribution_commands::validate_world_id(&world)?;
+    let world = world_id.to_string();
+    // This dispatch is based on the signed canonical membership, not a
+    // cached migration phase or the UI's claim that the world is single-user.
+    let play_mode = desktop_play_route::current_play_route_mode(world_id)?;
     processes.ensure_daemon_running(&app, "/ip4/0.0.0.0/udp/0/quic-v1".into())?;
+    if play_mode == desktop_play_route::PlayRouteMode::DaemonSignedMultiplayer {
+        if processes.current_direct_host_pid()?.is_some() {
+            return Err(
+                "A Desktop-owned direct Minecraft server is still running. Stop it safely and wait for its checkpoint before using the daemon-owned signed multiplayer route."
+                    .into(),
+            );
+        }
+        // A second, standalone `swarmcraft-runtime launch` process has no
+        // daemon-owned live Fabric IPC registry. It must NEVER host a
+        // multiplayer world while the daemon tries to sign fresh routes.
+        // The existing supervisor starts an eligible consenting authority
+        // through its live registry after quorum/fence checks. Player-only
+        // clients also take this branch but can never launch a JVM.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let mut selected = false;
+        while std::time::Instant::now() < deadline {
+            if !selected {
+                selected = run_cli(&app, vec!["world".into(), "game-route-select".into(), world.clone()]).await.is_ok();
+            }
+            if selected {
+                // No migration Ready, configured game_endpoint or old GUI
+                // proof may complete Play. A newly verified signed route is
+                // required, exact-world and bounded by Tauri's Rust decoder.
+                if let Ok(status) = game_route_status(app.clone(), world.clone()).await {
+                    if status.route_verified && status.state == "verified" {
+                        return Ok(None); // Daemon owns the Java process; not a fake host PID.
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        }
+        return Err(
+            "No fresh authenticated multiplayer Minecraft route. Verify connected quorum, hosting consent, the daemon-owned Fabric runtime and current checkpoint; direct server launch was not attempted."
+                .into(),
+        );
+    }
+    // Preserve original direct local Play ONLY for an unambiguous signed
+    // solo world. Solo mode never advertises a quorum-backed game route.
     let pid = processes.start_managed_host(&app, world.clone())?;
     for _ in 0..160 {
         match run_cli(&app, vec!["world".into(), "migration-status".into(), world.clone(), "--json".into()]).await {

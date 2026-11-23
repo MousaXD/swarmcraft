@@ -98,6 +98,14 @@ test('Play flow is wizard-first only when setup is missing, but ready runtimes l
   assert.match(wizard, /backend\.runtime\.launch\(world\.id\)/);
 });
 
+test('daemon-owned multiplayer Play does not claim that Desktop started a JVM or observed a Minecraft login', async () => {
+  const wizard = await source('runtime-wizard.js');
+  assert.match(wizard, /if \(pid == null\) \{/);
+  assert.match(wizard, /No direct Minecraft server was launched by Desktop/);
+  assert.match(wizard, /Minecraft server started · PID \$\{pid\}/);
+  assert.doesNotMatch(wizard, /Minecraft started\$\{pid \?/);
+});
+
 test('wizard exposes explicit EULA, retry safety, advanced fallback, progress, and keyboard restoration', async () => {
   const wizard = await source('runtime-wizard.js');
   for (const anchor of [
