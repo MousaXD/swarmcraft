@@ -53,7 +53,8 @@ Run when the other agent's Rust build is idle, with at most two jobs:
     CARGO_BUILD_JOBS=2 cargo test -p swarm-network --lib game_route_host_service --offline --jobs 2
     CARGO_BUILD_JOBS=2 cargo clippy -p swarm-network --lib --offline --jobs 2 -- -D warnings
 
-The tests deliberately use a synthetic stalled/unavailable proof source.
-They prove bounded refusal, worker-cap enforcement, and slot recovery.
+The tests use synthetic stalled/unavailable and synthetic ready proof sources.
+They prove bounded refusal, worker-cap enforcement, slot recovery, a valid
+signed offer/challenge path, one-use replay rejection and readiness withdrawal.
 They do not prove real quorum or Java readiness. The daemon has not yet
 connected this service to real host runtime authority.

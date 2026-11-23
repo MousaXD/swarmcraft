@@ -77,9 +77,7 @@ impl BoundedGameRouteHostResponder {
         }
         match timeout(self.max_wait, receiver).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) | Err(_) => {
-                Ok(GameRouteControlResponseV1::Refused(GameRouteRefusalV1::Unavailable))
-            }
+            Ok(Err(_)) | Err(_) => Ok(GameRouteControlResponseV1::Refused(GameRouteRefusalV1::Unavailable)),
         }
     }
 }
@@ -87,11 +85,11 @@ impl BoundedGameRouteHostResponder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game_route::{FreshAuthorityEvidence, FreshAuthoritySource};
+    use crate::game_route::{FreshAuthorityEvidence, FreshAuthoritySource, RouteVerifier};
     use ed25519_dalek::SigningKey;
     use libp2p::identity::Keypair;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use swarm_protocol::WorldId;
+    use swarm_protocol::{peer_id_from_public_key, Hash32, WorldId};
 
     struct SlowUnavailableAuthority {
         started: AtomicBool,
@@ -184,5 +182,122 @@ mod tests {
             .unwrap();
         assert_eq!(result, GameRouteControlResponseV1::Refused(GameRouteRefusalV1::ExpiredOrMalformed));
         assert!(!source.started.load(Ordering::SeqCst));
+    }
+
+    /// Test-only evidence fixture. This must NEVER be supplied to a real
+    /// daemon: its membership/quorum/runtime are synthetic, not certificates.
+    struct SyntheticReadyAuthority {
+        world: WorldId,
+        member: PeerId,
+        key: [u8; 32],
+        host_transport: TransportPeerId,
+        ready: AtomicBool,
+    }
+
+    impl FreshAuthoritySource for SyntheticReadyAuthority {
+        fn verify_fresh(
+            &self,
+            world: WorldId,
+            requester: PeerId,
+            nonce: [u8; 32],
+        ) -> Result<FreshAuthorityEvidence, GameRouteError> {
+            if world != self.world || requester != self.member {
+                return Err(GameRouteError::UnverifiedAuthority);
+            }
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            Ok(FreshAuthorityEvidence {
+                world_id: world,
+                realm_hash: Hash32([1; 32]),
+                authority_peer_id: peer_id_from_public_key(&self.key),
+                authority_public_key: self.key,
+                authority_transport_peer: self.host_transport,
+                game_server_port: 25565,
+                requester_is_member: true,
+                authority_is_member: true,
+                conflict_free: true,
+                hosting_consent_valid: true,
+                runtime_ready_verified: self.ready.load(Ordering::SeqCst),
+                membership_hash: Hash32([2; 32]),
+                quorum_certificate_hash: Hash32([3; 32]),
+                compatibility_fingerprint: Hash32([4; 32]),
+                checkpoint_hash: Hash32([5; 32]),
+                state_root: Hash32([6; 32]),
+                epoch: 4,
+                fencing_token: 9,
+                consent_revision: 2,
+                runtime_instance_nonce: [7; 32],
+                runtime_ready_proof_hash: Hash32([8; 32]),
+                challenge_nonce: nonce,
+                verified_at_unix_ms: now,
+                valid_until_unix_ms: now + 4_000,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_responder_signs_only_test_verified_authority_and_consumes_challenge() {
+        let root = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let key = SigningKey::from_bytes(&[22; 32]);
+        let host_transport = Keypair::generate_ed25519().public().to_peer_id();
+        let requester_transport = Keypair::generate_ed25519().public().to_peer_id();
+        let requester = PeerId([21; 32]);
+        let world = WorldId([10; 32]);
+        let source = Arc::new(SyntheticReadyAuthority {
+            world,
+            member: requester,
+            key: key.verifying_key().to_bytes(),
+            host_transport,
+            ready: AtomicBool::new(true),
+        });
+        let signer = Arc::new(AuthenticatedGameRouteHostSigner::new(
+            key,
+            host_transport,
+            source.clone(),
+            root.path().join("host-sequences"),
+        ));
+        let service = BoundedGameRouteHostResponder::new(signer);
+        let offer = service
+            .answer(requester, requester_transport, GameRouteControlRequestV1::Offer { world_id: world })
+            .await
+            .unwrap();
+        let GameRouteControlResponseV1::Offer(offer) = offer else {
+            panic!("the independent test authority should permit a signed offer");
+        };
+        assert_eq!(offer.verify_signature().unwrap(), host_transport);
+        let verifier = RouteVerifier::new(root.path().join("accepted-generation-floors"));
+        let challenge = verifier.issue_challenge(&offer, requester, requester_transport).unwrap();
+        let answer = service
+            .answer(requester, requester_transport, GameRouteControlRequestV1::Challenge(Box::new(challenge.clone())))
+            .await
+            .unwrap();
+        let GameRouteControlResponseV1::ChallengeResponse(response) = answer else {
+            panic!("the current signed offer must answer its one-time challenge");
+        };
+        assert_eq!(response.challenge, challenge);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let route = verifier.verify(&offer, &response, world, now, source.as_ref()).unwrap();
+        assert!(route.is_fresh());
+        assert_eq!(route.transport_peer(), host_transport);
+        assert_eq!(
+            service
+                .answer(requester, requester_transport, GameRouteControlRequestV1::Challenge(Box::new(challenge)),)
+                .await
+                .unwrap(),
+            GameRouteControlResponseV1::Refused(GameRouteRefusalV1::ExpiredOrMalformed)
+        );
+
+        source.ready.store(false, Ordering::SeqCst);
+        assert_eq!(
+            service
+                .answer(requester, requester_transport, GameRouteControlRequestV1::Offer { world_id: world },)
+                .await
+                .unwrap(),
+            GameRouteControlResponseV1::Refused(GameRouteRefusalV1::HostUnready)
+        );
     }
 }
