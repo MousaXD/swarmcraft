@@ -11,7 +11,13 @@ use crate::game_route::{
 };
 use libp2p::{request_response, PeerId as TransportPeerId};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use swarm_protocol::{Hash32, PeerId, WorldId};
+use thiserror::Error;
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::timeout,
+};
 
 pub const GAME_ROUTE_CONTROL_PROTOCOL: &str = "/swarmcraft/minecraft-route-control/1";
 pub const GAME_ROUTE_CONTROL_MAX_REQUEST_BYTES: u64 = 1024;
@@ -19,6 +25,63 @@ pub const GAME_ROUTE_CONTROL_MAX_RESPONSE_BYTES: u64 = MAX_ROUTE_WIRE_BYTES as u
 pub const GAME_ROUTE_CONTROL_MAX_OUTSTANDING: usize = 32;
 pub const GAME_ROUTE_CONTROL_MAX_REQUESTS_PER_WINDOW: u32 = 8;
 pub const GAME_ROUTE_CONTROL_EVENT_QUEUE: usize = 32;
+pub const GAME_ROUTE_RPC_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// A bounded request mailbox usable by a gateway while SwarmNode is owned by
+/// the daemon's existing event loop. Requires concurrent next_event() polling.
+/// Responses are connection-bound inside SwarmNode, never matched by world ID
+/// alone. Neither this client nor its mailbox supplies authority evidence.
+#[derive(Clone, Debug)]
+pub struct GameRouteRpcClient {
+    pub(crate) sender: mpsc::Sender<GameRouteRpcCommand>,
+}
+
+pub(crate) struct GameRouteRpcCommand {
+    pub peer: TransportPeerId,
+    pub request: GameRouteControlRequestV1,
+    pub reply: oneshot::Sender<Result<GameRouteControlResponseV1, GameRouteRpcError>>,
+}
+
+impl std::fmt::Debug for GameRouteRpcCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GameRouteRpcCommand").field("peer", &self.peer).finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum GameRouteRpcError {
+    #[error("invalid game-route control request")]
+    InvalidRequest,
+    #[error("requested peer is not authenticated or controller is unavailable")]
+    Unavailable,
+    #[error("game-route request budget is exhausted")]
+    Overloaded,
+    #[error("game-route request timed out or its driver stopped")]
+    Deadline,
+    #[error("game-route control reply is invalid or stale")]
+    InvalidResponse,
+}
+
+impl GameRouteRpcClient {
+    /// This method cannot make progress unless SwarmNode::next_event() is
+    /// actively polled. A stalled network driver always fails closed.
+    pub async fn request(
+        &self,
+        peer: TransportPeerId,
+        request: GameRouteControlRequestV1,
+    ) -> Result<GameRouteControlResponseV1, GameRouteRpcError> {
+        request.validate().map_err(|_| GameRouteRpcError::InvalidRequest)?;
+        let (reply, result) = oneshot::channel();
+        self.sender.try_send(GameRouteRpcCommand { peer, request, reply }).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => GameRouteRpcError::Overloaded,
+            mpsc::error::TrySendError::Closed(_) => GameRouteRpcError::Unavailable,
+        })?;
+        timeout(GAME_ROUTE_RPC_TIMEOUT, result)
+            .await
+            .map_err(|_| GameRouteRpcError::Deadline)?
+            .map_err(|_| GameRouteRpcError::Unavailable)?
+    }
+}
 
 /// Independent bounded subscription; adding route-control messages does not
 /// change the exhaustive legacy NetworkEvent enum used by the daemon.

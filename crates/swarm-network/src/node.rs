@@ -6,7 +6,8 @@ use crate::{
     build_peer_hello_proof,
     game_route_control::{
         GameRouteControlEvent, GameRouteControlRequestV1, GameRouteControlResponseV1, GameRouteRefusalV1,
-        GAME_ROUTE_CONTROL_EVENT_QUEUE, GAME_ROUTE_CONTROL_MAX_OUTSTANDING, GAME_ROUTE_CONTROL_MAX_REQUESTS_PER_WINDOW,
+        GameRouteRpcClient, GameRouteRpcCommand, GameRouteRpcError, GAME_ROUTE_CONTROL_EVENT_QUEUE,
+        GAME_ROUTE_CONTROL_MAX_OUTSTANDING, GAME_ROUTE_CONTROL_MAX_REQUESTS_PER_WINDOW,
         GAME_ROUTE_CONTROL_MAX_REQUEST_BYTES, GAME_ROUTE_CONTROL_MAX_RESPONSE_BYTES, GAME_ROUTE_CONTROL_PROTOCOL,
     },
     verify_peer_hello, verify_peer_hello_proof,
@@ -36,7 +37,7 @@ use std::{
     time::{Duration, Instant},
 };
 use swarm_protocol::{PeerHelloV1, PeerId, PROTOCOL_VERSION};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 pub const WIRE_PROTOCOL: &str = "/swarmcraft/1";
@@ -111,6 +112,7 @@ struct PendingGameRouteControl {
     connection_id: ConnectionId,
     request: GameRouteControlRequestV1,
     issued_at: Instant,
+    rpc_reply: Option<oneshot::Sender<std::result::Result<GameRouteControlResponseV1, GameRouteRpcError>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +139,8 @@ pub struct SwarmNode {
     game_route_budgets: HashMap<TransportPeerId, (Instant, u32)>,
     game_route_events_tx: mpsc::Sender<GameRouteControlEvent>,
     game_route_events_rx: Option<mpsc::Receiver<GameRouteControlEvent>>,
+    game_route_rpc_tx: mpsc::Sender<GameRouteRpcCommand>,
+    game_route_rpc_rx: mpsc::Receiver<GameRouteRpcCommand>,
     pending_challenges: HashMap<TransportPeerId, (ConnectionId, [u8; 32], Instant)>,
     active_connections: HashMap<TransportPeerId, ConnectionId>,
     connection_counts: HashMap<TransportPeerId, usize>,
@@ -213,6 +217,7 @@ impl SwarmNode {
             .build();
 
         let (game_route_events_tx, game_route_events_rx) = mpsc::channel(GAME_ROUTE_CONTROL_EVENT_QUEUE);
+        let (game_route_rpc_tx, game_route_rpc_rx) = mpsc::channel(GAME_ROUTE_CONTROL_MAX_OUTSTANDING);
         let mut node = Self {
             swarm,
             local_hello,
@@ -223,6 +228,8 @@ impl SwarmNode {
             game_route_budgets: HashMap::new(),
             game_route_events_tx,
             game_route_events_rx: Some(game_route_events_rx),
+            game_route_rpc_tx,
+            game_route_rpc_rx,
             pending_challenges: HashMap::new(),
             active_connections: HashMap::new(),
             connection_counts: HashMap::new(),
@@ -265,6 +272,13 @@ impl SwarmNode {
     /// existing replication daemon remains compatible and unchanged.
     pub fn take_game_route_control_events(&mut self) -> Option<mpsc::Receiver<GameRouteControlEvent>> {
         self.game_route_events_rx.take()
+    }
+
+    /// Clone this into a concurrent gateway resolver while the daemon owns
+    /// SwarmNode. The connection-bound identity and bounds are enforced by
+    /// the node, not by callers of this mailbox.
+    pub fn game_route_rpc_client(&self) -> GameRouteRpcClient {
+        GameRouteRpcClient { sender: self.game_route_rpc_tx.clone() }
     }
 
     pub fn connectivity_diagnostics(&self) -> ConnectivityDiagnosticsV1 {
@@ -496,6 +510,15 @@ impl SwarmNode {
         if self.game_route_events_rx.is_some() || self.game_route_events_tx.is_closed() {
             return Err(anyhow!("game route control events must have a live subscriber"));
         }
+        self.send_game_route_request_internal(peer, request, None)
+    }
+
+    fn send_game_route_request_internal(
+        &mut self,
+        peer: &TransportPeerId,
+        request: GameRouteControlRequestV1,
+        rpc_reply: Option<oneshot::Sender<std::result::Result<GameRouteControlResponseV1, GameRouteRpcError>>>,
+    ) -> Result<request_response::OutboundRequestId> {
         request.validate().map_err(|_| anyhow!("invalid game route control request"))?;
         if let GameRouteControlRequestV1::Challenge(ref challenge) = request {
             if challenge.requester_peer_id != self.local_hello.peer_id
@@ -520,9 +543,19 @@ impl SwarmNode {
         let request_id = self.swarm.behaviour_mut().game_route_control.send_request(peer, request.clone());
         self.pending_game_route.insert(
             request_id,
-            PendingGameRouteControl { peer: *peer, connection_id, request, issued_at: Instant::now() },
+            PendingGameRouteControl { peer: *peer, connection_id, request, issued_at: Instant::now(), rpc_reply },
         );
         Ok(request_id)
+    }
+
+    fn handle_game_route_rpc(&mut self, command: GameRouteRpcCommand) {
+        let GameRouteRpcCommand { peer, request, reply } = command;
+        // No unauthenticated shortcut: use EXACTLY the same validated request
+        // path as the subscriber API, with an independent one-shot reply.
+        if let Err(error) = self.send_game_route_request_internal(&peer, request, Some(reply)) {
+            debug!(%peer, %error, "game route RPC refused at network boundary");
+            // The one-shot sender has been dropped and the caller fails closed.
+        }
     }
 
     pub fn respond_game_route(
@@ -554,10 +587,19 @@ impl SwarmNode {
     pub async fn next_event(&mut self) -> Result<NetworkEvent> {
         loop {
             self.expire_stale_auth_challenges();
-            let event = match tokio::time::timeout(AUTH_CHALLENGE_TIMEOUT, self.swarm.select_next_some()).await {
-                Ok(event) => event,
-                Err(_) => continue,
+            let mut command = None;
+            let event = tokio::select! {
+                received = self.game_route_rpc_rx.recv() => {
+                    command = received;
+                    None
+                }
+                event = tokio::time::timeout(AUTH_CHALLENGE_TIMEOUT, self.swarm.select_next_some()) => event.ok(),
             };
+            if let Some(command) = command {
+                self.handle_game_route_rpc(command);
+                continue;
+            }
+            let Some(event) = event else { continue };
             self.expire_stale_auth_challenges();
             match event {
                 SwarmEvent::NewListenAddr { address, .. } => {
@@ -979,7 +1021,7 @@ impl SwarmNode {
                                 });
                             }
                             request_response::Message::Response { request_id, response } => {
-                                let Some(pending) = self.pending_game_route.remove(&request_id) else {
+                                let Some(mut pending) = self.pending_game_route.remove(&request_id) else {
                                     continue; // Never accept unsolicited or late responses.
                                 };
                                 let current =
@@ -996,6 +1038,13 @@ impl SwarmNode {
                                     || !pending.request.accepts_response(&response)
                                 {
                                     warn!(transport_peer = %peer, "discarded invalid/stale game route control reply");
+                                    if let Some(reply) = pending.rpc_reply.take() {
+                                        let _ = reply.send(Err(GameRouteRpcError::InvalidResponse));
+                                    }
+                                    continue;
+                                }
+                                if let Some(reply) = pending.rpc_reply.take() {
+                                    let _ = reply.send(Ok(response));
                                     continue;
                                 }
                                 if self
@@ -1012,7 +1061,11 @@ impl SwarmNode {
                             }
                         },
                         request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
-                            if self.pending_game_route.remove(&request_id).is_none() {
+                            let Some(mut pending) = self.pending_game_route.remove(&request_id) else {
+                                continue;
+                            };
+                            if let Some(reply) = pending.rpc_reply.take() {
+                                let _ = reply.send(Err(GameRouteRpcError::Unavailable));
                                 continue;
                             }
                             let _ = self.game_route_events_tx.try_send(GameRouteControlEvent::OutboundFailure {
