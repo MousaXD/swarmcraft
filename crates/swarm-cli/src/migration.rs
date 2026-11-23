@@ -2,6 +2,8 @@ use crate::{
     authority_permit::PermitWatch, host_readiness, hosting_budget, launch_guard,
     runtime_process_guard::RuntimeProcessGuard, server_mods,
 };
+#[path = "managed_server_properties.rs"]
+mod managed_server_properties;
 use anyhow::{anyhow, bail, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -134,6 +136,14 @@ pub fn load_migration_status(paths: &DataPaths, world: WorldId) -> Result<Migrat
     let path = migration_status_path(paths, world);
     let bytes = fs::read(&path).with_context(|| format!("migration status is unavailable at {}", path.display()))?;
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// Returns only the locally managed Minecraft listener port assignment.
+/// This is not runtime-readiness or signed route authorization: consumers
+/// must independently verify live authenticated Fabric IPC, current canonical
+/// quorum, membership, consent and fencing before forwarding any game data.
+pub fn managed_minecraft_port(paths: &DataPaths, world: WorldId) -> Result<Option<u16>> {
+    managed_server_properties::recorded_port(paths, world)
 }
 
 pub fn request_world_stop(paths: &DataPaths, storage: &Storage, world: WorldId) -> Result<()> {
@@ -711,6 +721,10 @@ async fn run_authority_runtime_inner(
         .with_context(|| format!("cannot install Fabric bridge from {}", options.mod_jar.display()))?;
     server_mods::install_verified_user_mods(paths, options.world, &world_config.compatibility, &runtime.join("mods"))?;
     fs::write(runtime.join("eula.txt"), "eula=true\n")?;
+    // Must be written before Java launch: the default Minecraft listener is
+    // 0.0.0.0:25565 and must NEVER be reachable outside SwarmCraft's signed
+    // authenticated game-stream route. The saved port is not a live proof.
+    let managed_port = managed_server_properties::prepare(paths, options.world, &runtime)?;
     seed_fabric_game_jar(paths, options.world, &metadata.genesis.minecraft_version, &runtime)?;
 
     publish_status(
@@ -744,6 +758,9 @@ async fn run_authority_runtime_inner(
     // pressure must be rechecked immediately before Java starts. Serialize
     // consent publication with the synchronous spawn to close that race.
     let mut child = hosting_budget::with_consent_guarded_spawn(paths, options.world, &admission, || {
+        // Do not launch a server into an occupied saved address or fall back
+        // to a fresh port that would silently redirect an existing world.
+        managed_server_properties::ensure_port_free(managed_port)?;
         launch_server(
             &options.java,
             &options.server_jar,
@@ -786,6 +803,17 @@ async fn run_authority_runtime_inner(
     ) {
         terminate_child(&mut child);
         return Err(error);
+    }
+    // SERVER_STARTED sends authenticated Fabric world info only after Java's
+    // Minecraft listener has initialized. Independently reject an unavailable
+    // local port before recording host-ready status. This does not replace
+    // Agent 1's nonce-bound runtime/authority proof used by game routing.
+    if let Err(error) = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, managed_port).into(),
+        Duration::from_secs(2),
+    ) {
+        terminate_child(&mut child);
+        return Err(anyhow!("managed Minecraft server listener on 127.0.0.1:{managed_port} is unavailable: {error}"));
     }
     if let Err(error) = ensure_authority_generation(storage, &identity, &epoch) {
         terminate_child(&mut child);
