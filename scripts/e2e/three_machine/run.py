@@ -472,7 +472,30 @@ def verify(c, output, review_file=None):
         require(len(route_snapshots) == 1,
                 "game_route_checkpoint_diverged_" + name)
     for role, node in stages["alice_crashed"].items():
-        require(node.get("game_route_status") == {"verified": False},
+        route = node.get("game_route_status")
+        if route == {"verified": False}:
+            continue
+        # A fast, *newly fenced* automatic recovery may legitimately finish
+        # between the actual Alice crash and this read-only remote capture.
+        # Only an unchanged old authority route is forbidden. Never demand a
+        # synthetic outage just so the observer can catch the interim state.
+        target = route.get("local_gateway") if isinstance(route, dict) else None
+        match = re.fullmatch(r"127\.0\.0\.1:([1-9][0-9]{0,4})", target) if isinstance(target, str) else None
+        previous = stages["checkpoint"][role]["game_route_status"]
+        require(isinstance(route, dict) and route.get("verified") is True and
+                route.get("world_fingerprint") == node["world_fingerprint"] and
+                route.get("authority_fingerprint") == b["identity_fingerprint"] and
+                route.get("authority_fingerprint") != a["identity_fingerprint"] and
+                type(route.get("epoch")) is int and type(a["epoch"]) is int and
+                route["epoch"] > a["epoch"] and
+                type(route.get("fencing_token")) is int and type(a["fencing_token"]) is int and
+                route["fencing_token"] > a["fencing_token"] and
+                isinstance(route.get("snapshot_hash"), str) and SHA.fullmatch(route["snapshot_hash"]) and
+                match is not None and int(match.group(1)) <= 65535 and
+                target == stable_gateway_by_role[role] and
+                type(route.get("proof_observed_unix_ms")) is int and
+                type(previous.get("proof_observed_unix_ms")) is int and
+                route["proof_observed_unix_ms"] > previous["proof_observed_unix_ms"],
                 "stale_game_route_survived_old_host_crash_" + role)
 
     # The reviewed denial media is mandatory: merely observing Carol with

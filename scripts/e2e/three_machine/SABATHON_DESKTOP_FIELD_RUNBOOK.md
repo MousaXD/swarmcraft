@@ -77,7 +77,10 @@ time-aligned videos, not a manually filled green checkbox.
    no global kill command. Two surviving voters must authorize exactly one
    replacement. Rejoin via each client's **same local gateway** and verify
    which accepted checkpoint was restored. Restart Alice and show that the
-   old authority cannot resume gameplay or write stale history.
+   old authority cannot resume gameplay or write stale history. The first
+   post-crash capture may already find Bob's *newly fenced* signed route;
+   accept that only if the epoch and fence advanced, the authority is Bob,
+   and the same local gateway has a fresh proof. Alice's old route must fail.
 4. **Quorum negative:** With only two total voters, isolate one. The surviving
    peer must refuse replacement hosting and new Minecraft sessions even if
    it has a byte-perfect stored copy or the old migration record says Ready.

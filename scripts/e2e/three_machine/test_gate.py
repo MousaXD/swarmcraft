@@ -687,9 +687,28 @@ class TestFailClosed(unittest.TestCase):
             out = Path(temp)
             c = fixtures(out)
             crashed = gate.load_json(out / "alice_crashed.json")
-            crashed["nodes"]["bob"]["game_route_status"] = {"verified": True}
+            # A plausible old Alice route with unchanged fence must fail,
+            # even if someone re-labels it as fresh at crash-capture time.
+            old = node("bob", "checkpoint")["game_route_status"]
+            old["proof_observed_unix_ms"] += 10_000
+            crashed["nodes"]["bob"]["game_route_status"] = old
             gate.save(out / "alice_crashed.json", crashed)
             with self.assertRaisesRegex(gate.Blocked, "stale_game_route_survived_old_host_crash_bob"):
+                gate.verify(c, out)
+
+    def test_allows_fast_newly_fenced_recovery_before_crash_probe(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            crashed = gate.load_json(out / "alice_crashed.json")
+            for role in gate.ROLES[1:]:
+                # Fast legitimate recovery may be observed before the
+                # intermediate blocked state, with no stale Alice route.
+                crashed["nodes"][role]["game_route_status"] = (
+                    node(role, "bob_recovered")["game_route_status"]
+                )
+            gate.save(out / "alice_crashed.json", crashed)
+            with self.assertRaisesRegex(gate.Blocked, "independent_player_evidence_review_missing"):
                 gate.verify(c, out)
 
     def test_rejects_replayed_route_observation_after_reconnect(self):
