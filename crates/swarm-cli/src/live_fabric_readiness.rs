@@ -8,7 +8,8 @@
 //! FreshAuthorityEvidence. Never call this on a cached file or network payload.
 
 use anyhow::{bail, Context, Result};
-use std::{path::Path, str::FromStr};
+use std::{path::Path, str::FromStr, time::Duration};
+use swarm_ipc::FabricSession;
 use swarm_protocol::{Hash32, WorldId};
 
 const RUNTIME_PROOF_DOMAIN: &[u8] = b"swarmcraft/live-fabric-ipc-ready/v1\0";
@@ -124,6 +125,25 @@ pub fn verify_runtime_reply(line: &str, expected: &ExpectedFabricRuntime<'_>) ->
         challenge_nonce: expected.challenge_nonce,
         ready_proof_hash: Hash32::from_domain_bytes(RUNTIME_PROOF_DOMAIN, &bytes),
     })
+}
+
+/// Acquire the verified runtime instance only over the supervised controller's
+/// EXISTING authenticated FabricSession, not a new socket or persisted status.
+/// The supervisor must additionally check the managed Java PID, active permit,
+/// consent and canonical authority both before and after this call. This is a
+/// runtime signal, NOT a signed quorum or permission to expose a game route.
+pub async fn challenge_authenticated_session(
+    session: &mut FabricSession,
+    expected: &ExpectedFabricRuntime<'_>,
+    deadline: Duration,
+) -> Result<VerifiedFabricRuntime> {
+    if session.world_info().compatibility_fingerprint != expected.compatibility_fingerprint
+        || Path::new(&session.world_info().world_directory) != expected.world_directory
+    {
+        bail!("authenticated Fabric session identity does not match managed runtime");
+    }
+    let reply = session.runtime_challenge(expected.request_id, expected.challenge_nonce, deadline).await?;
+    verify_runtime_reply(&reply, expected)
 }
 
 #[cfg(test)]

@@ -22,6 +22,9 @@ use tokio::{
 
 const MAX_CONTROL_LINE: usize = 16 * 1024;
 const CONTROLLER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+/// Leave time in the three-second canonical game-route proof budget for
+/// fresh quorum collection, signature verification and final state rechecks.
+const MAX_RUNTIME_CHALLENGE_WAIT: Duration = Duration::from_millis(1_500);
 
 #[derive(Clone)]
 pub struct IpcLaunchConfig {
@@ -86,6 +89,8 @@ pub enum IpcTransportError {
     RemoteError { request_id: u64, code: String },
     #[error("unexpected Fabric bridge response: {0}")]
     UnexpectedResponse(String),
+    #[error("Fabric controller session is no longer trustworthy")]
+    SessionInvalidated,
 }
 
 pub struct FabricBridgeListener {
@@ -107,18 +112,24 @@ impl FabricBridgeListener {
     }
 
     pub async fn accept(&self, deadline: Duration) -> Result<FabricSession, IpcTransportError> {
-        let (stream, peer) =
-            timeout(deadline, self.listener.accept()).await.map_err(|_| IpcTransportError::Timeout)??;
-        if !peer.ip().is_loopback() {
-            return Err(IpcTransportError::NonLoopbackPeer);
-        }
-        let (read, write) = stream.into_split();
-        let mut reader = BufReader::new(read);
-        let auth = read_line_bounded(&mut reader).await?;
-        if auth != format!("AUTH\t{}", self.token) {
-            return Err(IpcTransportError::AuthenticationFailed);
-        }
-        let info = parse_world_info(&read_line_bounded(&mut reader).await?)?;
+        // The budget covers the COMPLETE handshake. A loopback client that
+        // connects but withholds AUTH or WORLD_INFO must not stall a launch.
+        let (reader, write, info) = timeout(deadline, async {
+            let (stream, peer) = self.listener.accept().await?;
+            if !peer.ip().is_loopback() {
+                return Err(IpcTransportError::NonLoopbackPeer);
+            }
+            let (read, write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let auth = read_line_bounded(&mut reader).await?;
+            if auth != format!("AUTH\t{}", self.token) {
+                return Err(IpcTransportError::AuthenticationFailed);
+            }
+            let info = parse_world_info(&read_line_bounded(&mut reader).await?)?;
+            Ok::<_, IpcTransportError>((reader, write, info))
+        })
+        .await
+        .map_err(|_| IpcTransportError::Timeout)??;
         let writer = Arc::new(Mutex::new(write));
         let heartbeat_writer = Arc::clone(&writer);
         let heartbeat = tokio::spawn(async move {
@@ -130,7 +141,7 @@ impl FabricBridgeListener {
                 }
             }
         });
-        Ok(FabricSession { reader, writer, world_info: info, heartbeat })
+        Ok(FabricSession { reader, writer, world_info: info, heartbeat, invalidated: false })
     }
 }
 
@@ -139,6 +150,7 @@ pub struct FabricSession {
     writer: Arc<Mutex<OwnedWriteHalf>>,
     world_info: FabricWorldInfo,
     heartbeat: JoinHandle<()>,
+    invalidated: bool,
 }
 
 impl FabricSession {
@@ -154,6 +166,56 @@ impl FabricSession {
         self.request("PREPARE_SHUTDOWN", "READY_FOR_SHUTDOWN", request_id, deadline).await
     }
 
+    /// Ask the SAME token-authenticated live Fabric controller for fresh
+    /// runtime evidence. The caller MUST subsequently validate the complete
+    /// reply against its managed world, reserved loopback port and canonical
+    /// fingerprint using `live_fabric_readiness::verify_runtime_reply`.
+    /// This is never usable as authority or quorum proof on its own.
+    pub async fn runtime_challenge(
+        &mut self,
+        request_id: u64,
+        nonce: [u8; 32],
+        deadline: Duration,
+    ) -> Result<String, IpcTransportError> {
+        if self.invalidated {
+            return Err(IpcTransportError::SessionInvalidated);
+        }
+        if request_id == 0 || nonce == [0; 32] || deadline.is_zero() {
+            return Err(IpcTransportError::Malformed("missing runtime challenge identity, nonce or deadline".into()));
+        }
+        let request = format!("RUNTIME_CHALLENGE\t{request_id}\t{}\n", encode(nonce));
+        let result = timeout(deadline.min(MAX_RUNTIME_CHALLENGE_WAIT), async {
+            {
+                let mut writer = self.writer.lock().await;
+                writer.write_all(request.as_bytes()).await?;
+                writer.flush().await?;
+            }
+            let line = read_line_bounded(&mut self.reader).await?;
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields.len() == 3 && fields[0] == "ERROR" && fields[1] == request_id.to_string() {
+                return Err(IpcTransportError::RemoteError { request_id, code: fields[2].to_owned() });
+            }
+            if fields.len() != 7
+                || fields[0] != "RUNTIME_READY"
+                || fields[1] != request_id.to_string()
+                || fields[2] != encode(nonce)
+            {
+                return Err(IpcTransportError::UnexpectedResponse(line));
+            }
+            Ok(line)
+        })
+        .await
+        .map_err(|_| IpcTransportError::Timeout)
+        .and_then(|reply| reply);
+        if result.as_ref().is_err_and(|error| !matches!(error, IpcTransportError::RemoteError { .. })) {
+            // A late response may otherwise satisfy a subsequent request on
+            // this socket. Abandon the entire session after ANY RPC failure.
+            self.invalidated = true;
+            self.heartbeat.abort();
+        }
+        result
+    }
+
     async fn request(
         &mut self,
         command: &str,
@@ -161,22 +223,33 @@ impl FabricSession {
         request_id: u64,
         deadline: Duration,
     ) -> Result<(), IpcTransportError> {
-        {
-            let mut writer = self.writer.lock().await;
-            writer.write_all(format!("{command}\t{request_id}\n").as_bytes()).await?;
-            writer.flush().await?;
+        if self.invalidated {
+            return Err(IpcTransportError::SessionInvalidated);
         }
-        let line =
-            timeout(deadline, read_line_bounded(&mut self.reader)).await.map_err(|_| IpcTransportError::Timeout)??;
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() >= 3 && fields[0] == "ERROR" {
-            let remote_request = fields[1].parse::<u64>().map_err(|_| IpcTransportError::Malformed(line.clone()))?;
-            return Err(IpcTransportError::RemoteError { request_id: remote_request, code: fields[2].to_owned() });
+        let result = timeout(deadline, async {
+            {
+                let mut writer = self.writer.lock().await;
+                writer.write_all(format!("{command}\t{request_id}\n").as_bytes()).await?;
+                writer.flush().await?;
+            }
+            let line = read_line_bounded(&mut self.reader).await?;
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields.len() == 3 && fields[0] == "ERROR" && fields[1] == request_id.to_string() {
+                return Err(IpcTransportError::RemoteError { request_id, code: fields[2].to_owned() });
+            }
+            if fields.len() != 2 || fields[0] != expected || fields[1] != request_id.to_string() {
+                return Err(IpcTransportError::UnexpectedResponse(line));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| IpcTransportError::Timeout)
+        .and_then(|reply| reply);
+        if result.as_ref().is_err_and(|error| !matches!(error, IpcTransportError::RemoteError { .. })) {
+            self.invalidated = true;
+            self.heartbeat.abort();
         }
-        if fields.len() != 2 || fields[0] != expected || fields[1] != request_id.to_string() {
-            return Err(IpcTransportError::UnexpectedResponse(line));
-        }
-        Ok(())
+        result
     }
 }
 
@@ -303,5 +376,119 @@ mod tests {
             Hash32([7; 32])
         );
         assert!(matches!(parse_world_info(&line), Err(IpcTransportError::UnsupportedRuntime(_))));
+    }
+
+    async fn connected_test_bridge() -> (FabricSession, tokio::net::tcp::OwnedReadHalf, tokio::net::tcp::OwnedWriteHalf)
+    {
+        let listener = FabricBridgeListener::bind().await.unwrap();
+        let config = listener.launch_config().unwrap();
+        let client = tokio::spawn(async move {
+            let stream = TcpStream::connect((config.host.as_str(), config.port)).await.unwrap();
+            let (read, mut write) = stream.into_split();
+            write.write_all(format!("AUTH\t{}\n", config.token()).as_bytes()).await.unwrap();
+            write
+                .write_all(
+                    format!(
+                        "WORLD_INFO\t{}\t{}\t{}\t{}\t25\n",
+                        encode("26.1.2"),
+                        encode("0.19.3"),
+                        encode("/world"),
+                        Hash32([7; 32])
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            write.flush().await.unwrap();
+            (read, write)
+        });
+        let session = listener.accept(Duration::from_secs(2)).await.unwrap();
+        let (read, write) = client.await.unwrap();
+        (session, read, write)
+    }
+
+    async fn next_command(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> String {
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            if !line.starts_with("CONTROLLER_HEARTBEAT\t") {
+                return line;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_challenge_is_one_use_and_uses_authenticated_session() {
+        let (mut session, read, mut write) = connected_test_bridge().await;
+        let client = tokio::spawn(async move {
+            let mut reader = BufReader::new(read);
+            assert_eq!(next_command(&mut reader).await, format!("RUNTIME_CHALLENGE\t42\t{}\n", encode([9; 32])));
+            write
+                .write_all(
+                    format!(
+                        "RUNTIME_READY\t42\t{}\t{}\t25567\t{}\t{}\n",
+                        encode([9; 32]),
+                        encode([3; 32]),
+                        encode("/world"),
+                        Hash32([7; 32])
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            write.flush().await.unwrap();
+            assert_eq!(next_command(&mut reader).await, "SAVE_BARRIER\t43\n");
+            write.write_all(b"SAVE_COMPLETE\t43\n").await.unwrap();
+        });
+        let reply = session.runtime_challenge(42, [9; 32], Duration::from_secs(2)).await.unwrap();
+        assert!(reply.starts_with("RUNTIME_READY\t42\t"));
+        session.save_barrier(43, Duration::from_secs(2)).await.unwrap();
+        client.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_or_mismatched_runtime_reply_poison_session() {
+        let (mut session, read, mut write) = connected_test_bridge().await;
+        let client = tokio::spawn(async move {
+            let mut reader = BufReader::new(read);
+            assert!(next_command(&mut reader).await.starts_with("RUNTIME_CHALLENGE\t42\t"));
+            write.write_all(b"RUNTIME_READY\t41\twrong\n").await.unwrap();
+        });
+        assert!(matches!(
+            session.runtime_challenge(42, [9; 32], Duration::from_millis(500)).await,
+            Err(IpcTransportError::UnexpectedResponse(_))
+        ));
+        assert!(matches!(
+            session.save_barrier(43, Duration::from_millis(500)).await,
+            Err(IpcTransportError::SessionInvalidated)
+        ));
+        client.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_runtime_challenge_is_bounded_and_poisoned() {
+        let (mut session, read, _write) = connected_test_bridge().await;
+        let client = tokio::spawn(async move {
+            let mut reader = BufReader::new(read);
+            assert!(next_command(&mut reader).await.starts_with("RUNTIME_CHALLENGE\t42\t"));
+            sleep(Duration::from_millis(120)).await;
+        });
+        assert!(matches!(
+            session.runtime_challenge(42, [9; 32], Duration::from_millis(40)).await,
+            Err(IpcTransportError::Timeout)
+        ));
+        assert!(matches!(
+            session.runtime_challenge(43, [10; 32], Duration::from_secs(1)).await,
+            Err(IpcTransportError::SessionInvalidated)
+        ));
+        client.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authenticated_handshake_has_a_total_deadline() {
+        let listener = FabricBridgeListener::bind().await.unwrap();
+        let config = listener.launch_config().unwrap();
+        let _silent = TcpStream::connect((config.host.as_str(), config.port)).await.unwrap();
+        assert!(matches!(listener.accept(Duration::from_millis(50)).await, Err(IpcTransportError::Timeout)));
     }
 }

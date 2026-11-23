@@ -4,6 +4,7 @@ mod invite;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
+use swarm_cli::live_runtime_registry::LiveFabricRuntimeRegistry;
 use swarm_cli::migration::{self, RuntimeLaunchConfig, TransferPrepareResult};
 use swarm_cli::server_mods;
 use swarm_cli::{host_readiness, hosting_budget};
@@ -233,8 +234,9 @@ fn main() -> Result<()> {
             invite::configure_connectivity_snapshot(&paths);
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
-                let supervisor = tokio::spawn(migration::supervise(paths.clone()));
-                let result = daemon::run(&paths, &storage, &listen).await;
+                let live_runtime_registry = LiveFabricRuntimeRegistry::default();
+                let supervisor = tokio::spawn(migration::supervise(paths.clone(), live_runtime_registry.clone()));
+                let result = daemon::run(&paths, &storage, &listen, live_runtime_registry).await;
                 supervisor.abort();
                 result
             })?;

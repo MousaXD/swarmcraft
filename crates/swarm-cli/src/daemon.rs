@@ -8,6 +8,7 @@ use swarm_cli::{
     authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
     host_readiness::{self, PeerReadinessObservation},
     hosting_budget, launch_guard,
+    live_runtime_registry::LiveFabricRuntimeRegistry,
     migration::{self, clear_world_wake_request, world_wake_requested},
 };
 use swarm_consensus::{
@@ -181,7 +182,12 @@ struct LocalAuthorityContext<'a> {
     now: Instant,
 }
 
-pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<()> {
+pub async fn run(
+    paths: &DataPaths,
+    storage: &Storage,
+    listen: &str,
+    _live_runtime_registry: LiveFabricRuntimeRegistry,
+) -> Result<()> {
     let identity = PeerIdentity::load_or_create(paths)?;
     let transport_key = load_or_create_transport_key(&paths.transport_key())?;
     let hello = identity.signed_peer_hello(vec![

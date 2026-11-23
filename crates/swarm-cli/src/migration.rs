@@ -1,6 +1,10 @@
 use crate::{
-    authority_permit::PermitWatch, host_readiness, hosting_budget, launch_guard,
-    runtime_process_guard::RuntimeProcessGuard, server_mods,
+    authority_permit::PermitWatch,
+    host_readiness, hosting_budget, launch_guard,
+    live_fabric_readiness::{challenge_authenticated_session, ExpectedFabricRuntime},
+    live_runtime_registry::{LiveFabricRuntimeRegistry, LiveRuntimeIdentity, RuntimeChallengeCommand},
+    runtime_process_guard::RuntimeProcessGuard,
+    server_mods,
 };
 #[path = "managed_server_properties.rs"]
 mod managed_server_properties;
@@ -29,6 +33,7 @@ use swarm_protocol::{
 };
 use swarm_storage::{SnapshotContext, Storage};
 use tokio::{
+    sync::mpsc,
     task::JoinHandle,
     time::{sleep, timeout},
 };
@@ -280,7 +285,7 @@ pub fn request_world_wake(paths: &DataPaths, storage: &Storage, world: WorldId) 
     Ok(())
 }
 
-pub async fn supervise(paths: DataPaths) -> Result<()> {
+pub async fn supervise(paths: DataPaths, runtime_registry: LiveFabricRuntimeRegistry) -> Result<()> {
     let storage = Storage::open(paths.root.clone())?;
     let mut tasks: HashMap<WorldId, JoinHandle<()>> = HashMap::new();
     loop {
@@ -291,8 +296,9 @@ pub async fn supervise(paths: DataPaths) -> Result<()> {
             }
             let world = metadata.world_id;
             let task_paths = paths.clone();
+            let task_registry = runtime_registry.clone();
             let task = tokio::spawn(async move {
-                if let Err(error) = supervise_world(task_paths.clone(), world).await {
+                if let Err(error) = supervise_world(task_paths.clone(), world, task_registry).await {
                     warn!(%world, %error, "migration runtime supervisor stopped");
                     if let Ok(storage) = Storage::open(task_paths.root.clone()) {
                         let _ = publish_status(
@@ -315,7 +321,7 @@ pub async fn supervise(paths: DataPaths) -> Result<()> {
     }
 }
 
-async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
+async fn supervise_world(paths: DataPaths, world: WorldId, runtime_registry: LiveFabricRuntimeRegistry) -> Result<()> {
     let storage = Storage::open(paths.root.clone())?;
     let identity = PeerIdentity::load_or_create(&paths)?;
     loop {
@@ -419,6 +425,7 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
                     MigrationTrigger::WorldWake,
                     config.game_endpoint.clone(),
                     false,
+                    Some(&runtime_registry),
                 )
                 .await;
                 drop(authority_slot);
@@ -548,6 +555,7 @@ async fn supervise_world(paths: DataPaths, world: WorldId) -> Result<()> {
             trigger,
             config.game_endpoint.clone(),
             false,
+            Some(&runtime_registry),
         )
         .await;
         drop(authority_slot);
@@ -724,7 +732,7 @@ pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options
     // the daemon supervisor) already owns this world's hosting slot. Racing
     // here would reset the live runtime directory underneath a running server.
     let _authority_slot = AuthorityRuntimeGuard::acquire(paths, options.world)?;
-    run_authority_runtime_inner(paths, storage, options, MigrationTrigger::DirectHost, None, true).await
+    run_authority_runtime_inner(paths, storage, options, MigrationTrigger::DirectHost, None, true, None).await
 }
 
 async fn run_authority_runtime_inner(
@@ -734,6 +742,7 @@ async fn run_authority_runtime_inner(
     trigger: MigrationTrigger,
     game_endpoint: Option<String>,
     handle_shutdown_signal: bool,
+    runtime_registry: Option<&LiveFabricRuntimeRegistry>,
 ) -> Result<()> {
     if !options.accept_eula {
         bail!("Minecraft server EULA acceptance is required; configure the runtime only after reviewing Mojang's EULA");
@@ -968,6 +977,31 @@ async fn run_authority_runtime_inner(
             }
         }
     }
+    // Only this live supervisor can register the actual authenticated socket
+    // and Child handle. Registration is never a proof of signed authority; the
+    // challenge handler below rechecks the permit, generation, consent and PID.
+    let mut registration = None;
+    let mut challenge_commands = None;
+    if let Some(registry) = runtime_registry {
+        let identity = LiveRuntimeIdentity {
+            world: options.world,
+            pid: startup.pid(),
+            generation: AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token },
+            fingerprint: metadata.genesis.compatibility_fingerprint,
+            managed_port,
+        };
+        match registry.register(identity) {
+            Ok((guard, receiver)) => {
+                registration = Some(guard);
+                challenge_commands = Some(receiver);
+            }
+            Err(error) => {
+                // An already-running JVM must retain its save-first owner.
+                // Refuse game-route proofs without abandoning the supervisor.
+                warn!(world = %options.world, %error, "live Fabric registry refused registration; continuing supervised JVM without game-route evidence");
+            }
+        }
+    }
     // From here the existing supervisor owns shutdown and checkpointing.
     // Loss of consent after live Fabric handshaking must remain save-first.
     startup.disarm();
@@ -979,6 +1013,9 @@ async fn run_authority_runtime_inner(
         &epoch,
         &mut child,
         &mut session,
+        &world_dir,
+        managed_port,
+        challenge_commands.as_mut(),
         RuntimeExitOptions { handle_shutdown_signal, admission: &admission },
     )
     .await
@@ -989,6 +1026,9 @@ async fn run_authority_runtime_inner(
             return Err(error);
         }
     };
+    // From this point onward there is NO owned live game runtime. Revocation
+    // precedes checkpointing, transfer, or publishing any final saved state.
+    drop(registration);
 
     publish_status(
         paths,
@@ -1091,6 +1131,9 @@ struct RuntimeExitOptions<'a> {
     admission: &'a hosting_budget::HostingAdmission,
 }
 
+// Each argument is an independently authenticated runtime/lifecycle input;
+// do not collapse the Fabric ownership proof into cached status data.
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_runtime_exit(
     paths: &DataPaths,
     storage: &Storage,
@@ -1098,10 +1141,15 @@ async fn wait_for_runtime_exit(
     epoch: &EpochRecordV1,
     child: &mut Child,
     session: &mut swarm_ipc::FabricSession,
+    world_directory: &Path,
+    managed_port: u16,
+    mut challenge_commands: Option<&mut mpsc::Receiver<RuntimeChallengeCommand>>,
     options: RuntimeExitOptions<'_>,
 ) -> Result<RuntimeDisposition> {
     let mut withdrawal_reported = false;
     let mut invalid_stop_intent_reported = false;
+    let mut permit_watch =
+        PermitWatch::new(AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token });
     loop {
         if let Some(status) = child.try_wait()? {
             if !status.success() {
@@ -1301,10 +1349,77 @@ async fn wait_for_runtime_exit(
                     }
                 }
             }
+        } else if let Some(commands) = challenge_commands.as_mut() {
+            tokio::select! {
+                request = commands.recv() => {
+                    if let Some(request) = request {
+                        let reply = challenge_live_supervised_runtime(
+                            paths, storage, identity, epoch, child, session,
+                            world_directory, managed_port, options.admission,
+                            &mut permit_watch, request.request_id, request.nonce,
+                        ).await;
+                        let _ = request.response.send(reply);
+                    }
+                }
+                _ = sleep(SUPERVISOR_POLL) => {}
+            }
         } else {
             sleep(SUPERVISOR_POLL).await;
         }
     }
+}
+
+/// Runs ONLY in the task that owns the managed JVM and original authenticated
+/// FabricSession. Never use a cached Ready, an unbound PID or a new socket.
+#[allow(clippy::too_many_arguments)]
+async fn challenge_live_supervised_runtime(
+    paths: &DataPaths,
+    storage: &Storage,
+    identity: &PeerIdentity,
+    epoch: &EpochRecordV1,
+    child: &mut Child,
+    session: &mut swarm_ipc::FabricSession,
+    world_directory: &Path,
+    managed_port: u16,
+    admission: &hosting_budget::HostingAdmission,
+    permit_watch: &mut PermitWatch,
+    request_id: u64,
+    nonce: [u8; 32],
+) -> Result<crate::live_fabric_readiness::VerifiedFabricRuntime> {
+    if child.try_wait()?.is_some() {
+        bail!("managed Minecraft JVM has already exited");
+    }
+    ensure_authority_generation(storage, identity, epoch)?;
+    if hosting_budget::runtime_withdrawal(paths, epoch.world_id, admission.consent())?.is_some() {
+        bail!("hosting consent or memory admission was withdrawn");
+    }
+    if load_stop_intent(paths, epoch)? || load_transfer_intent(paths, epoch)?.is_some() {
+        bail!("runtime is stopping or transferring; no new game sessions");
+    }
+    if !permit_watch.observe(paths, epoch.world_id, Instant::now())? {
+        bail!("majority-backed authority permit has not been observed advancing live");
+    }
+    let expected = ExpectedFabricRuntime {
+        world_id: epoch.world_id,
+        world_directory,
+        compatibility_fingerprint: session.world_info().compatibility_fingerprint,
+        managed_loopback_port: managed_port,
+        request_id,
+        challenge_nonce: nonce,
+    };
+    let verified = challenge_authenticated_session(session, &expected, Duration::from_millis(1_200)).await?;
+    if child.try_wait()?.is_some() {
+        bail!("managed Minecraft process exited during Fabric challenge");
+    }
+    ensure_authority_generation(storage, identity, epoch)?;
+    if hosting_budget::runtime_withdrawal(paths, epoch.world_id, admission.consent())?.is_some()
+        || load_stop_intent(paths, epoch)?
+        || load_transfer_intent(paths, epoch)?.is_some()
+        || !permit_watch.observe(paths, epoch.world_id, Instant::now())?
+    {
+        bail!("hosting consent, permit or stop state changed during Fabric challenge");
+    }
+    Ok(verified)
 }
 
 pub fn prepare_manual_transfer(
