@@ -58,3 +58,38 @@ They prove bounded refusal, worker-cap enforcement, slot recovery, a valid
 signed offer/challenge path, one-use replay rejection and readiness withdrawal.
 They do not prove real quorum or Java readiness. The daemon has not yet
 connected this service to real host runtime authority.
+
+## Optional host event-loop adapter (implemented in network crate)
+
+The network crate now exports GameRouteHostControlService and
+GameRouteHostReplyAction from game_route_host_controller. Prefer this
+controller over manually spawning signer tasks in daemon.rs:
+
+1. Take the one-time authenticated inbound receiver from
+   SwarmNode::take_game_route_control_events(). Construct the controller
+   with Arc<BoundedGameRouteHostResponder> and that receiver.
+2. Construct an mpsc::channel<GameRouteHostReplyAction> with capacity
+   MAX_PENDING_HOST_ROUTE_ACTIONS (16), and run controller.run(sender,
+   host_shutdown_rx) as a daemon-owned async task. An oversized reply
+   channel is rejected rather than accidentally accumulating signed offers.
+3. Keep SwarmNode::next_event() polled. In the same mutable-owner loop,
+   select on its normal events and the receiver of GameRouteHostReplyAction.
+   Recheck the CURRENT hosting consent/fence/shutdown state immediately
+   before calling node.respond_game_route(action.channel, action.response).
+   Drop any queued action that became stale during a world switch.
+4. On stop, signal the host shutdown watch before stopping or replacing the
+   game receiver, and cancel/await the controller task. Its JoinSet owns all
+   concurrent async signing attempts; a superseded world cannot retain
+   detached authority-response tasks. The lower signer may still finish a
+   bounded blocking OS worker but cannot send an answer after shutdown.
+
+This adapter accepts only the authenticated application and transport peer
+identities delivered by SwarmNode. It limits in-flight replies to 16 and
+individual blocking proofs to the responder's 4 worker slots / 3-second
+deadline. Queue saturation, malformed requests and missing canonical
+evidence never become an authorization capability.
+
+Integration test (real local authenticated QUIC, deliberately unavailable
+authority and no real Minecraft runtime):
+
+    CARGO_BUILD_JOBS=2 cargo test -p swarm-network --test game_host_controller_quic --offline --jobs 2
