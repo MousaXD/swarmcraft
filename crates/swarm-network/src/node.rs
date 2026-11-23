@@ -406,17 +406,11 @@ impl SwarmNode {
         self.diagnostics.record_relay_configured(relay_address.to_string(), self.relay_peers.len());
         self.swarm.behaviour_mut().kad.add_address(&relay_peer, relay_address.clone());
         self.swarm.behaviour_mut().auto_nat.add_server(relay_peer, Some(relay_address.clone()));
-        if !self.swarm.is_connected(&relay_peer) {
-            if let Err(error) = self.swarm.dial(relay_address.clone()) {
-                self.record_issue(
-                    ConnectivityIssueKindV1::RelayUnavailable,
-                    Some(relay_peer),
-                    Some(&relay_address),
-                    error.to_string(),
-                );
-                return Err(error).context("failed to dial relay");
-            }
-        }
+        // libp2p's relay-client listener dials the relay itself when needed
+        // and binds its reservation to THAT exact connection ID. Dialling
+        // here as well starts two concurrent connections; connection
+        // replacement can then invalidate the listener's pending reservation
+        // before it receives a usable /p2p-circuit address.
         self.swarm
             .listen_on(relay_address.with(Protocol::P2pCircuit))
             .map(|_| ())
@@ -670,7 +664,14 @@ impl SwarmNode {
                     let defer_challenge = previous
                         .filter(|previous| *previous != connection_id && num_established.get() > 1)
                         .is_some_and(|previous| self.swarm.close_connection(previous));
-                    if !defer_challenge {
+                    // Explicitly configured relay/bootstrap infrastructure
+                    // does not speak the SwarmCraft application PeerHello
+                    // protocol. Requiring that handshake then closing a
+                    // silent infrastructure peer would tear down its relay
+                    // reservation and prevent game traffic over NAT relays.
+                    // These connections remain UNAUTHENTICATED to worlds:
+                    // never add them to the application or game peer maps.
+                    if !defer_challenge && application_path {
                         self.issue_auth_challenge(peer_id, connection_id)?;
                     }
                     return Ok(NetworkEvent::Connected { transport_peer: peer_id });
@@ -710,6 +711,9 @@ impl SwarmNode {
                     if let Some(active) =
                         self.active_connections.get(&peer_id).copied().filter(|active| *active != connection_id)
                     {
+                        if self.bootstrap_peers.contains(&peer_id) || self.relay_peers.contains(&peer_id) {
+                            continue;
+                        }
                         self.issue_auth_challenge(peer_id, active)?;
                     }
                     debug!(transport_peer = %peer_id, %connection_id, remaining_connections = num_established, "peer connection closed; replacement requires fresh application proof");
