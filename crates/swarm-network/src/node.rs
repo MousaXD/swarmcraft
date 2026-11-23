@@ -535,8 +535,14 @@ impl SwarmNode {
             })
             .map(|(_, id)| *id)
             .ok_or_else(|| anyhow!("game route peer must complete connection-bound application authentication"))?;
-        self.pending_game_route
-            .retain(|_, pending| pending.issued_at.elapsed() < GAME_ROUTE_CONTROL_TIMEOUT + Duration::from_secs(1));
+        // A successful candidate can finish a multi-host race while slower
+        // attempts are cancelled. Do not let abandoned one-shot requests
+        // occupy the fixed 32-request budget until their network timeout.
+        // Unsolicited late responses are still discarded by request ID.
+        self.pending_game_route.retain(|_, pending| {
+            pending.issued_at.elapsed() < GAME_ROUTE_CONTROL_TIMEOUT + Duration::from_secs(1)
+                && pending.rpc_reply.as_ref().is_none_or(|reply| !reply.is_closed())
+        });
         if self.pending_game_route.len() >= GAME_ROUTE_CONTROL_MAX_OUTSTANDING {
             return Err(anyhow!("game route control outstanding request limit reached"));
         }

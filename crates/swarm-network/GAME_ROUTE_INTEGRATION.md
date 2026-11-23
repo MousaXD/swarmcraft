@@ -74,6 +74,7 @@ The test `tests/game_stream_loopback.rs` illustrates the complete network wiring
 
 ## Backpressure, isolation and fail-closed behavior
 
+- Candidate authority IDs are discovery hints, never signed permission. The resolver probes no more than eight authenticated candidates concurrently; a connected but unresponsive old host does not block a freshly verified successor. Cancelled asynchronous route requests are removed from the pending admission budget on the next dispatch. Only a fresh, independent quorum and authenticated runtime proof can select the successful candidate.
 - Dedicated `/swarmcraft/minecraft-game/1` libp2p substreams; snapshot `WireRequest`/replication traffic is not used for Minecraft payload bytes.
 - At most 16 active streams per gateway/host receiver and 4 per remote host-side transport identity. Inbound stream open is bounded to 4096 bytes with a 4-second handshake timeout; server connection to 127.0.0.1 is capped at 3 seconds. A session has a 4-hour maximum lifetime.
 - A one-time random stream nonce cache is bounded (256). Unknown or unauthenticated application peers are denied. Existing streams are checked every second and closed when fresh canonical evidence, consent, runtime readiness or application authentication disappears.

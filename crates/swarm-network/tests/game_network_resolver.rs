@@ -5,6 +5,7 @@
 use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
 use std::{
+    net::{Ipv4Addr, SocketAddrV4, TcpListener as StdTcpListener},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, RwLock,
@@ -12,6 +13,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use swarm_network::{
+    game_port_registry::GameWorldPortRegistry,
     game_route::{
         FreshAuthorityEvidence, FreshAuthoritySource, GameRouteError, MinecraftRouteOfferV1, MinecraftRouteResponseV1,
         RouteVerifier, GAME_ROUTE_VERSION,
@@ -20,11 +22,16 @@ use swarm_network::{
         GameRouteControlEvent, GameRouteControlRequestV1, GameRouteControlResponseV1, GameRouteRefusalV1,
     },
     game_route_resolver::{AuthenticatedGameRouteResolver, GameRouteCandidateSource},
-    game_transport::GatewayRouteResolver,
+    game_transport::{GameStreamClient, GameStreamReceiver, GatewayRouteResolver, StableLoopbackGateway},
     generate_transport_key, NetworkEvent, SwarmNode, TransportPeerId,
 };
 use swarm_protocol::{peer_id_from_public_key, Hash32, PeerHelloV1, PeerId, WorldId, PROTOCOL_VERSION};
-use tokio::time::timeout;
+use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    net::{TcpListener, TcpStream},
+    sync::watch,
+    time::timeout,
+};
 
 fn unix_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
@@ -119,6 +126,10 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
         let host_transport = host.local_transport_peer_id();
         let unresponsive_transport = unresponsive.local_transport_peer_id();
         let player_transport = player.local_transport_peer_id();
+        let host_game_control = host.game_stream_control();
+        let host_game_authenticated = host.game_authenticated_peers();
+        let player_game_control = player.game_stream_control();
+        let player_game_authenticated = player.game_authenticated_peers();
         let mut host_control_events = host.take_game_route_control_events().unwrap();
         let mut unresponsive_control_events = unresponsive.take_game_route_control_events().unwrap();
         host.listen("/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()).unwrap();
@@ -161,6 +172,24 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
         }
 
         let world = WorldId([42; 32]);
+        // Real echo server on the hosting peer's loopback interface. The
+        // synthetic evidence provider below MUST bind this actual port to the
+        // signed offer. There is no public Minecraft listener or raw-IP path.
+        let java_surrogate = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let game_port = java_surrogate.local_addr().unwrap().port();
+        let java_surrogate_task = tokio::spawn(async move {
+            let mut sessions = tokio::task::JoinSet::new();
+            while let Ok((mut stream, _)) = java_surrogate.accept().await {
+                sessions.spawn(async move {
+                    let mut bytes = [0u8; 2048];
+                    while let Ok(count) = stream.read(&mut bytes).await {
+                        if count == 0 || stream.write_all(&bytes[..count]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
         let now = unix_ms();
         let mut offer = MinecraftRouteOfferV1 {
             version: GAME_ROUTE_VERSION,
@@ -169,7 +198,7 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
             authority_peer_id: host_app,
             authority_public_key: host_key.verifying_key().to_bytes(),
             authority_transport_peer: host_transport.to_bytes(),
-            game_server_port: 25565,
+            game_server_port: game_port,
             membership_hash: Hash32([2; 32]),
             quorum_certificate_hash: Hash32([3; 32]),
             compatibility_fingerprint: Hash32([4; 32]),
@@ -193,7 +222,7 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
             quorum_ready: AtomicBool::new(true),
         });
         let hints = Arc::new(CurrentCandidateHints { hosts: RwLock::new(vec![host_transport]) });
-        let resolver = AuthenticatedGameRouteResolver::new(
+        let resolver = Arc::new(AuthenticatedGameRouteResolver::new(
             player_app,
             player_transport,
             player.game_route_rpc_client(),
@@ -202,7 +231,7 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
             quorum.clone(),
             hints.clone(),
         )
-        .unwrap();
+        .unwrap());
 
         let host_server = tokio::spawn(async move {
             loop {
@@ -272,12 +301,54 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
 
         let verified = resolver.resolve(world).await.expect("authenticated offer and fresh challenge must verify");
         assert_eq!(verified.world_id(), world);
+        // Complete vertical slice: LOCAL Minecraft TCP client -> bounded
+        // gateway -> fresh authenticated route RPC -> real QUIC game substream
+        // -> separately authenticated host receiver -> loopback TCP server.
+        let receiver = Arc::new(
+            GameStreamReceiver::new(world, host_transport, game_port, quorum.clone(), host_game_authenticated)
+                .unwrap(),
+        );
+        let (stop_host, host_rx) = watch::channel(false);
+        let receiver_task = tokio::spawn(receiver.serve(host_game_control, host_rx));
+        let gateway_client = Arc::new(
+            GameStreamClient::new(player_app, player_transport, player_game_authenticated, quorum.clone()).unwrap(),
+        );
+        let reserved = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let stable_port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let registry = GameWorldPortRegistry::new(root.path().join("durable-client-ports"));
+        let gateway = StableLoopbackGateway::bind_reserved(world, stable_port, &registry).await.unwrap();
+        let (stop_gateway, gateway_rx) = watch::channel(false);
+        let gateway_resolver: Arc<dyn GatewayRouteResolver> = resolver.clone();
+        let gateway_task =
+            tokio::spawn(gateway.serve(gateway_resolver, gateway_client, player_game_control, gateway_rx));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut session = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, stable_port)).await.unwrap();
+        let data = b"authenticated route and game streams";
+        session.write_all(data).await.unwrap();
+        let mut echoed = vec![0u8; data.len()];
+        timeout(Duration::from_secs(4), session.read_exact(&mut echoed)).await.unwrap().unwrap();
+        assert_eq!(&echoed, data);
+
         // A correctly signed offer and response are insufficient when the
         // independently verified quorum/runtime lease disappears.
         quorum.quorum_ready.store(false, Ordering::SeqCst);
+        let mut buffer = [0; 32];
+        let ended = timeout(Duration::from_secs(4), session.read(&mut buffer)).await.unwrap();
+        assert!(matches!(ended, Ok(0) | Err(_)), "active Minecraft stream outlived quorum withdrawal");
+        let mut denied = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, stable_port)).await.unwrap();
+        let _ = denied.write_all(b"must be refused").await;
+        let rejected = timeout(Duration::from_secs(3), denied.read(&mut buffer)).await.unwrap();
+        assert!(matches!(rejected, Ok(0) | Err(_)), "gateway served a player without current quorum");
         assert!(resolver.resolve(world).await.is_err());
 
         quorum.quorum_ready.store(true, Ordering::SeqCst);
+        let mut rejoined = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, stable_port)).await.unwrap();
+        rejoined.write_all(b"fresh Java login").await.unwrap();
+        let mut reply = [0u8; 16];
+        timeout(Duration::from_secs(4), rejoined.read_exact(&mut reply)).await.unwrap().unwrap();
+        assert_eq!(&reply, b"fresh Java login");
+        assert_eq!(registry.lookup(world).unwrap(), Some(stable_port));
         hints.hosts.write().unwrap().clear();
         assert!(resolver.resolve(world).await.is_err(), "missing host hint must fail closed");
         let unauthenticated_host = libp2p::identity::Keypair::generate_ed25519().public().to_peer_id();
@@ -297,6 +368,11 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
             .expect("fresh independently verified host should be selected");
         assert_eq!(verified_successor.world_id(), world);
 
+        stop_gateway.send(true).unwrap();
+        stop_host.send(true).unwrap();
+        assert!(gateway_task.await.unwrap().is_ok());
+        assert!(receiver_task.await.unwrap().is_ok());
+        java_surrogate_task.abort();
         player_driver.abort();
         host_server.abort();
         blackhole.abort();
