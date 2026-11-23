@@ -48,6 +48,9 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock is configured").as_millis() as u64
 }
 
+// The libp2p relay behaviour's event is uninhabited, so the derive expands an
+// unreachable conversion. This annotation does not skip relay assertions.
+#[allow(unreachable_code)]
 #[derive(NetworkBehaviour)]
 struct RelayBehaviour {
     relay: relay::Behaviour,

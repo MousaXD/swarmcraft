@@ -1,8 +1,7 @@
-// Agent 1 owns the adapter but Agent 3 owns shared CLI module wiring.
-// Compile and exercise the standalone adapter without editing lib.rs/main.rs.
-#[path = "../src/live_fabric_readiness.rs"]
-mod live_fabric_readiness;
-
-pub use swarm_cli::hosting_budget;
+// The live Fabric adapter is now part of the real CLI library. Reuse that
+// compiled module for this legacy scoped authority test so the test does not
+// compile a duplicate unused authenticated-session entrypoint. The library
+// suite independently exercises the adapter's one-use challenge tests.
+pub use swarm_cli::{hosting_budget, live_fabric_readiness};
 #[path = "../src/live_authority.rs"]
 mod live_authority;

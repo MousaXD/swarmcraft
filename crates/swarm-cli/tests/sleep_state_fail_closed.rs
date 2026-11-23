@@ -56,7 +56,12 @@ async fn migration_supervisor_blocks_corrupt_sleep_state_before_runtime_launch()
     fs::create_dir_all(&metadata).unwrap();
     fs::write(metadata.join("sleep.postcard"), b"corrupt-sleep-state").unwrap();
 
-    let supervisor = tokio::spawn(migration::supervise(paths.clone()));
+    // This guard-only acceptance has no live JVM; supply an empty registry so
+    // no prior cached Fabric readiness could satisfy supervisor admission.
+    let supervisor = tokio::spawn(migration::supervise(
+        paths.clone(),
+        swarm_cli::live_runtime_registry::LiveFabricRuntimeRegistry::default(),
+    ));
     let status = timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(status) = migration::load_migration_status(&paths, world) {

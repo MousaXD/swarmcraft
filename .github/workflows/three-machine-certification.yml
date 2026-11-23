@@ -1,11 +1,22 @@
 name: Three-machine real E2E certification (manual / non-release)
 
 on:
+  # Cheap, real GitHub-hosted negative controls on every integration commit.
+  # This MUST NOT be represented as three real installed Minecraft clients.
+  push:
+    branches:
+      - integration/sabathon-p0-20261123
   pull_request:
     paths:
       - 'scripts/e2e/**'
       - '.github/workflows/three-machine-certification.yml'
   workflow_dispatch:
+    inputs:
+      run_remote_preflight:
+        description: Explicitly connect provisioned real machines (requires pinned SSH secrets)
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -24,7 +35,7 @@ jobs:
 
   remote-preflight:
     name: Three remote installations (preflight ONLY, not certification)
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.run_remote_preflight == true
     needs: harness-negative-controls
     runs-on: ubuntu-latest
     timeout-minutes: 15

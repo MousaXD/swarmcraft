@@ -201,6 +201,7 @@ fn read_record(path: &Path) -> Result<Assignment, GamePortRegistryError> {
 }
 
 fn private_options() -> OpenOptions {
+    #[allow(unused_mut)] // Unix needs mutability for mode(0600); Windows does not.
     let mut options = OpenOptions::new();
     #[cfg(unix)]
     {

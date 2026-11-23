@@ -586,6 +586,7 @@ pub(crate) fn sync_directory(path: &Path) -> Result<(), GameRouteError> {
 }
 
 pub(crate) fn private_floor_options() -> OpenOptions {
+    #[allow(unused_mut)] // Unix needs mutability for mode(0600); Windows does not.
     let mut options = OpenOptions::new();
     #[cfg(unix)]
     {

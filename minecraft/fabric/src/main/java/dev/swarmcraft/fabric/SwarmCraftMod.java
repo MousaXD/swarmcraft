@@ -352,7 +352,10 @@ public final class SwarmCraftMod implements ModInitializer {
                 }
                 String worldDirectory = valueOrEmpty(System.getenv("SWARMCRAFT_WORLD_DIR"));
                 String compatibility = valueOrEmpty(System.getenv("SWARMCRAFT_COMPAT_FINGERPRINT"));
-                int serverPort = server.getServerPort();
+                // Mojang's officially mapped 26.1.2 MinecraftServer API uses
+                // getPort() (the old Yarn name was getServerPort()). Read
+                // the live server object, not a saved server.properties port.
+                int serverPort = server.getPort();
                 if (worldDirectory.isBlank() || !compatibility.matches("[0-9a-f]{64}")
                     || serverPort <= 0 || serverPort > 65535) {
                     throw new IOException("managed Fabric runtime identity or listener is unavailable");

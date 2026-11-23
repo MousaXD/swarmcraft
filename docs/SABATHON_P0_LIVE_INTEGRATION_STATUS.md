@@ -105,6 +105,32 @@ checks, not a completed release or hypothetical Minecraft sessions.
 
 ## Local verification performed
 
+### GitHub-hosted CI follow-up (24 November)
+
+- Manually dispatched **Required Validation** against exact integrated
+  commit `2d75b9e` (GitHub Actions run `45262291031`). Unlike a successful
+  local Desktop-only test, CI exposed actual cross-platform and workspace
+  regressions: official Minecraft `26.1.2` names the running server listener
+  getter `getPort`, not the older Yarn `getServerPort`; integration tests had
+  stale `migration::supervise` signatures; strict all-target Clippy caught
+  test-fixture lints and Windows-only mutable OpenOptions; and the live Fabric
+  request counter needed a non-deprecated, MSRV-compatible overflow-checked
+  atomic increment.
+- Updated the native Fabric bridge, runtime registry, test harnesses and
+  platform-specific lints **without relaxing authorization, freshness,
+  lifecycle checks, or fail-closed assertions**. Upgraded only the Desktop
+  `cookie` lockfile entry from `0.18.2` to `0.18.3` to address the new
+  `RUSTSEC-2026-0594` advisory reported by GitHub's dependency audit.
+- The three-machine evidence workflow now runs its negative-control harness
+  automatically on each P0 integration branch push. Live remote-machine
+  preflight requires a **separate explicit manual opt-in and provisioned
+  pinned SSH hosts**; a green negative-control job can never be reported as
+  real three-machine Minecraft certification.
+- The original CI run tested the **prior** exact SHA and is not a verdict
+  on the source fixes listed above. Obtain an independent GitHub-hosted
+  Required Validation result against the new pushed commit before using it
+  as acceptance evidence.
+
 | Check | Result | Scope |
 | --- | --- | --- |
 | `cargo clippy -p swarm-cli --bin swarmcraft -- -D warnings` | PASS | Core Rust daemon and CLI wiring |

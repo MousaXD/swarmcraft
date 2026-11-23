@@ -8,6 +8,7 @@ use std::{
 };
 use swarm_cli::{
     authority_permit::refresh_permit,
+    live_runtime_registry::LiveFabricRuntimeRegistry,
     migration::{
         self, accept_manual_transfer, activate_manual_transfer, commit_manual_transfer, observe_manual_transfer_epoch,
         prepare_manual_transfer, MigrationPhase, RuntimeLaunchConfig, TransferPrepareResult,
@@ -388,7 +389,8 @@ async fn safe_stop_waits_for_fabric_barrier_then_commits_latest_state_and_sleep_
         AuthorityGeneration { epoch: shared.epoch.epoch_number, fencing_token: shared.epoch.fencing_token };
     let heartbeat = spawn_heartbeat(alice.paths.clone(), shared.world, generation);
     let supervisor_paths = alice.paths.clone();
-    let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });
+    let supervisor =
+        tokio::spawn(async move { migration::supervise(supervisor_paths, LiveFabricRuntimeRegistry::default()).await });
 
     wait_until_ready(&alice, shared.world, endpoint).await;
     migration::request_world_stop(&alice.paths, &alice.storage, shared.world).unwrap();
@@ -437,7 +439,8 @@ async fn withdrawing_active_host_consent_uses_fabric_barrier_and_durable_sleep()
         AuthorityGeneration { epoch: shared.epoch.epoch_number, fencing_token: shared.epoch.fencing_token };
     let heartbeat = spawn_heartbeat(alice.paths.clone(), shared.world, generation);
     let supervisor_paths = alice.paths.clone();
-    let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });
+    let supervisor =
+        tokio::spawn(async move { migration::supervise(supervisor_paths, LiveFabricRuntimeRegistry::default()).await });
 
     wait_until_ready(&alice, shared.world, endpoint).await;
     swarm_cli::hosting_budget::set_contribution(&alice.paths, shared.world, 0).unwrap();
@@ -479,7 +482,8 @@ async fn invalid_transfer_target_does_not_kill_authority_and_withdrawal_still_ch
         AuthorityGeneration { epoch: shared.epoch.epoch_number, fencing_token: shared.epoch.fencing_token };
     let heartbeat = spawn_heartbeat(alice.paths.clone(), shared.world, generation);
     let supervisor_paths = alice.paths.clone();
-    let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });
+    let supervisor =
+        tokio::spawn(async move { migration::supervise(supervisor_paths, LiveFabricRuntimeRegistry::default()).await });
     wait_until_ready(&alice, shared.world, endpoint).await;
 
     // An unsigned local intent naming the current authority is invalid.
@@ -611,7 +615,8 @@ async fn manual_transfer_uses_shared_runner_and_fences_alice() {
     let generation = AuthorityGeneration { epoch: bob_epoch.epoch_number, fencing_token: bob_epoch.fencing_token };
     let heartbeat = spawn_heartbeat(bob.paths.clone(), shared.world, generation);
     let supervisor_paths = bob.paths.clone();
-    let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });
+    let supervisor =
+        tokio::spawn(async move { migration::supervise(supervisor_paths, LiveFabricRuntimeRegistry::default()).await });
 
     wait_until_ready(&bob, shared.world, endpoint).await;
     wait_until_sleeping(&bob, shared.world).await;
@@ -660,7 +665,8 @@ async fn recovered_bob_waits_for_exact_permit_then_restores_and_reaches_fabric_r
     let generation = AuthorityGeneration { epoch: recovery.epoch_number, fencing_token: recovery.fencing_token };
     let heartbeat = spawn_heartbeat(bob.paths.clone(), shared.world, generation);
     let supervisor_paths = bob.paths.clone();
-    let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });
+    let supervisor =
+        tokio::spawn(async move { migration::supervise(supervisor_paths, LiveFabricRuntimeRegistry::default()).await });
 
     wait_until_ready(&bob, shared.world, endpoint).await;
     wait_until_sleeping(&bob, shared.world).await;
@@ -911,7 +917,8 @@ async fn former_transfer_source_can_launch_when_a_later_generation_returns_to_it
         AuthorityGeneration { epoch: returned.epoch_number, fencing_token: returned.fencing_token },
     );
     let supervisor_paths = alice.paths.clone();
-    let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths).await });
+    let supervisor =
+        tokio::spawn(async move { migration::supervise(supervisor_paths, LiveFabricRuntimeRegistry::default()).await });
 
     wait_until_ready(&alice, shared.world, endpoint).await;
     let ready = migration::load_migration_status(&alice.paths, shared.world).unwrap();

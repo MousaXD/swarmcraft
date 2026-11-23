@@ -4654,7 +4654,7 @@ mod live_quorum_vote_context_tests {
             fencing_token: epoch.fencing_token,
             config_sequence: config.sequence,
             config_hash,
-            canonical_head: Some(head.clone()),
+            canonical_head: Some(head),
             issued_unix_ms: 1_000,
             expires_unix_ms: 3_000,
         };
@@ -5147,21 +5147,21 @@ mod automatic_transfer_delivery_tests {
     fn staged_transfer_fences_old_lease_and_crash_recovery_at_every_phase() {
         let old = old_authority_epoch();
         for phase in [TransferPhase::Prepared, TransferPhase::Accepted, TransferPhase::Committed] {
-            assert_eq!(transfer_fences_epoch(&transfer(phase), &old).unwrap(), true);
+            assert!(transfer_fences_epoch(&transfer(phase), &old).unwrap());
         }
     }
 
     #[test]
     fn transfer_fence_releases_only_on_committed_successor_or_signed_later_generation() {
         let activated = successor_epoch();
-        assert_eq!(transfer_fences_epoch(&transfer(TransferPhase::Committed), &activated).unwrap(), false);
+        assert!(!transfer_fences_epoch(&transfer(TransferPhase::Committed), &activated).unwrap());
         for phase in [TransferPhase::Prepared, TransferPhase::Accepted] {
             assert!(transfer_fences_epoch(&transfer(phase), &activated).is_err());
         }
         let mut later = activated;
         later.epoch_number += 1;
         later.fencing_token += 1;
-        assert_eq!(transfer_fences_epoch(&transfer(TransferPhase::Committed), &later).unwrap(), false);
+        assert!(!transfer_fences_epoch(&transfer(TransferPhase::Committed), &later).unwrap());
         assert!(transfer_fences_epoch(&transfer(TransferPhase::Prepared), &later).is_err());
     }
 

@@ -157,17 +157,32 @@ impl LiveFabricRuntimeRegistry {
     }
 
     fn next_id(&self) -> Result<u64> {
-        let previous = self
-            .sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .map_err(|_| anyhow!("live Fabric request sequence exhausted"))?;
-        Ok(previous + 1)
+        // `fetch_update` was deprecated by the newer CI Rust toolchain;
+        // `try_update` requires Rust 1.95 and exceeds the crate's MSRV.
+        // A bounded-overflow CAS preserves unique IDs across concurrent
+        // Fabric challenge workers on every supported toolchain.
+        loop {
+            let previous = self.sequence.load(Ordering::Relaxed);
+            let next = previous.checked_add(1).context("live Fabric request sequence exhausted")?;
+            if self.sequence.compare_exchange_weak(previous, next, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                return Ok(next);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn challenge_request_ids_never_wrap_or_repeat() {
+        let registry = LiveFabricRuntimeRegistry::default();
+        assert_eq!(registry.next_id().unwrap(), 1);
+        assert_eq!(registry.next_id().unwrap(), 2);
+        registry.sequence.store(u64::MAX, Ordering::Relaxed);
+        assert!(registry.next_id().is_err());
+    }
 
     fn identity() -> LiveRuntimeIdentity {
         LiveRuntimeIdentity {

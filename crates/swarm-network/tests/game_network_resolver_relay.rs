@@ -62,6 +62,9 @@ fn hello(key: &SigningKey, marker: u8) -> PeerHelloV1 {
     hello
 }
 
+// Only the derive-generated conversion from relay's uninhabited event is
+// unreachable. Keep strict warnings on the rest of this full relay test.
+#[allow(unreachable_code)]
 #[derive(NetworkBehaviour)]
 struct InfrastructureRelay {
     relay: relay::Behaviour,

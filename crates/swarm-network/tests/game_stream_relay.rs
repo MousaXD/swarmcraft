@@ -21,6 +21,9 @@ use swarm_network::{game_route::GAME_STREAM_PROTOCOL, generate_transport_key, Ne
 use swarm_protocol::{peer_id_from_public_key, PeerHelloV1, PROTOCOL_VERSION};
 use tokio::time::timeout;
 
+// libp2p's relay Behaviour has an uninhabited event variant. Its derive emits
+// unreachable conversion code; this is a macro-only lint, not a test bypass.
+#[allow(unreachable_code)]
 #[derive(NetworkBehaviour)]
 struct LocalRelayBehaviour {
     relay: relay::Behaviour,
