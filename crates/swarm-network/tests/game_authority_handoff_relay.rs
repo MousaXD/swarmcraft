@@ -294,8 +294,7 @@ async fn rejected_new_join(port: u16) {
     assert!(matches!(read, Ok(0) | Err(_)), "unverified join leaked Minecraft data");
 }
 
-#[tokio::test]
-async fn relayed_hosts_are_fenced_and_fresh_successor_rejoins_same_local_gateway() {
+async fn run_relay_authority_handoff(crash_original_host: bool) {
     timeout(Duration::from_secs(55), async {
         let root = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -434,6 +433,15 @@ async fn relayed_hosts_are_fenced_and_fresh_successor_rejoins_same_local_gateway
         tokio::time::sleep(Duration::from_millis(100)).await; // register host protocols
 
         let mut original = join_local_gateway(stable_port, b"first authority", b'A').await;
+        if crash_original_host {
+            // Simulate a real network/runtime process loss, not just an
+            // application-level fencing flag. The host swarm, game-stream
+            // supervisor, and its private Java-surrogate TCP listener all
+            // stop abruptly while the player gateway stays on the SAME port.
+            task_a.abort();
+            pump_a.abort();
+            server_a.abort();
+        }
         // Synthetic transition says B is the accepted host, but B's runtime
         // is not yet ready. Old A MUST stop; no premature forwarding to B.
         state.update(offer_b.clone(), key_b.clone(), false);
@@ -457,10 +465,16 @@ async fn relayed_hosts_are_fenced_and_fresh_successor_rejoins_same_local_gateway
         state.update(offer_b, key_b, true);
         let _restored = join_local_gateway(stable_port, b"recovered B", b'B').await;
         stop_gateway.send(true).unwrap();
-        stop_a.send(true).unwrap();
+        if !crash_original_host {
+            stop_a.send(true).unwrap();
+        }
         stop_b.send(true).unwrap();
         assert!(task_gateway.await.unwrap().is_ok());
-        assert!(task_a.await.unwrap().is_ok());
+        if crash_original_host {
+            assert!(task_a.await.unwrap_err().is_cancelled());
+        } else {
+            assert!(task_a.await.unwrap().is_ok());
+        }
         assert!(task_b.await.unwrap().is_ok());
         pump_a.abort();
         pump_b.abort();
@@ -471,4 +485,14 @@ async fn relayed_hosts_are_fenced_and_fresh_successor_rejoins_same_local_gateway
     })
     .await
     .expect("synthetic three-peer authority handoff over relay timed out");
+}
+
+#[tokio::test]
+async fn relayed_hosts_are_fenced_and_fresh_successor_rejoins_same_local_gateway() {
+    run_relay_authority_handoff(false).await;
+}
+
+#[tokio::test]
+async fn crashed_relayed_host_recovers_via_new_authority_on_the_same_local_port() {
+    run_relay_authority_handoff(true).await;
 }
