@@ -156,6 +156,18 @@ p { line-height: 1.45; }
 .status-badge.danger::before, .status-badge.offline::before, .status-badge.action::before { background: var(--danger); }
 
 .safety-panel { margin-top: var(--s4); display: flex; align-items: center; justify-content: space-between; gap: var(--s4); padding: var(--s3); border-left: 3px solid var(--border-strong); background: var(--surface-2); }
+.game-readiness-checkpoints { display: grid; gap: 0; margin: var(--s3) 0; border-top: 1px solid var(--border); }
+.game-readiness-checkpoint { display: grid; grid-template-columns: minmax(110px, .8fr) minmax(0, 1.2fr); align-items: baseline; gap: var(--s2); padding: var(--s2) 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+.game-readiness-checkpoint dt { color: var(--text-2); }
+.game-readiness-checkpoint dd { margin: 0; overflow-wrap: anywhere; color: var(--muted); }
+.game-readiness-checkpoint dd[data-tone="safe"] { color: var(--safe); }
+.game-readiness-checkpoint dd[data-tone="warning"] { color: var(--warn); }
+.game-readiness-checkpoint dd[data-tone="danger"] { color: var(--danger); }
+.game-route-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--s3); margin: var(--s3) 0; }
+.game-route-actions > div { min-width: 0; flex: 1 1 200px; display: grid; gap: var(--s1); }
+.game-route-actions .machine-line { overflow-wrap: anywhere; font-size: 12px; }
+.game-route-actions .field-help { color: var(--muted); font-size: 11px; }
+.game-route-actions button { flex: 0 1 auto; }
 .safety-panel.safe { border-left-color: var(--safe); }
 .safety-panel.warning { border-left-color: var(--warn); }
 .safety-panel.danger { border-left-color: var(--danger); }

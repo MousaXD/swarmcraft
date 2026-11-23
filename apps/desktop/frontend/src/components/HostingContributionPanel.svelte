@@ -52,6 +52,9 @@
     error = '';
     notice = '';
     try {
+      // The native write can revoke host consent and fence this instance.
+      // Never leave an old green route/shutdown claim displayed while it runs.
+      window.__swarmcraftInvalidateTransientSafety?.(world);
       const response = await saveHostingContribution(world, heapMib);
       if (request !== generation || selectedWorld !== world) return;
       readiness = response;
@@ -73,6 +76,7 @@
     error = '';
     notice = '';
     try {
+      window.__swarmcraftInvalidateTransientSafety?.(world);
       const response = await saveHostingContribution(world, 0);
       if (request !== generation || selectedWorld !== world) return;
       readiness = response;

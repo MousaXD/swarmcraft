@@ -22,6 +22,23 @@ export interface HostingContributionReadiness {
   consent_revision: string | null;
 }
 
+/** Read-only, freshness-checked native status, not a renderer-issued route grant. */
+export interface NativeGameRouteStatus {
+  world_id: string;
+  state: 'verified' | 'waiting_for_quorum' | 'syncing_checkpoint' | 'restoring_runtime' | 'verifying_route' | 'blocked' | 'unavailable';
+  quorum_verified: boolean;
+  hosting_consent_verified: boolean;
+  server_ready: boolean;
+  route_verified: boolean;
+  local_gateway: string | null;
+  authority_peer_id: string | null;
+  epoch: number | null;
+  fencing_token: number | null;
+  snapshot_hash: string | null;
+  verified_at_unix_ms: number | null;
+  valid_until_unix_ms: number | null;
+}
+
 export interface NativeCommandTable {
   initialize_node: { args: Record<string, never>; result: string };
   node_identity: { args: Record<string, never>; result: string };
@@ -36,6 +53,7 @@ export interface NativeCommandTable {
   create_invite: { args: { world: string; expiresMinutes: number; bootstrapAddrs: string[] }; result: string };
   world_status: { args: { world: string }; result: string };
   host_readiness: { args: { world: string }; result: string };
+  game_route_status: { args: { world: string }; result: NativeGameRouteStatus };
   hosting_contribution_get: { args: { world: string }; result: HostingContributionReadiness };
   hosting_contribution_set: { args: { world: string; heapMib: number }; result: HostingContributionReadiness };
   world_mods_status: { args: { world: string }; result: string };

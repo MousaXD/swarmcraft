@@ -26,6 +26,67 @@ class TestCanonicalCliIdentifiers(unittest.TestCase):
             self.assertIsNone(node.canonical_peer_id(bad))
 
 
+class TestVerifiedGameRouteProbe(unittest.TestCase):
+    WORLD = "ab" * 32
+    PEER = "cd" * 32
+    SALT = "ef" * 32
+    NOW = 2_000_000
+
+    def report(self):
+        return {
+            "world_id": "scworld:" + self.WORLD,
+            "state": "verified",
+            "quorum_verified": True, "hosting_consent_verified": True,
+            "server_ready": True, "route_verified": True,
+            "authority_peer_id": "scpeer:" + self.PEER,
+            "local_gateway": "127.0.0.1:25570",
+            "epoch": 3, "fencing_token": 4,
+            "snapshot_hash": "1" * 64,
+            "verified_at_unix_ms": self.NOW - 100,
+            "valid_until_unix_ms": self.NOW + 4000,
+        }
+
+    def probe(self, report, code=0):
+        from types import SimpleNamespace
+        response = SimpleNamespace(returncode=code, stdout=json.dumps(report), stderr="private error")
+        with patch.object(node, "run", return_value=response) as runner:
+            result = node.verified_game_route("/usr/bin/swarmcraft", "/tmp/profile", self.WORLD,
+                                              self.SALT, now_ms=self.NOW)
+            runner.assert_called_once_with([
+                "/usr/bin/swarmcraft", "--data-dir", "/tmp/profile", "world", "game-route-status",
+                "scworld:" + self.WORLD, "--json"
+            ], timeout=8)
+            return result
+
+    def test_fresh_native_proof_redacts_identity_and_requires_loopback(self):
+        result = self.probe(self.report())
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["local_gateway"], "127.0.0.1:25570")
+        self.assertEqual(result["authority_fingerprint"], node.fp(self.SALT, "scpeer:" + self.PEER))
+        self.assertNotIn(self.PEER, json.dumps(result))
+
+    def test_wrong_world_stale_private_or_incomplete_proof_fails_closed(self):
+        replacements = (
+            ("world_id", "scworld:" + "aa" * 32),
+            ("state", "ready"),
+            ("quorum_verified", False),
+            ("hosting_consent_verified", False),
+            ("server_ready", False),
+            ("route_verified", False),
+            ("authority_peer_id", "not-a-peer-id"),
+            ("local_gateway", "192.168.1.2:25565"),
+            ("local_gateway", "127.0.0.1:65536"),
+            ("epoch", True),
+            ("snapshot_hash", "bad"),
+            ("verified_at_unix_ms", self.NOW - 6000),
+            ("valid_until_unix_ms", self.NOW - 1),
+        )
+        for field, value in replacements:
+            with self.subTest(field=field, value=value):
+                self.assertEqual(self.probe({**self.report(), field: value}), {"verified": False})
+        self.assertEqual(self.probe(self.report(), code=1), {"verified": False})
+
+
 class TestSanitizedDiagnostics(unittest.TestCase):
     def test_does_not_publish_addresses_tokens_or_error_details(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -96,6 +157,7 @@ class TestRealCliCaptureContract(unittest.TestCase):
         })()
         outputs = list(map(completed, (status, identity, "OK snapshot #8\n",
                                        migration, readiness)))
+        outputs.append(SimpleNamespace(returncode=1, stdout="", stderr="route unavailable"))
         with patch.object(node, "run", side_effect=outputs), patch.object(
                 node, "world_server_inventory", return_value=[124]):
             with patch.object(node, "canonical_head_digest", return_value="44" * 32):
@@ -116,6 +178,7 @@ class TestRealCliCaptureContract(unittest.TestCase):
         self.assertEqual(report["identity_fingerprint"], node.fp(args.salt, "scpeer:" + self.PEER))
         self.assertEqual(report["world_fingerprint"], node.fp(args.salt, self.WORLD))
         self.assertTrue(report["minecraft_client_process_observed"])
+        self.assertEqual(report["game_route_status"], {"verified": False})
 
 
 class TestWorldBoundJvmInventory(unittest.TestCase):

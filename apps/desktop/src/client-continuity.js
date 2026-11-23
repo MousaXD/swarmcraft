@@ -6,13 +6,15 @@
  * This is intentionally presentation-only: no socket, auto-join or endpoint
  * selection may be derived from the migration status on this path.
  */
-const outcome = (state, title, detail, tone = 'warning') => Object.freeze({
+import { isUsableGameRoute } from './game-route-status.js';
+
+const outcome = (state, title, detail, tone = 'warning', connectionTarget = null) => Object.freeze({
   state,
   title,
   detail,
   tone,
   automaticReconnect: false,
-  connectionTarget: null,
+  connectionTarget,
 });
 
 const UNKNOWN = outcome(
@@ -43,8 +45,9 @@ function isLocalRuntimeReportBoundToWorld(status, worldId) {
  * @param {unknown} status raw machine-local migration report
  * @param {string} expectedWorldId world currently selected in the UI
  * @param {string} safety separately observed local world-safety classification
+ * @param {object} route independently verified, fresh native game-route result
  */
-export function clientContinuityFromMigration(status, expectedWorldId, safety) {
+export function clientContinuityFromMigration(status, expectedWorldId, safety, route = null) {
   if (!expectedWorldId) return UNKNOWN;
 
   // Canonical history in the UI is still not a live routing certificate, but
@@ -55,6 +58,19 @@ export function clientContinuityFromMigration(status, expectedWorldId, safety) {
       'World history needs review',
       'Competing world histories are preserved. Do not reconnect to either server until the conflict is resolved through SwarmCraft.',
       'danger',
+    );
+  }
+  // A valid fresh route supersedes a possibly stale local migration report;
+  // that report can describe an old host even after the new one is verified.
+  // This is only reachable via the independently validated native route API,
+  // never through migration_status.game_endpoint or a manually entered IP.
+  if (isUsableGameRoute(route, expectedWorldId, safety)) {
+    return outcome(
+      'route_verified',
+      'Authenticated Minecraft route verified',
+      route.detail,
+      'safe',
+      route.connectionTarget,
     );
   }
   if (!status || typeof status !== 'object' || Array.isArray(status)) return UNKNOWN;

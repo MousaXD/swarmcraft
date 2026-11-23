@@ -36,6 +36,13 @@ STAGES = {
 SHA = re.compile(r"^[0-9a-fA-F]{64}$")
 COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
 SSH_TARGET = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.@:-]*$")
+
+# Capture queries up to three hosts in series, each with a 100-second SSH
+# timeout. Tying a route probe to its completed stage within this budget
+# rejects ancient/replayed observations without imposing a false 5-second
+# total window across three real WAN machines.
+MAX_ROUTE_STAGE_PROBE_LAG_MS = 330_000
+MAX_ROUTE_CLOCK_SKEW_MS = 2_000
 HERE = Path(__file__).resolve().parent
 
 
@@ -434,6 +441,83 @@ def verify(c, output, review_file=None):
                     for x in observed.values()),
                 "player_only_or_client_continuity_failed_" + name)
 
+    # The accepted checkpoint and actual Minecraft transport are distinct:
+    # require an independently sourced, recent game-route proof at every stage
+    # with a claimed playable successor. A CLI migration Ready status, generic
+    # NAT/relay diagnosis or open JVM process never satisfies this gate.
+    route_stages = ("checkpoint", "bob_recovered", "alice_returned",
+                    "bob_withdrawn", "carol_denied")
+    stable_gateway_by_role = {}
+    last_route_observation_by_role = {}
+    for name in route_stages:
+        route_snapshots = set()
+        for role, node in stages[name].items():
+            route = node.get("game_route_status")
+            require(isinstance(route, dict) and route.get("verified") is True,
+                    "authenticated_game_route_missing_" + name + "_" + role)
+            require(route.get("world_fingerprint") == node["world_fingerprint"] and
+                    route.get("authority_fingerprint") == node["authority_fingerprint"] and
+                    type(route.get("epoch")) is int and route["epoch"] == node["epoch"] and
+                    type(route.get("fencing_token")) is int and
+                    route["fencing_token"] == node["fencing_token"],
+                    "game_route_wrong_world_or_fence_" + name + "_" + role)
+            target = route.get("local_gateway")
+            match = re.fullmatch(r"127\.0\.0\.1:([1-9][0-9]{0,4})", target) if isinstance(target, str) else None
+            require(match is not None and int(match.group(1)) <= 65535,
+                    "game_route_not_loopback_" + name + "_" + role)
+            require(role not in stable_gateway_by_role or stable_gateway_by_role[role] == target,
+                    "local_gateway_changed_after_host_transfer_" + role)
+            stable_gateway_by_role[role] = target
+            observed_at = route.get("proof_observed_unix_ms")
+            require(type(observed_at) is int and observed_at > last_route_observation_by_role.get(role, 0),
+                    "game_route_probe_replayed_" + name + "_" + role)
+            last_route_observation_by_role[role] = observed_at
+            completed_at = int(stage_times[name].timestamp() * 1000)
+            require(-MAX_ROUTE_CLOCK_SKEW_MS <= completed_at - observed_at <= MAX_ROUTE_STAGE_PROBE_LAG_MS,
+                    "game_route_probe_outside_stage_window_" + name + "_" + role)
+            snap = route.get("snapshot_hash")
+            require(isinstance(snap, str) and SHA.fullmatch(snap),
+                    "signed_game_route_checkpoint_missing_" + name + "_" + role)
+            # An authenticated route must serve the same signed manifest the
+            # current hosting authority reports, not a shared but obsolete
+            # checkpoint replayed identically on all three clients. Replica
+            # migration records may omit the optional snapshot hash; the
+            # actively hosting authority's record must not.
+            if node["identity_fingerprint"] == node["authority_fingerprint"]:
+                local_head = node.get("snapshot_hash")
+                require(isinstance(local_head, str) and SHA.fullmatch(local_head) and
+                        snap.lower() == local_head.lower(),
+                        "game_route_not_current_host_snapshot_" + name + "_" + role)
+            route_snapshots.add(snap.lower())
+        require(len(route_snapshots) == 1,
+                "game_route_checkpoint_diverged_" + name)
+    for role, node in stages["alice_crashed"].items():
+        route = node.get("game_route_status")
+        if route == {"verified": False}:
+            continue
+        # A fast, *newly fenced* automatic recovery may legitimately finish
+        # between the actual Alice crash and this read-only remote capture.
+        # Only an unchanged old authority route is forbidden. Never demand a
+        # synthetic outage just so the observer can catch the interim state.
+        target = route.get("local_gateway") if isinstance(route, dict) else None
+        match = re.fullmatch(r"127\.0\.0\.1:([1-9][0-9]{0,4})", target) if isinstance(target, str) else None
+        previous = stages["checkpoint"][role]["game_route_status"]
+        require(isinstance(route, dict) and route.get("verified") is True and
+                route.get("world_fingerprint") == node["world_fingerprint"] and
+                route.get("authority_fingerprint") == b["identity_fingerprint"] and
+                route.get("authority_fingerprint") != a["identity_fingerprint"] and
+                type(route.get("epoch")) is int and type(a["epoch"]) is int and
+                route["epoch"] > a["epoch"] and
+                type(route.get("fencing_token")) is int and type(a["fencing_token"]) is int and
+                route["fencing_token"] > a["fencing_token"] and
+                isinstance(route.get("snapshot_hash"), str) and SHA.fullmatch(route["snapshot_hash"]) and
+                match is not None and int(match.group(1)) <= 65535 and
+                target == stable_gateway_by_role[role] and
+                type(route.get("proof_observed_unix_ms")) is int and
+                type(previous.get("proof_observed_unix_ms")) is int and
+                route["proof_observed_unix_ms"] > previous["proof_observed_unix_ms"],
+                "stale_game_route_survived_old_host_crash_" + role)
+
     # The reviewed denial media is mandatory: merely observing Carol with
     # zero allocation does not prove an actual negative hosting attempt.
     # Human examination of redacted native GUI, Minecraft-client and network
@@ -446,6 +530,8 @@ def verify(c, output, review_file=None):
             "reviewed_stage_observations_changed_or_unbound")
     required = ("three_independent_gui_installations", "explicit_eula_by_alice",
                 "signed_invites_and_real_client_join", "shared_ingame_marker_three_clients",
+                "real_minecraft_login_via_loopback_gateway",
+                "same_local_gateway_after_authority_handoff",
                 "bob_opt_in_budget_enforced", "carol_zero_host_budget_enforced",
                 "direct_or_hole_punch_transport_observed", "relay_fallback_observed",
                 "measured_packet_loss_disconnect_and_reconnection",

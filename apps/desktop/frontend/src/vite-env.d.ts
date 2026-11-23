@@ -24,6 +24,8 @@ declare global {
       select(world: string): Promise<void>;
       clear(): void;
     };
+    /** Revokes visible proof during local consent or signed transfer updates. Never grants authority. */
+    __swarmcraftInvalidateTransientSafety?: (world: string) => void;
     __swarmcraftSvelteWorlds?: {
       refresh(): Promise<import('./lib/world-list-state').NativeWorldEntry[]>;
       setSelected(id: string): void;

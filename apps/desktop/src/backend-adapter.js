@@ -1,6 +1,7 @@
 import { registerRuntimeWizard } from './runtime-wizard.js';
 import { adaptProviderInvocation } from './provider-contract-bridge.js';
 import { registerTransferWizard } from './transfer-wizard.js';
+import { normalizeGameRouteStatus } from './game-route-status.js';
 
 const unavailable = (feature) => {
   const error = new Error(`${feature} is not available in this build.`);
@@ -388,22 +389,44 @@ export function normalizeMigrationState(raw) {
   };
 }
 
-export function normalizeHostReadiness(raw) {
+export function normalizeHostReadiness(raw, expectedWorldId = null, now = Date.now()) {
   const source = raw && typeof raw === 'object' ? raw : {};
-  const state = connectivityKey(source.state || 'unknown');
+  // A local report can outlive its current quorum or a world selection.
+  // The Rust side expires at 6 seconds; repeat the world/freshness guard at
+  // the presentation boundary so even a contradictory JSON object is safe.
+  const generatedAt = source.generated_unix_ms;
+  const fresh = Number.isSafeInteger(generatedAt) && generatedAt >= 0
+    && Number.isSafeInteger(generatedAt + 6000)
+    && generatedAt <= now + 2000 && now - generatedAt < 6000;
+  const worldMatches = expectedWorldId !== null && source.world_id === expectedWorldId;
+  const reported = connectivityKey(source.state || 'unknown');
+  const positive = (reported === 'safe' || reported === 'sleeping')
+    && source.safe_to_shutdown === true;
+  const state = fresh && worldMatches && (!(reported === 'safe' || reported === 'sleeping') || positive)
+    ? reported : 'unknown';
   const mapped = HOST_READINESS_STATES[state] || HOST_READINESS_STATES.unknown;
+  const usableReport = state !== 'unknown' && Boolean(HOST_READINESS_STATES[state]);
+  const validPeer = (peer) => typeof peer === 'string' && /^scpeer:[a-f\d]{64}$/i.test(peer)
+    ? peer : null;
+  const safeSuccessor = usableReport && positive && state === 'safe';
   return {
-    available: state !== 'unknown',
+    available: usableReport,
     state: HOST_READINESS_STATES[state] ? state : 'unknown',
+    worldId: usableReport ? expectedWorldId : null,
+    validUntil: usableReport ? generatedAt + 6000 : null,
     kind: mapped.kind,
     label: mapped.label,
-    detail: String(source.detail || '').trim() || 'SwarmCraft has not yet proven whether this computer may safely shut down.',
-    safeToShutdown: Boolean(source.safe_to_shutdown ?? source.safeToShutdown),
-    successorPeerId: source.successor_peer_id ?? source.successorPeerId ?? null,
-    handoffCandidatePeerId: source.handoff_candidate_peer_id ?? source.handoffCandidatePeerId ?? null,
-    worldDataReplicated: Boolean(source.world_data_replicated ?? source.worldDataReplicated),
-    peers: Array.isArray(source.peers) ? source.peers : [],
-    raw: source,
+    detail: state === 'unknown'
+      ? 'SwarmCraft has not verified current shutdown safety for this world. Keep hosting until a fresh report is available.'
+      : String(source.detail || '').trim() || 'SwarmCraft has not yet proven whether this computer may safely shut down.',
+    safeToShutdown: positive && state === reported,
+    // A stale/unknown or unsafe report must not recommend a successor in the
+    // signed manual transfer wizard, even if it contains plausible peer IDs.
+    successorPeerId: safeSuccessor ? validPeer(source.successor_peer_id) : null,
+    handoffCandidatePeerId: usableReport ? validPeer(source.handoff_candidate_peer_id) : null,
+    worldDataReplicated: usableReport && source.world_data_replicated === true,
+    peers: usableReport && Array.isArray(source.peers) ? source.peers : [],
+    raw: usableReport ? source : {},
   };
 }
 
@@ -486,10 +509,17 @@ export function createBackendAdapter(invoke) {
     hostReadiness: async (world) => {
       const raw = await call('host_readiness', { world });
       try {
-        return normalizeHostReadiness(typeof raw === 'string' ? JSON.parse(raw) : raw);
+        return normalizeHostReadiness(typeof raw === 'string' ? JSON.parse(raw) : raw, world);
       } catch (error) {
         throw new Error(`Host readiness was not valid JSON: ${error}`);
       }
+    },
+    // This native command reads a bounded, world-bound, independently verified
+    // route. An unavailable daemon route adapter MUST NOT fall back to either
+    // migration_status.game_endpoint or generic peer connectivity.
+    gameRouteStatus: async (world) => {
+      const raw = await callOptional('game_route_status', { world }, 'Verified Minecraft route');
+      return normalizeGameRouteStatus(typeof raw === 'string' ? JSON.parse(raw) : raw, world);
     },
     worldCompatibility: (world) => call('world_compatibility', { world }),
     worldConflicts: (world) => call('world_conflicts', { world }),

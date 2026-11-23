@@ -46,7 +46,12 @@ def field(output, key):
 
 def integer(value):
     try:
-        n = int(value)
+        if type(value) is int:
+            n = value
+        elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+            n = int(value)
+        else:
+            return None
         return n if 0 <= n <= 2**63 - 1 else None
     except (ValueError, TypeError):
         return None
@@ -433,6 +438,59 @@ def stable_world_server_inventory(before, after):
             set(before) == set(after))
 
 
+def verified_game_route(cli, data_dir, world, salt, now_ms=None):
+    """Read an independently proven route, never migration.game_endpoint.
+
+    The CLI must establish live signed quorum and Fabric readiness. This
+    allowlisted observation cannot itself certify real Minecraft gameplay.
+    Missing native functionality intentionally returns an unverified state.
+    """
+    blocked = {"verified": False}
+    try:
+        output = run([str(cli), "--data-dir", str(data_dir), "world",
+                      "game-route-status", "scworld:" + world, "--json"], timeout=8)
+    except (OSError, subprocess.TimeoutExpired):
+        return blocked
+    if output.returncode != 0 or len(output.stdout) > 8192:
+        return blocked
+    try:
+        value = json.loads(output.stdout)
+    except (ValueError, TypeError):
+        return blocked
+    if not isinstance(value, dict) or canonical_world_id(value.get("world_id")) != world:
+        return blocked
+    if (value.get("state") != "verified" or
+            not all(value.get(field) is True for field in (
+                "quorum_verified", "hosting_consent_verified", "server_ready", "route_verified"))):
+        return blocked
+    gateway = value.get("local_gateway")
+    match = re.fullmatch(r"127\.0\.0\.1:([1-9][0-9]{0,4})", gateway) if isinstance(gateway, str) else None
+    if match is None or int(match.group(1)) > 65535:
+        return blocked
+    authority = canonical_peer_id(value.get("authority_peer_id"))
+    epoch, fence = integer(value.get("epoch")), integer(value.get("fencing_token"))
+    snapshot = value.get("snapshot_hash")
+    at = integer(value.get("verified_at_unix_ms"))
+    until = integer(value.get("valid_until_unix_ms"))
+    now = int(time.time() * 1000) if now_ms is None else now_ms
+    if (authority is None or epoch is None or fence is None or
+            not isinstance(snapshot, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", snapshot) or
+            at is None or until is None or now < 0 or
+            at > now + 2000 or now - at > 5000 or
+            until <= now or until <= at or until - at > 15000):
+        return blocked
+    return {
+        "verified": True,
+        "world_fingerprint": fp(salt, world),
+        "authority_fingerprint": fp(salt, authority),
+        "local_gateway": gateway,
+        "epoch": epoch,
+        "fencing_token": fence,
+        "snapshot_hash": snapshot.lower(),
+        "proof_observed_unix_ms": now,
+    }
+
+
 def capture(a):
     if not isinstance(a.world, str) or not re.fullmatch("[a-fA-F0-9]{64}", a.world):
         fail("world_id_invalid")
@@ -519,6 +577,7 @@ def capture(a):
             Path(a.binary).resolve(strict=True), Path(a.cli).resolve(strict=True)),
         "test_profile_log_digests": log_digests(root),
         "connectivity_diagnostics": connectivity_summary(root),
+        "game_route_status": verified_game_route(cli, root, a.world, a.salt),
     }
     after_inventory = world_server_inventory(root, a.world)
     if not stable_world_server_inventory(server_inventory, after_inventory):

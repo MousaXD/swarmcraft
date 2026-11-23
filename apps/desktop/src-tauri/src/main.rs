@@ -4,6 +4,7 @@ mod canonical_commands;
 mod canonical_world_commands;
 mod catalog_commands;
 mod curseforge;
+mod game_route_commands;
 mod hosting_contribution_commands;
 mod launcher_commands;
 mod modrinth_commands;
@@ -213,6 +214,23 @@ async fn world_status(app: AppHandle, world: String) -> Result<String, String> {
 async fn host_readiness(app: AppHandle, world: String) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
     run_cli(&app, vec!["world".into(), "host-readiness".into(), world, "--json".into()]).await
+}
+
+/// An optional read-only bridge. The daemon must implement a fresh, independent
+/// proof path before it may return `verified`. A missing CLI subcommand is an
+/// explicit unavailable state, never a guessed route from migration-status.
+#[tauri::command]
+async fn game_route_status(
+    app: AppHandle,
+    world: String,
+) -> Result<game_route_commands::GameRouteStatusReply, String> {
+    let world = hosting_contribution_commands::validate_world_id(&world)?;
+    let output = run_cli(
+        &app,
+        vec!["world".into(), "game-route-status".into(), world.to_string(), "--json".into()],
+    )
+    .await?;
+    game_route_commands::decode_current_game_route_status(&output, world)
 }
 
 #[tauri::command]
@@ -529,6 +547,7 @@ fn main() {
             create_invite,
             world_status,
             host_readiness,
+            game_route_status,
             hosting_contribution_get,
             hosting_contribution_set,
             world_mods_status,

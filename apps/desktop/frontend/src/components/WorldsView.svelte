@@ -152,6 +152,18 @@
                 <p id="playAvailability" class="action-reason">Checking whether this device can host the world…</p>
                 <p id="transferAvailability" class="action-reason" hidden></p>
 
+                <!-- The native game-route controller owns this display and
+                     both reconnect buttons. This Svelte candidate must never
+                     infer a playable route from compatibility or migration. -->
+                <div class="player-route-entry" aria-label="Minecraft multiplayer route">
+                  <div class="player-route-copy">
+                    <span class="section-label">Join current host</span>
+                    <strong data-primary-route-state>Minecraft route not verified</strong>
+                    <p data-primary-route-detail>A fresh authenticated route is required before reconnecting.</p>
+                  </div>
+                  <button class="button button-secondary" type="button" data-reconnect-world disabled>Reconnect instructions</button>
+                </div>
+
                 <div class="world-state-grid" aria-label="World summary">
                   <div class="state-cell">
                     <span class="state-label">Host</span>

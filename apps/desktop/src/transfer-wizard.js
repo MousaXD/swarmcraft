@@ -35,6 +35,33 @@ export function observeStatusLine(statusText) {
   return `Authority is now ${authority}${epochKnown ? ` at epoch ${epoch}` : ''}.`;
 }
 
+/**
+ * Generic status is diagnostic only. An actual successor transition needs a
+ * single canonical authority and an epoch strictly after the observed source
+ * epoch; even then this is *not* independent quorum or game-route proof.
+ */
+export function observeExpectedSuccessor(statusText, expectedPeer, sourceEpoch) {
+  if (!/^scpeer:[a-f\d]{64}$/i.test(String(expectedPeer || ''))
+      || !Number.isSafeInteger(sourceEpoch) || sourceEpoch < 0) return '';
+  const text = String(statusText || '');
+  const authorityLines = [...text.matchAll(/^Authority:\s*(\S+)\s*$/gm)];
+  const epochLines = [...text.matchAll(/^Epoch:\s*(\S+)\s*$/gm)];
+  if (authorityLines.length !== 1 || epochLines.length !== 1) return '';
+  const authority = authorityLines[0][1];
+  const epochText = epochLines[0][1];
+  if (authority !== expectedPeer || !/^(0|[1-9]\d*)$/.test(epochText)) return '';
+  const epoch = Number(epochText);
+  if (!Number.isSafeInteger(epoch) || epoch <= sourceEpoch) return '';
+  return `Local world status reports the selected successor at epoch ${epoch}. Current quorum, Fabric readiness and Minecraft route still require independent verification.`;
+}
+
+function statusEpoch(statusText) {
+  const lines = [...String(statusText || '').matchAll(/^Epoch:\s*(\S+)\s*$/gm)];
+  if (lines.length !== 1 || !/^(0|[1-9]\d*)$/.test(lines[0][1])) return null;
+  const value = Number(lines[0][1]);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
 const OBSERVE_GUIDANCE =
   'The successor epoch was accepted on this peer. Keep networking online while quorum propagation and the new host runtime readiness complete.';
 const OBSERVE_POLL_INTERVAL_MS = 3000;
@@ -221,12 +248,20 @@ export function registerTransferWizard(backend) {
     trigger.dataset.transferWizardBound = 'true';
     const dialog = ensureDialog();
     let currentWorld = '';
+    let sessionGeneration = 0;
+    let sourceEpoch = null;
+    let preparedSuccessor = '';
+    const activeSession = (world, generation) => dialog.open
+      && currentWorld === world && dialog.dataset.world === world && generation === sessionGeneration;
 
     const close = () => dialog.close();
     document.getElementById('closeTransferDialog').addEventListener('click', close);
     document.getElementById('doneTransferDialog').addEventListener('click', close);
     dialog.addEventListener('cancel', () => setError(''));
-    dialog.addEventListener('close', () => stopObservePolling());
+    dialog.addEventListener('close', () => {
+      sessionGeneration += 1;
+      stopObservePolling();
+    });
 
     let observeTimer = null;
     const stopObservePolling = () => {
@@ -236,10 +271,14 @@ export function registerTransferWizard(backend) {
       }
     };
 
-    const startObservePolling = (world, complete) => {
+    const startObservePolling = (world, generation, complete, expectedSuccessor, earlierEpoch) => {
       stopObservePolling();
       let attempts = 0;
       observeTimer = setInterval(async () => {
+        if (!activeSession(world, generation)) {
+          stopObservePolling();
+          return;
+        }
         attempts += 1;
         if (attempts > OBSERVE_POLL_ATTEMPTS) {
           stopObservePolling();
@@ -247,13 +286,15 @@ export function registerTransferWizard(backend) {
         }
         try {
           const statusText = await backend.worldStatus(world);
-          const line = observeStatusLine(statusText);
-          if (line && dialog.open && dialog.dataset.world === world) {
-            complete.textContent = `The successor epoch was accepted on this peer. ${line} Keep networking online while quorum propagation completes.`;
-            complete.dataset.tone = 'safe';
+          if (!activeSession(world, generation)) return;
+          const line = observeExpectedSuccessor(statusText, expectedSuccessor, earlierEpoch);
+          if (line) {
+            complete.textContent = line;
+            complete.dataset.tone = 'neutral';
+            stopObservePolling();
           }
         } catch {
-          if (dialog.open && dialog.dataset.world === world) complete.textContent = OBSERVE_GUIDANCE;
+          if (activeSession(world, generation)) complete.textContent = OBSERVE_GUIDANCE;
         }
         if (attempts >= OBSERVE_POLL_ATTEMPTS) stopObservePolling();
       }, OBSERVE_POLL_INTERVAL_MS);
@@ -261,61 +302,83 @@ export function registerTransferWizard(backend) {
 
     const runStep = async (buttonId, work) => {
       const button = document.getElementById(buttonId);
+      const world = currentWorld;
+      const generation = sessionGeneration;
+      const isCurrent = () => activeSession(world, generation);
+      if (!isCurrent() || inFlightSteps.has(buttonId)) return null;
+      inFlightSteps.add(buttonId);
       setError('');
       setBusy(button, true);
       try {
-        return await work();
+        return await work(world, isCurrent, generation);
       } catch (error) {
-        setError(error?.message || String(error));
+        if (isCurrent()) setError(error?.message || String(error));
         return null;
       } finally {
-        setBusy(button, false);
+        inFlightSteps.delete(buttonId);
+        // A result from a closed or replaced dialog may not re-enable a
+        // control whose fresh membership/role checks have disabled it.
+        if (isCurrent()) setBusy(button, false);
+        else button.removeAttribute('aria-busy');
       }
     };
 
-    document.getElementById('prepareTransfer').addEventListener('click', () => runStep('prepareTransfer', async () => {
+    const inFlightSteps = new Set();
+
+    document.getElementById('prepareTransfer').addEventListener('click', () => runStep('prepareTransfer', async (world, isCurrent) => {
       const target = document.getElementById('transferTargetPeer').value;
       if (!target) throw new Error('No authority-eligible transfer target is available.');
-      const token = await backend.migration.transferPrepare(currentWorld, target);
+      window.__swarmcraftInvalidateTransientSafety?.(world);
+      const token = await backend.migration.transferPrepare(world, target);
+      if (!isCurrent()) return null;
+      preparedSuccessor = target;
       document.getElementById('preparedTransferToken').value = token;
       document.getElementById('preparedTransferWrap').hidden = false;
       return token;
     }));
 
-    document.getElementById('commitTransfer').addEventListener('click', () => runStep('commitTransfer', async () => {
+    document.getElementById('commitTransfer').addEventListener('click', () => runStep('commitTransfer', async (world, isCurrent) => {
       const token = document.getElementById('acceptedTransferToken').value.trim();
       if (!token) throw new Error('Paste the accepted token returned by the target device.');
-      const committed = await backend.migration.transferCommit(currentWorld, token);
+      window.__swarmcraftInvalidateTransientSafety?.(world);
+      const committed = await backend.migration.transferCommit(world, token);
+      if (!isCurrent()) return null;
       document.getElementById('committedTransferToken').value = committed;
       document.getElementById('committedTransferWrap').hidden = false;
       return committed;
     }));
 
-    document.getElementById('observeTransfer').addEventListener('click', () => runStep('observeTransfer', async () => {
+    document.getElementById('observeTransfer').addEventListener('click', () => runStep('observeTransfer', async (world, isCurrent, generation) => {
       const token = document.getElementById('successorEpochToken').value.trim();
       if (!token) throw new Error('Paste the signed successor epoch returned by the new host.');
-      const result = await backend.migration.transferObserve(currentWorld, token);
+      window.__swarmcraftInvalidateTransientSafety?.(world);
+      const result = await backend.migration.transferObserve(world, token);
+      if (!isCurrent()) return null;
       const complete = document.getElementById('sourceTransferComplete');
       complete.textContent = OBSERVE_GUIDANCE;
-      complete.dataset.tone = 'safe';
+      complete.dataset.tone = 'neutral';
       complete.hidden = false;
-      startObservePolling(currentWorld, complete);
+      startObservePolling(world, generation, complete, preparedSuccessor, sourceEpoch);
       return result;
     }));
 
-    document.getElementById('acceptTransfer').addEventListener('click', () => runStep('acceptTransfer', async () => {
+    document.getElementById('acceptTransfer').addEventListener('click', () => runStep('acceptTransfer', async (world, isCurrent) => {
       const token = document.getElementById('incomingPreparedTransfer').value.trim();
       if (!token) throw new Error('Paste the prepared transfer token from the current host.');
-      const accepted = await backend.migration.transferAccept(currentWorld, token);
+      window.__swarmcraftInvalidateTransientSafety?.(world);
+      const accepted = await backend.migration.transferAccept(world, token);
+      if (!isCurrent()) return null;
       document.getElementById('outgoingAcceptedTransfer').value = accepted;
       document.getElementById('acceptedTransferWrap').hidden = false;
       return accepted;
     }));
 
-    document.getElementById('activateTransfer').addEventListener('click', () => runStep('activateTransfer', async () => {
+    document.getElementById('activateTransfer').addEventListener('click', () => runStep('activateTransfer', async (world, isCurrent) => {
       const token = document.getElementById('incomingCommittedTransfer').value.trim();
       if (!token) throw new Error('Paste the committed transfer token from the current host.');
-      const epoch = await backend.migration.transferActivate(currentWorld, token);
+      window.__swarmcraftInvalidateTransientSafety?.(world);
+      const epoch = await backend.migration.transferActivate(world, token);
+      if (!isCurrent()) return null;
       document.getElementById('outgoingEpochTransfer').value = epoch;
       document.getElementById('epochTransferWrap').hidden = false;
       return epoch;
@@ -338,8 +401,10 @@ export function registerTransferWizard(backend) {
       // attempting a target-less transfer call.
       event.preventDefault();
       event.stopImmediatePropagation();
+      const generation = ++sessionGeneration;
       setError('');
       currentWorld = document.getElementById('world')?.value.trim() || '';
+      const requestedWorld = currentWorld;
       if (!currentWorld) {
         setError('Choose a world first.');
         dialog.showModal();
@@ -348,7 +413,9 @@ export function registerTransferWizard(backend) {
       if ((dialog.dataset.world || '') !== currentWorld) {
         stopObservePolling();
         clearTransferProgress();
+        preparedSuccessor = '';
       }
+      sourceEpoch = null;
       dialog.dataset.world = currentWorld;
 
       try {
@@ -356,14 +423,24 @@ export function registerTransferWizard(backend) {
         if (!backend.migration.capabilities.transfer) throw new Error('Signed manual host transfer is not available in this build.');
         const [identityText, statusText, peerText, readiness] = await Promise.all([
           backend.nodeIdentity(),
-          backend.worldStatus(currentWorld),
-          backend.worldPeers(currentWorld),
-          backend.hostReadiness(currentWorld).catch(() => null),
+          backend.worldStatus(requestedWorld),
+          backend.worldPeers(requestedWorld),
+          backend.hostReadiness(requestedWorld).catch(() => null),
         ]);
+        if (generation !== sessionGeneration || currentWorld !== requestedWorld
+            || dialog.dataset.world !== requestedWorld) return;
         const localPeer = parsePeerId(identityText);
         const authority = parseAuthority(statusText);
+        sourceEpoch = statusEpoch(statusText);
         const isSource = Boolean(localPeer && authority && localPeer === authority);
         const peers = parseTransferPeers(peerText, localPeer);
+
+        for (const buttonId of [
+          'prepareTransfer', 'commitTransfer', 'observeTransfer',
+          'acceptTransfer', 'activateTransfer',
+        ]) {
+          if (!inFlightSteps.has(buttonId)) setBusy(document.getElementById(buttonId), false);
+        }
 
         document.getElementById('transferDialogTitle').textContent = isSource ? 'Transfer host safely' : 'Receive host handoff';
         document.getElementById('transferRoleNote').textContent = roleCopy(isSource, localPeer, authority);
@@ -374,7 +451,11 @@ export function registerTransferWizard(backend) {
         if (isSource) {
           const select = document.getElementById('transferTargetPeer');
           select.replaceChildren();
-          const recommended = readiness?.handoffCandidatePeerId || readiness?.successorPeerId || '';
+          // A signed candidate is not an endorsed safe takeover merely
+          // because it appears in an old or blocked readiness report.
+          const recommended = readiness?.safeToShutdown === true
+            ? readiness.successorPeerId || ''
+            : '';
           for (const peer of peers) {
             const option = document.createElement('option');
             option.value = peer.peerId;
@@ -390,13 +471,15 @@ export function registerTransferWizard(backend) {
           } else {
             hint.textContent = 'Host Readiness has not identified a preferred successor. A transfer can remain safe but may leave the world offline until the target runtime/mod setup and quorum are ready.';
           }
-          document.getElementById('prepareTransfer').disabled = !peers.length;
+          document.getElementById('prepareTransfer').disabled = !peers.length || inFlightSteps.has('prepareTransfer');
         }
 
-        dialog.showModal();
+        if (!dialog.open) dialog.showModal();
       } catch (error) {
+        if (generation !== sessionGeneration || currentWorld !== requestedWorld
+            || dialog.dataset.world !== requestedWorld) return;
         setError(error?.message || String(error));
-        dialog.showModal();
+        if (!dialog.open) dialog.showModal();
       }
     }, { capture: true });
   };

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { createBackendAdapter } from '../src/backend-adapter.js';
-import { observeStatusLine, parseAuthority, parsePeerId, parseTransferPeers } from '../src/transfer-wizard.js';
+import { observeExpectedSuccessor, observeStatusLine, parseAuthority, parsePeerId, parseTransferPeers } from '../src/transfer-wizard.js';
 
 const srcRoot = new URL('../src/', import.meta.url);
 const desktopRoot = new URL('../', import.meta.url);
@@ -148,17 +148,41 @@ test('post-observe live status reuses the existing world status command without 
   const adapter = await text('backend-adapter.js');
 
   assert.match(wizard, /backend\.worldStatus\(world\)/);
-  assert.match(wizard, /observeStatusLine\(statusText\)/);
+  assert.match(wizard, /observeExpectedSuccessor\(statusText, expectedSuccessor, earlierEpoch\)/);
   assert.match(wizard, /OBSERVE_POLL_INTERVAL_MS = 3000/);
   assert.match(wizard, /OBSERVE_POLL_ATTEMPTS = 20/);
   assert.match(wizard, /stopObservePolling/);
   // Polling must stop when the dialog closes so no stale write lands after a
   // reopen against a different world.
-  assert.match(wizard, /dialog\.open && dialog\.dataset\.world === world/);
+  assert.match(wizard, /currentWorld === world && dialog\.dataset\.world === world && generation === sessionGeneration/);
+  assert.match(wizard, /const world = currentWorld;/);
+  assert.match(wizard, /if \(!isCurrent\(\)\) return null;/);
+  assert.match(wizard, /if \(generation !== sessionGeneration \|\| currentWorld !== requestedWorld/);
 
   // No new Tauri command was introduced for polling: worldStatus is already
   // served by `world_status` through the adapter.
   assert.equal(adapter.split('world_status').length - 1 >= 1, true);
+});
+
+test('generic live status cannot pass as verified successor without the selected peer and newer epoch', () => {
+  const successor = `scpeer:${'b'.repeat(64)}`;
+  const old = `scpeer:${'a'.repeat(64)}`;
+  const valid = `World: Demo\nAuthority: ${successor}\nEpoch: 5`;
+  assert.match(observeExpectedSuccessor(valid, successor, 4), /selected successor at epoch 5/i);
+  assert.match(observeExpectedSuccessor(valid, successor, 4), /independent verification/i);
+  for (const [status, expected, epoch] of [
+    [valid, old, 4],
+    [valid, successor, 5],
+    [valid, successor, 6],
+    [valid, successor, null],
+    [valid, 'peer-b', 4],
+    [`World: Demo\nAuthority: ${old}\nEpoch: 5`, successor, 4],
+    [`World: Demo\nAuthority: ${successor}\nEpoch: unknown`, successor, 4],
+    [`World: Demo\nAuthority: ${successor}\nEpoch: 5\nEpoch: 6`, successor, 4],
+    [`World: Demo\nAuthority: ${successor}\nAuthority: ${old}\nEpoch: 5`, successor, 4],
+    [`World: Demo\nAuthority: ${successor}\nEpoch: 5.5`, successor, 4],
+    [`World: Demo\nAuthority: ${successor}\nEpoch: 99999999999999999999`, successor, 4],
+  ]) assert.equal(observeExpectedSuccessor(status, expected, epoch), '');
 });
 
 test('observeStatusLine summarizes live authority confirmation from world status output', () => {

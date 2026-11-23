@@ -99,7 +99,7 @@ test('Desktop surfaces an accessible connection-status result bound to selected 
   const root = new URL('../src/', import.meta.url);
   const app = await readFile(new URL('app.js', root), 'utf8');
   const html = await readFile(new URL('index.html', root), 'utf8');
-  assert.match(app, /clientContinuityFromMigration\(state, selectedWorldId, selectedWorld\(\)\?\.status\?\.Safety\)/);
+  assert.match(app, /clientContinuityFromMigration\(state, selectedWorldId, selectedWorld\(\)\?\.status\?\.Safety, gameRouteState\)/);
   assert.match(app, /ensureClientContinuityPanel\(document\)/);
   assert.match(app, /targets\.title\.textContent/);
   assert.match(app, /targets\.detail\.textContent/);
