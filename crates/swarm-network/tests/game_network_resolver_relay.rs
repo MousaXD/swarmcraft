@@ -1,3 +1,4 @@
+#![allow(unreachable_code)] // libp2p's generated relay-event conversion is unreachable under newer Rust.
 //! Full authenticated route-control and Minecraft TCP forwarding over a REAL
 //! locally hosted libp2p relay. There are no direct SwarmCraft peer dials,
 //! public Minecraft listeners, or unauthenticated endpoint fallbacks.
@@ -62,9 +63,6 @@ fn hello(key: &SigningKey, marker: u8) -> PeerHelloV1 {
     hello
 }
 
-// Only the derive-generated conversion from relay's uninhabited event is
-// unreachable. Keep strict warnings on the rest of this full relay test.
-#[allow(unreachable_code)]
 #[derive(NetworkBehaviour)]
 struct InfrastructureRelay {
     relay: relay::Behaviour,

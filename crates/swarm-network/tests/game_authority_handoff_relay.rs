@@ -1,3 +1,4 @@
+#![allow(unreachable_code)] // libp2p's generated relay-event conversion is unreachable under newer Rust.
 //! Full synthetic authority handoff over a REAL local libp2p relay circuit.
 //! Two possible SwarmCraft hosts and one player never dial application peers
 //! directly. Both Minecraft-style servers bind only to their own loopback.
@@ -48,9 +49,6 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock is configured").as_millis() as u64
 }
 
-// The libp2p relay behaviour's event is uninhabited, so the derive expands an
-// unreachable conversion. This annotation does not skip relay assertions.
-#[allow(unreachable_code)]
 #[derive(NetworkBehaviour)]
 struct RelayBehaviour {
     relay: relay::Behaviour,

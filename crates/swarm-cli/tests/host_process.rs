@@ -141,7 +141,7 @@ async fn real_host_process_restores_launches_and_commits_mutated_world() {
     let mock = temp.path().join("mock-java");
     fs::write(
         &mock,
-        r#"#!/usr/bin/env python3
+        r##"#!/usr/bin/env python3
 import os
 import pathlib
 import socket
@@ -160,13 +160,25 @@ pathlib.Path(world, "swarmcraft-runtime-smoke.txt").write_text("mutated-by-real-
 def encoded(value):
     return value.encode("utf-8").hex()
 
+# The real host supervisor now refuses Fabric WORLD_INFO if no Minecraft
+# listener is running. Mirror the private listener with a real bound mock;
+# do not weaken the production readiness probe or advertise a fake port.
+properties = dict(line.split("=", 1) for line in pathlib.Path("server.properties").read_text(encoding="utf-8").splitlines() if "=" in line and not line.startswith("#"))
+assert properties["server-ip"] == "127.0.0.1"
+assert properties["online-mode"] == "true"
+assert properties["enable-rcon"] == "false"
+assert properties["enable-query"] == "false"
+game_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+game_listener.bind(("127.0.0.1", int(properties["server-port"])))
+game_listener.listen(4)
+
 with socket.create_connection((host, port), timeout=5) as connection:
     writer = connection.makefile("w", encoding="utf-8", newline="\n")
     writer.write("AUTH\t" + token + "\n")
     writer.write("WORLD_INFO\t" + encoded("26.1.2") + "\t" + encoded("0.19.3") + "\t" + encoded(world) + "\t" + fingerprint + "\t25\n")
     writer.flush()
     time.sleep(0.5)
-"#,
+"##,
     )
     .unwrap();
     let mut permissions = fs::metadata(&mock).unwrap().permissions();
