@@ -349,6 +349,11 @@ impl RouteVerifier {
         now_unix_ms: u64,
         source: &(impl FreshAuthoritySource + ?Sized),
     ) -> Result<VerifiedGameRoute, GameRouteError> {
+        // The caller's wall-clock sample predates expensive signature,
+        // quorum/runtime and durable-floor I/O. Preserve that actual elapsed
+        // time; a slow verifier must never mint a fresh capability whose
+        // signed response or live evidence already expired while checking.
+        let verification_started = Instant::now();
         let pending = self
             .pending
             .lock()
@@ -421,7 +426,17 @@ impl RouteVerifier {
             return Err(GameRouteError::StaleAuthority);
         }
         let expires_ms = evidence.valid_until_unix_ms.min(offer.expires_unix_ms).min(response.expires_unix_ms);
+        let expires_at = verification_started + Duration::from_millis(expires_ms - now_unix_ms);
+        if Instant::now() >= expires_at {
+            return Err(GameRouteError::StaleAuthority);
+        }
         self.advance_floor(offer)?;
+        // A filesystem lock, fsync or antivirus scan can also outlast the
+        // proof's lease. Recheck after the durable floor commit, before the
+        // capability can ever be returned to the gateway.
+        if Instant::now() >= expires_at {
+            return Err(GameRouteError::StaleAuthority);
+        }
         Ok(VerifiedGameRoute {
             world_id: offer.world_id,
             authority_peer_id: offer.authority_peer_id,
@@ -429,7 +444,7 @@ impl RouteVerifier {
             epoch: offer.epoch,
             fencing_token: offer.fencing_token,
             offer_hash: response.challenge.offer_hash,
-            expires_at: Instant::now() + Duration::from_millis(expires_ms - now_unix_ms),
+            expires_at,
         })
     }
 
@@ -912,6 +927,63 @@ mod tests {
         source.evidence.verified_at_unix_ms = 10_150;
         source.evidence.valid_until_unix_ms = 10_150 + MAX_FRESH_EVIDENCE_LEASE_MS + 1;
         assert!(matches!(f.verify(&verifier, &source), Err(GameRouteError::StaleAuthority)));
+    }
+
+    #[test]
+    fn slow_external_authority_check_cannot_resurrect_an_expired_lease() {
+        struct SlowEvidence(EvidenceSource);
+        impl FreshAuthoritySource for SlowEvidence {
+            fn verify_fresh(
+                &self,
+                world: WorldId,
+                requester: PeerId,
+                nonce: [u8; 32],
+            ) -> Result<FreshAuthorityEvidence, GameRouteError> {
+                // Simulate a stalled quorum or authenticated Fabric IPC
+                // read that eventually returns an otherwise valid proof.
+                std::thread::sleep(Duration::from_millis(100));
+                self.0.verify_fresh(world, requester, nonce)
+            }
+        }
+
+        let mut f = Fixture::new();
+        f.sign();
+        let verifier = RouteVerifier::new(f.root.path());
+        let challenge = verifier.issue_challenge(&f.offer, f.client_peer, f.client_transport).unwrap();
+        let response = f.response(challenge);
+        let mut proof = f.source();
+        proof.evidence.valid_until_unix_ms = 10_190; // only 40 ms left at validation start
+        let outcome = verifier.verify(&f.offer, &response, f.offer.world_id, 10_150, &SlowEvidence(proof));
+        assert!(matches!(outcome, Err(GameRouteError::StaleAuthority)));
+    }
+
+    #[test]
+    fn durable_floor_lock_delay_cannot_extend_the_verified_route_lease() {
+        let mut f = Fixture::new();
+        f.sign();
+        let verifier = RouteVerifier::new(f.root.path());
+        let challenge = verifier.issue_challenge(&f.offer, f.client_peer, f.client_transport).unwrap();
+        let response = f.response(challenge);
+        let mut proof = f.source();
+        proof.evidence.valid_until_unix_ms = 10_200; // 50 ms remain
+
+        // Another verifier/process is writing the SAME world's floor. The
+        // client cannot treat the stale initial timestamp as an extra lease
+        // while waiting on the exclusive cross-process filesystem lock.
+        let lock_path = f.root.path().join(format!("{}.lock", f.offer.world_id.to_hex()));
+        let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(lock_path).unwrap();
+        lock.lock_exclusive().unwrap();
+        let release_lock = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(125));
+            FileExt::unlock(&lock).unwrap();
+        });
+        let outcome = verifier.verify(&f.offer, &response, f.offer.world_id, 10_150, &proof);
+        release_lock.join().unwrap();
+        assert!(matches!(outcome, Err(GameRouteError::StaleAuthority)));
+
+        // A *new* independently verified authority lease can subsequently
+        // use the durably recorded current offer without a rollback.
+        f.verify(&verifier, &f.source()).unwrap();
     }
 
     #[test]

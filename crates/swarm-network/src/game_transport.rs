@@ -360,7 +360,15 @@ async fn read_game_open<R: futures::AsyncRead + Unpin>(stream: &mut R) -> Result
     }
     let mut body = vec![0u8; length];
     stream.read_exact(&mut body).await?;
-    postcard::from_bytes(&body).map_err(|_| GameTransportError::InvalidFrame)
+    // postcard::from_bytes intentionally ignores trailing data. A framed
+    // game capability must be ONE canonical transcript, not a valid prefix
+    // followed by attacker-controlled uninterpreted bytes.
+    let (frame, trailing) =
+        postcard::take_from_bytes::<GameStreamOpenV1>(&body).map_err(|_| GameTransportError::InvalidFrame)?;
+    if !trailing.is_empty() {
+        return Err(GameTransportError::InvalidFrame);
+    }
+    Ok(frame)
 }
 
 async fn write_game_open<W: futures::AsyncWrite + Unpin>(
@@ -433,7 +441,14 @@ fn validate_live_evidence(
     nonce: [u8; 32],
     now: u64,
 ) -> Result<(), GameTransportError> {
+    let started = Instant::now();
     let proof: FreshAuthorityEvidence = source.verify_fresh(offer.world_id, requester, nonce)?;
+    // Never authorize an expired runtime/quorum lease merely because the
+    // source blocked after its caller sampled the clock. The monotonic
+    // elapsed-time bound also fails closed across a backwards system clock
+    // adjustment.
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let effective_now = now.saturating_add(elapsed_ms).max(unix_ms()?);
     if proof.world_id != offer.world_id
         || proof.realm_hash != offer.realm_hash
         || proof.authority_peer_id != offer.authority_peer_id
@@ -464,10 +479,10 @@ fn validate_live_evidence(
     }
     // Evidence is collected after the caller captures now; allow only bounded
     // wall-clock advancement during verification, never arbitrary future proof.
-    if proof.verified_at_unix_ms > now.saturating_add(2_000)
-        || now.saturating_sub(proof.verified_at_unix_ms) > MAX_FRESH_EVIDENCE_AGE_MS
-        || proof.valid_until_unix_ms <= now
-        || proof.valid_until_unix_ms > now.saturating_add(MAX_FRESH_EVIDENCE_LEASE_MS)
+    if proof.verified_at_unix_ms > effective_now.saturating_add(2_000)
+        || effective_now.saturating_sub(proof.verified_at_unix_ms) > MAX_FRESH_EVIDENCE_AGE_MS
+        || proof.valid_until_unix_ms <= effective_now
+        || proof.valid_until_unix_ms > effective_now.saturating_add(MAX_FRESH_EVIDENCE_LEASE_MS)
     {
         return Err(GameTransportError::StaleRoute);
     }
@@ -731,6 +746,73 @@ mod tests {
         assert!(matches!(read_game_open(&mut stream).await, Err(GameTransportError::InvalidFrame)));
         let mut truncated = Cursor::new(vec![0, 0, 0, 5, 1, 2]);
         assert!(matches!(read_game_open(&mut truncated).await, Err(GameTransportError::Io(_))));
+    }
+
+    #[tokio::test]
+    async fn game_open_rejects_valid_postcard_prefix_with_trailing_payload() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
+        let application = swarm_protocol::peer_id_from_public_key(&key.verifying_key().to_bytes());
+        let transport = peer();
+        let world = WorldId([7; 32]);
+        let offer = MinecraftRouteOfferV1 {
+            version: 1,
+            world_id: world,
+            realm_hash: Hash32([1; 32]),
+            authority_peer_id: application,
+            authority_public_key: key.verifying_key().to_bytes(),
+            authority_transport_peer: transport.to_bytes(),
+            game_server_port: 25565,
+            membership_hash: Hash32([2; 32]),
+            quorum_certificate_hash: Hash32([3; 32]),
+            compatibility_fingerprint: Hash32([4; 32]),
+            checkpoint_hash: Hash32([5; 32]),
+            state_root: Hash32([6; 32]),
+            epoch: 3,
+            fencing_token: 4,
+            consent_revision: 2,
+            runtime_instance_nonce: [8; 32],
+            runtime_ready_proof_hash: Hash32([9; 32]),
+            offer_id: [10; 32],
+            sequence: 1,
+            issued_unix_ms: 1000,
+            expires_unix_ms: 5000,
+            signature: vec![0; 64],
+        };
+        let response = MinecraftRouteResponseV1 {
+            challenge: crate::game_route::MinecraftRouteChallengeV1 {
+                world_id: world,
+                offer_hash: Hash32([12; 32]),
+                requester_peer_id: PeerId([13; 32]),
+                requester_transport_peer: peer().to_bytes(),
+                nonce: [14; 32],
+            },
+            authority_peer_id: application,
+            epoch: 3,
+            fencing_token: 4,
+            runtime_instance_nonce: [8; 32],
+            issued_unix_ms: 1100,
+            expires_unix_ms: 4000,
+            signature: vec![0; 64],
+        };
+        let frame = GameStreamOpenV1 {
+            version: 1,
+            offer,
+            response,
+            requester_application_peer: PeerId([13; 32]),
+            requester_transport_peer: peer().to_bytes(),
+            nonce: [15; 32],
+        };
+        let bytes = postcard::to_allocvec(&frame).unwrap();
+        let mut good_wire = Vec::from(u32::try_from(bytes.len()).unwrap().to_be_bytes());
+        good_wire.extend_from_slice(&bytes);
+        let good = read_game_open(&mut Cursor::new(good_wire)).await.unwrap();
+        assert_eq!(good.offer.world_id, world);
+
+        let mut contaminated = bytes;
+        contaminated.extend_from_slice(&[0xff, 0x00]);
+        let mut bad_wire = Vec::from(u32::try_from(contaminated.len()).unwrap().to_be_bytes());
+        bad_wire.extend_from_slice(&contaminated);
+        assert!(matches!(read_game_open(&mut Cursor::new(bad_wire)).await, Err(GameTransportError::InvalidFrame)));
     }
 
     #[test]
