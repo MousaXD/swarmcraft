@@ -7,6 +7,7 @@ mod discovery;
 pub mod game_port_registry;
 pub mod game_route;
 pub mod game_route_control;
+pub mod game_route_host;
 pub mod game_route_resolver;
 pub mod game_transport;
 mod invite_connectivity;

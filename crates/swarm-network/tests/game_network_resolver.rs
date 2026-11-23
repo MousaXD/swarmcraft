@@ -15,12 +15,11 @@ use std::{
 use swarm_network::{
     game_port_registry::GameWorldPortRegistry,
     game_route::{
-        FreshAuthorityEvidence, FreshAuthoritySource, GameRouteError, MinecraftRouteOfferV1, MinecraftRouteResponseV1,
-        RouteVerifier, GAME_ROUTE_VERSION,
+        FreshAuthorityEvidence, FreshAuthoritySource, GameRouteError, MinecraftRouteOfferV1, RouteVerifier,
+        GAME_ROUTE_VERSION,
     },
-    game_route_control::{
-        GameRouteControlEvent, GameRouteControlRequestV1, GameRouteControlResponseV1, GameRouteRefusalV1,
-    },
+    game_route_control::GameRouteControlEvent,
+    game_route_host::AuthenticatedGameRouteHostSigner,
     game_route_resolver::{AuthenticatedGameRouteResolver, GameRouteCandidateSource},
     game_transport::{GameStreamClient, GameStreamReceiver, GatewayRouteResolver, StableLoopbackGateway},
     generate_transport_key, NetworkEvent, SwarmNode, TransportPeerId,
@@ -221,6 +220,10 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
             player: player_app,
             quorum_ready: AtomicBool::new(true),
         });
+        let host_signer = AuthenticatedGameRouteHostSigner::new(
+            host_key.clone(), host_transport, quorum.clone(),
+            root.path().join("private-host-offer-sequences"),
+        );
         let hints = Arc::new(CurrentCandidateHints { hosts: RwLock::new(vec![host_transport]) });
         let resolver = Arc::new(AuthenticatedGameRouteResolver::new(
             player_app,
@@ -245,35 +248,11 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
                         };
                         assert_eq!(application_peer, player_app);
                         assert_eq!(transport_peer, player_transport);
-                        // This signer is intentionally test-only. Production
-                        // MUST get host approval from live canonical quorum,
-                        // membership, consent and signed Fabric readiness.
-                        let response = match request {
-                            GameRouteControlRequestV1::Offer { world_id } if world_id == world => {
-                                GameRouteControlResponseV1::Offer(Box::new(offer.clone()))
-                            }
-                            GameRouteControlRequestV1::Challenge(challenge)
-                                if challenge.world_id == world
-                                    && challenge.offer_hash == offer.offer_hash().unwrap()
-                                    && challenge.requester_peer_id == player_app
-                                    && challenge.requester_transport_peer == player_transport.to_bytes() =>
-                            {
-                                let issued = unix_ms();
-                                let mut signed = MinecraftRouteResponseV1 {
-                                    challenge: *challenge,
-                                    authority_peer_id: offer.authority_peer_id,
-                                    epoch: offer.epoch,
-                                    fencing_token: offer.fencing_token,
-                                    runtime_instance_nonce: offer.runtime_instance_nonce,
-                                    issued_unix_ms: issued,
-                                    expires_unix_ms: issued + 3_000,
-                                    signature: vec![],
-                                };
-                                signed.sign(&host_key).unwrap();
-                                GameRouteControlResponseV1::ChallengeResponse(Box::new(signed))
-                            }
-                            _ => GameRouteControlResponseV1::Refused(GameRouteRefusalV1::Unauthorized),
-                        };
+                        // Real host signing logic, with SYNTHETIC quorum and
+                        // runtime evidence injected only for this test. The
+                        // same handler refuses on withdrawal and re-verifies
+                        // after its durable offer sequence has been written.
+                        let response = host_signer.answer(application_peer, transport_peer, request).unwrap();
                         host.respond_game_route(channel, response).unwrap();
                     }
                 }

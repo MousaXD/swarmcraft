@@ -518,7 +518,7 @@ struct GenerationFloor {
     offer_hash: Hash32,
 }
 
-fn reject_symlink(path: &Path) -> Result<(), GameRouteError> {
+pub(crate) fn reject_symlink(path: &Path) -> Result<(), GameRouteError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(GameRouteError::InvalidTranscript),
         Ok(_) => Ok(()),
@@ -530,7 +530,7 @@ fn reject_symlink(path: &Path) -> Result<(), GameRouteError> {
 /// Persistent anti-rollback evidence must not live in a world-writable
 /// directory where another local user could unlink it and force a downgrade.
 /// Never follow a symlink as the final floor directory component.
-fn ensure_private_floor_directory(path: &Path) -> Result<(), GameRouteError> {
+pub(crate) fn ensure_private_floor_directory(path: &Path) -> Result<(), GameRouteError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -551,7 +551,7 @@ fn ensure_private_floor_directory(path: &Path) -> Result<(), GameRouteError> {
     Ok(())
 }
 
-fn sync_directory(path: &Path) -> Result<(), GameRouteError> {
+pub(crate) fn sync_directory(path: &Path) -> Result<(), GameRouteError> {
     #[cfg(unix)]
     {
         File::open(path)?.sync_all()?;
@@ -563,7 +563,7 @@ fn sync_directory(path: &Path) -> Result<(), GameRouteError> {
     Ok(())
 }
 
-fn private_floor_options() -> OpenOptions {
+pub(crate) fn private_floor_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     #[cfg(unix)]
     {
@@ -578,7 +578,7 @@ fn private_floor_options() -> OpenOptions {
 /// Windows. Match swarm-storage's write-through replacement semantics instead
 /// of deleting the old floor first (which would open a rollback window).
 #[cfg(windows)]
-fn replace_floor_atomically(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn replace_floor_atomically(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
@@ -604,7 +604,7 @@ fn replace_floor_atomically(source: &Path, destination: &Path) -> std::io::Resul
 }
 
 #[cfg(not(windows))]
-fn replace_floor_atomically(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn replace_floor_atomically(source: &Path, destination: &Path) -> std::io::Result<()> {
     fs::rename(source, destination)
 }
 
