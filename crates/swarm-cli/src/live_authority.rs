@@ -347,6 +347,12 @@ impl SignedLiveAuthoritySource {
         )?;
         verify_world_config_signature(&proof.config)?;
         verify_snapshot_signature(&proof.snapshot)?;
+        // A signed manifest alone does not prove that this replica still has
+        // the exact readable checkpoint bytes. Validate the complete local
+        // blob set before authorizing a route. This may be expensive for large
+        // worlds, but a slow check is denied by the caller's proof deadline;
+        // it must never silently degrade into a cached Ready assertion.
+        storage.verify_snapshot(&proof.snapshot)?;
         let head = storage.canonical_snapshot_head(world)?.head.context("no accepted canonical snapshot head")?;
         let checkpoint_hash = proof.snapshot.manifest_hash()?;
         if head.snapshot_number != proof.snapshot.snapshot_number

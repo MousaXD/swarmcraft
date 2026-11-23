@@ -36,6 +36,16 @@ stable canonical digest that the provider puts in the quorum challenge's
 `announcement_hash` field. It does NOT represent a completed vote by itself.
 Private worlds do not need public discovery announcements.
 
+The verifier additionally re-hashes the exact accepted snapshot blob set on
+each independent admission/heartbeat proof. A broken or missing checkpoint
+never silently becomes a verified world. This is intentionally conservative:
+large worlds may exceed the three-second proof budget and **fail closed**. A
+future performance optimization must retain independently proved integrity
+and explicit immutable checkpoint identity rather than converting this check
+into a cached `Ready` shortcut. The scoped positive Rust integration test
+builds real signed and persisted V1 records, then verifies consent withdrawal,
+blob corruption and majority loss with synthetic live signatures.
+
 Agent 3 owns the shared CLI module wiring: add
 `pub mod live_fabric_readiness;` and `pub mod live_authority;` to
 `crates/swarm-cli/src/lib.rs` when
