@@ -66,6 +66,9 @@ pub struct MinecraftRouteOfferV1 {
     pub authority_peer_id: PeerId,
     pub authority_public_key: [u8; 32],
     pub authority_transport_peer: Vec<u8>,
+    /// Actual local Minecraft listener port proved by authenticated Fabric IPC.
+    /// The host-side game receiver must dial only 127.0.0.1 at this port.
+    pub game_server_port: u16,
     pub membership_hash: Hash32,
     pub quorum_certificate_hash: Hash32,
     pub compatibility_fingerprint: Hash32,
@@ -104,6 +107,7 @@ impl MinecraftRouteOfferV1 {
             || self.expires_unix_ms - self.issued_unix_ms > MAX_ROUTE_OFFER_AGE_MS
             || self.authority_transport_peer.is_empty()
             || self.authority_transport_peer.len() > MAX_PEER_BYTES
+            || self.game_server_port == 0
             || self.signature.len() > 64
         {
             return Err(GameRouteError::InvalidTranscript);
@@ -218,6 +222,7 @@ pub struct FreshAuthorityEvidence {
     pub authority_peer_id: PeerId,
     pub authority_public_key: [u8; 32],
     pub authority_transport_peer: TransportPeerId,
+    pub game_server_port: u16,
     pub requester_is_member: bool,
     pub authority_is_member: bool,
     pub conflict_free: bool,
@@ -383,6 +388,7 @@ impl RouteVerifier {
             || evidence.authority_peer_id != offer.authority_peer_id
             || evidence.authority_public_key != offer.authority_public_key
             || evidence.authority_transport_peer != transport_peer
+            || evidence.game_server_port != offer.game_server_port
             || evidence.membership_hash != offer.membership_hash
             || evidence.quorum_certificate_hash != offer.quorum_certificate_hash
             || evidence.compatibility_fingerprint != offer.compatibility_fingerprint
@@ -430,7 +436,7 @@ impl RouteVerifier {
         let path = self.floor_dir.join(format!("{name}.floor"));
         let lock_path = self.floor_dir.join(format!("{name}.lock"));
         reject_symlink(&lock_path)?;
-        let lock = OpenOptions::new().read(true).write(true).create(true).open(&lock_path)?;
+        let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&lock_path)?;
         lock.lock_exclusive()?;
         let outcome = (|| {
             reject_symlink(&path)?;
@@ -451,6 +457,7 @@ impl RouteVerifier {
                     || offer.epoch < old.epoch
                     || offer.fencing_token < old.fencing_token
                     || (offer.epoch == old.epoch && offer.fencing_token != old.fencing_token)
+                    || (offer.epoch > old.epoch && offer.fencing_token <= old.fencing_token)
                     || (offer.epoch == old.epoch && offer.sequence < old.sequence)
                 {
                     return Err(GameRouteError::Downgrade);
@@ -578,6 +585,7 @@ mod tests {
                 authority_peer_id,
                 authority_public_key: key.verifying_key().to_bytes(),
                 authority_transport_peer,
+                game_server_port: 25570,
                 membership_hash: Hash32([3; 32]),
                 quorum_certificate_hash: Hash32([4; 32]),
                 compatibility_fingerprint: Hash32([5; 32]),
@@ -616,6 +624,7 @@ mod tests {
                     authority_peer_id: self.offer.authority_peer_id,
                     authority_public_key: self.offer.authority_public_key,
                     authority_transport_peer: self.offer.verify_signature().unwrap(),
+                    game_server_port: self.offer.game_server_port,
                     requester_is_member: true,
                     authority_is_member: true,
                     conflict_free: true,
@@ -708,6 +717,17 @@ mod tests {
         let verifier = RouteVerifier::new(f.root.path());
         f.verify(&verifier, &f.source()).unwrap();
         f.offer.offer_id = [88; 32];
+        f.sign();
+        assert!(matches!(f.verify(&verifier, &f.source()), Err(GameRouteError::Downgrade)));
+    }
+
+    #[test]
+    fn higher_epoch_requires_strictly_new_fencing_token() {
+        let mut f = Fixture::new();
+        f.sign();
+        let verifier = RouteVerifier::new(f.root.path());
+        f.verify(&verifier, &f.source()).unwrap();
+        f.offer.epoch += 1;
         f.sign();
         assert!(matches!(f.verify(&verifier, &f.source()), Err(GameRouteError::Downgrade)));
     }
