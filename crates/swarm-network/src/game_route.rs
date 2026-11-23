@@ -436,7 +436,7 @@ impl RouteVerifier {
         let path = self.floor_dir.join(format!("{name}.floor"));
         let lock_path = self.floor_dir.join(format!("{name}.lock"));
         reject_symlink(&lock_path)?;
-        let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&lock_path)?;
+        let lock = private_floor_options().read(true).write(true).create(true).truncate(false).open(&lock_path)?;
         lock.lock_exclusive()?;
         let outcome = (|| {
             reject_symlink(&path)?;
@@ -481,12 +481,12 @@ impl RouteVerifier {
             let mut rand = [0; 8];
             OsRng.fill_bytes(&mut rand);
             let tmp = self.floor_dir.join(format!(".{name}-{}.tmp", u64::from_be_bytes(rand)));
-            let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            let mut file = private_floor_options().write(true).create_new(true).open(&tmp)?;
             let commit = (|| -> Result<(), GameRouteError> {
                 file.write_all(&bytes)?;
                 file.sync_all()?;
                 drop(file);
-                fs::rename(&tmp, &path)?;
+                replace_floor_atomically(&tmp, &path)?;
                 sync_directory(&self.floor_dir)?;
                 Ok(())
             })();
@@ -529,6 +529,51 @@ fn sync_directory(path: &Path) -> Result<(), GameRouteError> {
         let _ = path;
     }
     Ok(())
+}
+
+fn private_floor_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
+/// Windows std::fs::rename does not reliably replace an existing destination.
+/// This floor MUST advance after the first accepted offer, including on
+/// Windows. Match swarm-storage's write-through replacement semantics instead
+/// of deleting the old floor first (which would open a rollback window).
+#[cfg(windows)]
+fn replace_floor_atomically(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
+    }
+
+    let source = source.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let destination = destination.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    // SAFETY: Both pointers refer to NUL-terminated UTF-16 buffers that
+    // remain alive for the duration of the synchronous Windows API call.
+    let result = unsafe {
+        MoveFileExW(source.as_ptr(), destination.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_floor_atomically(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(source, destination)
 }
 
 #[cfg(test)]
@@ -848,5 +893,18 @@ mod tests {
         f.verify(&verifier, &f.source()).unwrap();
         fs::write(f.root.path().join(format!("{}.floor", f.offer.world_id.to_hex())), b"corrupted").unwrap();
         assert!(matches!(f.verify(&verifier, &f.source()), Err(GameRouteError::InvalidTranscript)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_write_through_floor_replacement_overwrites_an_existing_floor() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("generation.floor");
+        let next = root.path().join("generation.new");
+        fs::write(&old, b"epoch 3").unwrap();
+        fs::write(&next, b"epoch 4").unwrap();
+        replace_floor_atomically(&next, &old).unwrap();
+        assert_eq!(fs::read(&old).unwrap(), b"epoch 4");
+        assert!(!next.exists());
     }
 }

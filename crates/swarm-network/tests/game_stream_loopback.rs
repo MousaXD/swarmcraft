@@ -240,9 +240,9 @@ async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
             verifier: RouteVerifier::new(temp.path()),
             source: source.clone(),
         });
-        let (host_stop, host_rx) = watch::channel(false);
+        let (_host_stop, host_rx) = watch::channel(false);
         let receiver_task = tokio::spawn(receiver.serve(host_control, host_rx));
-        let (player_stop, player_rx) = watch::channel(false);
+        let (_player_stop, player_rx) = watch::channel(false);
         let local = StdTcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
         let stable_port = local.local_addr().unwrap().port();
         drop(local);
@@ -257,6 +257,21 @@ async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
         let mut answer = [0; 29];
         minecraft.read_exact(&mut answer).await.unwrap();
         assert_eq!(&answer, b"minecraft synthetic roundtrip");
+
+        // Exercise sustained bidirectional TCP forwarding across multiple
+        // live authority checks, not just a single tiny packet. A recreated
+        // copy future could lose already-read buffered bytes at those ticks.
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let bulk: Vec<u8> = (0..(1024 * 1024)).map(|i| (i % 251) as u8).collect();
+        let mut echoed_bulk = vec![0; bulk.len()];
+        {
+            let (mut minecraft_reader, mut minecraft_writer) = minecraft.split();
+            let (sent, received) =
+                tokio::join!(minecraft_writer.write_all(&bulk), minecraft_reader.read_exact(&mut echoed_bulk));
+            sent.expect("large Minecraft data must pass to the host");
+            received.expect("large Minecraft echo must return intact");
+            assert_eq!(echoed_bulk, bulk, "game transport must preserve all bytes and order");
+        }
 
         // Withdraw consent while a connection is already forwarding. An
         // existing game stream must close, not just new admissions.
@@ -278,10 +293,16 @@ async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
         rejoined.read_exact(&mut rejoined_data).await.unwrap();
         assert_eq!(&rejoined_data, b"rejoined minecraft world");
 
-        // Simulate a gateway process restart, including a fresh verifier
-        // reading its durable generation floor. The loopback port stays fixed.
-        player_stop.send(true).unwrap();
-        assert!(gateway_task.await.unwrap().is_ok());
+        // Abruptly abort the gateway supervisor, as can happen during a
+        // world switch or daemon task failure. No detached child may keep the
+        // OLD world forwarding after this task terminates.
+        gateway_task.abort();
+        assert!(gateway_task.await.unwrap_err().is_cancelled());
+        let abruptly_closed = timeout(Duration::from_secs(3), rejoined.read(&mut buf)).await.unwrap();
+        assert!(matches!(abruptly_closed, Ok(0) | Err(_)), "aborted gateway left an old-world TCP session alive");
+
+        // Recreate the gateway at the SAME port with a new RouteVerifier
+        // reading the prior durable generation floor.
         let restarted_resolver: Arc<dyn GatewayRouteResolver> = Arc::new(SyntheticResolver {
             offer,
             signer: host_key,
@@ -299,10 +320,14 @@ async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
         let mut after_restart_bytes = [0; 17];
         after_restart.read_exact(&mut after_restart_bytes).await.unwrap();
         assert_eq!(&after_restart_bytes, b"restart reconnect");
+        // The hosting receiver's supervisor has the same lifetime guarantee:
+        // aborting it must cut its connected Minecraft TCP sessions.
+        receiver_task.abort();
+        assert!(receiver_task.await.unwrap_err().is_cancelled());
+        let host_cut_off = timeout(Duration::from_secs(4), after_restart.read(&mut buf)).await.unwrap();
+        assert!(matches!(host_cut_off, Ok(0) | Err(_)), "aborted host receiver left a game stream alive");
         restart_stop.send(true).unwrap();
         assert!(restart_task.await.unwrap().is_ok());
-        host_stop.send(true).unwrap();
-        assert!(receiver_task.await.unwrap().is_ok());
         host_pump.abort();
         player_pump.abort();
         mc_task.abort();

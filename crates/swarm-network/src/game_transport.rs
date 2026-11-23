@@ -7,6 +7,7 @@
 //! ceases to be fresh. The existing SwarmNode MUST continue polling alongside
 //! these tasks or no libp2p streams can make progress.
 
+use crate::game_port_registry::{GamePortRegistryError, GameWorldPortRegistry};
 use crate::game_route::{
     FreshAuthorityEvidence, FreshAuthoritySource, GameRouteError, MinecraftRouteOfferV1, MinecraftRouteResponseV1,
     VerifiedGameRoute, GAME_STREAM_PROTOCOL, MAX_FRESH_EVIDENCE_AGE_MS, MAX_ROUTE_WIRE_BYTES,
@@ -31,6 +32,7 @@ use thiserror::Error;
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{watch, OwnedSemaphorePermit, Semaphore},
+    task::JoinSet,
     time::{interval, timeout},
 };
 use tokio_util::compat::FuturesAsyncReadCompatExt;
@@ -73,6 +75,8 @@ pub enum GameTransportError {
     InvalidFrame,
     #[error("verified route is stale")]
     StaleRoute,
+    #[error(transparent)]
+    PortRegistry(#[from] GamePortRegistryError),
     #[error(transparent)]
     Route(#[from] GameRouteError),
     #[error(transparent)]
@@ -172,10 +176,19 @@ impl GameStreamReceiver {
         }
         let mut incoming: IncomingStreams =
             control.accept(StreamProtocol::new(GAME_STREAM_PROTOCOL)).map_err(|_| GameTransportError::Unavailable)?;
+        // Tie every accepted game stream to this receiver's lifetime. Dropping
+        // or aborting the supervisor MUST abort its spawned sessions as well;
+        // detached tokio::spawn tasks would otherwise survive world switches.
+        let mut sessions = JoinSet::new();
         loop {
             tokio::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() { return Ok(()); }
+                }
+                result = sessions.join_next(), if !sessions.is_empty() => {
+                    if let Some(Err(error)) = result {
+                        warn!(%error, "game receiver task failed");
+                    }
                 }
                 item = incoming.next() => {
                     let Some((peer, stream)) = item else { return Ok(()); };
@@ -188,7 +201,7 @@ impl GameStreamReceiver {
                     };
                     let receiver = Arc::clone(&self);
                     let stopped = shutdown.clone();
-                    tokio::spawn(async move {
+                    sessions.spawn(async move {
                         let _global = global;
                         let _peer = peer_slot;
                         if let Err(error) = receiver.handle_incoming(peer, stream, stopped).await {
@@ -241,6 +254,18 @@ impl GameStreamReceiver {
             .await
             .map_err(|_| GameTransportError::Timeout)??;
         server.set_nodelay(true)?;
+        // A loopback dial can outlive a consent/fence transition. Recheck
+        // independently *after* the dial and before acknowledging admission
+        // or forwarding the first Minecraft byte. Never rely on the earlier
+        // admission check after an awaited network operation.
+        if *shutdown.borrow() || authenticated_peer(&self.authenticated, remote) != Some(app_peer) {
+            return Err(GameTransportError::Unauthorized);
+        }
+        let mut post_dial_challenge = [0; 32];
+        OsRng.fill_bytes(&mut post_dial_challenge);
+        let post_dial_now = unix_ms()?;
+        validate_timestamps(&frame.offer, &frame.response, post_dial_now)?;
+        validate_live_evidence(self.evidence.as_ref(), &frame.offer, app_peer, post_dial_challenge, post_dial_now)?;
         timeout(MAX_GAME_HEADER_WAIT, stream.write_all(&[GAME_ACK]))
             .await
             .map_err(|_| GameTransportError::Timeout)??;
@@ -570,6 +595,17 @@ pub struct StableLoopbackGateway {
 }
 
 impl StableLoopbackGateway {
+    /// Reserve a durable per-world port before binding. An occupied saved port
+    /// fails closed; no arbitrary replacement endpoint is selected.
+    pub async fn bind_reserved(
+        world_id: WorldId,
+        preferred_port: u16,
+        registry: &GameWorldPortRegistry,
+    ) -> Result<Self, GameTransportError> {
+        let stable_port = registry.reserve(world_id, preferred_port)?;
+        Self::bind(world_id, stable_port).await
+    }
+
     pub async fn bind(world_id: WorldId, stable_port: u16) -> Result<Self, GameTransportError> {
         if world_id == WorldId::default() || stable_port == 0 {
             return Err(GameTransportError::InvalidFrame);
@@ -603,10 +639,19 @@ impl StableLoopbackGateway {
             return Ok(());
         }
         let slots = Arc::new(Semaphore::new(MAX_GAME_STREAMS));
+        // Session ownership is scoped to this gateway, not to the Tokio
+        // runtime. A cancelled gateway supervisor cannot leave an old-world
+        // Minecraft connection forwarding in a detached child.
+        let mut sessions = JoinSet::new();
         loop {
             tokio::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() { return Ok(()); }
+                }
+                result = sessions.join_next(), if !sessions.is_empty() => {
+                    if let Some(Err(error)) = result {
+                        warn!(%error, "gateway session task failed");
+                    }
                 }
                 accepted = self.listener.accept() => {
                     let (tcp, _) = accepted?;
@@ -620,7 +665,7 @@ impl StableLoopbackGateway {
                     let control = control.clone();
                     let stopped = shutdown.clone();
                     let world_id = self.world_id;
-                    tokio::spawn(async move {
+                    sessions.spawn(async move {
                         let _slot: OwnedSemaphorePermit = slot;
                         // Verification is bounded and always happens for this
                         // new session, including after planned/crash migration.
@@ -720,6 +765,31 @@ mod tests {
         assert!(StableLoopbackGateway::bind(WorldId([2; 32]), port).await.is_err());
         drop(gateway);
         StableLoopbackGateway::bind(WorldId([2; 32]), port).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn registered_gateway_never_changes_a_worlds_saved_local_port() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = GameWorldPortRegistry::new(root.path().join("gateway-ports"));
+        let world = WorldId([20; 32]);
+        let other = WorldId([21; 32]);
+        let reserved = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let original = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let gateway = StableLoopbackGateway::bind_reserved(world, original, &registry).await.unwrap();
+        assert_eq!(gateway.local_addr().unwrap().port(), original);
+        drop(gateway);
+
+        // A different preference on restart does not silently change the
+        // connection entry already saved in a Minecraft client.
+        let new_preference = if original == u16::MAX { original - 1 } else { original + 1 };
+        let restarted = StableLoopbackGateway::bind_reserved(world, new_preference, &registry).await.unwrap();
+        assert_eq!(restarted.local_addr().unwrap().port(), original);
+        drop(restarted);
+        assert!(matches!(
+            StableLoopbackGateway::bind_reserved(other, original, &registry).await,
+            Err(GameTransportError::PortRegistry(GamePortRegistryError::PortReservedForAnotherWorld))
+        ));
     }
 
     #[test]

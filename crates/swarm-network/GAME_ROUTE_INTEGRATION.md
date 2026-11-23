@@ -17,6 +17,7 @@ The following Rust APIs are exported by `swarm_network`:
 | `game_transport::GameStreamReceiver` | Host-only inbound libp2p game stream to its own `127.0.0.1:<managed_server_port>`; independently rechecks membership, quorum, live runtime/consent |
 | `game_transport::GameStreamClient` | Player gateway opens `/swarmcraft/minecraft-game/1` to the route's authenticated transport peer |
 | `game_transport::StableLoopbackGateway` | Binds one stable per-world localhost TCP port (IPv4 127.0.0.1 only), refuses wrong world or missing proof; requires a fresh resolver result per connection |
+| `game_port_registry::GameWorldPortRegistry` | Append-only durable port reservation per world, with a cross-process lock and immutable assignments. Rejects corrupt storage and collisions rather than silently changing the saved client address |
 | `SwarmNode::game_stream_control()` | Cloneable libp2p-stream transport control |
 | `SwarmNode::game_authenticated_peers()` | Live transport-to-application identity registry, set only by the existing PeerHello proof and revoked on disconnection |
 
@@ -35,7 +36,7 @@ The signed `game_server_port` is allowed only as a **loopback** destination on t
 1. Start a `SwarmNode` on each peer and **continue polling `next_event()`** while game tasks run. Completion of `NetworkEvent::Authenticated` alone does not guarantee membership.
 2. On the hosting peer, make the listener's live world/port available through Agent 1's verified runtime adapter, then start `GameStreamReceiver::new(world_id, local_transport_id, managed_port, authority_source, node.game_authenticated_peers())?.serve(node.game_stream_control(), stop_rx)`. This registers the dedicated game-stream protocol.
 3. On the playing peer, implement `GatewayRouteResolver::resolve(world_id)`: fetch a signed offer via an authenticated control request; issue a unique `RouteVerifier::issue_challenge(offer, local_application_id, local_transport_id)`; transmit challenge to that authenticated host; verify signed response and **fresh independently established authority** via `RouteVerifier::verify`; construct `VerifiedForwardRoute::new` only after success. Never accept a route by merely matching a cached endpoint or a valid signature.
-4. Start `StableLoopbackGateway::bind(world_id, stable_port)` with a saved **per-world stable local port** and `GameStreamClient::new(local_application_id,local_transport_id,node.game_authenticated_peers(),authority_source)`. Pass resolver, client, stream control and a mandatory shutdown watch to `gateway.serve(...)`.
+4. Open `GameWorldPortRegistry::new(private_durable_user_data_dir)` and call `StableLoopbackGateway::bind_reserved(world_id, preferred_port, &registry)`. The port assignment is immutable across restarts and cannot overlap another registered world. A busy or corrupted saved port fails closed; never choose a different port without explicit user remediation. Construct `GameStreamClient::new(local_application_id,local_transport_id,node.game_authenticated_peers(),authority_source)`, then pass resolver, client, stream control and a mandatory shutdown watch to `gateway.serve(...)`.
 5. Give the Java client **only** `127.0.0.1:<stable_port>` to join. For a transfer/crash, close old sessions, verify the new authority and real server again, then permit a **new Minecraft login** through that *same local port*. There is **no live TCP session migration**, automatic Fabric client reconnect module, or guarantee of uncheckpointed inventory/tick preservation.
 
 The test `tests/game_stream_loopback.rs` illustrates the complete network wiring, but its `SyntheticQuorumAndRuntime` deliberately supplies fake trust evidence. Never copy it into production. The test `tests/game_stream_transport.rs` exercises real libp2p substream isolation without purporting to prove Java gameplay.
@@ -45,7 +46,9 @@ The test `tests/game_stream_loopback.rs` illustrates the complete network wiring
 - Dedicated `/swarmcraft/minecraft-game/1` libp2p substreams; snapshot `WireRequest`/replication traffic is not used for Minecraft payload bytes.
 - At most 16 active streams per gateway/host receiver and 4 per remote host-side transport identity. Inbound stream open is bounded to 4096 bytes with a 4-second handshake timeout; server connection to 127.0.0.1 is capped at 3 seconds. A session has a 4-hour maximum lifetime.
 - A one-time random stream nonce cache is bounded (256). Unknown or unauthenticated application peers are denied. Existing streams are checked every second and closed when fresh canonical evidence, consent, runtime readiness or application authentication disappears.
+- Gateway and host receiver session tasks are owned by their parent `JoinSet`; cancelling, aborting, or dropping either supervisor also aborts every child game stream. A switched-world task cannot leave a detached old-world TCP session alive.
 - TCP copy state is kept **pinned across heartbeat ticks**, preserving backpressure without dropping buffered game bytes.
+- The signed route's durable generation floor updates by atomic sibling replacement: Unix rename or Windows `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`. No temporary removal of the old floor and no success if persistence fails.
 - Server binds **only loopback**; no public Minecraft listener, DNS endpoint, port forwarding, untrusted successor, or raw TCP proxy fallback.
 - Unsupported or unproven realm transitions fail closed; V2 rollout needs explicit versioned route transcript review. Production quorum and IPC adapters have not been shipped by Agent 2.
 
@@ -56,10 +59,13 @@ Locally available focused checks (run with at most two jobs, never concurrently 
 ```sh
 CARGO_BUILD_JOBS=2 cargo test -p swarm-network --lib --offline
 CARGO_BUILD_JOBS=2 cargo test -p swarm-network --test game_stream_loopback --offline
+CARGO_BUILD_JOBS=2 cargo test -p swarm-network --test game_authority_handoff --offline
 CARGO_BUILD_JOBS=2 cargo test -p swarm-network --test game_stream_transport --offline
 CARGO_BUILD_JOBS=2 cargo clippy -p swarm-network --lib --tests --offline -- -D warnings
 ```
 
-The synthetic acceptance covers two real encrypted/authenticated QUIC peers, loopback TCP byte round trip, active-stream consent withdrawal, denial of new joins, new session on recovered consent, and restart of the gateway/listener at the **same** per-world local port against the persisted floor. It **does not** establish current real quorum, real signed Fabric IPC readiness or actual Minecraft protocol/world semantics.
+The synthetic acceptance covers two real encrypted/authenticated QUIC peers, a 1 MiB loopback TCP byte-for-byte round trip across authority heartbeat ticks, active-stream consent withdrawal, denial of new joins, new session on recovered consent, hard-cancelled gateway and hosting receiver supervisors, and restart of the gateway/listener at the **same** per-world local port against the persisted floor. It **does not** establish current real quorum, real signed Fabric IPC readiness or actual Minecraft protocol/world semantics.
+
+The additional synthetic three-peer handoff test uses a real encrypted QUIC connection to each of two distinct hosts and tagged loopback TCP servers: it proves that old-host sessions close when authority changes, an unready new host receives no Minecraft traffic, a ready successor accepts a fresh session through the unchanged gateway address, and the persisted generation floor blocks a rollback to the old authority. Its synthetic accepted-head source is **test-only**; it cannot replace actual majority-backed recovery or an authenticated Fabric server.
 
 **Still required on independent machines:** three installed peers with real signed majority/fencing, real Fabric Java server and 2+ installed Minecraft clients, planned authority transfer, crash recovery, blocked two-voter quorum loss, exact accepted checkpoint/world markers, off-LAN NAT/hole punching/relay and relay outage behavior, actual Windows installer/firewall integration, long-running churn and interruption tests. Record exact SHAs and independently verify saved world state and any uncommitted gameplay loss. Keep P0 networking acceptance open until those tests pass.
