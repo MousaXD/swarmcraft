@@ -10,7 +10,8 @@
 use crate::game_port_registry::{GamePortRegistryError, GameWorldPortRegistry};
 use crate::game_route::{
     FreshAuthorityEvidence, FreshAuthoritySource, GameRouteError, MinecraftRouteOfferV1, MinecraftRouteResponseV1,
-    VerifiedGameRoute, GAME_STREAM_PROTOCOL, MAX_FRESH_EVIDENCE_AGE_MS, MAX_ROUTE_WIRE_BYTES,
+    VerifiedGameRoute, GAME_STREAM_PROTOCOL, MAX_FRESH_EVIDENCE_AGE_MS, MAX_FRESH_EVIDENCE_LEASE_MS,
+    MAX_ROUTE_WIRE_BYTES,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures::{AsyncReadExt as _, AsyncWriteExt as _, StreamExt as _};
@@ -466,7 +467,7 @@ fn validate_live_evidence(
     if proof.verified_at_unix_ms > now.saturating_add(2_000)
         || now.saturating_sub(proof.verified_at_unix_ms) > MAX_FRESH_EVIDENCE_AGE_MS
         || proof.valid_until_unix_ms <= now
-        || proof.valid_until_unix_ms > now.saturating_add(30_000)
+        || proof.valid_until_unix_ms > now.saturating_add(MAX_FRESH_EVIDENCE_LEASE_MS)
     {
         return Err(GameTransportError::StaleRoute);
     }
@@ -544,6 +545,27 @@ impl GameStreamClient {
         if ack != [GAME_ACK] {
             return Err(GameTransportError::Unauthorized);
         }
+        // Opening a libp2p stream and waiting for the host ACK can outlast
+        // the gateway's short-lived verified route. Re-check the capability,
+        // authenticated host identity and current canonical/runtime evidence
+        // before forwarding any Minecraft payload, not only before dialing.
+        if *shutdown.borrow()
+            || !route.is_fresh()
+            || authenticated_peer(&self.authenticated, target) != Some(route.authority_peer_id())
+        {
+            return Err(GameTransportError::StaleRoute);
+        }
+        let post_ack_now = unix_ms()?;
+        validate_timestamps(&frame.offer, &frame.response, post_ack_now)?;
+        let mut post_ack_nonce = [0; 32];
+        OsRng.fill_bytes(&mut post_ack_nonce);
+        validate_live_evidence(
+            self.evidence.as_ref(),
+            &frame.offer,
+            self.application_peer,
+            post_ack_nonce,
+            post_ack_now,
+        )?;
         minecraft_client.set_nodelay(true)?;
         let mut upstream = game_stream.compat();
         let mut heartbeat = interval(GAME_REVALIDATE_INTERVAL);

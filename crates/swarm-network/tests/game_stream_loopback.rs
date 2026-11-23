@@ -237,7 +237,7 @@ async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
             signer: host_key.clone(),
             requester: player_app,
             requester_transport: player_transport,
-            verifier: RouteVerifier::new(temp.path()),
+            verifier: RouteVerifier::new(temp.path().join("route-floors")),
             source: source.clone(),
         });
         let (_host_stop, host_rx) = watch::channel(false);
@@ -308,7 +308,7 @@ async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
             signer: host_key,
             requester: player_app,
             requester_transport: player_transport,
-            verifier: RouteVerifier::new(temp.path()),
+            verifier: RouteVerifier::new(temp.path().join("route-floors")),
             source: Arc::clone(&source),
         });
         let restarted_gateway = StableLoopbackGateway::bind(world, stable_port).await.unwrap();

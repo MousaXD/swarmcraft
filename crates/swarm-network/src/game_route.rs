@@ -25,6 +25,8 @@ pub const GAME_STREAM_PROTOCOL: &str = "/swarmcraft/minecraft-game/1";
 pub const MAX_ROUTE_OFFER_AGE_MS: u64 = 15_000;
 pub const MAX_ROUTE_RESPONSE_AGE_MS: u64 = 5_000;
 pub const MAX_FRESH_EVIDENCE_AGE_MS: u64 = 5_000;
+/// A quorum/readiness attestation is a short lease, never a durable Ready flag.
+pub const MAX_FRESH_EVIDENCE_LEASE_MS: u64 = 30_000;
 pub const MAX_ROUTE_WIRE_BYTES: usize = 4096;
 const MAX_PEER_BYTES: usize = 128;
 const OFFER_DOMAIN: &[u8] = b"swarmcraft/minecraft-route-offer/v1\0";
@@ -345,7 +347,7 @@ impl RouteVerifier {
         response: &MinecraftRouteResponseV1,
         expected_world: WorldId,
         now_unix_ms: u64,
-        source: &impl FreshAuthoritySource,
+        source: &(impl FreshAuthoritySource + ?Sized),
     ) -> Result<VerifiedGameRoute, GameRouteError> {
         let pending = self
             .pending
@@ -414,6 +416,7 @@ impl RouteVerifier {
             || evidence.verified_at_unix_ms > now_unix_ms.saturating_add(CLOCK_SKEW_MS)
             || now_unix_ms.saturating_sub(evidence.verified_at_unix_ms) > MAX_FRESH_EVIDENCE_AGE_MS
             || evidence.valid_until_unix_ms <= now_unix_ms
+            || evidence.valid_until_unix_ms > now_unix_ms.saturating_add(MAX_FRESH_EVIDENCE_LEASE_MS)
         {
             return Err(GameRouteError::StaleAuthority);
         }
@@ -431,7 +434,7 @@ impl RouteVerifier {
     }
 
     fn advance_floor(&self, offer: &MinecraftRouteOfferV1) -> Result<(), GameRouteError> {
-        fs::create_dir_all(&self.floor_dir)?;
+        ensure_private_floor_directory(&self.floor_dir)?;
         let name = offer.world_id.to_hex();
         let path = self.floor_dir.join(format!("{name}.floor"));
         let lock_path = self.floor_dir.join(format!("{name}.lock"));
@@ -447,7 +450,12 @@ impl RouteVerifier {
                 if data.len() > 128 {
                     return Err(GameRouteError::InvalidTranscript);
                 }
-                Some(postcard::from_bytes::<GenerationFloor>(&data).map_err(|_| GameRouteError::InvalidTranscript)?)
+                let (value, remainder) = postcard::take_from_bytes::<GenerationFloor>(&data)
+                    .map_err(|_| GameRouteError::InvalidTranscript)?;
+                if !remainder.is_empty() {
+                    return Err(GameRouteError::InvalidTranscript);
+                }
+                Some(value)
             } else {
                 None
             };
@@ -517,6 +525,30 @@ fn reject_symlink(path: &Path) -> Result<(), GameRouteError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(GameRouteError::Storage(error)),
     }
+}
+
+/// Persistent anti-rollback evidence must not live in a world-writable
+/// directory where another local user could unlink it and force a downgrade.
+/// Never follow a symlink as the final floor directory component.
+fn ensure_private_floor_directory(path: &Path) -> Result<(), GameRouteError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        builder.mode(0o700);
+        builder.create(path)?;
+        let meta = fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() || meta.permissions().mode() & 0o022 != 0 {
+            return Err(GameRouteError::InvalidTranscript);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path)?;
+        reject_symlink(path)?;
+    }
+    Ok(())
 }
 
 fn sync_directory(path: &Path) -> Result<(), GameRouteError> {
@@ -647,8 +679,17 @@ mod tests {
                 expires_unix_ms: 20_000,
                 signature: Vec::new(),
             };
+            // tempfile::tempdir uses the process umask (often 0o002), and
+            // thus can produce 0o775 on this machine. Tests exercising a
+            // durable anti-rollback floor require a genuinely private path.
+            let root = tempfile::tempdir().unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            }
             Self {
-                root: tempfile::tempdir().unwrap(),
+                root,
                 key,
                 offer,
                 client_peer: PeerId([12; 32]),
@@ -866,6 +907,11 @@ mod tests {
         // Nor can an expired freshness attestation be replayed.
         source.evidence.verified_at_unix_ms = 4_000;
         assert!(matches!(f.verify(&verifier, &source), Err(GameRouteError::StaleAuthority)));
+        // An attestation cannot claim arbitrarily long validity even while
+        // its observation timestamp is fresh and signatures are valid.
+        source.evidence.verified_at_unix_ms = 10_150;
+        source.evidence.valid_until_unix_ms = 10_150 + MAX_FRESH_EVIDENCE_LEASE_MS + 1;
+        assert!(matches!(f.verify(&verifier, &source), Err(GameRouteError::StaleAuthority)));
     }
 
     #[test]
@@ -892,6 +938,30 @@ mod tests {
         let verifier = RouteVerifier::new(f.root.path());
         f.verify(&verifier, &f.source()).unwrap();
         fs::write(f.root.path().join(format!("{}.floor", f.offer.world_id.to_hex())), b"corrupted").unwrap();
+        assert!(matches!(f.verify(&verifier, &f.source()), Err(GameRouteError::InvalidTranscript)));
+    }
+
+    #[test]
+    fn trailing_bytes_after_valid_durable_generation_are_never_ignored() {
+        let mut f = Fixture::new();
+        f.sign();
+        let verifier = RouteVerifier::new(f.root.path());
+        f.verify(&verifier, &f.source()).unwrap();
+        let path = f.root.path().join(format!("{}.floor", f.offer.world_id.to_hex()));
+        OpenOptions::new().append(true).open(path).unwrap().write_all(b"junk").unwrap();
+        assert!(matches!(f.verify(&verifier, &f.source()), Err(GameRouteError::InvalidTranscript)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn world_writable_floor_directory_cannot_reset_the_monotonic_generation() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut f = Fixture::new();
+        f.sign();
+        let shared = f.root.path().join("untrusted");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
+        let verifier = RouteVerifier::new(shared);
         assert!(matches!(f.verify(&verifier, &f.source()), Err(GameRouteError::InvalidTranscript)));
     }
 

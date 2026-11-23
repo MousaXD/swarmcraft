@@ -222,9 +222,22 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn secure_test_dir() -> tempfile::TempDir {
+        // tempfile uses default directory permissions under the process
+        // umask; with umask=0o002 that can be group-writable (0o775).
+        // Durable gateway configuration must instead be in a private path.
+        let root = tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        root
+    }
+
     #[test]
     fn port_remains_stable_across_restart_and_cannot_be_assigned_to_another_world() {
-        let root = tempdir().unwrap();
+        let root = secure_test_dir();
         let dir = root.path().join("permanent");
         let first = GameWorldPortRegistry::new(&dir);
         let a = WorldId([1; 32]);
@@ -244,7 +257,7 @@ mod tests {
 
     #[test]
     fn malformed_records_block_reassignment_instead_of_resetting() {
-        let root = tempdir().unwrap();
+        let root = secure_test_dir();
         let registry = GameWorldPortRegistry::new(root.path());
         let a = WorldId([3; 32]);
         let b = WorldId([4; 32]);
@@ -257,7 +270,7 @@ mod tests {
 
     #[test]
     fn trailing_bytes_cannot_be_hidden_after_a_valid_world_port_record() {
-        let root = tempdir().unwrap();
+        let root = secure_test_dir();
         let registry = GameWorldPortRegistry::new(root.path());
         let world = WorldId([7; 32]);
         registry.reserve(world, 35558).unwrap();
@@ -268,7 +281,7 @@ mod tests {
 
     #[test]
     fn oversized_record_is_read_with_a_hard_limit_and_refused() {
-        let root = tempdir().unwrap();
+        let root = secure_test_dir();
         let registry = GameWorldPortRegistry::new(root.path());
         let world = WorldId([13; 32]);
         registry.reserve(world, 35560).unwrap();
@@ -280,7 +293,7 @@ mod tests {
 
     #[test]
     fn no_privileged_ports_or_default_world() {
-        let root = tempdir().unwrap();
+        let root = secure_test_dir();
         let registry = GameWorldPortRegistry::new(root.path());
         assert!(matches!(registry.reserve(WorldId::default(), 25565), Err(GamePortRegistryError::InvalidAssignment)));
         assert!(matches!(registry.reserve(WorldId([1; 32]), 0), Err(GamePortRegistryError::InvalidAssignment)));
@@ -290,7 +303,7 @@ mod tests {
 
     #[test]
     fn concurrent_process_style_reservation_is_single_assignment() {
-        let root = tempdir().unwrap();
+        let root = secure_test_dir();
         let dir = root.path().to_path_buf();
         let a = WorldId([5; 32]);
         let mut handles = Vec::new();
@@ -332,9 +345,6 @@ mod tests {
         fs::create_dir(&public).unwrap();
         fs::set_permissions(&public, fs::Permissions::from_mode(0o777)).unwrap();
         let registry = GameWorldPortRegistry::new(public);
-        assert!(matches!(
-            registry.reserve(WorldId([1; 32]), 40001),
-            Err(GamePortRegistryError::CorruptRegistry)
-        ));
+        assert!(matches!(registry.reserve(WorldId([1; 32]), 40001), Err(GamePortRegistryError::CorruptRegistry)));
     }
 }
