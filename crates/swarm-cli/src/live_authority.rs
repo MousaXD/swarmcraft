@@ -122,7 +122,9 @@ impl SignedHostFabricAttestation {
         Ok(signed)
     }
 
-    fn verify(&self, now: u64) -> Result<()> {
+    /// Verify the authority signature and its bounded, current lifetime.
+    /// This alone is never a quorum, consent or canonical runtime permit.
+    pub fn verify(&self, now: u64) -> Result<()> {
         if self.world_id == WorldId::default()
             || self.realm_hash == Hash32::default()
             || self.authority_peer_id == PeerId::default()

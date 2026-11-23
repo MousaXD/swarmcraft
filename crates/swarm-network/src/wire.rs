@@ -20,6 +20,9 @@ pub const MAX_DISCOVERY_TAGS: usize = 16;
 pub const MAX_DISCOVERY_QUERY_BYTES: usize = 512;
 pub const MAX_DISCOVERY_ANNOUNCEMENT_BYTES: usize = 16 * 1024;
 pub const MAX_DISCOVERY_MEMBERSHIP_PROOF_BYTES: usize = 512 * 1024;
+/// A signed, nonce-bound host Fabric report is a short single-proof envelope.
+/// It is never a substitute for the separately signed quorum transcript.
+pub const MAX_HOST_FABRIC_ATTESTATION_BYTES: usize = 4 * 1024;
 pub const MAX_DISCOVERY_MEMBERSHIP_CERTIFICATES: usize = 256;
 pub const MAX_HANDSHAKE_TRANSPORT_ID_BYTES: usize = 128;
 
@@ -156,6 +159,13 @@ pub enum WireRequest {
         expires_unix_ms: u64,
     },
     DiscoveryFreshnessVote(Box<DiscoveryFreshnessChallengeV1>),
+    // Append-only: signed host runtime evidence is requested ONLY from an
+    // application-authenticated canonical world member, and signed by the
+    // actual authority after a fresh authenticated Fabric IPC challenge.
+    HostFabricChallenge {
+        world_id: WorldId,
+        nonce: [u8; 32],
+    },
 }
 
 impl WireRequest {
@@ -183,7 +193,8 @@ impl WireRequest {
             | Self::WorldDescriptor { world_id }
             | Self::MissingBlobs { world_id, .. }
             | Self::BlobChunk { world_id, .. }
-            | Self::HostCapability { world_id } => Some(*world_id),
+            | Self::HostCapability { world_id }
+            | Self::HostFabricChallenge { world_id, .. } => Some(*world_id),
             Self::LeaveRequest(request) => Some(request.world_id),
             Self::SnapshotManifest(manifest) => Some(manifest.world_id),
             Self::ReplicaAck(ack) => Some(ack.world_id),
@@ -251,6 +262,9 @@ impl WireRequest {
             {
                 Err(WireLimitError::HandshakeTransportIdTooLarge)
             }
+            Self::HostFabricChallenge { world_id, nonce } if *world_id == WorldId::default() || *nonce == [0; 32] => {
+                Err(WireLimitError::InvalidHostFabricChallenge)
+            }
             _ => Ok(()),
         }
     }
@@ -289,6 +303,9 @@ pub enum WireResponse {
     HelloChallengeAccepted,
     DiscoveryFreshnessContext(Option<Box<DiscoveryMembershipProofV1>>),
     DiscoveryFreshnessVote(Option<Box<DiscoveryFreshnessVoteV1>>),
+    // Signed bytes are decoded and verified by the independent authority
+    // source; the wire response itself does not assert readiness or authority.
+    HostFabricAttestation(Option<Vec<u8>>),
 }
 
 impl WireResponse {
@@ -340,6 +357,9 @@ impl WireResponse {
                 }
                 Ok(())
             }
+            Self::HostFabricAttestation(Some(bytes)) if bytes.len() > MAX_HOST_FABRIC_ATTESTATION_BYTES => {
+                Err(WireLimitError::HostFabricAttestationTooLarge(bytes.len()))
+            }
             _ => Ok(()),
         }
     }
@@ -366,6 +386,10 @@ fn validate_announcement_size(value: &WorldAnnouncementV1) -> Result<(), WireLim
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WireLimitError {
+    #[error("host Fabric challenge lacks a valid world or fresh nonce")]
+    InvalidHostFabricChallenge,
+    #[error("host Fabric attestation is {0} bytes; maximum is {MAX_HOST_FABRIC_ATTESTATION_BYTES}")]
+    HostFabricAttestationTooLarge(usize),
     #[error("blob chunk is {0} bytes; maximum is {MAX_BLOB_CHUNK}")]
     BlobChunkTooLarge(usize),
     #[error("missing-blob request contains {0} hashes; maximum is {MAX_MISSING_BLOBS}")]
@@ -477,6 +501,31 @@ mod tests {
             WireRequest::DiscoveryPublic { filter }.validate_limits(),
             Err(WireLimitError::DiscoveryFilterTooLarge(_))
         ));
+    }
+
+    #[test]
+    fn host_fabric_rpc_is_append_only_world_scoped_and_bounded() {
+        let world = WorldId([19; 32]);
+        let challenge = WireRequest::HostFabricChallenge { world_id: world, nonce: [21; 32] };
+        assert_eq!(challenge.membership_world_id(), Some(world));
+        assert!(challenge.validate_limits().is_ok());
+        assert_eq!(
+            WireRequest::HostFabricChallenge { world_id: world, nonce: [0; 32] }.validate_limits(),
+            Err(WireLimitError::InvalidHostFabricChallenge)
+        );
+        assert_eq!(
+            WireRequest::HostFabricChallenge { world_id: WorldId::default(), nonce: [21; 32] }.validate_limits(),
+            Err(WireLimitError::InvalidHostFabricChallenge)
+        );
+        assert_eq!(
+            WireResponse::HostFabricAttestation(Some(vec![0; MAX_HOST_FABRIC_ATTESTATION_BYTES + 1])).validate_limits(),
+            Err(WireLimitError::HostFabricAttestationTooLarge(MAX_HOST_FABRIC_ATTESTATION_BYTES + 1))
+        );
+        let encoded = postcard::to_allocvec(&challenge).unwrap();
+        let decoded: WireRequest = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded, challenge);
+        // Fail closed: a malformed or overly large signed report is not a
+        // transport permit, even from an already authenticated remote peer.
     }
 
     #[test]

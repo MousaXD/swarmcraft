@@ -2,12 +2,13 @@
 //! A remote authority cannot be attested here: no network-cache/Ready fallback.
 
 use super::live_quorum::LiveQuorumClient;
+use super::remote_fabric::RemoteFabricRpcClient;
 use anyhow::{anyhow, bail, Context, Result};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use swarm_cli::{
     live_authority::{
         canonical_quorum_hash, sign_live_host_fabric_attestation, v1_realm_hash, LiveAuthorityObservation,
-        LiveAuthorityProofProvider, RuntimeCanonicalBinding,
+        LiveAuthorityProofProvider, RuntimeCanonicalBinding, SignedHostFabricAttestation,
     },
     live_runtime_registry::LiveFabricRuntimeRegistry,
 };
@@ -36,6 +37,7 @@ pub(super) struct DaemonLocalLiveAuthority {
     application_peer: PeerId,
     transport_peer: TransportPeerId,
     quorum: LiveQuorumClient,
+    remote_fabric: RemoteFabricRpcClient,
     runtime: LiveFabricRuntimeRegistry,
     reactor: Handle,
 }
@@ -46,10 +48,11 @@ impl DaemonLocalLiveAuthority {
         application_peer: PeerId,
         transport_peer: TransportPeerId,
         quorum: LiveQuorumClient,
+        remote_fabric: RemoteFabricRpcClient,
         runtime: LiveFabricRuntimeRegistry,
         reactor: Handle,
     ) -> Self {
-        Self { paths, application_peer, transport_peer, quorum, runtime, reactor }
+        Self { paths, application_peer, transport_peer, quorum, remote_fabric, runtime, reactor }
     }
 
     fn signed_context(&self, storage: &Storage, world: WorldId) -> Result<SignedContext> {
@@ -77,8 +80,8 @@ impl DaemonLocalLiveAuthority {
         let epoch = storage.load_epoch_record(world)?;
         let config = storage.load_world_config(world)?;
         let snapshot = storage.latest_snapshot(world)?.context("no accepted canonical checkpoint")?;
-        if epoch.mode != EpochMode::Quorum || epoch.authority_peer_id != self.application_peer {
-            bail!("local daemon is not the signed quorum authority");
+        if epoch.mode != EpochMode::Quorum {
+            bail!("game routing requires a signed quorum authority generation");
         }
         let accepted = storage.canonical_snapshot_head(world)?.head.context("no accepted canonical snapshot head")?;
         let head = DiscoveryCanonicalHeadV1 {
@@ -116,6 +119,64 @@ impl DaemonLocalLiveAuthority {
             expires_unix_ms: 0,
         };
         Ok(SignedContext { membership, epoch, config, snapshot, quorum_challenge, canonical })
+    }
+
+    /// An authenticated peer may request fresh host Fabric evidence, but this
+    /// is never a replacement for independent majority-signed quorum proof.
+    /// Execute on a bounded blocking worker, NOT the SwarmNode reactor.
+    pub fn attest_remote_requester(
+        &self,
+        world: WorldId,
+        requester: PeerId,
+        nonce: [u8; 32],
+    ) -> Result<SignedHostFabricAttestation> {
+        if requester == PeerId::default() || world == WorldId::default() || nonce == [0; 32] {
+            bail!("invalid host Fabric challenge");
+        }
+        let storage = Storage::open(self.paths.root.clone())?;
+        let identity = PeerIdentity::load_or_create(&self.paths)?;
+        if identity.peer_id() != self.application_peer {
+            bail!("local signed host identity changed");
+        }
+        let before = self.signed_context(&storage, world)?;
+        if before.epoch.authority_peer_id != self.application_peer {
+            bail!("remote Fabric report may only be signed by its currently accepted authority");
+        }
+        if !before.membership.current_membership.members.iter().any(|member| {
+            member.peer_id == requester
+                && !member.banned
+                && swarm_protocol::peer_id_from_public_key(&member.public_key) == requester
+        }) {
+            bail!("remote requester is not a canonical member");
+        }
+        // Challenge the original supervised, token-authenticated Fabric socket.
+        // The live runtime registry itself enforces one-use nonces, advancing
+        // permits, current process, consent and fence both before and after.
+        let observed = self.reactor.block_on(self.runtime.challenge(world, nonce))?;
+        if observed.identity.generation.epoch != before.epoch.epoch_number
+            || observed.identity.generation.fencing_token != before.epoch.fencing_token
+            || observed.identity.fingerprint != before.membership.genesis.compatibility_fingerprint
+        {
+            bail!("live managed JVM and accepted canonical authority generation differ");
+        }
+        let after = self.signed_context(&storage, world)?;
+        if before.membership != after.membership
+            || before.epoch != after.epoch
+            || before.config != after.config
+            || before.snapshot != after.snapshot
+            || before.canonical != after.canonical
+        {
+            bail!("signed canonical state changed during Fabric IPC proof");
+        }
+        sign_live_host_fabric_attestation(
+            &self.paths,
+            &identity,
+            &self.transport_peer,
+            requester,
+            v1_realm_hash(world),
+            after.canonical,
+            &observed.fabric,
+        )
     }
 }
 
@@ -157,30 +218,34 @@ impl LiveAuthorityProofProvider for DaemonLocalLiveAuthority {
         let challenge = context.quorum_challenge.clone();
         // Both independent REAL sources are polled concurrently, staying
         // under the verifier's three-second monotonic acquisition budget.
-        let (quorum_votes, live) = std::thread::scope(|scope| -> Result<_> {
+        let (quorum_votes, host_fabric) = std::thread::scope(|scope| -> Result<_> {
             let vote_task = scope.spawn(|| self.quorum.collect_blocking(challenge));
-            let live = self.reactor.block_on(self.runtime.challenge(world, nonce));
+            let host_fabric = if context.epoch.authority_peer_id == self.application_peer {
+                let live = self.reactor.block_on(self.runtime.challenge(world, nonce))?;
+                if live.identity.generation.epoch != context.canonical.epoch
+                    || live.identity.generation.fencing_token != context.canonical.fencing_token
+                    || live.identity.fingerprint != context.membership.genesis.compatibility_fingerprint
+                {
+                    bail!("managed Fabric JVM and signed canonical authority generation differ");
+                }
+                sign_live_host_fabric_attestation(
+                    &self.paths,
+                    &identity,
+                    &self.transport_peer,
+                    requester,
+                    v1_realm_hash(world),
+                    context.canonical,
+                    &live.fabric,
+                )?
+            } else {
+                self.remote_fabric.collect_blocking(world, context.epoch.authority_peer_id, nonce)?
+            };
             let votes = vote_task.join().map_err(|_| anyhow!("quorum worker panicked"))??;
-            Ok((votes, live?))
+            Ok((votes, host_fabric))
         })?;
         if Instant::now() >= deadline {
             bail!("quorum or Fabric acquisition exceeded the monotonic deadline");
         }
-        if live.identity.generation.epoch != context.canonical.epoch
-            || live.identity.generation.fencing_token != context.canonical.fencing_token
-            || live.identity.fingerprint != context.membership.genesis.compatibility_fingerprint
-        {
-            bail!("managed Fabric JVM and signed canonical authority generation differ");
-        }
-        let host_fabric = sign_live_host_fabric_attestation(
-            &self.paths,
-            &identity,
-            &self.transport_peer,
-            requester,
-            v1_realm_hash(world),
-            context.canonical,
-            &live.fabric,
-        )?;
         if Instant::now() >= deadline {
             bail!("host Fabric signature exceeded the monotonic deadline");
         }

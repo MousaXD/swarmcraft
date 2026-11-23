@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Debug,
+    sync::mpsc as sync_mpsc,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -9,7 +10,7 @@ use swarm_cli::{
     authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
     host_readiness::{self, PeerReadinessObservation},
     hosting_budget, launch_guard,
-    live_authority::SignedLiveAuthoritySource,
+    live_authority::{SignedHostFabricAttestation, SignedLiveAuthoritySource},
     live_runtime_registry::LiveFabricRuntimeRegistry,
     migration::{self, clear_world_wake_request, world_wake_requested},
 };
@@ -54,7 +55,7 @@ use swarm_storage::{
 };
 use tokio::time::MissedTickBehavior;
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{mpsc, watch, Semaphore},
     task::JoinHandle,
 };
 use tracing::{info, warn};
@@ -63,6 +64,29 @@ use tracing::{info, warn};
 mod live_quorum;
 #[path = "daemon_local_live_authority.rs"]
 mod local_live_authority;
+#[path = "daemon_remote_fabric.rs"]
+mod remote_fabric;
+
+const MAX_IN_FLIGHT_HOST_FABRIC_RPC: usize = 4;
+const MAX_HOST_FABRIC_RPC_WAIT: Duration = Duration::from_millis(2_450);
+
+struct HostFabricReplyAction {
+    channel: ResponseChannel<WireResponse>,
+    transport_peer: TransportPeerId,
+    application_peer: PeerId,
+    world: WorldId,
+    nonce: [u8; 32],
+    signed: Option<SignedHostFabricAttestation>,
+}
+
+struct PendingRemoteFabricProof {
+    world: WorldId,
+    authority: PeerId,
+    transport: TransportPeerId,
+    nonce: [u8; 32],
+    started: Instant,
+    response: sync_mpsc::SyncSender<Result<SignedHostFabricAttestation>>,
+}
 
 #[cfg(test)]
 use swarm_network::game_route_control::GameRouteControlRequestV1;
@@ -236,11 +260,14 @@ pub async fn run(
     let mut leases = LeaseRuntime::default();
     let (live_quorum_client, mut live_quorum_commands) = live_quorum::channel();
     let mut live_quorum_driver = live_quorum::LiveQuorumDriver::default();
+    let (remote_fabric_client, mut remote_fabric_commands) = remote_fabric::channel();
+    let mut pending_remote_fabric: HashMap<String, PendingRemoteFabricProof> = HashMap::new();
     let provider = Arc::new(local_live_authority::DaemonLocalLiveAuthority::new(
         paths.clone(),
         identity.peer_id(),
         node.local_transport_peer_id(),
         live_quorum_client,
+        remote_fabric_client,
         live_runtime_registry.clone(),
         tokio::runtime::Handle::current(),
     ));
@@ -249,7 +276,7 @@ pub async fn run(
         identity.peer_id(),
         node.local_transport_peer_id(),
         node.game_authenticated_peers(),
-        provider,
+        provider.clone(),
     ));
     let signer = Arc::new(AuthenticatedGameRouteHostSigner::new(
         identity.network_signing_key(),
@@ -266,6 +293,9 @@ pub async fn run(
     // On daemon exit dropping route_shutdown closes the controller's watch;
     // detached proof tasks cannot enqueue a route once its receiver closes.
     let _route_control_ownership = (route_shutdown, route_control_task);
+    let (fabric_reply_tx, mut fabric_replies) = mpsc::channel::<HostFabricReplyAction>(MAX_IN_FLIGHT_HOST_FABRIC_RPC);
+    let fabric_workers = Arc::new(Semaphore::new(MAX_IN_FLIGHT_HOST_FABRIC_RPC));
+    let mut fabric_tasks = tokio::task::JoinSet::new();
     let mut game_stream_receiver: Option<ActiveGameReceiver> = None;
     let (transfer_done_tx, mut transfer_done_rx) = mpsc::channel::<CompletedTransferStep>(MAX_IN_FLIGHT_TRANSFER_STEPS);
     let mut transfer_steps_in_flight = HashSet::new();
@@ -276,6 +306,61 @@ pub async fn run(
         tokio::select! {
             Some(command) = live_quorum_commands.recv() => {
                 live_quorum_driver.start(storage, &identity, &mut node, &mut outbound, &leases, command);
+            }
+            Some(command) = remote_fabric_commands.recv() => {
+                let eligible = storage.load_epoch_record(command.world).is_ok_and(|epoch| {
+                    epoch.mode == EpochMode::Quorum && epoch.authority_peer_id == command.authority
+                }) && authorize_member(storage, command.world, command.authority).is_ok()
+                    && command.authority != identity.peer_id()
+                    && command.nonce != [0; 32]
+                    && pending_remote_fabric.len() < remote_fabric::REMOTE_HOST_RPC_CAPACITY;
+                let remote = if eligible {
+                    leases.authenticated_peers.iter().find_map(|(transport, app)| {
+                        (*app == command.authority && node.application_peer(transport) == Some(command.authority))
+                            .then_some(*transport)
+                    })
+                } else { None };
+                let result = remote.and_then(|transport| {
+                    node.send_request(&transport, WireRequest::HostFabricChallenge {
+                        world_id: command.world, nonce: command.nonce,
+                    }).ok().map(|id| (transport, id))
+                });
+                if let Some((transport, id)) = result {
+                    pending_remote_fabric.insert(request_key(&id), PendingRemoteFabricProof {
+                        world: command.world, authority: command.authority, transport,
+                        nonce: command.nonce, started: Instant::now(), response: command.response,
+                    });
+                } else {
+                    let _ = command.response.try_send(Err(anyhow!(
+                        "no application-authenticated current authority for fresh remote Fabric proof"
+                    )));
+                }
+            }
+            completed = fabric_tasks.join_next(), if !fabric_tasks.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    warn!(%error, "signed host Fabric proof worker failed");
+                }
+            }
+            Some(reply) = fabric_replies.recv() => {
+                // Requester might have disconnected or rotated its Noise-
+                // authenticated application identity during the IPC request.
+                let current = node.application_peer(&reply.transport_peer) == Some(reply.application_peer);
+                let signed = if current && reply.signed.as_ref().is_some_and(|signed| {
+                    current_host_fabric_reply_is_safe(
+                        paths, storage, &identity, &node, &live_runtime_registry,
+                        reply.world, reply.application_peer, reply.nonce, signed,
+                    )
+                }) {
+                    reply.signed.and_then(|signed| postcard::to_allocvec(&signed).ok())
+                } else {
+                    None
+                };
+                let response = WireResponse::HostFabricAttestation(signed);
+                if response.validate_limits().is_ok() {
+                    let _ = node.respond(reply.channel, response);
+                } else {
+                    let _ = node.respond(reply.channel, WireResponse::HostFabricAttestation(None));
+                }
             }
             Some(action) = route_replies.recv() => {
                 let authenticated = node.application_peer(&action.transport_peer) == Some(action.application_peer);
@@ -292,6 +377,12 @@ pub async fn run(
                 }
             }
             _ = lease_tick.tick() => {
+                pending_remote_fabric.retain(|_, pending| {
+                    if pending.started.elapsed() >= remote_fabric::REMOTE_HOST_RPC_TIMEOUT {
+                        let _ = pending.response.try_send(Err(anyhow!("remote signed Fabric IPC proof timed out")));
+                        false
+                    } else { true }
+                });
                 maintain_game_stream_receiver(
                     paths, storage, &identity, &node, &live_runtime_registry,
                     &authority, &mut game_stream_receiver,
@@ -355,6 +446,41 @@ pub async fn run(
                         let application_peer = node
                             .application_peer(&transport_peer)
                             .context("authenticated request lost application peer mapping")?;
+                        if let WireRequest::HostFabricChallenge { world_id, nonce } = &request {
+                            let (world_id, nonce) = (*world_id, *nonce);
+                            let accepted = nonce != [0; 32]
+                                && authorize_member(storage, world_id, application_peer).is_ok()
+                                && node.application_peer(&transport_peer) == Some(application_peer);
+                            let slot = if accepted { Arc::clone(&fabric_workers).try_acquire_owned().ok() } else { None };
+                            if let Some(slot) = slot {
+                                let source = Arc::clone(&provider);
+                                let replies = fabric_reply_tx.clone();
+                                fabric_tasks.spawn(async move {
+                                    let job = tokio::task::spawn_blocking(move || {
+                                        let _slot = slot;
+                                        source.attest_remote_requester(world_id, application_peer, nonce)
+                                    });
+                                    let signed = match tokio::time::timeout(MAX_HOST_FABRIC_RPC_WAIT, job).await {
+                                        Ok(Ok(Ok(proof))) => Some(proof),
+                                        Ok(Ok(Err(error))) => {
+                                            tracing::debug!(world = %world_id, %error, "host Fabric attestation refused");
+                                            None
+                                        }
+                                        Ok(Err(error)) => {
+                                            warn!(world = %world_id, %error, "host Fabric worker crashed");
+                                            None
+                                        }
+                                        Err(_) => None,
+                                    };
+                                    let _ = replies.try_send(HostFabricReplyAction {
+                                        channel, transport_peer, application_peer, world: world_id, nonce, signed,
+                                    });
+                                });
+                            } else {
+                                let _ = node.respond(channel, WireResponse::HostFabricAttestation(None));
+                            }
+                            continue;
+                        }
                         let context = HandlerContext { paths, identity: &identity, storage };
                         let mut state = RequestState {
                             pending_manifests: &mut pending_manifests,
@@ -375,6 +501,13 @@ pub async fn run(
             }
                     }
                     NetworkEvent::Response { transport_peer, request_id, response } => {
+                        if let Some(pending) = pending_remote_fabric.remove(&request_key(&request_id)) {
+                            let verified = verify_remote_host_fabric_rpc(
+                                storage, &node, identity.peer_id(), transport_peer, &pending, response,
+                            );
+                            let _ = pending.response.try_send(verified);
+                            continue;
+                        }
                         // Receiving HelloAccepted means the remote has authenticated our
                         // signed PeerHello. If we have also authenticated theirs, both sides
                         // can now safely accept canonical world synchronization requests.
@@ -422,6 +555,10 @@ pub async fn run(
                         }
                     }
                     NetworkEvent::OutboundFailure { transport_peer, request_id, error } => {
+                        if let Some(pending) = pending_remote_fabric.remove(&request_key(&request_id)) {
+                            let _ = pending.response.try_send(Err(anyhow!("remote host Fabric RPC failed: {error}")));
+                            continue;
+                        }
                         if let Some(context) = outbound.remove(&request_key(&request_id)) {
                             match context {
                                 OutboundContext::Lease { world, peer, .. } => {
@@ -456,6 +593,12 @@ pub async fn run(
                         warn!(transport = %transport_peer, %error, "outbound peer request failed; replication will renegotiate after reconnect");
                     }
                     NetworkEvent::Disconnected { transport_peer } => {
+                        pending_remote_fabric.retain(|_, pending| {
+                            if pending.transport == transport_peer {
+                                let _ = pending.response.try_send(Err(anyhow!("remote Fabric authority disconnected")));
+                                false
+                            } else { true }
+                        });
                         live_quorum_driver.on_disconnect(&transport_peer);
                         if let Some(application_peer) = leases.authenticated_peers.remove(&transport_peer) {
                             leases.lease_acks.retain(|(_, peer), _| *peer != application_peer);
@@ -527,6 +670,97 @@ fn queued_game_route_response_current(
             registry,
             HostRouteGeneration { world, epoch_number, fencing_token, consent_revision },
         )
+}
+
+/// Denial-only final edge check on a signed remote Fabric IPC reply. The
+/// remote requester must still independently verify the signed canonical
+/// majority, membership, checkpoint, consent and entire Fabric transcript.
+#[allow(clippy::too_many_arguments)]
+fn current_host_fabric_reply_is_safe(
+    paths: &DataPaths,
+    storage: &Storage,
+    identity: &PeerIdentity,
+    node: &SwarmNode,
+    registry: &LiveFabricRuntimeRegistry,
+    world: WorldId,
+    requester: PeerId,
+    nonce: [u8; 32],
+    attestation: &SignedHostFabricAttestation,
+) -> bool {
+    let Ok(now) = unix_millis() else { return false };
+    if attestation.world_id != world
+        || attestation.requester_peer_id != requester
+        || attestation.challenge_nonce != nonce
+        || attestation.authority_peer_id != identity.peer_id()
+        || attestation.authority_public_key != identity.public_key()
+        || attestation.authority_transport_peer != node.local_transport_peer_id().to_bytes()
+        || attestation.verify(now).is_err()
+        || !local_host_generation_eligible(
+            paths,
+            storage,
+            identity,
+            registry,
+            HostRouteGeneration {
+                world,
+                epoch_number: attestation.canonical.epoch,
+                fencing_token: attestation.canonical.fencing_token,
+                consent_revision: Some(attestation.consent_revision),
+            },
+        )
+    {
+        return false;
+    }
+    let Ok(Some(snapshot)) = storage.latest_snapshot(world) else { return false };
+    matches!(snapshot.manifest_hash(), Ok(hash) if hash == attestation.canonical.checkpoint_hash)
+        && snapshot.state_root == attestation.canonical.state_root
+}
+
+/// Network envelopes are not trust. Each remote signed runtime attestation
+/// must be bound to the exact still-authenticated authority transport and
+/// original requester nonce, with current locally accepted canonical state.
+/// The independent SignedLiveAuthoritySource additionally validates majority
+/// quorum, membership history, consent and full checkpoint byte integrity.
+fn verify_remote_host_fabric_rpc(
+    storage: &Storage,
+    node: &SwarmNode,
+    local_peer: PeerId,
+    transport: TransportPeerId,
+    pending: &PendingRemoteFabricProof,
+    response: WireResponse,
+) -> Result<SignedHostFabricAttestation> {
+    if pending.started.elapsed() >= remote_fabric::REMOTE_HOST_RPC_TIMEOUT
+        || transport != pending.transport
+        || node.application_peer(&transport) != Some(pending.authority)
+        || response.validate_limits().is_err()
+    {
+        anyhow::bail!("remote Fabric response arrived late or without the originally authenticated authority");
+    }
+    let WireResponse::HostFabricAttestation(Some(bytes)) = response else {
+        anyhow::bail!("remote signed Fabric authority proof was refused or unavailable");
+    };
+    let signed: SignedHostFabricAttestation =
+        postcard::from_bytes(&bytes).context("invalid signed host Fabric attestation encoding")?;
+    signed.verify(unix_millis()?)?;
+    if signed.world_id != pending.world
+        || signed.requester_peer_id != local_peer
+        || signed.challenge_nonce != pending.nonce
+        || signed.authority_peer_id != pending.authority
+        || signed.authority_transport_peer != transport.to_bytes()
+    {
+        anyhow::bail!("remote Fabric attestation was misbound to the requested world, nonce or peer");
+    }
+    let epoch = storage.load_epoch_record(pending.world)?;
+    let snapshot = storage.latest_snapshot(pending.world)?.context("missing accepted local checkpoint")?;
+    if epoch.mode != EpochMode::Quorum
+        || epoch.authority_peer_id != pending.authority
+        || epoch.epoch_number != signed.canonical.epoch
+        || epoch.fencing_token != signed.canonical.fencing_token
+        || signed.canonical.checkpoint_hash != snapshot.manifest_hash()?
+        || signed.canonical.state_root != snapshot.state_root
+    {
+        anyhow::bail!("remote runtime proof conflicts with locally accepted canonical authority and checkpoint");
+    }
+    Ok(signed)
 }
 
 struct HostRouteGeneration {
@@ -3199,6 +3433,13 @@ fn handle_request(
                 }
             };
             node.respond(channel, WireResponse::DiscoveryFreshnessVote(vote))?;
+        }
+        WireRequest::HostFabricChallenge { .. } => {
+            // This synchronous request dispatcher must NEVER block the
+            // SwarmNode event loop waiting for a Fabric IPC challenge.
+            // Until the bounded asynchronous supervisor path owns this RPC,
+            // explicit absence of a signed proof is the only safe response.
+            node.respond(channel, WireResponse::HostFabricAttestation(None))?;
         }
         WireRequest::DiscoveryPublic { .. }
         | WireRequest::DiscoveryResolve { .. }
