@@ -207,9 +207,26 @@ async fn encrypted_game_substream_survives_a_real_local_libp2p_relay_circuit() {
         })
         .await
         .expect("relay infrastructure must not be cut off by the application auth timeout");
+
+        // Simulate an actual relay outage. A relayed SwarmCraft connection
+        // must lose its application-authentication mapping, and a Minecraft
+        // stream must NOT silently fall back to a raw IP or stale circuit.
+        relay_task.abort();
+        timeout(Duration::from_secs(8), async {
+            while authenticated_host.read().unwrap().contains_key(&player_transport) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("relay outage must revoke application authentication");
+        let reopened = timeout(
+            Duration::from_secs(3),
+            player_control.open_stream(host_transport, StreamProtocol::new(GAME_STREAM_PROTOCOL)),
+        )
+        .await;
+        assert!(!matches!(reopened, Ok(Ok(_))), "game stream unexpectedly opened after the only relay went down");
         host_task.abort();
         player_task.abort();
-        relay_task.abort();
     })
     .await
     .expect("bounded local relay acceptance must finish");
