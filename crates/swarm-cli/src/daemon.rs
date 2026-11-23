@@ -690,6 +690,7 @@ fn validate_persisted_transfer(
         return Ok(false);
     }
     let epoch = storage.load_epoch_record(record.world_id)?;
+    verify_signature(epoch.authority_peer_id, epoch.authority_public_key, &epoch.signing_bytes()?, &epoch.signature)?;
     if epoch.authority_peer_id != record.from_peer_id || epoch.authority_public_key != source.public_key {
         return Ok(false);
     }
@@ -3761,19 +3762,21 @@ fn validate_transfer_shape_without_progression(
         return Err(anyhow!("transfer signer key does not match membership"));
     }
     let latest = storage.latest_snapshot(transfer.world_id)?.context("cannot transfer authority without a snapshot")?;
+    verify_snapshot_signature(&latest)?;
     if latest.manifest_hash()? != transfer.base_snapshot_hash {
         return Err(anyhow!("transfer does not reference the exact latest snapshot"));
     }
-    if let Some(epoch) = load_optional_epoch_record(storage, transfer.world_id)? {
-        if epoch.authority_peer_id != from.peer_id || epoch.authority_public_key != from.public_key {
-            return Err(anyhow!("transfer source does not match accepted canonical authority"));
-        }
-        let expected = AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token }
-            .checked_next()
-            .context("accepted authority generation is exhausted")?;
-        if transfer.next_epoch != expected.epoch || transfer.next_fencing_token != expected.fencing_token {
-            return Err(anyhow!("transfer generation does not advance the accepted epoch exactly once"));
-        }
+    let epoch = load_optional_epoch_record(storage, transfer.world_id)?
+        .context("transfer requires an accepted signed epoch")?;
+    verify_signature(epoch.authority_peer_id, epoch.authority_public_key, &epoch.signing_bytes()?, &epoch.signature)?;
+    if epoch.authority_peer_id != from.peer_id || epoch.authority_public_key != from.public_key {
+        return Err(anyhow!("transfer source does not match accepted canonical authority"));
+    }
+    let expected = AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token }
+        .checked_next()
+        .context("accepted authority generation is exhausted")?;
+    if transfer.next_epoch != expected.epoch || transfer.next_fencing_token != expected.fencing_token {
+        return Err(anyhow!("transfer generation does not advance the accepted epoch exactly once"));
     }
     Ok(())
 }

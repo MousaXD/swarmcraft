@@ -84,6 +84,12 @@ handoff role: the source delivers Prepared/Committed, the target sends
 Accepted to the source, and the source alone may relay Accepted to witnesses.
 A different world member cannot replay a valid signature to bypass the
 source's delivery order.
+Each inbound phase and each automatic retry now also rechecks the accepted
+epoch signature and the exact latest checkpoint signature; missing or
+signature-corrupted accepted epochs do not count as a bootstrap generation
+and cannot authorize another transfer phase. The test fixture uses a
+genuinely signed canonical epoch, and negative regressions exercise altered
+signature bytes and deleted epoch records.
 
 ## Not implemented / explicit integration dependencies
 

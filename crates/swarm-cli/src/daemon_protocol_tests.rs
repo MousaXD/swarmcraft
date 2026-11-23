@@ -85,21 +85,21 @@ fn fixture() -> Fixture {
     };
     authority.sign_membership(&mut membership).unwrap();
     storage.save_membership_record(&membership).unwrap();
-    storage
-        .save_epoch_record(&EpochRecordV1 {
-            protocol_version: PROTOCOL_VERSION,
-            world_id: world,
-            epoch_number: 0,
-            previous_epoch_hash: None,
-            base_state_hash: Hash32([44; 32]),
-            authority_peer_id: authority.peer_id(),
-            authority_public_key: authority.public_key(),
-            mode: EpochMode::Quorum,
-            fencing_token: 0,
-            reason: "fixture".into(),
-            signature: Vec::new(),
-        })
-        .unwrap();
+    let mut initial_epoch = EpochRecordV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        epoch_number: 0,
+        previous_epoch_hash: None,
+        base_state_hash: Hash32([44; 32]),
+        authority_peer_id: authority.peer_id(),
+        authority_public_key: authority.public_key(),
+        mode: EpochMode::Quorum,
+        fencing_token: 0,
+        reason: "fixture".into(),
+        signature: Vec::new(),
+    };
+    initial_epoch.signature = authority.sign(&initial_epoch.signing_bytes().unwrap());
+    storage.save_epoch_record(&initial_epoch).unwrap();
 
     Fixture { _temp: temp, storage, authority, member: member_identity, world, compatibility }
 }
@@ -431,8 +431,11 @@ fn corrupt_epoch_blocks_config_snapshot_and_transfer_preflight() {
     );
     assert!(authorize_manifest(&fixture.storage, fixture.authority.peer_id(), &second).is_ok());
     assert!(validate_transfer(&fixture.storage, &transfer).is_ok());
+    let descriptor = fixture.storage.load_world_descriptor(fixture.world).unwrap();
+    assert!(validate_persisted_transfer(&fixture.storage, &descriptor, &transfer).unwrap());
 
     let epoch_path = fixture.storage.world_dir(fixture.world).join("metadata/epoch.postcard");
+    let valid_epoch = fixture.storage.load_epoch_record(fixture.world).unwrap();
     let corrupt = b"corrupt accepted authority epoch";
     std::fs::write(&epoch_path, corrupt).unwrap();
 
@@ -443,6 +446,20 @@ fn corrupt_epoch_blocks_config_snapshot_and_transfer_preflight() {
     assert!(validate_transfer(&fixture.storage, &transfer).is_err());
     assert_eq!(std::fs::read(&epoch_path).unwrap(), corrupt);
     assert!(fixture.storage.load_transfer_record(fixture.world).is_err());
+
+    // Well-formed but unsigned/altered records are just as unsafe as
+    // unreadable bytes. Never infer a valid authority from storage semantics.
+    let mut unsigned_epoch = valid_epoch;
+    unsigned_epoch.signature[0] ^= 1;
+    std::fs::write(&epoch_path, postcard::to_allocvec(&unsigned_epoch).unwrap()).unwrap();
+    assert!(fixture.storage.load_epoch_record(fixture.world).is_ok());
+    assert!(validate_transfer(&fixture.storage, &transfer).is_err());
+    assert!(validate_persisted_transfer(&fixture.storage, &descriptor, &transfer).is_err());
+
+    // Missing is not an implicit signed bootstrap authority for handoff.
+    std::fs::remove_file(&epoch_path).unwrap();
+    assert!(validate_transfer(&fixture.storage, &transfer).is_err());
+    assert!(validate_persisted_transfer(&fixture.storage, &descriptor, &transfer).is_err());
 }
 
 #[test]
