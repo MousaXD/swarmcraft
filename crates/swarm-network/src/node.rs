@@ -21,10 +21,12 @@ use libp2p::{
     swarm::{dial_opts::DialOpts, ConnectionId, NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId as TransportPeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
+use libp2p_stream as stream;
 use rand_core::{OsRng, RngCore};
 use std::{
     collections::{HashMap, HashSet},
     env,
+    sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
 use swarm_protocol::{PeerHelloV1, PeerId, PROTOCOL_VERSION};
@@ -45,6 +47,7 @@ mod generated_behaviour {
     #[derive(NetworkBehaviour)]
     pub(super) struct Behaviour {
         pub(super) request_response: cbor::Behaviour<WireRequest, WireResponse>,
+        pub(super) game_stream: stream::Behaviour,
         pub(super) mdns: mdns::tokio::Behaviour,
         pub(super) identify: identify::Behaviour,
         pub(super) ping: ping::Behaviour,
@@ -112,6 +115,7 @@ pub struct SwarmNode {
     local_hello: PeerHelloV1,
     application_signing_key: SigningKey,
     authenticated: HashMap<TransportPeerId, (PeerId, ConnectionId)>,
+    game_authenticated: Arc<RwLock<HashMap<TransportPeerId, PeerId>>>,
     pending_challenges: HashMap<TransportPeerId, (ConnectionId, [u8; 32], Instant)>,
     active_connections: HashMap<TransportPeerId, ConnectionId>,
     connection_counts: HashMap<TransportPeerId, usize>,
@@ -164,6 +168,7 @@ impl SwarmNode {
             .with_relay_client(noise::Config::new, yamux::Config::default)?
             .with_behaviour(move |_, relay_client| Behaviour {
                 request_response,
+                game_stream: stream::Behaviour::new(),
                 mdns,
                 identify,
                 ping: ping::Behaviour::default(),
@@ -180,6 +185,7 @@ impl SwarmNode {
             local_hello,
             application_signing_key,
             authenticated: HashMap::new(),
+            game_authenticated: Arc::new(RwLock::new(HashMap::new())),
             pending_challenges: HashMap::new(),
             active_connections: HashMap::new(),
             connection_counts: HashMap::new(),
@@ -200,6 +206,20 @@ impl SwarmNode {
 
     pub fn application_peer(&self, transport_peer: &TransportPeerId) -> Option<PeerId> {
         self.authenticated.get(transport_peer).map(|(peer, _)| *peer)
+    }
+
+    /// Dedicated Noise-authenticated libp2p substreams. Transport identity
+    /// does NOT authorize a Minecraft route; recipients must validate fresh
+    /// canonical state and application membership before accepting streams.
+    pub fn game_stream_control(&self) -> stream::Control {
+        self.swarm.behaviour().game_stream.new_control()
+    }
+
+    /// Read-only dynamic application-authentication registry for stream
+    /// handlers. Revoked/rotated connections are removed before new admission.
+    /// The receiver must STILL verify canonical world membership separately.
+    pub fn game_authenticated_peers(&self) -> Arc<RwLock<HashMap<TransportPeerId, PeerId>>> {
+        Arc::clone(&self.game_authenticated)
     }
 
     pub fn connectivity_diagnostics(&self) -> ConnectivityDiagnosticsV1 {
@@ -478,6 +498,7 @@ impl SwarmNode {
                     }
                     self.connection_counts.insert(peer_id, num_established.get() as usize);
                     self.authenticated.remove(&peer_id);
+                    self.game_authenticated.write().expect("game auth registry poisoned").remove(&peer_id);
                     self.pending_challenges.remove(&peer_id);
                     debug!(transport_peer = %peer_id, %connection_id, %num_established, relayed = endpoint.is_relayed(), ?path_kind, "peer connected");
 
@@ -503,6 +524,7 @@ impl SwarmNode {
                         .is_some_and(|(_, authenticated_connection)| *authenticated_connection == connection_id)
                     {
                         self.authenticated.remove(&peer_id);
+                        self.game_authenticated.write().expect("game auth registry poisoned").remove(&peer_id);
                     }
                     if self
                         .pending_challenges
@@ -515,6 +537,7 @@ impl SwarmNode {
                         self.active_connections.remove(&peer_id);
                         self.connection_counts.remove(&peer_id);
                         self.authenticated.remove(&peer_id);
+                        self.game_authenticated.write().expect("game auth registry poisoned").remove(&peer_id);
                         self.pending_challenges.remove(&peer_id);
                         self.admission.forget_peer(peer_id);
                         return Ok(NetworkEvent::Disconnected { transport_peer: peer_id });
@@ -709,6 +732,7 @@ impl SwarmNode {
                                     ) {
                                         Ok(()) => {
                                             self.authenticated.insert(peer, (proof.hello.peer_id, connection_id));
+                                            self.game_authenticated.write().expect("game auth registry poisoned").insert(peer, proof.hello.peer_id);
                                             if let Err(response_error) = self.respond(
                                                 channel,
                                                 WireResponse::HelloAccepted { protocol_version: PROTOCOL_VERSION },
@@ -799,6 +823,7 @@ impl SwarmNode {
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Kad(_))
                 | SwarmEvent::Behaviour(BehaviourEvent::Ping(_))
+                | SwarmEvent::Behaviour(BehaviourEvent::GameStream(_))
                 | SwarmEvent::Behaviour(BehaviourEvent::Identify(_)) => {}
                 other => debug!(event = ?other, "network event"),
             }
@@ -809,6 +834,7 @@ impl SwarmNode {
         let mut challenge = [0_u8; 32];
         OsRng.fill_bytes(&mut challenge);
         self.authenticated.remove(&peer);
+        self.game_authenticated.write().expect("game auth registry poisoned").remove(&peer);
         self.pending_challenges.insert(peer, (connection_id, challenge, Instant::now()));
         self.swarm.behaviour_mut().request_response.send_request(&peer, WireRequest::HelloChallenge { challenge });
         Ok(())
@@ -826,6 +852,7 @@ impl SwarmNode {
         for (peer, connection_id) in stale {
             self.pending_challenges.remove(&peer);
             self.authenticated.remove(&peer);
+            self.game_authenticated.write().expect("game auth registry poisoned").remove(&peer);
             if self.active_connections.get(&peer).is_some_and(|active| *active == connection_id) {
                 self.active_connections.remove(&peer);
             }

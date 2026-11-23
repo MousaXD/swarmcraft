@@ -723,7 +723,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 2.0.119",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -901,7 +901,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2098,6 +2098,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "libp2p-stream"
+version = "0.5.0-alpha"
+source = "git+https://github.com/libp2p/rust-libp2p?rev=b4c6d6dcaccbae6c69bc5e579a50478911c6f157#b4c6d6dcaccbae6c69bc5e579a50478911c6f157"
+dependencies = [
+ "futures",
+ "libp2p-core",
+ "libp2p-identity",
+ "libp2p-swarm",
+ "rand",
+ "tracing",
+]
+
+[[package]]
 name = "libp2p-swarm"
 version = "0.48.0"
 source = "git+https://github.com/libp2p/rust-libp2p?rev=b4c6d6dcaccbae6c69bc5e579a50478911c6f157#b4c6d6dcaccbae6c69bc5e579a50478911c6f157"
@@ -3028,7 +3041,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3432,8 +3445,11 @@ version = "0.5.1"
 dependencies = [
  "anyhow",
  "ed25519-dalek 2.2.0",
+ "fs2",
  "futures",
  "libp2p",
+ "libp2p-stream",
+ "postcard",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
@@ -3441,6 +3457,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -3548,10 +3565,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3703,6 +3720,7 @@ checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "libc",
  "pin-project-lite",
@@ -4065,7 +4083,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

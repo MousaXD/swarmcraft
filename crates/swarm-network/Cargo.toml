@@ -9,13 +9,17 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 ed25519-dalek.workspace = true
+fs2.workspace = true
 futures.workspace = true
 libp2p.workspace = true
+libp2p-stream = { git = "https://github.com/libp2p/rust-libp2p", rev = "b4c6d6dcaccbae6c69bc5e579a50478911c6f157" }
+postcard.workspace = true
 rand_core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util = { version = "0.7", features = ["compat"] }
 tracing.workspace = true
 swarm-protocol = { path = "../swarm-protocol" }
 
