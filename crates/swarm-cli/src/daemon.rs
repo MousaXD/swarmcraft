@@ -48,6 +48,9 @@ use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
+#[path = "daemon_live_quorum.rs"]
+mod live_quorum;
+
 const AUTHORITY_LEASE_DURATION_MS: u64 = 5_000;
 const RECOVERY_SETTLE_DELAY: Duration = Duration::from_secs(2);
 const STATUS_FRESHNESS: Duration = Duration::from_secs(3);
@@ -79,6 +82,7 @@ enum OutboundContext {
     Status { world: WorldId, peer: PeerId },
     HostCapability { world: WorldId, peer: PeerId },
     Transfer { peer: PeerId, record: AuthorityTransferV1 },
+    LiveQuorum { id: u64, peer: PeerId },
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +214,12 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
     let mut pending_manifests: HashMap<WorldId, SnapshotManifestV1> = HashMap::new();
     let mut outbound: HashMap<String, OutboundContext> = HashMap::new();
     let mut leases = LeaseRuntime::default();
+    // Agent 1's live Fabric proof provider will receive the command-side
+    // client when the actual managed FabricSession becomes available. For now
+    // the only active route responder explicitly refuses every game route;
+    // this bounded queue cannot itself authorize or sign a route.
+    let (_live_quorum_client, mut live_quorum_commands) = live_quorum::channel();
+    let mut live_quorum_driver = live_quorum::LiveQuorumDriver::default();
     let (transfer_done_tx, mut transfer_done_rx) = mpsc::channel::<CompletedTransferStep>(MAX_IN_FLIGHT_TRANSFER_STEPS);
     let mut transfer_steps_in_flight = HashSet::new();
     let mut lease_tick = tokio::time::interval(PERMIT_HEARTBEAT_INTERVAL);
@@ -217,6 +227,9 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
 
     loop {
         tokio::select! {
+            Some(command) = live_quorum_commands.recv() => {
+                live_quorum_driver.start(storage, &identity, &mut node, &mut outbound, &leases, command);
+            }
             Some(event) = game_route_events.recv() => {
                 match event {
                     GameRouteControlEvent::Inbound { transport_peer, application_peer, request, channel } => {
@@ -235,6 +248,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                 }
             }
             _ = lease_tick.tick() => {
+                live_quorum_driver.expire(Instant::now());
                 retry_due_replication(
                     storage,
                     &mut node,
@@ -338,15 +352,26 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                             }
                         }
                         let context = outbound.remove(&request_key(&request_id));
-                        handle_response(
-                            storage,
-                            &mut node,
-                            &transport_peer,
-                            context,
-                            response,
-                            &mut outbound,
-                            &mut leases,
-                        )?;
+                        match context {
+                            Some(OutboundContext::LiveQuorum { id, peer }) => {
+                                live_quorum_driver.on_response(
+                                    storage,
+                                    &identity,
+                                    &node,
+                                    &leases,
+                                    live_quorum::InboundVoteResult { id, peer, transport: transport_peer, response },
+                                );
+                            }
+                            other => handle_response(
+                                storage,
+                                &mut node,
+                                &transport_peer,
+                                other,
+                                response,
+                                &mut outbound,
+                                &mut leases,
+                            )?,
+                        }
                     }
                     NetworkEvent::OutboundFailure { transport_peer, request_id, error } => {
                         if let Some(context) = outbound.remove(&request_key(&request_id)) {
@@ -371,6 +396,9 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                                     leases.peer_capability.remove(&(world, peer));
                                 }
                                 OutboundContext::Transfer { .. } => {}
+                                OutboundContext::LiveQuorum { id, .. } => {
+                                    live_quorum_driver.fail(id, anyhow!("fresh-quorum signature RPC failed"));
+                                }
                                 OutboundContext::Manifest { .. } => {}
                                 OutboundContext::BlobChunk { world, .. } => {
                                     leases.replications.remove(&(transport_peer, world));
@@ -380,6 +408,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                         warn!(transport = %transport_peer, %error, "outbound peer request failed; replication will renegotiate after reconnect");
                     }
                     NetworkEvent::Disconnected { transport_peer } => {
+                        live_quorum_driver.on_disconnect(&transport_peer);
                         if let Some(application_peer) = leases.authenticated_peers.remove(&transport_peer) {
                             leases.lease_acks.retain(|(_, peer), _| *peer != application_peer);
                             leases.recovery_votes.retain(|(_, peer), _| *peer != application_peer);

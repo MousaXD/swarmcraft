@@ -94,6 +94,19 @@ planned handoff, never silently lower its authority requirements.
   refuses Solo/Recovery modes and pending joint membership for now rather than
   guessing a safe voter set. **This is only a quorum vote**, not a verified
   Fabric runtime session, game route, host consent or proof of a live JVM.
+- The daemon's new bounded outbound live-quorum collector is in
+  `src/daemon_live_quorum.rs`. It runs on the existing authenticated
+  `SwarmNode::next_event()` loop: a future blocking proof worker supplies an
+  exact newly generated canonical challenge, the collector contacts currently
+  authenticated voters and validates each signature, voter key, transport
+  identity, nonce and canonical majority. It revalidates persisted canonical
+  membership, certificate history, epoch and snapshot before yielding signed
+  votes. It rejects missing majorities, wrong replies, disconnected voters,
+  expired challenges, replayed nonces, overloaded requests and changed
+  identity. There are at most four concurrent collections, at most 32 voters
+  per world and a 2.6-second deadline; larger worlds fail closed for P0.
+  The command-side client is intentionally **not yet connected** to a route
+  authorizer: it cannot create Fabric readiness or a route offer.
 - The real, nonce-bound `FreshAuthoritySource` adapter integrating current
   canonical signed quorum/membership/fencing, local consent and authenticated
   live Fabric IPC is **not** available in this branch. Do not enable game
@@ -116,6 +129,20 @@ planned handoff, never silently lower its authority requirements.
   crash recovery, consent withdrawal, two-voter loss, stale-host fencing, and
   home-network/WAN/relay behavior. Local daemon/unit tests do not cover those.
 
+### Live authority owner integration contract
+
+Once the real managed FabricSession has been exposed by the runtime owner,
+Agent 1's proof provider can call
+`LiveQuorumClient::collect_blocking(challenge)` from a blocking proof worker.
+It returns only a sorted vector of authenticated new signed votes or an
+error; the proof provider must still independently verify complete membership
+history, majority, current host consent and the live signed Fabric
+attestation. Never call this blocking client on the `SwarmNode` event loop.
+The source's three-second total proof budget requires overlapping live
+Fabric challenge and vote collection under one deadline rather than stacking
+two separate nearly three-second operations. Keep the game-route responder
+deny-only until those dependencies and a real host lifecycle are integrated.
+
 ## Local verification
 
 Run Cargo checks **serially with the other agents** from this worktree:
@@ -126,7 +153,7 @@ flock -x /tmp/swarmcraft-sabathon-cargo.lock sh -c \
    CARGO_BUILD_JOBS=2 cargo clippy -p swarm-cli --bin swarmcraft --offline --jobs 2 -- -D warnings'
 ```
 
-On 23 Nov 2026 the full `swarmcraft` binary unit suite passed **37/37**
+On 23 Nov 2026 the full `swarmcraft` binary unit suite passed **40/40**
 and strict `swarmcraft` binary Clippy passed on the Agent 3 worktree.
 These tests include phase ordering, witness gate, replay/redelivery,
 checkpoint-ack identity, exact activated successor generation, and the
@@ -134,5 +161,9 @@ no-stale-lease/no-recovery fence across every handoff phase, plus disabled
 route-control refusal for valid and malformed authenticated requests. The
 live-voter contract tests additionally cover exact nonce/context/expiry
 matching and a **real signed vote against persisted accepted canonical
-records**, including denial to a mismatched requester and after sleep.
+records**, including denial to a mismatched requester and after sleep. The
+outbound quorum collector tests cover valid signed replies, wrong peer/key,
+changed nonces, tampered signatures, response refusal, disconnected/expired
+work, and bounded worker requests. They are local scoped tests, not three
+independently installed Minecraft peers.
 They are **source/local tests, not a three-machine Minecraft field pass**.
