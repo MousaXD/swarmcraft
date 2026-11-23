@@ -1,6 +1,7 @@
 //! Real libp2p stream integration, not a Minecraft gameplay certification.
 //! Validates that the dedicated game protocol works over an authenticated
-//! encrypted QUIC connection without using snapshot request-response framing.
+//! encrypted QUIC or TCP/Noise connection without using snapshot
+//! request-response framing.
 
 use ed25519_dalek::{Signer, SigningKey};
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
@@ -25,8 +26,10 @@ fn hello(key: &SigningKey, nonce: u8) -> PeerHelloV1 {
     value
 }
 
-#[tokio::test]
-async fn authenticated_game_substream_echoes_bytes_over_quic_without_snapshot_protocol() {
+async fn authenticated_game_substream_echoes_bytes_without_snapshot_protocol(
+    listen_address: &str,
+    transport_name: &str,
+) {
     let key_a = SigningKey::generate(&mut OsRng);
     let key_b = SigningKey::generate(&mut OsRng);
     let application_a = peer_id_from_public_key(&key_a.verifying_key().to_bytes());
@@ -35,7 +38,7 @@ async fn authenticated_game_substream_echoes_bytes_over_quic_without_snapshot_pr
     let mut node_b = SwarmNode::new(generate_transport_key(), hello(&key_b, 2), key_b).unwrap();
     let transport_a = node_a.local_transport_peer_id();
     let transport_b = node_b.local_transport_peer_id();
-    node_a.listen("/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()).unwrap();
+    node_a.listen(listen_address.parse().unwrap()).unwrap();
     let listen = timeout(Duration::from_secs(10), async {
         loop {
             if let NetworkEvent::Listening { address } = node_a.next_event().await.unwrap() {
@@ -44,7 +47,7 @@ async fn authenticated_game_substream_echoes_bytes_over_quic_without_snapshot_pr
         }
     })
     .await
-    .expect("QUIC listener must bind");
+    .expect("authenticated transport listener must bind");
     node_b.dial(listen).unwrap();
 
     let mut a_authenticated = false;
@@ -111,7 +114,17 @@ async fn authenticated_game_substream_echoes_bytes_over_quic_without_snapshot_pr
         tokio::join!(send, receive);
     })
     .await
-    .expect("QUIC game substream must make progress");
+    .unwrap_or_else(|_| panic!("{transport_name} game substream must make progress"));
     driver_a.abort();
     driver_b.abort();
+}
+
+#[tokio::test]
+async fn authenticated_game_substream_echoes_bytes_over_quic_without_snapshot_protocol() {
+    authenticated_game_substream_echoes_bytes_without_snapshot_protocol("/ip4/127.0.0.1/udp/0/quic-v1", "QUIC").await;
+}
+
+#[tokio::test]
+async fn authenticated_game_substream_echoes_bytes_over_tcp_noise_without_snapshot_protocol() {
+    authenticated_game_substream_echoes_bytes_without_snapshot_protocol("/ip4/127.0.0.1/tcp/0", "TCP/Noise").await;
 }
