@@ -816,12 +816,11 @@ async fn authenticated_quic_stream_drop_is_observable_for_browse_and_exact_resol
 /// create a false successful browse or a false "world not found" conclusion.
 /// Even persistent adversarial transport failure receives at most two
 /// additional explicit-provider requests per query.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn permanently_disconnecting_explicit_provider_is_bounded_and_fails_closed() {
-    let (_, mut provider, address, _) = make_node([103; 32]).await;
-    let received = Arc::new(Mutex::new(Vec::<&'static str>::new()));
-    let received_for_task = received.clone();
-    let provider_task = tokio::spawn(async move {
+fn drop_every_discovery_request(
+    mut provider: DiscoveryNode,
+    received_for_task: Arc<Mutex<Vec<&'static str>>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
         loop {
             if let DiscoveryNetworkEvent::InboundRequest { transport_peer, request, channel, .. } =
                 provider.next_event().await.expect("blackhole discovery provider event")
@@ -839,7 +838,14 @@ async fn permanently_disconnecting_explicit_provider_is_bounded_and_fails_closed
                 drop(channel);
             }
         }
-    });
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn permanently_disconnecting_explicit_provider_is_bounded_and_fails_closed() {
+    let (_, browse_provider, address, _) = make_node([103; 32]).await;
+    let received = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    let provider_task = drop_every_discovery_request(browse_provider, received.clone());
 
     let temp = tempfile::tempdir().unwrap();
     let paths = DataPaths::from_root(temp.path());
@@ -856,8 +862,19 @@ async fn permanently_disconnecting_explicit_provider_is_bounded_and_fails_closed
     );
     assert!(browse.results.is_empty(), "failed network discovery must not invent a canonical world");
 
+    // Use a fresh blackhole provider for the independent exact-resolve query.
+    // The first provider has already exhausted its authenticated QUIC
+    // connection churn by repeatedly closing the stream for browse. Reusing
+    // that *same connection fixture* can make exact resolve fail before ANY
+    // request reaches it, which does not exercise exact-resolve retries.
+    provider_task.abort();
+    assert!(provider_task.await.is_err_and(|error| error.is_cancelled()));
+    let (_, exact_provider, exact_address, _) = make_node([104; 32]).await;
+    let exact_task = drop_every_discovery_request(exact_provider, received.clone());
+    let exact_bootstraps = [exact_address];
+
     let exact =
-        timeout(Duration::from_secs(25), resolve_world(&paths, swarm_protocol::WorldId([105; 32]), &bootstraps))
+        timeout(Duration::from_secs(25), resolve_world(&paths, swarm_protocol::WorldId([105; 32]), &exact_bootstraps))
             .await
             .expect("bounded exact resolve should terminate")
             .expect("exact resolve should produce a structured failure report");
@@ -875,6 +892,6 @@ async fn permanently_disconnecting_explicit_provider_is_bounded_and_fails_closed
         assert!((1..=3).contains(&resolve_attempts), "exact resolve exceeded its bounded retry budget: {attempts:?}");
     }
 
-    provider_task.abort();
-    assert!(provider_task.await.is_err_and(|error| error.is_cancelled()));
+    exact_task.abort();
+    assert!(exact_task.await.is_err_and(|error| error.is_cancelled()));
 }

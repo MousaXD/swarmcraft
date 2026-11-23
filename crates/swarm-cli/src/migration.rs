@@ -2439,6 +2439,28 @@ fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     if fs::symlink_metadata(parent)?.file_type().is_symlink() {
         bail!("control path directory was replaced by an unsafe symlink");
     }
+    // CLI, Desktop and daemon supervisors can publish the same status from
+    // separate processes. Windows ReplaceFileW must not race another writer
+    // on the same destination. A private, durable cross-process lock covers
+    // the entire validation + staged replacement, without a delete gap.
+    let lock_path = path.with_extension("publish.lock");
+    if let Ok(metadata) = fs::symlink_metadata(&lock_path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("control publication lock is an unsafe symlink or non-regular file");
+        }
+    }
+    let mut lock_options = fs::OpenOptions::new();
+    lock_options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        lock_options.mode(0o600);
+    }
+    let lock = lock_options.open(&lock_path)?;
+    FileExt::lock_exclusive(&lock)?;
+    if fs::symlink_metadata(&lock_path)?.file_type().is_symlink() {
+        bail!("control publication lock became an unsafe symlink");
+    }
     if let Ok(metadata) = fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             bail!("control file path is an unsafe symlink or non-regular file: {}", path.display());
@@ -2516,7 +2538,7 @@ fn replace_control_file_atomically(tmp: &Path, destination: &Path) -> std::io::R
             return Ok(());
         }
         let error = std::io::Error::last_os_error();
-        if attempt == 40 || !matches!(error.raw_os_error(), Some(2 | 3 | 5 | 32 | 33)) {
+        if attempt == 40 || !matches!(error.raw_os_error(), Some(2 | 3 | 5 | 32 | 33 | 1176 | 1177)) {
             return Err(error);
         }
         std::thread::sleep(Duration::from_millis(2));
@@ -2766,7 +2788,22 @@ mod runtime_retirement_tests {
         let reader = std::thread::spawn(move || {
             reader_barrier.wait();
             while reader_active.load(Ordering::Relaxed) {
-                let bytes = fs::read(&reader_path).unwrap();
+                let bytes = match fs::read(&reader_path) {
+                    Ok(bytes) => bytes,
+                    // A Windows replacement can briefly deny or interrupt
+                    // a read. No such failure may be interpreted as a Ready
+                    // status: ONLY a complete decoded status is admissible.
+                    Err(error)
+                        if cfg!(windows)
+                            && (matches!(
+                                error.kind(),
+                                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                            ) || matches!(error.raw_os_error(), Some(32 | 33))) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => panic!("unexpected migration status read error: {error}"),
+                };
                 let status: MigrationStatus = serde_json::from_slice(&bytes).expect("torn migration status read");
                 assert_eq!(status.world_id, world.to_string());
             }
@@ -2789,5 +2826,9 @@ mod runtime_retirement_tests {
         writer.join().unwrap();
         active.store(false, Ordering::Relaxed);
         reader.join().unwrap();
+        let final_bytes = fs::read(&path).unwrap();
+        let final_status: MigrationStatus =
+            serde_json::from_slice(&final_bytes).expect("last Windows or Unix publication must be complete");
+        assert_eq!(final_status.world_id, world.to_string());
     }
 }

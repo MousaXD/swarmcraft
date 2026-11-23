@@ -20,10 +20,38 @@ use std::{
 /// and after durable directory creation. Missing suffix components are fine
 /// before creation; their creator must set private permissions.
 pub(crate) fn validate_durable_ancestors(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
+    // Apple's /var and /tmp are immutable OS-owned aliases into /private.
+    // Validate their exact canonical destinations, and then walk all actual
+    // path components using the ordinary strict owner/mode/symlink checks.
+    // No other symlink (including one under a user-controlled temp dir) is
+    // followed or trusted.
+    #[cfg(target_os = "macos")]
+    return validate_durable_ancestors_for_uid(&resolve_macos_system_alias(path)?, effective_uid());
+    #[cfg(all(unix, not(target_os = "macos")))]
     return validate_durable_ancestors_for_uid(path, effective_uid());
     #[cfg(not(unix))]
     return validate_ancestor_components(path, |_| Ok(()));
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_macos_system_alias(path: &Path) -> io::Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+
+    for (alias, expected) in [("/var", "/private/var"), ("/tmp", "/private/tmp")] {
+        let alias = Path::new(alias);
+        if let Ok(suffix) = path.strip_prefix(alias) {
+            let meta = fs::symlink_metadata(alias)?;
+            if !meta.file_type().is_symlink() {
+                // A macOS install without this alias is validated normally.
+                return Ok(path.to_path_buf());
+            }
+            if meta.uid() != 0 || fs::canonicalize(alias)? != Path::new(expected) {
+                return Err(untrusted_ancestor());
+            }
+            return Ok(Path::new(expected).join(suffix));
+        }
+    }
+    Ok(path.to_path_buf())
 }
 
 #[cfg(unix)]

@@ -233,7 +233,7 @@ fn replace_permit_atomically(temporary: &Path, destination: &Path) -> io::Result
             return Ok(());
         }
         let error = io::Error::last_os_error();
-        if attempt == 40 || !matches!(error.raw_os_error(), Some(2 | 3 | 5 | 32 | 33)) {
+        if attempt == 40 || !matches!(error.raw_os_error(), Some(2 | 3 | 5 | 32 | 33 | 1176 | 1177)) {
             return Err(error);
         }
         std::thread::sleep(Duration::from_millis(2));
@@ -613,7 +613,23 @@ mod tests {
         let reader = std::thread::spawn(move || {
             reader_barrier.wait();
             while reader_running.load(Ordering::Relaxed) {
-                let value = fs::read_to_string(&path).unwrap();
+                let value = match fs::read_to_string(&path) {
+                    Ok(value) => value,
+                    // On Windows a read overlapping an OS file replacement
+                    // can briefly fail. PermitWatch treats EVERY read error
+                    // as loss of freshness, never as permission to keep
+                    // serving; only complete, parseable reads count here.
+                    Err(error)
+                        if cfg!(windows)
+                            && (matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied)
+                                || matches!(error.raw_os_error(), Some(32 | 33))) =>
+                    {
+                        // The production PermitWatch::observe fail-closed
+                        // behavior on read errors is tested independently.
+                        continue;
+                    }
+                    Err(error) => panic!("unexpected authority permit read error: {error}"),
+                };
                 let (observed, _) = parse_permit(&value).expect("reader saw a truncated permit");
                 assert_eq!(observed, generation);
                 std::thread::yield_now();

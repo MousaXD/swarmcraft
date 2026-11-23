@@ -105,6 +105,35 @@ checks, not a completed release or hypothetical Minecraft sessions.
 
 ## Local verification performed
 
+### CI cross-platform regressions from `5287081` (24 November 2026)
+
+- Required Validation run `45270169979` passed process-level acceptance,
+  real clean-machine Minecraft/Fabric journey, packaging on all four desktop
+  targets, network impairment, fuzz, and dependency/security checks. The
+  separate all-workspace Rust matrix caught three further issues:
+  **macOS** Apple-owned `/var` temporary-path alias rejection in private world
+  port storage; **Windows** transient sharing / duplicate-writer errors during
+  atomic permit and migration-status publication; **Linux** the adversarial
+  discovery test reusing an exhausted QUIC blackhole session across two
+  separate queries.
+- macOS durable-path validation now recognizes only root-owned, canonical
+  Apple `/var` and `/tmp` aliases targeting `/private/var` and `/private/tmp`.
+  It validates every resolved ancestor under the original strict UID/mode/
+  symlink rules. No user-owned symlink or group-writable ancestor is allowed.
+- Windows status writers now serialize via a private cross-process publication
+  lock. Existing destination replacements retry bounded transient Windows
+  sharing and replacement errors, keeping the old complete value on failure.
+  A Windows read interrupted by file replacement is explicitly treated as
+  **unavailable, never as a valid heartbeat or Ready status**; successful
+  reads must decode complete generation-scoped records.
+- The discovery test now uses distinct malicious providers for browse and
+  exact resolve. Each must independently receive 1–3 requests, reject false
+  success, and terminate inside a bounded deadline, rather than relying on a
+  prior QUIC connection that the browse half intentionally churned down.
+- The above changes need a **new GitHub exact-SHA run** before being counted
+  as independently verified cross-platform fixes; a Linux test does not
+  certify Windows/macOS behavior.
+
 ### GitHub-hosted integration follow-up: application peer connectivity and Windows publication
 
 - GitHub Required Validation run `45267243725` on commit `0db4a66`
