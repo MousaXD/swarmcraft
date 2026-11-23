@@ -714,6 +714,10 @@ async fn run_authority_runtime_inner(
     )?;
     // This persistent ownership record survives a hard-killed Rust supervisor.
     // A subsequent launcher must prove the old Java PID is gone before any runtime bytes are reset.
+    // Every fresh attempt invalidates the preceding machine-local Fabric
+    // verification, including when an orphaned Java PID blocks the reset.
+    // A prior launch can never certify a newly restoring Minecraft process.
+    host_readiness::invalidate_runtime_verification(paths, options.world)?;
     let mut runtime_process = RuntimeProcessGuard::begin(paths, options.world)?;
     reset_runtime_directory(&runtime)?;
     fs::create_dir_all(runtime.join("mods"))?;
@@ -1013,15 +1017,40 @@ async fn wait_for_runtime_exit(
     session: &mut swarm_ipc::FabricSession,
     options: RuntimeExitOptions<'_>,
 ) -> Result<RuntimeDisposition> {
+    let mut withdrawal_reported = false;
     loop {
         if let Some(status) = child.try_wait()? {
             if !status.success() {
+                if let Err(error) = retire_live_runtime(
+                    paths,
+                    epoch.world_id,
+                    MigrationPhase::Failed,
+                    Some(&format!("Minecraft server exited unsuccessfully: {status}")),
+                ) {
+                    warn!(world = %epoch.world_id, %error, "could not invalidate stale readiness after Java exit");
+                }
                 bail!("Minecraft server exited unsuccessfully: {status}");
+            }
+            if let Err(error) = retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, None) {
+                warn!(world = %epoch.world_id, %error, "could not invalidate readiness after Java exited");
             }
             return Ok(RuntimeDisposition::Sleep);
         }
-        ensure_authority_generation(storage, identity, epoch)?;
+        if let Err(error) = ensure_authority_generation(storage, identity, epoch) {
+            if let Err(report_error) = retire_live_runtime(
+                paths,
+                epoch.world_id,
+                MigrationPhase::Superseded,
+                Some("runtime authority generation was superseded"),
+            ) {
+                warn!(world = %epoch.world_id, %report_error, "could not invalidate superseded runtime status");
+            }
+            return Err(error);
+        }
         if stop_intent_path(paths, epoch.world_id).exists() {
+            if let Err(error) = retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, None) {
+                warn!(world = %epoch.world_id, %error, "could not publish safe-stop checkpointing state");
+            }
             let stop_result = async {
                 session.prepare_shutdown(1, FABRIC_SHUTDOWN_TIMEOUT).await?;
                 timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
@@ -1030,10 +1059,22 @@ async fn wait_for_runtime_exit(
                 Ok::<(), anyhow::Error>(())
             }
             .await;
-            clear_stop_intent(paths, epoch.world_id)?;
+            if let Err(error) = clear_stop_intent(paths, epoch.world_id) {
+                // An inability to clear telemetry/intent must never kill the
+                // unfenced Java process or discard an already saved checkpoint.
+                warn!(world = %epoch.world_id, %error, "cannot clear safe-stop intent");
+            }
             match stop_result {
                 Ok(()) => return Ok(RuntimeDisposition::Sleep),
                 Err(error) => {
+                    if let Err(report_error) = retire_live_runtime(
+                        paths,
+                        epoch.world_id,
+                        MigrationPhase::Blocked,
+                        Some("safe-stop save barrier failed; Java remains running until it can be stopped safely"),
+                    ) {
+                        warn!(world = %epoch.world_id, %report_error, "could not publish failed safe-stop state");
+                    }
                     warn!(world = %epoch.world_id, %error, "safe stop save barrier failed; keeping Minecraft running");
                     continue;
                 }
@@ -1045,6 +1086,10 @@ async fn wait_for_runtime_exit(
         match load_transfer_intent(paths, epoch.world_id) {
             Ok(Some(target)) => match validate_transfer_target(storage, identity, epoch.world_id, target) {
                 Ok(()) => {
+                    if let Err(error) = retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, None)
+                    {
+                        warn!(world = %epoch.world_id, %error, "could not publish transfer checkpointing state");
+                    }
                     let outcome = async {
                         session.prepare_shutdown(2, FABRIC_SHUTDOWN_TIMEOUT).await?;
                         timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
@@ -1056,6 +1101,14 @@ async fn wait_for_runtime_exit(
                     match outcome {
                         Ok(()) => return Ok(RuntimeDisposition::Transfer(target)),
                         Err(error) => {
+                            if let Err(report_error) = retire_live_runtime(
+                                paths,
+                                epoch.world_id,
+                                MigrationPhase::Blocked,
+                                Some("transfer save barrier failed; current Java authority remains running"),
+                            ) {
+                                warn!(world = %epoch.world_id, %report_error, "could not publish failed transfer state");
+                            }
                             warn!(
                                 world = %epoch.world_id,
                                 %error,
@@ -1083,6 +1136,14 @@ async fn wait_for_runtime_exit(
             Err(error) => Some(format!("cannot revalidate local hosting consent or memory: {error}")),
         };
         if let Some(reason) = withdrawal {
+            if !withdrawal_reported {
+                match retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, Some(&reason)) {
+                    Ok(()) => withdrawal_reported = true,
+                    Err(error) => {
+                        warn!(world = %epoch.world_id, %error, "could not invalidate runtime readiness on hosting withdrawal");
+                    }
+                }
+            }
             warn!(world = %epoch.world_id, %reason, "hosting contribution withdrawn or unsafe; requesting durable safe stop");
             let stopped = async {
                 session.prepare_shutdown(1, FABRIC_SHUTDOWN_TIMEOUT).await?;
@@ -1095,6 +1156,14 @@ async fn wait_for_runtime_exit(
             match stopped {
                 Ok(()) => return Ok(RuntimeDisposition::Sleep),
                 Err(error) => {
+                    if let Err(report_error) = retire_live_runtime(
+                        paths,
+                        epoch.world_id,
+                        MigrationPhase::Blocked,
+                        Some("hosting withdrawal save barrier failed; Java remains running while shutdown retries"),
+                    ) {
+                        warn!(world = %epoch.world_id, %report_error, "could not publish failed hosting-withdrawal state");
+                    }
                     warn!(world = %epoch.world_id, %error, "cannot safely checkpoint withdrawn host; preserving running authority and retrying")
                 }
             }
@@ -1104,11 +1173,30 @@ async fn wait_for_runtime_exit(
                 _ = sleep(SUPERVISOR_POLL) => {}
                 result = tokio::signal::ctrl_c() => {
                     result.context("failed to listen for Ctrl+C")?;
-                    session.prepare_shutdown(1, FABRIC_SHUTDOWN_TIMEOUT).await?;
-                    timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
-                        .await
-                        .map_err(|_| anyhow!("Minecraft did not stop after the shutdown barrier"))??;
-                    return Ok(RuntimeDisposition::Sleep);
+                    if let Err(error) = retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, None) {
+                        warn!(world = %epoch.world_id, %error, "could not publish Ctrl+C checkpointing state");
+                    }
+                    let stop_result = async {
+                        session.prepare_shutdown(1, FABRIC_SHUTDOWN_TIMEOUT).await?;
+                        timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
+                            .await
+                            .map_err(|_| anyhow!("Minecraft did not stop after the shutdown barrier"))??;
+                        Ok::<(), anyhow::Error>(())
+                    }.await;
+                    match stop_result {
+                        Ok(()) => return Ok(RuntimeDisposition::Sleep),
+                        Err(error) => {
+                            if let Err(report_error) = retire_live_runtime(
+                                paths,
+                                epoch.world_id,
+                                MigrationPhase::Blocked,
+                                Some("Ctrl+C save barrier failed; Java remains running until it can stop safely"),
+                            ) {
+                                warn!(world = %epoch.world_id, %report_error, "could not publish failed Ctrl+C stop state");
+                            }
+                            warn!(world = %epoch.world_id, %error, "Ctrl+C save barrier failed; preserving Java and allowing a later safe-stop retry");
+                        }
+                    }
                 }
             }
         } else {
@@ -1912,6 +2000,26 @@ fn publish_status(
     Ok(())
 }
 
+/// Remove machine-local runtime readiness before awaiting any checkpoint,
+/// transfer, fencing or consent-withdrawal barrier. A previously persisted
+/// `Ready` report must not remain green while Java is stopping, untrusted, or
+/// preserving its last save after a failed barrier. Never treat this status
+/// update as a replacement for fresh canonical authority and Fabric checks.
+fn retire_live_runtime(paths: &DataPaths, world: WorldId, phase: MigrationPhase, detail: Option<&str>) -> Result<()> {
+    // Do this first: even if the status file is corrupt, no older local
+    // runtime verification should remain available for optimistic reuse.
+    host_readiness::invalidate_runtime_verification(paths, world)?;
+    let mut status = load_migration_status(paths, world).context("cannot load live runtime status for retirement")?;
+    if status.world_id != world.to_string() {
+        bail!("live runtime status belongs to another world; cannot retire readiness safely");
+    }
+    status.phase = phase;
+    status.runtime_ready = false;
+    status.game_endpoint = None;
+    status.failure_reason = detail.map(str::to_owned);
+    atomic_json(&migration_status_path(paths, world), &status)
+}
+
 fn runtime_config_path(paths: &DataPaths, world: WorldId) -> PathBuf {
     control_dir(paths, world).join("runtime.json")
 }
@@ -1998,4 +2106,63 @@ fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
 fn epoch_record_hash(record: &EpochRecordV1) -> Result<Hash32> {
     let encoded = postcard::to_allocvec(record)?;
     Ok(Hash32::from_domain_bytes(b"swarmcraft/epoch-record/v1\0", &encoded))
+}
+
+#[cfg(test)]
+mod runtime_retirement_tests {
+    use super::*;
+
+    fn ready_status(world: WorldId) -> MigrationStatus {
+        MigrationStatus {
+            world_id: world.to_string(),
+            authority_peer_id: None,
+            epoch: Some(4),
+            fencing_token: Some(9),
+            trigger: Some(MigrationTrigger::DirectHost),
+            phase: MigrationPhase::Ready,
+            runtime_ready: true,
+            game_endpoint: Some("127.0.0.1:25565".into()),
+            snapshot_hash: None,
+            failure_reason: None,
+        }
+    }
+
+    #[test]
+    fn checkpointing_or_withdrawal_clears_stale_ready_and_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(dir.path());
+        let world = WorldId([23; 32]);
+        atomic_json(&migration_status_path(&paths, world), &ready_status(world)).unwrap();
+        let proof = control_dir(&paths, world).join("runtime-verified.json");
+        fs::write(&proof, b"previous runtime proof").unwrap();
+
+        retire_live_runtime(&paths, world, MigrationPhase::Checkpointing, Some("hosting consent withdrawn")).unwrap();
+        let retired = load_migration_status(&paths, world).unwrap();
+        assert_eq!(retired.world_id, world.to_string());
+        assert_eq!(retired.phase, MigrationPhase::Checkpointing);
+        assert!(!retired.runtime_ready);
+        assert_eq!(retired.game_endpoint, None);
+        assert_eq!(retired.failure_reason.as_deref(), Some("hosting consent withdrawn"));
+        assert_eq!(retired.epoch, Some(4));
+        assert_eq!(retired.fencing_token, Some(9));
+        assert!(!proof.exists());
+
+        retire_live_runtime(&paths, world, MigrationPhase::Blocked, Some("checkpoint failed")).unwrap();
+        let blocked = load_migration_status(&paths, world).unwrap();
+        assert_eq!(blocked.phase, MigrationPhase::Blocked);
+        assert_eq!(blocked.failure_reason.as_deref(), Some("checkpoint failed"));
+        assert!(!blocked.runtime_ready);
+    }
+
+    #[test]
+    fn mismatched_world_status_cannot_retain_a_runtime_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(dir.path());
+        let world = WorldId([24; 32]);
+        atomic_json(&migration_status_path(&paths, world), &ready_status(WorldId([25; 32]))).unwrap();
+        let proof = control_dir(&paths, world).join("runtime-verified.json");
+        fs::write(&proof, b"previous runtime proof").unwrap();
+        assert!(retire_live_runtime(&paths, world, MigrationPhase::Superseded, None).is_err());
+        assert!(!proof.exists());
+    }
 }
