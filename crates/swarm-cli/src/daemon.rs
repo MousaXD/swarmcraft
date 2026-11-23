@@ -16,6 +16,7 @@ use swarm_consensus::{
     MembershipConsensusError, SoloReconciliation,
 };
 use swarm_core::{
+    discovery::sign_discovery_freshness_vote,
     lifecycle::{verify_join_request_signature, verify_leave_request_signature, verify_sleep_record_signature},
     protocol_v2::{
         sign_recovery_ballot, sign_recovery_vote, sign_solo_branch, verify_recovery_ballot_signature,
@@ -33,10 +34,11 @@ use swarm_network::{
     WireResponse, MAX_BLOB_CHUNK,
 };
 use swarm_protocol::{
-    peer_id_from_public_key, AuthorityLeaseGrantV1, AuthorityTransferV1, BlobDescriptor, EpochMode, EpochRecordV1,
-    Hash32, MembershipCertificateV1, MembershipProposalV1, MembershipRecordV1, MembershipVoteV1, PeerId,
-    RecoveryBallotV1, RecoveryCertificateV1, RecoveryVoteV1, SleepRecordV1, SnapshotManifestV1, TransferPhase,
-    WorldDescriptorV1, WorldId, WorldStatusV1, PROTOCOL_VERSION,
+    peer_id_from_public_key, AuthorityLeaseGrantV1, AuthorityTransferV1, BlobDescriptor, DiscoveryCanonicalHeadV1,
+    DiscoveryFreshnessChallengeV1, DiscoveryFreshnessVoteV1, EpochMode, EpochRecordV1, Hash32, MembershipCertificateV1,
+    MembershipProposalV1, MembershipRecordV1, MembershipVoteV1, PeerId, RecoveryBallotV1, RecoveryCertificateV1,
+    RecoveryVoteV1, SleepRecordV1, SnapshotManifestV1, TransferPhase, WorldDescriptorV1, WorldId, WorldStatusV1,
+    PROTOCOL_VERSION,
 };
 use swarm_storage::{
     DurableMembershipPromiseV1, DurableRecoveryPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage,
@@ -60,6 +62,10 @@ const MAX_REMEMBERED_TRANSFER_ACKS: usize = 1024;
 // Snapshot RPC has a 30-second transport deadline; don't start overlapping
 // manifest negotiations for the same peer while one can still be in flight.
 const TRANSFER_MANIFEST_RETRY: Duration = Duration::from_secs(35);
+const GAME_QUORUM_CONTEXT_DOMAIN: &[u8] = b"swarmcraft/game-live-quorum-context/v1\0";
+const LIVE_QUORUM_VOTE_LIFETIME_MS: u64 = 3_000;
+const LIVE_QUORUM_MAX_CLOCK_SKEW_MS: u64 = 500;
+const MAX_IN_MEMORY_LIVE_QUORUM_VOTES: usize = 1_024;
 
 #[derive(Debug, Clone)]
 enum OutboundContext {
@@ -145,6 +151,7 @@ struct LeaseRuntime {
     transfer_acks: Vec<TransferDeliveryAck>,
     transfer_replica_acks: HashMap<(WorldId, PeerId), Hash32>,
     transfer_manifest_requests: HashMap<(WorldId, PeerId), (Hash32, Instant)>,
+    live_quorum_vote_nonces: HashMap<(WorldId, PeerId, [u8; 32]), u64>,
 }
 
 struct HandlerContext<'a> {
@@ -415,6 +422,171 @@ fn disabled_game_route_response(
         GameRouteRefusalV1::QuorumUnavailable
     };
     GameRouteControlResponseV1::Refused(reason)
+}
+
+struct CurrentLiveVoteContext<'a> {
+    membership: &'a MembershipRecordV1,
+    epoch: &'a EpochRecordV1,
+    config: &'a swarm_protocol::WorldConfigV1,
+    head: &'a DiscoveryCanonicalHeadV1,
+    requester: PeerId,
+    now_unix_ms: u64,
+}
+
+/// The digest MUST agree with Agent 1's canonical_quorum_hash contract. This
+/// context hash alone has no authority: each voter signs a new nonce-bound
+/// request over the independently accepted signed canonical state.
+fn canonical_live_quorum_context_hash(
+    world: WorldId,
+    membership_hash: Hash32,
+    epoch: &EpochRecordV1,
+    config_hash: Hash32,
+    head: &DiscoveryCanonicalHeadV1,
+) -> Result<Hash32> {
+    Ok(Hash32::from_domain_bytes(
+        GAME_QUORUM_CONTEXT_DOMAIN,
+        &postcard::to_allocvec(&(
+            world,
+            membership_hash,
+            epoch.authority_peer_id,
+            epoch.epoch_number,
+            epoch.fencing_token,
+            config_hash,
+            head,
+        ))?,
+    ))
+}
+
+fn current_live_vote_matches_challenge(
+    context: CurrentLiveVoteContext<'_>,
+    challenge: &DiscoveryFreshnessChallengeV1,
+) -> Result<bool> {
+    let CurrentLiveVoteContext { membership, epoch, config, head, requester, now_unix_ms } = context;
+    let world = membership.world_id;
+    let membership_hash = membership.record_hash()?;
+    let config_hash = config.config_hash()?;
+    let expected_hash = canonical_live_quorum_context_hash(world, membership_hash, epoch, config_hash, head)?;
+    Ok(challenge.protocol_version == PROTOCOL_VERSION
+        && challenge.verifier_peer_id == requester
+        && challenge.nonce != [0; 32]
+        && challenge.world_id == world
+        && challenge.announcement_hash == expected_hash
+        && challenge.membership_sequence == membership.sequence
+        && challenge.membership_hash == membership_hash
+        && challenge.pending_membership_proposal_hash.is_none()
+        && challenge.authority_peer_id == epoch.authority_peer_id
+        && challenge.authority_epoch == epoch.epoch_number
+        && challenge.fencing_token == epoch.fencing_token
+        && challenge.config_sequence == config.sequence
+        && challenge.config_hash == config_hash
+        && challenge.canonical_head == Some(*head)
+        && challenge.expires_unix_ms > challenge.issued_unix_ms
+        && challenge.expires_unix_ms - challenge.issued_unix_ms <= LIVE_QUORUM_VOTE_LIFETIME_MS
+        && challenge.issued_unix_ms <= now_unix_ms.saturating_add(LIVE_QUORUM_MAX_CLOCK_SKEW_MS)
+        && challenge.expires_unix_ms > now_unix_ms)
+}
+
+/// This signs a *single authenticated, one-use canonical quorum vote*, never
+/// a route or hosting permit. Refuse unknown/private nonmembers, joint
+/// membership transitions, recovery/solo modes, stale host generations,
+/// pending higher recovery promises and any unreadable signed state.
+fn sign_local_live_quorum_vote(
+    storage: &Storage,
+    identity: &PeerIdentity,
+    requester: PeerId,
+    challenge: &DiscoveryFreshnessChallengeV1,
+    now_unix_ms: u64,
+) -> Result<Option<DiscoveryFreshnessVoteV1>> {
+    let world = challenge.world_id;
+    if world == WorldId::default() || requester != challenge.verifier_peer_id {
+        return Ok(None);
+    }
+    let descriptor = storage.load_world_descriptor(world)?;
+    let membership = storage.load_membership_record(world)?;
+    verify_membership_signature(&membership)?;
+    if descriptor.world_id != world || membership.world_id != world {
+        return Ok(None);
+    }
+    // Public-discovery service can handle joint-membership records; this
+    // daemon P0 live-provider leg refuses to sign until the transition is
+    // committed and there is a single unambiguous current voter set.
+    if load_optional_membership_promise(storage, world)?.is_some() {
+        return Ok(None);
+    }
+    for peer in [requester, identity.peer_id()] {
+        let active = authorized_descriptor_member(&descriptor, peer).ok();
+        let committed = membership.members.iter().find(|member| member.peer_id == peer && !member.banned);
+        if !matches!((active, committed), (Some(a), Some(b)) if a.public_key == b.public_key) {
+            return Ok(None);
+        }
+    }
+    let local_member = membership.members.iter().find(|member| member.peer_id == identity.peer_id());
+    if local_member.is_none_or(|member| member.public_key != identity.public_key()) {
+        return Ok(None);
+    }
+    let epoch = storage.load_epoch_record(world)?;
+    epoch.validate_semantics()?;
+    verify_signature(epoch.authority_peer_id, epoch.authority_public_key, &epoch.signing_bytes()?, &epoch.signature)?;
+    if epoch.mode != EpochMode::Quorum
+        || epoch.world_id != world
+        || membership.authority_peer_id != epoch.authority_peer_id
+        || membership.authority_public_key != epoch.authority_public_key
+        || membership.epoch != epoch.epoch_number
+    {
+        return Ok(None);
+    }
+    if active_signed_transfer_fences_authority(storage, &descriptor, &epoch)? {
+        return Ok(None);
+    }
+    if launch_guard::load_sleep_record_fail_closed(storage, world)?.is_some() {
+        return Ok(None);
+    }
+    if let Some(promise) = load_optional_recovery_promise(storage, world)? {
+        if (promise.ballot.target_epoch, promise.ballot.target_fencing_token)
+            > (epoch.epoch_number, epoch.fencing_token)
+        {
+            return Ok(None);
+        }
+    }
+    let config = storage.load_world_config(world)?;
+    verify_world_config_signature(&config)?;
+    if config.authority_peer_id != epoch.authority_peer_id || config.authority_public_key != epoch.authority_public_key
+    {
+        return Ok(None);
+    }
+    let latest = storage.latest_snapshot(world)?.context("canonical live vote requires an accepted checkpoint")?;
+    verify_snapshot_signature(&latest)?;
+    if latest.world_id != world || latest.epoch > epoch.epoch_number {
+        return Ok(None);
+    }
+    let canonical_head = storage.canonical_snapshot_head(world)?.head.context("canonical snapshot head missing")?;
+    if canonical_head.manifest_hash != latest.manifest_hash()?
+        || canonical_head.snapshot_number != latest.snapshot_number
+        || canonical_head.epoch != latest.epoch
+        || canonical_head.sequence != latest.sequence
+    {
+        return Ok(None);
+    }
+    let head = DiscoveryCanonicalHeadV1 {
+        snapshot_number: canonical_head.snapshot_number,
+        manifest_hash: canonical_head.manifest_hash,
+        epoch: canonical_head.epoch,
+        sequence: canonical_head.sequence,
+    };
+    if !current_live_vote_matches_challenge(
+        CurrentLiveVoteContext {
+            membership: &membership,
+            epoch: &epoch,
+            config: &config,
+            head: &head,
+            requester,
+            now_unix_ms,
+        },
+        challenge,
+    )? {
+        return Ok(None);
+    }
+    Ok(Some(sign_discovery_freshness_vote(identity, challenge)?))
 }
 
 /// A transfer is not a generic message broadcast. In a multi-member world the
@@ -2727,11 +2899,33 @@ fn handle_request(
                 WireResponse::SleepAccepted { epoch: record.epoch, fencing_token: record.fencing_token },
             )?;
         }
+        WireRequest::DiscoveryFreshnessVote(challenge) => {
+            let challenge = *challenge;
+            let now = unix_millis()?;
+            let nonces = &mut state.leases.live_quorum_vote_nonces;
+            nonces.retain(|_, until| *until > now);
+            let replay_key = (challenge.world_id, application_peer, challenge.nonce);
+            let vote = if nonces.contains_key(&replay_key) || nonces.len() >= MAX_IN_MEMORY_LIVE_QUORUM_VOTES {
+                None
+            } else {
+                match sign_local_live_quorum_vote(storage, identity, application_peer, &challenge, now) {
+                    Ok(Some(vote)) => {
+                        nonces.insert(replay_key, challenge.expires_unix_ms);
+                        Some(Box::new(vote))
+                    }
+                    Ok(None) => None,
+                    Err(error) => {
+                        tracing::debug!(world = %challenge.world_id, %error, "canonical live quorum vote refused");
+                        None
+                    }
+                }
+            };
+            node.respond(channel, WireResponse::DiscoveryFreshnessVote(vote))?;
+        }
         WireRequest::DiscoveryPublic { .. }
         | WireRequest::DiscoveryResolve { .. }
         | WireRequest::FriendPresence { .. }
-        | WireRequest::DiscoveryFreshnessContext { .. }
-        | WireRequest::DiscoveryFreshnessVote(_) => {
+        | WireRequest::DiscoveryFreshnessContext { .. } => {
             node.respond(
                 channel,
                 WireResponse::Error {
@@ -3699,6 +3893,341 @@ mod authorization_matrix_tests {
             banned: false,
         };
         assert!(authorized_descriptor_member(&descriptor(vec![mismatched]), claimed_peer).is_err());
+    }
+}
+
+#[cfg(test)]
+mod live_quorum_vote_context_tests {
+    use super::*;
+    use swarm_core::{discovery::verify_discovery_freshness_vote, sign_world_config};
+    use swarm_protocol::{
+        AuthorityPolicyV1, MembershipPolicyV1, RuntimeCompatibilityManifestV1, WorldConfigV1, WorldGenesisV1,
+        WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, STORAGE_SCHEMA_VERSION,
+    };
+    use swarm_storage::{SnapshotContext, WorldMetadataV1};
+
+    #[test]
+    fn signed_vote_context_requires_exact_current_digest_and_fresh_authenticated_nonce() {
+        let identity = PeerIdentity::from_secret_bytes([37; 32]);
+        let world = WorldId([7; 32]);
+        let membership = MembershipRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            epoch: 3,
+            sequence: 2,
+            previous_membership_hash: Some(Hash32([4; 32])),
+            members: vec![WorldMemberV1 {
+                peer_id: identity.peer_id(),
+                public_key: identity.public_key(),
+                authority_eligible: true,
+                banned: false,
+            }],
+            authority_peer_id: identity.peer_id(),
+            authority_public_key: identity.public_key(),
+            signature: Vec::new(),
+        };
+        let epoch = EpochRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            epoch_number: 3,
+            previous_epoch_hash: Some(Hash32([5; 32])),
+            base_state_hash: Hash32([6; 32]),
+            authority_peer_id: identity.peer_id(),
+            authority_public_key: identity.public_key(),
+            mode: EpochMode::Quorum,
+            fencing_token: 4,
+            reason: "test canonical state".into(),
+            signature: Vec::new(),
+        };
+        let config = WorldConfigV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            sequence: 1,
+            previous_config_hash: None,
+            compatibility: RuntimeCompatibilityManifestV1 {
+                minecraft_version: "1.21.8".into(),
+                loader_id: "fabric".into(),
+                loader_version: "0.17.2".into(),
+                swarmcraft_protocol_version: PROTOCOL_VERSION,
+                fabric_adapter_version: "0.5.0".into(),
+                required_server_mods: Vec::new(),
+                required_client_mods: Vec::new(),
+                datapacks: Vec::new(),
+            },
+            visibility: WorldVisibilityV1::Private,
+            authority_policy: AuthorityPolicyV1 { allow_solo_advancement: false, preferred_replication_factor: 2 },
+            membership_policy: MembershipPolicyV1::InviteOnly,
+            presentation: WorldPresentationV1 {
+                name: "quorum test".into(),
+                description: String::new(),
+                tags: Vec::new(),
+                icon_hash: None,
+                approximate_region: None,
+            },
+            authority_peer_id: identity.peer_id(),
+            authority_public_key: identity.public_key(),
+            signature: Vec::new(),
+        };
+        let head =
+            DiscoveryCanonicalHeadV1 { snapshot_number: 5, manifest_hash: Hash32([10; 32]), epoch: 3, sequence: 5 };
+        let membership_hash = membership.record_hash().unwrap();
+        let config_hash = config.config_hash().unwrap();
+        let digest = canonical_live_quorum_context_hash(world, membership_hash, &epoch, config_hash, &head).unwrap();
+        let requester = PeerId([3; 32]);
+        let challenge = DiscoveryFreshnessChallengeV1 {
+            protocol_version: PROTOCOL_VERSION,
+            verifier_peer_id: requester,
+            nonce: [9; 32],
+            world_id: world,
+            announcement_hash: digest,
+            membership_sequence: membership.sequence,
+            membership_hash,
+            pending_membership_proposal_hash: None,
+            authority_peer_id: epoch.authority_peer_id,
+            authority_epoch: epoch.epoch_number,
+            fencing_token: epoch.fencing_token,
+            config_sequence: config.sequence,
+            config_hash,
+            canonical_head: Some(head.clone()),
+            issued_unix_ms: 1_000,
+            expires_unix_ms: 3_000,
+        };
+        let matches = |candidate: &DiscoveryFreshnessChallengeV1, now| {
+            current_live_vote_matches_challenge(
+                CurrentLiveVoteContext {
+                    membership: &membership,
+                    epoch: &epoch,
+                    config: &config,
+                    head: &head,
+                    requester,
+                    now_unix_ms: now,
+                },
+                candidate,
+            )
+            .unwrap()
+        };
+        assert!(matches(&challenge, 2_000));
+        let mut wrong = challenge.clone();
+        wrong.announcement_hash = Hash32([11; 32]);
+        assert!(!matches(&wrong, 2_000));
+        wrong = challenge.clone();
+        wrong.pending_membership_proposal_hash = Some(Hash32([12; 32]));
+        assert!(!matches(&wrong, 2_000));
+        wrong = challenge.clone();
+        wrong.verifier_peer_id = PeerId([13; 32]);
+        assert!(!matches(&wrong, 2_000));
+        wrong = challenge.clone();
+        wrong.canonical_head = None;
+        assert!(!matches(&wrong, 2_000));
+        wrong = challenge.clone();
+        wrong.nonce = [0; 32];
+        assert!(!matches(&wrong, 2_000));
+        wrong = challenge.clone();
+        wrong.expires_unix_ms = 5_000;
+        assert!(!matches(&wrong, 2_000));
+        wrong = challenge.clone();
+        wrong.issued_unix_ms = 2_600;
+        assert!(!matches(&wrong, 2_000));
+        assert!(!matches(&challenge, 3_000)); // Expired is an explicit denial.
+    }
+
+    #[test]
+    fn actual_signed_live_vote_requires_canonical_member_and_awake_world() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open(temp.path()).unwrap();
+        let authority = PeerIdentity::from_secret_bytes([41; 32]);
+        let requester = PeerIdentity::from_secret_bytes([42; 32]);
+        let compatibility = RuntimeCompatibilityManifestV1 {
+            minecraft_version: "1.21.8".into(),
+            loader_id: "fabric".into(),
+            loader_version: "0.17.2".into(),
+            swarmcraft_protocol_version: PROTOCOL_VERSION,
+            fabric_adapter_version: "0.5.0".into(),
+            required_server_mods: Vec::new(),
+            required_client_mods: Vec::new(),
+            datapacks: Vec::new(),
+        };
+        let mut member_ids = vec![authority.peer_id(), requester.peer_id()];
+        member_ids.sort();
+        let genesis = WorldGenesisV1 {
+            protocol_version: PROTOCOL_VERSION,
+            minecraft_version: "1.21.8".into(),
+            fabric_loader_version: "0.17.2".into(),
+            compatibility_fingerprint: compatibility.fingerprint().unwrap(),
+            creation_nonce: [43; 32],
+            creator_public_key: authority.public_key(),
+            initial_membership: member_ids,
+        };
+        let world = genesis.world_id().unwrap();
+        storage
+            .create_world(&WorldMetadataV1 {
+                storage_schema_version: STORAGE_SCHEMA_VERSION,
+                display_name: "live vote acceptance".into(),
+                world_id: world,
+                genesis,
+            })
+            .unwrap();
+        let mut members = vec![
+            WorldMemberV1 {
+                peer_id: authority.peer_id(),
+                public_key: authority.public_key(),
+                authority_eligible: true,
+                banned: false,
+            },
+            WorldMemberV1 {
+                peer_id: requester.peer_id(),
+                public_key: requester.public_key(),
+                authority_eligible: true,
+                banned: false,
+            },
+        ];
+        members.sort_by_key(|member| member.peer_id);
+        storage
+            .save_world_descriptor(&WorldDescriptorV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id: world,
+                compatibility_fingerprint: compatibility.fingerprint().unwrap(),
+                members: members.clone(),
+                preferred_replication_factor: 2,
+            })
+            .unwrap();
+        // Epoch 1 must be accepted first; storage refuses to bootstrap an
+        // initial membership at a non-genesis epoch without that exact fence.
+        let mut epoch = EpochRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            epoch_number: 1,
+            previous_epoch_hash: Some(Hash32([5; 32])),
+            base_state_hash: Hash32([6; 32]),
+            authority_peer_id: authority.peer_id(),
+            authority_public_key: authority.public_key(),
+            mode: EpochMode::Quorum,
+            fencing_token: 1,
+            reason: "live vote test".into(),
+            signature: Vec::new(),
+        };
+        epoch.signature = authority.sign(&epoch.signing_bytes().unwrap());
+        storage.save_epoch_record(&epoch).unwrap();
+        let mut membership = MembershipRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            epoch: 1,
+            sequence: 0,
+            previous_membership_hash: None,
+            members,
+            authority_peer_id: authority.peer_id(),
+            authority_public_key: authority.public_key(),
+            signature: Vec::new(),
+        };
+        authority.sign_membership(&mut membership).unwrap();
+        storage.save_membership_record(&membership).unwrap();
+        let mut config = WorldConfigV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            sequence: 1,
+            previous_config_hash: None,
+            compatibility,
+            visibility: WorldVisibilityV1::Private,
+            authority_policy: AuthorityPolicyV1 { allow_solo_advancement: false, preferred_replication_factor: 2 },
+            membership_policy: MembershipPolicyV1::InviteOnly,
+            presentation: WorldPresentationV1 {
+                name: "live vote acceptance".into(),
+                description: String::new(),
+                tags: Vec::new(),
+                icon_hash: None,
+                approximate_region: None,
+            },
+            authority_peer_id: authority.peer_id(),
+            authority_public_key: authority.public_key(),
+            signature: Vec::new(),
+        };
+        sign_world_config(&authority, &mut config).unwrap();
+        storage.save_world_config(&config).unwrap();
+        let seed = temp.path().join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        let mut snapshot = storage
+            .snapshot_directory(
+                &seed,
+                SnapshotContext {
+                    world,
+                    snapshot_number: 1,
+                    epoch: 1,
+                    sequence: 1,
+                    previous_snapshot_hash: None,
+                    authority_peer_id: authority.peer_id(),
+                    authority_public_key: authority.public_key(),
+                },
+            )
+            .unwrap();
+        authority.sign_snapshot(&mut snapshot).unwrap();
+        storage.commit_snapshot(&snapshot).unwrap();
+        let head = storage.canonical_snapshot_head(world).unwrap().head.unwrap();
+        let canonical = DiscoveryCanonicalHeadV1 {
+            snapshot_number: head.snapshot_number,
+            manifest_hash: head.manifest_hash,
+            epoch: head.epoch,
+            sequence: head.sequence,
+        };
+        let membership_hash = membership.record_hash().unwrap();
+        let config_hash = config.config_hash().unwrap();
+        let challenge = DiscoveryFreshnessChallengeV1 {
+            protocol_version: PROTOCOL_VERSION,
+            verifier_peer_id: requester.peer_id(),
+            nonce: [8; 32],
+            world_id: world,
+            announcement_hash: canonical_live_quorum_context_hash(
+                world,
+                membership_hash,
+                &epoch,
+                config_hash,
+                &canonical,
+            )
+            .unwrap(),
+            membership_sequence: membership.sequence,
+            membership_hash,
+            pending_membership_proposal_hash: None,
+            authority_peer_id: authority.peer_id(),
+            authority_epoch: 1,
+            fencing_token: 1,
+            config_sequence: config.sequence,
+            config_hash,
+            canonical_head: Some(canonical),
+            issued_unix_ms: 1_000,
+            expires_unix_ms: 3_000,
+        };
+        let vote = sign_local_live_quorum_vote(&storage, &authority, requester.peer_id(), &challenge, 2_000)
+            .unwrap()
+            .expect("current authenticated member must receive an actual signature");
+        verify_discovery_freshness_vote(&vote, &challenge).unwrap();
+        assert_eq!(vote.voter_peer_id, authority.peer_id());
+
+        let mut wrong = challenge.clone();
+        wrong.announcement_hash = Hash32([3; 32]);
+        assert!(sign_local_live_quorum_vote(&storage, &authority, requester.peer_id(), &wrong, 2_000)
+            .unwrap()
+            .is_none());
+        assert!(sign_local_live_quorum_vote(&storage, &authority, PeerId([9; 32]), &challenge, 2_000)
+            .unwrap()
+            .is_none());
+
+        let mut sleeping = SleepRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            latest_snapshot_hash: snapshot.manifest_hash().unwrap(),
+            epoch: 1,
+            fencing_token: 1,
+            authority_peer_id: authority.peer_id(),
+            authority_public_key: authority.public_key(),
+            signature: Vec::new(),
+        };
+        authority.sign_sleep_record(&mut sleeping).unwrap();
+        storage.save_sleep_record(&sleeping).unwrap();
+        assert!(
+            sign_local_live_quorum_vote(&storage, &authority, requester.peer_id(), &challenge, 2_000)
+                .unwrap()
+                .is_none(),
+            "sleeping world must never issue a fresh game-route quorum vote"
+        );
     }
 }
 

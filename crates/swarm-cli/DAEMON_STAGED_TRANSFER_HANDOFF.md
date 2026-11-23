@@ -73,6 +73,17 @@ planned handoff, never silently lower its authority requirements.
   receive `ExpiredOrMalformed`, and lost application authentication receives
   `Unauthorized`. This is an intentional deny-only handler, not a working
   game-route responder; it does not create a signer, receiver or gateway.
+- The daemon can now respond to an application-authenticated
+  `WireRequest::DiscoveryFreshnessVote` with a one-use, nonce-bound **signed
+  canonical voter response**. The vote is tied to the exact accepted membership,
+  epoch/fence, signed configuration and current canonical snapshot head using
+  Agent 1's canonical live-quorum context domain. It rejects changed or
+  expired nonces, unknown/removed requesters, unreadable or mismatched state,
+  active handoff, a sleeping world or a newer recovery promise, and bounds
+  per-process replay tracking to 1,024 short-lived nonces. It deliberately
+  refuses Solo/Recovery modes and pending joint membership for now rather than
+  guessing a safe voter set. **This is only a quorum vote**, not a verified
+  Fabric runtime session, game route, host consent or proof of a live JVM.
 - The real, nonce-bound `FreshAuthoritySource` adapter integrating current
   canonical signed quorum/membership/fencing, local consent and authenticated
   live Fabric IPC is **not** available in this branch. Do not enable game
@@ -105,10 +116,13 @@ flock -x /tmp/swarmcraft-sabathon-cargo.lock sh -c \
    CARGO_BUILD_JOBS=2 cargo clippy -p swarm-cli --bin swarmcraft --offline --jobs 2 -- -D warnings'
 ```
 
-On 23 Nov 2026 the full `swarmcraft` binary unit suite passed **33/33**
+On 23 Nov 2026 the full `swarmcraft` binary unit suite passed **35/35**
 and strict `swarmcraft` binary Clippy passed on the Agent 3 worktree.
 These tests include phase ordering, witness gate, replay/redelivery,
 checkpoint-ack identity, exact activated successor generation, and the
 no-stale-lease/no-recovery fence across every handoff phase, plus disabled
-route-control refusal for valid and malformed authenticated requests.
+route-control refusal for valid and malformed authenticated requests. The
+live-voter contract tests additionally cover exact nonce/context/expiry
+matching and a **real signed vote against persisted accepted canonical
+records**, including denial to a mismatched requester and after sleep.
 They are **source/local tests, not a three-machine Minecraft field pass**.
