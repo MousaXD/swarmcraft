@@ -22,7 +22,11 @@ use swarm_consensus::{
     recovery::validate_recovery_certificate_shape,
 };
 use swarm_core::{
-    discovery::verify_discovery_freshness_vote, protocol_v2::verify_world_config_signature,
+    discovery::{
+        verify_discovery_freshness_vote, MAX_DISCOVERY_FRESHNESS_VOTES, MAX_DISCOVERY_MEMBERS,
+        MAX_DISCOVERY_MEMBERSHIP_CERTIFICATES,
+    },
+    protocol_v2::verify_world_config_signature,
     verify_membership_signature, verify_signature, verify_snapshot_signature, DataPaths, PeerIdentity,
 };
 use swarm_network::{
@@ -32,8 +36,8 @@ use swarm_network::{
 };
 use swarm_protocol::{
     peer_id_from_public_key, DiscoveryCanonicalHeadV1, DiscoveryFreshnessChallengeV1, DiscoveryFreshnessVoteV1,
-    DiscoveryMembershipProofV1, EpochMode, EpochRecordV1, Hash32, PeerId, SnapshotManifestV1, WorldConfigV1, WorldId,
-    PROTOCOL_VERSION,
+    DiscoveryMembershipProofV1, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, PeerId, SnapshotManifestV1,
+    WorldConfigV1, WorldId, PROTOCOL_VERSION,
 };
 use swarm_storage::{CanonicalSnapshotRefV1, Storage, StorageError};
 
@@ -600,11 +604,23 @@ impl FreshAuthoritySource for SignedLiveAuthoritySource {
         let started = Instant::now();
         let observed =
             self.provider.acquire(world, requester, challenge).map_err(|_| GameRouteError::UnverifiedAuthority)?;
-        if started.elapsed() >= Duration::from_millis(MAX_FRESH_PROOF_MS) {
-            return Err(GameRouteError::StaleAuthority);
-        }
-        self.verify_current(world, requester, challenge, &observed).map_err(|_| GameRouteError::UnverifiedAuthority)
+        require_monotonic_proof_deadline(started)?;
+        let verified = self
+            .verify_current(world, requester, challenge, &observed)
+            .map_err(|_| GameRouteError::UnverifiedAuthority)?;
+        // Local snapshot verification and certificate validation are also
+        // part of the proof budget. Wall-clock expiry alone is not enough:
+        // a backwards clock jump must not authorize a slow/stale proof.
+        require_monotonic_proof_deadline(started)?;
+        Ok(verified)
     }
+}
+
+fn require_monotonic_proof_deadline(started: Instant) -> std::result::Result<(), GameRouteError> {
+    if started.elapsed() >= Duration::from_millis(MAX_FRESH_PROOF_MS) {
+        return Err(GameRouteError::StaleAuthority);
+    }
+    Ok(())
 }
 
 /// P0 V1 realms are anchored in the signed genesis world identifier. Unknown
@@ -638,6 +654,25 @@ pub fn canonical_quorum_hash(
 }
 
 fn verify_genesis_anchored_membership(proof: &DiscoveryMembershipProofV1) -> Result<()> {
+    // Refuse overlarge and noncanonical histories BEFORE expensive signature
+    // checks, including on worlds which have not been publicly advertised.
+    // The private-world route follows the same maximum proof envelope as
+    // public discovery.
+    if proof.membership_certificates.len() > MAX_DISCOVERY_MEMBERSHIP_CERTIFICATES
+        || proof.initial_membership.members.len() > MAX_DISCOVERY_MEMBERS
+        || proof.current_membership.members.len() > MAX_DISCOVERY_MEMBERS
+        || proof.membership_certificates.iter().any(|cert| {
+            cert.proposal.previous.members.len() > MAX_DISCOVERY_MEMBERS
+                || cert.proposal.proposed.members.len() > MAX_DISCOVERY_MEMBERS
+                || cert.votes.len() > MAX_DISCOVERY_FRESHNESS_VOTES
+        })
+        || proof.pending_membership.as_ref().is_some_and(|pending| {
+            pending.previous.members.len() > MAX_DISCOVERY_MEMBERS
+                || pending.proposed.members.len() > MAX_DISCOVERY_MEMBERS
+        })
+    {
+        bail!("live membership history exceeds supported proof limits");
+    }
     validate_discovery_membership_proof_shape(proof)?;
     let initial = &proof.initial_membership;
     if initial.protocol_version != PROTOCOL_VERSION
@@ -651,27 +686,39 @@ fn verify_genesis_anchored_membership(proof: &DiscoveryMembershipProofV1) -> Res
     {
         bail!("membership history is not anchored to world genesis");
     }
-    verify_membership_signature(initial)?;
-    for member in &initial.members {
-        if member.peer_id != peer_id_from_public_key(&member.public_key) {
-            bail!("initial member key and peer ID do not match");
-        }
-    }
+    verify_membership_record_and_keys(initial)?;
     for certificate in &proof.membership_certificates {
-        verify_membership_signature(&certificate.proposal.previous)?;
-        verify_membership_signature(&certificate.proposal.proposed)?;
+        verify_membership_record_and_keys(&certificate.proposal.previous)?;
+        verify_membership_record_and_keys(&certificate.proposal.proposed)?;
+        let mut seen_voters = BTreeSet::new();
         for vote in &certificate.votes {
+            // Legacy committed certificates are assembled from a HashMap,
+            // so their vote order is not guaranteed. Uniqueness and exact
+            // signatures matter; imposing sorted storage would strand real
+            // accepted histories without making the quorum stronger.
+            if !seen_voters.insert(vote.voter_peer_id)
+                || peer_id_from_public_key(&vote.voter_public_key) != vote.voter_peer_id
+                || !vote.matches_proposal(&certificate.proposal)?
+            {
+                bail!("membership certificate has mismatched or repeated voters");
+            }
             verify_signature(vote.voter_peer_id, vote.voter_public_key, &vote.signing_bytes()?, &vote.signature)?;
         }
     }
-    verify_membership_signature(&proof.current_membership)?;
+    verify_membership_record_and_keys(&proof.current_membership)?;
     if let Some(pending) = &proof.pending_membership {
-        verify_membership_signature(&pending.previous)?;
-        verify_membership_signature(&pending.proposed)?;
+        verify_membership_record_and_keys(&pending.previous)?;
+        verify_membership_record_and_keys(&pending.proposed)?;
     }
-    for member in &proof.current_membership.members {
+    Ok(())
+}
+
+fn verify_membership_record_and_keys(record: &MembershipRecordV1) -> Result<()> {
+    record.validate_semantics()?;
+    verify_membership_signature(record)?;
+    for member in &record.members {
         if member.peer_id != peer_id_from_public_key(&member.public_key) {
-            bail!("current member key does not match its canonical peer ID");
+            bail!("membership contains a key that does not match its canonical peer ID");
         }
     }
     Ok(())

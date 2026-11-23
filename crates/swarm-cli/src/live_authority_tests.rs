@@ -2,7 +2,9 @@ use super::*;
 use crate::live_fabric_readiness::{verify_runtime_reply, ExpectedFabricRuntime};
 use std::{collections::HashMap, path::Path, sync::RwLock};
 use swarm_core::discovery::sign_discovery_freshness_vote;
-use swarm_protocol::{MembershipRecordV1, WorldGenesisV1, WorldMemberV1};
+use swarm_protocol::{
+    MembershipCertificateV1, MembershipProposalV1, MembershipRecordV1, MembershipVoteV1, WorldGenesisV1, WorldMemberV1,
+};
 
 fn identity(seed: u8) -> PeerIdentity {
     PeerIdentity::from_secret_bytes([seed; 32])
@@ -58,6 +60,98 @@ fn initial_membership_with_fingerprint(
         current_membership: record,
         pending_membership: None,
     }
+}
+
+fn signed_membership_vote(identity: &PeerIdentity, proposal: &MembershipProposalV1) -> MembershipVoteV1 {
+    let mut vote =
+        swarm_consensus::membership::membership_vote_for(proposal, identity.peer_id(), identity.public_key()).unwrap();
+    vote.signature = identity.sign(&vote.signing_bytes().unwrap());
+    vote
+}
+
+#[test]
+fn signed_membership_certificates_require_unique_voters_and_bounded_history() {
+    let alice = identity(31);
+    let bob = identity(32);
+    let dave = identity(34);
+    let mut proof = initial_membership(&[identity(31), identity(32), identity(33)]);
+    let mut proposed = proof.current_membership.clone();
+    proposed.sequence = 1;
+    proposed.previous_membership_hash = Some(proof.current_membership.record_hash().unwrap());
+    proposed.members.push(WorldMemberV1 {
+        peer_id: dave.peer_id(),
+        public_key: dave.public_key(),
+        authority_eligible: true,
+        banned: false,
+    });
+    proposed.members.sort_by_key(|member| member.peer_id);
+    alice.sign_membership(&mut proposed).unwrap();
+    let proposal = MembershipProposalV1 { previous: proof.current_membership.clone(), proposed: proposed.clone() };
+    let mut votes =
+        [&alice, &bob, &dave].iter().map(|signer| signed_membership_vote(signer, &proposal)).collect::<Vec<_>>();
+    votes.sort_by_key(|vote| vote.voter_peer_id);
+    proof.current_membership = proposed;
+    proof.membership_certificates = vec![MembershipCertificateV1 { proposal, votes }];
+    verify_genesis_anchored_membership(&proof).unwrap();
+
+    let mut repeated = proof.clone();
+    let duplicate_vote = repeated.membership_certificates[0].votes[0].clone();
+    repeated.membership_certificates[0].votes.push(duplicate_vote);
+    assert!(verify_genesis_anchored_membership(&repeated).is_err());
+    let mut out_of_order = proof.clone();
+    out_of_order.membership_certificates[0].votes.reverse();
+    // The live daemon's old HashMap-based vote collection is unordered.
+    // Legitimate historical signatures remain valid regardless of order.
+    verify_genesis_anchored_membership(&out_of_order).unwrap();
+    let mut too_many = proof.clone();
+    too_many.membership_certificates =
+        vec![proof.membership_certificates[0].clone(); MAX_DISCOVERY_MEMBERSHIP_CERTIFICATES + 1];
+    assert!(verify_genesis_anchored_membership(&too_many).is_err());
+
+    // This is signed by a real member and still has sufficient honest votes.
+    // Adding a voter-key mismatch in historical records is not acceptable.
+    // The forged *banned* key is absent from the final membership, so only an
+    // intermediate-history check can detect it.
+    let mut intermediate = initial_membership(&[identity(31), identity(32), identity(33)]);
+    let mut with_ghost = intermediate.current_membership.clone();
+    with_ghost.sequence = 1;
+    with_ghost.previous_membership_hash = Some(intermediate.current_membership.record_hash().unwrap());
+    with_ghost.members.push(WorldMemberV1 {
+        peer_id: dave.peer_id(),
+        public_key: [77; 32],
+        authority_eligible: false,
+        banned: true,
+    });
+    with_ghost.members.sort_by_key(|member| member.peer_id);
+    alice.sign_membership(&mut with_ghost).unwrap();
+    let first_proposal =
+        MembershipProposalV1 { previous: intermediate.current_membership.clone(), proposed: with_ghost.clone() };
+    let mut first_votes =
+        [&alice, &bob].iter().map(|signer| signed_membership_vote(signer, &first_proposal)).collect::<Vec<_>>();
+    first_votes.sort_by_key(|vote| vote.voter_peer_id);
+    let mut without_ghost = with_ghost.clone();
+    without_ghost.sequence = 2;
+    without_ghost.previous_membership_hash = Some(with_ghost.record_hash().unwrap());
+    without_ghost.members.retain(|member| member.peer_id != dave.peer_id());
+    alice.sign_membership(&mut without_ghost).unwrap();
+    let second_proposal = MembershipProposalV1 { previous: with_ghost, proposed: without_ghost.clone() };
+    let mut second_votes =
+        [&alice, &bob].iter().map(|signer| signed_membership_vote(signer, &second_proposal)).collect::<Vec<_>>();
+    second_votes.sort_by_key(|vote| vote.voter_peer_id);
+    intermediate.membership_certificates = vec![
+        MembershipCertificateV1 { proposal: first_proposal, votes: first_votes },
+        MembershipCertificateV1 { proposal: second_proposal, votes: second_votes },
+    ];
+    intermediate.current_membership = without_ghost;
+    validate_discovery_membership_proof_shape(&intermediate).unwrap();
+    assert!(verify_genesis_anchored_membership(&intermediate).is_err());
+}
+
+#[test]
+fn monotonic_deadline_includes_all_proof_verification_work() {
+    assert!(require_monotonic_proof_deadline(Instant::now()).is_ok());
+    let stale = Instant::now().checked_sub(Duration::from_millis(MAX_FRESH_PROOF_MS + 1)).unwrap();
+    assert!(matches!(require_monotonic_proof_deadline(stale), Err(GameRouteError::StaleAuthority)));
 }
 
 fn freshness_challenge(proof: &DiscoveryMembershipProofV1, verifier: PeerId) -> DiscoveryFreshnessChallengeV1 {

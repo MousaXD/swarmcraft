@@ -74,6 +74,18 @@ instead of returning `conflict_free=true` for an unresolved world. The
 Future daemon wiring must still fail closed and close streams on subsequent
 world/consent changes; no synchronous recheck is a perpetual lease.
 
+The signed membership decoder now refuses overlarge private-world histories
+using the same limits as discovery, and checks unique, proposal-bound signed
+certificate voters plus cryptographic member-key binding on ALL intermediate
+and pending membership records. Historical certificates may have unordered
+votes because the existing daemon stores HashMap iteration order; duplicates
+are rejected, while otherwise valid ordering differences remain accepted.
+A fully signed intermediate record containing a
+ghost/banned member key does not become acceptable just because the current
+voter set is valid. In addition to the signed and wall-clock freshness limits,
+the full acquire + snapshot/certificate validation pipeline is bounded by a
+monotonic three-second deadline, including the final verification stage.
+
 Agent 3 owns the shared CLI module wiring: add
 `pub mod live_fabric_readiness;` and `pub mod live_authority;` to
 `crates/swarm-cli/src/lib.rs` when
