@@ -22,7 +22,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use swarm_protocol::{PeerId, WorldId};
-use tokio::{sync::Semaphore, task, time::timeout};
+use tokio::{
+    sync::{oneshot, Semaphore},
+    time::timeout,
+};
 
 pub const MAX_GAME_ROUTE_CANDIDATES: usize = 8;
 pub const MAX_GAME_ROUTE_PROOF_WORKERS: usize = 8;
@@ -125,21 +128,29 @@ impl AuthenticatedGameRouteResolver {
         let slot = Arc::clone(&self.proof_workers).try_acquire_owned().map_err(|_| GameTransportError::Overloaded)?;
         let verifier = Arc::clone(&self.verifier);
         let authority = Arc::clone(&self.authority);
-        let (verified, offer, response) = timeout(
-            MAX_GAME_ROUTE_PROOF_WAIT,
-            task::spawn_blocking(move || -> Result<_, GameTransportError> {
+        // Tokio's spawn_blocking workers can hold a runtime shutdown hostage
+        // when a third-party quorum/Fabric adapter never returns. A bounded
+        // detached OS thread plus one-shot reply preserves the exact same
+        // fail-closed timeout while allowing a daemon restart to finish.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        std::thread::Builder::new()
+            .name("swarm-route-proof".to_owned())
+            .spawn(move || {
                 let _slot = slot;
-                // Sample time INSIDE the worker, not before its scheduling
-                // delay. RouteVerifier additionally accounts for quorum and
-                // durable-file latency against that signed expiry.
-                let now_ms = current_unix_ms()?;
-                let verified = verifier.verify(&offer, &response, world, now_ms, authority.as_ref())?;
-                Ok((verified, offer, response))
-            }),
-        )
-        .await
-        .map_err(|_| GameTransportError::Timeout)?
-        .map_err(|_| GameTransportError::Unavailable)??;
+                let result = (|| -> Result<_, GameTransportError> {
+                    // Time starts inside the worker, excluding scheduling
+                    // delay; the verifier also accounts for proof/fsync time.
+                    let now_ms = current_unix_ms()?;
+                    let verified = verifier.verify(&offer, &response, world, now_ms, authority.as_ref())?;
+                    Ok((verified, offer, response))
+                })();
+                let _ = reply_tx.send(result);
+            })
+            .map_err(|_| GameTransportError::Unavailable)?;
+        let (verified, offer, response) = timeout(MAX_GAME_ROUTE_PROOF_WAIT, reply_rx)
+            .await
+            .map_err(|_| GameTransportError::Timeout)?
+            .map_err(|_| GameTransportError::Unavailable)??;
         if !self.is_authenticated_as(transport, offer.authority_peer_id) {
             return Err(GameTransportError::Unauthorized);
         }
