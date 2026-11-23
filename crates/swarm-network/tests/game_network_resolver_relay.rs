@@ -333,7 +333,15 @@ async fn signed_route_control_and_gateway_operate_over_authenticated_relay() {
         assert_eq!(selected.world_id(), world);
 
         let receiver = Arc::new(
-            GameStreamReceiver::new(world, host_transport, java_port, proof.clone(), host_authenticated).unwrap(),
+            GameStreamReceiver::new(
+                world,
+                host_transport,
+                java_port,
+                proof.clone(),
+                host_authenticated,
+                root.path().join("host-stream-replays"),
+            )
+            .unwrap(),
         );
         let gateway_client =
             Arc::new(GameStreamClient::new(player_app, player_transport, player_authenticated, proof.clone()).unwrap());

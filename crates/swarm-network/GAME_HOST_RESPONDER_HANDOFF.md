@@ -38,6 +38,12 @@ runtime shutdown. The actual verifier should still bound its own remote calls.
 - Host accepts game streams only for its managed loopback Java listener.
   Player binds a durable, stable, per-world loopback gateway. No public
   raw-TCP fallback is available.
+- Create the host GameStreamReceiver with its new mandatory sixth argument:
+  a private durable host replay-ledger directory. Keep that directory across
+  daemon, gateway and world restarts. It persists signed stream challenge
+  consumption before accepting Minecraft bytes, so replayed authorizations
+  cannot regain access simply by restarting the host gateway. Do not put
+  it in a tempdir or imported world save; corrupt or unsafe storage fails closed.
 - On accepted-generation change, withdrawn consent or runtime shutdown,
   send shutdown through the existing watch channel to close old host and
   gateway sessions. Host and player verify live evidence independently before

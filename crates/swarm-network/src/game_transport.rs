@@ -13,6 +13,7 @@ use crate::game_route::{
     VerifiedGameRoute, GAME_STREAM_PROTOCOL, MAX_FRESH_EVIDENCE_AGE_MS, MAX_FRESH_EVIDENCE_LEASE_MS,
     MAX_ROUTE_WIRE_BYTES,
 };
+use crate::game_stream_replay::{DurableGameStreamReplayLedger, GameStreamReplayError};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures::{AsyncReadExt as _, AsyncWriteExt as _, StreamExt as _};
 use libp2p::{PeerId as TransportPeerId, Stream, StreamProtocol};
@@ -24,6 +25,7 @@ use std::{
     future::Future,
     io,
     net::{Ipv4Addr, SocketAddrV4},
+    path::PathBuf,
     pin::Pin,
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -32,7 +34,7 @@ use swarm_protocol::{PeerId, WorldId};
 use thiserror::Error;
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{watch, OwnedSemaphorePermit, Semaphore},
+    sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore},
     task::{self, JoinSet},
     time::{interval, timeout},
 };
@@ -49,10 +51,6 @@ pub const GAME_REVALIDATE_INTERVAL: Duration = Duration::from_secs(1);
 /// A hung Fabric IPC or quorum check must not stall the libp2p reactor.
 pub const MAX_GAME_LIVE_PROOF_WAIT: Duration = Duration::from_secs(3);
 pub const MAX_GAME_LIVE_PROOF_WORKERS: usize = 8;
-const MAX_OPEN_NONCES: usize = 256;
-const NONCE_TTL: Duration = Duration::from_secs(30);
-type RecentGameNonces = Arc<Mutex<HashMap<(TransportPeerId, [u8; 32]), Instant>>>;
-
 /// Bound to both the application-authenticated requester and the encrypted
 /// libp2p transport identity. A stream doesn't authorize membership by itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,7 +139,8 @@ pub struct GameStreamReceiver {
     authenticated: GameAuthenticatedPeers,
     active: Arc<Semaphore>,
     peers: Arc<Mutex<HashMap<TransportPeerId, usize>>>,
-    nonces: RecentGameNonces,
+    replay: Arc<DurableGameStreamReplayLedger>,
+    replay_workers: Arc<Semaphore>,
     proof_workers: Arc<Semaphore>,
 }
 
@@ -152,6 +151,7 @@ impl GameStreamReceiver {
         managed_minecraft_port: u16,
         evidence: Arc<dyn FreshAuthoritySource>,
         authenticated: GameAuthenticatedPeers,
+        replay_directory: impl Into<PathBuf>,
     ) -> Result<Self, GameTransportError> {
         if world_id == WorldId::default() || managed_minecraft_port == 0 {
             return Err(GameTransportError::InvalidFrame);
@@ -164,7 +164,8 @@ impl GameStreamReceiver {
             authenticated,
             active: Arc::new(Semaphore::new(MAX_GAME_STREAMS)),
             peers: Arc::new(Mutex::new(HashMap::new())),
-            nonces: Arc::new(Mutex::new(HashMap::new())),
+            replay: Arc::new(DurableGameStreamReplayLedger::new(replay_directory)),
+            replay_workers: Arc::new(Semaphore::new(MAX_GAME_LIVE_PROOF_WORKERS)),
             proof_workers: Arc::new(Semaphore::new(MAX_GAME_LIVE_PROOF_WORKERS)),
         })
     }
@@ -258,8 +259,9 @@ impl GameStreamReceiver {
         .await?;
         // The client-chosen open nonce is NOT sufficient replay protection:
         // an attacker could modify it while replaying a still-valid signed
-        // route response. Consume the SIGNED route challenge exactly once.
-        self.consume_open_nonce(remote, frame.response.challenge.nonce)?;
+        // route response. Persist the SIGNED challenge before admitting any
+        // Minecraft stream; an interrupted host process must not forget it.
+        self.consume_open_nonce(frame.response.challenge.nonce, frame.response.expires_unix_ms, unix_ms()?).await?;
 
         // The only TCP dial on the host is a locally configured loopback port.
         // Never trust remote endpoint hints, DNS, persisted Ready, or raw IP.
@@ -333,14 +335,36 @@ impl GameStreamReceiver {
         Ok(())
     }
 
-    fn consume_open_nonce(&self, peer: TransportPeerId, nonce: [u8; 32]) -> Result<(), GameTransportError> {
-        let mut used = self.nonces.lock().map_err(|_| GameTransportError::Unavailable)?;
-        used.retain(|_, time| time.elapsed() < NONCE_TTL);
-        if used.contains_key(&(peer, nonce)) || used.len() >= MAX_OPEN_NONCES {
-            return Err(GameTransportError::Unauthorized);
+    async fn consume_open_nonce(
+        &self,
+        nonce: [u8; 32],
+        expires_ms: u64,
+        now_ms: u64,
+    ) -> Result<(), GameTransportError> {
+        // A disk lock/fsync may block behind a competing receiver process.
+        // Never block the network reactor, spawn unbounded workers or let an
+        // I/O deadline bypass replay admission.
+        let slot = Arc::clone(&self.replay_workers).try_acquire_owned().map_err(|_| GameTransportError::Overloaded)?;
+        let ledger = Arc::clone(&self.replay);
+        let world = self.world_id;
+        let result = timeout(
+            MAX_GAME_LIVE_PROOF_WAIT,
+            task::spawn_blocking(move || {
+                let _slot = slot;
+                ledger.consume(world, nonce, expires_ms, now_ms)
+            }),
+        )
+        .await
+        .map_err(|_| GameTransportError::Timeout)?
+        .map_err(|_| GameTransportError::Unavailable)?;
+        match result {
+            Ok(()) => Ok(()),
+            Err(GameStreamReplayError::Replayed) => Err(GameTransportError::Unauthorized),
+            Err(GameStreamReplayError::Capacity) => Err(GameTransportError::Overloaded),
+            Err(GameStreamReplayError::InvalidState | GameStreamReplayError::Storage(_)) => {
+                Err(GameTransportError::Unavailable)
+            }
         }
-        used.insert((peer, nonce), Instant::now());
-        Ok(())
     }
 }
 
@@ -535,16 +559,22 @@ async fn validate_live_evidence_bounded(
 ) -> Result<(), GameTransportError> {
     let slot = workers.try_acquire_owned().map_err(|_| GameTransportError::Overloaded)?;
     let offer = offer.clone();
-    timeout(
-        MAX_GAME_LIVE_PROOF_WAIT,
-        task::spawn_blocking(move || {
+    // A permanently stuck external IPC verifier must not hold a Tokio
+    // blocking-pool thread (and thus a desktop daemon's shutdown) forever.
+    // Use a detached OS worker with strict semaphore accounting. At most
+    // MAX_GAME_LIVE_PROOF_WORKERS exist per client/receiver at a time.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("swarm-game-live-proof".to_owned())
+        .spawn(move || {
             let _slot = slot;
-            validate_live_evidence(evidence.as_ref(), &offer, requester, nonce, sampled_unix_ms)
-        }),
-    )
-    .await
-    .map_err(|_| GameTransportError::Timeout)?
-    .map_err(|_| GameTransportError::Unavailable)?
+            let _ = reply_tx.send(validate_live_evidence(evidence.as_ref(), &offer, requester, nonce, sampled_unix_ms));
+        })
+        .map_err(|_| GameTransportError::Unavailable)?;
+    timeout(MAX_GAME_LIVE_PROOF_WAIT, reply_rx)
+        .await
+        .map_err(|_| GameTransportError::Timeout)?
+        .map_err(|_| GameTransportError::Unavailable)?
 }
 
 /// Gateway side of a dedicated authenticated game stream. The caller must
@@ -906,8 +936,8 @@ mod tests {
         assert!(matches!(read_game_open(&mut Cursor::new(bad_wire)).await, Err(GameTransportError::InvalidFrame)));
     }
 
-    #[test]
-    fn per_peer_admission_and_nonce_replay_are_bounded() {
+    #[tokio::test]
+    async fn per_peer_admission_and_nonce_replay_are_bounded() {
         let counts = Arc::new(Mutex::new(HashMap::new()));
         let attacker = peer();
         let mut slots = Vec::new();
@@ -931,13 +961,49 @@ mod tests {
             }
         }
         let world = WorldId([1; 32]);
-        let receiver =
-            GameStreamReceiver::new(world, peer(), 25001, Arc::new(NoEvidence), Arc::new(RwLock::new(HashMap::new())))
-                .unwrap();
-        receiver.consume_open_nonce(attacker, [12; 32]).unwrap();
-        assert!(matches!(receiver.consume_open_nonce(attacker, [12; 32]), Err(GameTransportError::Unauthorized)));
+        let private = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(private.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let replay_path = private.path().join("durable-host-replays");
+        let receiver = GameStreamReceiver::new(
+            world,
+            peer(),
+            25001,
+            Arc::new(NoEvidence),
+            Arc::new(RwLock::new(HashMap::new())),
+            &replay_path,
+        )
+        .unwrap();
+        receiver.consume_open_nonce([12; 32], 2_000, 1_000).await.unwrap();
         assert!(matches!(
-            GameStreamReceiver::new(world, peer(), 0, Arc::new(NoEvidence), Arc::new(RwLock::new(HashMap::new()))),
+            receiver.consume_open_nonce([12; 32], 2_000, 1_000).await,
+            Err(GameTransportError::Unauthorized)
+        ));
+        let restarted = GameStreamReceiver::new(
+            world,
+            peer(),
+            25001,
+            Arc::new(NoEvidence),
+            Arc::new(RwLock::new(HashMap::new())),
+            &replay_path,
+        )
+        .unwrap();
+        assert!(matches!(
+            restarted.consume_open_nonce([12; 32], 2_000, 1_000).await,
+            Err(GameTransportError::Unauthorized)
+        ));
+        assert!(matches!(
+            GameStreamReceiver::new(
+                world,
+                peer(),
+                0,
+                Arc::new(NoEvidence),
+                Arc::new(RwLock::new(HashMap::new())),
+                replay_path
+            ),
             Err(GameTransportError::InvalidFrame)
         ));
     }

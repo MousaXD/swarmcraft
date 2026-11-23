@@ -233,8 +233,17 @@ async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
             member: player_app,
             allowed: AtomicBool::new(true),
         });
-        let receiver =
-            Arc::new(GameStreamReceiver::new(world, host_transport, mc_port, source.clone(), host_auth).unwrap());
+        let receiver = Arc::new(
+            GameStreamReceiver::new(
+                world,
+                host_transport,
+                mc_port,
+                source.clone(),
+                host_auth,
+                temp.path().join("host-stream-replays"),
+            )
+            .unwrap(),
+        );
         let client =
             Arc::new(GameStreamClient::new(player_app, player_transport, player_auth, source.clone()).unwrap());
         let resolver: Arc<dyn GatewayRouteResolver> = Arc::new(SyntheticResolver {

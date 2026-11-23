@@ -409,8 +409,28 @@ async fn run_relay_authority_handoff(crash_original_host: bool) {
             }),
             player: app_player,
         });
-        let receiver_a = Arc::new(GameStreamReceiver::new(world, transport_a, port_a, state.clone(), peers_a).unwrap());
-        let receiver_b = Arc::new(GameStreamReceiver::new(world, transport_b, port_b, state.clone(), peers_b).unwrap());
+        let receiver_a = Arc::new(
+            GameStreamReceiver::new(
+                world,
+                transport_a,
+                port_a,
+                state.clone(),
+                peers_a,
+                root.path().join("host-a-replay"),
+            )
+            .unwrap(),
+        );
+        let receiver_b = Arc::new(
+            GameStreamReceiver::new(
+                world,
+                transport_b,
+                port_b,
+                state.clone(),
+                peers_b,
+                root.path().join("host-b-replay"),
+            )
+            .unwrap(),
+        );
         let (stop_a, rx_a) = watch::channel(false);
         let (stop_b, rx_b) = watch::channel(false);
         let task_a = tokio::spawn(receiver_a.serve(control_a, rx_a));

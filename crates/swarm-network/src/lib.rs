@@ -12,6 +12,7 @@ pub mod game_route_host;
 pub mod game_route_host_controller;
 pub mod game_route_host_service;
 pub mod game_route_resolver;
+pub mod game_stream_replay;
 pub mod game_transport;
 mod invite_connectivity;
 mod node;

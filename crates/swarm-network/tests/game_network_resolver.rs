@@ -342,7 +342,10 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
         // gateway -> fresh authenticated route RPC -> real QUIC game substream
         // -> separately authenticated host receiver -> loopback TCP server.
         let receiver = Arc::new(
-            GameStreamReceiver::new(world, host_transport, game_port, quorum.clone(), host_game_authenticated)
+            GameStreamReceiver::new(
+                world, host_transport, game_port, quorum.clone(), host_game_authenticated,
+                root.path().join("host-stream-replays"),
+            )
                 .unwrap(),
         );
         let (stop_host, host_rx) = watch::channel(false);
