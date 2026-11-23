@@ -216,7 +216,7 @@ fn runtime_ready(peer: &PeerFixture, world: WorldId, endpoint: &str, trigger: Mi
 fn write_mock_java(path: &Path) {
     fs::write(
         path,
-        r#"#!/usr/bin/env python3
+        r##"#!/usr/bin/env python3
 import os
 import pathlib
 import socket
@@ -236,6 +236,17 @@ pathlib.Path(world, "swarmcraft-migration-smoke.txt").write_text("started-after-
 def encoded(value):
     return value.encode("utf-8").hex()
 
+# The supervisor requires an actually listening private Minecraft socket;
+# no WORLD_INFO frame alone constitutes a successful Java server startup.
+properties = dict(line.split("=", 1) for line in pathlib.Path("server.properties").read_text(encoding="utf-8").splitlines() if "=" in line and not line.startswith("#"))
+assert properties["server-ip"] == "127.0.0.1"
+assert properties["online-mode"] == "true"
+assert properties["enable-rcon"] == "false"
+assert properties["enable-query"] == "false"
+game_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+game_listener.bind(("127.0.0.1", int(properties["server-port"])))
+game_listener.listen(4)
+
 with socket.create_connection((host, port), timeout=5) as connection:
     writer = connection.makefile("w", encoding="utf-8", newline="\n")
     writer.write("AUTH\t" + token + "\n")
@@ -244,7 +255,7 @@ with socket.create_connection((host, port), timeout=5) as connection:
     reader = connection.makefile("r", encoding="utf-8")
     while reader.readline():
         pass
-"#,
+"##,
     )
     .unwrap();
     let mut permissions = fs::metadata(path).unwrap().permissions();

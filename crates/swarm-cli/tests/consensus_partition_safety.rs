@@ -175,8 +175,9 @@ fn configure_host_capability(peer: &PeerFixture, world: WorldId) {
     let fabric = directory.join("swarmcraft-fabric.jar");
     fs::write(
         &java,
-        r#"#!/usr/bin/env python3
+        r##"#!/usr/bin/env python3
 import os
+import pathlib
 import socket
 import sys
 
@@ -193,6 +194,17 @@ fingerprint = os.environ["SWARMCRAFT_COMPAT_FINGERPRINT"]
 def encoded(value):
     return value.encode("utf-8").hex()
 
+# The partition fixture may not claim Fabric readiness without an actual
+# private listener; still require signed quorum and fencing independently.
+properties = dict(line.split("=", 1) for line in pathlib.Path("server.properties").read_text(encoding="utf-8").splitlines() if "=" in line and not line.startswith("#"))
+assert properties["server-ip"] == "127.0.0.1"
+assert properties["online-mode"] == "true"
+assert properties["enable-rcon"] == "false"
+assert properties["enable-query"] == "false"
+game_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+game_listener.bind(("127.0.0.1", int(properties["server-port"])))
+game_listener.listen(4)
+
 with socket.create_connection((host, port), timeout=5) as connection:
     writer = connection.makefile("w", encoding="utf-8", newline="\n")
     writer.write("AUTH\t" + token + "\n")
@@ -201,7 +213,7 @@ with socket.create_connection((host, port), timeout=5) as connection:
     reader = connection.makefile("r", encoding="utf-8")
     while reader.readline():
         pass
-"#,
+"##,
     )
     .unwrap();
     let mut permissions = fs::metadata(&java).unwrap().permissions();

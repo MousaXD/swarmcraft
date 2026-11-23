@@ -181,8 +181,9 @@ fn canonical_hash(fixture: &RuntimeFixture) -> swarm_protocol::Hash32 {
 
 fn write_mock_java(path: &Path, minecraft_version: &str, loader_version: &str) {
     let script = format!(
-        r#"#!/usr/bin/env python3
+        r##"#!/usr/bin/env python3
 import os
+import pathlib
 import socket
 import sys
 import time
@@ -200,6 +201,17 @@ fingerprint = os.environ["SWARMCRAFT_COMPAT_FINGERPRINT"]
 def encoded(value):
     return value.encode("utf-8").hex()
 
+# Keep mock admission honest: an authenticated Fabric WORLD_INFO must only
+# follow an actual bound private listener at the per-world reserved port.
+properties = dict(line.split("=", 1) for line in pathlib.Path("server.properties").read_text(encoding="utf-8").splitlines() if "=" in line and not line.startswith("#"))
+assert properties["server-ip"] == "127.0.0.1"
+assert properties["online-mode"] == "true"
+assert properties["enable-rcon"] == "false"
+assert properties["enable-query"] == "false"
+game_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+game_listener.bind(("127.0.0.1", int(properties["server-port"])))
+game_listener.listen(4)
+
 with socket.create_connection((host, port), timeout=5) as connection:
     writer = connection.makefile("w", encoding="utf-8", newline="\n")
     writer.write("AUTH\t" + token + "\n")
@@ -216,7 +228,7 @@ with socket.create_connection((host, port), timeout=5) as connection:
     )
     writer.flush()
     time.sleep(0.35)
-"#,
+"##,
         minecraft = minecraft_version,
         loader = loader_version,
     );
