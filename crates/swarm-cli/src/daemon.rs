@@ -8,7 +8,7 @@ use swarm_cli::{
     authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
     host_readiness::{self, PeerReadinessObservation},
     hosting_budget, launch_guard,
-    migration::{clear_world_wake_request, world_wake_requested},
+    migration::{self, clear_world_wake_request, world_wake_requested},
 };
 use swarm_consensus::{
     elect_authority, has_quorum, membership_vote_for, reconcile_solo_history, validate_membership_certificate_shape,
@@ -30,15 +30,16 @@ use swarm_network::{
     WireResponse, MAX_BLOB_CHUNK,
 };
 use swarm_protocol::{
-    peer_id_from_public_key, AuthorityLeaseGrantV1, BlobDescriptor, EpochMode, EpochRecordV1, Hash32,
-    MembershipCertificateV1, MembershipProposalV1, MembershipRecordV1, MembershipVoteV1, PeerId, RecoveryBallotV1,
-    RecoveryCertificateV1, RecoveryVoteV1, SleepRecordV1, SnapshotManifestV1, TransferPhase, WorldDescriptorV1,
-    WorldId, WorldStatusV1, PROTOCOL_VERSION,
+    peer_id_from_public_key, AuthorityLeaseGrantV1, AuthorityTransferV1, BlobDescriptor, EpochMode, EpochRecordV1,
+    Hash32, MembershipCertificateV1, MembershipProposalV1, MembershipRecordV1, MembershipVoteV1, PeerId,
+    RecoveryBallotV1, RecoveryCertificateV1, RecoveryVoteV1, SleepRecordV1, SnapshotManifestV1, TransferPhase,
+    WorldDescriptorV1, WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{
     DurableMembershipPromiseV1, DurableRecoveryPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage,
     StorageError,
 };
+use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
@@ -49,6 +50,10 @@ const STATUS_FRESHNESS: Duration = Duration::from_secs(3);
 // request budget is exhausted. Back off beyond that admission window instead
 // of dropping replication data or busy-looping against the secured transport.
 const REPLICATION_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(11);
+// Limit snapshot verification and consent-guarded transfer phase transitions
+// running outside the mutable libp2p event loop.
+const MAX_IN_FLIGHT_TRANSFER_STEPS: usize = 4;
+const MAX_REMEMBERED_TRANSFER_ACKS: usize = 1024;
 
 #[derive(Debug, Clone)]
 enum OutboundContext {
@@ -61,6 +66,26 @@ enum OutboundContext {
     Epoch { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
     Status { world: WorldId, peer: PeerId },
     HostCapability { world: WorldId, peer: PeerId },
+    Transfer { peer: PeerId, record: AuthorityTransferV1 },
+}
+
+#[derive(Debug, Clone)]
+struct TransferDeliveryAck {
+    peer: PeerId,
+    record: AuthorityTransferV1,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AutomatedTransferStep {
+    Accept,
+    Commit,
+    Activate,
+}
+
+struct CompletedTransferStep {
+    world: WorldId,
+    step: AutomatedTransferStep,
+    result: Result<()>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -111,6 +136,7 @@ struct LeaseRuntime {
     recovery_not_before: HashMap<WorldId, Instant>,
     recovery_replication_sent: HashSet<(WorldId, PeerId)>,
     replications: HashMap<(TransportPeerId, WorldId), ReplicationState>,
+    transfer_acks: Vec<TransferDeliveryAck>,
 }
 
 struct HandlerContext<'a> {
@@ -163,6 +189,8 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
     let mut pending_manifests: HashMap<WorldId, SnapshotManifestV1> = HashMap::new();
     let mut outbound: HashMap<String, OutboundContext> = HashMap::new();
     let mut leases = LeaseRuntime::default();
+    let (transfer_done_tx, mut transfer_done_rx) = mpsc::channel::<CompletedTransferStep>(MAX_IN_FLIGHT_TRANSFER_STEPS);
+    let mut transfer_steps_in_flight = HashSet::new();
     let mut lease_tick = tokio::time::interval(PERMIT_HEARTBEAT_INTERVAL);
     lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -185,6 +213,25 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                     &mut leases,
                     Instant::now(),
                 )?;
+                if let Err(error) = drive_staged_transfers(
+                    paths,
+                    storage,
+                    &identity,
+                    &mut node,
+                    &mut outbound,
+                    &leases,
+                    &transfer_done_tx,
+                    &mut transfer_steps_in_flight,
+                ) {
+                    warn!(%error, "automated transfer tick blocked; preserving signed phase and retrying");
+                }
+            }
+            Some(done) = transfer_done_rx.recv() => {
+                transfer_steps_in_flight.remove(&done.world);
+                match done.result {
+                    Ok(()) => info!(world = %done.world, step = ?done.step, "signed transfer step committed locally"),
+                    Err(error) => warn!(world = %done.world, step = ?done.step, %error, "automatic transfer step refused; signed state remains available for retry"),
+                }
             }
             event = node.next_event() => {
                 match event? {
@@ -283,6 +330,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                                 OutboundContext::HostCapability { world, peer } => {
                                     leases.peer_capability.remove(&(world, peer));
                                 }
+                                OutboundContext::Transfer { .. } => {}
                                 OutboundContext::Manifest { .. } => {}
                                 OutboundContext::BlobChunk { world, .. } => {
                                     leases.replications.remove(&(transport_peer, world));
@@ -299,6 +347,7 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
                             leases.epoch_acks.retain(|(_, peer), _| *peer != application_peer);
                             leases.peer_status.retain(|(_, peer), _| *peer != application_peer);
                             leases.peer_capability.retain(|(_, peer), _| *peer != application_peer);
+                            leases.transfer_acks.retain(|ack| ack.peer != application_peer);
                         }
                         leases.replications.retain(|(peer, _), _| *peer != transport_peer);
                         info!(transport = %transport_peer, "peer disconnected");
@@ -313,6 +362,218 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
             }
         }
     }
+}
+
+/// A transfer is not a generic message broadcast. In a multi-member world the
+/// source must deliver each signed phase to every other voter before handing
+/// the next phase to the successor. Otherwise a witness that missed Prepared
+/// cannot validate Committed, and the successor could strand its quorum.
+/// Disconnected witnesses block progress rather than silently disappearing.
+fn transfer_witnesses(descriptor: &WorldDescriptorV1, record: &AuthorityTransferV1) -> Vec<PeerId> {
+    descriptor
+        .members
+        .iter()
+        .filter(|member| !member.banned && member.peer_id != record.from_peer_id && member.peer_id != record.to_peer_id)
+        .map(|member| member.peer_id)
+        .collect()
+}
+
+fn transfer_delivered(acks: &[TransferDeliveryAck], peer: PeerId, record: &AuthorityTransferV1) -> bool {
+    acks.iter().any(|ack| ack.peer == peer && ack.record == *record)
+}
+
+fn pending_transfer_witnesses(
+    descriptor: &WorldDescriptorV1,
+    record: &AuthorityTransferV1,
+    acks: &[TransferDeliveryAck],
+) -> Vec<PeerId> {
+    transfer_witnesses(descriptor, record).into_iter().filter(|peer| !transfer_delivered(acks, *peer, record)).collect()
+}
+
+fn transfer_recipients(
+    local: PeerId,
+    descriptor: &WorldDescriptorV1,
+    record: &AuthorityTransferV1,
+    acks: &[TransferDeliveryAck],
+) -> Vec<PeerId> {
+    let witnesses = pending_transfer_witnesses(descriptor, record, acks);
+    let candidate = match (record.phase, local) {
+        (TransferPhase::Prepared | TransferPhase::Committed, peer) if peer == record.from_peer_id => {
+            if !witnesses.is_empty() {
+                return witnesses;
+            }
+            Some(record.to_peer_id)
+        }
+        (TransferPhase::Accepted, peer) if peer == record.to_peer_id => Some(record.from_peer_id),
+        (TransferPhase::Accepted, peer) if peer == record.from_peer_id => return witnesses,
+        _ => None,
+    };
+    candidate.filter(|peer| !transfer_delivered(acks, *peer, record)).into_iter().collect()
+}
+
+/// Re-read durable, independently signed state before any automatic phase
+/// transition or retransmission. This is a conservative eligibility test;
+/// migration's existing consent guard, snapshot verification and fencing
+/// checks are still mandatory inside each actual phase operation.
+fn validate_persisted_transfer(
+    storage: &Storage,
+    descriptor: &WorldDescriptorV1,
+    record: &AuthorityTransferV1,
+) -> Result<bool> {
+    ensure_no_membership_prepare(storage, record.world_id)?;
+    verify_transfer_signature(record)?;
+    let source = authorized_descriptor_member(descriptor, record.from_peer_id)?;
+    let target = authorized_descriptor_member(descriptor, record.to_peer_id)?;
+    if !target.authority_eligible || source.peer_id == target.peer_id {
+        return Ok(false);
+    }
+    let signer = authorized_descriptor_member(descriptor, record.signer_peer_id)?;
+    let expected_signer = match record.phase {
+        TransferPhase::Prepared | TransferPhase::Committed => record.from_peer_id,
+        TransferPhase::Accepted => record.to_peer_id,
+    };
+    if record.signer_peer_id != expected_signer || record.signer_public_key != signer.public_key {
+        return Ok(false);
+    }
+    let epoch = storage.load_epoch_record(record.world_id)?;
+    if epoch.authority_peer_id != record.from_peer_id || epoch.authority_public_key != source.public_key {
+        return Ok(false);
+    }
+    let expected = AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token }
+        .checked_next()
+        .context("transfer generation exhausted")?;
+    if record.next_epoch != expected.epoch || record.next_fencing_token != expected.fencing_token {
+        return Ok(false);
+    }
+    let Some(latest) = storage.latest_snapshot(record.world_id)? else { return Ok(false) };
+    verify_snapshot_signature(&latest)?;
+    Ok(latest.manifest_hash()? == record.base_snapshot_hash)
+}
+
+fn transfer_request_pending(
+    outbound: &HashMap<String, OutboundContext>,
+    peer: PeerId,
+    record: &AuthorityTransferV1,
+) -> bool {
+    outbound.values().any(
+        |context| matches!(context, OutboundContext::Transfer { peer: p, record: r } if *p == peer && *r == *record),
+    )
+}
+
+fn launch_automated_transfer_step(
+    paths: &DataPaths,
+    record: &AuthorityTransferV1,
+    step: AutomatedTransferStep,
+    completed: &mpsc::Sender<CompletedTransferStep>,
+) -> Result<()> {
+    let paths = paths.clone();
+    let world = record.world_id;
+    let token = hex::encode(postcard::to_allocvec(record)?);
+    let completed = completed.clone();
+    // Never read/verify a large checkpoint or acquire a consent file lock in
+    // SwarmNode's mutable event loop. All three operations re-check the exact
+    // signed phase and require current membership and/or local hosting consent.
+    tokio::task::spawn_blocking(move || {
+        let result = (|| -> Result<()> {
+            let storage = Storage::open(paths.root.clone())?;
+            match step {
+                AutomatedTransferStep::Accept => {
+                    migration::accept_manual_transfer(&paths, &storage, world, &token)?;
+                }
+                AutomatedTransferStep::Commit => {
+                    migration::commit_manual_transfer(&paths, &storage, world, &token)?;
+                }
+                AutomatedTransferStep::Activate => {
+                    migration::activate_manual_transfer(&paths, &storage, world, &token)?;
+                }
+            }
+            Ok(())
+        })();
+        let _ = completed.blocking_send(CompletedTransferStep { world, step, result });
+    });
+    Ok(())
+}
+
+fn drive_staged_transfers(
+    paths: &DataPaths,
+    storage: &Storage,
+    identity: &PeerIdentity,
+    node: &mut SwarmNode,
+    outbound: &mut HashMap<String, OutboundContext>,
+    leases: &LeaseRuntime,
+    completed: &mpsc::Sender<CompletedTransferStep>,
+    in_flight: &mut HashSet<WorldId>,
+) -> Result<()> {
+    for metadata in storage.list_worlds()? {
+        let world = metadata.world_id;
+        let record = match storage.load_transfer_record(world) {
+            Ok(record) => record,
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(error) => {
+                warn!(%world, %error, "cannot read signed transfer for automatic handoff");
+                continue;
+            }
+        };
+        let descriptor = match storage.load_world_descriptor(world) {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                warn!(%world, %error, "cannot load membership for automatic handoff");
+                continue;
+            }
+        };
+        match validate_persisted_transfer(storage, &descriptor, &record) {
+            Ok(true) => {}
+            Ok(false) => continue, // Superseded, fenced, or unrelated generation.
+            Err(error) => {
+                warn!(%world, %error, "signed transfer fails canonical preflight");
+                continue;
+            }
+        }
+
+        let local = identity.peer_id();
+        let witnesses_waiting = pending_transfer_witnesses(&descriptor, &record, &leases.transfer_acks);
+        for peer in transfer_recipients(local, &descriptor, &record, &leases.transfer_acks) {
+            if transfer_request_pending(outbound, peer, &record) {
+                continue;
+            }
+            let Some((transport, _)) = leases.authenticated_peers.iter().find(|(_, member)| **member == peer) else {
+                // All configured witnesses must confirm the phase; losing a
+                // connection cannot be treated as approval to skip a voter.
+                continue;
+            };
+            match node.send_request(transport, WireRequest::AuthorityTransfer(record.clone())) {
+                Ok(id) => {
+                    outbound.insert(request_key(&id), OutboundContext::Transfer { peer, record: record.clone() });
+                }
+                Err(error) => warn!(%world, %peer, %error, "signed transfer delivery deferred"),
+            }
+        }
+
+        if in_flight.contains(&world) || in_flight.len() >= MAX_IN_FLIGHT_TRANSFER_STEPS {
+            continue;
+        }
+        let step = match (record.phase, local) {
+            (TransferPhase::Prepared, peer) if peer == record.to_peer_id => Some(AutomatedTransferStep::Accept),
+            (TransferPhase::Accepted, peer) if peer == record.from_peer_id && witnesses_waiting.is_empty() => {
+                Some(AutomatedTransferStep::Commit)
+            }
+            (TransferPhase::Committed, peer) if peer == record.to_peer_id => Some(AutomatedTransferStep::Activate),
+            _ => None,
+        };
+        if let Some(step) = step {
+            // The intent to transfer was already explicitly created by the
+            // source via the safe Fabric checkpoint barrier. The target still
+            // requires its own explicit per-world contribution consent.
+            in_flight.insert(world);
+            if let Err(error) = launch_automated_transfer_step(paths, &record, step, completed) {
+                in_flight.remove(&world);
+                warn!(%world, step = ?step, %error, "cannot schedule automatic transfer");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn maintain_authority_leases(
@@ -2076,6 +2337,16 @@ fn handle_request(
             ensure_no_membership_prepare(storage, transfer.world_id)?;
             verify_transfer_signature(&transfer)?;
             authorize_member(storage, transfer.world_id, transfer.signer_peer_id)?;
+            // Lost acknowledgements are common across reconnects. Exact
+            // signed replays of the durable phase are safe to acknowledge,
+            // but still require the current canonical base and membership.
+            if let Ok(previous) = storage.load_transfer_record(transfer.world_id) {
+                if previous == transfer {
+                    validate_transfer_shape_without_progression(storage, &transfer)?;
+                    node.respond(channel, WireResponse::TransferAccepted)?;
+                    return Ok(());
+                }
+            }
             validate_transfer(storage, &transfer)?;
             storage.save_transfer_record(&transfer)?;
             node.respond(channel, WireResponse::TransferAccepted)?;
@@ -2362,6 +2633,17 @@ fn handle_response(
         ) => {
             validate_generation_response(generation, epoch, fencing_token, "epoch")?;
             runtime.epoch_acks.insert((world, peer), generation);
+        }
+        (Some(OutboundContext::Transfer { peer, record }), WireResponse::TransferAccepted) => {
+            if runtime.authenticated_peers.get(transport_peer).copied() != Some(peer) {
+                return Err(anyhow!("transfer acknowledgement came from a different authenticated member"));
+            }
+            if !transfer_delivered(&runtime.transfer_acks, peer, &record) {
+                if runtime.transfer_acks.len() >= MAX_REMEMBERED_TRANSFER_ACKS {
+                    runtime.transfer_acks.remove(0);
+                }
+                runtime.transfer_acks.push(TransferDeliveryAck { peer, record });
+            }
         }
         (Some(OutboundContext::Status { world, peer }), WireResponse::WorldStatus(Some(status))) => {
             if status.world_id != world {
@@ -2831,35 +3113,7 @@ fn authorize_epoch(storage: &Storage, sender: PeerId, record: &EpochRecordV1) ->
 }
 
 fn validate_transfer(storage: &Storage, transfer: &swarm_protocol::AuthorityTransferV1) -> Result<()> {
-    let descriptor = storage.load_world_descriptor(transfer.world_id)?;
-    let from = descriptor.member(transfer.from_peer_id).context("transfer source is not a world member")?;
-    let to = descriptor.member(transfer.to_peer_id).context("transfer target is not a world member")?;
-    if from.banned || to.banned || !to.authority_eligible {
-        return Err(anyhow!("transfer participants are banned or target is not authority eligible"));
-    }
-    let expected_signer = match transfer.phase {
-        TransferPhase::Prepared | TransferPhase::Committed => transfer.from_peer_id,
-        TransferPhase::Accepted => transfer.to_peer_id,
-    };
-    if transfer.signer_peer_id != expected_signer {
-        return Err(anyhow!("transfer phase was signed by the wrong participant"));
-    }
-    let signer = descriptor.member(transfer.signer_peer_id).context("transfer signer is not a member")?;
-    if signer.public_key != transfer.signer_public_key {
-        return Err(anyhow!("transfer signer key does not match membership"));
-    }
-    let latest = storage.latest_snapshot(transfer.world_id)?.context("cannot transfer authority without a snapshot")?;
-    if latest.manifest_hash()? != transfer.base_snapshot_hash {
-        return Err(anyhow!("transfer does not reference the exact latest snapshot"));
-    }
-    if let Some(epoch) = load_optional_epoch_record(storage, transfer.world_id)? {
-        let expected = AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token }
-            .checked_next()
-            .context("accepted authority generation is exhausted")?;
-        if transfer.next_epoch != expected.epoch || transfer.next_fencing_token != expected.fencing_token {
-            return Err(anyhow!("transfer generation does not advance the accepted epoch exactly once"));
-        }
-    }
+    validate_transfer_shape_without_progression(storage, transfer)?;
     let previous = match storage.load_transfer_record(transfer.world_id) {
         Ok(previous) => Some(previous),
         Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
@@ -2880,6 +3134,45 @@ fn validate_transfer(storage: &Storage, transfer: &swarm_protocol::AuthorityTran
         }
     } else if transfer.phase != TransferPhase::Prepared {
         return Err(anyhow!("authority transfer must begin in the prepared phase"));
+    }
+    Ok(())
+}
+
+fn validate_transfer_shape_without_progression(
+    storage: &Storage,
+    transfer: &swarm_protocol::AuthorityTransferV1,
+) -> Result<()> {
+    let descriptor = storage.load_world_descriptor(transfer.world_id)?;
+    let from = descriptor.member(transfer.from_peer_id).context("transfer source is not a world member")?;
+    let to = descriptor.member(transfer.to_peer_id).context("transfer target is not a world member")?;
+    if from.banned || to.banned || !to.authority_eligible || from.peer_id == to.peer_id {
+        return Err(anyhow!("transfer participants are banned or target is not authority eligible"));
+    }
+    let expected_signer = match transfer.phase {
+        TransferPhase::Prepared | TransferPhase::Committed => transfer.from_peer_id,
+        TransferPhase::Accepted => transfer.to_peer_id,
+    };
+    if transfer.signer_peer_id != expected_signer {
+        return Err(anyhow!("transfer phase was signed by the wrong participant"));
+    }
+    let signer = descriptor.member(transfer.signer_peer_id).context("transfer signer is not a member")?;
+    if signer.public_key != transfer.signer_public_key {
+        return Err(anyhow!("transfer signer key does not match membership"));
+    }
+    let latest = storage.latest_snapshot(transfer.world_id)?.context("cannot transfer authority without a snapshot")?;
+    if latest.manifest_hash()? != transfer.base_snapshot_hash {
+        return Err(anyhow!("transfer does not reference the exact latest snapshot"));
+    }
+    if let Some(epoch) = load_optional_epoch_record(storage, transfer.world_id)? {
+        if epoch.authority_peer_id != from.peer_id || epoch.authority_public_key != from.public_key {
+            return Err(anyhow!("transfer source does not match accepted canonical authority"));
+        }
+        let expected = AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token }
+            .checked_next()
+            .context("accepted authority generation is exhausted")?;
+        if transfer.next_epoch != expected.epoch || transfer.next_fencing_token != expected.fencing_token {
+            return Err(anyhow!("transfer generation does not advance the accepted epoch exactly once"));
+        }
     }
     Ok(())
 }
@@ -3098,6 +3391,105 @@ mod authorization_matrix_tests {
             banned: false,
         };
         assert!(authorized_descriptor_member(&descriptor(vec![mismatched]), claimed_peer).is_err());
+    }
+}
+
+#[cfg(test)]
+mod automatic_transfer_delivery_tests {
+    use super::*;
+
+    fn peer(byte: u8) -> PeerId {
+        PeerId([byte; 32])
+    }
+
+    fn member(byte: u8) -> swarm_protocol::WorldMemberV1 {
+        swarm_protocol::WorldMemberV1 {
+            peer_id: peer(byte),
+            public_key: [byte; 32],
+            authority_eligible: true,
+            banned: false,
+        }
+    }
+
+    fn descriptor() -> WorldDescriptorV1 {
+        WorldDescriptorV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: WorldId([7; 32]),
+            compatibility_fingerprint: Hash32([5; 32]),
+            members: vec![member(1), member(2), member(3)],
+            preferred_replication_factor: 3,
+        }
+    }
+
+    fn transfer(phase: TransferPhase) -> AuthorityTransferV1 {
+        AuthorityTransferV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: WorldId([7; 32]),
+            from_peer_id: peer(1),
+            to_peer_id: peer(2),
+            base_snapshot_hash: Hash32([11; 32]),
+            next_epoch: 2,
+            next_fencing_token: 2,
+            phase,
+            signer_peer_id: if phase == TransferPhase::Accepted { peer(2) } else { peer(1) },
+            signer_public_key: if phase == TransferPhase::Accepted { [2; 32] } else { [1; 32] },
+            signature: vec![99; 64],
+        }
+    }
+
+    fn ack(peer_id: PeerId, record: AuthorityTransferV1) -> TransferDeliveryAck {
+        TransferDeliveryAck { peer: peer_id, record }
+    }
+
+    #[test]
+    fn source_never_sends_prepared_or_committed_to_target_before_witness_ack() {
+        let descriptor = descriptor();
+        for phase in [TransferPhase::Prepared, TransferPhase::Committed] {
+            let record = transfer(phase);
+            assert_eq!(transfer_recipients(peer(1), &descriptor, &record, &[]), vec![peer(3)]);
+            let acknowledged = vec![ack(peer(3), record.clone())];
+            assert_eq!(transfer_recipients(peer(1), &descriptor, &record, &acknowledged), vec![peer(2)]);
+            assert!(
+                transfer_recipients(peer(1), &descriptor, &record, &[ack(peer(2), record.clone())]).contains(&peer(3))
+            );
+            assert!(transfer_recipients(
+                peer(1),
+                &descriptor,
+                &record,
+                &[ack(peer(3), record.clone()), ack(peer(2), record.clone())]
+            )
+            .is_empty());
+        }
+    }
+
+    #[test]
+    fn accepted_phase_returns_to_source_then_is_relayed_to_witnesses() {
+        let descriptor = descriptor();
+        let accepted = transfer(TransferPhase::Accepted);
+        assert_eq!(transfer_recipients(peer(2), &descriptor, &accepted, &[]), vec![peer(1)]);
+        assert_eq!(transfer_recipients(peer(1), &descriptor, &accepted, &[]), vec![peer(3)]);
+        assert!(transfer_recipients(peer(3), &descriptor, &accepted, &[]).is_empty());
+    }
+
+    #[test]
+    fn phase_ack_is_exact_and_reconnect_requires_redelivery() {
+        let prepared = transfer(TransferPhase::Prepared);
+        let committed = transfer(TransferPhase::Committed);
+        let acks = [ack(peer(3), prepared.clone())];
+        assert!(transfer_delivered(&acks, peer(3), &prepared));
+        assert!(!transfer_delivered(&acks, peer(2), &prepared));
+        assert!(!transfer_delivered(&acks, peer(3), &committed));
+        assert_eq!(pending_transfer_witnesses(&descriptor(), &prepared, &acks), Vec::<PeerId>::new());
+        assert_eq!(pending_transfer_witnesses(&descriptor(), &committed, &acks), vec![peer(3)]);
+        assert_eq!(pending_transfer_witnesses(&descriptor(), &prepared, &[]), vec![peer(3)]);
+    }
+
+    #[test]
+    fn banned_witness_is_not_in_active_membership_but_unbanned_witness_is_required() {
+        let mut descriptor = descriptor();
+        assert_eq!(transfer_witnesses(&descriptor, &transfer(TransferPhase::Prepared)), vec![peer(3)]);
+        descriptor.members[2].banned = true;
+        assert!(transfer_witnesses(&descriptor, &transfer(TransferPhase::Prepared)).is_empty());
     }
 }
 
