@@ -161,7 +161,7 @@ pub fn sign_live_host_fabric_attestation(
     fabric: &VerifiedFabricRuntime,
     now: u64,
 ) -> Result<SignedHostFabricAttestation> {
-    if consent.world_id != fabric.world_id
+    if consent.world_id != fabric.world_id()
         || consent.peer_id != identity.peer_id()
         || !consent.enabled
         || consent.revision == 0
@@ -174,24 +174,24 @@ pub fn sign_live_host_fabric_attestation(
         || canonical.epoch == 0
         || canonical.fencing_token == 0
         || requester == PeerId::default()
-        || fabric.challenge_nonce == [0; 32]
-        || fabric.port == 0
+        || fabric.challenge_nonce() == [0; 32]
+        || fabric.port() == 0
     {
         bail!("host Fabric readiness does not match unwithdrawn hosting consent");
     }
     let mut attestation = SignedHostFabricAttestation {
-        world_id: fabric.world_id,
+        world_id: fabric.world_id(),
         realm_hash,
         authority_peer_id: identity.peer_id(),
         authority_public_key: identity.public_key(),
         authority_transport_peer: transport_peer.to_bytes(),
         requester_peer_id: requester,
-        challenge_nonce: fabric.challenge_nonce,
+        challenge_nonce: fabric.challenge_nonce(),
         canonical,
-        compatibility_fingerprint: fabric.compatibility_fingerprint,
-        runtime_instance_nonce: fabric.runtime_instance_nonce,
-        runtime_ready_proof_hash: fabric.ready_proof_hash,
-        game_server_port: fabric.port,
+        compatibility_fingerprint: fabric.compatibility_fingerprint(),
+        runtime_instance_nonce: fabric.runtime_instance_nonce(),
+        runtime_ready_proof_hash: fabric.ready_proof_hash(),
+        game_server_port: fabric.port(),
         consent_revision: consent.revision,
         consent_heap_mib: consent.heap_mib,
         issued_unix_ms: now,

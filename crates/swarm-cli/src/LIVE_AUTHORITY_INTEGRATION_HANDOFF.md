@@ -16,6 +16,10 @@ directory and reserved Minecraft loopback listener port. The returned
 `ready_proof_hash` identifies the same running instance across independently
 challenged sessions. It is **not a signature**, and neither it nor the existing
 `MigrationPhase::Ready` establishes canonical authority.
+`VerifiedFabricRuntime` has private fields and read-only accessors, so another
+CLI module cannot simply construct a fake verified instance from a cached
+status. The decoder still requires its caller to prove that the input came
+over the currently authenticated `FabricSession` (not an arbitrary text line).
 
 `live_authority::SignedLiveAuthoritySource` implements the network crate's
 `FreshAuthoritySource` trait. It accepts raw signed inputs through the

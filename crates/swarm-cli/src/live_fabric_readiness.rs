@@ -28,12 +28,41 @@ pub struct ExpectedFabricRuntime<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedFabricRuntime {
-    pub world_id: WorldId,
-    pub port: u16,
-    pub compatibility_fingerprint: Hash32,
-    pub runtime_instance_nonce: [u8; 32],
-    pub challenge_nonce: [u8; 32],
-    pub ready_proof_hash: Hash32,
+    world_id: WorldId,
+    port: u16,
+    compatibility_fingerprint: Hash32,
+    runtime_instance_nonce: [u8; 32],
+    challenge_nonce: [u8; 32],
+    ready_proof_hash: Hash32,
+}
+
+impl VerifiedFabricRuntime {
+    /// Only the readiness reply validator in this module can create this
+    /// evidence. Consumers may read verified fields but cannot mint one from
+    /// stale configuration, migration status or a disconnected process.
+    pub fn world_id(&self) -> WorldId {
+        self.world_id
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn compatibility_fingerprint(&self) -> Hash32 {
+        self.compatibility_fingerprint
+    }
+
+    pub fn runtime_instance_nonce(&self) -> [u8; 32] {
+        self.runtime_instance_nonce
+    }
+
+    pub fn challenge_nonce(&self) -> [u8; 32] {
+        self.challenge_nonce
+    }
+
+    pub fn ready_proof_hash(&self) -> Hash32 {
+        self.ready_proof_hash
+    }
 }
 
 /// Decode the reply to a fresh challenge on a live, token-authenticated IPC
