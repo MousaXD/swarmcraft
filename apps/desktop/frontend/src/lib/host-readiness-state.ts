@@ -31,33 +31,52 @@ const STATES: Record<string, [string, string, NativeReadinessView['tone']]> = {
   unknown: ['Checking shutdown safety…', UNKNOWN, 'neutral'],
 };
 
-export function parseNativeHostReadiness(response: unknown): Pick<NativeReadinessView, 'title' | 'detail' | 'tone'> {
+type ParsedNativeReadiness = Pick<NativeReadinessView, 'title' | 'detail' | 'tone'> & {
+  proofValidUntil: number | null;
+};
+
+const UNVERIFIED: ParsedNativeReadiness = {
+  title: 'Shutdown safety not verified', detail: UNKNOWN, tone: 'warning', proofValidUntil: null,
+};
+
+export function parseNativeHostReadiness(
+  response: unknown, expectedWorldId: string, now = Date.now(),
+): ParsedNativeReadiness {
   let raw: unknown = response;
   if (typeof raw === 'string') raw = JSON.parse(raw);
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('Invalid Rust host readiness envelope.');
   }
   const body = raw as Record<string, unknown>;
+  const generatedAt = body.generated_unix_ms;
+  const validUntil = typeof generatedAt === 'number' && Number.isSafeInteger(generatedAt) && generatedAt >= 0
+    ? generatedAt + 6000 : NaN;
+  if (body.world_id !== expectedWorldId || !/^scworld:[a-f\d]{64}$/i.test(expectedWorldId)
+      || !Number.isSafeInteger(validUntil)
+      || typeof now !== 'number' || !Number.isSafeInteger(now)
+      || (generatedAt as number) > now + 2000 || validUntil <= now) {
+    return UNVERIFIED;
+  }
   if (typeof body.state !== 'string') throw new Error('Missing native host readiness state.');
   const state = body.state.trim().toLowerCase().replace(/[\s-]+/g, '_');
   if (!Object.prototype.hasOwnProperty.call(STATES, state)) {
-    return { title: 'Shutdown safety not verified', detail: UNKNOWN, tone: 'warning' };
+    return UNVERIFIED;
   }
   const [title, detail, tone] = STATES[state];
   // Rust safe_to_shutdown must be affirmative; status strings alone are not
   // enough to assert the actual shutdown/recovery safety contract.
-  if ((state === 'safe' || state === 'sleeping') && body.safe_to_shutdown !== true && body.safeToShutdown !== true) {
-    return { title: 'Shutdown safety not verified', detail: UNKNOWN, tone: 'warning' };
+  if ((state === 'safe' || state === 'sleeping') && body.safe_to_shutdown !== true) {
+    return UNVERIFIED;
   }
   // A negative authoritative flag overrides contradictory state labels.
-  if (body.safe_to_shutdown === false || body.safeToShutdown === false) {
+  if (body.safe_to_shutdown === false) {
     if (state === 'safe' || state === 'sleeping') {
-      return { title: 'Shutdown safety not verified', detail: UNKNOWN, tone: 'warning' };
+      return UNVERIFIED;
     }
   }
   // Do not reflect arbitrary peer IDs, diagnostic errors or paths contained
   // in body.detail or body.peers into a privileged safety UI.
-  return { title, detail, tone };
+  return { title, detail, tone, proofValidUntil: validUntil };
 }
 
 export function createNativeHostReadinessController(
@@ -73,9 +92,16 @@ export function createNativeHostReadinessController(
   let selectedWorld = '';
   let pending: Promise<void> | null = null;
   let verifiedReadCount = 0;
+  let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function cancelExpiry() {
+    if (expiryTimer !== undefined) clearTimeout(expiryTimer);
+    expiryTimer = undefined;
+  }
 
   function clearState() {
     version += 1;
+    cancelExpiry();
     selectedWorld = '';
     pending = null;
     state.set({ ...initial(), verifiedReadCount });
@@ -85,12 +111,13 @@ export function createNativeHostReadinessController(
     state: { subscribe: state.subscribe },
     clear: clearState,
     select(world) {
-      if (!/^scworld:[^\s]+$/.test(world)) {
+      if (!/^scworld:[a-f\d]{64}$/i.test(world)) {
         clearState();
         return Promise.resolve();
       }
       if (world === selectedWorld && pending) return pending;
       const epoch = ++version;
+      cancelExpiry();
       selectedWorld = world;
       state.set({
         phase: 'checking', world,
@@ -105,12 +132,21 @@ export function createNativeHostReadinessController(
           timer = setTimeout(() => reject(new Error('Rust host readiness timed out')), timeoutMs);
         }),
       ]).then(result => {
-        const mapped = parseNativeHostReadiness(result);
+        const mapped = parseNativeHostReadiness(result, world);
         if (epoch !== version || selectedWorld !== world) return;
         verifiedReadCount += 1;
         state.set({
           phase: 'ready', world, ...mapped, busy: false, verifiedReadCount,
         });
+        if (mapped.proofValidUntil !== null) {
+          expiryTimer = setTimeout(() => {
+            if (epoch !== version || selectedWorld !== world) return;
+            state.set({
+              phase: 'unavailable', world, title: 'Shutdown safety expired',
+              detail: UNKNOWN, tone: 'warning', busy: false, verifiedReadCount,
+            });
+          }, Math.max(0, mapped.proofValidUntil - Date.now()) + 1);
+        }
       }).catch(() => {
         if (epoch !== version || selectedWorld !== world) return;
         state.set({

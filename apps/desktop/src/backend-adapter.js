@@ -396,7 +396,8 @@ export function normalizeHostReadiness(raw, expectedWorldId = null, now = Date.n
   // the presentation boundary so even a contradictory JSON object is safe.
   const generatedAt = source.generated_unix_ms;
   const fresh = Number.isSafeInteger(generatedAt) && generatedAt >= 0
-    && generatedAt <= now + 2000 && now - generatedAt <= 6000;
+    && Number.isSafeInteger(generatedAt + 6000)
+    && generatedAt <= now + 2000 && now - generatedAt < 6000;
   const worldMatches = expectedWorldId !== null && source.world_id === expectedWorldId;
   const reported = connectivityKey(source.state || 'unknown');
   const positive = (reported === 'safe' || reported === 'sleeping')
@@ -411,6 +412,8 @@ export function normalizeHostReadiness(raw, expectedWorldId = null, now = Date.n
   return {
     available: usableReport,
     state: HOST_READINESS_STATES[state] ? state : 'unknown',
+    worldId: usableReport ? expectedWorldId : null,
+    validUntil: usableReport ? generatedAt + 6000 : null,
     kind: mapped.kind,
     label: mapped.label,
     detail: state === 'unknown'

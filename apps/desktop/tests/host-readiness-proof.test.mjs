@@ -16,12 +16,16 @@ const report = () => ({
 });
 
 test('positive shutdown safety needs a fresh, matching world report and affirmative flag', () => {
-  assert.equal(normalizeHostReadiness(report(), WORLD, NOW).kind, 'safe');
+  const current = normalizeHostReadiness(report(), WORLD, NOW);
+  assert.equal(current.kind, 'safe');
+  assert.equal(current.worldId, WORLD);
+  assert.equal(current.validUntil, NOW + 5800);
   assert.equal(normalizeHostReadiness(report(), WORLD, NOW).successorPeerId, SUCCESSOR);
   for (const invalid of [
     { ...report(), safe_to_shutdown: false },
     { ...report(), safe_to_shutdown: undefined },
     { ...report(), generated_unix_ms: NOW - 7000 },
+    { ...report(), generated_unix_ms: NOW - 6000 },
     { ...report(), generated_unix_ms: NOW + 4000 },
     { ...report(), generated_unix_ms: null },
     { ...report(), world_id: OTHER },
@@ -32,6 +36,8 @@ test('positive shutdown safety needs a fresh, matching world report and affirmat
     assert.equal(state.safeToShutdown, false);
     assert.notEqual(state.kind, 'safe');
     assert.doesNotMatch(state.label, /safe to shut down/i);
+    assert.equal(state.validUntil, null);
+    assert.equal(state.worldId, null);
     assert.equal(state.successorPeerId, null);
     assert.equal(state.handoffCandidatePeerId, null);
     assert.equal(state.worldDataReplicated, false);
@@ -63,5 +69,9 @@ test('native host-readiness adapter binds the requested world instead of trustin
 test('shipping renderer refuses a false safe shutdown state even after normalization', async () => {
   const source = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
   assert.match(source, /readiness\?\.safeToShutdown !== true/);
-  assert.match(source, /\? 'unknown' : claimed/);
+  assert.match(source, /readiness\.validUntil > Date\.now\(\)/);
+  assert.match(source, /readiness\?\.worldId === selectedWorldId/);
+  assert.match(source, /readiness\.validUntil - Date\.now\(\)/);
+  assert.match(source, /function invalidateHostReadiness\(\)/);
+  assert.match(source, /document\.addEventListener\('visibilitychange', refreshVisibleHostReadiness\)/);
 });

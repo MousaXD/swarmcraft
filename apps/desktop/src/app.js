@@ -324,6 +324,8 @@ function clearSelection() {
   showInline('runtimeNotice', '');
   if (window.__swarmcraftSvelteReadinessOwned === true) {
     window.__swarmcraftSvelteReadiness?.clear();
+  } else {
+    renderHostReadiness(null);
   }
   updateWorldSpecificControls();
   updateDiagnosticsContext();
@@ -521,7 +523,10 @@ function renderHostReadiness(readiness) {
   const panel = $('hostReadinessPanel');
   if (!panel) return;
   const claimed = readiness?.state || 'unknown';
-  const state = (claimed === 'safe' || claimed === 'sleeping') && readiness?.safeToShutdown !== true
+  const proofIsCurrent = readiness?.worldId === selectedWorldId
+    && Number.isSafeInteger(readiness?.validUntil) && readiness.validUntil > Date.now();
+  const state = (claimed === 'safe' || claimed === 'sleeping')
+    && (readiness?.safeToShutdown !== true || !proofIsCurrent)
     ? 'unknown' : claimed;
   const copy = {
     safe: ['Safe to shut down this PC', 'Another ready device can take over this world.'],
@@ -567,6 +572,13 @@ async function refreshHostReadiness(world) {
     const readiness = await backend.hostReadiness(requestedWorldId);
     if (selectedWorldId === requestedWorldId && requestGeneration === hostReadinessRequestGeneration) {
       renderHostReadiness(readiness);
+      if (readiness.safeToShutdown === true && Number.isSafeInteger(readiness.validUntil)) {
+        setTimeout(() => {
+          if (selectedWorldId === requestedWorldId && requestGeneration === hostReadinessRequestGeneration) {
+            renderHostReadiness(null);
+          }
+        }, Math.max(0, readiness.validUntil - Date.now()) + 1);
+      }
     }
   } catch (error) {
     if (selectedWorldId === requestedWorldId && requestGeneration === hostReadinessRequestGeneration) {
@@ -576,9 +588,26 @@ async function refreshHostReadiness(world) {
 }
 
 function refreshVisibleHostReadiness() {
-  if (document.hidden) return;
+  if (document.hidden) {
+    hostReadinessRequestGeneration += 1;
+    if (window.__swarmcraftSvelteReadinessOwned === true) {
+      window.__swarmcraftSvelteReadiness?.clear();
+    } else {
+      renderHostReadiness(null);
+    }
+    return;
+  }
   const world = selectedWorld();
-  if (world) refreshHostReadiness(world);
+  if (world) void refreshHostReadiness(world);
+}
+
+function invalidateHostReadiness() {
+  hostReadinessRequestGeneration += 1;
+  if (window.__swarmcraftSvelteReadinessOwned === true) {
+    window.__swarmcraftSvelteReadiness?.clear();
+  } else {
+    renderHostReadiness(null);
+  }
 }
 
 function modComponent(runtimeStatus, id) {
@@ -691,6 +720,8 @@ async function openModsFolder() {
 }
 
 function selectWorld(world, { focusDetail = false } = {}) {
+  hostReadinessRequestGeneration += 1;
+  if (window.__swarmcraftSvelteReadinessOwned !== true) renderHostReadiness(null);
   gameRouteRequestGeneration += 1;
   gameRouteState = UNVERIFIED_GAME_ROUTE;
   if (selectedWorldId !== world.id) localCheckpointVerification = null;
@@ -1231,6 +1262,7 @@ function openSleepDialog() {
 
 async function sleepWorld() {
   invalidateGameRoute();
+  invalidateHostReadiness();
   await run('Stopping local Minecraft runtime…', () => backend.stopHost(worldId()), {
     successMessage: 'World runtime stopped gracefully. Replica storage can continue separately.',
   });
@@ -1279,6 +1311,7 @@ function showRuntimeValidation(issue) {
 
 async function hostWorld() {
   invalidateGameRoute();
+  invalidateHostReadiness();
   const issue = runtimeValidationIssue();
   if (issue) {
     showRuntimeValidation(issue);
@@ -1303,6 +1336,7 @@ async function hostWorld() {
 
 async function stopHost() {
   invalidateGameRoute();
+  invalidateHostReadiness();
   await run('Stopping Minecraft runtime…', () => backend.stopHost(worldId()), { successMessage: 'World stopped safely. Latest world state is checkpointed and sleeping.' });
 }
 
@@ -1316,6 +1350,7 @@ async function startDaemon() {
 
 async function stopDaemon() {
   invalidateGameRoute();
+  invalidateHostReadiness();
   await run('Stopping networking…', () => backend.stopDaemon(), { successMessage: 'Desktop-owned networking daemon stopped.' });
   setServiceWarning('Networking is stopped for this Desktop session. Start networking to restore replication and automatic migration supervision.');
 }
@@ -1342,6 +1377,7 @@ async function recoverWorld() {
 
 async function transferHost() {
   invalidateGameRoute();
+  invalidateHostReadiness();
   if (!backend.migration.capabilities.transfer) return;
   await run('Preparing host transfer…', () => backend.migration.transferAuthority(worldId()));
   await refreshMigrationState(selectedWorld());
@@ -1349,6 +1385,7 @@ async function transferHost() {
 
 async function wakeWorld() {
   invalidateGameRoute();
+  invalidateHostReadiness();
   if (!backend.migration.capabilities.wake) return;
   await run('Waking world…', () => backend.migration.wakeWorld(worldId()));
   await refreshMigrationState(selectedWorld());
@@ -1364,6 +1401,7 @@ if (window.__swarmcraftSvelteCreateOwned === true
     || window.__swarmcraftSvelteLeaveOwned === true) {
 window.__swarmcraftAfterSvelteLeave = async () => {
   invalidateGameRoute();
+  invalidateHostReadiness();
   $('leaveDialog').close();
   selectedWorldId = '';
   migrationRequestGeneration += 1;
@@ -1414,6 +1452,7 @@ if (window.__swarmcraftSvelteNetworkingOwned === true) {
     ++connectivityGeneration;
     if (outcome === 'stopped' || outcome === 'unknown') {
       invalidateGameRoute();
+      invalidateHostReadiness();
       networkStoppedBySvelte = true;
       setServiceWarning(outcome === 'stopped'
         ? 'Networking is stopped for this Desktop session. Replication and automatic migration supervision may be unavailable.'
@@ -1550,6 +1589,7 @@ window.swarmcraftRetryStartup = () => {
 window.swarmcraftRetryStartup();
 document.addEventListener('visibilitychange', refreshVisibleMigration);
 document.addEventListener('visibilitychange', refreshVisibleGameRoute);
+document.addEventListener('visibilitychange', refreshVisibleHostReadiness);
 setInterval(refreshVisibleMigration, MIGRATION_REFRESH_MS);
 setInterval(refreshVisibleGameRoute, MIGRATION_REFRESH_MS);
 setInterval(refreshVisibleHostReadiness, MIGRATION_REFRESH_MS);
