@@ -15,6 +15,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus},
     str::FromStr,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 use swarm_consensus::AuthorityGeneration;
@@ -37,6 +38,39 @@ use tracing::{info, warn};
 const FABRIC_START_TIMEOUT: Duration = Duration::from_secs(60);
 const FABRIC_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const SUPERVISOR_POLL: Duration = Duration::from_millis(250);
+const STOP_INTENT_SCHEMA_VERSION: u16 = 1;
+// serde encodes WorldId/PeerId as byte arrays; pretty JSON can be larger
+// than a compact machine token. Keep an explicit, small read ceiling.
+const MAX_STOP_INTENT_BYTES: u64 = 4 * 1024;
+static CONTROL_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Machine-local stop requests must be tied to the exact authority generation.
+/// An old UI request must never stop a newly recovered or transferred host.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StopIntentV1 {
+    schema_version: u16,
+    world_id: WorldId,
+    epoch: u64,
+    fencing_token: u64,
+    authority_peer_id: PeerId,
+}
+
+impl StopIntentV1 {
+    fn from_epoch(epoch: &EpochRecordV1) -> Self {
+        Self {
+            schema_version: STOP_INTENT_SCHEMA_VERSION,
+            world_id: epoch.world_id,
+            epoch: epoch.epoch_number,
+            fencing_token: epoch.fencing_token,
+            authority_peer_id: epoch.authority_peer_id,
+        }
+    }
+
+    fn matches_epoch(&self, epoch: &EpochRecordV1) -> bool {
+        self == &Self::from_epoch(epoch)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeLaunchConfig {
@@ -156,11 +190,24 @@ pub fn request_world_stop(paths: &DataPaths, storage: &Storage, world: WorldId) 
     if epoch.authority_peer_id != identity.peer_id() || epoch.authority_public_key != identity.public_key() {
         bail!("only the current authority may request a safe world stop");
     }
-    let path = stop_intent_path(paths, world);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&path, b"stop\n").with_context(|| format!("cannot write safe-stop intent {}", path.display()))?;
+    // The user requested a checkpoint: immediately retract the previous
+    // machine-local runtime proof and any green readiness cache, even before
+    // Java reaches its save barrier. It must not accept new game sessions
+    // during this transition.
+    host_readiness::invalidate_runtime_verification(paths, world)?;
+    host_readiness::invalidate_cached_readiness(paths, world)?;
+    publish_status(
+        paths,
+        storage,
+        world,
+        Some(MigrationTrigger::DirectHost),
+        MigrationPhase::Checkpointing,
+        false,
+        None,
+        storage.latest_snapshot(world)?.and_then(|snapshot| snapshot.manifest_hash().ok()),
+        None,
+    )?;
+    atomic_json(&stop_intent_path(paths, world), &StopIntentV1::from_epoch(&epoch))?;
     Ok(())
 }
 
@@ -1018,6 +1065,7 @@ async fn wait_for_runtime_exit(
     options: RuntimeExitOptions<'_>,
 ) -> Result<RuntimeDisposition> {
     let mut withdrawal_reported = false;
+    let mut invalid_stop_intent_reported = false;
     loop {
         if let Some(status) = child.try_wait()? {
             if !status.success() {
@@ -1047,7 +1095,20 @@ async fn wait_for_runtime_exit(
             }
             return Err(error);
         }
-        if stop_intent_path(paths, epoch.world_id).exists() {
+        let stop_requested = match load_stop_intent(paths, epoch) {
+            Ok(requested) => {
+                invalid_stop_intent_reported = false;
+                requested
+            }
+            Err(error) => {
+                if !invalid_stop_intent_reported {
+                    warn!(world = %epoch.world_id, %error, "invalid or stale safe-stop intent; refusing to stop this authority generation");
+                    invalid_stop_intent_reported = true;
+                }
+                false
+            }
+        };
+        if stop_requested {
             if let Err(error) = retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, None) {
                 warn!(world = %epoch.world_id, %error, "could not publish safe-stop checkpointing state");
             }
@@ -1252,6 +1313,10 @@ pub fn prepare_manual_transfer(
         return Ok(TransferPrepareResult::Prepared(encode_transfer(&prepared)?));
     }
 
+    // A transfer begins at the current authority, but no cached Ready proof
+    // may remain usable once a checkpoint handoff has been requested.
+    host_readiness::invalidate_runtime_verification(paths, world)?;
+    host_readiness::invalidate_cached_readiness(paths, world)?;
     atomic_bytes(&transfer_intent_path(paths, world), format!("{}\n", target).as_bytes())?;
     publish_status(
         paths,
@@ -2009,6 +2074,7 @@ fn retire_live_runtime(paths: &DataPaths, world: WorldId, phase: MigrationPhase,
     // Do this first: even if the status file is corrupt, no older local
     // runtime verification should remain available for optimistic reuse.
     host_readiness::invalidate_runtime_verification(paths, world)?;
+    host_readiness::invalidate_cached_readiness(paths, world)?;
     let mut status = load_migration_status(paths, world).context("cannot load live runtime status for retirement")?;
     if status.world_id != world.to_string() {
         bail!("live runtime status belongs to another world; cannot retire readiness safely");
@@ -2030,6 +2096,38 @@ fn migration_status_path(paths: &DataPaths, world: WorldId) -> PathBuf {
 
 fn stop_intent_path(paths: &DataPaths, world: WorldId) -> PathBuf {
     paths.root.join("runtime-control").join(world.to_hex()).join("stop.intent")
+}
+
+/// A plain `stop\n` legacy intent is not tied to a host generation and must
+/// fail closed after an authority change, rather than stopping a successor.
+fn load_stop_intent(paths: &DataPaths, epoch: &EpochRecordV1) -> Result<bool> {
+    let path = stop_intent_path(paths, epoch.world_id);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("cannot inspect safe-stop intent {}", path.display())),
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_STOP_INTENT_BYTES
+    {
+        bail!("safe-stop intent is not a bounded regular file; refusing unsafe stop");
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    fs::File::open(&path)
+        .with_context(|| format!("cannot open safe-stop intent {}", path.display()))?
+        .take(MAX_STOP_INTENT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("cannot read safe-stop intent {}", path.display()))?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_STOP_INTENT_BYTES {
+        bail!("safe-stop intent exceeded size limit; refusing unsafe stop");
+    }
+    let intent: StopIntentV1 = serde_json::from_slice(&bytes).context("safe-stop intent is malformed or obsolete")?;
+    if !intent.matches_epoch(epoch) {
+        bail!("safe-stop intent is for a different authority generation, fence or world");
+    }
+    Ok(true)
 }
 
 fn clear_stop_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
@@ -2092,15 +2190,80 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 
 fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("control file has no parent directory")?;
-    fs::create_dir_all(parent)?;
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes)?;
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path)?;
+    // Control/status files can be written by the foreground CLI while the
+    // supervisor publishes progress. Give every writer a distinct temporary
+    // file; never truncate a shared .tmp or remove the old Windows destination
+    // before the replacement is committed.
+    for directory in [parent.parent(), Some(parent)].into_iter().flatten() {
+        if let Ok(metadata) = fs::symlink_metadata(directory) {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!("control path has an unsafe symlink or non-directory ancestor: {}", directory.display());
+            }
+        }
     }
-    fs::rename(&tmp, path)?;
-    Ok(())
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(parent)?;
+    if fs::symlink_metadata(parent)?.file_type().is_symlink() {
+        bail!("control path directory was replaced by an unsafe symlink");
+    }
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("control file path is an unsafe symlink or non-regular file: {}", path.display());
+        }
+    }
+    let seq = CONTROL_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}.{}.tmp", std::process::id(), seq));
+    let result = (|| -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        replace_control_file_atomically(&tmp, path)?;
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_control_file_atomically(tmp: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(tmp, destination)
+}
+
+#[cfg(windows)]
+fn replace_control_file_atomically(tmp: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
+    }
+    let old = tmp.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let new = destination.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    // SAFETY: both buffers are valid NUL-terminated UTF-16 for this call.
+    let result = unsafe { MoveFileExW(old.as_ptr(), new.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn epoch_record_hash(record: &EpochRecordV1) -> Result<Hash32> {
@@ -2111,6 +2274,22 @@ fn epoch_record_hash(record: &EpochRecordV1) -> Result<Hash32> {
 #[cfg(test)]
 mod runtime_retirement_tests {
     use super::*;
+
+    fn epoch(world: WorldId) -> EpochRecordV1 {
+        EpochRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            epoch_number: 4,
+            previous_epoch_hash: None,
+            base_state_hash: Hash32([4; 32]),
+            authority_peer_id: PeerId([5; 32]),
+            authority_public_key: [6; 32],
+            mode: EpochMode::Quorum,
+            fencing_token: 9,
+            reason: "stop-intent-test".into(),
+            signature: Vec::new(),
+        }
+    }
 
     fn ready_status(world: WorldId) -> MigrationStatus {
         MigrationStatus {
@@ -2135,6 +2314,8 @@ mod runtime_retirement_tests {
         atomic_json(&migration_status_path(&paths, world), &ready_status(world)).unwrap();
         let proof = control_dir(&paths, world).join("runtime-verified.json");
         fs::write(&proof, b"previous runtime proof").unwrap();
+        let readiness = control_dir(&paths, world).join("host-readiness.json");
+        fs::write(&readiness, b"previous green readiness").unwrap();
 
         retire_live_runtime(&paths, world, MigrationPhase::Checkpointing, Some("hosting consent withdrawn")).unwrap();
         let retired = load_migration_status(&paths, world).unwrap();
@@ -2146,6 +2327,7 @@ mod runtime_retirement_tests {
         assert_eq!(retired.epoch, Some(4));
         assert_eq!(retired.fencing_token, Some(9));
         assert!(!proof.exists());
+        assert!(!readiness.exists());
 
         retire_live_runtime(&paths, world, MigrationPhase::Blocked, Some("checkpoint failed")).unwrap();
         let blocked = load_migration_status(&paths, world).unwrap();
@@ -2164,5 +2346,93 @@ mod runtime_retirement_tests {
         fs::write(&proof, b"previous runtime proof").unwrap();
         assert!(retire_live_runtime(&paths, world, MigrationPhase::Superseded, None).is_err());
         assert!(!proof.exists());
+    }
+
+    #[test]
+    fn safe_stop_intent_must_match_exact_world_epoch_fence_and_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(dir.path());
+        let current = epoch(WorldId([30; 32]));
+        let intent_path = stop_intent_path(&paths, current.world_id);
+        assert!(!load_stop_intent(&paths, &current).unwrap());
+
+        atomic_json(&intent_path, &StopIntentV1::from_epoch(&current)).unwrap();
+        assert!(load_stop_intent(&paths, &current).unwrap());
+
+        let mut advanced = current.clone();
+        advanced.epoch_number += 1;
+        assert!(load_stop_intent(&paths, &advanced).is_err());
+        advanced = current.clone();
+        advanced.fencing_token += 1;
+        assert!(load_stop_intent(&paths, &advanced).is_err());
+        advanced = current.clone();
+        advanced.authority_peer_id = PeerId([31; 32]);
+        assert!(load_stop_intent(&paths, &advanced).is_err());
+
+        fs::write(&intent_path, b"stop\n").unwrap();
+        assert!(
+            load_stop_intent(&paths, &current).is_err(),
+            "legacy plain stop cannot survive an authority transition"
+        );
+        fs::write(&intent_path, vec![b'X'; MAX_STOP_INTENT_BYTES as usize + 1]).unwrap();
+        assert!(load_stop_intent(&paths, &current).is_err(), "oversized stop must fail closed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_stop_intent_does_not_request_a_checkpoint() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(dir.path());
+        let current = epoch(WorldId([31; 32]));
+        let path = stop_intent_path(&paths, current.world_id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let unrelated = dir.path().join("unrelated-stop");
+        fs::write(&unrelated, serde_json::to_vec(&StopIntentV1::from_epoch(&current)).unwrap()).unwrap();
+        symlink(&unrelated, &path).unwrap();
+        assert!(load_stop_intent(&paths, &current).is_err());
+        assert!(atomic_json(&path, &StopIntentV1::from_epoch(&current)).is_err());
+        assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn concurrent_status_writes_never_publish_truncated_json() {
+        use std::sync::{atomic::AtomicBool, Arc, Barrier};
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(dir.path());
+        let world = WorldId([32; 32]);
+        let path = migration_status_path(&paths, world);
+        atomic_json(&path, &ready_status(world)).unwrap();
+        let active = Arc::new(AtomicBool::new(true));
+        let barrier = Arc::new(Barrier::new(3));
+        let reader_path = path.clone();
+        let reader_active = Arc::clone(&active);
+        let reader_barrier = Arc::clone(&barrier);
+        let reader = std::thread::spawn(move || {
+            reader_barrier.wait();
+            while reader_active.load(Ordering::Relaxed) {
+                let bytes = fs::read(&reader_path).unwrap();
+                let status: MigrationStatus = serde_json::from_slice(&bytes).expect("torn migration status read");
+                assert_eq!(status.world_id, world.to_string());
+            }
+        });
+        let writer_barrier = Arc::clone(&barrier);
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            writer_barrier.wait();
+            for _ in 0..20 {
+                atomic_json(&writer_path, &ready_status(world)).unwrap();
+            }
+        });
+        barrier.wait();
+        for _ in 0..20 {
+            let mut status = ready_status(world);
+            status.phase = MigrationPhase::Checkpointing;
+            status.runtime_ready = false;
+            atomic_json(&path, &status).unwrap();
+        }
+        writer.join().unwrap();
+        active.store(false, Ordering::Relaxed);
+        reader.join().unwrap();
     }
 }
