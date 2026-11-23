@@ -142,6 +142,11 @@ impl GatewayRouteResolver for SyntheticResolver {
 async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
     timeout(Duration::from_secs(25), async {
         let temp = TempDir::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let host_key = SigningKey::generate(&mut OsRng);
         let player_key = SigningKey::generate(&mut OsRng);
         let host_hello = hello(&host_key, 1);

@@ -473,6 +473,11 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let root = tempfile::tempdir().unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            }
             let key = SigningKey::from_bytes(&[42; 32]);
             let host_transport = Keypair::generate_ed25519().public().to_peer_id();
             let requester_transport = Keypair::generate_ed25519().public().to_peer_id();
@@ -736,5 +741,33 @@ mod tests {
         let mut values = threads.into_iter().map(|thread| thread.join().unwrap()).collect::<Vec<_>>();
         values.sort_unstable();
         assert_eq!(values, (1..=8).collect::<Vec<_>>());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signing_sequence_cannot_be_allocated_under_replaceable_storage_parent() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let f = Fixture::new();
+        let shared = f.root.path().join("shared-parent");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o770)).unwrap();
+        let unsafe_dir = shared.join("private-sequences");
+        let sequencer = DurableHostOfferSequencer::new(&unsafe_dir);
+        assert!(matches!(
+            sequencer.reserve_next(f.world, Hash32([1; 32]), 1, 1),
+            Err(GameRouteError::InvalidTranscript)
+        ));
+        assert!(!unsafe_dir.exists());
+
+        let private = f.root.path().join("trusted");
+        fs::create_dir(&private).unwrap();
+        let link = f.root.path().join("linked-parent");
+        symlink(private.clone(), &link).unwrap();
+        let sequencer = DurableHostOfferSequencer::new(link.join("sequences"));
+        assert!(matches!(
+            sequencer.reserve_next(f.world, Hash32([1; 32]), 1, 1),
+            Err(GameRouteError::InvalidTranscript)
+        ));
+        assert!(!private.join("sequences").exists());
     }
 }

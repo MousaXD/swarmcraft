@@ -4,6 +4,7 @@ mod admission;
 pub mod authority_capability;
 mod diagnostics;
 mod discovery;
+mod game_durable_path;
 pub mod game_port_registry;
 pub mod game_route;
 pub mod game_route_control;

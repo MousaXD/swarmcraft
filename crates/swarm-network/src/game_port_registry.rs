@@ -7,6 +7,7 @@
 //! authorization credential; game_route and game_transport still independently
 //! verify each join.
 
+use crate::game_durable_path::validate_durable_ancestors;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -106,6 +107,7 @@ impl GameWorldPortRegistry {
     }
 
     fn create_directory(&self) -> Result<(), GamePortRegistryError> {
+        validate_durable_ancestors(&self.directory).map_err(|_| GamePortRegistryError::CorruptRegistry)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -122,6 +124,7 @@ impl GameWorldPortRegistry {
         if fs::symlink_metadata(&self.directory)?.file_type().is_symlink() {
             return Err(GamePortRegistryError::CorruptRegistry);
         }
+        validate_durable_ancestors(&self.directory).map_err(|_| GamePortRegistryError::CorruptRegistry)?;
         Ok(())
     }
 
@@ -320,7 +323,7 @@ mod tests {
     #[test]
     fn symlinked_record_and_directory_fail_closed() {
         use std::os::unix::fs::symlink;
-        let root = tempdir().unwrap();
+        let root = secure_test_dir();
         let registry = GameWorldPortRegistry::new(root.path().join("ports"));
         let a = WorldId([9; 32]);
         registry.reserve(a, 39000).unwrap();
@@ -334,6 +337,27 @@ mod tests {
         let linked = GameWorldPortRegistry::new(root.path().join("linked"));
         symlink(root.path().join("ports"), root.path().join("linked")).unwrap();
         assert!(matches!(linked.reserve(WorldId([11; 32]), 39002), Err(GamePortRegistryError::CorruptRegistry)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_or_symlinked_parent_cannot_replace_a_private_world_port_registry() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let root = secure_test_dir();
+        let shared = root.path().join("group-writable");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o770)).unwrap();
+        let registry = GameWorldPortRegistry::new(shared.join("ports"));
+        assert!(matches!(registry.reserve(WorldId([14; 32]), 25580), Err(GamePortRegistryError::CorruptRegistry)));
+        assert!(!shared.join("ports").exists(), "reject before creating durable data in untrusted ancestry");
+
+        let private = root.path().join("private");
+        fs::create_dir(&private).unwrap();
+        let linked = root.path().join("linked-parent");
+        symlink(&private, &linked).unwrap();
+        let registry = GameWorldPortRegistry::new(linked.join("ports"));
+        assert!(matches!(registry.reserve(WorldId([15; 32]), 25581), Err(GamePortRegistryError::CorruptRegistry)));
+        assert!(!private.join("ports").exists());
     }
 
     #[cfg(unix)]

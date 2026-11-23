@@ -245,6 +245,11 @@ async fn signed_offer_and_challenge_traverse_separate_authenticated_control_chan
         remote_offer.verify_signature().unwrap();
 
         let root = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let verifier = RouteVerifier::new(root.path().join("route-floors"));
         let challenge = verifier.issue_challenge(&remote_offer, app_player, player_transport).unwrap();
         let mut impersonating = challenge.clone();

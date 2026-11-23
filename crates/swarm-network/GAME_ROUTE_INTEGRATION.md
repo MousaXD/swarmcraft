@@ -84,6 +84,7 @@ The test `tests/game_stream_loopback.rs` illustrates the complete network wiring
 - TCP copy state is kept **pinned across heartbeat ticks**, preserving backpressure without dropping buffered game bytes.
 - The signed route's durable generation floor updates by atomic sibling replacement: Unix rename or Windows `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`. No temporary removal of the old floor and no success if persistence fails.
 - Server binds **only loopback**; no public Minecraft listener, DNS endpoint, port forwarding, untrusted successor, or raw TCP proxy fallback.
+- Durable generation floors, host offer sequences, and per-world gateway port registries reject writable or symlinked storage ancestors on Unix (except root-owned sticky temporary roots such as /tmp). A private leaf under a replaceable parent is not durable anti-rollback state. Use a dedicated private application-data path, never a group-writable repository or world save.
 - Unsupported or unproven realm transitions fail closed; V2 rollout needs explicit versioned route transcript review. Production quorum and IPC adapters have not been shipped by Agent 2.
 
 ## Verification performed and not performed

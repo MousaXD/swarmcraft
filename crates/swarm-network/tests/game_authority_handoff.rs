@@ -240,6 +240,11 @@ async fn rejected_new_join(port: u16) {
 async fn old_host_is_fenced_and_fresh_successor_rejoins_same_gateway_port() {
     timeout(Duration::from_secs(25), async {
         let root = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let world = WorldId([31; 32]);
         let key_a = SigningKey::generate(&mut OsRng);
         let key_b = SigningKey::generate(&mut OsRng);

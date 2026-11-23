@@ -7,7 +7,7 @@ use rand_core::OsRng;
 use std::{
     net::{Ipv4Addr, SocketAddrV4, TcpListener as StdTcpListener},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, RwLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -28,7 +28,7 @@ use swarm_protocol::{peer_id_from_public_key, Hash32, PeerHelloV1, PeerId, World
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
-    sync::watch,
+    sync::{watch, Notify},
     time::timeout,
 };
 
@@ -64,6 +64,32 @@ struct SyntheticQuorum {
     offer: MinecraftRouteOfferV1,
     player: PeerId,
     quorum_ready: AtomicBool,
+}
+
+/// Only the client-side verifier is delayed. The real authenticated host
+/// control handler and hosting game receiver continue using the immediate
+/// synthetic source, so this exercises an otherwise blocking client proof
+/// without also stalling host-side signing on a single-thread Tokio runtime.
+struct DelayedClientProof {
+    source: Arc<SyntheticQuorum>,
+    delay_ms: AtomicU64,
+    entered: Notify,
+}
+
+impl FreshAuthoritySource for DelayedClientProof {
+    fn verify_fresh(
+        &self,
+        world: WorldId,
+        requester: PeerId,
+        nonce: [u8; 32],
+    ) -> Result<FreshAuthorityEvidence, GameRouteError> {
+        let delay = self.delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            self.entered.notify_one();
+            std::thread::sleep(Duration::from_millis(delay));
+        }
+        self.source.verify_fresh(world, requester, nonce)
+    }
 }
 
 impl FreshAuthoritySource for SyntheticQuorum {
@@ -111,6 +137,11 @@ impl FreshAuthoritySource for SyntheticQuorum {
 async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_evidence() {
     timeout(Duration::from_secs(25), async {
         let root = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let host_key = SigningKey::generate(&mut OsRng);
         let unresponsive_key = SigningKey::generate(&mut OsRng);
         let player_key = SigningKey::generate(&mut OsRng);
@@ -220,6 +251,11 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
             player: player_app,
             quorum_ready: AtomicBool::new(true),
         });
+        let delayed_client_proof = Arc::new(DelayedClientProof {
+            source: Arc::clone(&quorum),
+            delay_ms: AtomicU64::new(0),
+            entered: Notify::new(),
+        });
         let host_signer = AuthenticatedGameRouteHostSigner::new(
             host_key.clone(), host_transport, quorum.clone(),
             root.path().join("private-host-offer-sequences"),
@@ -231,7 +267,7 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
             player.game_route_rpc_client(),
             RouteVerifier::new(root.path().join("private-floors")),
             player.game_authenticated_peers(),
-            quorum.clone(),
+            delayed_client_proof.clone(),
             hints.clone(),
         )
         .unwrap());
@@ -350,6 +386,46 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
             .expect("stalled candidate must not block the current authority")
             .expect("fresh independently verified host should be selected");
         assert_eq!(verified_successor.world_id(), world);
+
+        // A real quorum/Fabric adapter may do synchronous I/O. The network
+        // driver's current-thread Tokio reactor must remain responsive while
+        // the resolver verifies it. Begin only after the control request
+        // budget's documented 2-second window has recovered.
+        *hints.hosts.write().unwrap() = vec![host_transport];
+        tokio::time::sleep(Duration::from_millis(2_200)).await;
+        delayed_client_proof.delay_ms.store(350, Ordering::SeqCst);
+        let slow_resolver = Arc::clone(&resolver);
+        let mut slow_join = tokio::spawn(async move { slow_resolver.resolve(world).await });
+        timeout(Duration::from_secs(3), delayed_client_proof.entered.notified())
+            .await
+            .expect("signed reply must reach independent proof verification");
+        assert!(
+            timeout(Duration::from_millis(60), &mut slow_join).await.is_err(),
+            "a synchronous authority check must never block the Tokio reactor"
+        );
+        assert!(slow_join.await.unwrap().is_ok(), "a completed, fresh delayed proof should still authorize");
+        delayed_client_proof.delay_ms.store(0, Ordering::SeqCst);
+
+        // An indefinitely slow real authority adapter cannot hold a gateway
+        // connection forever. Tokio cannot kill an OS blocking function, so
+        // the resolver returns within its three-second deadline while the
+        // worker's owned resource permit remains held until it exits.
+        tokio::time::sleep(Duration::from_millis(2_200)).await;
+        delayed_client_proof.delay_ms.store(3_800, Ordering::SeqCst);
+        let timed_resolver = Arc::clone(&resolver);
+        let mut timed_join = tokio::spawn(async move { timed_resolver.resolve(world).await });
+        timeout(Duration::from_secs(3), delayed_client_proof.entered.notified())
+            .await
+            .expect("the stalled proof must have started");
+        let bounded_result = timeout(Duration::from_millis(3_300), &mut timed_join)
+            .await
+            .expect("stalled proof must not outlive the resolver deadline")
+            .expect("the resolver task must not panic");
+        assert!(bounded_result.is_err(), "a timed-out proof must never authorize gameplay");
+        delayed_client_proof.delay_ms.store(0, Ordering::SeqCst);
+        // Allow the detached but still resource-accounted blocking worker to
+        // finish before tearing down this disposable test world.
+        tokio::time::sleep(Duration::from_millis(900)).await;
 
         stop_gateway.send(true).unwrap();
         stop_host.send(true).unwrap();

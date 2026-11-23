@@ -119,6 +119,12 @@ impl Fixture {
             expires_unix_ms: now_ms() + 10_000,
             signature: vec![],
         };
+        let root = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         Self {
             host_key,
             host_transport,
@@ -133,7 +139,7 @@ impl Fixture {
                 consent: AtomicBool::new(true),
                 runtime_ready: AtomicBool::new(true),
             }),
-            root: tempfile::tempdir().unwrap(),
+            root,
         }
     }
 

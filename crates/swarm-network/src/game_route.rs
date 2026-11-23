@@ -546,6 +546,9 @@ pub(crate) fn reject_symlink(path: &Path) -> Result<(), GameRouteError> {
 /// directory where another local user could unlink it and force a downgrade.
 /// Never follow a symlink as the final floor directory component.
 pub(crate) fn ensure_private_floor_directory(path: &Path) -> Result<(), GameRouteError> {
+    // A private leaf is not durable anti-rollback state if another user can
+    // replace a writable or symlinked ancestor with an older directory.
+    crate::game_durable_path::validate_durable_ancestors(path).map_err(|_| GameRouteError::InvalidTranscript)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -563,6 +566,7 @@ pub(crate) fn ensure_private_floor_directory(path: &Path) -> Result<(), GameRout
         fs::create_dir_all(path)?;
         reject_symlink(path)?;
     }
+    crate::game_durable_path::validate_durable_ancestors(path).map_err(|_| GameRouteError::InvalidTranscript)?;
     Ok(())
 }
 
@@ -1035,6 +1039,31 @@ mod tests {
         fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
         let verifier = RouteVerifier::new(shared);
         assert!(matches!(f.verify(&verifier, &f.source()), Err(GameRouteError::InvalidTranscript)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_or_symlinked_floor_parent_cannot_reset_the_generation() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let mut f = Fixture::new();
+        f.sign();
+
+        let shared = f.root.path().join("shared-parent");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o770)).unwrap();
+        let floor_dir = shared.join("private-floor");
+        let verifier = RouteVerifier::new(&floor_dir);
+        assert!(matches!(f.verify(&verifier, &f.source()), Err(GameRouteError::InvalidTranscript)));
+        assert!(!floor_dir.exists(), "fail before creating state under a replaceable parent");
+
+        let trusted = f.root.path().join("trusted");
+        fs::create_dir(&trusted).unwrap();
+        let link = f.root.path().join("linked-parent");
+        symlink(&trusted, &link).unwrap();
+        let floor_dir = link.join("private-floor");
+        let verifier = RouteVerifier::new(&floor_dir);
+        assert!(matches!(f.verify(&verifier, &f.source()), Err(GameRouteError::InvalidTranscript)));
+        assert!(!trusted.join("private-floor").exists(), "must not follow symlinked floor parent");
     }
 
     #[cfg(windows)]
