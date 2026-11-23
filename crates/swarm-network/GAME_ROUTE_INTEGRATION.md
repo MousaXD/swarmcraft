@@ -4,6 +4,32 @@
 
 ## Trust boundary / Agent 1 integration contract
 
+### Authenticated route-control channel (new)
+
+The network crate also exports a separate libp2p protocol named
+/swarmcraft/minecraft-route-control/1. It is NOT the legacy snapshot protocol
+and does not grant canonical authority by itself. The two typed requests are
+Offer (with WorldId) and Challenge (with the verifier-issued one-use challenge);
+the replies are signed Offer, signed ChallengeResponse, or an explicit Refused
+reason. A signed answer must still pass the independent RouteVerifier.
+
+For daemon integration, call SwarmNode.take_game_route_control_events() once,
+then poll SwarmNode.next_event() and drain the returned bounded receiver in
+the same asynchronous event loop. Inbound events include authenticated
+application/transport identity and a typed reply channel. The daemon must
+independently validate membership, current canonical quorum, fencing,
+hosting consent and live Fabric readiness before it signs either reply.
+Use SwarmNode.send_game_route_request() and respond_game_route() for the
+two control messages. The legacy exhaustive NetworkEvent enum is unchanged.
+**The existing daemon does NOT subscribe and therefore refuses route control
+requests; this new protocol is not production-integrated yet.**
+
+The control protocol uses bounded 1024-byte requests, 4096-byte replies,
+5-second request deadline, up to 16 concurrent control streams, 32 outstanding
+outbound requests, 8 inbound requests per authenticated peer per 2 seconds,
+and a 32-event queue. Late, unsolicited, wrong-world, misbound, stale-connection
+and malformed replies cannot be promoted into verified game sessions.
+
 The following Rust APIs are exported by `swarm_network`:
 
 | API | Role |

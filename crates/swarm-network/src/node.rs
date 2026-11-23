@@ -3,7 +3,13 @@ use crate::{
         application_connection_allowed, auth_challenge_expired, primary_connection_limits, AdmissionController,
         AUTH_CHALLENGE_TIMEOUT,
     },
-    build_peer_hello_proof, verify_peer_hello, verify_peer_hello_proof,
+    build_peer_hello_proof,
+    game_route_control::{
+        GameRouteControlEvent, GameRouteControlRequestV1, GameRouteControlResponseV1, GameRouteRefusalV1,
+        GAME_ROUTE_CONTROL_EVENT_QUEUE, GAME_ROUTE_CONTROL_MAX_OUTSTANDING, GAME_ROUTE_CONTROL_MAX_REQUESTS_PER_WINDOW,
+        GAME_ROUTE_CONTROL_MAX_REQUEST_BYTES, GAME_ROUTE_CONTROL_MAX_RESPONSE_BYTES, GAME_ROUTE_CONTROL_PROTOCOL,
+    },
+    verify_peer_hello, verify_peer_hello_proof,
     wire::WireRequest,
     wire::WireResponse,
     ConnectivityDiagnosticsV1, ConnectivityIssueKindV1, ConnectivityIssueV1, NatStatusV1,
@@ -30,11 +36,14 @@ use std::{
     time::{Duration, Instant},
 };
 use swarm_protocol::{PeerHelloV1, PeerId, PROTOCOL_VERSION};
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 pub const WIRE_PROTOCOL: &str = "/swarmcraft/1";
 pub const BOOTSTRAP_ENV: &str = "SWARMCRAFT_BOOTSTRAP";
 pub const RELAY_ENV: &str = "SWARMCRAFT_RELAY";
+const GAME_ROUTE_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+const GAME_ROUTE_CONTROL_BUDGET_WINDOW: Duration = Duration::from_secs(2);
 
 // libp2p-swarm-derive 0.36.0 emits unreachable code for an uninhabited
 // connection_limits event on Rust 1.100. Only the generated behaviour lives
@@ -47,6 +56,7 @@ mod generated_behaviour {
     #[derive(NetworkBehaviour)]
     pub(super) struct Behaviour {
         pub(super) request_response: cbor::Behaviour<WireRequest, WireResponse>,
+        pub(super) game_route_control: cbor::Behaviour<GameRouteControlRequestV1, GameRouteControlResponseV1>,
         pub(super) game_stream: stream::Behaviour,
         pub(super) mdns: mdns::tokio::Behaviour,
         pub(super) identify: identify::Behaviour,
@@ -96,6 +106,13 @@ pub enum NetworkEvent {
     },
 }
 
+struct PendingGameRouteControl {
+    peer: TransportPeerId,
+    connection_id: ConnectionId,
+    request: GameRouteControlRequestV1,
+    issued_at: Instant,
+}
+
 #[derive(Debug, Clone)]
 struct RelayFallbackPlan {
     relay_address: Multiaddr,
@@ -116,6 +133,10 @@ pub struct SwarmNode {
     application_signing_key: SigningKey,
     authenticated: HashMap<TransportPeerId, (PeerId, ConnectionId)>,
     game_authenticated: Arc<RwLock<HashMap<TransportPeerId, PeerId>>>,
+    pending_game_route: HashMap<request_response::OutboundRequestId, PendingGameRouteControl>,
+    game_route_budgets: HashMap<TransportPeerId, (Instant, u32)>,
+    game_route_events_tx: mpsc::Sender<GameRouteControlEvent>,
+    game_route_events_rx: Option<mpsc::Receiver<GameRouteControlEvent>>,
     pending_challenges: HashMap<TransportPeerId, (ConnectionId, [u8; 32], Instant)>,
     active_connections: HashMap<TransportPeerId, ConnectionId>,
     connection_counts: HashMap<TransportPeerId, usize>,
@@ -141,6 +162,16 @@ impl SwarmNode {
             request_response::Config::default()
                 .with_request_timeout(Duration::from_secs(30))
                 .with_max_concurrent_streams(128),
+        );
+        // Separate from snapshot messages and with independent resource bounds.
+        let game_route_control = request_response::Behaviour::with_codec(
+            cbor::codec::Codec::<GameRouteControlRequestV1, GameRouteControlResponseV1>::default()
+                .set_request_size_maximum(GAME_ROUTE_CONTROL_MAX_REQUEST_BYTES)
+                .set_response_size_maximum(GAME_ROUTE_CONTROL_MAX_RESPONSE_BYTES),
+            [(StreamProtocol::new(GAME_ROUTE_CONTROL_PROTOCOL), ProtocolSupport::Full)],
+            request_response::Config::default()
+                .with_request_timeout(GAME_ROUTE_CONTROL_TIMEOUT)
+                .with_max_concurrent_streams(16),
         );
         let mdns =
             mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer).context("failed to initialize mDNS")?;
@@ -168,6 +199,7 @@ impl SwarmNode {
             .with_relay_client(noise::Config::new, yamux::Config::default)?
             .with_behaviour(move |_, relay_client| Behaviour {
                 request_response,
+                game_route_control,
                 game_stream: stream::Behaviour::new(),
                 mdns,
                 identify,
@@ -180,12 +212,17 @@ impl SwarmNode {
             })?
             .build();
 
+        let (game_route_events_tx, game_route_events_rx) = mpsc::channel(GAME_ROUTE_CONTROL_EVENT_QUEUE);
         let mut node = Self {
             swarm,
             local_hello,
             application_signing_key,
             authenticated: HashMap::new(),
             game_authenticated: Arc::new(RwLock::new(HashMap::new())),
+            pending_game_route: HashMap::new(),
+            game_route_budgets: HashMap::new(),
+            game_route_events_tx,
+            game_route_events_rx: Some(game_route_events_rx),
             pending_challenges: HashMap::new(),
             active_connections: HashMap::new(),
             connection_counts: HashMap::new(),
@@ -220,6 +257,14 @@ impl SwarmNode {
     /// The receiver must STILL verify canonical world membership separately.
     pub fn game_authenticated_peers(&self) -> Arc<RwLock<HashMap<TransportPeerId, PeerId>>> {
         Arc::clone(&self.game_authenticated)
+    }
+
+    /// At most one game-route controller can subscribe. The network driver
+    /// MUST keep polling next_event() and drain this receiver concurrently.
+    /// Without a subscriber, all route offers/challenges fail closed; the
+    /// existing replication daemon remains compatible and unchanged.
+    pub fn take_game_route_control_events(&mut self) -> Option<mpsc::Receiver<GameRouteControlEvent>> {
+        self.game_route_events_rx.take()
     }
 
     pub fn connectivity_diagnostics(&self) -> ConnectivityDiagnosticsV1 {
@@ -440,6 +485,72 @@ impl SwarmNode {
             .map_err(|_| anyhow!("response channel closed"))
     }
 
+    /// Only an already application-authenticated peer can receive a game
+    /// route control request. The reply is never an authorization capability
+    /// until RouteVerifier independently validates live canonical history.
+    pub fn send_game_route_request(
+        &mut self,
+        peer: &TransportPeerId,
+        request: GameRouteControlRequestV1,
+    ) -> Result<request_response::OutboundRequestId> {
+        if self.game_route_events_rx.is_some() || self.game_route_events_tx.is_closed() {
+            return Err(anyhow!("game route control events must have a live subscriber"));
+        }
+        request.validate().map_err(|_| anyhow!("invalid game route control request"))?;
+        if let GameRouteControlRequestV1::Challenge(ref challenge) = request {
+            if challenge.requester_peer_id != self.local_hello.peer_id
+                || challenge.requester_transport_peer != self.local_transport_peer_id().to_bytes()
+            {
+                return Err(anyhow!("game route challenge requester must match the authenticated local identity"));
+            }
+        }
+        let connection_id = self
+            .authenticated
+            .get(peer)
+            .filter(|(_, id)| {
+                self.active_connections.get(peer) == Some(id) && self.connection_counts.get(peer) == Some(&1)
+            })
+            .map(|(_, id)| *id)
+            .ok_or_else(|| anyhow!("game route peer must complete connection-bound application authentication"))?;
+        self.pending_game_route
+            .retain(|_, pending| pending.issued_at.elapsed() < GAME_ROUTE_CONTROL_TIMEOUT + Duration::from_secs(1));
+        if self.pending_game_route.len() >= GAME_ROUTE_CONTROL_MAX_OUTSTANDING {
+            return Err(anyhow!("game route control outstanding request limit reached"));
+        }
+        let request_id = self.swarm.behaviour_mut().game_route_control.send_request(peer, request.clone());
+        self.pending_game_route.insert(
+            request_id,
+            PendingGameRouteControl { peer: *peer, connection_id, request, issued_at: Instant::now() },
+        );
+        Ok(request_id)
+    }
+
+    pub fn respond_game_route(
+        &mut self,
+        channel: request_response::ResponseChannel<GameRouteControlResponseV1>,
+        response: GameRouteControlResponseV1,
+    ) -> Result<()> {
+        response.validate().map_err(|_| anyhow!("invalid game route control reply"))?;
+        self.swarm
+            .behaviour_mut()
+            .game_route_control
+            .send_response(channel, response)
+            .map_err(|_| anyhow!("game route control response channel closed"))
+    }
+
+    fn admit_game_route_control(&mut self, peer: TransportPeerId) -> bool {
+        let now = Instant::now();
+        let entry = self.game_route_budgets.entry(peer).or_insert((now, 0));
+        if now.duration_since(entry.0) >= GAME_ROUTE_CONTROL_BUDGET_WINDOW {
+            *entry = (now, 0);
+        }
+        if entry.1 >= GAME_ROUTE_CONTROL_MAX_REQUESTS_PER_WINDOW {
+            return false;
+        }
+        entry.1 += 1;
+        true
+    }
+
     pub async fn next_event(&mut self) -> Result<NetworkEvent> {
         loop {
             self.expire_stale_auth_challenges();
@@ -499,6 +610,8 @@ impl SwarmNode {
                     self.connection_counts.insert(peer_id, num_established.get() as usize);
                     self.authenticated.remove(&peer_id);
                     self.game_authenticated.write().expect("game auth registry poisoned").remove(&peer_id);
+                    self.pending_game_route.retain(|_, pending| pending.peer != peer_id);
+                    self.game_route_budgets.remove(&peer_id);
                     self.pending_challenges.remove(&peer_id);
                     debug!(transport_peer = %peer_id, %connection_id, %num_established, relayed = endpoint.is_relayed(), ?path_kind, "peer connected");
 
@@ -518,6 +631,8 @@ impl SwarmNode {
                     self.connection_paths.remove(&connection_id);
                     self.refresh_connectivity_paths();
                     self.connection_counts.insert(peer_id, num_established as usize);
+                    self.pending_game_route
+                        .retain(|_, pending| pending.peer != peer_id || pending.connection_id != connection_id);
                     if self
                         .authenticated
                         .get(&peer_id)
@@ -540,6 +655,7 @@ impl SwarmNode {
                         self.game_authenticated.write().expect("game auth registry poisoned").remove(&peer_id);
                         self.pending_challenges.remove(&peer_id);
                         self.admission.forget_peer(peer_id);
+                        self.game_route_budgets.remove(&peer_id);
                         return Ok(NetworkEvent::Disconnected { transport_peer: peer_id });
                     }
 
@@ -791,6 +907,122 @@ impl SwarmNode {
                         }
                         request_response::Event::InboundFailure { peer, error, .. } => {
                             warn!(transport_peer = %peer, %error, "inbound request failed");
+                        }
+                        request_response::Event::ResponseSent { .. } => {}
+                    }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::GameRouteControl(event)) => {
+                    match event {
+                        request_response::Event::Message { peer, connection_id, message } => match message {
+                            request_response::Message::Request { request, channel, .. } => {
+                                let application_peer = self
+                                    .authenticated
+                                    .get(&peer)
+                                    .filter(|(_, authenticated_connection)| {
+                                        *authenticated_connection == connection_id
+                                            && self.active_connections.get(&peer) == Some(authenticated_connection)
+                                            && self.connection_counts.get(&peer) == Some(&1)
+                                    })
+                                    .map(|(application_peer, _)| *application_peer);
+                                let Some(application_peer) = application_peer else {
+                                    let _ = self.respond_game_route(
+                                        channel,
+                                        GameRouteControlResponseV1::Refused(GameRouteRefusalV1::Unauthorized),
+                                    );
+                                    continue;
+                                };
+                                if request.validate().is_err() {
+                                    let _ = self.respond_game_route(
+                                        channel,
+                                        GameRouteControlResponseV1::Refused(GameRouteRefusalV1::ExpiredOrMalformed),
+                                    );
+                                    continue;
+                                }
+                                if let GameRouteControlRequestV1::Challenge(challenge) = &request {
+                                    if challenge.requester_peer_id != application_peer
+                                        || challenge.requester_transport_peer != peer.to_bytes()
+                                    {
+                                        let _ = self.respond_game_route(
+                                            channel,
+                                            GameRouteControlResponseV1::Refused(GameRouteRefusalV1::Unauthorized),
+                                        );
+                                        continue;
+                                    }
+                                }
+                                if !self.admit_game_route_control(peer) {
+                                    let _ = self.respond_game_route(
+                                        channel,
+                                        GameRouteControlResponseV1::Refused(GameRouteRefusalV1::RateLimited),
+                                    );
+                                    continue;
+                                }
+                                if self.game_route_events_rx.is_some() || self.game_route_events_tx.is_closed() {
+                                    let _ = self.respond_game_route(
+                                        channel,
+                                        GameRouteControlResponseV1::Refused(GameRouteRefusalV1::Unavailable),
+                                    );
+                                    continue;
+                                }
+                                if self.game_route_events_tx.capacity() == 0 {
+                                    let _ = self.respond_game_route(
+                                        channel,
+                                        GameRouteControlResponseV1::Refused(GameRouteRefusalV1::RateLimited),
+                                    );
+                                    continue;
+                                }
+                                // Unsubscribed or overloaded controllers cannot grant access.
+                                let _ = self.game_route_events_tx.try_send(GameRouteControlEvent::Inbound {
+                                    transport_peer: peer,
+                                    application_peer,
+                                    request,
+                                    channel,
+                                });
+                            }
+                            request_response::Message::Response { request_id, response } => {
+                                let Some(pending) = self.pending_game_route.remove(&request_id) else {
+                                    continue; // Never accept unsolicited or late responses.
+                                };
+                                let current =
+                                    self.authenticated.get(&peer).is_some_and(|(_, authenticated_connection)| {
+                                        *authenticated_connection == connection_id
+                                            && self.connection_counts.get(&peer) == Some(&1)
+                                            && self.active_connections.get(&peer) == Some(authenticated_connection)
+                                    });
+                                if pending.peer != peer
+                                    || pending.connection_id != connection_id
+                                    || pending.issued_at.elapsed() >= GAME_ROUTE_CONTROL_TIMEOUT
+                                    || !current
+                                    || response.validate().is_err()
+                                    || !pending.request.accepts_response(&response)
+                                {
+                                    warn!(transport_peer = %peer, "discarded invalid/stale game route control reply");
+                                    continue;
+                                }
+                                if self
+                                    .game_route_events_tx
+                                    .try_send(GameRouteControlEvent::Response {
+                                        transport_peer: peer,
+                                        request_id,
+                                        response,
+                                    })
+                                    .is_err()
+                                {
+                                    warn!(transport_peer = %peer, "game route controller unavailable or overloaded");
+                                }
+                            }
+                        },
+                        request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
+                            if self.pending_game_route.remove(&request_id).is_none() {
+                                continue;
+                            }
+                            let _ = self.game_route_events_tx.try_send(GameRouteControlEvent::OutboundFailure {
+                                transport_peer: peer,
+                                request_id,
+                                error: error.to_string(),
+                            });
+                        }
+                        request_response::Event::InboundFailure { peer, error, .. } => {
+                            debug!(transport_peer = %peer, %error, "game route control request failed");
                         }
                         request_response::Event::ResponseSent { .. } => {}
                     }
