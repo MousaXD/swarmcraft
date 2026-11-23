@@ -25,6 +25,9 @@ use swarm_core::{
     verify_snapshot_signature, verify_transfer_signature, DataPaths, PeerIdentity,
 };
 use swarm_network::{
+    game_route_control::{
+        GameRouteControlEvent, GameRouteControlRequestV1, GameRouteControlResponseV1, GameRouteRefusalV1,
+    },
     load_or_create_transport_key, validate_invite_dial_address, BlobResumeV1, HostCapabilityV1, HostRuntimeReadinessV1,
     NetworkEvent, ReplicaAckV1, ResponseChannel, ServerModsReadinessV1, SwarmNode, TransportPeerId, WireRequest,
     WireResponse, MAX_BLOB_CHUNK,
@@ -187,6 +190,12 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
         "host-readiness-v1".into(),
     ])?;
     let mut node = SwarmNode::new(transport_key, hello, identity.network_signing_key())?;
+    // One bounded subscriber is mandatory for route-control RPCs. Until the
+    // daemon can inject a real current-quorum plus live Fabric verifier, this
+    // subscriber explicitly refuses every route instead of timing out. It
+    // MUST NOT sign even an Offer from persisted migration Ready data.
+    let mut game_route_events =
+        node.take_game_route_control_events().context("authenticated game-route control subscription already owned")?;
     node.listen(listen.parse().context("invalid listen multiaddress")?)?;
     dial_pending_invite_bootstraps(storage, &mut node)?;
     info!(peer = %identity.peer_id(), %listen, "SwarmCraft daemon starting");
@@ -201,6 +210,23 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
 
     loop {
         tokio::select! {
+            Some(event) = game_route_events.recv() => {
+                match event {
+                    GameRouteControlEvent::Inbound { transport_peer, application_peer, request, channel } => {
+                        let authenticated = node.application_peer(&transport_peer) == Some(application_peer);
+                        let response = disabled_game_route_response(&request, authenticated);
+                        if let Err(error) = node.respond_game_route(channel, response) {
+                            tracing::debug!(%transport_peer, %error, "game route denial could not be delivered");
+                        }
+                    }
+                    GameRouteControlEvent::Response { transport_peer, .. } => {
+                        tracing::debug!(%transport_peer, "unexpected game route response while authority provider is disabled");
+                    }
+                    GameRouteControlEvent::OutboundFailure { transport_peer, error, .. } => {
+                        tracing::debug!(%transport_peer, %error, "game route request failed while authority provider is disabled");
+                    }
+                }
+            }
             _ = lease_tick.tick() => {
                 retry_due_replication(
                     storage,
@@ -371,6 +397,24 @@ pub async fn run(paths: &DataPaths, storage: &Storage, listen: &str) -> Result<(
             }
         }
     }
+}
+
+/// This is a security boundary, not a placeholder success path. Production
+/// route signing, host game streams and local Minecraft gateways stay
+/// disabled until the daemon owns independently verified signed quorum,
+/// membership/consent/fence and a live authenticated Fabric challenge.
+fn disabled_game_route_response(
+    request: &GameRouteControlRequestV1,
+    authenticated: bool,
+) -> GameRouteControlResponseV1 {
+    let reason = if !authenticated {
+        GameRouteRefusalV1::Unauthorized
+    } else if request.validate().is_err() {
+        GameRouteRefusalV1::ExpiredOrMalformed
+    } else {
+        GameRouteRefusalV1::QuorumUnavailable
+    };
+    GameRouteControlResponseV1::Refused(reason)
 }
 
 /// A transfer is not a generic message broadcast. In a multi-member world the
@@ -3655,6 +3699,65 @@ mod authorization_matrix_tests {
             banned: false,
         };
         assert!(authorized_descriptor_member(&descriptor(vec![mismatched]), claimed_peer).is_err());
+    }
+}
+
+#[cfg(test)]
+mod game_route_disabled_tests {
+    use super::*;
+    use swarm_network::game_route::MinecraftRouteChallengeV1;
+
+    fn offer() -> GameRouteControlRequestV1 {
+        GameRouteControlRequestV1::Offer { world_id: WorldId([7; 32]) }
+    }
+
+    fn challenge() -> GameRouteControlRequestV1 {
+        let mut transport_bytes = vec![0, 32]; // libp2p identity multihash, 32-byte digest
+        transport_bytes.extend_from_slice(&[12; 32]);
+        let transport = TransportPeerId::from_bytes(&transport_bytes).expect("valid test peer ID");
+        GameRouteControlRequestV1::Challenge(Box::new(MinecraftRouteChallengeV1 {
+            world_id: WorldId([7; 32]),
+            offer_hash: Hash32([8; 32]),
+            requester_peer_id: PeerId([9; 32]),
+            requester_transport_peer: transport.to_bytes(),
+            nonce: [10; 32],
+        }))
+    }
+
+    #[test]
+    fn authenticated_offer_and_challenge_never_route_without_live_proof_provider() {
+        for request in [offer(), challenge()] {
+            assert!(request.validate().is_ok());
+            assert_eq!(
+                disabled_game_route_response(&request, true),
+                GameRouteControlResponseV1::Refused(GameRouteRefusalV1::QuorumUnavailable)
+            );
+            assert_eq!(
+                disabled_game_route_response(&request, false),
+                GameRouteControlResponseV1::Refused(GameRouteRefusalV1::Unauthorized)
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_route_control_request_is_never_treated_as_a_valid_offer() {
+        let invalid = GameRouteControlRequestV1::Offer { world_id: WorldId::default() };
+        assert_eq!(
+            disabled_game_route_response(&invalid, true),
+            GameRouteControlResponseV1::Refused(GameRouteRefusalV1::ExpiredOrMalformed)
+        );
+        assert_eq!(
+            disabled_game_route_response(&invalid, false),
+            GameRouteControlResponseV1::Refused(GameRouteRefusalV1::Unauthorized)
+        );
+        let mut malformed = challenge();
+        if let GameRouteControlRequestV1::Challenge(ref mut value) = malformed {
+            value.nonce = [0; 32];
+        }
+        assert_eq!(
+            disabled_game_route_response(&malformed, true),
+            GameRouteControlResponseV1::Refused(GameRouteRefusalV1::ExpiredOrMalformed)
+        );
     }
 }
 

@@ -66,6 +66,13 @@ planned handoff, never silently lower its authority requirements.
 
 ## Not implemented / explicit integration dependencies
 
+- The daemon now owns the one-time bounded game-route control subscriber and
+  drains authenticated inbound `Offer` and `Challenge` events alongside the
+  existing polled `SwarmNode` network loop. **Until the real live verifier is
+  injected**, valid requests receive `QuorumUnavailable`, malformed requests
+  receive `ExpiredOrMalformed`, and lost application authentication receives
+  `Unauthorized`. This is an intentional deny-only handler, not a working
+  game-route responder; it does not create a signer, receiver or gateway.
 - The real, nonce-bound `FreshAuthoritySource` adapter integrating current
   canonical signed quorum/membership/fencing, local consent and authenticated
   live Fabric IPC is **not** available in this branch. Do not enable game
@@ -98,9 +105,10 @@ flock -x /tmp/swarmcraft-sabathon-cargo.lock sh -c \
    CARGO_BUILD_JOBS=2 cargo clippy -p swarm-cli --bin swarmcraft --offline --jobs 2 -- -D warnings'
 ```
 
-On 23 Nov 2026 the full `swarmcraft` binary unit suite passed **31/31**
+On 23 Nov 2026 the full `swarmcraft` binary unit suite passed **33/33**
 and strict `swarmcraft` binary Clippy passed on the Agent 3 worktree.
 These tests include phase ordering, witness gate, replay/redelivery,
 checkpoint-ack identity, exact activated successor generation, and the
-no-stale-lease/no-recovery fence across every handoff phase.
+no-stale-lease/no-recovery fence across every handoff phase, plus disabled
+route-control refusal for valid and malformed authenticated requests.
 They are **source/local tests, not a three-machine Minecraft field pass**.
