@@ -494,6 +494,27 @@ async fn invalid_transfer_target_does_not_kill_authority_and_withdrawal_still_ch
     })
     .await
     .expect("invalid transfer intent must be rejected and cleared");
+
+    // A former request to a VALID target must also be rejected if its
+    // generation no longer matches the currently running authority. A stale
+    // request must not cause a checkpoint merely because the target remains
+    // eligible after a recovery or a later transfer.
+    let stale_intent = serde_json::json!({
+        "schema_version": 1,
+        "world_id": shared.world,
+        "epoch": shared.epoch.epoch_number + 1,
+        "fencing_token": shared.epoch.fencing_token,
+        "authority_peer_id": alice.identity.peer_id(),
+        "target_peer_id": bob.identity.peer_id(),
+    });
+    fs::write(&intent, serde_json::to_vec(&stale_intent).unwrap()).unwrap();
+    timeout(Duration::from_secs(5), async {
+        while intent.exists() {
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("stale generation transfer intent must be rejected and cleared");
     let status = migration::load_migration_status(&alice.paths, shared.world).unwrap();
     assert_eq!(status.phase, MigrationPhase::Ready);
     assert!(status.runtime_ready);

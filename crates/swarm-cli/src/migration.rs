@@ -14,7 +14,6 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus},
-    str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
@@ -42,6 +41,8 @@ const STOP_INTENT_SCHEMA_VERSION: u16 = 1;
 // serde encodes WorldId/PeerId as byte arrays; pretty JSON can be larger
 // than a compact machine token. Keep an explicit, small read ceiling.
 const MAX_STOP_INTENT_BYTES: u64 = 4 * 1024;
+const TRANSFER_INTENT_SCHEMA_VERSION: u16 = 1;
+const MAX_TRANSFER_INTENT_BYTES: u64 = 4 * 1024;
 static CONTROL_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Machine-local stop requests must be tied to the exact authority generation.
@@ -69,6 +70,41 @@ impl StopIntentV1 {
 
     fn matches_epoch(&self, epoch: &EpochRecordV1) -> bool {
         self == &Self::from_epoch(epoch)
+    }
+}
+
+/// A local transfer request is scoped to the exact authority generation.
+/// This is not signed transfer authorization: that is created only after
+/// Fabric has checkpointed and the canonical generation is revalidated.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct TransferIntentV1 {
+    schema_version: u16,
+    world_id: WorldId,
+    epoch: u64,
+    fencing_token: u64,
+    authority_peer_id: PeerId,
+    target_peer_id: PeerId,
+}
+
+impl TransferIntentV1 {
+    fn from_epoch(epoch: &EpochRecordV1, target_peer_id: PeerId) -> Self {
+        Self {
+            schema_version: TRANSFER_INTENT_SCHEMA_VERSION,
+            world_id: epoch.world_id,
+            epoch: epoch.epoch_number,
+            fencing_token: epoch.fencing_token,
+            authority_peer_id: epoch.authority_peer_id,
+            target_peer_id,
+        }
+    }
+
+    fn matches_epoch(&self, epoch: &EpochRecordV1) -> bool {
+        self.schema_version == TRANSFER_INTENT_SCHEMA_VERSION
+            && self.world_id == epoch.world_id
+            && self.epoch == epoch.epoch_number
+            && self.fencing_token == epoch.fencing_token
+            && self.authority_peer_id == epoch.authority_peer_id
     }
 }
 
@@ -1144,7 +1180,7 @@ async fn wait_for_runtime_exit(
         // Prefer any already-requested signed transfer checkpoint. A withdrawn
         // contribution otherwise requests the same Fabric save barrier used by
         // a safe user stop; a failed barrier does NOT kill an unfenced JVM.
-        match load_transfer_intent(paths, epoch.world_id) {
+        match load_transfer_intent(paths, epoch) {
             Ok(Some(target)) => match validate_transfer_target(storage, identity, epoch.world_id, target) {
                 Ok(()) => {
                     if let Err(error) = retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, None)
@@ -1190,7 +1226,12 @@ async fn wait_for_runtime_exit(
                 }
             },
             Ok(None) => {}
-            Err(error) => warn!(world = %epoch.world_id, %error, "ignoring unreadable transfer intent"),
+            Err(error) => {
+                warn!(world = %epoch.world_id, %error, "rejecting stale or malformed transfer intent without stopping Minecraft");
+                if let Err(clear_error) = clear_transfer_intent(paths, epoch.world_id) {
+                    warn!(world = %epoch.world_id, %clear_error, "cannot clear rejected transfer intent");
+                }
+            }
         }
         let withdrawal = match hosting_budget::runtime_withdrawal(paths, epoch.world_id, options.admission.consent()) {
             Ok(reason) => reason,
@@ -1317,7 +1358,7 @@ pub fn prepare_manual_transfer(
     // may remain usable once a checkpoint handoff has been requested.
     host_readiness::invalidate_runtime_verification(paths, world)?;
     host_readiness::invalidate_cached_readiness(paths, world)?;
-    atomic_bytes(&transfer_intent_path(paths, world), format!("{}\n", target).as_bytes())?;
+    atomic_json(&transfer_intent_path(paths, world), &TransferIntentV1::from_epoch(&epoch, target))?;
     publish_status(
         paths,
         storage,
@@ -2189,13 +2230,35 @@ fn control_dir(paths: &DataPaths, world: WorldId) -> PathBuf {
     paths.root.join("control").join(world.to_hex())
 }
 
-fn load_transfer_intent(paths: &DataPaths, world: WorldId) -> Result<Option<PeerId>> {
-    let path = transfer_intent_path(paths, world);
-    if !path.exists() {
-        return Ok(None);
+fn load_transfer_intent(paths: &DataPaths, epoch: &EpochRecordV1) -> Result<Option<PeerId>> {
+    let path = transfer_intent_path(paths, epoch.world_id);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("cannot inspect transfer intent {}", path.display())),
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_TRANSFER_INTENT_BYTES
+    {
+        bail!("transfer intent is not a bounded regular file; refusing unsafe transfer");
     }
-    let value = fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-    Ok(Some(PeerId::from_str(value.trim()).context("transfer intent contains an invalid peer ID")?))
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    fs::File::open(&path)
+        .with_context(|| format!("cannot open transfer intent {}", path.display()))?
+        .take(MAX_TRANSFER_INTENT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("cannot read transfer intent {}", path.display()))?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_TRANSFER_INTENT_BYTES {
+        bail!("transfer intent exceeded size limit; refusing unsafe transfer");
+    }
+    let intent: TransferIntentV1 =
+        serde_json::from_slice(&bytes).context("transfer intent is malformed or obsolete")?;
+    if !intent.matches_epoch(epoch) {
+        bail!("transfer intent is for a different authority generation, fence or world");
+    }
+    Ok(Some(intent.target_peer_id))
 }
 
 fn clear_transfer_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
@@ -2455,6 +2518,63 @@ mod runtime_retirement_tests {
         );
         fs::write(&intent_path, vec![b'X'; MAX_STOP_INTENT_BYTES as usize + 1]).unwrap();
         assert!(load_stop_intent(&paths, &current).is_err(), "oversized stop must fail closed");
+    }
+
+    #[test]
+    fn transfer_intent_requires_exact_world_generation_fence_and_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(dir.path());
+        let current = epoch(WorldId([36; 32]));
+        let target = PeerId([37; 32]);
+        let intent_path = transfer_intent_path(&paths, current.world_id);
+
+        assert_eq!(load_transfer_intent(&paths, &current).unwrap(), None);
+        atomic_json(&intent_path, &TransferIntentV1::from_epoch(&current, target)).unwrap();
+        assert_eq!(load_transfer_intent(&paths, &current).unwrap(), Some(target));
+
+        let mut successor = current.clone();
+        successor.epoch_number += 1;
+        assert!(load_transfer_intent(&paths, &successor).is_err());
+        successor = current.clone();
+        successor.fencing_token += 1;
+        assert!(load_transfer_intent(&paths, &successor).is_err());
+        successor = current.clone();
+        successor.authority_peer_id = PeerId([38; 32]);
+        assert!(load_transfer_intent(&paths, &successor).is_err());
+
+        let mut wrong_world = TransferIntentV1::from_epoch(&current, target);
+        wrong_world.world_id = WorldId([39; 32]);
+        atomic_json(&intent_path, &wrong_world).unwrap();
+        assert!(load_transfer_intent(&paths, &current).is_err());
+        let mut unknown_version = TransferIntentV1::from_epoch(&current, target);
+        unknown_version.schema_version += 1;
+        atomic_json(&intent_path, &unknown_version).unwrap();
+        assert!(load_transfer_intent(&paths, &current).is_err());
+
+        // Legacy unscoped target text must not cause a checkpoint after
+        // migration to the generation-fenced format.
+        fs::write(&intent_path, format!("{}\n", target)).unwrap();
+        assert!(load_transfer_intent(&paths, &current).is_err());
+        fs::write(&intent_path, vec![b'X'; MAX_TRANSFER_INTENT_BYTES as usize + 1]).unwrap();
+        assert!(load_transfer_intent(&paths, &current).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_transfer_intent_cannot_trigger_checkpoint() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(dir.path());
+        let current = epoch(WorldId([40; 32]));
+        let intent_path = transfer_intent_path(&paths, current.world_id);
+        fs::create_dir_all(intent_path.parent().unwrap()).unwrap();
+        let outside = dir.path().join("unrelated-transfer");
+        fs::write(&outside, serde_json::to_vec(&TransferIntentV1::from_epoch(&current, PeerId([41; 32]))).unwrap())
+            .unwrap();
+        symlink(&outside, &intent_path).unwrap();
+        assert!(load_transfer_intent(&paths, &current).is_err());
+        assert!(atomic_json(&intent_path, &TransferIntentV1::from_epoch(&current, PeerId([41; 32]))).is_err());
+        assert!(fs::symlink_metadata(&intent_path).unwrap().file_type().is_symlink());
     }
 
     #[cfg(unix)]
