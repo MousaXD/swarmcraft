@@ -30,7 +30,10 @@ use swarm_protocol::WorldId;
 use thiserror::Error;
 
 pub const MAX_DURABLE_GAME_REPLAYS: usize = 256;
-const REPLAY_LEDGER_VERSION: u8 = 1;
+// V2 records a durable observed-time floor. A signed challenge that was
+// pruned after a forward wall-clock jump must never become replayable when
+// the system clock is subsequently set backwards.
+const REPLAY_LEDGER_VERSION: u8 = 2;
 const MAX_LEDGER_BYTES: u64 = 128 + (MAX_DURABLE_GAME_REPLAYS as u64 * 48);
 const TIMESTAMP_TOLERANCE_MS: u64 = 2_000;
 
@@ -61,6 +64,9 @@ struct ReplayEntry {
 struct ReplayRecord {
     version: u8,
     world_id: WorldId,
+    /// Highest admission clock seen for this world, persisted atomically
+    /// with pruning. Regressing the clock fails closed across restarts.
+    latest_observed_unix_ms: u64,
     #[serde(deserialize_with = "deserialize_bounded_entries")]
     entries: Vec<ReplayEntry>,
 }
@@ -113,6 +119,7 @@ impl DurableGameStreamReplayLedger {
     ) -> Result<(), GameStreamReplayError> {
         if world_id == WorldId::default()
             || challenge_nonce == [0; 32]
+            || now_unix_ms == 0
             || signed_response_expiry_ms <= now_unix_ms
             || signed_response_expiry_ms
                 > now_unix_ms.saturating_add(MAX_ROUTE_RESPONSE_AGE_MS + TIMESTAMP_TOLERANCE_MS)
@@ -144,8 +151,22 @@ impl DurableGameStreamReplayLedger {
         let mut record = if path.exists() {
             Self::read_record(&path, world_id)?
         } else {
-            ReplayRecord { version: REPLAY_LEDGER_VERSION, world_id, entries: Vec::new() }
+            ReplayRecord {
+                version: REPLAY_LEDGER_VERSION,
+                world_id,
+                latest_observed_unix_ms: now_ms,
+                entries: Vec::new(),
+            }
         };
+        // A forward clock correction may already have pruned a challenge
+        // that was valid before it. Without a durable clock floor, a later
+        // backwards correction could make that signed challenge valid again
+        // after its one-use entry was removed. Do not silently roll back
+        // the admission clock, even for a small negative adjustment.
+        if now_ms < record.latest_observed_unix_ms {
+            return Err(GameStreamReplayError::InvalidState);
+        }
+        record.latest_observed_unix_ms = now_ms;
         // Old challenges cannot be replayed once expired because the signed
         // response verifier also rejects them. Prune only those entries.
         record.entries.retain(|entry| entry.signed_response_expiry_ms > now_ms);
@@ -190,6 +211,7 @@ impl DurableGameStreamReplayLedger {
         if !trailing.is_empty()
             || record.version != REPLAY_LEDGER_VERSION
             || record.world_id != world_id
+            || record.latest_observed_unix_ms == 0
             || record.entries.len() > MAX_DURABLE_GAME_REPLAYS
             || record
                 .entries
@@ -240,6 +262,39 @@ mod tests {
     }
 
     #[test]
+    fn forward_clock_jump_then_rollback_cannot_resurrect_a_pruned_signed_challenge() {
+        let dir = secured();
+        let path = dir.path().join("game-replay");
+        let world = WorldId([25; 32]);
+        let base = 100_000;
+        let signed_nonce = [31; 32];
+        let ledger = DurableGameStreamReplayLedger::new(&path);
+        ledger.consume(world, signed_nonce, base + 2_000, base).unwrap();
+
+        // A clock jump beyond the signed expiry correctly prunes the entry
+        // while processing another newly signed challenge.
+        let future = base + 4_000;
+        ledger.consume(world, [32; 32], future + 2_000, future).unwrap();
+        drop(ledger);
+
+        // Even though the old signed response LOOKS valid again under the
+        // rolled-back clock, a restarted host refuses the entire attempt.
+        let restarted = DurableGameStreamReplayLedger::new(path);
+        assert!(matches!(
+            restarted.consume(world, signed_nonce, base + 2_000, base + 1_000),
+            Err(GameStreamReplayError::InvalidState)
+        ));
+        // Small negative adjustments also fail closed; there is no
+        // time-skew window that could re-admit a pruned one-use nonce.
+        assert!(matches!(
+            restarted.consume(world, [33; 32], future + 2_000, future - 1),
+            Err(GameStreamReplayError::InvalidState)
+        ));
+        // Normal advancement still permits a *fresh* challenge.
+        restarted.consume(world, [34; 32], future + 2_001, future + 1).unwrap();
+    }
+
+    #[test]
     fn corrupted_world_or_noncanonical_ledger_never_resets_replay_protection() {
         let dir = secured();
         let path = dir.path().join("game-replay");
@@ -250,9 +305,16 @@ mod tests {
         let old = std::fs::read(&record).unwrap();
         std::fs::write(&record, b"invalid-ledger").unwrap();
         assert!(matches!(ledger.consume(world, [4; 32], 1050, 1000), Err(GameStreamReplayError::InvalidState)));
-        std::fs::write(&record, [old, vec![0xaa]].concat()).unwrap();
+        std::fs::write(&record, [old.clone(), vec![0xaa]].concat()).unwrap();
         assert!(matches!(ledger.consume(world, [4; 32], 1050, 1000), Err(GameStreamReplayError::InvalidState)));
         std::fs::write(&record, vec![0; MAX_LEDGER_BYTES as usize + 5]).unwrap();
+        assert!(matches!(ledger.consume(world, [4; 32], 1050, 1000), Err(GameStreamReplayError::InvalidState)));
+
+        // Do not silently load or reset an old on-disk schema that lacks the
+        // clock floor needed to preserve one-use replay protection.
+        let mut legacy = old;
+        legacy[0] = REPLAY_LEDGER_VERSION - 1;
+        std::fs::write(&record, legacy).unwrap();
         assert!(matches!(ledger.consume(world, [4; 32], 1050, 1000), Err(GameStreamReplayError::InvalidState)));
     }
 
@@ -315,6 +377,7 @@ mod tests {
         // length in postcard's little-endian varint encoding.
         let mut poisoned = vec![REPLAY_LEDGER_VERSION];
         poisoned.extend_from_slice(&world.0);
+        poisoned.extend_from_slice(&postcard::to_allocvec(&1_000u64).unwrap());
         poisoned.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x0f]);
         std::fs::write(path, poisoned).unwrap();
         assert!(matches!(ledger.consume(world, [2; 32], 1_500, 1_000), Err(GameStreamReplayError::InvalidState)));
