@@ -1,3 +1,4 @@
+use fs2::FileExt;
 #[cfg(unix)]
 use std::fs::File;
 use std::{
@@ -28,8 +29,74 @@ pub fn refresh_permit(
     heartbeat: u64,
 ) -> io::Result<()> {
     let path = permit_path(paths, world);
-    let value = format!("{} {} {}\n", generation.epoch, generation.fencing_token, heartbeat);
+    let _lock = lock_permit_publication(&path)?;
+    let floor_path = permit_floor_path(&path);
+    let floor = read_saved_permit(&floor_path)?;
+    // Upgrade from an earlier daemon that wrote only authority.permit. A
+    // signed/canonical lease must still be checked by the caller before this
+    // function; local counters alone NEVER authorize an authority.
+    let visible = match read_saved_permit(&path) {
+        Ok(visible) => visible,
+        // A valid durable floor lets a healthy publisher repair corrupted
+        // visible permit bytes. Readers remain fenced until the replacement.
+        Err(error) if floor.is_some() && error.kind() == io::ErrorKind::InvalidData => None,
+        Err(error) => return Err(error),
+    };
+    let requested_generation = (generation.epoch, generation.fencing_token);
+    let mut next_heartbeat = heartbeat;
+    for (previous_generation, previous_heartbeat) in [floor, visible].into_iter().flatten() {
+        let previous_generation = (previous_generation.epoch, previous_generation.fencing_token);
+        if previous_generation > requested_generation {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "stale authority generation cannot replace a newer permit floor",
+            ));
+        }
+        if previous_generation == requested_generation {
+            next_heartbeat =
+                next_heartbeat.max(previous_heartbeat.checked_add(1).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "authority heartbeat floor exhausted")
+                })?);
+        }
+    }
+    let value = format!("{} {} {}\n", generation.epoch, generation.fencing_token, next_heartbeat);
+    // Publish the durable floor BEFORE the visible permit. If either write
+    // fails, a subsequent publisher must not reuse the previous counter.
+    write_permit_atomically(&floor_path, value.as_bytes())?;
     write_permit_atomically(&path, value.as_bytes())
+}
+
+fn permit_floor_path(permit: &Path) -> PathBuf {
+    permit.with_extension("permit.floor")
+}
+
+fn lock_permit_publication(permit: &Path) -> io::Result<fs::File> {
+    let parent = permit.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "permit has no parent"))?;
+    ensure_private_permit_directory(parent)?;
+    let lock_path = parent.join("authority.permit.lock");
+    reject_unsafe_entry(&lock_path, false)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options.open(&lock_path)?;
+    FileExt::lock_exclusive(&lock)?;
+    reject_unsafe_entry(&lock_path, false)?;
+    Ok(lock)
+}
+
+fn read_saved_permit(path: &Path) -> io::Result<Option<(AuthorityGeneration, u64)>> {
+    let text = match read_private_permit(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    parse_permit(&text)
+        .map(Some)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed authority heartbeat floor or permit"))
 }
 
 /// Fabric polls this file while Rust refreshes it. Never truncate the published
@@ -38,22 +105,7 @@ pub fn refresh_permit(
 /// the ordinary heartbeat timeout still fails closed if no refresh succeeds.
 fn write_permit_atomically(path: &Path, value: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "permit has no parent"))?;
-    // An attacker-controlled/symlinked control path must never redirect an
-    // authority heartbeat into an unrelated location. Check both the world
-    // control directory and its parent before allowing any publication.
-    for directory in [parent.parent().and_then(Path::parent), parent.parent(), Some(parent)].into_iter().flatten() {
-        reject_unsafe_entry(directory, true)?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true).mode(0o700);
-        builder.create(parent)?;
-    }
-    #[cfg(not(unix))]
-    fs::create_dir_all(parent)?;
-    reject_unsafe_entry(parent, true)?;
+    ensure_private_permit_directory(parent)?;
     reject_unsafe_entry(path, false)?;
     let sequence = PERMIT_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = parent.join(format!("authority.permit.{}.{}.tmp", std::process::id(), sequence));
@@ -78,6 +130,26 @@ fn write_permit_atomically(path: &Path, value: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     outcome
+}
+
+fn ensure_private_permit_directory(parent: &Path) -> io::Result<()> {
+    // An attacker-controlled/symlinked control path must never redirect an
+    // authority heartbeat into an unrelated location. Check both the world
+    // control directory and its parent before allowing any publication.
+    for directory in [parent.parent().and_then(Path::parent), parent.parent(), Some(parent)].into_iter().flatten() {
+        reject_unsafe_entry(directory, true)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(parent)?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(parent)?;
+    reject_unsafe_entry(parent, true)?;
+    Ok(())
 }
 
 fn reject_unsafe_entry(path: &Path, expect_directory: bool) -> io::Result<()> {
@@ -143,6 +215,7 @@ fn replace_permit_atomically(temporary: &Path, destination: &Path) -> io::Result
 
 pub fn clear_permit(paths: &DataPaths, world: WorldId) -> io::Result<()> {
     let path = permit_path(paths, world);
+    let _lock = lock_permit_publication(&path)?;
     // A fencing/consent revocation must not follow a substituted control
     // directory into an unrelated location or remove a link to another file.
     validate_permit_path(&path)?;
@@ -312,14 +385,101 @@ mod tests {
         refresh_permit(&paths, world, generation, 101).unwrap();
         assert!(watch.observe(&paths, world, now + Duration::from_secs(1)).unwrap());
 
-        refresh_permit(&paths, world, generation, 100).unwrap();
+        // Simulate a stale copy written outside the canonical publisher. A
+        // legitimate refresh_permit call never rolls its durable counter back.
+        fs::write(permit_path(&paths, world), b"8 18 100\n").unwrap();
         assert!(!watch.observe(&paths, world, now + Duration::from_secs(2)).unwrap());
         assert!(!watch.is_fresh(now + Duration::from_secs(2)));
         // Repeated replay of a formerly fresh value must stay fenced.
-        refresh_permit(&paths, world, generation, 101).unwrap();
+        fs::write(permit_path(&paths, world), b"8 18 101\n").unwrap();
         assert!(!watch.observe(&paths, world, now + Duration::from_secs(3)).unwrap());
-        refresh_permit(&paths, world, generation, 102).unwrap();
+        refresh_permit(&paths, world, generation, 1).unwrap();
         assert!(watch.observe(&paths, world, now + Duration::from_secs(4)).unwrap());
+    }
+
+    #[test]
+    fn daemon_restart_resumes_heartbeat_above_persistent_floor_after_clearing_visible_permit() {
+        let temp = private_tempdir();
+        let paths = DataPaths::from_root(temp.path());
+        let world = WorldId([18; 32]);
+        let generation = AuthorityGeneration { epoch: 9, fencing_token: 32 };
+        let now = Instant::now();
+        let mut watch = PermitWatch::new(generation);
+        refresh_permit(&paths, world, generation, 80).unwrap();
+        assert!(!watch.observe(&paths, world, now).unwrap());
+        refresh_permit(&paths, world, generation, 81).unwrap();
+        assert!(watch.observe(&paths, world, now + Duration::from_secs(1)).unwrap());
+
+        clear_permit(&paths, world).unwrap();
+        assert!(!permit_path(&paths, world).exists());
+        assert_eq!(read_saved_permit(&permit_floor_path(&permit_path(&paths, world))).unwrap(), Some((generation, 81)));
+
+        // The daemon's in-memory HashMap resets its heartbeat to one. A Java
+        // watchdog need not observe the brief deletion to accept the new
+        // monotonic heartbeat after a same-generation daemon restart.
+        let restarted = DataPaths::from_root(temp.path());
+        refresh_permit(&restarted, world, generation, 1).unwrap();
+        assert_eq!(read_saved_permit(&permit_path(&paths, world)).unwrap(), Some((generation, 82)));
+        assert!(watch.observe(&paths, world, now + Duration::from_secs(2)).unwrap());
+    }
+
+    #[test]
+    fn stale_generation_cannot_publish_after_newer_floor_even_when_permit_is_removed() {
+        let temp = private_tempdir();
+        let paths = DataPaths::from_root(temp.path());
+        let world = WorldId([19; 32]);
+        let older = AuthorityGeneration { epoch: 4, fencing_token: 18 };
+        let newer = AuthorityGeneration { epoch: 5, fencing_token: 19 };
+        refresh_permit(&paths, world, older, 70).unwrap();
+        refresh_permit(&paths, world, newer, 1).unwrap();
+        clear_permit(&paths, world).unwrap();
+
+        assert!(refresh_permit(&paths, world, older, 71).is_err());
+        assert!(!permit_path(&paths, world).exists());
+        refresh_permit(&paths, world, newer, 1).unwrap();
+        assert_eq!(read_saved_permit(&permit_path(&paths, world)).unwrap(), Some((newer, 2)));
+    }
+
+    #[test]
+    fn corrupt_or_exhausted_heartbeat_floor_never_resets_to_a_fresh_permit() {
+        let temp = private_tempdir();
+        let paths = DataPaths::from_root(temp.path());
+        let world = WorldId([20; 32]);
+        let generation = AuthorityGeneration { epoch: 6, fencing_token: 22 };
+        refresh_permit(&paths, world, generation, 42).unwrap();
+        let visible_path = permit_path(&paths, world);
+        let floor_path = permit_floor_path(&visible_path);
+
+        fs::write(&floor_path, b"invalid floor").unwrap();
+        assert!(refresh_permit(&paths, world, generation, 1).is_err());
+        assert_eq!(read_saved_permit(&visible_path).unwrap(), Some((generation, 42)));
+
+        fs::write(&floor_path, format!("6 22 {}\n", u64::MAX)).unwrap();
+        assert!(refresh_permit(&paths, world, generation, 1).is_err());
+        assert_eq!(read_saved_permit(&visible_path).unwrap(), Some((generation, 42)));
+    }
+
+    #[test]
+    fn concurrent_publishers_serialize_heartbeat_updates() {
+        let temp = private_tempdir();
+        let paths = DataPaths::from_root(temp.path());
+        let world = WorldId([21; 32]);
+        let generation = AuthorityGeneration { epoch: 14, fencing_token: 20 };
+        let writers: Vec<_> = (0..4)
+            .map(|_| {
+                let paths = paths.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..12 {
+                        refresh_permit(&paths, world, generation, 1).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        assert_eq!(read_saved_permit(&permit_path(&paths, world)).unwrap(), Some((generation, 48)));
+        assert_eq!(read_saved_permit(&permit_floor_path(&permit_path(&paths, world))).unwrap(), Some((generation, 48)));
     }
 
     #[test]
