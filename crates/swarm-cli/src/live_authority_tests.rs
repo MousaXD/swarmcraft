@@ -175,26 +175,27 @@ fn signed_fabric_attestation_binds_consent_world_nonce_and_port() {
         v1_realm_hash(world),
         canonical,
         &runtime,
-        1_000,
     )
     .unwrap();
-    attestation.verify(1_001).unwrap();
-    assert!(attestation.verify(4_000).is_err());
+    let signed_at = attestation.issued_unix_ms;
+    attestation.verify(signed_at + 1).unwrap();
+    assert!(attestation.verify(signed_at + MAX_SIGNED_RUNTIME_MS).is_err());
+    assert!(attestation.issued_unix_ms.abs_diff(unix_ms().unwrap()) <= CLOCK_SKEW_MS);
     let mut tampered = attestation.clone();
     tampered.game_server_port = 25565;
-    assert!(tampered.verify(1_001).is_err());
+    assert!(tampered.verify(signed_at + 1).is_err());
     tampered = attestation.clone();
     tampered.challenge_nonce = [11; 32];
-    assert!(tampered.verify(1_001).is_err());
+    assert!(tampered.verify(signed_at + 1).is_err());
     tampered = attestation.clone();
     tampered.consent_revision += 1;
-    assert!(tampered.verify(1_001).is_err());
+    assert!(tampered.verify(signed_at + 1).is_err());
     tampered = attestation.clone();
     tampered.canonical.fencing_token += 1;
-    assert!(tampered.verify(1_001).is_err());
+    assert!(tampered.verify(signed_at + 1).is_err());
     tampered = attestation.clone();
     tampered.canonical.checkpoint_hash = Hash32([99; 32]);
-    assert!(tampered.verify(1_001).is_err());
+    assert!(tampered.verify(signed_at + 1).is_err());
     let mut revoked = consent.clone();
     revoked.enabled = false;
     revoked.heap_mib = 0;
@@ -208,7 +209,6 @@ fn signed_fabric_attestation_binds_consent_world_nonce_and_port() {
         v1_realm_hash(world),
         canonical,
         &runtime,
-        1_000,
     )
     .is_err());
     // Re-enabling creates a different revision; the signer must obtain it
@@ -228,7 +228,6 @@ fn signed_fabric_attestation_binds_consent_world_nonce_and_port() {
         v1_realm_hash(world),
         canonical,
         &runtime,
-        1_000,
     )
     .unwrap();
     assert_eq!(refreshed.consent_revision, reenabled.revision);
@@ -244,7 +243,6 @@ fn signed_fabric_attestation_binds_consent_world_nonce_and_port() {
         v1_realm_hash(world),
         canonical,
         &runtime,
-        1_000,
     )
     .is_err());
     drop(lock);
@@ -256,9 +254,45 @@ fn signed_fabric_attestation_binds_consent_world_nonce_and_port() {
         v1_realm_hash(world),
         canonical,
         &runtime,
-        1_000,
     )
     .is_ok());
+
+    // Missing, damaged, or identity-swapped local consent must never be
+    // silently replaced by the last successful signed preference.
+    std::fs::write(&consent_path, b"invalid consent json").unwrap();
+    assert!(sign_live_host_fabric_attestation(
+        &paths,
+        &host,
+        &transport,
+        identity(5).peer_id(),
+        v1_realm_hash(world),
+        canonical,
+        &runtime,
+    )
+    .is_err());
+    let wrong_peer = hosting_budget::HostingConsentV1 { peer_id: identity(6).peer_id(), ..reenabled.clone() };
+    std::fs::write(&consent_path, serde_json::to_vec(&wrong_peer).unwrap()).unwrap();
+    assert!(sign_live_host_fabric_attestation(
+        &paths,
+        &host,
+        &transport,
+        identity(5).peer_id(),
+        v1_realm_hash(world),
+        canonical,
+        &runtime,
+    )
+    .is_err());
+    std::fs::remove_file(&consent_path).unwrap();
+    assert!(sign_live_host_fabric_attestation(
+        &paths,
+        &host,
+        &transport,
+        identity(5).peer_id(),
+        v1_realm_hash(world),
+        canonical,
+        &runtime,
+    )
+    .is_err());
 }
 
 struct NoLiveProof;
@@ -472,7 +506,6 @@ fn canonical_route_requires_signed_majority_and_current_host_consent() {
         v1_realm_hash(world),
         canonical,
         &runtime,
-        now,
     )
     .unwrap();
     let proof = LiveAuthorityObservation {

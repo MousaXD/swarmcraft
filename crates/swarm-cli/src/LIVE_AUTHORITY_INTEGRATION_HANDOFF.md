@@ -38,6 +38,10 @@ consent object supplied by a caller. The caller must still obtain
 `VerifiedFabricRuntime` over the SAME live authenticated Fabric IPC session,
 and retain the runtime/authority lifecycle and process identity. The
 signature does not remain authoritative after later consent withdrawal.
+Issuance and three-second expiry are generated from the local system clock
+inside the guarded signer, not from a caller-provided timestamp. Tests reject
+stale/revoked, missing, corrupt, mismatched-device and concurrently updated
+consent records.
 The signed attestation additionally includes `RuntimeCanonicalBinding`:
 exact current membership/config hashes, accepted snapshot hash/state root,
 epoch and fencing token. Agent 3 must derive that binding from independently

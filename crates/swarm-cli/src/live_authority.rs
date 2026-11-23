@@ -162,7 +162,6 @@ pub fn sign_live_host_fabric_attestation(
     realm_hash: Hash32,
     canonical: RuntimeCanonicalBinding,
     fabric: &VerifiedFabricRuntime,
-    now: u64,
 ) -> Result<SignedHostFabricAttestation> {
     // The same cross-process lock is used by hosting_budget::set_contribution.
     // A concurrent revocation must win the lock before this proof is signed or
@@ -198,6 +197,9 @@ pub fn sign_live_host_fabric_attestation(
     {
         bail!("host Fabric readiness does not match unwithdrawn hosting consent");
     }
+    // Caller-supplied timestamps are not a freshness oracle. Derive issuance
+    // immediately before the signature from this machine's current clock.
+    let issued_unix_ms = unix_ms()?;
     let mut attestation = SignedHostFabricAttestation {
         world_id: fabric.world_id(),
         realm_hash,
@@ -213,8 +215,10 @@ pub fn sign_live_host_fabric_attestation(
         game_server_port: fabric.port(),
         consent_revision: consent.revision,
         consent_heap_mib: consent.heap_mib,
-        issued_unix_ms: now,
-        expires_unix_ms: now.checked_add(MAX_SIGNED_RUNTIME_MS).context("host attestation clock overflow")?,
+        issued_unix_ms,
+        expires_unix_ms: issued_unix_ms
+            .checked_add(MAX_SIGNED_RUNTIME_MS)
+            .context("host attestation clock overflow")?,
         signature: Vec::new(),
     };
     attestation.signature = identity.sign(&attestation.signing_bytes()?);
