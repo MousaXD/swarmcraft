@@ -8,10 +8,10 @@
 
 use crate::{
     game_route::{
-        ensure_private_floor_directory, private_floor_options, reject_symlink, replace_floor_atomically,
-        sync_directory, FreshAuthorityEvidence, FreshAuthoritySource, GameRouteError, MinecraftRouteOfferV1,
-        MinecraftRouteResponseV1, GAME_ROUTE_VERSION, MAX_FRESH_EVIDENCE_AGE_MS, MAX_FRESH_EVIDENCE_LEASE_MS,
-        MAX_ROUTE_OFFER_AGE_MS, MAX_ROUTE_RESPONSE_AGE_MS,
+        ensure_private_floor_directory, private_floor_options, replace_floor_atomically, sync_directory,
+        FreshAuthorityEvidence, FreshAuthoritySource, GameRouteError, MinecraftRouteOfferV1, MinecraftRouteResponseV1,
+        GAME_ROUTE_VERSION, MAX_FRESH_EVIDENCE_AGE_MS, MAX_FRESH_EVIDENCE_LEASE_MS, MAX_ROUTE_OFFER_AGE_MS,
+        MAX_ROUTE_RESPONSE_AGE_MS,
     },
     game_route_control::{GameRouteControlRequestV1, GameRouteControlResponseV1, GameRouteRefusalV1},
 };
@@ -71,12 +71,14 @@ impl DurableHostOfferSequencer {
         let name = world_id.to_hex();
         let lock_path = self.directory.join(format!("{name}.sequence.lock"));
         let path = self.directory.join(format!("{name}.sequence"));
-        reject_symlink(&lock_path)?;
+        crate::game_durable_path::validate_private_state_file(&lock_path)
+            .map_err(|_| GameRouteError::InvalidTranscript)?;
         let lock = private_floor_options().read(true).write(true).create(true).truncate(false).open(&lock_path)?;
         lock.lock_exclusive()?;
         let result = (|| {
-            reject_symlink(&path)?;
-            let previous = if path.exists() {
+            let exists = crate::game_durable_path::validate_private_state_file(&path)
+                .map_err(|_| GameRouteError::InvalidTranscript)?;
+            let previous = if exists {
                 let mut bytes = Vec::new();
                 File::open(&path)?.take(MAX_OFFER_SEQUENCE_BYTES + 1).read_to_end(&mut bytes)?;
                 if bytes.is_empty() || bytes.len() as u64 > MAX_OFFER_SEQUENCE_BYTES {
@@ -724,6 +726,21 @@ mod tests {
             Err(GameRouteError::InvalidTranscript)
         ));
         assert_eq!(offer.sequence, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permissive_persisted_signing_sequence_cannot_issue_a_new_offer() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let signer = f.signer();
+        f.offer(&signer);
+        let path = f.root.path().join("durable-host-sequences").join(format!("{}.sequence", f.world.to_hex()));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(matches!(
+            signer.answer(f.requester, f.requester_transport, GameRouteControlRequestV1::Offer { world_id: f.world }),
+            Err(GameRouteError::InvalidTranscript)
+        ));
     }
 
     #[test]

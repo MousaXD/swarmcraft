@@ -7,7 +7,7 @@
 //! authorization credential; game_route and game_transport still independently
 //! verify each join.
 
-use crate::game_durable_path::validate_durable_ancestors;
+use crate::game_durable_path::{validate_durable_ancestors, validate_private_state_file};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -130,9 +130,7 @@ impl GameWorldPortRegistry {
 
     fn open_lock(&self) -> Result<File, GamePortRegistryError> {
         let path = self.directory.join("game-ports.lock");
-        if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-            return Err(GamePortRegistryError::CorruptRegistry);
-        }
+        validate_private_state_file(&path).map_err(|_| GamePortRegistryError::CorruptRegistry)?;
         private_options().read(true).write(true).create(true).truncate(false).open(path).map_err(Into::into)
     }
 
@@ -180,7 +178,7 @@ fn check_assignment(world_id: WorldId, port: u16) -> Result<(), GamePortRegistry
 }
 
 fn read_record(path: &Path) -> Result<Assignment, GamePortRegistryError> {
-    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+    if !validate_private_state_file(path).map_err(|_| GamePortRegistryError::CorruptRegistry)? {
         return Err(GamePortRegistryError::CorruptRegistry);
     }
     // Never read an unbounded local file before checking its size: a corrupt
@@ -337,6 +335,23 @@ mod tests {
         let linked = GameWorldPortRegistry::new(root.path().join("linked"));
         symlink(root.path().join("ports"), root.path().join("linked")).unwrap();
         assert!(matches!(linked.reserve(WorldId([11; 32]), 39002), Err(GamePortRegistryError::CorruptRegistry)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn world_writable_saved_port_and_lock_files_cannot_redirect_gateway() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = secure_test_dir();
+        let registry = GameWorldPortRegistry::new(root.path().join("ports"));
+        let world = WorldId([19; 32]);
+        registry.reserve(world, 40015).unwrap();
+        let record = root.path().join("ports").join(format!("{}.port", world.to_hex()));
+        let lock = root.path().join("ports").join("game-ports.lock");
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(matches!(registry.lookup(world), Err(GamePortRegistryError::CorruptRegistry)));
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(matches!(registry.lookup(world), Err(GamePortRegistryError::CorruptRegistry)));
     }
 
     #[cfg(unix)]

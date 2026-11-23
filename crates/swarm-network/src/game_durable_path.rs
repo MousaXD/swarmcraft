@@ -87,6 +87,30 @@ fn untrusted_ancestor() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "unsafe game-route durable storage parent")
 }
 
+/// A trusted directory does not make an existing 0666 record safe. Refuse
+/// hard links, symlinks, non-files, foreign-owned or writable-by-others files
+/// before consulting durable game authorization state. Only the actual owner
+/// can create/replace entries in a private parent directory; same-UID
+/// malicious processes remain outside this boundary.
+pub(crate) fn validate_private_state_file(path: &Path) -> io::Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(untrusted_ancestor());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != effective_uid() || metadata.permissions().mode() & 0o022 != 0 || metadata.nlink() != 1 {
+            return Err(untrusted_ancestor());
+        }
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +180,24 @@ mod tests {
             io::ErrorKind::PermissionDenied
         );
         assert!(validate_durable_ancestors_for_uid(&temp.path().join("private-generation-floor"), user_id).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_world_writable_state_file_is_never_trusted() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let record = dir.path().join("game.floor");
+        fs::write(&record, b"private-authority-record").unwrap();
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(validate_private_state_file(&record).unwrap(), true);
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(validate_private_state_file(&record).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
+        let second = dir.path().join("hard-linked-record");
+        fs::hard_link(&record, &second).unwrap();
+        assert_eq!(validate_private_state_file(&record).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(validate_private_state_file(&dir.path().join("not-created")).unwrap(), false);
     }
 }

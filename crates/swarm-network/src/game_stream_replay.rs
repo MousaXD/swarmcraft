@@ -12,7 +12,7 @@
 //! response's validity window, including across process restarts.
 
 use crate::game_route::{
-    ensure_private_floor_directory, private_floor_options, reject_symlink, replace_floor_atomically, sync_directory,
+    ensure_private_floor_directory, private_floor_options, replace_floor_atomically, sync_directory,
     MAX_ROUTE_RESPONSE_AGE_MS,
 };
 use fs2::FileExt;
@@ -129,7 +129,8 @@ impl DurableGameStreamReplayLedger {
         ensure_private_floor_directory(&self.directory).map_err(|_| GameStreamReplayError::InvalidState)?;
         let basename = world_id.to_hex();
         let lock_path = self.directory.join(format!("{basename}.replay.lock"));
-        reject_symlink(&lock_path).map_err(|_| GameStreamReplayError::InvalidState)?;
+        crate::game_durable_path::validate_private_state_file(&lock_path)
+            .map_err(|_| GameStreamReplayError::InvalidState)?;
         let lock = private_floor_options().read(true).write(true).create(true).truncate(false).open(&lock_path)?;
         lock.lock_exclusive()?;
 
@@ -147,8 +148,9 @@ impl DurableGameStreamReplayLedger {
         now_ms: u64,
     ) -> Result<(), GameStreamReplayError> {
         let path = self.directory.join(format!("{basename}.replay"));
-        reject_symlink(&path).map_err(|_| GameStreamReplayError::InvalidState)?;
-        let mut record = if path.exists() {
+        let exists = crate::game_durable_path::validate_private_state_file(&path)
+            .map_err(|_| GameStreamReplayError::InvalidState)?;
+        let mut record = if exists {
             Self::read_record(&path, world_id)?
         } else {
             ReplayRecord {
@@ -316,6 +318,23 @@ mod tests {
         legacy[0] = REPLAY_LEDGER_VERSION - 1;
         std::fs::write(&record, legacy).unwrap();
         assert!(matches!(ledger.consume(world, [4; 32], 1050, 1000), Err(GameStreamReplayError::InvalidState)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_consumed_nonce_record_or_lock_cannot_reset_replay_protection() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = secured();
+        let ledger = DurableGameStreamReplayLedger::new(dir.path().join("replays"));
+        let world = WorldId([51; 32]);
+        ledger.consume(world, [1; 32], 1_500, 1_000).unwrap();
+        let record = ledger.directory.join(format!("{}.replay", world.to_hex()));
+        let lock = ledger.directory.join(format!("{}.replay.lock", world.to_hex()));
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(matches!(ledger.consume(world, [2; 32], 1_500, 1_000), Err(GameStreamReplayError::InvalidState)));
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(matches!(ledger.consume(world, [2; 32], 1_500, 1_000), Err(GameStreamReplayError::InvalidState)));
     }
 
     #[test]

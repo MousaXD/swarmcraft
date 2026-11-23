@@ -453,12 +453,14 @@ impl RouteVerifier {
         let name = offer.world_id.to_hex();
         let path = self.floor_dir.join(format!("{name}.floor"));
         let lock_path = self.floor_dir.join(format!("{name}.lock"));
-        reject_symlink(&lock_path)?;
+        crate::game_durable_path::validate_private_state_file(&lock_path)
+            .map_err(|_| GameRouteError::InvalidTranscript)?;
         let lock = private_floor_options().read(true).write(true).create(true).truncate(false).open(&lock_path)?;
         lock.lock_exclusive()?;
         let outcome = (|| {
-            reject_symlink(&path)?;
-            let floor = if path.exists() {
+            let exists = crate::game_durable_path::validate_private_state_file(&path)
+                .map_err(|_| GameRouteError::InvalidTranscript)?;
+            let floor = if exists {
                 let file = File::open(&path)?;
                 let mut data = Vec::new();
                 file.take(256).read_to_end(&mut data)?;
@@ -533,6 +535,7 @@ struct GenerationFloor {
     offer_hash: Hash32,
 }
 
+#[cfg(not(unix))]
 pub(crate) fn reject_symlink(path: &Path) -> Result<(), GameRouteError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(GameRouteError::InvalidTranscript),
@@ -803,6 +806,19 @@ mod tests {
         assert!(matches!(f.verify(&restarted, &f.source()), Err(GameRouteError::Downgrade)));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn permissive_generation_file_cannot_reauthorize_or_roll_back_a_world() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut f = Fixture::new();
+        f.sign();
+        let verifier = RouteVerifier::new(f.root.path());
+        f.verify(&verifier, &f.source()).unwrap();
+        let floor = f.root.path().join(format!("{}.floor", f.offer.world_id.to_hex()));
+        fs::set_permissions(&floor, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(matches!(f.verify(&verifier, &f.source()), Err(GameRouteError::InvalidTranscript)));
+    }
+
     #[test]
     fn same_generation_rejects_lower_offer_sequence() {
         let mut f = Fixture::new();
@@ -975,7 +991,7 @@ mod tests {
         // client cannot treat the stale initial timestamp as an extra lease
         // while waiting on the exclusive cross-process filesystem lock.
         let lock_path = f.root.path().join(format!("{}.lock", f.offer.world_id.to_hex()));
-        let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(lock_path).unwrap();
+        let lock = private_floor_options().read(true).write(true).create(true).truncate(false).open(lock_path).unwrap();
         lock.lock_exclusive().unwrap();
         let release_lock = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(125));

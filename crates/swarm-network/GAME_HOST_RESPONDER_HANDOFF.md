@@ -44,6 +44,9 @@ runtime shutdown. The actual verifier should still bound its own remote calls.
   consumption before accepting Minecraft bytes, so replayed authorizations
   cannot regain access simply by restarting the host gateway. Do not put
   it in a tempdir or imported world save; corrupt or unsafe storage fails closed.
+  Existing ledger files and locks must stay owner-controlled and non-hard-linked
+  on Unix. Never "repair" a corrupt or overly permissive file by resetting the
+  consumed nonce records; surface a blocked state for explicit remediation.
 - On accepted-generation change, withdrawn consent or runtime shutdown,
   send shutdown through the existing watch channel to close old host and
   gateway sessions. Host and player verify live evidence independently before
