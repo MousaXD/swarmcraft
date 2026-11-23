@@ -50,6 +50,17 @@ into a cached `Ready` shortcut. The scoped positive Rust integration test
 builds real signed and persisted V1 records, then verifies consent withdrawal,
 blob corruption and majority loss with synthetic live signatures.
 
+The accepted canonical generation is now checked **both before and after**
+potentially expensive verification. The final gate re-reads signed membership,
+epoch, config, checkpoint head, pending membership, recovery promises and
+reservations, committed transfers, sleep, and local hosting consent; it also
+rechecks the authenticated host transport. It refuses any surviving signed
+solo branch or preserved solo conflict, including malformed conflict records,
+instead of returning `conflict_free=true` for an unresolved world. The
+`verified_at_unix_ms` timestamp is recorded only after that final gate.
+Future daemon wiring must still fail closed and close streams on subsequent
+world/consent changes; no synchronous recheck is a perpetual lease.
+
 Agent 3 owns the shared CLI module wiring: add
 `pub mod live_fabric_readiness;` and `pub mod live_authority;` to
 `crates/swarm-cli/src/lib.rs` when

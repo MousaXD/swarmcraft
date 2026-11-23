@@ -33,7 +33,7 @@ use swarm_protocol::{
     DiscoveryMembershipProofV1, EpochMode, EpochRecordV1, Hash32, PeerId, SnapshotManifestV1, WorldConfigV1, WorldId,
     PROTOCOL_VERSION,
 };
-use swarm_storage::{Storage, StorageError};
+use swarm_storage::{CanonicalSnapshotRefV1, Storage, StorageError};
 
 use crate::{hosting_budget, live_fabric_readiness::VerifiedFabricRuntime};
 
@@ -274,69 +274,7 @@ impl SignedLiveAuthoritySource {
         }
         proof.membership.genesis.validate_semantics()?;
         verify_genesis_anchored_membership(&proof.membership)?;
-        if storage.load_world(world)?.genesis != proof.membership.genesis
-            || storage.load_membership_record(world)? != proof.membership.current_membership
-            || storage.load_membership_certificate_chain(world)? != proof.membership.membership_certificates
-            || storage.load_epoch_record(world)? != proof.epoch
-            || storage.load_world_config(world)? != proof.config
-            || storage.latest_snapshot(world)?.as_ref() != Some(&proof.snapshot)
-        {
-            bail!("live authority transcript differs from locally accepted canonical records");
-        }
-        let current_pending = match storage.load_membership_promise(world) {
-            Ok(value) => Some(value.proposal),
-            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        if current_pending != proof.membership.pending_membership {
-            bail!("pending membership does not match durable promise");
-        }
-        // A present sleep record can never be treated as an awake authority.
-        match storage.load_sleep_record(world) {
-            Ok(_) => bail!("world is durably sleeping"),
-            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        // A promised higher recovery round/fence cannot be ignored even when
-        // the old epoch file still exists.
-        match storage.load_recovery_promise(world) {
-            Ok(promise)
-                if (promise.ballot.target_epoch, promise.ballot.target_fencing_token)
-                    > (proof.epoch.epoch_number, proof.epoch.fencing_token) =>
-            {
-                bail!("higher recovery promise fences the offered authority")
-            }
-            Ok(_) => {}
-            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        match storage.load_recovery_reservation(world) {
-            Ok(reservation) => {
-                swarm_core::verify_lease_signature(&reservation)?;
-                if (reservation.epoch, reservation.fencing_token)
-                    > (proof.epoch.epoch_number, proof.epoch.fencing_token)
-                    || (reservation.epoch, reservation.fencing_token)
-                        == (proof.epoch.epoch_number, proof.epoch.fencing_token)
-                        && reservation.authority_peer_id != proof.epoch.authority_peer_id
-                {
-                    bail!("a recovery reservation fences this authority");
-                }
-            }
-            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        match storage.load_transfer_record(world) {
-            Ok(transfer) => {
-                swarm_core::verify_transfer_signature(&transfer)?;
-                if transfer.phase == swarm_protocol::TransferPhase::Committed
-                    && transfer.from_peer_id == proof.epoch.authority_peer_id
-                {
-                    bail!("the source authority has already committed a transfer");
-                }
-            }
-            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+        let head = require_current_canonical_generation(&storage, world, proof)?;
 
         proof.epoch.validate_semantics()?;
         verify_signature(
@@ -353,7 +291,6 @@ impl SignedLiveAuthoritySource {
         // worlds, but a slow check is denied by the caller's proof deadline;
         // it must never silently degrade into a cached Ready assertion.
         storage.verify_snapshot(&proof.snapshot)?;
-        let head = storage.canonical_snapshot_head(world)?.head.context("no accepted canonical snapshot head")?;
         let checkpoint_hash = proof.snapshot.manifest_hash()?;
         if head.snapshot_number != proof.snapshot.snapshot_number
             || head.manifest_hash != checkpoint_hash
@@ -474,14 +411,47 @@ impl SignedLiveAuthoritySource {
             }
         }
         let valid_until = host.expires_unix_ms.min(challenge.expires_unix_ms);
-        let verified_at = unix_ms()?;
-        if verified_at >= valid_until || verified_at > now.saturating_add(MAX_FRESH_PROOF_MS) {
-            bail!("quorum or Fabric proof expired while verifying");
-        }
         let certificate_hash = Hash32::from_domain_bytes(
             CANONICAL_CERT_DOMAIN,
             &postcard::to_allocvec(&(quorum_hash, checkpoint_hash, proof.snapshot.state_root))?,
         );
+        // Verify the same durable generation AGAIN after potentially slow
+        // snapshot, signature, quorum and Fabric checks. In particular, a new
+        // transfer, higher recovery promise, membership/config update or sleep
+        // must not race the proof and leave an old generation authorized.
+        if require_current_canonical_generation(&storage, world, proof)? != head {
+            bail!("canonical head changed while verifying the live authority");
+        }
+        let host_still_authenticated = if proof.epoch.authority_peer_id == self.local_application_peer {
+            transport == self.local_transport_peer
+        } else {
+            self.authenticated
+                .read()
+                .map_err(|_| anyhow!("authenticated-peer registry is unavailable"))?
+                .get(&transport)
+                .copied()
+                == Some(proof.epoch.authority_peer_id)
+        };
+        if !host_still_authenticated {
+            bail!("host authentication was withdrawn during proof verification");
+        }
+        if proof.epoch.authority_peer_id == self.local_application_peer {
+            let consent =
+                hosting_budget::load_consent(&self.paths, world)?.context("local hosting consent is absent")?;
+            if !consent.enabled
+                || consent.revision != host.consent_revision
+                || consent.heap_mib != host.consent_heap_mib
+            {
+                bail!("local hosting consent changed during proof verification");
+            }
+        }
+        if proof.epoch.mode == EpochMode::Recovery {
+            verify_current_recovery_certificate(&storage, &proof.epoch, &proof.membership)?;
+        }
+        let verified_at = unix_ms()?;
+        if verified_at >= valid_until || verified_at > now.saturating_add(MAX_FRESH_PROOF_MS) {
+            bail!("quorum or runtime proof expired during final generation recheck");
+        }
         Ok(FreshAuthorityEvidence {
             world_id: world,
             realm_hash,
@@ -509,6 +479,88 @@ impl SignedLiveAuthoritySource {
             valid_until_unix_ms: valid_until,
         })
     }
+}
+
+/// Compare the entire accepted canonical generation and every durable fence
+/// both before and after verification. Never accept a missing/corrupt file as
+/// permission to fall back to an earlier epoch or a persisted Ready status.
+fn require_current_canonical_generation(
+    storage: &Storage,
+    world: WorldId,
+    proof: &LiveAuthorityObservation,
+) -> Result<CanonicalSnapshotRefV1> {
+    if storage.load_world(world)?.genesis != proof.membership.genesis
+        || storage.load_membership_record(world)? != proof.membership.current_membership
+        || storage.load_membership_certificate_chain(world)? != proof.membership.membership_certificates
+        || storage.load_epoch_record(world)? != proof.epoch
+        || storage.load_world_config(world)? != proof.config
+        || storage.latest_snapshot(world)?.as_ref() != Some(&proof.snapshot)
+    {
+        bail!("live authority transcript differs from locally accepted canonical records");
+    }
+    let head = storage.canonical_snapshot_head(world)?.head.context("no accepted canonical snapshot head")?;
+    let current_pending = match storage.load_membership_promise(world) {
+        Ok(value) => Some(value.proposal),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if current_pending != proof.membership.pending_membership {
+        bail!("pending membership does not match durable promise");
+    }
+    match storage.load_sleep_record(world) {
+        Ok(_) => bail!("world is durably sleeping"),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // Signed votes cannot silently hide a surviving solo branch or an
+    // unresolved conflict preserved on this device. A corrupt conflict
+    // ledger is also a denial, not an empty history.
+    if !storage.list_solo_conflicts(world)?.is_empty() {
+        bail!("unresolved solo world-history conflicts block the game route");
+    }
+    match storage.load_solo_branch(world) {
+        Ok(_) => bail!("solo-unreplicated world history cannot authorize a quorum game route"),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    match storage.load_recovery_promise(world) {
+        Ok(promise)
+            if (promise.ballot.target_epoch, promise.ballot.target_fencing_token)
+                > (proof.epoch.epoch_number, proof.epoch.fencing_token) =>
+        {
+            bail!("higher recovery promise fences the offered authority")
+        }
+        Ok(_) => {}
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    match storage.load_recovery_reservation(world) {
+        Ok(reservation) => {
+            swarm_core::verify_lease_signature(&reservation)?;
+            if (reservation.epoch, reservation.fencing_token) > (proof.epoch.epoch_number, proof.epoch.fencing_token)
+                || (reservation.epoch, reservation.fencing_token)
+                    == (proof.epoch.epoch_number, proof.epoch.fencing_token)
+                    && reservation.authority_peer_id != proof.epoch.authority_peer_id
+            {
+                bail!("a recovery reservation fences this authority");
+            }
+        }
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    match storage.load_transfer_record(world) {
+        Ok(transfer) => {
+            swarm_core::verify_transfer_signature(&transfer)?;
+            if transfer.phase == swarm_protocol::TransferPhase::Committed
+                && transfer.from_peer_id == proof.epoch.authority_peer_id
+            {
+                bail!("the source authority has already committed a transfer");
+            }
+        }
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(head)
 }
 
 impl FreshAuthoritySource for SignedLiveAuthoritySource {

@@ -238,8 +238,8 @@ impl LiveAuthorityProofProvider for FixedSignedMaterial {
 fn canonical_route_requires_signed_majority_and_current_host_consent() {
     use std::fs;
     use swarm_protocol::{
-        AuthorityPolicyV1, MembershipPolicyV1, RuntimeCompatibilityManifestV1, WorldConfigV1, WorldDescriptorV1,
-        WorldPresentationV1, WorldVisibilityV1, STORAGE_SCHEMA_VERSION,
+        AuthorityPolicyV1, MembershipPolicyV1, RuntimeCompatibilityManifestV1, SoloBranchV1, WorldConfigV1,
+        WorldDescriptorV1, WorldPresentationV1, WorldVisibilityV1, STORAGE_SCHEMA_VERSION,
     };
     use swarm_storage::{SnapshotContext, WorldMetadataV1};
 
@@ -464,7 +464,54 @@ fn canonical_route_requires_signed_majority_and_current_host_consent() {
     fs::write(&blob, original_blob).unwrap();
     assert!(source.verify_fresh(world, bob.peer_id(), nonce).is_ok());
 
+    let mut solo_branch = SoloBranchV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        base_snapshot_hash: head.manifest_hash,
+        base_epoch: 1,
+        head_snapshot_hash: head.manifest_hash,
+        head_epoch: 1,
+        head_sequence: 1,
+        state_hash: canonical.state_root,
+        authority_peer_id: alice.peer_id(),
+        authority_public_key: alice.public_key(),
+        signature: Vec::new(),
+    };
+    swarm_core::sign_solo_branch(&alice, &mut solo_branch).unwrap();
+    storage.save_solo_branch(&solo_branch).unwrap();
+    assert!(source.verify_fresh(world, bob.peer_id(), nonce).is_err());
+    fs::remove_file(storage.world_dir(world).join("metadata/solo-branch.postcard")).unwrap();
+    assert!(source.verify_fresh(world, bob.peer_id(), nonce).is_ok());
+
+    // A preserved conflict is not resolved merely because the current host
+    // can gather fresh majority signatures. Corrupt conflict records must
+    // fail closed instead of being silently treated as an empty ledger.
+    let preserved_conflict = storage.preserve_solo_conflict(&solo_branch).unwrap();
+    assert!(source.verify_fresh(world, bob.peer_id(), nonce).is_err());
+    fs::remove_file(preserved_conflict).unwrap();
+    assert!(source.verify_fresh(world, bob.peer_id(), nonce).is_ok());
+    let conflict_dir = storage.world_dir(world).join("recovery").join("solo-conflicts");
+    fs::create_dir_all(&conflict_dir).unwrap();
+    let unreadable_conflict = conflict_dir.join("unreadable.postcard");
+    fs::write(&unreadable_conflict, b"corrupted solo conflict").unwrap();
+    assert!(source.verify_fresh(world, bob.peer_id(), nonce).is_err());
+    fs::remove_file(&unreadable_conflict).unwrap();
+    assert!(source.verify_fresh(world, bob.peer_id(), nonce).is_ok());
+
     // An attacker cannot obtain a route with one vote in this 3-member world.
     signed.write().unwrap().quorum_votes.pop();
+    assert!(source.verify_fresh(world, bob.peer_id(), nonce).is_err());
+
+    // A newer accepted epoch/fence invalidates the old evidence even when
+    // it was correctly signed and its snapshot bytes remain intact.
+    let original_proof = signed.read().unwrap().clone();
+    assert!(require_current_canonical_generation(&storage, world, &original_proof).is_ok());
+    let mut next_epoch = original_proof.epoch.clone();
+    next_epoch.epoch_number += 1;
+    next_epoch.fencing_token += 1;
+    next_epoch.reason = "superseded while verifying route authority".into();
+    next_epoch.signature = alice.sign(&next_epoch.signing_bytes().unwrap());
+    storage.save_epoch_record(&next_epoch).unwrap();
+    assert!(require_current_canonical_generation(&storage, world, &original_proof).is_err());
     assert!(source.verify_fresh(world, bob.peer_id(), nonce).is_err());
 }
