@@ -411,8 +411,8 @@ impl RouteVerifier {
             return Err(GameRouteError::UnverifiedAuthority);
         }
         if !evidence.conflict_free
-            || evidence.verified_at_unix_ms > now_unix_ms
-            || now_unix_ms - evidence.verified_at_unix_ms > MAX_FRESH_EVIDENCE_AGE_MS
+            || evidence.verified_at_unix_ms > now_unix_ms.saturating_add(CLOCK_SKEW_MS)
+            || now_unix_ms.saturating_sub(evidence.verified_at_unix_ms) > MAX_FRESH_EVIDENCE_AGE_MS
             || evidence.valid_until_unix_ms <= now_unix_ms
         {
             return Err(GameRouteError::StaleAuthority);
@@ -804,6 +804,23 @@ mod tests {
         source.evidence.valid_until_unix_ms = 14_000;
         source.evidence.epoch += 1;
         assert!(matches!(f.verify(&verifier, &source), Err(GameRouteError::WrongAuthority)));
+    }
+
+    #[test]
+    fn independently_generated_evidence_allows_bounded_time_advance_only() {
+        let mut f = Fixture::new();
+        f.sign();
+        let verifier = RouteVerifier::new(f.root.path());
+        let mut source = f.source();
+        // The source runs after the caller captured its wall-clock sample.
+        source.evidence.verified_at_unix_ms = 10_151;
+        assert!(f.verify(&verifier, &source).is_ok());
+        // A purported future proof beyond the allowed skew is never accepted.
+        source.evidence.verified_at_unix_ms = 12_151;
+        assert!(matches!(f.verify(&verifier, &source), Err(GameRouteError::StaleAuthority)));
+        // Nor can an expired freshness attestation be replayed.
+        source.evidence.verified_at_unix_ms = 4_000;
+        assert!(matches!(f.verify(&verifier, &source), Err(GameRouteError::StaleAuthority)));
     }
 
     #[test]

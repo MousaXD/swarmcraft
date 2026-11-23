@@ -2,9 +2,10 @@
 
 mod admission;
 pub mod authority_capability;
-pub mod game_route;
 mod diagnostics;
 mod discovery;
+pub mod game_route;
+pub mod game_transport;
 mod invite_connectivity;
 mod node;
 mod transport;
