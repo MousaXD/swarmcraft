@@ -476,6 +476,57 @@ fn activated_epoch_matches_transfer(record: &AuthorityTransferV1, epoch: &EpochR
         && epoch.previous_epoch_hash.is_some()
 }
 
+/// Prepared/Accepted/Committed records with the old epoch still accepted
+/// must never authorize a new permit, election or recovery ballot. Only a
+/// signed successor epoch (or independently signed later epoch) releases
+/// that handoff fence. A future epoch cannot excuse an incomplete transfer.
+fn transfer_fences_epoch(record: &AuthorityTransferV1, epoch: &EpochRecordV1) -> Result<bool> {
+    if record.world_id != epoch.world_id || record.from_peer_id == record.to_peer_id {
+        return Err(anyhow!("transfer does not match the current world or changes no authority"));
+    }
+    if activated_epoch_matches_transfer(record, epoch, record.to_peer_id) {
+        return Ok(false);
+    }
+    if record.phase == TransferPhase::Committed
+        && epoch.epoch_number > record.next_epoch
+        && epoch.fencing_token > record.next_fencing_token
+    {
+        return Ok(false);
+    }
+    let next = AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token }
+        .checked_next()
+        .context("authority generation exhausted during transfer fence")?;
+    if epoch.authority_peer_id != record.from_peer_id
+        || record.next_epoch != next.epoch
+        || record.next_fencing_token != next.fencing_token
+    {
+        return Err(anyhow!("transfer state conflicts with the accepted authority generation"));
+    }
+    Ok(true)
+}
+
+fn active_signed_transfer_fences_authority(
+    storage: &Storage,
+    descriptor: &WorldDescriptorV1,
+    epoch: &EpochRecordV1,
+) -> Result<bool> {
+    let record = match storage.load_transfer_record(epoch.world_id) {
+        Ok(record) => record,
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    verify_transfer_signature(&record)?;
+    verify_signature(epoch.authority_peer_id, epoch.authority_public_key, &epoch.signing_bytes()?, &epoch.signature)?;
+    if authorized_descriptor_member(descriptor, epoch.authority_peer_id)?.public_key != epoch.authority_public_key {
+        return Err(anyhow!("signed epoch authority does not match current membership"));
+    }
+    let fenced = transfer_fences_epoch(&record, epoch)?;
+    if fenced && !validate_persisted_transfer(storage, descriptor, &record)? {
+        return Err(anyhow!("in-flight transfer is invalid or no longer matches the canonical snapshot"));
+    }
+    Ok(fenced)
+}
+
 struct ActivatedTransferContext<'a> {
     paths: &'a DataPaths,
     storage: &'a Storage,
@@ -824,6 +875,27 @@ fn maintain_authority_leases(
             clear_permit(paths, world)?;
             continue;
         };
+        // An explicit staged transfer fences the old lease owner and every
+        // prospective crash-recovery candidate until the exact signed
+        // successor epoch is accepted. Corrupt transfer state is a denial.
+        match active_signed_transfer_fences_authority(storage, &descriptor, &epoch) {
+            Ok(false) => {}
+            Ok(true) => {
+                clear_permit(paths, world)?;
+                runtime.permit_heartbeats.remove(&world);
+                runtime.lease_acks.retain(|(w, _), _| *w != world);
+                runtime.inbound_leases.remove(&world);
+                runtime.recovery_ballots.remove(&world);
+                runtime.recovery_votes.retain(|(w, _), _| *w != world);
+                continue;
+            }
+            Err(error) => {
+                warn!(%world, %error, "unreadable, conflicting or unsigned transfer blocks all local authority operations");
+                clear_permit(paths, world)?;
+                clear_runtime_world(runtime, world);
+                continue;
+            }
+        }
         let generation = AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token };
         let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
         runtime.recovery_not_before.entry(world).or_insert(now + recovery_initial_delay);
@@ -3733,6 +3805,54 @@ mod automatic_transfer_delivery_tests {
         let mut solo = epoch;
         solo.mode = EpochMode::Solo;
         assert!(!activated_epoch_matches_transfer(&transfer(TransferPhase::Committed), &solo, peer(2)));
+    }
+
+    fn old_authority_epoch() -> EpochRecordV1 {
+        let mut epoch = successor_epoch();
+        epoch.epoch_number = 1;
+        epoch.fencing_token = 1;
+        epoch.authority_peer_id = peer(1);
+        epoch.authority_public_key = [1; 32];
+        epoch
+    }
+
+    #[test]
+    fn staged_transfer_fences_old_lease_and_crash_recovery_at_every_phase() {
+        let old = old_authority_epoch();
+        for phase in [TransferPhase::Prepared, TransferPhase::Accepted, TransferPhase::Committed] {
+            assert_eq!(transfer_fences_epoch(&transfer(phase), &old).unwrap(), true);
+        }
+    }
+
+    #[test]
+    fn transfer_fence_releases_only_on_committed_successor_or_signed_later_generation() {
+        let activated = successor_epoch();
+        assert_eq!(transfer_fences_epoch(&transfer(TransferPhase::Committed), &activated).unwrap(), false);
+        for phase in [TransferPhase::Prepared, TransferPhase::Accepted] {
+            assert!(transfer_fences_epoch(&transfer(phase), &activated).is_err());
+        }
+        let mut later = activated;
+        later.epoch_number += 1;
+        later.fencing_token += 1;
+        assert_eq!(transfer_fences_epoch(&transfer(TransferPhase::Committed), &later).unwrap(), false);
+        assert!(transfer_fences_epoch(&transfer(TransferPhase::Prepared), &later).is_err());
+    }
+
+    #[test]
+    fn mismatched_world_source_or_fence_blocks_staged_transfer() {
+        let old = old_authority_epoch();
+        let mut wrong_world = transfer(TransferPhase::Prepared);
+        wrong_world.world_id = WorldId([8; 32]);
+        assert!(transfer_fences_epoch(&wrong_world, &old).is_err());
+        let mut wrong_source = transfer(TransferPhase::Prepared);
+        wrong_source.from_peer_id = peer(3);
+        assert!(transfer_fences_epoch(&wrong_source, &old).is_err());
+        let mut wrong_fence = transfer(TransferPhase::Prepared);
+        wrong_fence.next_fencing_token += 1;
+        assert!(transfer_fences_epoch(&wrong_fence, &old).is_err());
+        let mut same_authority = transfer(TransferPhase::Prepared);
+        same_authority.to_peer_id = peer(1);
+        assert!(transfer_fences_epoch(&same_authority, &old).is_err());
     }
 }
 

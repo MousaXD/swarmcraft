@@ -50,6 +50,15 @@ different or stale phase cannot replace the durable record. A cancelled,
 crashed or restarted daemon retries from persisted transfer state; in-memory
 phase/replica acknowledgments are not treated as durable proof after restart.
 
+The ordinary daemon lease/recovery tick also examines the **persisted and
+signed** transfer before refreshing a permit or starting a crash-recovery
+ballot. Any still-in-progress phase fences the old authority permit, target
+pre-election and witness recovery, including after daemon restart. An unreadable
+or conflicting transfer fails closed. Normal lease processing resumes only
+once the exact committed successor epoch, or a later independently signed
+canonical epoch, has superseded the transfer. This prevents a stopped source
+from reacquiring its hosting permit between handoff phases.
+
 This implementation intentionally requires all currently authorized active
 members to acknowledge the final checkpoint and relevant transfer stages.
 This is **stricter than quorum**: offline non-banned members may delay a
@@ -89,8 +98,9 @@ flock -x /tmp/swarmcraft-sabathon-cargo.lock sh -c \
    CARGO_BUILD_JOBS=2 cargo clippy -p swarm-cli --bin swarmcraft --offline --jobs 2 -- -D warnings'
 ```
 
-On 23 Nov 2026 the full `swarmcraft` binary unit suite passed **28/28**
+On 23 Nov 2026 the full `swarmcraft` binary unit suite passed **31/31**
 and strict `swarmcraft` binary Clippy passed on the Agent 3 worktree.
 These tests include phase ordering, witness gate, replay/redelivery,
-checkpoint-ack identity, and exact activated successor generation.
+checkpoint-ack identity, exact activated successor generation, and the
+no-stale-lease/no-recovery fence across every handoff phase.
 They are **source/local tests, not a three-machine Minecraft field pass**.
