@@ -672,6 +672,26 @@ class TestFailClosed(unittest.TestCase):
             with self.assertRaisesRegex(gate.Blocked, "game_route_wrong_world_or_fence_bob_recovered_bob"):
                 gate.verify(c, out)
 
+    def test_rejects_host_route_pointing_at_obsolete_signed_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            checkpoint = gate.load_json(out / "checkpoint.json")
+            checkpoint["nodes"]["alice"]["game_route_status"]["snapshot_hash"] = "8" * 64
+            gate.save(out / "checkpoint.json", checkpoint)
+            with self.assertRaisesRegex(gate.Blocked, "game_route_not_current_host_snapshot_checkpoint_alice"):
+                gate.verify(c, out)
+
+    def test_rejects_host_route_if_authoritative_checkpoint_hash_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            recovered = gate.load_json(out / "bob_recovered.json")
+            recovered["nodes"]["bob"]["snapshot_hash"] = None
+            gate.save(out / "bob_recovered.json", recovered)
+            with self.assertRaisesRegex(gate.Blocked, "game_route_not_current_host_snapshot_bob_recovered_bob"):
+                gate.verify(c, out)
+
     def test_rejects_local_gateway_changed_after_host_transfer(self):
         with tempfile.TemporaryDirectory() as temp:
             out = Path(temp)

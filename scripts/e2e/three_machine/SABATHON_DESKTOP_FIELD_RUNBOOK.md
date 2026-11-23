@@ -126,3 +126,9 @@ verified old route immediately after the observed crash. Each participant's
 localhost port must remain unchanged across authority transitions. Missing
 CLI support, timeouts and unverifiable route reports yield **BLOCKED**, not a
 fallback to the old configured `game_endpoint`.
+At stable playable stages, the current host's signed manifest hash must also
+match the snapshot hash in the game-route proof; identical but obsolete
+checkpoints on several clients are insufficient. Nonhosting replicas may
+legitimately omit a migration-status snapshot hash, but still need matching
+fresh world/authority/fencing evidence and their independently verified
+canonical heads.

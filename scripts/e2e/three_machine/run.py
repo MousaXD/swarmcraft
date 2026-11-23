@@ -468,6 +468,16 @@ def verify(c, output, review_file=None):
             snap = route.get("snapshot_hash")
             require(isinstance(snap, str) and SHA.fullmatch(snap),
                     "signed_game_route_checkpoint_missing_" + name + "_" + role)
+            # An authenticated route must serve the same signed manifest the
+            # current hosting authority reports, not a shared but obsolete
+            # checkpoint replayed identically on all three clients. Replica
+            # migration records may omit the optional snapshot hash; the
+            # actively hosting authority's record must not.
+            if node["identity_fingerprint"] == node["authority_fingerprint"]:
+                local_head = node.get("snapshot_hash")
+                require(isinstance(local_head, str) and SHA.fullmatch(local_head) and
+                        snap.lower() == local_head.lower(),
+                        "game_route_not_current_host_snapshot_" + name + "_" + role)
             route_snapshots.add(snap.lower())
         require(len(route_snapshots) == 1,
                 "game_route_checkpoint_diverged_" + name)
