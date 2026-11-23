@@ -43,6 +43,10 @@ fn valid_snapshot_hash(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn valid_authority_peer_id(value: &str) -> bool {
+    value.strip_prefix("scpeer:").is_some_and(|hex| valid_snapshot_hash(hex))
+}
+
 pub fn decode_game_route_status(
     output: &str,
     world: WorldId,
@@ -93,7 +97,7 @@ pub fn decode_game_route_status(
     if parsed.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) || parsed.port() == 0 || address != parsed.to_string() {
         return Err("Verified gateway must bind the exact 127.0.0.1 loopback address".into());
     }
-    if !report.authority_peer_id.as_deref().is_some_and(|peer| !peer.is_empty() && peer.len() <= 256)
+    if !report.authority_peer_id.as_deref().is_some_and(valid_authority_peer_id)
         || report.epoch.is_none()
         || report.fencing_token.is_none()
         || !report.snapshot_hash.as_deref().is_some_and(valid_snapshot_hash)
@@ -140,7 +144,7 @@ mod tests {
             "server_ready": true,
             "route_verified": true,
             "local_gateway": "127.0.0.1:25570",
-            "authority_peer_id": "authenticated-host",
+            "authority_peer_id": format!("scpeer:{}", "c".repeat(64)),
             "epoch": 3,
             "fencing_token": 12,
             "snapshot_hash": "a".repeat(64),
@@ -160,6 +164,7 @@ mod tests {
             ("world_id", serde_json::json!(OTHER)),
             ("local_gateway", serde_json::json!("192.168.1.2:25570")),
             ("authority_peer_id", serde_json::json!("")),
+            ("authority_peer_id", serde_json::json!("not-a-canonical-peer")),
             ("snapshot_hash", serde_json::json!("not-a-hash")),
             ("verified_at_unix_ms", serde_json::json!(NOW - 7_000)),
             ("valid_until_unix_ms", serde_json::json!(NOW - 1)),

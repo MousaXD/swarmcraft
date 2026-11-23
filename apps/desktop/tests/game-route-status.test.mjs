@@ -10,7 +10,7 @@ const NOW = Date.now();
 const live = () => ({
   world_id: WORLD, state: 'verified', quorum_verified: true,
   hosting_consent_verified: true, server_ready: true, route_verified: true,
-  local_gateway: '127.0.0.1:25570', authority_peer_id: 'signed-host',
+  local_gateway: '127.0.0.1:25570', authority_peer_id: `scpeer:${'c'.repeat(64)}`,
   epoch: 10, fencing_token: 23, snapshot_hash: 'a'.repeat(64),
   verified_at_unix_ms: NOW - 100, valid_until_unix_ms: NOW + 10_000,
 });
@@ -28,6 +28,7 @@ test('verified route is strictly live, localhost-only and world-bound', () => {
     ['local_gateway', '127.0.0.1:65536'],
     ['route_verified', false],
     ['quorum_verified', false],
+    ['authority_peer_id', 'not-a-canonical-peer'],
     ['hosting_consent_verified', false],
     ['server_ready', false],
     ['snapshot_hash', 'not-verified'],

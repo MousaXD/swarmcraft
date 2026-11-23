@@ -114,3 +114,12 @@ adapter. Agent 4's native command intentionally returns an error until that
 production path exists. The schema is in
 `apps/desktop/src-tauri/src/game_route_commands.rs`; the WebView may never
 manufacture it from `migration-status.json`.
+
+The `node.py` field probe now records only an allowlisted, world-bound
+summary of that fresh native CLI response; it never publishes the signed
+proof or remote host endpoint. `run.py verify` requires this report on the
+checkpoint, recovered, returned and consent-withdrawal stages, and rejects a
+verified old route immediately after the observed crash. Each participant's
+localhost port must remain unchanged across authority transitions. Missing
+CLI support, timeouts and unverifiable route reports yield **BLOCKED**, not a
+fallback to the old configured `game_endpoint`.

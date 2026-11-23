@@ -37,6 +37,18 @@ def node(role, stage):
     epoch = 3 if after_withdrawal else (2 if authority == BOB else 1)
     snapshot_number = 5 if after_withdrawal else (4 if stage == "alice_returned" else 3)
     withdrawn_bob = after_withdrawal and role == "bob"
+    route_present = stage in ("checkpoint", "bob_recovered", "alice_returned",
+                              "bob_withdrawn", "carol_denied")
+    route = ({
+        "verified": True,
+        "world_fingerprint": "world-fp",
+        "authority_fingerprint": authority,
+        "local_gateway": "127.0.0.1:" + str({"alice": 25570, "bob": 25571, "carol": 25572}[role]),
+        "epoch": epoch,
+        "fencing_token": epoch,
+        "snapshot_hash": ("4" if after_withdrawal else "1" if authority == ALICE else "2") * 64,
+        "proof_observed_unix_ms": 1_000_000 + 10_000 * list(gate.STAGES).index(stage),
+    } if route_present else {"verified": False})
     return {
         "machine_fingerprint": "host-" + role,
         "world_fingerprint": "world-fp",
@@ -81,6 +93,7 @@ def node(role, stage):
             "relay_connectivity": stage == "transport_relay",
             "hole_punch": "idle",
         },
+        "game_route_status": route,
     }
 
 
@@ -606,7 +619,9 @@ class TestFailClosed(unittest.TestCase):
     def test_missing_negative_human_review_flags_block_ready(self):
         # Synthetic records are deliberately rejected before media inspection.
         # They cannot establish a genuine installed-app denial.
-        for missing in ("bob_withdrawal_and_safe_handoff_observed",
+        for missing in ("real_minecraft_login_via_loopback_gateway",
+                        "same_local_gateway_after_authority_handoff",
+                        "bob_withdrawal_and_safe_handoff_observed",
                         "bob_rehost_attempt_denied_after_withdrawal",
                         "carol_player_only_host_denial_observed"):
             with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temp:
@@ -635,6 +650,58 @@ class TestFailClosed(unittest.TestCase):
             check["nodes"]["bob"]["minecraft_client_process_observed"] = False
             gate.save(out / "checkpoint.json", check)
             with self.assertRaisesRegex(gate.Blocked, "installed_gui_or_real_client_not_observed"):
+                gate.verify(c, out)
+
+    def test_rejects_successor_without_authenticated_game_route(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            recovered = gate.load_json(out / "bob_recovered.json")
+            recovered["nodes"]["bob"]["game_route_status"] = {"verified": False}
+            gate.save(out / "bob_recovered.json", recovered)
+            with self.assertRaisesRegex(gate.Blocked, "authenticated_game_route_missing_bob_recovered_bob"):
+                gate.verify(c, out)
+
+    def test_rejects_route_claim_with_old_authority_generation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            recovered = gate.load_json(out / "bob_recovered.json")
+            recovered["nodes"]["bob"]["game_route_status"]["fencing_token"] = 1
+            gate.save(out / "bob_recovered.json", recovered)
+            with self.assertRaisesRegex(gate.Blocked, "game_route_wrong_world_or_fence_bob_recovered_bob"):
+                gate.verify(c, out)
+
+    def test_rejects_local_gateway_changed_after_host_transfer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            returned = gate.load_json(out / "alice_returned.json")
+            returned["nodes"]["carol"]["game_route_status"]["local_gateway"] = "127.0.0.1:29099"
+            gate.save(out / "alice_returned.json", returned)
+            with self.assertRaisesRegex(gate.Blocked, "local_gateway_changed_after_host_transfer_carol"):
+                gate.verify(c, out)
+
+    def test_rejects_game_route_surviving_old_host_crash(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            crashed = gate.load_json(out / "alice_crashed.json")
+            crashed["nodes"]["bob"]["game_route_status"] = {"verified": True}
+            gate.save(out / "alice_crashed.json", crashed)
+            with self.assertRaisesRegex(gate.Blocked, "stale_game_route_survived_old_host_crash_bob"):
+                gate.verify(c, out)
+
+    def test_rejects_replayed_route_observation_after_reconnect(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            returned = gate.load_json(out / "alice_returned.json")
+            returned["nodes"]["alice"]["game_route_status"]["proof_observed_unix_ms"] = (
+                node("alice", "checkpoint")["game_route_status"]["proof_observed_unix_ms"]
+            )
+            gate.save(out / "alice_returned.json", returned)
+            with self.assertRaisesRegex(gate.Blocked, "game_route_probe_replayed_alice_returned_alice"):
                 gate.verify(c, out)
 
 

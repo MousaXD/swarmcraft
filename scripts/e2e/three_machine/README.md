@@ -2,6 +2,11 @@
 
 **Agent 05 / issue #85. Current verdict: BLOCKED.** This is a reproducible,
 fail-closed field-test harness, not a claim that a real three-player run passed.
+For the sabathon's authenticated localhost game gateway and reconnect gate,
+also follow [SABATHON_DESKTOP_FIELD_RUNBOOK.md](SABATHON_DESKTOP_FIELD_RUNBOOK.md).
+The verifier requires a fresh native `world game-route-status` proof at each
+playable checkpoint and a stable per-player localhost port through handoff;
+an unavailable daemon adapter explicitly blocks certification.
 Do not close #85 or add this job to mandatory release gates without the complete
 evidence and independent review.
 

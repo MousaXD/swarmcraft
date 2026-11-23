@@ -434,6 +434,47 @@ def verify(c, output, review_file=None):
                     for x in observed.values()),
                 "player_only_or_client_continuity_failed_" + name)
 
+    # The accepted checkpoint and actual Minecraft transport are distinct:
+    # require an independently sourced, recent game-route proof at every stage
+    # with a claimed playable successor. A CLI migration Ready status, generic
+    # NAT/relay diagnosis or open JVM process never satisfies this gate.
+    route_stages = ("checkpoint", "bob_recovered", "alice_returned",
+                    "bob_withdrawn", "carol_denied")
+    stable_gateway_by_role = {}
+    last_route_observation_by_role = {}
+    for name in route_stages:
+        route_snapshots = set()
+        for role, node in stages[name].items():
+            route = node.get("game_route_status")
+            require(isinstance(route, dict) and route.get("verified") is True,
+                    "authenticated_game_route_missing_" + name + "_" + role)
+            require(route.get("world_fingerprint") == node["world_fingerprint"] and
+                    route.get("authority_fingerprint") == node["authority_fingerprint"] and
+                    type(route.get("epoch")) is int and route["epoch"] == node["epoch"] and
+                    type(route.get("fencing_token")) is int and
+                    route["fencing_token"] == node["fencing_token"],
+                    "game_route_wrong_world_or_fence_" + name + "_" + role)
+            target = route.get("local_gateway")
+            match = re.fullmatch(r"127\.0\.0\.1:([1-9][0-9]{0,4})", target) if isinstance(target, str) else None
+            require(match is not None and int(match.group(1)) <= 65535,
+                    "game_route_not_loopback_" + name + "_" + role)
+            require(role not in stable_gateway_by_role or stable_gateway_by_role[role] == target,
+                    "local_gateway_changed_after_host_transfer_" + role)
+            stable_gateway_by_role[role] = target
+            observed_at = route.get("proof_observed_unix_ms")
+            require(type(observed_at) is int and observed_at > last_route_observation_by_role.get(role, 0),
+                    "game_route_probe_replayed_" + name + "_" + role)
+            last_route_observation_by_role[role] = observed_at
+            snap = route.get("snapshot_hash")
+            require(isinstance(snap, str) and SHA.fullmatch(snap),
+                    "signed_game_route_checkpoint_missing_" + name + "_" + role)
+            route_snapshots.add(snap.lower())
+        require(len(route_snapshots) == 1,
+                "game_route_checkpoint_diverged_" + name)
+    for role, node in stages["alice_crashed"].items():
+        require(node.get("game_route_status") == {"verified": False},
+                "stale_game_route_survived_old_host_crash_" + role)
+
     # The reviewed denial media is mandatory: merely observing Carol with
     # zero allocation does not prove an actual negative hosting attempt.
     # Human examination of redacted native GUI, Minecraft-client and network
@@ -446,6 +487,8 @@ def verify(c, output, review_file=None):
             "reviewed_stage_observations_changed_or_unbound")
     required = ("three_independent_gui_installations", "explicit_eula_by_alice",
                 "signed_invites_and_real_client_join", "shared_ingame_marker_three_clients",
+                "real_minecraft_login_via_loopback_gateway",
+                "same_local_gateway_after_authority_handoff",
                 "bob_opt_in_budget_enforced", "carol_zero_host_budget_enforced",
                 "direct_or_hole_punch_transport_observed", "relay_fallback_observed",
                 "measured_packet_loss_disconnect_and_reconnection",

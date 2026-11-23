@@ -50,7 +50,8 @@ export function normalizeGameRouteStatus(report, expectedWorldId, now = Date.now
       || !isLocalPort(report.local_gateway)
       || !isSafeInt(report.epoch) || !isSafeInt(report.fencing_token)
       || !isHash(report.snapshot_hash)
-      || typeof report.authority_peer_id !== 'string' || !report.authority_peer_id.trim()
+      || typeof report.authority_peer_id !== 'string'
+      || !/^scpeer:[a-f\d]{64}$/i.test(report.authority_peer_id)
       || !isSafeInt(proofTime) || !isSafeInt(expiry)
       || !Number.isFinite(now) || proofTime > now + 2000
       || now - proofTime > 5000 || expiry <= now || expiry <= proofTime

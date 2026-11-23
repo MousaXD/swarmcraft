@@ -8,6 +8,8 @@
   "explicit_eula_by_alice": false,
   "signed_invites_and_real_client_join": false,
   "shared_ingame_marker_three_clients": false,
+  "real_minecraft_login_via_loopback_gateway": false,
+  "same_local_gateway_after_authority_handoff": false,
   "bob_opt_in_budget_enforced": false,
   "carol_zero_host_budget_enforced": false,
   "direct_or_hole_punch_transport_observed": false,
