@@ -87,7 +87,7 @@ test('manual signed transfer and hosting-consent mutations revoke visible proofs
   assert.match(app, /if \(!selectedWorldId \|\| world !== selectedWorldId\) return;/);
   assert.match(typeBridge, /__swarmcraftInvalidateTransientSafety\?: \(world: string\) => void/);
   for (const method of ['transferPrepare', 'transferCommit', 'transferObserve', 'transferAccept', 'transferActivate']) {
-    const pattern = new RegExp('window\\.__swarmcraftInvalidateTransientSafety\\?\\.\\(currentWorld\\);\\s+const [^\\n]+ = await backend\\.migration\\.' + method + '\\(');
+    const pattern = new RegExp('window\\.__swarmcraftInvalidateTransientSafety\\?\\.\\(world\\);\\s+const [^\\n]+ = await backend\\.migration\\.' + method + '\\(');
     assert.match(wizard, pattern, `${method} must revoke stale UX before invoking Rust`);
   }
   for (const budget of ['heapMib', '0']) {
