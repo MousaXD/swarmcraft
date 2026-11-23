@@ -2,7 +2,7 @@
 use std::fs::File;
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -14,6 +14,7 @@ use swarm_protocol::WorldId;
 pub const PERMIT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 pub const PERMIT_TIMEOUT: Duration = Duration::from_secs(6);
 pub const PERMIT_START_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_PERMIT_BYTES: u64 = 128;
 static PERMIT_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn permit_path(paths: &DataPaths, world: WorldId) -> PathBuf {
@@ -40,7 +41,7 @@ fn write_permit_atomically(path: &Path, value: &[u8]) -> io::Result<()> {
     // An attacker-controlled/symlinked control path must never redirect an
     // authority heartbeat into an unrelated location. Check both the world
     // control directory and its parent before allowing any publication.
-    for directory in [parent.parent(), Some(parent)].into_iter().flatten() {
+    for directory in [parent.parent().and_then(Path::parent), parent.parent(), Some(parent)].into_iter().flatten() {
         reject_unsafe_entry(directory, true)?;
     }
     #[cfg(unix)]
@@ -100,7 +101,12 @@ fn reject_unsafe_entry(path: &Path, expect_directory: bool) -> io::Result<()> {
         if metadata.permissions().mode() & 0o022 != 0 || (!expect_directory && metadata.nlink() != 1) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "unsafe writable or hard-linked authority permit path",
+                format!(
+                    "unsafe writable or hard-linked authority permit path {} (mode {:o}, links {})",
+                    path.display(),
+                    metadata.permissions().mode() & 0o7777,
+                    metadata.nlink()
+                ),
             ));
         }
     }
@@ -137,11 +143,38 @@ fn replace_permit_atomically(temporary: &Path, destination: &Path) -> io::Result
 
 pub fn clear_permit(paths: &DataPaths, world: WorldId) -> io::Result<()> {
     let path = permit_path(paths, world);
+    // A fencing/consent revocation must not follow a substituted control
+    // directory into an unrelated location or remove a link to another file.
+    validate_permit_path(&path)?;
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn validate_permit_path(path: &Path) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "permit has no parent"))?;
+    for directory in [parent.parent().and_then(Path::parent), parent.parent(), Some(parent)].into_iter().flatten() {
+        reject_unsafe_entry(directory, true)?;
+    }
+    reject_unsafe_entry(path, false)
+}
+
+fn read_private_permit(path: &Path) -> io::Result<String> {
+    validate_permit_path(path)?;
+    let file = fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_PERMIT_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "authority permit is not a bounded regular file"));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_PERMIT_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_PERMIT_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "authority permit exceeded its bounded size"));
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "authority permit is not valid UTF-8"))
 }
 
 #[derive(Debug)]
@@ -157,22 +190,41 @@ impl PermitWatch {
     }
 
     pub fn observe(&mut self, paths: &DataPaths, world: WorldId, now: Instant) -> io::Result<bool> {
-        let value = fs::read_to_string(permit_path(paths, world))?;
+        let value = match read_private_permit(&permit_path(paths, world)) {
+            Ok(value) => value,
+            Err(error) => {
+                self.reset();
+                return Err(error);
+            }
+        };
         let Some((generation, heartbeat)) = parse_permit(&value) else {
+            self.reset();
             return Ok(false);
         };
         if generation != self.expected {
+            self.reset();
             return Ok(false);
         }
         match self.last_heartbeat {
             None => self.last_heartbeat = Some(heartbeat),
-            Some(previous) if previous != heartbeat => {
+            Some(previous) if heartbeat > previous => {
                 self.last_heartbeat = Some(heartbeat);
                 self.last_refresh = Some(now);
+            }
+            Some(previous) if heartbeat < previous => {
+                // A rolled-back copy of an old heartbeat is not evidence of
+                // ongoing majority lease renewal. Do not refresh or lower
+                // the monotonic floor: only a strictly newer tick can.
+                self.last_refresh = None;
             }
             Some(_) => {}
         }
         Ok(self.is_fresh(now))
+    }
+
+    fn reset(&mut self) {
+        self.last_heartbeat = None;
+        self.last_refresh = None;
     }
 
     pub fn is_fresh(&self, now: Instant) -> bool {
@@ -195,9 +247,22 @@ fn parse_permit(value: &str) -> Option<(AuthorityGeneration, u64)> {
 mod tests {
     use super::*;
 
+    fn private_tempdir() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        // The agent runner uses umask 0002: Rust tempfile directories can
+        // inherit mode 0775. An authority permit must reside under a private
+        // application root, so give test fixtures the same security boundary.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        temp
+    }
+
     #[test]
     fn frozen_permit_never_becomes_live() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let paths = DataPaths::from_root(temp.path());
         let world = WorldId([7; 32]);
         let generation = AuthorityGeneration { epoch: 4, fencing_token: 9 };
@@ -210,7 +275,7 @@ mod tests {
 
     #[test]
     fn changing_exact_generation_becomes_live_then_expires() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let paths = DataPaths::from_root(temp.path());
         let world = WorldId([8; 32]);
         let generation = AuthorityGeneration { epoch: 11, fencing_token: 22 };
@@ -225,7 +290,7 @@ mod tests {
 
     #[test]
     fn different_generation_is_ignored() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let paths = DataPaths::from_root(temp.path());
         let world = WorldId([9; 32]);
         let expected = AuthorityGeneration { epoch: 2, fencing_token: 2 };
@@ -235,9 +300,119 @@ mod tests {
     }
 
     #[test]
+    fn rolled_back_heartbeat_never_renews_a_fresh_lease() {
+        let temp = private_tempdir();
+        let paths = DataPaths::from_root(temp.path());
+        let world = WorldId([10; 32]);
+        let generation = AuthorityGeneration { epoch: 8, fencing_token: 18 };
+        let now = Instant::now();
+        let mut watch = PermitWatch::new(generation);
+        refresh_permit(&paths, world, generation, 100).unwrap();
+        assert!(!watch.observe(&paths, world, now).unwrap());
+        refresh_permit(&paths, world, generation, 101).unwrap();
+        assert!(watch.observe(&paths, world, now + Duration::from_secs(1)).unwrap());
+
+        refresh_permit(&paths, world, generation, 100).unwrap();
+        assert!(!watch.observe(&paths, world, now + Duration::from_secs(2)).unwrap());
+        assert!(!watch.is_fresh(now + Duration::from_secs(2)));
+        // Repeated replay of a formerly fresh value must stay fenced.
+        refresh_permit(&paths, world, generation, 101).unwrap();
+        assert!(!watch.observe(&paths, world, now + Duration::from_secs(3)).unwrap());
+        refresh_permit(&paths, world, generation, 102).unwrap();
+        assert!(watch.observe(&paths, world, now + Duration::from_secs(4)).unwrap());
+    }
+
+    #[test]
+    fn unreadable_or_malformed_permit_retires_cached_freshness() {
+        let temp = private_tempdir();
+        let paths = DataPaths::from_root(temp.path());
+        let world = WorldId([11; 32]);
+        let generation = AuthorityGeneration { epoch: 6, fencing_token: 16 };
+        let now = Instant::now();
+        let mut watch = PermitWatch::new(generation);
+        refresh_permit(&paths, world, generation, 10).unwrap();
+        assert!(!watch.observe(&paths, world, now).unwrap());
+        refresh_permit(&paths, world, generation, 11).unwrap();
+        assert!(watch.observe(&paths, world, now + Duration::from_secs(1)).unwrap());
+
+        fs::write(permit_path(&paths, world), b"malformed permit").unwrap();
+        assert!(!watch.observe(&paths, world, now + Duration::from_secs(2)).unwrap());
+        assert!(!watch.is_fresh(now + Duration::from_secs(2)));
+        refresh_permit(&paths, world, generation, 12).unwrap();
+        assert!(!watch.observe(&paths, world, now + Duration::from_secs(3)).unwrap());
+        refresh_permit(&paths, world, generation, 13).unwrap();
+        assert!(watch.observe(&paths, world, now + Duration::from_secs(4)).unwrap());
+
+        fs::write(permit_path(&paths, world), vec![b'1'; MAX_PERMIT_BYTES as usize + 1]).unwrap();
+        assert!(watch.observe(&paths, world, now + Duration::from_secs(5)).is_err());
+        assert!(!watch.is_fresh(now + Duration::from_secs(5)));
+        clear_permit(&paths, world).unwrap();
+        assert!(watch.observe(&paths, world, now + Duration::from_secs(6)).is_err());
+        assert!(!watch.is_fresh(now + Duration::from_secs(6)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_permit_cannot_be_observed_or_cleared_through_the_link() {
+        use std::os::unix::fs::symlink;
+        let temp = private_tempdir();
+        let paths = DataPaths::from_root(temp.path());
+        let world = WorldId([12; 32]);
+        let generation = AuthorityGeneration { epoch: 8, fencing_token: 16 };
+        refresh_permit(&paths, world, generation, 1).unwrap();
+        let outside = temp.path().join("outside");
+        fs::write(&outside, b"8 16 2\n").unwrap();
+        let path = permit_path(&paths, world);
+        fs::remove_file(&path).unwrap();
+        symlink(&outside, &path).unwrap();
+
+        let mut watch = PermitWatch::new(generation);
+        assert!(watch.observe(&paths, world, Instant::now()).is_err());
+        assert!(clear_permit(&paths, world).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"8 16 2\n");
+        assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_or_linked_control_paths_never_prove_fresh_authority() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let temp = private_tempdir();
+        let paths = DataPaths::from_root(temp.path());
+        let world = WorldId([17; 32]);
+        let generation = AuthorityGeneration { epoch: 2, fencing_token: 5 };
+        refresh_permit(&paths, world, generation, 1).unwrap();
+        let path = permit_path(&paths, world);
+        let world_control = path.parent().unwrap();
+        let mut watch = PermitWatch::new(generation);
+
+        fs::set_permissions(world_control, fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(watch.observe(&paths, world, Instant::now()).is_err());
+        assert!(clear_permit(&paths, world).is_err());
+        assert!(refresh_permit(&paths, world, generation, 2).is_err());
+        fs::set_permissions(world_control, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let other = temp.path().join("hardlinked");
+        fs::hard_link(&path, &other).unwrap();
+        assert!(watch.observe(&paths, world, Instant::now()).is_err());
+        assert!(clear_permit(&paths, world).is_err());
+        fs::remove_file(other).unwrap();
+
+        // A replaced world directory must not redirect a stop/refresh into
+        // another folder, even if it contains a plausible changing permit.
+        let elsewhere = temp.path().join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::rename(world_control, temp.path().join("moved-control")).unwrap();
+        symlink(&elsewhere, world_control).unwrap();
+        assert!(watch.observe(&paths, world, Instant::now()).is_err());
+        assert!(clear_permit(&paths, world).is_err());
+        assert!(!elsewhere.join("authority.permit").exists());
+    }
+
+    #[test]
     fn concurrent_reads_never_observe_a_torn_published_permit() {
         use std::sync::{atomic::AtomicBool, Arc, Barrier};
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let paths = DataPaths::from_root(temp.path());
         let world = WorldId([13; 32]);
         let generation = AuthorityGeneration { epoch: 25, fencing_token: 38 };
@@ -268,7 +443,7 @@ mod tests {
     #[test]
     fn unsafe_existing_permit_symlink_fails_closed() {
         use std::os::unix::fs::symlink;
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let paths = DataPaths::from_root(temp.path());
         let world = WorldId([14; 32]);
         let outside = temp.path().join("outside");
@@ -285,7 +460,7 @@ mod tests {
     #[test]
     fn unsafe_world_control_directory_fails_closed() {
         use std::os::unix::fs::symlink;
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let paths = DataPaths::from_root(temp.path());
         let world = WorldId([15; 32]);
         let outside = temp.path().join("elsewhere");
