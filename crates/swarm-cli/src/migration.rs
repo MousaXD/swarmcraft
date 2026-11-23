@@ -2,6 +2,8 @@ use crate::{
     authority_permit::PermitWatch, host_readiness, hosting_budget, launch_guard,
     runtime_process_guard::RuntimeProcessGuard, server_mods,
 };
+#[path = "managed_server_properties.rs"]
+mod managed_server_properties;
 use anyhow::{anyhow, bail, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -12,7 +14,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus},
-    str::FromStr,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 use swarm_consensus::AuthorityGeneration;
@@ -35,6 +37,76 @@ use tracing::{info, warn};
 const FABRIC_START_TIMEOUT: Duration = Duration::from_secs(60);
 const FABRIC_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const SUPERVISOR_POLL: Duration = Duration::from_millis(250);
+const STOP_INTENT_SCHEMA_VERSION: u16 = 1;
+// serde encodes WorldId/PeerId as byte arrays; pretty JSON can be larger
+// than a compact machine token. Keep an explicit, small read ceiling.
+const MAX_STOP_INTENT_BYTES: u64 = 4 * 1024;
+const TRANSFER_INTENT_SCHEMA_VERSION: u16 = 1;
+const MAX_TRANSFER_INTENT_BYTES: u64 = 4 * 1024;
+static CONTROL_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Machine-local stop requests must be tied to the exact authority generation.
+/// An old UI request must never stop a newly recovered or transferred host.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StopIntentV1 {
+    schema_version: u16,
+    world_id: WorldId,
+    epoch: u64,
+    fencing_token: u64,
+    authority_peer_id: PeerId,
+}
+
+impl StopIntentV1 {
+    fn from_epoch(epoch: &EpochRecordV1) -> Self {
+        Self {
+            schema_version: STOP_INTENT_SCHEMA_VERSION,
+            world_id: epoch.world_id,
+            epoch: epoch.epoch_number,
+            fencing_token: epoch.fencing_token,
+            authority_peer_id: epoch.authority_peer_id,
+        }
+    }
+
+    fn matches_epoch(&self, epoch: &EpochRecordV1) -> bool {
+        self == &Self::from_epoch(epoch)
+    }
+}
+
+/// A local transfer request is scoped to the exact authority generation.
+/// This is not signed transfer authorization: that is created only after
+/// Fabric has checkpointed and the canonical generation is revalidated.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct TransferIntentV1 {
+    schema_version: u16,
+    world_id: WorldId,
+    epoch: u64,
+    fencing_token: u64,
+    authority_peer_id: PeerId,
+    target_peer_id: PeerId,
+}
+
+impl TransferIntentV1 {
+    fn from_epoch(epoch: &EpochRecordV1, target_peer_id: PeerId) -> Self {
+        Self {
+            schema_version: TRANSFER_INTENT_SCHEMA_VERSION,
+            world_id: epoch.world_id,
+            epoch: epoch.epoch_number,
+            fencing_token: epoch.fencing_token,
+            authority_peer_id: epoch.authority_peer_id,
+            target_peer_id,
+        }
+    }
+
+    fn matches_epoch(&self, epoch: &EpochRecordV1) -> bool {
+        self.schema_version == TRANSFER_INTENT_SCHEMA_VERSION
+            && self.world_id == epoch.world_id
+            && self.epoch == epoch.epoch_number
+            && self.fencing_token == epoch.fencing_token
+            && self.authority_peer_id == epoch.authority_peer_id
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeLaunchConfig {
@@ -136,6 +208,14 @@ pub fn load_migration_status(paths: &DataPaths, world: WorldId) -> Result<Migrat
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+/// Returns only the locally managed Minecraft listener port assignment.
+/// This is not runtime-readiness or signed route authorization: consumers
+/// must independently verify live authenticated Fabric IPC, current canonical
+/// quorum, membership, consent and fencing before forwarding any game data.
+pub fn managed_minecraft_port(paths: &DataPaths, world: WorldId) -> Result<Option<u16>> {
+    managed_server_properties::recorded_port(paths, world)
+}
+
 pub fn request_world_stop(paths: &DataPaths, storage: &Storage, world: WorldId) -> Result<()> {
     storage.load_world(world)?;
     if launch_guard::load_sleep_record_fail_closed(storage, world)?.is_some() {
@@ -146,11 +226,24 @@ pub fn request_world_stop(paths: &DataPaths, storage: &Storage, world: WorldId) 
     if epoch.authority_peer_id != identity.peer_id() || epoch.authority_public_key != identity.public_key() {
         bail!("only the current authority may request a safe world stop");
     }
-    let path = stop_intent_path(paths, world);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&path, b"stop\n").with_context(|| format!("cannot write safe-stop intent {}", path.display()))?;
+    // The user requested a checkpoint: immediately retract the previous
+    // machine-local runtime proof and any green readiness cache, even before
+    // Java reaches its save barrier. It must not accept new game sessions
+    // during this transition.
+    host_readiness::invalidate_runtime_verification(paths, world)?;
+    host_readiness::invalidate_cached_readiness(paths, world)?;
+    publish_status(
+        paths,
+        storage,
+        world,
+        Some(MigrationTrigger::DirectHost),
+        MigrationPhase::Checkpointing,
+        false,
+        None,
+        storage.latest_snapshot(world)?.and_then(|snapshot| snapshot.manifest_hash().ok()),
+        None,
+    )?;
+    atomic_json(&stop_intent_path(paths, world), &StopIntentV1::from_epoch(&epoch))?;
     Ok(())
 }
 
@@ -704,6 +797,10 @@ async fn run_authority_runtime_inner(
     )?;
     // This persistent ownership record survives a hard-killed Rust supervisor.
     // A subsequent launcher must prove the old Java PID is gone before any runtime bytes are reset.
+    // Every fresh attempt invalidates the preceding machine-local Fabric
+    // verification, including when an orphaned Java PID blocks the reset.
+    // A prior launch can never certify a newly restoring Minecraft process.
+    host_readiness::invalidate_runtime_verification(paths, options.world)?;
     let mut runtime_process = RuntimeProcessGuard::begin(paths, options.world)?;
     reset_runtime_directory(&runtime)?;
     fs::create_dir_all(runtime.join("mods"))?;
@@ -711,6 +808,10 @@ async fn run_authority_runtime_inner(
         .with_context(|| format!("cannot install Fabric bridge from {}", options.mod_jar.display()))?;
     server_mods::install_verified_user_mods(paths, options.world, &world_config.compatibility, &runtime.join("mods"))?;
     fs::write(runtime.join("eula.txt"), "eula=true\n")?;
+    // Must be written before Java launch: the default Minecraft listener is
+    // 0.0.0.0:25565 and must NEVER be reachable outside SwarmCraft's signed
+    // authenticated game-stream route. The saved port is not a live proof.
+    let managed_port = managed_server_properties::prepare(paths, options.world, &runtime)?;
     seed_fabric_game_jar(paths, options.world, &metadata.genesis.minecraft_version, &runtime)?;
 
     publish_status(
@@ -744,6 +845,9 @@ async fn run_authority_runtime_inner(
     // pressure must be rechecked immediately before Java starts. Serialize
     // consent publication with the synchronous spawn to close that race.
     let mut child = hosting_budget::with_consent_guarded_spawn(paths, options.world, &admission, || {
+        // Do not launch a server into an occupied saved address or fall back
+        // to a fresh port that would silently redirect an existing world.
+        managed_server_properties::ensure_port_free(managed_port)?;
         launch_server(
             &options.java,
             &options.server_jar,
@@ -754,10 +858,11 @@ async fn run_authority_runtime_inner(
             &launch.environment(),
         )
     })?;
-    if let Err(error) = runtime_process.record_java(child.id()) {
-        terminate_child(&mut child);
-        return Err(error);
-    }
+    // Any failed publish, verification, or IPC handshake before Ready must
+    // reap this Java process. Dropping std::process::Child alone leaves the
+    // unverified server running without its Rust supervisor.
+    let startup = StartupJavaGuard::new(&mut child, paths, options.world);
+    runtime_process.record_java(startup.pid())?;
 
     publish_status(
         paths,
@@ -770,25 +875,26 @@ async fn run_authority_runtime_inner(
         Some(latest.manifest_hash()?),
         None,
     )?;
-    let mut session = match listener.accept(FABRIC_START_TIMEOUT).await {
-        Ok(session) => session,
-        Err(error) => {
-            terminate_child(&mut child);
-            return Err(error.into());
-        }
-    };
-    if let Err(error) = validate_world_info(
+    let mut session = listener.accept(FABRIC_START_TIMEOUT).await?;
+    validate_world_info(
         session.world_info(),
         &metadata.genesis.minecraft_version,
         &metadata.genesis.fabric_loader_version,
         &world_dir,
         metadata.genesis.compatibility_fingerprint,
+    )?;
+    // SERVER_STARTED sends authenticated Fabric world info only after Java's
+    // Minecraft listener has initialized. Independently reject an unavailable
+    // local port before recording host-ready status. This does not replace
+    // Agent 1's nonce-bound runtime/authority proof used by game routing.
+    if let Err(error) = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, managed_port).into(),
+        Duration::from_secs(2),
     ) {
-        terminate_child(&mut child);
-        return Err(error);
+        return Err(anyhow!("managed Minecraft server listener on 127.0.0.1:{managed_port} is unavailable: {error}"));
     }
     if let Err(error) = ensure_authority_generation(storage, &identity, &epoch) {
-        terminate_child(&mut child);
+        terminate_child(&mut *startup.child);
         publish_status(
             paths,
             storage,
@@ -833,7 +939,7 @@ async fn run_authority_runtime_inner(
                 Some(latest.manifest_hash()?),
                 None,
             )?;
-            info!(world = %options.world, pid = child.id(), ?trigger, "Minecraft authority runtime is ready");
+            info!(world = %options.world, pid = startup.pid(), ?trigger, "Minecraft authority runtime is ready");
         }
         state => {
             // Never advertise Ready after consent has changed during Fabric
@@ -843,7 +949,7 @@ async fn run_authority_runtime_inner(
                 Err(error) => format!("cannot verify hosting contribution: {error}"),
                 Ok(None) => unreachable!(),
             };
-            publish_status(
+            if let Err(error) = publish_status(
                 paths,
                 storage,
                 options.world,
@@ -853,9 +959,18 @@ async fn run_authority_runtime_inner(
                 game_endpoint.clone(),
                 Some(latest.manifest_hash()?),
                 Some(detail),
-            )?;
+            ) {
+                // Consent was withdrawn during authenticated Fabric startup.
+                // Do not abandon the newly running JVM because telemetry
+                // failed; the supervised loop must still request a Fabric
+                // save barrier instead of killing uncheckpointed world data.
+                warn!(world = %options.world, %error, "could not publish blocked startup state; continuing safe-stop supervision");
+            }
         }
     }
+    // From here the existing supervisor owns shutdown and checkpointing.
+    // Loss of consent after live Fabric handshaking must remain save-first.
+    startup.disarm();
 
     let disposition = match wait_for_runtime_exit(
         paths,
@@ -985,15 +1100,54 @@ async fn wait_for_runtime_exit(
     session: &mut swarm_ipc::FabricSession,
     options: RuntimeExitOptions<'_>,
 ) -> Result<RuntimeDisposition> {
+    let mut withdrawal_reported = false;
+    let mut invalid_stop_intent_reported = false;
     loop {
         if let Some(status) = child.try_wait()? {
             if !status.success() {
+                if let Err(error) = retire_live_runtime(
+                    paths,
+                    epoch.world_id,
+                    MigrationPhase::Failed,
+                    Some(&format!("Minecraft server exited unsuccessfully: {status}")),
+                ) {
+                    warn!(world = %epoch.world_id, %error, "could not invalidate stale readiness after Java exit");
+                }
                 bail!("Minecraft server exited unsuccessfully: {status}");
+            }
+            if let Err(error) = retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, None) {
+                warn!(world = %epoch.world_id, %error, "could not invalidate readiness after Java exited");
             }
             return Ok(RuntimeDisposition::Sleep);
         }
-        ensure_authority_generation(storage, identity, epoch)?;
-        if stop_intent_path(paths, epoch.world_id).exists() {
+        if let Err(error) = ensure_authority_generation(storage, identity, epoch) {
+            if let Err(report_error) = retire_live_runtime(
+                paths,
+                epoch.world_id,
+                MigrationPhase::Superseded,
+                Some("runtime authority generation was superseded"),
+            ) {
+                warn!(world = %epoch.world_id, %report_error, "could not invalidate superseded runtime status");
+            }
+            return Err(error);
+        }
+        let stop_requested = match load_stop_intent(paths, epoch) {
+            Ok(requested) => {
+                invalid_stop_intent_reported = false;
+                requested
+            }
+            Err(error) => {
+                if !invalid_stop_intent_reported {
+                    warn!(world = %epoch.world_id, %error, "invalid or stale safe-stop intent; refusing to stop this authority generation");
+                    invalid_stop_intent_reported = true;
+                }
+                false
+            }
+        };
+        if stop_requested {
+            if let Err(error) = retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, None) {
+                warn!(world = %epoch.world_id, %error, "could not publish safe-stop checkpointing state");
+            }
             let stop_result = async {
                 session.prepare_shutdown(1, FABRIC_SHUTDOWN_TIMEOUT).await?;
                 timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
@@ -1002,10 +1156,22 @@ async fn wait_for_runtime_exit(
                 Ok::<(), anyhow::Error>(())
             }
             .await;
-            clear_stop_intent(paths, epoch.world_id)?;
+            if let Err(error) = clear_stop_intent(paths, epoch.world_id) {
+                // An inability to clear telemetry/intent must never kill the
+                // unfenced Java process or discard an already saved checkpoint.
+                warn!(world = %epoch.world_id, %error, "cannot clear safe-stop intent");
+            }
             match stop_result {
                 Ok(()) => return Ok(RuntimeDisposition::Sleep),
                 Err(error) => {
+                    if let Err(report_error) = retire_live_runtime(
+                        paths,
+                        epoch.world_id,
+                        MigrationPhase::Blocked,
+                        Some("safe-stop save barrier failed; Java remains running until it can be stopped safely"),
+                    ) {
+                        warn!(world = %epoch.world_id, %report_error, "could not publish failed safe-stop state");
+                    }
                     warn!(world = %epoch.world_id, %error, "safe stop save barrier failed; keeping Minecraft running");
                     continue;
                 }
@@ -1014,9 +1180,13 @@ async fn wait_for_runtime_exit(
         // Prefer any already-requested signed transfer checkpoint. A withdrawn
         // contribution otherwise requests the same Fabric save barrier used by
         // a safe user stop; a failed barrier does NOT kill an unfenced JVM.
-        match load_transfer_intent(paths, epoch.world_id) {
+        match load_transfer_intent(paths, epoch) {
             Ok(Some(target)) => match validate_transfer_target(storage, identity, epoch.world_id, target) {
                 Ok(()) => {
+                    if let Err(error) = retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, None)
+                    {
+                        warn!(world = %epoch.world_id, %error, "could not publish transfer checkpointing state");
+                    }
                     let outcome = async {
                         session.prepare_shutdown(2, FABRIC_SHUTDOWN_TIMEOUT).await?;
                         timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
@@ -1028,6 +1198,14 @@ async fn wait_for_runtime_exit(
                     match outcome {
                         Ok(()) => return Ok(RuntimeDisposition::Transfer(target)),
                         Err(error) => {
+                            if let Err(report_error) = retire_live_runtime(
+                                paths,
+                                epoch.world_id,
+                                MigrationPhase::Blocked,
+                                Some("transfer save barrier failed; current Java authority remains running"),
+                            ) {
+                                warn!(world = %epoch.world_id, %report_error, "could not publish failed transfer state");
+                            }
                             warn!(
                                 world = %epoch.world_id,
                                 %error,
@@ -1048,13 +1226,26 @@ async fn wait_for_runtime_exit(
                 }
             },
             Ok(None) => {}
-            Err(error) => warn!(world = %epoch.world_id, %error, "ignoring unreadable transfer intent"),
+            Err(error) => {
+                warn!(world = %epoch.world_id, %error, "rejecting stale or malformed transfer intent without stopping Minecraft");
+                if let Err(clear_error) = clear_transfer_intent(paths, epoch.world_id) {
+                    warn!(world = %epoch.world_id, %clear_error, "cannot clear rejected transfer intent");
+                }
+            }
         }
         let withdrawal = match hosting_budget::runtime_withdrawal(paths, epoch.world_id, options.admission.consent()) {
             Ok(reason) => reason,
             Err(error) => Some(format!("cannot revalidate local hosting consent or memory: {error}")),
         };
         if let Some(reason) = withdrawal {
+            if !withdrawal_reported {
+                match retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, Some(&reason)) {
+                    Ok(()) => withdrawal_reported = true,
+                    Err(error) => {
+                        warn!(world = %epoch.world_id, %error, "could not invalidate runtime readiness on hosting withdrawal");
+                    }
+                }
+            }
             warn!(world = %epoch.world_id, %reason, "hosting contribution withdrawn or unsafe; requesting durable safe stop");
             let stopped = async {
                 session.prepare_shutdown(1, FABRIC_SHUTDOWN_TIMEOUT).await?;
@@ -1067,6 +1258,14 @@ async fn wait_for_runtime_exit(
             match stopped {
                 Ok(()) => return Ok(RuntimeDisposition::Sleep),
                 Err(error) => {
+                    if let Err(report_error) = retire_live_runtime(
+                        paths,
+                        epoch.world_id,
+                        MigrationPhase::Blocked,
+                        Some("hosting withdrawal save barrier failed; Java remains running while shutdown retries"),
+                    ) {
+                        warn!(world = %epoch.world_id, %report_error, "could not publish failed hosting-withdrawal state");
+                    }
                     warn!(world = %epoch.world_id, %error, "cannot safely checkpoint withdrawn host; preserving running authority and retrying")
                 }
             }
@@ -1076,11 +1275,30 @@ async fn wait_for_runtime_exit(
                 _ = sleep(SUPERVISOR_POLL) => {}
                 result = tokio::signal::ctrl_c() => {
                     result.context("failed to listen for Ctrl+C")?;
-                    session.prepare_shutdown(1, FABRIC_SHUTDOWN_TIMEOUT).await?;
-                    timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
-                        .await
-                        .map_err(|_| anyhow!("Minecraft did not stop after the shutdown barrier"))??;
-                    return Ok(RuntimeDisposition::Sleep);
+                    if let Err(error) = retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, None) {
+                        warn!(world = %epoch.world_id, %error, "could not publish Ctrl+C checkpointing state");
+                    }
+                    let stop_result = async {
+                        session.prepare_shutdown(1, FABRIC_SHUTDOWN_TIMEOUT).await?;
+                        timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
+                            .await
+                            .map_err(|_| anyhow!("Minecraft did not stop after the shutdown barrier"))??;
+                        Ok::<(), anyhow::Error>(())
+                    }.await;
+                    match stop_result {
+                        Ok(()) => return Ok(RuntimeDisposition::Sleep),
+                        Err(error) => {
+                            if let Err(report_error) = retire_live_runtime(
+                                paths,
+                                epoch.world_id,
+                                MigrationPhase::Blocked,
+                                Some("Ctrl+C save barrier failed; Java remains running until it can stop safely"),
+                            ) {
+                                warn!(world = %epoch.world_id, %report_error, "could not publish failed Ctrl+C stop state");
+                            }
+                            warn!(world = %epoch.world_id, %error, "Ctrl+C save barrier failed; preserving Java and allowing a later safe-stop retry");
+                        }
+                    }
                 }
             }
         } else {
@@ -1136,7 +1354,11 @@ pub fn prepare_manual_transfer(
         return Ok(TransferPrepareResult::Prepared(encode_transfer(&prepared)?));
     }
 
-    atomic_bytes(&transfer_intent_path(paths, world), format!("{}\n", target).as_bytes())?;
+    // A transfer begins at the current authority, but no cached Ready proof
+    // may remain usable once a checkpoint handoff has been requested.
+    host_readiness::invalidate_runtime_verification(paths, world)?;
+    host_readiness::invalidate_cached_readiness(paths, world)?;
+    atomic_json(&transfer_intent_path(paths, world), &TransferIntentV1::from_epoch(&epoch, target))?;
     publish_status(
         paths,
         storage,
@@ -1834,6 +2056,45 @@ fn terminate_child(child: &mut Child) {
     }
 }
 
+/// An unverified Minecraft Java launch must not outlive a failed startup.
+/// This guard only covers startup, before the runtime is turned over to the
+/// Fabric save-first supervisor. After handoff, its Drop never kills Java.
+struct StartupJavaGuard<'a> {
+    child: &'a mut Child,
+    paths: &'a DataPaths,
+    world: WorldId,
+    armed: bool,
+}
+
+impl<'a> StartupJavaGuard<'a> {
+    fn new(child: &'a mut Child, paths: &'a DataPaths, world: WorldId) -> Self {
+        Self { child, paths, world, armed: true }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartupJavaGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        terminate_child(&mut *self.child);
+        if let Err(error) = host_readiness::invalidate_runtime_verification(self.paths, self.world) {
+            warn!(world = %self.world, %error, "could not retract failed-startup runtime verification");
+        }
+        if let Err(error) = host_readiness::invalidate_cached_readiness(self.paths, self.world) {
+            warn!(world = %self.world, %error, "could not retract failed-startup host readiness");
+        }
+    }
+}
+
 fn publish_failure(
     paths: &DataPaths,
     storage: &Storage,
@@ -1884,6 +2145,27 @@ fn publish_status(
     Ok(())
 }
 
+/// Remove machine-local runtime readiness before awaiting any checkpoint,
+/// transfer, fencing or consent-withdrawal barrier. A previously persisted
+/// `Ready` report must not remain green while Java is stopping, untrusted, or
+/// preserving its last save after a failed barrier. Never treat this status
+/// update as a replacement for fresh canonical authority and Fabric checks.
+fn retire_live_runtime(paths: &DataPaths, world: WorldId, phase: MigrationPhase, detail: Option<&str>) -> Result<()> {
+    // Do this first: even if the status file is corrupt, no older local
+    // runtime verification should remain available for optimistic reuse.
+    host_readiness::invalidate_runtime_verification(paths, world)?;
+    host_readiness::invalidate_cached_readiness(paths, world)?;
+    let mut status = load_migration_status(paths, world).context("cannot load live runtime status for retirement")?;
+    if status.world_id != world.to_string() {
+        bail!("live runtime status belongs to another world; cannot retire readiness safely");
+    }
+    status.phase = phase;
+    status.runtime_ready = false;
+    status.game_endpoint = None;
+    status.failure_reason = detail.map(str::to_owned);
+    atomic_json(&migration_status_path(paths, world), &status)
+}
+
 fn runtime_config_path(paths: &DataPaths, world: WorldId) -> PathBuf {
     control_dir(paths, world).join("runtime.json")
 }
@@ -1894,6 +2176,38 @@ fn migration_status_path(paths: &DataPaths, world: WorldId) -> PathBuf {
 
 fn stop_intent_path(paths: &DataPaths, world: WorldId) -> PathBuf {
     paths.root.join("runtime-control").join(world.to_hex()).join("stop.intent")
+}
+
+/// A plain `stop\n` legacy intent is not tied to a host generation and must
+/// fail closed after an authority change, rather than stopping a successor.
+fn load_stop_intent(paths: &DataPaths, epoch: &EpochRecordV1) -> Result<bool> {
+    let path = stop_intent_path(paths, epoch.world_id);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("cannot inspect safe-stop intent {}", path.display())),
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_STOP_INTENT_BYTES
+    {
+        bail!("safe-stop intent is not a bounded regular file; refusing unsafe stop");
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    fs::File::open(&path)
+        .with_context(|| format!("cannot open safe-stop intent {}", path.display()))?
+        .take(MAX_STOP_INTENT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("cannot read safe-stop intent {}", path.display()))?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_STOP_INTENT_BYTES {
+        bail!("safe-stop intent exceeded size limit; refusing unsafe stop");
+    }
+    let intent: StopIntentV1 = serde_json::from_slice(&bytes).context("safe-stop intent is malformed or obsolete")?;
+    if !intent.matches_epoch(epoch) {
+        bail!("safe-stop intent is for a different authority generation, fence or world");
+    }
+    Ok(true)
 }
 
 fn clear_stop_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
@@ -1916,13 +2230,35 @@ fn control_dir(paths: &DataPaths, world: WorldId) -> PathBuf {
     paths.root.join("control").join(world.to_hex())
 }
 
-fn load_transfer_intent(paths: &DataPaths, world: WorldId) -> Result<Option<PeerId>> {
-    let path = transfer_intent_path(paths, world);
-    if !path.exists() {
-        return Ok(None);
+fn load_transfer_intent(paths: &DataPaths, epoch: &EpochRecordV1) -> Result<Option<PeerId>> {
+    let path = transfer_intent_path(paths, epoch.world_id);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("cannot inspect transfer intent {}", path.display())),
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_TRANSFER_INTENT_BYTES
+    {
+        bail!("transfer intent is not a bounded regular file; refusing unsafe transfer");
     }
-    let value = fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-    Ok(Some(PeerId::from_str(value.trim()).context("transfer intent contains an invalid peer ID")?))
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    fs::File::open(&path)
+        .with_context(|| format!("cannot open transfer intent {}", path.display()))?
+        .take(MAX_TRANSFER_INTENT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("cannot read transfer intent {}", path.display()))?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_TRANSFER_INTENT_BYTES {
+        bail!("transfer intent exceeded size limit; refusing unsafe transfer");
+    }
+    let intent: TransferIntentV1 =
+        serde_json::from_slice(&bytes).context("transfer intent is malformed or obsolete")?;
+    if !intent.matches_epoch(epoch) {
+        bail!("transfer intent is for a different authority generation, fence or world");
+    }
+    Ok(Some(intent.target_peer_id))
 }
 
 fn clear_transfer_intent(paths: &DataPaths, world: WorldId) -> Result<()> {
@@ -1956,18 +2292,346 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 
 fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("control file has no parent directory")?;
-    fs::create_dir_all(parent)?;
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes)?;
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path)?;
+    // Control/status files can be written by the foreground CLI while the
+    // supervisor publishes progress. Give every writer a distinct temporary
+    // file; never truncate a shared .tmp or remove the old Windows destination
+    // before the replacement is committed.
+    for directory in [parent.parent(), Some(parent)].into_iter().flatten() {
+        if let Ok(metadata) = fs::symlink_metadata(directory) {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!("control path has an unsafe symlink or non-directory ancestor: {}", directory.display());
+            }
+        }
     }
-    fs::rename(&tmp, path)?;
-    Ok(())
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(parent)?;
+    if fs::symlink_metadata(parent)?.file_type().is_symlink() {
+        bail!("control path directory was replaced by an unsafe symlink");
+    }
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("control file path is an unsafe symlink or non-regular file: {}", path.display());
+        }
+    }
+    let seq = CONTROL_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}.{}.tmp", std::process::id(), seq));
+    let result = (|| -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        replace_control_file_atomically(&tmp, path)?;
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_control_file_atomically(tmp: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(tmp, destination)
+}
+
+#[cfg(windows)]
+fn replace_control_file_atomically(tmp: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
+    }
+    let old = tmp.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let new = destination.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    // SAFETY: both buffers are valid NUL-terminated UTF-16 for this call.
+    let result = unsafe { MoveFileExW(old.as_ptr(), new.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn epoch_record_hash(record: &EpochRecordV1) -> Result<Hash32> {
     let encoded = postcard::to_allocvec(record)?;
     Ok(Hash32::from_domain_bytes(b"swarmcraft/epoch-record/v1\0", &encoded))
+}
+
+#[cfg(test)]
+mod runtime_retirement_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn sleeping_mock_java() -> Child {
+        Command::new("/bin/sh").args(["-c", "exec sleep 30"]).spawn().expect("cannot spawn isolated mock Java process")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_startup_guard_reaps_java_and_invalidates_both_readiness_proofs() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path());
+        let world = WorldId([34; 32]);
+        let proof = control_dir(&paths, world).join("runtime-verified.json");
+        let readiness = control_dir(&paths, world).join("host-readiness.json");
+        fs::create_dir_all(proof.parent().unwrap()).unwrap();
+        fs::write(&proof, b"stale runtime proof").unwrap();
+        fs::write(&readiness, b"stale readiness snapshot").unwrap();
+        let mut child = sleeping_mock_java();
+        {
+            let guard = StartupJavaGuard::new(&mut child, &paths, world);
+            assert!(guard.pid() != 0);
+            // An ordinary fallible startup operation (`?`) unwinds here.
+        }
+        assert!(child.try_wait().unwrap().is_some(), "failed startup must not orphan a Java process");
+        assert!(!proof.exists());
+        assert!(!readiness.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disarmed_startup_guard_does_not_kill_a_supervised_java_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path());
+        let world = WorldId([35; 32]);
+        let mut child = sleeping_mock_java();
+        StartupJavaGuard::new(&mut child, &paths, world).disarm();
+        assert!(child.try_wait().unwrap().is_none(), "save-first supervisor must retain the live Java child");
+        terminate_child(&mut child);
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    fn epoch(world: WorldId) -> EpochRecordV1 {
+        EpochRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            epoch_number: 4,
+            previous_epoch_hash: None,
+            base_state_hash: Hash32([4; 32]),
+            authority_peer_id: PeerId([5; 32]),
+            authority_public_key: [6; 32],
+            mode: EpochMode::Quorum,
+            fencing_token: 9,
+            reason: "stop-intent-test".into(),
+            signature: Vec::new(),
+        }
+    }
+
+    fn ready_status(world: WorldId) -> MigrationStatus {
+        MigrationStatus {
+            world_id: world.to_string(),
+            authority_peer_id: None,
+            epoch: Some(4),
+            fencing_token: Some(9),
+            trigger: Some(MigrationTrigger::DirectHost),
+            phase: MigrationPhase::Ready,
+            runtime_ready: true,
+            game_endpoint: Some("127.0.0.1:25565".into()),
+            snapshot_hash: None,
+            failure_reason: None,
+        }
+    }
+
+    #[test]
+    fn checkpointing_or_withdrawal_clears_stale_ready_and_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(dir.path());
+        let world = WorldId([23; 32]);
+        atomic_json(&migration_status_path(&paths, world), &ready_status(world)).unwrap();
+        let proof = control_dir(&paths, world).join("runtime-verified.json");
+        fs::write(&proof, b"previous runtime proof").unwrap();
+        let readiness = control_dir(&paths, world).join("host-readiness.json");
+        fs::write(&readiness, b"previous green readiness").unwrap();
+
+        retire_live_runtime(&paths, world, MigrationPhase::Checkpointing, Some("hosting consent withdrawn")).unwrap();
+        let retired = load_migration_status(&paths, world).unwrap();
+        assert_eq!(retired.world_id, world.to_string());
+        assert_eq!(retired.phase, MigrationPhase::Checkpointing);
+        assert!(!retired.runtime_ready);
+        assert_eq!(retired.game_endpoint, None);
+        assert_eq!(retired.failure_reason.as_deref(), Some("hosting consent withdrawn"));
+        assert_eq!(retired.epoch, Some(4));
+        assert_eq!(retired.fencing_token, Some(9));
+        assert!(!proof.exists());
+        assert!(!readiness.exists());
+
+        retire_live_runtime(&paths, world, MigrationPhase::Blocked, Some("checkpoint failed")).unwrap();
+        let blocked = load_migration_status(&paths, world).unwrap();
+        assert_eq!(blocked.phase, MigrationPhase::Blocked);
+        assert_eq!(blocked.failure_reason.as_deref(), Some("checkpoint failed"));
+        assert!(!blocked.runtime_ready);
+    }
+
+    #[test]
+    fn mismatched_world_status_cannot_retain_a_runtime_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(dir.path());
+        let world = WorldId([24; 32]);
+        atomic_json(&migration_status_path(&paths, world), &ready_status(WorldId([25; 32]))).unwrap();
+        let proof = control_dir(&paths, world).join("runtime-verified.json");
+        fs::write(&proof, b"previous runtime proof").unwrap();
+        assert!(retire_live_runtime(&paths, world, MigrationPhase::Superseded, None).is_err());
+        assert!(!proof.exists());
+    }
+
+    #[test]
+    fn safe_stop_intent_must_match_exact_world_epoch_fence_and_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(dir.path());
+        let current = epoch(WorldId([30; 32]));
+        let intent_path = stop_intent_path(&paths, current.world_id);
+        assert!(!load_stop_intent(&paths, &current).unwrap());
+
+        atomic_json(&intent_path, &StopIntentV1::from_epoch(&current)).unwrap();
+        assert!(load_stop_intent(&paths, &current).unwrap());
+
+        let mut advanced = current.clone();
+        advanced.epoch_number += 1;
+        assert!(load_stop_intent(&paths, &advanced).is_err());
+        advanced = current.clone();
+        advanced.fencing_token += 1;
+        assert!(load_stop_intent(&paths, &advanced).is_err());
+        advanced = current.clone();
+        advanced.authority_peer_id = PeerId([31; 32]);
+        assert!(load_stop_intent(&paths, &advanced).is_err());
+
+        fs::write(&intent_path, b"stop\n").unwrap();
+        assert!(
+            load_stop_intent(&paths, &current).is_err(),
+            "legacy plain stop cannot survive an authority transition"
+        );
+        fs::write(&intent_path, vec![b'X'; MAX_STOP_INTENT_BYTES as usize + 1]).unwrap();
+        assert!(load_stop_intent(&paths, &current).is_err(), "oversized stop must fail closed");
+    }
+
+    #[test]
+    fn transfer_intent_requires_exact_world_generation_fence_and_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(dir.path());
+        let current = epoch(WorldId([36; 32]));
+        let target = PeerId([37; 32]);
+        let intent_path = transfer_intent_path(&paths, current.world_id);
+
+        assert_eq!(load_transfer_intent(&paths, &current).unwrap(), None);
+        atomic_json(&intent_path, &TransferIntentV1::from_epoch(&current, target)).unwrap();
+        assert_eq!(load_transfer_intent(&paths, &current).unwrap(), Some(target));
+
+        let mut successor = current.clone();
+        successor.epoch_number += 1;
+        assert!(load_transfer_intent(&paths, &successor).is_err());
+        successor = current.clone();
+        successor.fencing_token += 1;
+        assert!(load_transfer_intent(&paths, &successor).is_err());
+        successor = current.clone();
+        successor.authority_peer_id = PeerId([38; 32]);
+        assert!(load_transfer_intent(&paths, &successor).is_err());
+
+        let mut wrong_world = TransferIntentV1::from_epoch(&current, target);
+        wrong_world.world_id = WorldId([39; 32]);
+        atomic_json(&intent_path, &wrong_world).unwrap();
+        assert!(load_transfer_intent(&paths, &current).is_err());
+        let mut unknown_version = TransferIntentV1::from_epoch(&current, target);
+        unknown_version.schema_version += 1;
+        atomic_json(&intent_path, &unknown_version).unwrap();
+        assert!(load_transfer_intent(&paths, &current).is_err());
+
+        // Legacy unscoped target text must not cause a checkpoint after
+        // migration to the generation-fenced format.
+        fs::write(&intent_path, format!("{}\n", target)).unwrap();
+        assert!(load_transfer_intent(&paths, &current).is_err());
+        fs::write(&intent_path, vec![b'X'; MAX_TRANSFER_INTENT_BYTES as usize + 1]).unwrap();
+        assert!(load_transfer_intent(&paths, &current).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_transfer_intent_cannot_trigger_checkpoint() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(dir.path());
+        let current = epoch(WorldId([40; 32]));
+        let intent_path = transfer_intent_path(&paths, current.world_id);
+        fs::create_dir_all(intent_path.parent().unwrap()).unwrap();
+        let outside = dir.path().join("unrelated-transfer");
+        fs::write(&outside, serde_json::to_vec(&TransferIntentV1::from_epoch(&current, PeerId([41; 32]))).unwrap())
+            .unwrap();
+        symlink(&outside, &intent_path).unwrap();
+        assert!(load_transfer_intent(&paths, &current).is_err());
+        assert!(atomic_json(&intent_path, &TransferIntentV1::from_epoch(&current, PeerId([41; 32]))).is_err());
+        assert!(fs::symlink_metadata(&intent_path).unwrap().file_type().is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_stop_intent_does_not_request_a_checkpoint() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(dir.path());
+        let current = epoch(WorldId([31; 32]));
+        let path = stop_intent_path(&paths, current.world_id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let unrelated = dir.path().join("unrelated-stop");
+        fs::write(&unrelated, serde_json::to_vec(&StopIntentV1::from_epoch(&current)).unwrap()).unwrap();
+        symlink(&unrelated, &path).unwrap();
+        assert!(load_stop_intent(&paths, &current).is_err());
+        assert!(atomic_json(&path, &StopIntentV1::from_epoch(&current)).is_err());
+        assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn concurrent_status_writes_never_publish_truncated_json() {
+        use std::sync::{atomic::AtomicBool, Arc, Barrier};
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(dir.path());
+        let world = WorldId([32; 32]);
+        let path = migration_status_path(&paths, world);
+        atomic_json(&path, &ready_status(world)).unwrap();
+        let active = Arc::new(AtomicBool::new(true));
+        let barrier = Arc::new(Barrier::new(3));
+        let reader_path = path.clone();
+        let reader_active = Arc::clone(&active);
+        let reader_barrier = Arc::clone(&barrier);
+        let reader = std::thread::spawn(move || {
+            reader_barrier.wait();
+            while reader_active.load(Ordering::Relaxed) {
+                let bytes = fs::read(&reader_path).unwrap();
+                let status: MigrationStatus = serde_json::from_slice(&bytes).expect("torn migration status read");
+                assert_eq!(status.world_id, world.to_string());
+            }
+        });
+        let writer_barrier = Arc::clone(&barrier);
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            writer_barrier.wait();
+            for _ in 0..20 {
+                atomic_json(&writer_path, &ready_status(world)).unwrap();
+            }
+        });
+        barrier.wait();
+        for _ in 0..20 {
+            let mut status = ready_status(world);
+            status.phase = MigrationPhase::Checkpointing;
+            status.runtime_ready = false;
+            atomic_json(&path, &status).unwrap();
+        }
+        writer.join().unwrap();
+        active.store(false, Ordering::Relaxed);
+        reader.join().unwrap();
+    }
 }

@@ -57,6 +57,14 @@ fn hosting_capacity_for_process_test() -> bool {
 }
 
 fn peer(root: PathBuf) -> PeerFixture {
+    // Runtime port registries and signed-route floors require private data
+    // ancestors. Temp fixtures under the runner's umask may be group writable
+    // unless the test provisions its own private root explicitly.
+    fs::create_dir_all(&root).unwrap();
+    if let Some(parent) = root.parent() {
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let paths = DataPaths::from_root(root);
     let storage = Storage::open(paths.root.clone()).unwrap();
     let identity = PeerIdentity::load_or_create(&paths).unwrap();
@@ -266,7 +274,7 @@ fn configure_safe_stop_runtime(temp: &Path, peer: &PeerFixture, world: WorldId, 
 fn write_safe_stop_java(path: &Path) {
     fs::write(
         path,
-        r#"#!/usr/bin/env python3
+        r##"#!/usr/bin/env python3
 import os
 import pathlib
 import socket
@@ -279,6 +287,15 @@ fingerprint = os.environ["SWARMCRAFT_COMPAT_FINGERPRINT"]
 
 def encoded(value):
     return value.encode("utf-8").hex()
+
+properties = dict(line.split("=", 1) for line in pathlib.Path("server.properties").read_text(encoding="utf-8").splitlines() if "=" in line and not line.startswith("#"))
+assert properties["server-ip"] == "127.0.0.1"
+assert properties["online-mode"] == "true"
+assert properties["enable-rcon"] == "false"
+assert properties["enable-query"] == "false"
+game_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+game_listener.bind(("127.0.0.1", int(properties["server-port"])))
+game_listener.listen(4)
 
 with socket.create_connection((host, port), timeout=5) as connection:
     reader = connection.makefile("r", encoding="utf-8", newline="\n")
@@ -293,7 +310,7 @@ with socket.create_connection((host, port), timeout=5) as connection:
             writer.write("READY_FOR_SHUTDOWN\t" + fields[1] + "\n")
             writer.flush()
             break
-"#,
+"##,
     )
     .unwrap();
     let mut permissions = fs::metadata(path).unwrap().permissions();
@@ -302,6 +319,15 @@ with socket.create_connection((host, port), timeout=5) as connection:
 }
 
 fn spawn_heartbeat(paths: DataPaths, world: WorldId, generation: AuthorityGeneration) -> JoinHandle<()> {
+    // The security boundary requires private permit directories. Other test
+    // fixtures construct a temporary data root under the runner's umask,
+    // which can be 0002 (group writable). Set explicit test-only permissions;
+    // never relax the production authority-permit path validation instead.
+    let control = paths.root.join("control");
+    let world_control = control.join(world.to_hex());
+    fs::create_dir_all(&world_control).unwrap();
+    fs::set_permissions(&control, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&world_control, fs::Permissions::from_mode(0o700)).unwrap();
     tokio::spawn(async move {
         for sequence in 1..100u64 {
             refresh_permit(&paths, world, generation, sequence).unwrap();
@@ -468,6 +494,27 @@ async fn invalid_transfer_target_does_not_kill_authority_and_withdrawal_still_ch
     })
     .await
     .expect("invalid transfer intent must be rejected and cleared");
+
+    // A former request to a VALID target must also be rejected if its
+    // generation no longer matches the currently running authority. A stale
+    // request must not cause a checkpoint merely because the target remains
+    // eligible after a recovery or a later transfer.
+    let stale_intent = serde_json::json!({
+        "schema_version": 1,
+        "world_id": shared.world,
+        "epoch": shared.epoch.epoch_number + 1,
+        "fencing_token": shared.epoch.fencing_token,
+        "authority_peer_id": alice.identity.peer_id(),
+        "target_peer_id": bob.identity.peer_id(),
+    });
+    fs::write(&intent, serde_json::to_vec(&stale_intent).unwrap()).unwrap();
+    timeout(Duration::from_secs(5), async {
+        while intent.exists() {
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("stale generation transfer intent must be rejected and cleared");
     let status = migration::load_migration_status(&alice.paths, shared.world).unwrap();
     assert_eq!(status.phase, MigrationPhase::Ready);
     assert!(status.runtime_ready);
@@ -641,7 +688,7 @@ fn epoch_hash(record: &EpochRecordV1) -> swarm_protocol::Hash32 {
 fn write_mock_java(path: &Path) {
     fs::write(
         path,
-        r#"#!/usr/bin/env python3
+        r##"#!/usr/bin/env python3
 import os
 import pathlib
 import socket
@@ -657,13 +704,22 @@ pathlib.Path(world, "swarmcraft-migration-smoke.txt").write_text("started-after-
 def encoded(value):
     return value.encode("utf-8").hex()
 
+properties = dict(line.split("=", 1) for line in pathlib.Path("server.properties").read_text(encoding="utf-8").splitlines() if "=" in line and not line.startswith("#"))
+assert properties["server-ip"] == "127.0.0.1"
+assert properties["online-mode"] == "true"
+assert properties["enable-rcon"] == "false"
+assert properties["enable-query"] == "false"
+game_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+game_listener.bind(("127.0.0.1", int(properties["server-port"])))
+game_listener.listen(4)
+
 with socket.create_connection((host, port), timeout=5) as connection:
     writer = connection.makefile("w", encoding="utf-8", newline="\n")
     writer.write("AUTH\t" + token + "\n")
     writer.write("WORLD_INFO\t" + encoded("26.1.2") + "\t" + encoded("0.19.3") + "\t" + encoded(world) + "\t" + fingerprint + "\t25\n")
     writer.flush()
     time.sleep(2.0)
-"#,
+"##,
     )
     .unwrap();
     let mut permissions = fs::metadata(path).unwrap().permissions();
