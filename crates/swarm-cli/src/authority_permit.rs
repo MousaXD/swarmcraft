@@ -190,8 +190,9 @@ fn replace_permit_atomically(temporary: &Path, destination: &Path) -> io::Result
     fs::rename(temporary, destination)
 }
 
-/// `std::fs::rename` cannot replace an existing destination reliably on
-/// Windows. Never delete the published permit before moving its replacement.
+/// Windows `MoveFileExW(REPLACE_EXISTING)` can make a visible permit briefly
+/// unavailable under concurrent readers. Prefer `ReplaceFileW` when the file
+/// already exists; retries are bounded and never delete an old permit.
 #[cfg(windows)]
 fn replace_permit_atomically(temporary: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
@@ -201,16 +202,43 @@ fn replace_permit_atomically(temporary: &Path, destination: &Path) -> io::Result
     #[link(name = "kernel32")]
     extern "system" {
         fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
+        fn ReplaceFileW(
+            replaced_file_name: *const u16,
+            replacement_file_name: *const u16,
+            backup_file_name: *const u16,
+            replace_flags: u32,
+            exclude: *mut std::ffi::c_void,
+            reserved: *mut std::ffi::c_void,
+        ) -> i32;
     }
     let old = temporary.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
     let new = destination.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
     // SAFETY: both UTF-16 buffers are NUL-terminated and live for the call.
-    let result = unsafe { MoveFileExW(old.as_ptr(), new.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
-    if result == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
+    for attempt in 0..=40 {
+        let result = unsafe {
+            if destination.exists() {
+                ReplaceFileW(
+                    new.as_ptr(),
+                    old.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            } else {
+                MoveFileExW(old.as_ptr(), new.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+            }
+        };
+        if result != 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if attempt == 40 || !matches!(error.raw_os_error(), Some(2 | 3 | 5 | 32 | 33)) {
+            return Err(error);
+        }
+        std::thread::sleep(Duration::from_millis(2));
     }
+    unreachable!("bounded Windows permit replacement loop returned without a verdict")
 }
 
 pub fn clear_permit(paths: &DataPaths, world: WorldId) -> io::Result<()> {

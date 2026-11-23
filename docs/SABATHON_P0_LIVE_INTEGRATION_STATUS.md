@@ -105,6 +105,33 @@ checks, not a completed release or hypothetical Minecraft sessions.
 
 ## Local verification performed
 
+### GitHub-hosted integration follow-up: application peer connectivity and Windows publication
+
+- GitHub Required Validation run `45267243725` on commit `0db4a66`
+  independently passed the clean-machine Java 25 Minecraft/Fabric build and
+  player-journey job, provider/Desktop checks, package jobs, network impairment,
+  and security audits. It **failed** later in the genuine three-daemon and
+  partition test harnesses: test peers were configured through
+  `SWARMCRAFT_BOOTSTRAP`, which deliberately classifies them as infrastructure
+  rather than authenticated application members, so no signed majority lease
+  acknowledgements could form. Infrastructure was **not** promoted to voters.
+- A bounded `swarmcraft daemon --peer <transport-multiaddress>` path now dials
+  explicit known application peers. It requires a valid terminal transport
+  PeerId, safe addresses and explicit QUIC listener ports, and still requires
+  connection-bound signed PeerHello plus ordinary canonical membership/quorum,
+  consent and fencing checks after dialing. Exactly formed operator-owned
+  `127.0.0.1` QUIC application hints may support real multi-process loopback
+  tests; publicly signed invites continue to reject loopback addresses.
+  The recovery and partition tests now use this path rather than treating
+  bootstrap infrastructure as authenticated voting members.
+- The same GitHub run found Windows `Access is denied`/`NotFound` during
+  concurrent visible permit and migration-status publication. For an existing
+  Windows destination, publication now uses `ReplaceFileW` with bounded
+  transient sharing retries rather than `MoveFileExW` alone. No delete-then-
+  rename gap, stale permit promotion, or weakened status assertion was added.
+  **The new Windows implementation still needs an independent passing CI run**;
+  a local Linux compilation cannot certify Windows kernel semantics.
+
 ### GitHub-hosted CI follow-up (24 November)
 
 - Manually dispatched **Required Validation** against exact integrated

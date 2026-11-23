@@ -42,6 +42,10 @@ enum Command {
     Daemon {
         #[arg(long, default_value = "/ip4/0.0.0.0/udp/0/quic-v1")]
         listen: String,
+        /// Explicit application peer transport hints (not bootstrap infrastructure or Minecraft endpoints).
+        /// Every dial still requires connection-bound PeerHello, canonical membership and live quorum.
+        #[arg(long = "peer")]
+        peer_addrs: Vec<String>,
     },
     /// Manage replicated worlds.
     World {
@@ -241,13 +245,13 @@ fn main() -> Result<()> {
             println!("Peer ID: {}", identity.peer_id());
             println!("Public key: {}", hex_string(&identity.public_key()));
         }
-        Command::Daemon { listen } => {
+        Command::Daemon { listen, peer_addrs } => {
             invite::configure_connectivity_snapshot(&paths);
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
                 let live_runtime_registry = LiveFabricRuntimeRegistry::default();
                 let supervisor = tokio::spawn(migration::supervise(paths.clone(), live_runtime_registry.clone()));
-                let result = daemon::run(&paths, &storage, &listen, live_runtime_registry).await;
+                let result = daemon::run(&paths, &storage, &listen, &peer_addrs, live_runtime_registry).await;
                 supervisor.abort();
                 result
             })?;

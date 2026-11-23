@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Debug,
@@ -39,9 +39,10 @@ use swarm_network::{
     },
     game_route_host_service::BoundedGameRouteHostResponder,
     game_transport::{GameStreamReceiver, VerifiedGameRouteStatus},
-    load_or_create_transport_key, validate_invite_dial_address, BlobResumeV1, HostCapabilityV1, HostRuntimeReadinessV1,
-    NetworkEvent, ReplicaAckV1, ResponseChannel, ServerModsReadinessV1, SwarmNode, TransportPeerId, WireRequest,
-    WireResponse, MAX_BLOB_CHUNK,
+    load_or_create_transport_key, validate_invite_addresses, validate_invite_dial_address, BlobResumeV1,
+    HostCapabilityV1, HostRuntimeReadinessV1, NetworkEvent, ReplicaAckV1, ResponseChannel, ServerModsReadinessV1,
+    SwarmNode, TransportPeerId, WireRequest, WireResponse, MAX_BLOB_CHUNK, MAX_INVITE_ADDRESSES,
+    MAX_INVITE_ADDRESS_CHARS,
 };
 use swarm_protocol::{
     peer_id_from_public_key, AuthorityLeaseGrantV1, AuthorityTransferV1, BlobDescriptor, DiscoveryCanonicalHeadV1,
@@ -246,6 +247,7 @@ pub async fn run(
     paths: &DataPaths,
     storage: &Storage,
     listen: &str,
+    explicit_application_peers: &[String],
     live_runtime_registry: LiveFabricRuntimeRegistry,
 ) -> Result<()> {
     let identity = PeerIdentity::load_or_create(paths)?;
@@ -273,6 +275,7 @@ pub async fn run(
     let game_route_events =
         node.take_game_route_control_events().context("authenticated game-route control subscription already owned")?;
     node.listen(listen.parse().context("invalid listen multiaddress")?)?;
+    dial_explicit_application_peers(&mut node, explicit_application_peers)?;
     dial_pending_invite_bootstraps(storage, &mut node)?;
     info!(peer = %identity.peer_id(), %listen, "SwarmCraft daemon starting");
 
@@ -2706,6 +2709,92 @@ fn capability_request_pending(outbound: &HashMap<String, OutboundContext>, world
     outbound.values().any(|context| {
         matches!(context, OutboundContext::HostCapability { world: request_world, peer: request_peer } if *request_world == world && *request_peer == peer)
     })
+}
+
+/// Bootstrap/relay infrastructure is never application-authenticated.
+/// A specifically configured world peer must instead use an application
+/// transport connection, where the receiver performs a fresh signed PeerHello
+/// and independently checks world membership, generation and quorum.
+/// These hints cannot authorize any game stream or select a Minecraft IP.
+fn canonical_application_dial_hints(values: &[String]) -> Result<Vec<String>> {
+    if values.len() > MAX_INVITE_ADDRESSES {
+        bail!("too many explicit application peer transport hints");
+    }
+    let mut canonical = Vec::with_capacity(values.len());
+    for value in values {
+        if value.is_empty() || value != value.trim() || value.chars().count() > MAX_INVITE_ADDRESS_CHARS {
+            bail!("invalid explicit application peer transport hint length or whitespace");
+        }
+        // Only the exact localhost QUIC + transport-PeerId form is allowed
+        // as a private CLI hint. Public invitation validation still rejects
+        // ALL loopback addresses; no special case enters signed invitations.
+        let validated = if let Some(rest) = value.strip_prefix("/ip4/127.0.0.1/udp/") {
+            let (port, claimed_peer) = rest
+                .split_once("/quic-v1/p2p/")
+                .context("loopback peer hint must have a QUIC port and transport PeerId")?;
+            let port: u16 = port.parse().context("invalid loopback application peer port")?;
+            let peer: TransportPeerId = claimed_peer.parse().context("invalid loopback application transport peer")?;
+            if port == 0 || value != &format!("/ip4/127.0.0.1/udp/{port}/quic-v1/p2p/{peer}") {
+                bail!("loopback application peer hint is not a canonical private QUIC transport address");
+            }
+            value.clone()
+        } else {
+            validate_invite_addresses(std::slice::from_ref(value))
+                .context("invalid explicit application peer transport hint")?
+                .into_iter()
+                .next()
+                .context("missing validated application transport address")?
+        };
+        validate_invite_dial_address(&validated.parse()?)
+            .context("explicit application peer DNS address is not safe")?;
+        let (_, identity) = value
+            .rsplit_once("/p2p/")
+            .context("explicit application peer must end with a libp2p /p2p/<transport-peer> identity")?;
+        let _: TransportPeerId = identity.parse().context("invalid explicit application transport peer identity")?;
+        if !canonical.contains(&validated) {
+            canonical.push(validated);
+        }
+    }
+    Ok(canonical)
+}
+
+fn dial_explicit_application_peers(node: &mut SwarmNode, values: &[String]) -> Result<()> {
+    for value in canonical_application_dial_hints(values)? {
+        let address = value.parse().context("invalid explicit application peer multiaddress")?;
+        validate_invite_dial_address(&address).context("explicit peer DNS address is not safe to dial")?;
+        let (_, identity) =
+            value.rsplit_once("/p2p/").context("explicit application peer is missing its transport identity")?;
+        let peer: TransportPeerId = identity.parse().context("invalid explicit peer transport identity")?;
+        if peer == node.local_transport_peer_id() {
+            return Err(anyhow!("explicit application peer cannot be this daemon's own transport identity"));
+        }
+        node.dial(address).context("failed to dial explicitly selected application peer")?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod explicit_application_dial_tests {
+    use super::*;
+
+    #[test]
+    fn application_hints_require_bounded_identity_bound_transport_addresses() {
+        let peer = swarm_network::generate_transport_key().public().to_peer_id();
+        let address = format!("/ip4/127.0.0.1/udp/41100/quic-v1/p2p/{peer}");
+        // Public invite validation must continue refusing machine-local
+        // loopback, even though a privately configured test peer can dial it.
+        assert!(validate_invite_addresses(std::slice::from_ref(&address)).is_err());
+        assert_eq!(
+            canonical_application_dial_hints(&[address.clone(), address.clone()]).unwrap(),
+            vec![address.clone()]
+        );
+        assert!(canonical_application_dial_hints(&[format!("/ip4/127.0.0.1/udp/0/quic-v1/p2p/{peer}")]).is_err());
+        assert!(canonical_application_dial_hints(&[format!("/ip4/127.0.0.1/tcp/41100/p2p/{peer}")]).is_err());
+        assert!(canonical_application_dial_hints(&["/ip4/127.0.0.1/udp/41100/quic-v1".into()]).is_err());
+        assert!(canonical_application_dial_hints(&["127.0.0.1:25565".into()]).is_err());
+        assert!(canonical_application_dial_hints(&["/ip4/127.0.0.1/udp/41100/quic-v1/p2p/not-a-peer".into()]).is_err());
+        assert!(canonical_application_dial_hints(&vec![address; 9]).is_err());
+    }
 }
 
 fn dial_pending_invite_bootstraps(storage: &Storage, node: &mut SwarmNode) -> Result<()> {

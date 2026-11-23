@@ -2482,16 +2482,46 @@ fn replace_control_file_atomically(tmp: &Path, destination: &Path) -> std::io::R
     #[link(name = "kernel32")]
     extern "system" {
         fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
+        fn ReplaceFileW(
+            replaced_file_name: *const u16,
+            replacement_file_name: *const u16,
+            backup_file_name: *const u16,
+            replace_flags: u32,
+            exclude: *mut std::ffi::c_void,
+            reserved: *mut std::ffi::c_void,
+        ) -> i32;
     }
     let old = tmp.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
     let new = destination.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
-    // SAFETY: both buffers are valid NUL-terminated UTF-16 for this call.
-    let result = unsafe { MoveFileExW(old.as_ptr(), new.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
-    if result == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+    // ReplaceFileW retains an existing destination's visibility under Windows
+    // readers, while MoveFileExW creates the first version without an unsafe
+    // remove/rename gap. Retry only transient file-sharing errors, bounded.
+    for attempt in 0..=40 {
+        // SAFETY: all UTF-16 buffers are NUL-terminated and live for the call.
+        let result = unsafe {
+            if destination.exists() {
+                ReplaceFileW(
+                    new.as_ptr(),
+                    old.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            } else {
+                MoveFileExW(old.as_ptr(), new.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+            }
+        };
+        if result != 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if attempt == 40 || !matches!(error.raw_os_error(), Some(2 | 3 | 5 | 32 | 33)) {
+            return Err(error);
+        }
+        std::thread::sleep(Duration::from_millis(2));
     }
+    unreachable!("bounded Windows control replacement loop returned without a verdict")
 }
 
 fn epoch_record_hash(record: &EpochRecordV1) -> Result<Hash32> {

@@ -113,6 +113,16 @@ SWARMCRAFT_PROBE_SECONDS=90 \
   cargo run -p swarm-network --example connectivity_probe --locked
 ```
 
+**Application peers are not bootstrap infrastructure.** A daemon running a
+world already shared with friends can explicitly dial a known peer with
+`swarmcraft daemon --peer '/ip4/192.168.1.10/udp/4001/quic-v1/p2p/<transport-peer-id>'`.
+Pass additional `--peer` values to connect more known devices. These are
+bounded, transport-identity-bound **connection hints only**: each dial must
+still complete the live signed application PeerHello, and world membership,
+leases, authority, hosting consent and game routes are checked independently.
+Do not use `SWARMCRAFT_BOOTSTRAP` for a world voter: bootstrap/relay nodes are
+intentionally classified as untrusted infrastructure and cannot vote or host.
+
 The probe duration is bounded to 5 through 300 seconds. It is intentionally a connectivity probe, not proof of world replication, authority correctness or universal NAT traversal. Use the full daemon/world exercise below for certification records.
 
 ## Automated coverage

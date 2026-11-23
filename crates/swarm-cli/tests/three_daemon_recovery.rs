@@ -101,7 +101,7 @@ fn transport_address(peer: &PeerFixture) -> String {
     format!("/ip4/127.0.0.1/udp/{}/quic-v1/p2p/{}", peer.port, peer.transport_peer)
 }
 
-fn spawn_daemon(peer: &PeerFixture, bootstraps: &[String]) -> ManagedChild {
+fn spawn_daemon(peer: &PeerFixture, application_peers: &[String]) -> ManagedChild {
     let mut command = Command::new(env!("CARGO_BIN_EXE_swarmcraft"));
     command
         .arg("--data-dir")
@@ -112,8 +112,10 @@ fn spawn_daemon(peer: &PeerFixture, bootstraps: &[String]) -> ManagedChild {
         .env("RUST_LOG", "warn")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
-    if !bootstraps.is_empty() {
-        command.env("SWARMCRAFT_BOOTSTRAP", bootstraps.join(","));
+    // These are world voters, NOT bootstrap infrastructure. Bootstrap peers
+    // intentionally do not receive authenticated application PeerHello.
+    for address in application_peers {
+        command.arg("--peer").arg(address);
     }
     ManagedChild(command.spawn().unwrap())
 }

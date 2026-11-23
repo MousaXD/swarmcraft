@@ -109,7 +109,7 @@ fn transport_address(peer: &PeerFixture) -> String {
     format!("/ip4/127.0.0.1/udp/{}/quic-v1/p2p/{}", peer.port, peer.transport_peer)
 }
 
-fn spawn_daemon(peer: &PeerFixture, bootstraps: &[String], pause_after_certificate: bool) -> ManagedChild {
+fn spawn_daemon(peer: &PeerFixture, application_peers: &[String], pause_after_certificate: bool) -> ManagedChild {
     let log_path = peer.paths.root.join("recovery-acceptance-daemon.log");
     let log = fs::File::create(&log_path).unwrap();
     let log_err = log.try_clone().unwrap();
@@ -123,8 +123,10 @@ fn spawn_daemon(peer: &PeerFixture, bootstraps: &[String], pause_after_certifica
         .env("RUST_LOG", "info")
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
-    if !bootstraps.is_empty() {
-        command.env("SWARMCRAFT_BOOTSTRAP", bootstraps.join(","));
+    // Explicit world peers authenticate as applications, never as bootstrap
+    // infrastructure (which is deliberately excluded from lease voting).
+    for address in application_peers {
+        command.arg("--peer").arg(address);
     }
     if pause_after_certificate {
         command.env("SWARMCRAFT_TEST_PAUSE_AFTER_RECOVERY_CERTIFICATE_MS", RECOVERY_PAUSE_MS.to_string());
