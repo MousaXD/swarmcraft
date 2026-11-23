@@ -3,7 +3,14 @@ use crate::{
         application_connection_allowed, auth_challenge_expired, primary_connection_limits, AdmissionController,
         AUTH_CHALLENGE_TIMEOUT,
     },
-    build_peer_hello_proof, verify_peer_hello, verify_peer_hello_proof,
+    build_peer_hello_proof,
+    game_route_control::{
+        GameRouteControlEvent, GameRouteControlRequestV1, GameRouteControlResponseV1, GameRouteRefusalV1,
+        GameRouteRpcClient, GameRouteRpcCommand, GameRouteRpcError, GAME_ROUTE_CONTROL_EVENT_QUEUE,
+        GAME_ROUTE_CONTROL_MAX_OUTSTANDING, GAME_ROUTE_CONTROL_MAX_REQUESTS_PER_WINDOW,
+        GAME_ROUTE_CONTROL_MAX_REQUEST_BYTES, GAME_ROUTE_CONTROL_MAX_RESPONSE_BYTES, GAME_ROUTE_CONTROL_PROTOCOL,
+    },
+    verify_peer_hello, verify_peer_hello_proof,
     wire::WireRequest,
     wire::WireResponse,
     ConnectivityDiagnosticsV1, ConnectivityIssueKindV1, ConnectivityIssueV1, NatStatusV1,
@@ -21,18 +28,23 @@ use libp2p::{
     swarm::{dial_opts::DialOpts, ConnectionId, NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId as TransportPeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
+use libp2p_stream as stream;
 use rand_core::{OsRng, RngCore};
 use std::{
     collections::{HashMap, HashSet},
     env,
+    sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
 use swarm_protocol::{PeerHelloV1, PeerId, PROTOCOL_VERSION};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 pub const WIRE_PROTOCOL: &str = "/swarmcraft/1";
 pub const BOOTSTRAP_ENV: &str = "SWARMCRAFT_BOOTSTRAP";
 pub const RELAY_ENV: &str = "SWARMCRAFT_RELAY";
+const GAME_ROUTE_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+const GAME_ROUTE_CONTROL_BUDGET_WINDOW: Duration = Duration::from_secs(2);
 
 // libp2p-swarm-derive 0.36.0 emits unreachable code for an uninhabited
 // connection_limits event on Rust 1.100. Only the generated behaviour lives
@@ -45,6 +57,8 @@ mod generated_behaviour {
     #[derive(NetworkBehaviour)]
     pub(super) struct Behaviour {
         pub(super) request_response: cbor::Behaviour<WireRequest, WireResponse>,
+        pub(super) game_route_control: cbor::Behaviour<GameRouteControlRequestV1, GameRouteControlResponseV1>,
+        pub(super) game_stream: stream::Behaviour,
         pub(super) mdns: mdns::tokio::Behaviour,
         pub(super) identify: identify::Behaviour,
         pub(super) ping: ping::Behaviour,
@@ -93,6 +107,14 @@ pub enum NetworkEvent {
     },
 }
 
+struct PendingGameRouteControl {
+    peer: TransportPeerId,
+    connection_id: ConnectionId,
+    request: GameRouteControlRequestV1,
+    issued_at: Instant,
+    rpc_reply: Option<oneshot::Sender<std::result::Result<GameRouteControlResponseV1, GameRouteRpcError>>>,
+}
+
 #[derive(Debug, Clone)]
 struct RelayFallbackPlan {
     relay_address: Multiaddr,
@@ -112,6 +134,13 @@ pub struct SwarmNode {
     local_hello: PeerHelloV1,
     application_signing_key: SigningKey,
     authenticated: HashMap<TransportPeerId, (PeerId, ConnectionId)>,
+    game_authenticated: Arc<RwLock<HashMap<TransportPeerId, PeerId>>>,
+    pending_game_route: HashMap<request_response::OutboundRequestId, PendingGameRouteControl>,
+    game_route_budgets: HashMap<TransportPeerId, (Instant, u32)>,
+    game_route_events_tx: mpsc::Sender<GameRouteControlEvent>,
+    game_route_events_rx: Option<mpsc::Receiver<GameRouteControlEvent>>,
+    game_route_rpc_tx: mpsc::Sender<GameRouteRpcCommand>,
+    game_route_rpc_rx: mpsc::Receiver<GameRouteRpcCommand>,
     pending_challenges: HashMap<TransportPeerId, (ConnectionId, [u8; 32], Instant)>,
     active_connections: HashMap<TransportPeerId, ConnectionId>,
     connection_counts: HashMap<TransportPeerId, usize>,
@@ -137,6 +166,16 @@ impl SwarmNode {
             request_response::Config::default()
                 .with_request_timeout(Duration::from_secs(30))
                 .with_max_concurrent_streams(128),
+        );
+        // Separate from snapshot messages and with independent resource bounds.
+        let game_route_control = request_response::Behaviour::with_codec(
+            cbor::codec::Codec::<GameRouteControlRequestV1, GameRouteControlResponseV1>::default()
+                .set_request_size_maximum(GAME_ROUTE_CONTROL_MAX_REQUEST_BYTES)
+                .set_response_size_maximum(GAME_ROUTE_CONTROL_MAX_RESPONSE_BYTES),
+            [(StreamProtocol::new(GAME_ROUTE_CONTROL_PROTOCOL), ProtocolSupport::Full)],
+            request_response::Config::default()
+                .with_request_timeout(GAME_ROUTE_CONTROL_TIMEOUT)
+                .with_max_concurrent_streams(16),
         );
         let mdns =
             mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer).context("failed to initialize mDNS")?;
@@ -164,6 +203,8 @@ impl SwarmNode {
             .with_relay_client(noise::Config::new, yamux::Config::default)?
             .with_behaviour(move |_, relay_client| Behaviour {
                 request_response,
+                game_route_control,
+                game_stream: stream::Behaviour::new(),
                 mdns,
                 identify,
                 ping: ping::Behaviour::default(),
@@ -175,11 +216,20 @@ impl SwarmNode {
             })?
             .build();
 
+        let (game_route_events_tx, game_route_events_rx) = mpsc::channel(GAME_ROUTE_CONTROL_EVENT_QUEUE);
+        let (game_route_rpc_tx, game_route_rpc_rx) = mpsc::channel(GAME_ROUTE_CONTROL_MAX_OUTSTANDING);
         let mut node = Self {
             swarm,
             local_hello,
             application_signing_key,
             authenticated: HashMap::new(),
+            game_authenticated: Arc::new(RwLock::new(HashMap::new())),
+            pending_game_route: HashMap::new(),
+            game_route_budgets: HashMap::new(),
+            game_route_events_tx,
+            game_route_events_rx: Some(game_route_events_rx),
+            game_route_rpc_tx,
+            game_route_rpc_rx,
             pending_challenges: HashMap::new(),
             active_connections: HashMap::new(),
             connection_counts: HashMap::new(),
@@ -200,6 +250,35 @@ impl SwarmNode {
 
     pub fn application_peer(&self, transport_peer: &TransportPeerId) -> Option<PeerId> {
         self.authenticated.get(transport_peer).map(|(peer, _)| *peer)
+    }
+
+    /// Dedicated Noise-authenticated libp2p substreams. Transport identity
+    /// does NOT authorize a Minecraft route; recipients must validate fresh
+    /// canonical state and application membership before accepting streams.
+    pub fn game_stream_control(&self) -> stream::Control {
+        self.swarm.behaviour().game_stream.new_control()
+    }
+
+    /// Read-only dynamic application-authentication registry for stream
+    /// handlers. Revoked/rotated connections are removed before new admission.
+    /// The receiver must STILL verify canonical world membership separately.
+    pub fn game_authenticated_peers(&self) -> Arc<RwLock<HashMap<TransportPeerId, PeerId>>> {
+        Arc::clone(&self.game_authenticated)
+    }
+
+    /// At most one game-route controller can subscribe. The network driver
+    /// MUST keep polling next_event() and drain this receiver concurrently.
+    /// Without a subscriber, all route offers/challenges fail closed; the
+    /// existing replication daemon remains compatible and unchanged.
+    pub fn take_game_route_control_events(&mut self) -> Option<mpsc::Receiver<GameRouteControlEvent>> {
+        self.game_route_events_rx.take()
+    }
+
+    /// Clone this into a concurrent gateway resolver while the daemon owns
+    /// SwarmNode. The connection-bound identity and bounds are enforced by
+    /// the node, not by callers of this mailbox.
+    pub fn game_route_rpc_client(&self) -> GameRouteRpcClient {
+        GameRouteRpcClient { sender: self.game_route_rpc_tx.clone() }
     }
 
     pub fn connectivity_diagnostics(&self) -> ConnectivityDiagnosticsV1 {
@@ -327,17 +406,11 @@ impl SwarmNode {
         self.diagnostics.record_relay_configured(relay_address.to_string(), self.relay_peers.len());
         self.swarm.behaviour_mut().kad.add_address(&relay_peer, relay_address.clone());
         self.swarm.behaviour_mut().auto_nat.add_server(relay_peer, Some(relay_address.clone()));
-        if !self.swarm.is_connected(&relay_peer) {
-            if let Err(error) = self.swarm.dial(relay_address.clone()) {
-                self.record_issue(
-                    ConnectivityIssueKindV1::RelayUnavailable,
-                    Some(relay_peer),
-                    Some(&relay_address),
-                    error.to_string(),
-                );
-                return Err(error).context("failed to dial relay");
-            }
-        }
+        // libp2p's relay-client listener dials the relay itself when needed
+        // and binds its reservation to THAT exact connection ID. Dialling
+        // here as well starts two concurrent connections; connection
+        // replacement can then invalidate the listener's pending reservation
+        // before it receives a usable /p2p-circuit address.
         self.swarm
             .listen_on(relay_address.with(Protocol::P2pCircuit))
             .map(|_| ())
@@ -420,13 +493,113 @@ impl SwarmNode {
             .map_err(|_| anyhow!("response channel closed"))
     }
 
+    /// Only an already application-authenticated peer can receive a game
+    /// route control request. The reply is never an authorization capability
+    /// until RouteVerifier independently validates live canonical history.
+    pub fn send_game_route_request(
+        &mut self,
+        peer: &TransportPeerId,
+        request: GameRouteControlRequestV1,
+    ) -> Result<request_response::OutboundRequestId> {
+        if self.game_route_events_rx.is_some() || self.game_route_events_tx.is_closed() {
+            return Err(anyhow!("game route control events must have a live subscriber"));
+        }
+        self.send_game_route_request_internal(peer, request, None)
+    }
+
+    fn send_game_route_request_internal(
+        &mut self,
+        peer: &TransportPeerId,
+        request: GameRouteControlRequestV1,
+        rpc_reply: Option<oneshot::Sender<std::result::Result<GameRouteControlResponseV1, GameRouteRpcError>>>,
+    ) -> Result<request_response::OutboundRequestId> {
+        request.validate().map_err(|_| anyhow!("invalid game route control request"))?;
+        if let GameRouteControlRequestV1::Challenge(ref challenge) = request {
+            if challenge.requester_peer_id != self.local_hello.peer_id
+                || challenge.requester_transport_peer != self.local_transport_peer_id().to_bytes()
+            {
+                return Err(anyhow!("game route challenge requester must match the authenticated local identity"));
+            }
+        }
+        let connection_id = self
+            .authenticated
+            .get(peer)
+            .filter(|(_, id)| {
+                self.active_connections.get(peer) == Some(id) && self.connection_counts.get(peer) == Some(&1)
+            })
+            .map(|(_, id)| *id)
+            .ok_or_else(|| anyhow!("game route peer must complete connection-bound application authentication"))?;
+        // A successful candidate can finish a multi-host race while slower
+        // attempts are cancelled. Do not let abandoned one-shot requests
+        // occupy the fixed 32-request budget until their network timeout.
+        // Unsolicited late responses are still discarded by request ID.
+        self.pending_game_route.retain(|_, pending| {
+            pending.issued_at.elapsed() < GAME_ROUTE_CONTROL_TIMEOUT + Duration::from_secs(1)
+                && pending.rpc_reply.as_ref().is_none_or(|reply| !reply.is_closed())
+        });
+        if self.pending_game_route.len() >= GAME_ROUTE_CONTROL_MAX_OUTSTANDING {
+            return Err(anyhow!("game route control outstanding request limit reached"));
+        }
+        let request_id = self.swarm.behaviour_mut().game_route_control.send_request(peer, request.clone());
+        self.pending_game_route.insert(
+            request_id,
+            PendingGameRouteControl { peer: *peer, connection_id, request, issued_at: Instant::now(), rpc_reply },
+        );
+        Ok(request_id)
+    }
+
+    fn handle_game_route_rpc(&mut self, command: GameRouteRpcCommand) {
+        let GameRouteRpcCommand { peer, request, reply } = command;
+        // No unauthenticated shortcut: use EXACTLY the same validated request
+        // path as the subscriber API, with an independent one-shot reply.
+        if let Err(error) = self.send_game_route_request_internal(&peer, request, Some(reply)) {
+            debug!(%peer, %error, "game route RPC refused at network boundary");
+            // The one-shot sender has been dropped and the caller fails closed.
+        }
+    }
+
+    pub fn respond_game_route(
+        &mut self,
+        channel: request_response::ResponseChannel<GameRouteControlResponseV1>,
+        response: GameRouteControlResponseV1,
+    ) -> Result<()> {
+        response.validate().map_err(|_| anyhow!("invalid game route control reply"))?;
+        self.swarm
+            .behaviour_mut()
+            .game_route_control
+            .send_response(channel, response)
+            .map_err(|_| anyhow!("game route control response channel closed"))
+    }
+
+    fn admit_game_route_control(&mut self, peer: TransportPeerId) -> bool {
+        let now = Instant::now();
+        let entry = self.game_route_budgets.entry(peer).or_insert((now, 0));
+        if now.duration_since(entry.0) >= GAME_ROUTE_CONTROL_BUDGET_WINDOW {
+            *entry = (now, 0);
+        }
+        if entry.1 >= GAME_ROUTE_CONTROL_MAX_REQUESTS_PER_WINDOW {
+            return false;
+        }
+        entry.1 += 1;
+        true
+    }
+
     pub async fn next_event(&mut self) -> Result<NetworkEvent> {
         loop {
             self.expire_stale_auth_challenges();
-            let event = match tokio::time::timeout(AUTH_CHALLENGE_TIMEOUT, self.swarm.select_next_some()).await {
-                Ok(event) => event,
-                Err(_) => continue,
+            let mut command = None;
+            let event = tokio::select! {
+                received = self.game_route_rpc_rx.recv() => {
+                    command = received;
+                    None
+                }
+                event = tokio::time::timeout(AUTH_CHALLENGE_TIMEOUT, self.swarm.select_next_some()) => event.ok(),
             };
+            if let Some(command) = command {
+                self.handle_game_route_rpc(command);
+                continue;
+            }
+            let Some(event) = event else { continue };
             self.expire_stale_auth_challenges();
             match event {
                 SwarmEvent::NewListenAddr { address, .. } => {
@@ -478,18 +651,32 @@ impl SwarmNode {
                     }
                     self.connection_counts.insert(peer_id, num_established.get() as usize);
                     self.authenticated.remove(&peer_id);
+                    self.game_authenticated.write().expect("game auth registry poisoned").remove(&peer_id);
+                    self.pending_game_route.retain(|_, pending| pending.peer != peer_id);
+                    self.game_route_budgets.remove(&peer_id);
                     self.pending_challenges.remove(&peer_id);
                     debug!(transport_peer = %peer_id, %connection_id, %num_established, relayed = endpoint.is_relayed(), ?path_kind, "peer connected");
 
-                    // request-response selects by peer ID. During replacement races,
-                    // close the superseded route before issuing a fresh receiver
-                    // challenge so proof traffic can only use the canonical connection.
-                    let previous = self.active_connections.insert(peer_id, connection_id);
-                    let defer_challenge = previous
-                        .filter(|previous| *previous != connection_id && num_established.get() > 1)
-                        .is_some_and(|previous| self.swarm.close_connection(previous));
-                    if !defer_challenge {
-                        self.issue_auth_challenge(peer_id, connection_id)?;
+                    if application_path {
+                        // Application request-response selects by peer ID.
+                        // Replace a superseded application connection before
+                        // issuing the new connection-bound PeerHello challenge.
+                        let previous = self.active_connections.insert(peer_id, connection_id);
+                        let defer_challenge = previous
+                            .filter(|previous| *previous != connection_id && num_established.get() > 1)
+                            .is_some_and(|previous| self.swarm.close_connection(previous));
+                        if !defer_challenge {
+                            self.issue_auth_challenge(peer_id, connection_id)?;
+                        }
+                    } else {
+                        // Relay/bootstrap infrastructure peers can legitimately
+                        // have multiple concurrent connections supporting
+                        // different reservations/circuits. Closing one simply
+                        // because another appeared can tear down live game
+                        // circuits and trip libp2p request-response connection
+                        // accounting during host failures. NEVER apply the
+                        // one-application-connection policy to infrastructure.
+                        // Neither connection is authorized as a world member.
                     }
                     return Ok(NetworkEvent::Connected { transport_peer: peer_id });
                 }
@@ -497,12 +684,15 @@ impl SwarmNode {
                     self.connection_paths.remove(&connection_id);
                     self.refresh_connectivity_paths();
                     self.connection_counts.insert(peer_id, num_established as usize);
+                    self.pending_game_route
+                        .retain(|_, pending| pending.peer != peer_id || pending.connection_id != connection_id);
                     if self
                         .authenticated
                         .get(&peer_id)
                         .is_some_and(|(_, authenticated_connection)| *authenticated_connection == connection_id)
                     {
                         self.authenticated.remove(&peer_id);
+                        self.game_authenticated.write().expect("game auth registry poisoned").remove(&peer_id);
                     }
                     if self
                         .pending_challenges
@@ -515,14 +705,19 @@ impl SwarmNode {
                         self.active_connections.remove(&peer_id);
                         self.connection_counts.remove(&peer_id);
                         self.authenticated.remove(&peer_id);
+                        self.game_authenticated.write().expect("game auth registry poisoned").remove(&peer_id);
                         self.pending_challenges.remove(&peer_id);
                         self.admission.forget_peer(peer_id);
+                        self.game_route_budgets.remove(&peer_id);
                         return Ok(NetworkEvent::Disconnected { transport_peer: peer_id });
                     }
 
                     if let Some(active) =
                         self.active_connections.get(&peer_id).copied().filter(|active| *active != connection_id)
                     {
+                        if self.bootstrap_peers.contains(&peer_id) || self.relay_peers.contains(&peer_id) {
+                            continue;
+                        }
                         self.issue_auth_challenge(peer_id, active)?;
                     }
                     debug!(transport_peer = %peer_id, %connection_id, remaining_connections = num_established, "peer connection closed; replacement requires fresh application proof");
@@ -563,7 +758,18 @@ impl SwarmNode {
                     warn!(transport_peer = ?peer_id, error = %error, "outgoing connection failed");
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
-                    if let Some((peer, address)) = peers.into_iter().next() {
+                    // mDNS is a LOCAL discovery hint, not an alternate
+                    // relay-circuit dialer. A host already advertising its
+                    // explicit /p2p-circuit route must not be auto-dialled
+                    // through that circuit by an unrelated local peer:
+                    // duplicate in-flight dials can disrupt a reservation
+                    // or the connection-bound authentication registry during
+                    // host crashes. Relay circuits are negotiated only by
+                    // the authenticated explicit/known-peer dial flow.
+                    if let Some((peer, address)) = peers
+                        .into_iter()
+                        .find(|(_, address)| !address.iter().any(|p| matches!(p, Protocol::P2pCircuit)))
+                    {
                         debug!(transport_peer = %peer, %address, "mDNS discovered peer");
                         self.swarm.behaviour_mut().kad.add_address(&peer, address.clone());
                         if !self.swarm.is_connected(&peer) {
@@ -709,6 +915,7 @@ impl SwarmNode {
                                     ) {
                                         Ok(()) => {
                                             self.authenticated.insert(peer, (proof.hello.peer_id, connection_id));
+                                            self.game_authenticated.write().expect("game auth registry poisoned").insert(peer, proof.hello.peer_id);
                                             if let Err(response_error) = self.respond(
                                                 channel,
                                                 WireResponse::HelloAccepted { protocol_version: PROTOCOL_VERSION },
@@ -771,6 +978,133 @@ impl SwarmNode {
                         request_response::Event::ResponseSent { .. } => {}
                     }
                 }
+                SwarmEvent::Behaviour(BehaviourEvent::GameRouteControl(event)) => {
+                    match event {
+                        request_response::Event::Message { peer, connection_id, message } => match message {
+                            request_response::Message::Request { request, channel, .. } => {
+                                let application_peer = self
+                                    .authenticated
+                                    .get(&peer)
+                                    .filter(|(_, authenticated_connection)| {
+                                        *authenticated_connection == connection_id
+                                            && self.active_connections.get(&peer) == Some(authenticated_connection)
+                                            && self.connection_counts.get(&peer) == Some(&1)
+                                    })
+                                    .map(|(application_peer, _)| *application_peer);
+                                let Some(application_peer) = application_peer else {
+                                    let _ = self.respond_game_route(
+                                        channel,
+                                        GameRouteControlResponseV1::Refused(GameRouteRefusalV1::Unauthorized),
+                                    );
+                                    continue;
+                                };
+                                if request.validate().is_err() {
+                                    let _ = self.respond_game_route(
+                                        channel,
+                                        GameRouteControlResponseV1::Refused(GameRouteRefusalV1::ExpiredOrMalformed),
+                                    );
+                                    continue;
+                                }
+                                if let GameRouteControlRequestV1::Challenge(challenge) = &request {
+                                    if challenge.requester_peer_id != application_peer
+                                        || challenge.requester_transport_peer != peer.to_bytes()
+                                    {
+                                        let _ = self.respond_game_route(
+                                            channel,
+                                            GameRouteControlResponseV1::Refused(GameRouteRefusalV1::Unauthorized),
+                                        );
+                                        continue;
+                                    }
+                                }
+                                if !self.admit_game_route_control(peer) {
+                                    let _ = self.respond_game_route(
+                                        channel,
+                                        GameRouteControlResponseV1::Refused(GameRouteRefusalV1::RateLimited),
+                                    );
+                                    continue;
+                                }
+                                if self.game_route_events_rx.is_some() || self.game_route_events_tx.is_closed() {
+                                    let _ = self.respond_game_route(
+                                        channel,
+                                        GameRouteControlResponseV1::Refused(GameRouteRefusalV1::Unavailable),
+                                    );
+                                    continue;
+                                }
+                                if self.game_route_events_tx.capacity() == 0 {
+                                    let _ = self.respond_game_route(
+                                        channel,
+                                        GameRouteControlResponseV1::Refused(GameRouteRefusalV1::RateLimited),
+                                    );
+                                    continue;
+                                }
+                                // Unsubscribed or overloaded controllers cannot grant access.
+                                let _ = self.game_route_events_tx.try_send(GameRouteControlEvent::Inbound {
+                                    transport_peer: peer,
+                                    application_peer,
+                                    request,
+                                    channel,
+                                });
+                            }
+                            request_response::Message::Response { request_id, response } => {
+                                let Some(mut pending) = self.pending_game_route.remove(&request_id) else {
+                                    continue; // Never accept unsolicited or late responses.
+                                };
+                                let current =
+                                    self.authenticated.get(&peer).is_some_and(|(_, authenticated_connection)| {
+                                        *authenticated_connection == connection_id
+                                            && self.connection_counts.get(&peer) == Some(&1)
+                                            && self.active_connections.get(&peer) == Some(authenticated_connection)
+                                    });
+                                if pending.peer != peer
+                                    || pending.connection_id != connection_id
+                                    || pending.issued_at.elapsed() >= GAME_ROUTE_CONTROL_TIMEOUT
+                                    || !current
+                                    || response.validate().is_err()
+                                    || !pending.request.accepts_response(&response)
+                                {
+                                    warn!(transport_peer = %peer, "discarded invalid/stale game route control reply");
+                                    if let Some(reply) = pending.rpc_reply.take() {
+                                        let _ = reply.send(Err(GameRouteRpcError::InvalidResponse));
+                                    }
+                                    continue;
+                                }
+                                if let Some(reply) = pending.rpc_reply.take() {
+                                    let _ = reply.send(Ok(response));
+                                    continue;
+                                }
+                                if self
+                                    .game_route_events_tx
+                                    .try_send(GameRouteControlEvent::Response {
+                                        transport_peer: peer,
+                                        request_id,
+                                        response,
+                                    })
+                                    .is_err()
+                                {
+                                    warn!(transport_peer = %peer, "game route controller unavailable or overloaded");
+                                }
+                            }
+                        },
+                        request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
+                            let Some(mut pending) = self.pending_game_route.remove(&request_id) else {
+                                continue;
+                            };
+                            if let Some(reply) = pending.rpc_reply.take() {
+                                let _ = reply.send(Err(GameRouteRpcError::Unavailable));
+                                continue;
+                            }
+                            let _ = self.game_route_events_tx.try_send(GameRouteControlEvent::OutboundFailure {
+                                transport_peer: peer,
+                                request_id,
+                                error: error.to_string(),
+                            });
+                        }
+                        request_response::Event::InboundFailure { peer, error, .. } => {
+                            debug!(transport_peer = %peer, %error, "game route control request failed");
+                        }
+                        request_response::Event::ResponseSent { .. } => {}
+                    }
+                }
                 SwarmEvent::Behaviour(BehaviourEvent::RelayClient(event)) => {
                     // Relay reservation/circuit transport events are infrastructure signals.
                     // RelayConnected is derived only from an established relayed application connection.
@@ -799,6 +1133,7 @@ impl SwarmNode {
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Kad(_))
                 | SwarmEvent::Behaviour(BehaviourEvent::Ping(_))
+                | SwarmEvent::Behaviour(BehaviourEvent::GameStream(_))
                 | SwarmEvent::Behaviour(BehaviourEvent::Identify(_)) => {}
                 other => debug!(event = ?other, "network event"),
             }
@@ -809,6 +1144,7 @@ impl SwarmNode {
         let mut challenge = [0_u8; 32];
         OsRng.fill_bytes(&mut challenge);
         self.authenticated.remove(&peer);
+        self.game_authenticated.write().expect("game auth registry poisoned").remove(&peer);
         self.pending_challenges.insert(peer, (connection_id, challenge, Instant::now()));
         self.swarm.behaviour_mut().request_response.send_request(&peer, WireRequest::HelloChallenge { challenge });
         Ok(())
@@ -826,6 +1162,7 @@ impl SwarmNode {
         for (peer, connection_id) in stale {
             self.pending_challenges.remove(&peer);
             self.authenticated.remove(&peer);
+            self.game_authenticated.write().expect("game auth registry poisoned").remove(&peer);
             if self.active_connections.get(&peer).is_some_and(|active| *active == connection_id) {
                 self.active_connections.remove(&peer);
             }
