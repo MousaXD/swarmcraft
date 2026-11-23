@@ -2,6 +2,7 @@
 """Negative-only unit checks. Synthetic records are NEVER real E2E evidence."""
 from __future__ import annotations
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -39,6 +40,8 @@ def node(role, stage):
     withdrawn_bob = after_withdrawal and role == "bob"
     route_present = stage in ("checkpoint", "bob_recovered", "alice_returned",
                               "bob_withdrawn", "carol_denied")
+    stage_index = list(gate.STAGES).index(stage) + 1
+    stage_time = datetime(2026, 11, 8, 0, stage_index, tzinfo=timezone.utc)
     route = ({
         "verified": True,
         "world_fingerprint": "world-fp",
@@ -47,7 +50,7 @@ def node(role, stage):
         "epoch": epoch,
         "fencing_token": epoch,
         "snapshot_hash": ("4" if after_withdrawal else "1" if authority == ALICE else "2") * 64,
-        "proof_observed_unix_ms": 1_000_000 + 10_000 * list(gate.STAGES).index(stage),
+        "proof_observed_unix_ms": int(stage_time.timestamp() * 1000) - 1000,
     } if route_present else {"verified": False})
     return {
         "machine_fingerprint": "host-" + role,
@@ -741,6 +744,29 @@ class TestFailClosed(unittest.TestCase):
             )
             gate.save(out / "alice_returned.json", returned)
             with self.assertRaisesRegex(gate.Blocked, "game_route_probe_replayed_alice_returned_alice"):
+                gate.verify(c, out)
+
+    def test_rejects_route_probe_from_an_old_unrelated_field_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            checkpoint = gate.load_json(out / "checkpoint.json")
+            checkpoint["nodes"]["alice"]["game_route_status"]["proof_observed_unix_ms"] = 1_000_000
+            gate.save(out / "checkpoint.json", checkpoint)
+            with self.assertRaisesRegex(gate.Blocked, "game_route_probe_outside_stage_window_checkpoint_alice"):
+                gate.verify(c, out)
+
+    def test_rejects_future_route_probe_timestamp(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            c = fixtures(out)
+            recovered = gate.load_json(out / "bob_recovered.json")
+            observed = datetime.fromisoformat(recovered["observed_utc"])
+            recovered["nodes"]["bob"]["game_route_status"]["proof_observed_unix_ms"] = (
+                int(observed.timestamp() * 1000) + 30_000
+            )
+            gate.save(out / "bob_recovered.json", recovered)
+            with self.assertRaisesRegex(gate.Blocked, "game_route_probe_outside_stage_window_bob_recovered_bob"):
                 gate.verify(c, out)
 
 

@@ -36,6 +36,13 @@ STAGES = {
 SHA = re.compile(r"^[0-9a-fA-F]{64}$")
 COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
 SSH_TARGET = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.@:-]*$")
+
+# Capture queries up to three hosts in series, each with a 100-second SSH
+# timeout. Tying a route probe to its completed stage within this budget
+# rejects ancient/replayed observations without imposing a false 5-second
+# total window across three real WAN machines.
+MAX_ROUTE_STAGE_PROBE_LAG_MS = 330_000
+MAX_ROUTE_CLOCK_SKEW_MS = 2_000
 HERE = Path(__file__).resolve().parent
 
 
@@ -465,6 +472,9 @@ def verify(c, output, review_file=None):
             require(type(observed_at) is int and observed_at > last_route_observation_by_role.get(role, 0),
                     "game_route_probe_replayed_" + name + "_" + role)
             last_route_observation_by_role[role] = observed_at
+            completed_at = int(stage_times[name].timestamp() * 1000)
+            require(-MAX_ROUTE_CLOCK_SKEW_MS <= completed_at - observed_at <= MAX_ROUTE_STAGE_PROBE_LAG_MS,
+                    "game_route_probe_outside_stage_window_" + name + "_" + role)
             snap = route.get("snapshot_hash")
             require(isinstance(snap, str) and SHA.fullmatch(snap),
                     "signed_game_route_checkpoint_missing_" + name + "_" + role)

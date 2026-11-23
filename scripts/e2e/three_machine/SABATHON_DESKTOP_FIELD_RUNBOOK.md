@@ -132,3 +132,8 @@ checkpoints on several clients are insufficient. Nonhosting replicas may
 legitimately omit a migration-status snapshot hash, but still need matching
 fresh world/authority/fencing evidence and their independently verified
 canonical heads.
+Each stage captures its own completion time after the sequential remote
+observations. The route-probe observation timestamp must fall within the
+bounded three-machine SSH collection window (330 seconds plus 2 seconds
+for clock skew), and strictly advance across playable stages. An old field
+run's route report cannot be made fresh just by changing the stage label.
