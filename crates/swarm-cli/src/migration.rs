@@ -822,10 +822,11 @@ async fn run_authority_runtime_inner(
             &launch.environment(),
         )
     })?;
-    if let Err(error) = runtime_process.record_java(child.id()) {
-        terminate_child(&mut child);
-        return Err(error);
-    }
+    // Any failed publish, verification, or IPC handshake before Ready must
+    // reap this Java process. Dropping std::process::Child alone leaves the
+    // unverified server running without its Rust supervisor.
+    let startup = StartupJavaGuard::new(&mut child, paths, options.world);
+    runtime_process.record_java(startup.pid())?;
 
     publish_status(
         paths,
@@ -838,23 +839,14 @@ async fn run_authority_runtime_inner(
         Some(latest.manifest_hash()?),
         None,
     )?;
-    let mut session = match listener.accept(FABRIC_START_TIMEOUT).await {
-        Ok(session) => session,
-        Err(error) => {
-            terminate_child(&mut child);
-            return Err(error.into());
-        }
-    };
-    if let Err(error) = validate_world_info(
+    let mut session = listener.accept(FABRIC_START_TIMEOUT).await?;
+    validate_world_info(
         session.world_info(),
         &metadata.genesis.minecraft_version,
         &metadata.genesis.fabric_loader_version,
         &world_dir,
         metadata.genesis.compatibility_fingerprint,
-    ) {
-        terminate_child(&mut child);
-        return Err(error);
-    }
+    )?;
     // SERVER_STARTED sends authenticated Fabric world info only after Java's
     // Minecraft listener has initialized. Independently reject an unavailable
     // local port before recording host-ready status. This does not replace
@@ -863,11 +855,10 @@ async fn run_authority_runtime_inner(
         &std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, managed_port).into(),
         Duration::from_secs(2),
     ) {
-        terminate_child(&mut child);
         return Err(anyhow!("managed Minecraft server listener on 127.0.0.1:{managed_port} is unavailable: {error}"));
     }
     if let Err(error) = ensure_authority_generation(storage, &identity, &epoch) {
-        terminate_child(&mut child);
+        terminate_child(&mut *startup.child);
         publish_status(
             paths,
             storage,
@@ -912,7 +903,7 @@ async fn run_authority_runtime_inner(
                 Some(latest.manifest_hash()?),
                 None,
             )?;
-            info!(world = %options.world, pid = child.id(), ?trigger, "Minecraft authority runtime is ready");
+            info!(world = %options.world, pid = startup.pid(), ?trigger, "Minecraft authority runtime is ready");
         }
         state => {
             // Never advertise Ready after consent has changed during Fabric
@@ -922,7 +913,7 @@ async fn run_authority_runtime_inner(
                 Err(error) => format!("cannot verify hosting contribution: {error}"),
                 Ok(None) => unreachable!(),
             };
-            publish_status(
+            if let Err(error) = publish_status(
                 paths,
                 storage,
                 options.world,
@@ -932,9 +923,18 @@ async fn run_authority_runtime_inner(
                 game_endpoint.clone(),
                 Some(latest.manifest_hash()?),
                 Some(detail),
-            )?;
+            ) {
+                // Consent was withdrawn during authenticated Fabric startup.
+                // Do not abandon the newly running JVM because telemetry
+                // failed; the supervised loop must still request a Fabric
+                // save barrier instead of killing uncheckpointed world data.
+                warn!(world = %options.world, %error, "could not publish blocked startup state; continuing safe-stop supervision");
+            }
         }
     }
+    // From here the existing supervisor owns shutdown and checkpointing.
+    // Loss of consent after live Fabric handshaking must remain save-first.
+    startup.disarm();
 
     let disposition = match wait_for_runtime_exit(
         paths,
@@ -2015,6 +2015,45 @@ fn terminate_child(child: &mut Child) {
     }
 }
 
+/// An unverified Minecraft Java launch must not outlive a failed startup.
+/// This guard only covers startup, before the runtime is turned over to the
+/// Fabric save-first supervisor. After handoff, its Drop never kills Java.
+struct StartupJavaGuard<'a> {
+    child: &'a mut Child,
+    paths: &'a DataPaths,
+    world: WorldId,
+    armed: bool,
+}
+
+impl<'a> StartupJavaGuard<'a> {
+    fn new(child: &'a mut Child, paths: &'a DataPaths, world: WorldId) -> Self {
+        Self { child, paths, world, armed: true }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartupJavaGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        terminate_child(&mut *self.child);
+        if let Err(error) = host_readiness::invalidate_runtime_verification(self.paths, self.world) {
+            warn!(world = %self.world, %error, "could not retract failed-startup runtime verification");
+        }
+        if let Err(error) = host_readiness::invalidate_cached_readiness(self.paths, self.world) {
+            warn!(world = %self.world, %error, "could not retract failed-startup host readiness");
+        }
+    }
+}
+
 fn publish_failure(
     paths: &DataPaths,
     storage: &Storage,
@@ -2274,6 +2313,46 @@ fn epoch_record_hash(record: &EpochRecordV1) -> Result<Hash32> {
 #[cfg(test)]
 mod runtime_retirement_tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn sleeping_mock_java() -> Child {
+        Command::new("/bin/sh").args(["-c", "exec sleep 30"]).spawn().expect("cannot spawn isolated mock Java process")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_startup_guard_reaps_java_and_invalidates_both_readiness_proofs() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path());
+        let world = WorldId([34; 32]);
+        let proof = control_dir(&paths, world).join("runtime-verified.json");
+        let readiness = control_dir(&paths, world).join("host-readiness.json");
+        fs::create_dir_all(proof.parent().unwrap()).unwrap();
+        fs::write(&proof, b"stale runtime proof").unwrap();
+        fs::write(&readiness, b"stale readiness snapshot").unwrap();
+        let mut child = sleeping_mock_java();
+        {
+            let guard = StartupJavaGuard::new(&mut child, &paths, world);
+            assert!(guard.pid() != 0);
+            // An ordinary fallible startup operation (`?`) unwinds here.
+        }
+        assert!(child.try_wait().unwrap().is_some(), "failed startup must not orphan a Java process");
+        assert!(!proof.exists());
+        assert!(!readiness.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disarmed_startup_guard_does_not_kill_a_supervised_java_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path());
+        let world = WorldId([35; 32]);
+        let mut child = sleeping_mock_java();
+        StartupJavaGuard::new(&mut child, &paths, world).disarm();
+        assert!(child.try_wait().unwrap().is_none(), "save-first supervisor must retain the live Java child");
+        terminate_child(&mut child);
+        assert!(child.try_wait().unwrap().is_some());
+    }
 
     fn epoch(world: WorldId) -> EpochRecordV1 {
         EpochRecordV1 {
