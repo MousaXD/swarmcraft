@@ -29,6 +29,15 @@ certificate-backed membership chain; the locally accepted signed epoch,
 config and snapshot; fresh, challenge-bound **signed majority votes**; and
 `SignedHostFabricAttestation` signed by the authority over the *same nonce*
 after actual live authenticated Fabric readiness and current local consent.
+Host-side `sign_live_host_fabric_attestation(paths, identity, ...)` reads the
+actual current local hosting consent under the same advisory update lock used
+by `hosting_budget::set_contribution`. It refuses during a concurrent
+consent update, after revocation, on missing/corrupt consent or wrong
+identity, and signs the current revision rather than trusting an earlier
+consent object supplied by a caller. The caller must still obtain
+`VerifiedFabricRuntime` over the SAME live authenticated Fabric IPC session,
+and retain the runtime/authority lifecycle and process identity. The
+signature does not remain authoritative after later consent withdrawal.
 The signed attestation additionally includes `RuntimeCanonicalBinding`:
 exact current membership/config hashes, accepted snapshot hash/state root,
 epoch and fencing token. Agent 3 must derive that binding from independently

@@ -9,9 +9,11 @@
 //! wiring. Without such a provider, no instance of this adapter can be used.
 
 use anyhow::{anyhow, bail, Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
+    fs::OpenOptions,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -147,20 +149,37 @@ impl SignedHostFabricAttestation {
     }
 }
 
-/// Host-only action. The caller must first read and verify local current
-/// hosting consent and issue a fresh challenge through its actual FabricSession.
+/// Host-only action. The caller must issue a fresh challenge through its actual
+/// FabricSession. This method loads LOCAL consent while holding the existing
+/// consent-update lock: a stale consent object cannot be passed by its caller.
 /// A persisted or synthetically constructed Ready cannot satisfy that contract.
 #[allow(clippy::too_many_arguments)]
 pub fn sign_live_host_fabric_attestation(
+    paths: &DataPaths,
     identity: &PeerIdentity,
     transport_peer: &TransportPeerId,
     requester: PeerId,
     realm_hash: Hash32,
     canonical: RuntimeCanonicalBinding,
-    consent: &hosting_budget::HostingConsentV1,
     fabric: &VerifiedFabricRuntime,
     now: u64,
 ) -> Result<SignedHostFabricAttestation> {
+    // The same cross-process lock is used by hosting_budget::set_contribution.
+    // A concurrent revocation must win the lock before this proof is signed or
+    // must be published afterwards (and invalidate subsequent rechecks).
+    // Nonblocking acquisition refuses instead of holding a proof worker
+    // indefinitely behind a slow consent update.
+    let consent_lock_path = paths.root.join("control").join("hosting-consent-write.lock");
+    let consent_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&consent_lock_path)
+        .with_context(|| format!("cannot open hosting consent update lock {}", consent_lock_path.display()))?;
+    consent_lock.try_lock_exclusive().context("hosting consent is being updated; refuse attestation")?;
+    let consent = hosting_budget::load_consent(paths, fabric.world_id())?
+        .context("hosting consent disappeared; cannot sign host readiness")?;
     if consent.world_id != fabric.world_id()
         || consent.peer_id != identity.peer_id()
         || !consent.enabled
@@ -199,6 +218,7 @@ pub fn sign_live_host_fabric_attestation(
         signature: Vec::new(),
     };
     attestation.signature = identity.sign(&attestation.signing_bytes()?);
+    drop(consent_lock);
     Ok(attestation)
 }
 

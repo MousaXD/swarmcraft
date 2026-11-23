@@ -128,6 +128,10 @@ fn signed_fabric_attestation_binds_consent_world_nonce_and_port() {
     let host = identity(4);
     let transport = swarm_network::generate_transport_key().public().to_peer_id();
     let world = WorldId([7; 32]);
+    let temp = tempfile::tempdir().unwrap();
+    let paths = DataPaths::from_root(temp.path().join("data"));
+    paths.ensure().unwrap();
+    std::fs::write(paths.identity_key(), host.network_signing_key().to_bytes()).unwrap();
     let expected = ExpectedFabricRuntime {
         world_id: world,
         world_directory: Path::new("/private/world"),
@@ -152,6 +156,9 @@ fn signed_fabric_attestation_binds_consent_world_nonce_and_port() {
         heap_mib: 2_048,
         revision: 3,
     };
+    let consent_path = paths.root.join("control").join(world.to_hex()).join("hosting-consent.json");
+    std::fs::create_dir_all(consent_path.parent().unwrap()).unwrap();
+    std::fs::write(&consent_path, serde_json::to_vec(&consent).unwrap()).unwrap();
     let canonical = RuntimeCanonicalBinding {
         membership_hash: Hash32([12; 32]),
         config_hash: Hash32([13; 32]),
@@ -161,12 +168,12 @@ fn signed_fabric_attestation_binds_consent_world_nonce_and_port() {
         fencing_token: 7,
     };
     let attestation = sign_live_host_fabric_attestation(
+        &paths,
         &host,
         &transport,
         identity(5).peer_id(),
         v1_realm_hash(world),
         canonical,
-        &consent,
         &runtime,
         1_000,
     )
@@ -188,19 +195,70 @@ fn signed_fabric_attestation_binds_consent_world_nonce_and_port() {
     tampered = attestation.clone();
     tampered.canonical.checkpoint_hash = Hash32([99; 32]);
     assert!(tampered.verify(1_001).is_err());
-    let mut revoked = consent;
+    let mut revoked = consent.clone();
     revoked.enabled = false;
+    revoked.heap_mib = 0;
+    revoked.revision += 1;
+    std::fs::write(&consent_path, serde_json::to_vec(&revoked).unwrap()).unwrap();
     assert!(sign_live_host_fabric_attestation(
+        &paths,
         &host,
         &transport,
         identity(5).peer_id(),
         v1_realm_hash(world),
         canonical,
-        &revoked,
         &runtime,
         1_000,
     )
     .is_err());
+    // Re-enabling creates a different revision; the signer must obtain it
+    // from the CURRENT record, never from the previous caller's object.
+    let reenabled = hosting_budget::HostingConsentV1 {
+        enabled: true,
+        heap_mib: consent.heap_mib,
+        revision: revoked.revision + 1,
+        ..consent.clone()
+    };
+    std::fs::write(&consent_path, serde_json::to_vec(&reenabled).unwrap()).unwrap();
+    let refreshed = sign_live_host_fabric_attestation(
+        &paths,
+        &host,
+        &transport,
+        identity(5).peer_id(),
+        v1_realm_hash(world),
+        canonical,
+        &runtime,
+        1_000,
+    )
+    .unwrap();
+    assert_eq!(refreshed.consent_revision, reenabled.revision);
+    assert_ne!(refreshed.signature, attestation.signature);
+    let lock =
+        OpenOptions::new().read(true).write(true).open(paths.root.join("control/hosting-consent-write.lock")).unwrap();
+    lock.try_lock_exclusive().unwrap();
+    assert!(sign_live_host_fabric_attestation(
+        &paths,
+        &host,
+        &transport,
+        identity(5).peer_id(),
+        v1_realm_hash(world),
+        canonical,
+        &runtime,
+        1_000,
+    )
+    .is_err());
+    drop(lock);
+    assert!(sign_live_host_fabric_attestation(
+        &paths,
+        &host,
+        &transport,
+        identity(5).peer_id(),
+        v1_realm_hash(world),
+        canonical,
+        &runtime,
+        1_000,
+    )
+    .is_ok());
 }
 
 struct NoLiveProof;
@@ -407,12 +465,12 @@ fn canonical_route_requires_signed_majority_and_current_host_consent() {
         fencing_token: epoch.fencing_token,
     };
     let host_fabric = sign_live_host_fabric_attestation(
+        &paths,
         &alice,
         &transport,
         bob.peer_id(),
         v1_realm_hash(world),
         canonical,
-        &consent,
         &runtime,
         now,
     )
