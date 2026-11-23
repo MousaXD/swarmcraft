@@ -33,7 +33,7 @@ use thiserror::Error;
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{watch, OwnedSemaphorePermit, Semaphore},
-    task::JoinSet,
+    task::{self, JoinSet},
     time::{interval, timeout},
 };
 use tokio_util::compat::FuturesAsyncReadCompatExt;
@@ -46,6 +46,9 @@ pub const MAX_GAME_HEADER_WAIT: Duration = Duration::from_secs(4);
 pub const MAX_GAME_DIAL_WAIT: Duration = Duration::from_secs(3);
 pub const MAX_GAME_SESSION: Duration = Duration::from_secs(4 * 60 * 60);
 pub const GAME_REVALIDATE_INTERVAL: Duration = Duration::from_secs(1);
+/// A hung Fabric IPC or quorum check must not stall the libp2p reactor.
+pub const MAX_GAME_LIVE_PROOF_WAIT: Duration = Duration::from_secs(3);
+pub const MAX_GAME_LIVE_PROOF_WORKERS: usize = 8;
 const MAX_OPEN_NONCES: usize = 256;
 const NONCE_TTL: Duration = Duration::from_secs(30);
 type RecentGameNonces = Arc<Mutex<HashMap<(TransportPeerId, [u8; 32]), Instant>>>;
@@ -139,6 +142,7 @@ pub struct GameStreamReceiver {
     active: Arc<Semaphore>,
     peers: Arc<Mutex<HashMap<TransportPeerId, usize>>>,
     nonces: RecentGameNonces,
+    proof_workers: Arc<Semaphore>,
 }
 
 impl GameStreamReceiver {
@@ -161,6 +165,7 @@ impl GameStreamReceiver {
             active: Arc::new(Semaphore::new(MAX_GAME_STREAMS)),
             peers: Arc::new(Mutex::new(HashMap::new())),
             nonces: Arc::new(Mutex::new(HashMap::new())),
+            proof_workers: Arc::new(Semaphore::new(MAX_GAME_LIVE_PROOF_WORKERS)),
         })
     }
 
@@ -242,7 +247,15 @@ impl GameStreamReceiver {
         }
         verify_response_signature(&frame.offer, &frame.response)?;
         validate_timestamps(&frame.offer, &frame.response, now)?;
-        validate_live_evidence(self.evidence.as_ref(), &frame.offer, app_peer, frame.response.challenge.nonce, now)?;
+        validate_live_evidence_bounded(
+            Arc::clone(&self.evidence),
+            Arc::clone(&self.proof_workers),
+            &frame.offer,
+            app_peer,
+            frame.response.challenge.nonce,
+            now,
+        )
+        .await?;
         // The client-chosen open nonce is NOT sufficient replay protection:
         // an attacker could modify it while replaying a still-valid signed
         // route response. Consume the SIGNED route challenge exactly once.
@@ -266,7 +279,22 @@ impl GameStreamReceiver {
         OsRng.fill_bytes(&mut post_dial_challenge);
         let post_dial_now = unix_ms()?;
         validate_timestamps(&frame.offer, &frame.response, post_dial_now)?;
-        validate_live_evidence(self.evidence.as_ref(), &frame.offer, app_peer, post_dial_challenge, post_dial_now)?;
+        validate_live_evidence_bounded(
+            Arc::clone(&self.evidence),
+            Arc::clone(&self.proof_workers),
+            &frame.offer,
+            app_peer,
+            post_dial_challenge,
+            post_dial_now,
+        )
+        .await?;
+        // An independently verified proof is not a permit to reuse an
+        // already-expired signed route. Its blocking validation can consume
+        // the remaining host handshake lease; recheck at the forwarding edge.
+        validate_timestamps(&frame.offer, &frame.response, unix_ms()?)?;
+        if *shutdown.borrow() || authenticated_peer(&self.authenticated, remote) != Some(app_peer) {
+            return Err(GameTransportError::StaleRoute);
+        }
         timeout(MAX_GAME_HEADER_WAIT, stream.write_all(&[GAME_ACK]))
             .await
             .map_err(|_| GameTransportError::Timeout)??;
@@ -293,7 +321,10 @@ impl GameStreamReceiver {
                         }
                         let mut fresh_nonce = [0; 32];
                         OsRng.fill_bytes(&mut fresh_nonce);
-                        validate_live_evidence(self.evidence.as_ref(), &frame.offer, app_peer, fresh_nonce, unix_ms()?)?;
+                        validate_live_evidence_bounded(
+                            Arc::clone(&self.evidence), Arc::clone(&self.proof_workers),
+                            &frame.offer, app_peer, fresh_nonce, unix_ms()?,
+                        ).await?;
                     }
                 }
             }
@@ -489,6 +520,33 @@ fn validate_live_evidence(
     Ok(())
 }
 
+/// Separate the synchronous authority, membership and authenticated Fabric
+/// readiness proof from the Tokio networking reactor. A blocking adapter may
+/// outlive this request's deadline: its owned permit stays in the OS worker
+/// until the adapter actually returns, so repeated timeouts never create an
+/// unbounded number of blocked threads. No proof or available slot = no game.
+async fn validate_live_evidence_bounded(
+    evidence: Arc<dyn FreshAuthoritySource>,
+    workers: Arc<Semaphore>,
+    offer: &MinecraftRouteOfferV1,
+    requester: PeerId,
+    nonce: [u8; 32],
+    sampled_unix_ms: u64,
+) -> Result<(), GameTransportError> {
+    let slot = workers.try_acquire_owned().map_err(|_| GameTransportError::Overloaded)?;
+    let offer = offer.clone();
+    timeout(
+        MAX_GAME_LIVE_PROOF_WAIT,
+        task::spawn_blocking(move || {
+            let _slot = slot;
+            validate_live_evidence(evidence.as_ref(), &offer, requester, nonce, sampled_unix_ms)
+        }),
+    )
+    .await
+    .map_err(|_| GameTransportError::Timeout)?
+    .map_err(|_| GameTransportError::Unavailable)?
+}
+
 /// Gateway side of a dedicated authenticated game stream. The caller must
 /// supply a fresh RouteVerifier-produced capability and the associated signed
 /// offer/response for this exact requester transport identity.
@@ -497,6 +555,7 @@ pub struct GameStreamClient {
     transport_peer: TransportPeerId,
     authenticated: GameAuthenticatedPeers,
     evidence: Arc<dyn FreshAuthoritySource>,
+    proof_workers: Arc<Semaphore>,
 }
 
 impl GameStreamClient {
@@ -509,7 +568,13 @@ impl GameStreamClient {
         if application_peer == PeerId::default() {
             return Err(GameTransportError::Unauthorized);
         }
-        Ok(Self { application_peer, transport_peer, authenticated, evidence })
+        Ok(Self {
+            application_peer,
+            transport_peer,
+            authenticated,
+            evidence,
+            proof_workers: Arc::new(Semaphore::new(MAX_GAME_LIVE_PROOF_WORKERS)),
+        })
     }
 
     pub async fn forward(
@@ -534,7 +599,15 @@ impl GameStreamClient {
         validate_timestamps(&offer, &response, now)?;
         let mut nonce = [0; 32];
         OsRng.fill_bytes(&mut nonce);
-        validate_live_evidence(self.evidence.as_ref(), &offer, self.application_peer, nonce, now)?;
+        validate_live_evidence_bounded(
+            Arc::clone(&self.evidence),
+            Arc::clone(&self.proof_workers),
+            &offer,
+            self.application_peer,
+            nonce,
+            now,
+        )
+        .await?;
 
         let frame = GameStreamOpenV1 {
             version: 1,
@@ -574,13 +647,24 @@ impl GameStreamClient {
         validate_timestamps(&frame.offer, &frame.response, post_ack_now)?;
         let mut post_ack_nonce = [0; 32];
         OsRng.fill_bytes(&mut post_ack_nonce);
-        validate_live_evidence(
-            self.evidence.as_ref(),
+        validate_live_evidence_bounded(
+            Arc::clone(&self.evidence),
+            Arc::clone(&self.proof_workers),
             &frame.offer,
             self.application_peer,
             post_ack_nonce,
             post_ack_now,
-        )?;
+        )
+        .await?;
+        // Closing the last proof/IPC read also closes the opportunity to
+        // forward bytes under an expired one-time route capability.
+        if *shutdown.borrow()
+            || !route.is_fresh()
+            || authenticated_peer(&self.authenticated, target) != Some(route.authority_peer_id())
+        {
+            return Err(GameTransportError::StaleRoute);
+        }
+        validate_timestamps(&frame.offer, &frame.response, unix_ms()?)?;
         minecraft_client.set_nodelay(true)?;
         let mut upstream = game_stream.compat();
         let mut heartbeat = interval(GAME_REVALIDATE_INTERVAL);
@@ -603,7 +687,10 @@ impl GameStreamClient {
                         }
                         let mut fresh_nonce = [0; 32];
                         OsRng.fill_bytes(&mut fresh_nonce);
-                        validate_live_evidence(self.evidence.as_ref(), &frame.offer, self.application_peer, fresh_nonce, unix_ms()?)?;
+                        validate_live_evidence_bounded(
+                            Arc::clone(&self.evidence), Arc::clone(&self.proof_workers),
+                            &frame.offer, self.application_peer, fresh_nonce, unix_ms()?,
+                        ).await?;
                     }
                 }
             }
@@ -729,8 +816,12 @@ mod tests {
     use super::*;
     use futures::io::Cursor;
     use libp2p::identity::Keypair;
-    use std::net::TcpListener as StdTcpListener;
+    use std::{
+        net::TcpListener as StdTcpListener,
+        sync::atomic::{AtomicU64, Ordering},
+    };
     use swarm_protocol::{Hash32, WorldId};
+    use tokio::sync::Notify;
 
     fn peer() -> TransportPeerId {
         Keypair::generate_ed25519().public().to_peer_id()
@@ -914,5 +1005,113 @@ mod tests {
         // No route can be fabricated from this registry; it holds identity
         // only, not quorum, runtime readiness, or the capability itself.
         assert_ne!(Hash32([1; 32]), Hash32::default());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_game_quorum_checks_are_bounded_off_reactor_even_after_timeout() {
+        struct DelayedUnavailableProof {
+            delay_ms: AtomicU64,
+            started: Notify,
+        }
+
+        impl FreshAuthoritySource for DelayedUnavailableProof {
+            fn verify_fresh(
+                &self,
+                _world: WorldId,
+                _requester: PeerId,
+                _nonce: [u8; 32],
+            ) -> Result<FreshAuthorityEvidence, GameRouteError> {
+                self.started.notify_one();
+                std::thread::sleep(Duration::from_millis(self.delay_ms.load(Ordering::SeqCst)));
+                Err(GameRouteError::UnverifiedAuthority)
+            }
+        }
+
+        // No authorization can be granted from these intentionally incomplete
+        // test fields; the source ALWAYS refuses after a blocking delay.
+        let authority = peer();
+        let offer = MinecraftRouteOfferV1 {
+            version: 1,
+            world_id: WorldId([1; 32]),
+            realm_hash: Hash32([2; 32]),
+            authority_peer_id: PeerId([3; 32]),
+            authority_public_key: [4; 32],
+            authority_transport_peer: authority.to_bytes(),
+            game_server_port: 25565,
+            membership_hash: Hash32([5; 32]),
+            quorum_certificate_hash: Hash32([6; 32]),
+            compatibility_fingerprint: Hash32([7; 32]),
+            checkpoint_hash: Hash32([8; 32]),
+            state_root: Hash32([9; 32]),
+            epoch: 1,
+            fencing_token: 1,
+            consent_revision: 1,
+            runtime_instance_nonce: [10; 32],
+            runtime_ready_proof_hash: Hash32([11; 32]),
+            offer_id: [12; 32],
+            sequence: 1,
+            issued_unix_ms: 1,
+            expires_unix_ms: 2,
+            signature: vec![],
+        };
+        let source = Arc::new(DelayedUnavailableProof { delay_ms: AtomicU64::new(350), started: Notify::new() });
+        let workers = Arc::new(Semaphore::new(1));
+        let proof = source.clone();
+        let slots = Arc::clone(&workers);
+        let candidate = offer.clone();
+        let started_at = Instant::now();
+        let first = tokio::spawn(async move {
+            validate_live_evidence_bounded(proof, slots, &candidate, PeerId([14; 32]), [15; 32], 100).await
+        });
+        timeout(Duration::from_secs(2), source.started.notified()).await.expect("proof must begin in a worker");
+        assert!(
+            started_at.elapsed() < Duration::from_millis(300),
+            "blocking proof must not occupy the Tokio networking thread for 350ms"
+        );
+        assert!(matches!(
+            validate_live_evidence_bounded(
+                source.clone(),
+                Arc::clone(&workers),
+                &offer,
+                PeerId([14; 32]),
+                [16; 32],
+                100,
+            )
+            .await,
+            Err(GameTransportError::Overloaded)
+        ));
+        assert!(matches!(first.await.unwrap(), Err(GameTransportError::Route(GameRouteError::UnverifiedAuthority))));
+
+        source.delay_ms.store(3_700, Ordering::SeqCst);
+        let proof = source.clone();
+        let slots = Arc::clone(&workers);
+        let candidate = offer.clone();
+        let timed = tokio::spawn(async move {
+            validate_live_evidence_bounded(proof, slots, &candidate, PeerId([14; 32]), [17; 32], 100).await
+        });
+        timeout(Duration::from_secs(2), source.started.notified()).await.expect("stalled proof must start");
+        assert!(matches!(
+            timeout(Duration::from_millis(3_200), timed)
+                .await
+                .expect("stalled proof must return before deadline")
+                .unwrap(),
+            Err(GameTransportError::Timeout)
+        ));
+        assert!(matches!(
+            validate_live_evidence_bounded(
+                source.clone(),
+                Arc::clone(&workers),
+                &offer,
+                PeerId([14; 32]),
+                [18; 32],
+                100,
+            )
+            .await,
+            Err(GameTransportError::Overloaded)
+        ));
+        // The timed-out OS worker cannot be killed, so wait until it exits
+        // before dropping this test's fake authority environment.
+        tokio::time::sleep(Duration::from_millis(850)).await;
+        assert_eq!(workers.available_permits(), 1);
     }
 }

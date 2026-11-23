@@ -20,6 +20,7 @@ use swarm_network::{
     },
     game_route_control::GameRouteControlEvent,
     game_route_host::AuthenticatedGameRouteHostSigner,
+    game_route_host_service::BoundedGameRouteHostResponder,
     game_route_resolver::{AuthenticatedGameRouteResolver, GameRouteCandidateSource},
     game_transport::{GameStreamClient, GameStreamReceiver, GatewayRouteResolver, StableLoopbackGateway},
     generate_transport_key, NetworkEvent, SwarmNode, TransportPeerId,
@@ -256,10 +257,11 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
             delay_ms: AtomicU64::new(0),
             entered: Notify::new(),
         });
-        let host_signer = AuthenticatedGameRouteHostSigner::new(
+        let host_signer = Arc::new(AuthenticatedGameRouteHostSigner::new(
             host_key.clone(), host_transport, quorum.clone(),
             root.path().join("private-host-offer-sequences"),
-        );
+        ));
+        let host_responder = Arc::new(BoundedGameRouteHostResponder::new(host_signer));
         let hints = Arc::new(CurrentCandidateHints { hosts: RwLock::new(vec![host_transport]) });
         let resolver = Arc::new(AuthenticatedGameRouteResolver::new(
             player_app,
@@ -273,10 +275,26 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
         .unwrap());
 
         let host_server = tokio::spawn(async move {
+            // This is the host daemon wiring boundary: signing is dispatched
+            // to bounded worker tasks, then their reply channels return to
+            // the continuously-polled SwarmNode. Awaiting a blocking Fabric
+            // check in the branch handling next_event() would deadlock peers.
+            let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel(32);
+            let mut signer_tasks = tokio::task::JoinSet::new();
             loop {
                 tokio::select! {
                     event = host.next_event() => {
                         if event.is_err() { break; }
+                    }
+                    reply = reply_rx.recv() => {
+                        if let Some((channel, response)) = reply {
+                            host.respond_game_route(channel, response).unwrap();
+                        }
+                    }
+                    completed = signer_tasks.join_next(), if !signer_tasks.is_empty() => {
+                        if let Some(Err(error)) = completed {
+                            panic!("host signer task panicked: {error}");
+                        }
                     }
                     event = host_control_events.recv() => {
                         let Some(GameRouteControlEvent::Inbound { application_peer, transport_peer, request, channel }) = event else {
@@ -288,8 +306,12 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
                         // runtime evidence injected only for this test. The
                         // same handler refuses on withdrawal and re-verifies
                         // after its durable offer sequence has been written.
-                        let response = host_signer.answer(application_peer, transport_peer, request).unwrap();
-                        host.respond_game_route(channel, response).unwrap();
+                        let responder = Arc::clone(&host_responder);
+                        let reply_tx = reply_tx.clone();
+                        signer_tasks.spawn(async move {
+                            let response = responder.answer(application_peer, transport_peer, request).await.unwrap();
+                            let _ = reply_tx.send((channel, response)).await;
+                        });
                     }
                 }
             }
