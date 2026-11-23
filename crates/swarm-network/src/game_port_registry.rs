@@ -11,7 +11,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 use swarm_protocol::WorldId;
@@ -108,11 +108,14 @@ impl GameWorldPortRegistry {
     fn create_directory(&self) -> Result<(), GamePortRegistryError> {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::DirBuilderExt;
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
             let mut builder = fs::DirBuilder::new();
             builder.recursive(true);
             builder.mode(0o700);
             builder.create(&self.directory)?;
+            if fs::symlink_metadata(&self.directory)?.permissions().mode() & 0o022 != 0 {
+                return Err(GamePortRegistryError::CorruptRegistry);
+            }
         }
         #[cfg(not(unix))]
         fs::create_dir_all(&self.directory)?;
@@ -177,11 +180,19 @@ fn read_record(path: &Path) -> Result<Assignment, GamePortRegistryError> {
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
         return Err(GamePortRegistryError::CorruptRegistry);
     }
-    let bytes = fs::read(path)?;
+    // Never read an unbounded local file before checking its size: a corrupt
+    // or malicious record could otherwise exhaust memory before rejection.
+    let file = File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take((MAX_PORT_RECORD_SIZE + 1) as u64).read_to_end(&mut bytes)?;
     if bytes.is_empty() || bytes.len() > MAX_PORT_RECORD_SIZE {
         return Err(GamePortRegistryError::CorruptRegistry);
     }
-    let value: Assignment = postcard::from_bytes(&bytes).map_err(|_| GamePortRegistryError::CorruptRegistry)?;
+    let (value, remainder): (Assignment, &[u8]) =
+        postcard::take_from_bytes(&bytes).map_err(|_| GamePortRegistryError::CorruptRegistry)?;
+    if !remainder.is_empty() {
+        return Err(GamePortRegistryError::CorruptRegistry);
+    }
     if value.version != PORT_REGISTRY_VERSION || check_assignment(value.world_id, value.port).is_err() {
         return Err(GamePortRegistryError::CorruptRegistry);
     }
@@ -245,6 +256,29 @@ mod tests {
     }
 
     #[test]
+    fn trailing_bytes_cannot_be_hidden_after_a_valid_world_port_record() {
+        let root = tempdir().unwrap();
+        let registry = GameWorldPortRegistry::new(root.path());
+        let world = WorldId([7; 32]);
+        registry.reserve(world, 35558).unwrap();
+        let path = root.path().join(format!("{}.port", world.to_hex()));
+        OpenOptions::new().append(true).open(path).unwrap().write_all(b"junk").unwrap();
+        assert!(matches!(registry.lookup(world), Err(GamePortRegistryError::CorruptRegistry)));
+    }
+
+    #[test]
+    fn oversized_record_is_read_with_a_hard_limit_and_refused() {
+        let root = tempdir().unwrap();
+        let registry = GameWorldPortRegistry::new(root.path());
+        let world = WorldId([13; 32]);
+        registry.reserve(world, 35560).unwrap();
+        let path = root.path().join(format!("{}.port", world.to_hex()));
+        fs::write(&path, vec![42_u8; 2 * 1024 * 1024]).unwrap();
+        assert!(matches!(registry.lookup(world), Err(GamePortRegistryError::CorruptRegistry)));
+        assert!(matches!(registry.reserve(WorldId([14; 32]), 35561), Err(GamePortRegistryError::CorruptRegistry)));
+    }
+
+    #[test]
     fn no_privileged_ports_or_default_world() {
         let root = tempdir().unwrap();
         let registry = GameWorldPortRegistry::new(root.path());
@@ -287,5 +321,20 @@ mod tests {
         let linked = GameWorldPortRegistry::new(root.path().join("linked"));
         symlink(root.path().join("ports"), root.path().join("linked")).unwrap();
         assert!(matches!(linked.reserve(WorldId([11; 32]), 39002), Err(GamePortRegistryError::CorruptRegistry)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn world_writable_port_registry_is_not_an_authoritative_local_endpoint() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir().unwrap();
+        let public = root.path().join("public");
+        fs::create_dir(&public).unwrap();
+        fs::set_permissions(&public, fs::Permissions::from_mode(0o777)).unwrap();
+        let registry = GameWorldPortRegistry::new(public);
+        assert!(matches!(
+            registry.reserve(WorldId([1; 32]), 40001),
+            Err(GamePortRegistryError::CorruptRegistry)
+        ));
     }
 }
