@@ -4,6 +4,7 @@ mod invite;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
+use swarm_cli::game_route_api::{call_live_daemon, GameRouteApiOperation, GameRouteApiReply, GameRouteStatusV1};
 use swarm_cli::live_runtime_registry::LiveFabricRuntimeRegistry;
 use swarm_cli::migration::{self, RuntimeLaunchConfig, TransferPrepareResult};
 use swarm_cli::server_mods;
@@ -135,6 +136,16 @@ enum WorldCommand {
     },
     /// Show machine-readable migration/runtime state for Desktop or operators.
     MigrationStatus {
+        world: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Select the ONE active local Minecraft gateway world. This reserves a
+    /// stable loopback port; it does not assert that any host is ready.
+    GameRouteSelect { world: String },
+    /// Ask the LIVE daemon for a freshly verified signed route, never a
+    /// persisted migration Ready or configured Minecraft endpoint.
+    GameRouteStatus {
         world: String,
         #[arg(long)]
         json: bool,
@@ -515,6 +526,31 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 if let Some(reason) = status.failure_reason {
                     println!("Failure: {reason}");
                 }
+            }
+        }
+        WorldCommand::GameRouteSelect { world } => {
+            let world = parse_world(&world)?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            match runtime.block_on(call_live_daemon(paths, GameRouteApiOperation::Select, world))? {
+                GameRouteApiReply::Selected => {
+                    println!("Local gateway selected for {world}; live route is not yet verified.")
+                }
+                _ => bail!("live daemon cannot safely select the requested game gateway"),
+            }
+        }
+        WorldCommand::GameRouteStatus { world, json } => {
+            let world = parse_world(&world)?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            let status = match runtime.block_on(call_live_daemon(paths, GameRouteApiOperation::Status, world))? {
+                GameRouteApiReply::Status { value } => value,
+                _ => GameRouteStatusV1::unavailable(world),
+            };
+            if json {
+                println!("{}", serde_json::to_string(&status)?);
+            } else if status.route_verified {
+                println!("Fresh signed Minecraft route: {}", status.local_gateway.as_deref().unwrap_or("unavailable"));
+            } else {
+                println!("Minecraft route unavailable for {world}; no cached fallback is permitted.");
             }
         }
         WorldCommand::Hosting { command } => match command {

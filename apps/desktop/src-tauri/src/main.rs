@@ -216,9 +216,18 @@ async fn host_readiness(app: AppHandle, world: String) -> Result<String, String>
     run_cli(&app, vec!["world".into(), "host-readiness".into(), world, "--json".into()]).await
 }
 
-/// An optional read-only bridge. The daemon must implement a fresh, independent
-/// proof path before it may return `verified`. A missing CLI subcommand is an
-/// explicit unavailable state, never a guessed route from migration-status.
+/// Selecting a world binds (or preserves) its durable per-world LOCAL TCP
+/// gateway in the running daemon. Selection never constitutes authority or
+/// permission to connect: the read-only status command proves that separately.
+#[tauri::command]
+async fn game_route_select(app: AppHandle, world: String) -> Result<String, String> {
+    let world = hosting_contribution_commands::validate_world_id(&world)?;
+    run_cli(&app, vec!["world".into(), "game-route-select".into(), world.to_string()]).await
+}
+
+/// The native CLI asks the *live* authenticated daemon to perform a new,
+/// nonce-bound signed route proof. A missing daemon or failed proof never
+/// falls back to migration-status, discovery or a configured game endpoint.
 #[tauri::command]
 async fn game_route_status(
     app: AppHandle,
@@ -547,6 +556,7 @@ fn main() {
             create_invite,
             world_status,
             host_readiness,
+            game_route_select,
             game_route_status,
             hosting_contribution_get,
             hosting_contribution_set,

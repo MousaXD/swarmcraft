@@ -53,6 +53,9 @@ export interface NativeCommandTable {
   create_invite: { args: { world: string; expiresMinutes: number; bootstrapAddrs: string[] }; result: string };
   world_status: { args: { world: string }; result: string };
   host_readiness: { args: { world: string }; result: string };
+  /** Select exactly one local loopback gateway; this does NOT verify a route. */
+  game_route_select: { args: { world: string }; result: string };
+  /** Fresh signed-quorum, consent and Fabric proof from the live daemon. */
   game_route_status: { args: { world: string }; result: NativeGameRouteStatus };
   hosting_contribution_get: { args: { world: string }; result: HostingContributionReadiness };
   hosting_contribution_set: { args: { world: string; heapMib: number }; result: HostingContributionReadiness };

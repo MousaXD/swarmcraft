@@ -7,6 +7,12 @@ license = "Apache-2.0"
 repository = "https://github.com/MousaXD/swarmcraft"
 build = "build.rs"
 
+# Desktop has its own Cargo.lock and is intentionally excluded from the Rust
+# core workspace. Explicitly anchor that boundary when checked out inside a
+# nested Git worktree (otherwise Cargo walks upward into the parent repository
+# workspace and rejects this manifest before compiling).
+[workspace]
+
 [[bin]]
 name = "swarmcraft-desktop"
 path = "src/main.rs"

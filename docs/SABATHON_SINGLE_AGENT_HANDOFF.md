@@ -1,5 +1,10 @@
 # SwarmCraft Sabathon P0 — Single-agent continuation
 
+> Historical consolidation snapshot. The later integrated host/remote proof,
+> localhost gateway, native Desktop status and locally verified results are
+> recorded in [`SABATHON_P0_LIVE_INTEGRATION_STATUS.md`](SABATHON_P0_LIVE_INTEGRATION_STATUS.md).
+> **P0 remains NOT CERTIFIED** until real three-machine Minecraft acceptance.
+
 **Consolidated branch:** `integration/sabathon-p0-20261123`
 
 This branch contains the original runtime + authenticated game-route baseline

@@ -8,6 +8,7 @@ use std::{
 };
 use swarm_cli::{
     authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
+    game_route_api::{GameRouteApiOperation, GameRouteApiReply, GameRouteApiServer, GameRouteStatusV1},
     host_readiness::{self, PeerReadinessObservation},
     hosting_budget, launch_guard,
     live_authority::{SignedHostFabricAttestation, SignedLiveAuthoritySource},
@@ -37,7 +38,7 @@ use swarm_network::{
         GameRouteHostControlService, GameRouteHostReplyAction, MAX_PENDING_HOST_ROUTE_ACTIONS,
     },
     game_route_host_service::BoundedGameRouteHostResponder,
-    game_transport::GameStreamReceiver,
+    game_transport::{GameStreamReceiver, VerifiedGameRouteStatus},
     load_or_create_transport_key, validate_invite_dial_address, BlobResumeV1, HostCapabilityV1, HostRuntimeReadinessV1,
     NetworkEvent, ReplicaAckV1, ResponseChannel, ServerModsReadinessV1, SwarmNode, TransportPeerId, WireRequest,
     WireResponse, MAX_BLOB_CHUNK,
@@ -60,6 +61,8 @@ use tokio::{
 };
 use tracing::{info, warn};
 
+#[path = "daemon_game_gateway.rs"]
+mod game_gateway;
 #[path = "daemon_live_quorum.rs"]
 mod live_quorum;
 #[path = "daemon_local_live_authority.rs"]
@@ -86,6 +89,24 @@ struct PendingRemoteFabricProof {
     nonce: [u8; 32],
     started: Instant,
     response: sync_mpsc::SyncSender<Result<SignedHostFabricAttestation>>,
+}
+
+struct CompletedGameRouteStatus {
+    world: WorldId,
+    selection_revision: u64,
+    response: tokio::sync::oneshot::Sender<GameRouteApiReply>,
+    status: GameRouteStatusV1,
+    verified: Option<VerifiedGameRouteStatus>,
+}
+
+/// An unexpected daemon return must close the local game-route control TCP
+/// listener. Dropping a bare JoinHandle would detach an orphaned listener.
+struct AbortServerOnDrop(JoinHandle<()>);
+
+impl Drop for AbortServerOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 #[cfg(test)]
@@ -284,7 +305,7 @@ pub async fn run(
         authority.clone(),
         paths.root.join("game-route-offer-sequences"),
     ));
-    let responder = Arc::new(BoundedGameRouteHostResponder::new(signer));
+    let responder = Arc::new(BoundedGameRouteHostResponder::new(signer.clone()));
     let (route_reply_tx, mut route_replies) = mpsc::channel::<GameRouteHostReplyAction>(MAX_PENDING_HOST_ROUTE_ACTIONS);
     let (route_shutdown, route_shutdown_rx) = watch::channel(false);
     let route_control_task = tokio::spawn(
@@ -297,6 +318,16 @@ pub async fn run(
     let fabric_workers = Arc::new(Semaphore::new(MAX_IN_FLIGHT_HOST_FABRIC_RPC));
     let mut fabric_tasks = tokio::task::JoinSet::new();
     let mut game_stream_receiver: Option<ActiveGameReceiver> = None;
+    let api_server = GameRouteApiServer::bind(paths).await?;
+    let (game_api_tx, mut game_api_requests) = mpsc::channel(8);
+    let _api_owner = AbortServerOnDrop(tokio::spawn(async move {
+        if let Err(error) = api_server.serve(game_api_tx).await {
+            warn!(%error, "local game-route status endpoint stopped; all further native status checks will fail closed");
+        }
+    }));
+    let mut gateways = game_gateway::GameGatewayController::default();
+    let (status_done_tx, mut status_done_rx) = mpsc::channel::<CompletedGameRouteStatus>(8);
+    let mut status_tasks = tokio::task::JoinSet::new();
     let (transfer_done_tx, mut transfer_done_rx) = mpsc::channel::<CompletedTransferStep>(MAX_IN_FLIGHT_TRANSFER_STEPS);
     let mut transfer_steps_in_flight = HashSet::new();
     let mut lease_tick = tokio::time::interval(PERMIT_HEARTBEAT_INTERVAL);
@@ -304,6 +335,55 @@ pub async fn run(
 
     loop {
         tokio::select! {
+            Some(command) = game_api_requests.recv() => {
+                match command.operation {
+                    GameRouteApiOperation::Select => {
+                        let reply = match gateways.select(
+                            paths, storage, &identity, &node, authority.clone(), signer.clone(), command.world,
+                        ).await {
+                            Ok(()) => GameRouteApiReply::Selected,
+                            Err(error) => {
+                                warn!(world = %command.world, %error, "local Minecraft gateway selection denied");
+                                GameRouteApiReply::Unavailable
+                            }
+                        };
+                        let _ = command.response.send(reply);
+                    }
+                    GameRouteApiOperation::Status => {
+                        if let Some((resolver, addr)) = gateways.status_source(command.world) {
+                            let reply = status_done_tx.clone();
+                            let revision = gateways.revision();
+                            status_tasks.spawn(async move {
+                                let (status, verified) = game_gateway::resolve_status(command.world, resolver, addr).await;
+                                let _ = reply.try_send(CompletedGameRouteStatus {
+                                    world: command.world, selection_revision: revision,
+                                    response: command.response, status, verified,
+                                });
+                            });
+                        } else {
+                            let _ = command.response.send(GameRouteApiReply::Status {
+                                value: GameRouteStatusV1::unavailable(command.world),
+                            });
+                        }
+                    }
+                }
+            }
+            finished = status_tasks.join_next(), if !status_tasks.is_empty() => {
+                if let Some(Err(error)) = finished { warn!(%error, "fresh Minecraft route status verifier failed"); }
+            }
+            Some(completed) = status_done_rx.recv() => {
+                let valid = gateways.revision() == completed.selection_revision
+                    && gateways.active_world() == Some(completed.world)
+                    && completed.verified.is_some_and(|proof| {
+                        current_verified_route_status_matches(
+                            paths, storage, &identity, &node, &live_runtime_registry,
+                            completed.world, &proof,
+                        )
+                    });
+                let value = if valid { completed.status }
+                    else { GameRouteStatusV1::unavailable(completed.world) };
+                let _ = completed.response.send(GameRouteApiReply::Status { value });
+            }
             Some(command) = live_quorum_commands.recv() => {
                 live_quorum_driver.start(storage, &identity, &mut node, &mut outbound, &leases, command);
             }
@@ -761,6 +841,71 @@ fn verify_remote_host_fabric_rpc(
         anyhow::bail!("remote runtime proof conflicts with locally accepted canonical authority and checkpoint");
     }
     Ok(signed)
+}
+
+/// Refuse a status that completed after its authority disconnected, the
+/// canonical checkpoint changed, signed transfer fenced the old host or the
+/// route's actual monotonic lifetime expired. These checks only REMOVE a
+/// VerifiedForwardRoute; they can never mint one.
+fn current_verified_route_status_matches(
+    paths: &DataPaths,
+    storage: &Storage,
+    identity: &PeerIdentity,
+    node: &SwarmNode,
+    registry: &LiveFabricRuntimeRegistry,
+    world: WorldId,
+    proof: &VerifiedGameRouteStatus,
+) -> bool {
+    let authenticated = if proof.authority_peer_id() == identity.peer_id() {
+        proof.transport_peer() == node.local_transport_peer_id()
+            && local_host_generation_eligible(
+                paths,
+                storage,
+                identity,
+                registry,
+                HostRouteGeneration {
+                    world,
+                    epoch_number: proof.epoch(),
+                    fencing_token: proof.fencing_token(),
+                    consent_revision: Some(proof.consent_revision()),
+                },
+            )
+    } else {
+        node.application_peer(&proof.transport_peer()) == Some(proof.authority_peer_id())
+    };
+    if proof.world_id() != world
+        || !authenticated
+        || proof.epoch() == 0
+        || proof.fencing_token() == 0
+        || !unix_millis().is_ok_and(|now| now >= proof.verified_at_unix_ms() && now < proof.valid_until_unix_ms())
+    {
+        return false;
+    }
+    let (Ok(epoch), Ok(head), Ok(descriptor)) = (
+        storage.load_epoch_record(world),
+        storage.canonical_snapshot_head(world),
+        storage.load_world_descriptor(world),
+    ) else {
+        return false;
+    };
+    // A membership revocation during an asynchronous proof invalidates even
+    // an otherwise correctly signed old route before Desktop sees it.
+    let member = descriptor.member(proof.authority_peer_id());
+    if epoch.mode != EpochMode::Quorum
+        || epoch.authority_peer_id != proof.authority_peer_id()
+        || epoch.epoch_number != proof.epoch()
+        || epoch.fencing_token != proof.fencing_token()
+        || authorize_member(storage, world, identity.peer_id()).is_err()
+        || !member.is_some_and(|member| {
+            !member.banned && member.authority_eligible && member.public_key == epoch.authority_public_key
+        })
+        || !head.head.is_some_and(|h| h.manifest_hash == proof.checkpoint_hash())
+        || !matches!(launch_guard::load_sleep_record_fail_closed(storage, world), Ok(None))
+        || !matches!(active_signed_transfer_fences_authority(storage, &descriptor, &epoch), Ok(false))
+    {
+        return false;
+    }
+    storage.list_solo_conflicts(world).is_ok_and(|conflicts| conflicts.is_empty())
 }
 
 struct HostRouteGeneration {

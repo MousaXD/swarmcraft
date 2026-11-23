@@ -12,6 +12,10 @@ let currentView = 'worlds';
 let migrationRequestGeneration = 0;
 let hostReadinessRequestGeneration = 0;
 let gameRouteRequestGeneration = 0;
+let gameRouteInFlightWorld = '';
+// World-switch operations must be serialized: a slow selection of world A
+// must never re-open A's gateway after the player has moved to world B.
+let gatewaySelectionQueue = Promise.resolve();
 let gameRouteState = UNVERIFIED_GAME_ROUTE;
 let latestMigrationState = null;
 let localCheckpointVerification = null;
@@ -435,6 +439,13 @@ function invalidateGameRoute() {
 
 async function refreshGameRoute(world) {
   const requestedWorldId = world?.id;
+  // A fresh signed offer + challenge + independently collected quorum may
+  // legitimately take longer than one UI polling interval. Coalesce only
+  // concurrent requests for the SAME world: superseding each slow request
+  // every five seconds would prevent even a valid route from being shown.
+  // World switches still increment the generation and immediately invalidate.
+  if (requestedWorldId && gameRouteInFlightWorld === requestedWorldId) return;
+  gameRouteInFlightWorld = requestedWorldId || '';
   const generation = ++gameRouteRequestGeneration;
   // Never keep an old route live while a refresh, world switch, or a daemon
   // error is pending. Each poll must produce a fresh independent proof.
@@ -457,6 +468,8 @@ async function refreshGameRoute(world) {
   } catch (_) {
     if (requestedWorldId !== selectedWorldId || generation !== gameRouteRequestGeneration) return;
     gameRouteState = UNVERIFIED_GAME_ROUTE;
+  } finally {
+    if (gameRouteInFlightWorld === requestedWorldId) gameRouteInFlightWorld = '';
   }
   renderGameRoute();
   // A new signed route can become available even though the local migration
@@ -720,6 +733,21 @@ async function openModsFolder() {
   } catch (_) {}
 }
 
+function queueGameGatewaySelection(world) {
+  if (!world?.id) return gatewaySelectionQueue;
+  // A daemon restart invalidates the old process-owned TCP gateway. Reapply
+  // only the player's CURRENT selection using the same serialized queue as
+  // world switching; this action never represents game-route verification.
+  gatewaySelectionQueue = gatewaySelectionQueue.catch(() => {}).then(async () => {
+    if (selectedWorldId !== world.id) return;
+    await backend.gameRouteSelect(world.id);
+    if (selectedWorldId === world.id) void refreshGameRoute(world);
+  }).catch(() => {
+    if (selectedWorldId === world.id) invalidateGameRoute();
+  });
+  return gatewaySelectionQueue;
+}
+
 function selectWorld(world, { focusDetail = false } = {}) {
   hostReadinessRequestGeneration += 1;
   if (window.__swarmcraftSvelteReadinessOwned !== true) renderHostReadiness(null);
@@ -727,6 +755,7 @@ function selectWorld(world, { focusDetail = false } = {}) {
   gameRouteState = UNVERIFIED_GAME_ROUTE;
   if (selectedWorldId !== world.id) localCheckpointVerification = null;
   selectedWorldId = world.id;
+  queueGameGatewaySelection(world);
   $('world').value = world.id;
   // The candidate now renders read-only selected-world metadata directly
   // from Svelte's current native Rust world-list response. Preserve legacy
@@ -1346,6 +1375,7 @@ async function startDaemon() {
     successMessage: (pid) => `Networking daemon is running. PID ${pid}.`,
   });
   setServiceWarning('');
+  await queueGameGatewaySelection(selectedWorld());
   await refreshConnectivityDiagnostics({ logFailure: true });
 }
 
