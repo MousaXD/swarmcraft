@@ -4,21 +4,38 @@ import test from 'node:test';
 import { deriveJourneyState } from '../src/player-experience.js';
 
 const srcRoot = new URL('../src/', import.meta.url);
+const desktopRoot = new URL('../', import.meta.url);
 
 async function text(name) {
   return readFile(new URL(name, srcRoot), 'utf8');
 }
 
-test('player journey treats Play readiness separately from shutdown redundancy', () => {
-  const ready = deriveJourneyState({
+async function desktopText(name) {
+  return readFile(new URL(name, desktopRoot), 'utf8');
+}
+
+test('local Play readiness does not imply a verified Minecraft route', () => {
+  const localReady = deriveJourneyState({
     playDisabled: false,
     playDetail: 'Ready to launch Minecraft.',
     hostReadiness: 'Keep this PC on. No successor is ready yet.',
     migration: 'Not active',
     connectivity: 'Direct connection',
   });
-  assert.equal(ready.kind, 'ready');
-  assert.equal(ready.label, 'Ready to play');
+  assert.equal(localReady.kind, 'neutral');
+  assert.equal(localReady.label, 'Local setup available');
+  assert.match(localReady.detail, /not proof of a live multiplayer route/i);
+
+  const routed = deriveJourneyState({
+    playDisabled: true,
+    playDetail: 'Local hosting not eligible',
+    migration: 'Not active',
+    connectivity: 'Connectivity diagnostics unavailable',
+    routeVerified: true,
+  });
+  assert.equal(routed.kind, 'ready');
+  assert.equal(routed.label, 'Minecraft route verified');
+  assert.match(routed.detail, /actual game login has not yet been observed/i);
 });
 
 test('player journey elevates real play blockers and active host changes', () => {
@@ -62,6 +79,22 @@ test('player-first layout keeps proven command IDs while moving operator surface
   assert.match(source, /Advanced world controls/);
   assert.match(source, /Replication, hosting, mods and diagnostics/);
   assert.match(source, /Keep world available here/);
+  assert.match(source, /data-primary-route-state/);
+  assert.match(source, /data-primary-route-detail/);
+  assert.match(source, /data-reconnect-world disabled/);
+  assert.match(source, /attributeFilter: \['hidden', 'disabled', 'class', 'data-route-verified'\]/);
+});
+
+test('staged Svelte and shipping HTML use the same delegated proof-bound reconnect action', async () => {
+  const candidate = await desktopText('frontend/src/components/WorldsView.svelte');
+  const controller = await text('app.js');
+  const route = await text('game-route-status.js');
+  for (const field of ['data-primary-route-state', 'data-primary-route-detail', 'data-reconnect-world']) {
+    assert.match(candidate, new RegExp(field));
+    assert.match(route, new RegExp(field));
+  }
+  assert.match(controller, /updateGameRouteControls\(document, route, selectedWorldId/);
+  assert.match(controller, /event\.target\?\.closest\?\.\('\[data-reconnect-world\]'\)/);
 });
 
 test('presentation layer does not recreate backend authority, fencing, quorum or runtime actions', async () => {

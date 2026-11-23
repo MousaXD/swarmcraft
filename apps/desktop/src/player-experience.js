@@ -8,11 +8,24 @@ export function deriveJourneyState({
   hostReadiness = '',
   migration = '',
   connectivity = '',
+  routeVerified = false,
 } = {}) {
   const migrationText = String(migration || '').trim();
   const readinessText = String(hostReadiness || '').trim();
   const playText = String(playDetail || '').trim();
   const connectivityText = String(connectivity || '').trim();
+
+  // Local hosting eligibility, transport reachability and a cached migration
+  // Ready state never prove the Minecraft client can reach the live host.
+  // This flag is presentation-only and is set by the native-proof controller;
+  // clicking Reconnect always revalidates the current world and expiry.
+  if (routeVerified === true) {
+    return {
+      kind: 'ready',
+      label: 'Minecraft route verified',
+      detail: 'An authenticated route to the current host is available. Connect in Minecraft Multiplayer; an actual game login has not yet been observed.',
+    };
+  }
 
   if (migrationText && !/not active|sleeping/i.test(migrationText) && WORKING_WORDS.test(migrationText)) {
     return {
@@ -44,9 +57,9 @@ export function deriveJourneyState({
   }
   if (PLAY_READY.test(playText)) {
     return {
-      kind: 'ready',
-      label: 'Ready to play',
-      detail: playText || 'This world is ready on this device.',
+      kind: 'neutral',
+      label: 'Local setup available',
+      detail: 'Local Minecraft launch eligibility is not proof of a live multiplayer route. Wait for an authenticated route before reconnecting.',
     };
   }
   if (!playDisabled) {
@@ -138,6 +151,14 @@ function createJourneyOverview(hero) {
         <span>World safety</span>
         <strong id="playerSafetySummary">Checking…</strong>
       </div>
+    </div>
+    <div class="player-route-entry" aria-label="Minecraft multiplayer route">
+      <div class="player-route-copy">
+        <span class="section-label">Join current host</span>
+        <strong data-primary-route-state>Minecraft route not verified</strong>
+        <p data-primary-route-detail>A fresh authenticated route is required before reconnecting.</p>
+      </div>
+      <button class="button button-secondary" type="button" data-reconnect-world disabled>Reconnect instructions</button>
     </div>`;
   hero.after(overview);
   return overview;
@@ -231,6 +252,7 @@ function updateWorldExperience() {
     hostReadiness: `${textOf('hostReadinessTitle')} ${textOf('hostReadinessDetail')}`,
     migration: `${textOf('migrationBadge')} ${textOf('migrationSummary')}`,
     connectivity: `${textOf('selectedConnectivity')} ${textOf('selectedConnectivityDetail')}`,
+    routeVerified: byId('playerJourneyOverview')?.dataset.routeVerified === 'true',
   });
 
   setText(byId('playerJourneyTitle'), state.label);
@@ -297,7 +319,7 @@ export function installPlayerExperience() {
       childList: true,
       characterData: true,
       attributes: true,
-      attributeFilter: ['hidden', 'disabled', 'class'],
+      attributeFilter: ['hidden', 'disabled', 'class', 'data-route-verified'],
     });
   }
 }

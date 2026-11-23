@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { createBackendAdapter } from '../src/backend-adapter.js';
 import { clientContinuityFromMigration } from '../src/client-continuity.js';
-import { ensureGameReconnectActions, gameReadinessCheckpoints, isUsableGameRoute, normalizeGameRouteStatus, UNVERIFIED_GAME_ROUTE, updateGameReadinessChecklist } from '../src/game-route-status.js';
+import { ensureGameReconnectActions, gameReadinessCheckpoints, isUsableGameRoute, normalizeGameRouteStatus, UNVERIFIED_GAME_ROUTE, updateGameReadinessChecklist, updateGameRouteControls } from '../src/game-route-status.js';
 
 const WORLD = 'scworld:1111111111111111111111111111111111111111111111111111111111111111';
 const NOW = Date.now();
@@ -172,4 +172,40 @@ test('the staged Svelte DOM gets one reusable fail-closed reconnect UI without d
   assert.equal(fixture.card.children.length, 3);
   updateGameReadinessChecklist(fixture.doc, checkpoints);
   assert.equal(fixture.card.children.length, 3);
+});
+
+test('primary and advanced reconnect actions remain jointly disabled until one current native route is verified', () => {
+  const elements = new Map([
+    ['[data-reconnect-world]', [{ disabled: true }, { disabled: true }]],
+    ['[data-verified-gateway-address]', [{ textContent: 'No verified address' }]],
+    ['[data-verified-gateway-hint]', [{ textContent: '' }]],
+    ['[data-primary-route-state]', [{ textContent: 'Minecraft route not verified' }]],
+    ['[data-primary-route-detail]', [{ textContent: '' }]],
+  ]);
+  const overview = { dataset: {} };
+  const doc = {
+    querySelectorAll(selector) { return elements.get(selector) || []; },
+    getElementById(id) { return id === 'playerJourneyOverview' ? overview : null; },
+  };
+  const route = normalizeGameRouteStatus(live(), WORLD, NOW);
+  assert.equal(updateGameRouteControls(doc, route, WORLD, 'Canonical', NOW), true);
+  assert.deepEqual(elements.get('[data-reconnect-world]').map(item => item.disabled), [false, false]);
+  assert.equal(elements.get('[data-verified-gateway-address]')[0].textContent, '127.0.0.1:25570');
+  assert.match(elements.get('[data-primary-route-state]')[0].textContent, /Verified.*127\.0\.0\.1:25570/);
+  assert.match(elements.get('[data-primary-route-detail]')[0].textContent, /login has not yet been observed/i);
+  assert.equal(overview.dataset.routeVerified, 'true');
+
+  for (const [world, safety, when] of [
+    ['scworld:other', 'Canonical', NOW],
+    [WORLD, 'Conflict', NOW],
+    [WORLD, 'Canonical', NOW + 5_000],
+  ]) {
+    assert.equal(updateGameRouteControls(doc, route, world, safety, when), false);
+    assert.deepEqual(elements.get('[data-reconnect-world]').map(item => item.disabled), [true, true]);
+    assert.equal(elements.get('[data-verified-gateway-address]')[0].textContent, 'No verified address');
+    assert.doesNotMatch(elements.get('[data-primary-route-state]')[0].textContent, /^Verified/);
+    assert.equal(overview.dataset.routeVerified, 'false');
+  }
+  assert.equal(updateGameRouteControls(doc, UNVERIFIED_GAME_ROUTE, WORLD, 'Canonical', NOW), false);
+  assert.deepEqual(elements.get('[data-reconnect-world]').map(item => item.disabled), [true, true]);
 });

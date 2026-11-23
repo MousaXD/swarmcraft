@@ -160,6 +160,38 @@
   color: var(--muted);
 }
 
+.player-route-entry {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.player-route-copy {
+  display: grid;
+  flex: 1 1 220px;
+  min-width: 0;
+  gap: 4px;
+}
+
+.player-route-copy strong {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.player-route-copy p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.player-route-entry > button {
+  flex: 0 1 auto;
+}
+
 .selection-content[data-player-experience="true"] #hostReadinessPanel {
   margin-top: 14px;
   padding: 14px 16px;

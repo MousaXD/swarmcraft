@@ -108,6 +108,43 @@ export function gameReadinessCheckpoints({ world = null, route = UNVERIFIED_GAME
   ]);
 }
 
+/**
+ * Present the *same* fail-closed native decision in the primary player flow
+ * and the advanced handoff details, for both shipped HTML and staged Svelte.
+ * Controls are merely display affordances: the click handler independently
+ * validates world identity, canonical safety and proof expiry again.
+ */
+export function updateGameRouteControls(doc, route, expectedWorldId, safety, now = Date.now()) {
+  const verified = isUsableGameRoute(route, expectedWorldId, safety, now);
+  const safeState = verified ? route
+    : route?.verified ? UNVERIFIED_GAME_ROUTE : route || UNVERIFIED_GAME_ROUTE;
+  const target = verified ? route.connectionTarget : 'No verified address';
+  const hint = verified
+    ? 'Open Minecraft Java Multiplayer and join this exact loopback address. A new login is required after a host change.'
+    : 'A saved checkpoint or a running host does not prove a playable connection. Wait for a fresh signed game-route proof.';
+  const primaryLabel = verified ? `Verified · ${route.connectionTarget}` : safeState.label;
+  const primaryDetail = verified
+    ? 'Use Reconnect instructions to start a new Minecraft session. An actual successful Minecraft login has not yet been observed.'
+    : safeState.detail;
+  const updateText = (selector, value) => {
+    for (const element of doc.querySelectorAll(selector)) {
+      if (element.textContent !== value) element.textContent = value;
+    }
+  };
+  for (const button of doc.querySelectorAll('[data-reconnect-world]')) {
+    if (button.disabled !== !verified) button.disabled = !verified;
+  }
+  updateText('[data-verified-gateway-address]', target);
+  updateText('[data-verified-gateway-hint]', hint);
+  updateText('[data-primary-route-state]', primaryLabel);
+  updateText('[data-primary-route-detail]', primaryDetail);
+  const overview = doc.getElementById('playerJourneyOverview');
+  if (overview && overview.dataset.routeVerified !== String(verified)) {
+    overview.dataset.routeVerified = String(verified);
+  }
+  return verified;
+}
+
 /** The same DOM helper works in shipped HTML and staged Svelte compatibility. */
 export function updateGameReadinessChecklist(doc, checkpoints) {
   const card = doc.getElementById('migrationCard');

@@ -100,6 +100,12 @@ time-aligned videos, not a manually filled green checkbox.
    consent; Reconnect instructions must disable immediately on refresh and
    after any five-second proof expiry. Desktop must never turn a cached
    migration Ready or configured IP into a trusted game address.
+   Capture the **primary player overview** and **advanced host handoff**
+   simultaneously: both reconnect controls must agree on enabled/disabled
+   state and loopback target. Local hosting compatibility may enable Play,
+   but cannot show a verified multiplayer route by itself. On a valid proof,
+   the primary panel may say the route is verified; it must never claim an
+   actual Minecraft login until the real player session is separately seen.
 
 ## Verdict
 

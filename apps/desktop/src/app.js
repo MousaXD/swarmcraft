@@ -1,7 +1,7 @@
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
 import { createImportRequest, parseImportResult } from './import-flow.js';
 import { clientContinuityFromMigration, ensureClientContinuityPanel } from './client-continuity.js';
-import { UNVERIFIED_GAME_ROUTE, ensureGameReconnectActions, gameReadinessCheckpoints, isUsableGameRoute, updateGameReadinessChecklist } from './game-route-status.js';
+import { UNVERIFIED_GAME_ROUTE, ensureGameReconnectActions, gameReadinessCheckpoints, isUsableGameRoute, updateGameReadinessChecklist, updateGameRouteControls } from './game-route-status.js';
 
 const $ = (id) => document.getElementById(id);
 const invoke = window.__TAURI__?.core?.invoke;
@@ -412,15 +412,7 @@ function renderGameRoute() {
   }));
   ensureGameReconnectActions(document);
   const route = gameRouteState;
-  const routeVerified = isUsableGameRoute(route, selectedWorldId, selectedWorld()?.status?.Safety);
-  const reconnect = document.querySelector('[data-reconnect-world]');
-  if (reconnect) reconnect.disabled = !selectedWorldId || !routeVerified;
-  const target = document.querySelector('[data-verified-gateway-address]');
-  if (target) target.textContent = routeVerified ? route.connectionTarget : 'No verified address';
-  const hint = document.querySelector('[data-verified-gateway-hint]');
-  if (hint) hint.textContent = routeVerified
-    ? 'Open Minecraft Java Multiplayer, then join this exact loopback address. A new login is required after each host change.'
-    : 'A saved checkpoint or a running host does not establish a player connection. Wait for a fresh signed game-route proof.';
+  const routeVerified = updateGameRouteControls(document, route, selectedWorldId, selectedWorld()?.status?.Safety);
   // Also revoke the accessible continuity headline immediately. Do not leave
   // a green route claim visible between a stop, tab switch and next CLI poll.
   const continuity = clientContinuityFromMigration(
