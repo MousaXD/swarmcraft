@@ -191,13 +191,13 @@ mod tests {
         let record = dir.path().join("game.floor");
         fs::write(&record, b"private-authority-record").unwrap();
         fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(validate_private_state_file(&record).unwrap(), true);
+        assert!(validate_private_state_file(&record).unwrap());
         fs::set_permissions(&record, fs::Permissions::from_mode(0o666)).unwrap();
         assert_eq!(validate_private_state_file(&record).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
         let second = dir.path().join("hard-linked-record");
         fs::hard_link(&record, &second).unwrap();
         assert_eq!(validate_private_state_file(&record).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(validate_private_state_file(&dir.path().join("not-created")).unwrap(), false);
+        assert!(!validate_private_state_file(&dir.path().join("not-created")).unwrap());
     }
 }
