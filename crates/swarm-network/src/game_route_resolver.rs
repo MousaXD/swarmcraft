@@ -19,11 +19,14 @@ use std::{
     future::Future,
     pin::Pin,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use swarm_protocol::{PeerId, WorldId};
+use tokio::{sync::Semaphore, task, time::timeout};
 
 pub const MAX_GAME_ROUTE_CANDIDATES: usize = 8;
+pub const MAX_GAME_ROUTE_PROOF_WORKERS: usize = 8;
+pub const MAX_GAME_ROUTE_PROOF_WAIT: Duration = Duration::from_secs(3);
 
 /// Supplies only candidate transport IDs, for example from the current world
 /// membership/discovery view. The list may be stale or adversarial. Supplying
@@ -41,7 +44,8 @@ pub struct AuthenticatedGameRouteResolver {
     requester_application: PeerId,
     requester_transport: TransportPeerId,
     rpc: GameRouteRpcClient,
-    verifier: RouteVerifier,
+    verifier: Arc<RouteVerifier>,
+    proof_workers: Arc<Semaphore>,
     authenticated: GameAuthenticatedPeers,
     authority: Arc<dyn FreshAuthoritySource>,
     candidates: Arc<dyn GameRouteCandidateSource>,
@@ -60,7 +64,16 @@ impl AuthenticatedGameRouteResolver {
         if requester_application == PeerId::default() {
             return Err(GameTransportError::Unauthorized);
         }
-        Ok(Self { requester_application, requester_transport, rpc, verifier, authenticated, authority, candidates })
+        Ok(Self {
+            requester_application,
+            requester_transport,
+            rpc,
+            verifier: Arc::new(verifier),
+            proof_workers: Arc::new(Semaphore::new(MAX_GAME_ROUTE_PROOF_WORKERS)),
+            authenticated,
+            authority,
+            candidates,
+        })
     }
 
     /// This is only the application-authenticated transport identity. It
@@ -100,8 +113,33 @@ impl AuthenticatedGameRouteResolver {
         let GameRouteControlResponseV1::ChallengeResponse(response) = response else {
             return Err(GameTransportError::Unauthorized);
         };
-        let now_ms = current_unix_ms()?;
-        let verified = self.verifier.verify(&offer, &response, world, now_ms, self.authority.as_ref())?;
+        // Real quorum/Fabric checks and the durable generation floor may
+        // block. NEVER perform those synchronous operations on the Tokio
+        // networking reactor: it would prevent the gateway's timeout,
+        // disconnection and other peers' control messages from being polled.
+        //
+        // A timeout cancels this caller but cannot abort an OS blocking
+        // function. Carry the owned permit INSIDE the worker so even a
+        // permanently stalled adapter consumes one of only eight slots.
+        // Exhaustion fails closed instead of spawning unbounded threads.
+        let slot = Arc::clone(&self.proof_workers).try_acquire_owned().map_err(|_| GameTransportError::Overloaded)?;
+        let verifier = Arc::clone(&self.verifier);
+        let authority = Arc::clone(&self.authority);
+        let (verified, offer, response) = timeout(
+            MAX_GAME_ROUTE_PROOF_WAIT,
+            task::spawn_blocking(move || -> Result<_, GameTransportError> {
+                let _slot = slot;
+                // Sample time INSIDE the worker, not before its scheduling
+                // delay. RouteVerifier additionally accounts for quorum and
+                // durable-file latency against that signed expiry.
+                let now_ms = current_unix_ms()?;
+                let verified = verifier.verify(&offer, &response, world, now_ms, authority.as_ref())?;
+                Ok((verified, offer, response))
+            }),
+        )
+        .await
+        .map_err(|_| GameTransportError::Timeout)?
+        .map_err(|_| GameTransportError::Unavailable)??;
         if !self.is_authenticated_as(transport, offer.authority_peer_id) {
             return Err(GameTransportError::Unauthorized);
         }
