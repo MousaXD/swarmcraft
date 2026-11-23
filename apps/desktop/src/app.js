@@ -1347,17 +1347,25 @@ async function hostWorld() {
     showRuntimeValidation(issue);
     return;
   }
+  const requestedWorld = worldId();
   showInline('runtimeNotice', '');
   try {
-    await run('Starting Minecraft…', () => backend.hostWorld({
-      world: worldId(),
+    const pid = await run('Starting Minecraft…', () => backend.hostWorld({
+      world: requestedWorld,
       java: $('java').value.trim(),
       serverJar: $('serverJar').value.trim(),
       modJar: $('modJar').value.trim(),
       acceptEula: $('eula').checked,
-    }), { successMessage: (pid) => `Minecraft authority runtime started. PID ${pid}.` });
+    }), { successMessage: (pid) => pid == null
+      ? 'Fresh signed Minecraft route verified. Desktop did not start a separate Java server or confirm a player login.'
+      : `Minecraft authority runtime started. PID ${pid}.` });
+    // An in-flight launch may finish after the player selects a different
+    // world. Never repaint the new world's panel with the old route/PID.
+    if (selectedWorldId !== requestedWorld) return;
     showView('worlds');
-    showInline('worldNotice', 'Minecraft runtime started. Runtime setup is persisted for automatic takeover.', 'safe');
+    showInline('worldNotice', pid == null
+      ? 'Authenticated Minecraft route verified. Use Join current host to find the localhost address and reconnect in Minecraft Java Multiplayer.'
+      : 'Minecraft runtime started for this solo world. Runtime setup is persisted.', 'safe');
   } catch (error) {
     showInline('runtimeNotice', `Could not start Minecraft: ${String(error)}`, 'danger');
     throw error;

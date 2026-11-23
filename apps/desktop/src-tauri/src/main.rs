@@ -509,6 +509,14 @@ async fn runtime_launch(
     }
     // Preserve original direct local Play ONLY for an unambiguous signed
     // solo world. Solo mode never advertises a quorum-backed game route.
+    // The daemon startup above can cross a membership/epoch transition.
+    // Recheck before spawning a standalone JVM rather than reusing the
+    // earlier classification to bypass the newly accepted quorum boundary.
+    if desktop_play_route::current_play_route_mode(world_id)? != desktop_play_route::PlayRouteMode::SoloDirect {
+        return Err(
+            "World membership or authority changed during Play. Retry through the signed multiplayer route.".into()
+        );
+    }
     let pid = processes.start_managed_host(&app, world.clone())?;
     for _ in 0..160 {
         match run_cli(&app, vec!["world".into(), "migration-status".into(), world.clone(), "--json".into()]).await {
@@ -543,8 +551,12 @@ async fn connectivity_diagnostics(app: AppHandle, processes: State<'_, RuntimePr
     }
 }
 
+/// Compatibility entrypoint for the legacy Desktop Play / Host button.
+/// Its runtime configuration has already been persisted by the frontend;
+/// critically, it must share the signed Play dispatcher rather than spawning
+/// a second `swarmcraft-host` JVM for an already-multiplayer world.
 #[tauri::command(rename_all = "camelCase")]
-fn host_world(
+async fn host_world(
     app: AppHandle,
     processes: State<'_, RuntimeProcesses>,
     world: String,
@@ -552,27 +564,15 @@ fn host_world(
     server_jar: String,
     mod_jar: String,
     accept_eula: bool,
-) -> Result<u32, String> {
-    if world.trim().is_empty() || server_jar.trim().is_empty() || mod_jar.trim().is_empty() {
-        return Err("world ID, Fabric server jar, and SwarmCraft mod jar are required".into());
+) -> Result<Option<u32>, String> {
+    let world = hosting_contribution_commands::validate_world_id(&world)?.to_string();
+    if java.trim().is_empty() || server_jar.trim().is_empty() || mod_jar.trim().is_empty() {
+        return Err("Java, Fabric server jar, and SwarmCraft mod jar are required".into());
     }
     if !accept_eula {
         return Err("Minecraft server EULA acceptance is required before hosting".into());
     }
-    processes.start_host(
-        &app,
-        vec![
-            "--world".into(),
-            world,
-            "--java".into(),
-            java,
-            "--server-jar".into(),
-            server_jar,
-            "--mod-jar".into(),
-            mod_jar,
-            "--accept-eula".into(),
-        ],
-    )
+    runtime_launch(app, processes, world).await
 }
 
 fn main() {

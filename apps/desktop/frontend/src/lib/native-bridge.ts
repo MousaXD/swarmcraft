@@ -106,7 +106,7 @@ export interface NativeCommandTable {
   start_daemon: { args: { listen: string }; result: number };
   stop_daemon: { args: Record<string, never>; result: void };
   stop_host: { args: { world: string }; result: string };
-  host_world: { args: { world: string; java: string; serverJar: string; modJar: string; acceptEula: boolean }; result: number };
+  host_world: { args: { world: string; java: string; serverJar: string; modJar: string; acceptEula: boolean }; result: number | null };
 }
 
 export type NativeCommandName = keyof NativeCommandTable;

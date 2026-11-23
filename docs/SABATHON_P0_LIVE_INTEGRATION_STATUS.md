@@ -79,6 +79,30 @@ checks, not a completed release or hypothetical Minecraft sessions.
   verified multiplayer game route**. This deliberately does not permit
   stale solo authority to join a multi-member generation.
 
+### Legacy Desktop Play and process-world isolation follow-up (24 November)
+
+- The original legacy `host_world` Tauri command was still reachable from the
+  shipped Play / Host actions and launched an independent `swarmcraft-host`
+  sidecar instead of the new signed Desktop Play dispatcher. It now validates
+  the canonical world ID and explicit EULA/Java/mod inputs, then delegates to
+  the **same** `runtime_launch` path. Desktop no longer exposes an alternate
+  native direct-JVM launch via that compatibility command. The signed
+  multiplayer route returns no fabricated host PID; both legacy Play and the
+  runtime wizard distinguish that result from starting a solo Minecraft JVM.
+- A world transition while daemon startup is in progress causes the solo
+  dispatcher to **recheck** signed local world membership/epoch before a
+  standalone JVM can launch. The Desktop process slot now also remembers the
+  exact world of a running direct host: a second world's launch cannot reuse
+  an unrelated PID or be misreported as successful. Existing same-world
+  process reuse and generation-based termination fencing are retained.
+- Runtime diagnostic filenames now accept validated canonical `scworld:` IDs
+  using portable, traversal-safe per-world names (including Windows), without
+  weakening sanitization of legacy diagnostic keys. Legacy Play suppresses a
+  completed result if the player selected another world during the operation.
+- These fixes close locally observed Desktop dispatch and reporting gaps. They
+  do not assert that any Java 25 Fabric runtime started, connected to a game
+  client, or passed installed-machine acceptance.
+
 ## Local verification performed
 
 | Check | Result | Scope |
@@ -89,11 +113,11 @@ checks, not a completed release or hypothetical Minecraft sessions.
 | `cargo test -p swarm-cli --lib` | 126 PASS | Supervisor, permit, signed authority, checkpoint, runtime registry and local IPC |
 | `cargo test -p swarm-cli --bin swarmcraft` | 44 PASS | Signed transfer, recovery, fencing, quorum, gateway selection and failure paths |
 | `cargo test -p swarm-network --lib -- --test-threads=1` | 111 PASS | Signed routes, durable generation floors, real localhost mock byte forwarding and consent loss |
-| `node --test apps/desktop/tests/*.test.mjs` | 129 PASS after Desktop Play follow-up | Includes real Chrome 157 / matching temporary ChromeDriver smoke at three viewport sizes |
+| `node --test apps/desktop/tests/*.test.mjs` | **130 PASS** after legacy Play compatibility follow-up | Includes real Chrome 157 / matching temporary ChromeDriver smoke at three viewport sizes |
 | Three-machine Python `test_*.py` unittest discovery | 112 PASS | Field evidence and acceptance-policy mocks only |
 | Native Linux Desktop `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked` | PASS again after Desktop Play follow-up | Compiles native Tauri app with real staged sidecars, **not** a signed installer or GUI login |
-| Native Linux Desktop `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked -- --test-threads=1` | 57 PASS after Desktop Play follow-up | Full native Tauri suite; includes 3 signed solo/multi-member dispatch and forged-membership refusal tests |
-| Native Linux Desktop `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --bin swarmcraft-desktop --locked -- -D warnings` | PASS | Strict native lint; also replaced a behavior-equivalent pre-existing redundant closure in the game-route decoder |
+| Native Linux Desktop `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked -- --test-threads=1` | **58 PASS** after legacy Play compatibility follow-up | Full native Tauri suite; includes signed dispatch, world-scoped host PID isolation, canonical diagnostics, and forged-membership refusal tests |
+| Native Linux Desktop `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --bin swarmcraft-desktop --locked -- -D warnings` | **PASS again** | Strict native lint after legacy Play process ownership fix |
 | `python3 scripts/e2e/sabathon_local_gateway_smoke.py` | PASS | Disposable genuine daemon + native CLI, double-daemon ownership refusal, durable localhost port after restart, no-quorum/consent TCP refusal, no cached status |
 
 All Cargo work was serialized via `/tmp/swarmcraft-sabathon-cargo.lock`

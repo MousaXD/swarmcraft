@@ -17,6 +17,7 @@ const MAX_RUNTIME_DIAGNOSTIC_BYTES: u64 = 4 * 1024 * 1024;
 struct OwnedChild<T> {
     generation: u64,
     child: T,
+    world: Option<String>,
 }
 
 struct SlotState<T> {
@@ -35,10 +36,25 @@ impl<T> SlotState<T> {
         self.owned.as_ref().map(|owned| pid(&owned.child))
     }
 
+    fn existing_pid_for_world(&self, world: Option<&str>, pid: impl FnOnce(&T) -> u32) -> Result<Option<u32>, String> {
+        match &self.owned {
+            Some(owned) if owned.world.as_deref() != world => Err(
+                "Another Desktop-owned process is running for a different world. Stop it safely before switching worlds."
+                    .into(),
+            ),
+            Some(owned) => Ok(Some(pid(&owned.child))),
+            None => Ok(None),
+        }
+    }
+
     fn insert(&mut self, child: T) -> u64 {
+        self.insert_for_world(child, None)
+    }
+
+    fn insert_for_world(&mut self, child: T, world: Option<String>) -> u64 {
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
         let generation = self.next_generation;
-        self.owned = Some(OwnedChild { generation, child });
+        self.owned = Some(OwnedChild { generation, child, world });
         generation
     }
 
@@ -94,6 +110,7 @@ impl RuntimeProcesses {
             &self.daemon,
             "Replication daemon",
             None,
+            None,
         )
     }
 
@@ -114,25 +131,16 @@ impl RuntimeProcesses {
         })
     }
 
-    pub fn start_host(&self, app: &AppHandle, arguments: Vec<String>) -> Result<u32, String> {
-        let world = arguments
-            .windows(2)
-            .find(|pair| pair[0] == "--world")
-            .map(|pair| pair[1].clone())
-            .ok_or_else(|| "Authority host arguments are missing --world for diagnostics ownership".to_owned())?;
-        let diagnostic = runtime_diagnostic(app, &world)?;
-        spawn(app, "swarmcraft-host", arguments, &self.host, "Authority host", Some(diagnostic))
-    }
-
     pub fn start_managed_host(&self, app: &AppHandle, world: String) -> Result<u32, String> {
         let diagnostic = runtime_diagnostic(app, &world)?;
         spawn(
             app,
             "swarmcraft-runtime",
-            vec!["launch".into(), world],
+            vec!["launch".into(), world.clone()],
             &self.host,
             "Managed authority host",
             Some(diagnostic),
+            Some(world),
         )
     }
 
@@ -173,9 +181,10 @@ fn spawn(
     slot: &ProcessSlot,
     label: &str,
     diagnostic: Option<RuntimeDiagnostic>,
+    world: Option<String>,
 ) -> Result<u32, String> {
     let mut guard = slot.state.lock().map_err(|_| format!("{label} process state is poisoned"))?;
-    if let Some(pid) = guard.existing_pid(CommandChild::pid) {
+    if let Some(pid) = guard.existing_pid_for_world(world.as_deref(), CommandChild::pid)? {
         return Ok(pid);
     }
 
@@ -187,7 +196,7 @@ fn spawn(
         .spawn()
         .map_err(|error| error.to_string())?;
     let pid = child.pid();
-    let generation = guard.insert(child);
+    let generation = if world.is_some() { guard.insert_for_world(child, world) } else { guard.insert(child) };
     drop(guard);
 
     if let Some(diagnostic) = diagnostic.as_ref() {
@@ -248,6 +257,16 @@ fn sanitize_world_key(world: &str) -> Result<String, String> {
     let value = world.trim();
     if value.is_empty() {
         return Err("World ID is required for runtime diagnostics".into());
+    }
+    // Canonical `WorldId` strings have a colon, which is forbidden in a
+    // Windows filename. Validate the complete ID and write its canonical
+    // 64-hex value to a portable, world-scoped diagnostic filename.
+    if value.starts_with("scworld:") {
+        let parsed: swarm_protocol::WorldId = value.parse().map_err(|_| "Invalid world ID for runtime diagnostics")?;
+        return Ok(format!("scworld_{}", hex::encode(parsed.0)));
+    }
+    if value.len() > 128 {
+        return Err("World ID is too long for runtime diagnostics".into());
     }
     if !value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')) {
         return Err("World ID contains characters that are unsafe for a diagnostics filename".into());
@@ -345,6 +364,17 @@ mod tests {
     }
 
     #[test]
+    fn a_direct_solo_host_pid_cannot_be_reused_for_another_world() {
+        let mut state = SlotState::default();
+        let first_generation = state.insert_for_world(41_u32, Some("scworld:first".into()));
+        assert_eq!(state.existing_pid_for_world(Some("scworld:first"), |pid| *pid).unwrap(), Some(41));
+        assert!(state.existing_pid_for_world(Some("scworld:second"), |pid| *pid).is_err());
+        assert!(state.existing_pid_for_world(None, |pid| *pid).is_err());
+        assert!(state.clear_if_generation(first_generation));
+        assert_eq!(state.existing_pid_for_world(Some("scworld:second"), |pid| *pid).unwrap(), None);
+    }
+
+    #[test]
     fn stop_path_has_no_handle_for_external_processes() {
         let mut state = SlotState::<u32>::default();
         assert_eq!(state.take(), None, "an unrelated daemon must never appear as Desktop-owned");
@@ -353,6 +383,11 @@ mod tests {
     #[test]
     fn runtime_diagnostics_filename_is_world_scoped_and_path_safe() {
         assert_eq!(sanitize_world_key("abcd-1234").unwrap(), "abcd-1234");
+        let canonical = format!("scworld:{}", "ab".repeat(32));
+        assert_eq!(sanitize_world_key(&canonical).unwrap(), format!("scworld_{}", "ab".repeat(32)));
+        assert!(sanitize_world_key("scworld:short").is_err());
+        assert!(sanitize_world_key("scworld:../traverse").is_err());
+        assert!(sanitize_world_key(&"a".repeat(129)).is_err());
         assert!(sanitize_world_key("../escape").is_err());
         assert!(sanitize_world_key("world/other").is_err());
     }

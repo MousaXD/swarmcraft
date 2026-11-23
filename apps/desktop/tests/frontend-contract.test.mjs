@@ -20,7 +20,7 @@ async function desktopText(name) {
   return readFile(new URL(name, desktopRoot), 'utf8');
 }
 
-test('runtime configuration is persisted before direct host launch', async () => {
+test('runtime configuration is persisted before legacy Play dispatch', async () => {
   const calls = [];
   const backend = createBackendAdapter(async (command, payload) => {
     calls.push({ command, payload });
@@ -64,6 +64,19 @@ test('failed runtime persistence never silently proceeds as failover-ready', asy
   assert.deepEqual(calls, ['configure_world_runtime']);
 });
 
+test('legacy Play dispatch uses the same safe native runtime launcher and never advertises a fake multiplayer PID', async () => {
+  const native = await desktopText('src-tauri/src/main.rs');
+  const legacy = native.match(/async fn host_world\(([\s\S]*?)\n\}/)?.[1] || '';
+  assert.match(legacy, /runtime_launch\(app, processes, world\)\.await/);
+  assert.doesNotMatch(legacy, /start_host\(|swarmcraft-host/);
+  const app = await text('app.js');
+  assert.match(app, /pid == null\s*\? 'Fresh signed Minecraft route verified/);
+  assert.match(app, /pid == null\s*\? 'Authenticated Minecraft route verified/);
+  assert.match(app, /if \(selectedWorldId !== requestedWorld\) return;/);
+  const typedBridge = await desktopText('frontend/src/lib/native-bridge.ts');
+  assert.match(typedBridge, /host_world: \{[^\n]+result: number \| null/);
+});
+
 test('startup automatically initializes the node and ensures the daemon before loading worlds', async () => {
   const app = await text('app.js');
   const startup = app.match(/async function startup\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
@@ -77,7 +90,8 @@ test('startup automatically initializes the node and ensures the daemon before l
 
 test('daemon ownership is idempotent and stale termination cannot clear a newer child', async () => {
   const runtime = await desktopText('src-tauri/src/runtime.rs');
-  assert.match(runtime, /if let Some\(pid\) = guard\.existing_pid\(CommandChild::pid\) \{\s*return Ok\(pid\);/);
+  assert.match(runtime, /if let Some\(pid\) = guard\.existing_pid_for_world\(world\.as_deref\(\), CommandChild::pid\)\? \{\s*return Ok\(pid\);/);
+  assert.match(runtime, /a_direct_solo_host_pid_cannot_be_reused_for_another_world/);
   assert.match(runtime, /clear_if_generation\(generation\)/);
   assert.match(runtime, /stale_termination_cannot_clear_newer_owned_process/);
   assert.match(runtime, /existing_owned_process_is_idempotent/);
