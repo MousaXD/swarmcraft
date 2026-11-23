@@ -874,6 +874,11 @@ mod tests {
     #[tokio::test]
     async fn registered_gateway_never_changes_a_worlds_saved_local_port() {
         let root = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let registry = GameWorldPortRegistry::new(root.path().join("gateway-ports"));
         let world = WorldId([20; 32]);
         let other = WorldId([21; 32]);
