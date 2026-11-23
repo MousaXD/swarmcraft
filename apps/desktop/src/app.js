@@ -1,6 +1,7 @@
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
 import { createImportRequest, parseImportResult } from './import-flow.js';
 import { clientContinuityFromMigration, ensureClientContinuityPanel } from './client-continuity.js';
+import { UNVERIFIED_GAME_ROUTE, ensureGameReconnectActions, gameReadinessCheckpoints, updateGameReadinessChecklist } from './game-route-status.js';
 
 const $ = (id) => document.getElementById(id);
 const invoke = window.__TAURI__?.core?.invoke;
@@ -10,6 +11,10 @@ let selectedWorldId = '';
 let currentView = 'worlds';
 let migrationRequestGeneration = 0;
 let hostReadinessRequestGeneration = 0;
+let gameRouteRequestGeneration = 0;
+let gameRouteState = UNVERIFIED_GAME_ROUTE;
+let latestMigrationState = null;
+let localCheckpointVerification = null;
 let modsRequestGeneration = 0;
 let connectivityRefreshInFlight = false;
 let connectivityGeneration = 0;
@@ -300,6 +305,9 @@ function clearSelection() {
   selectedWorldId = '';
   migrationRequestGeneration += 1;
   hostReadinessRequestGeneration += 1;
+  gameRouteRequestGeneration += 1;
+  gameRouteState = UNVERIFIED_GAME_ROUTE;
+  localCheckpointVerification = null;
   modsRequestGeneration += 1;
   $('world').value = '';
   $('selectionContent').hidden = true;
@@ -320,6 +328,7 @@ function clearSelection() {
   updateWorldSpecificControls();
   updateDiagnosticsContext();
   renderMigration(null);
+  renderGameRoute();
 }
 
 function updateDiagnosticsContext() {
@@ -358,11 +367,12 @@ function runtimeSetupActionButton() {
 }
 
 function renderMigration(state) {
+  latestMigrationState = state;
   const mismatched = Boolean(state && typeof state === 'object' && 'phase' in state && state.world_id !== selectedWorldId);
   const migration = normalizeMigrationState(mismatched
     ? { phase: 'blocked', failure_reason: 'Host status was not bound to the selected world.' }
     : state);
-  const continuity = clientContinuityFromMigration(state, selectedWorldId, selectedWorld()?.status?.Safety);
+  const continuity = clientContinuityFromMigration(state, selectedWorldId, selectedWorld()?.status?.Safety, gameRouteState);
   const targets = ensureClientContinuityPanel(document);
   if (targets) {
     targets.title.textContent = continuity.title;
@@ -393,6 +403,91 @@ function renderMigration(state) {
   });
 }
 
+function renderGameRoute() {
+  updateGameReadinessChecklist(document, gameReadinessCheckpoints({
+    world: selectedWorld(), route: gameRouteState,
+    localVerification: localCheckpointVerification,
+  }));
+  ensureGameReconnectActions(document);
+  const route = gameRouteState;
+  const routeVerified = route.verified === true
+    && Number.isSafeInteger(route.validUntil) && route.validUntil > Date.now()
+    && /^canonical$/i.test(String(selectedWorld()?.status?.Safety || ''));
+  const reconnect = document.querySelector('[data-reconnect-world]');
+  if (reconnect) reconnect.disabled = !selectedWorldId || !routeVerified;
+  const target = document.querySelector('[data-verified-gateway-address]');
+  if (target) target.textContent = routeVerified ? route.connectionTarget : 'No verified address';
+  const hint = document.querySelector('[data-verified-gateway-hint]');
+  if (hint) hint.textContent = routeVerified
+    ? 'Open Minecraft Java Multiplayer, then join this exact loopback address. A new login is required after each host change.'
+    : 'A saved checkpoint or a running host does not establish a player connection. Wait for a fresh signed game-route proof.';
+  // Also revoke the accessible continuity headline immediately. Do not leave
+  // a green route claim visible between a stop, tab switch and next CLI poll.
+  const continuity = clientContinuityFromMigration(
+    latestMigrationState, selectedWorldId, selectedWorld()?.status?.Safety,
+    routeVerified ? route : UNVERIFIED_GAME_ROUTE,
+  );
+  const continuityTargets = ensureClientContinuityPanel(document);
+  if (continuityTargets) {
+    continuityTargets.title.textContent = continuity.title;
+    continuityTargets.detail.textContent = continuity.detail;
+    continuityTargets.detail.dataset.tone = continuity.tone;
+  }
+}
+
+function invalidateGameRoute() {
+  gameRouteRequestGeneration += 1;
+  gameRouteState = UNVERIFIED_GAME_ROUTE;
+  renderGameRoute();
+}
+
+async function refreshGameRoute(world) {
+  const requestedWorldId = world?.id;
+  const generation = ++gameRouteRequestGeneration;
+  // Never keep an old route live while a refresh, world switch, or a daemon
+  // error is pending. Each poll must produce a fresh independent proof.
+  gameRouteState = UNVERIFIED_GAME_ROUTE;
+  renderGameRoute();
+  if (!requestedWorldId) return;
+  try {
+    const result = await backend.gameRouteStatus(requestedWorldId);
+    if (requestedWorldId !== selectedWorldId || generation !== gameRouteRequestGeneration) return;
+    gameRouteState = result;
+  } catch (_) {
+    if (requestedWorldId !== selectedWorldId || generation !== gameRouteRequestGeneration) return;
+    gameRouteState = UNVERIFIED_GAME_ROUTE;
+  }
+  renderGameRoute();
+  // A new signed route can become available even though the local migration
+  // report still describes the old authority; never fabricate that proof.
+  await refreshMigrationState(selectedWorld());
+}
+
+function refreshVisibleGameRoute() {
+  if (document.hidden) {
+    gameRouteRequestGeneration += 1;
+    gameRouteState = UNVERIFIED_GAME_ROUTE;
+    renderGameRoute();
+    return;
+  }
+  const world = selectedWorld();
+  if (world) void refreshGameRoute(world);
+}
+
+function reconnectWorld() {
+  const route = gameRouteState;
+  if (!selectedWorld() || route.verified !== true
+      || !Number.isSafeInteger(route.validUntil) || route.validUntil <= Date.now()
+      || !/^canonical$/i.test(String(selectedWorld()?.status?.Safety || ''))) {
+    gameRouteState = UNVERIFIED_GAME_ROUTE;
+    renderGameRoute();
+    throw new Error('No current authenticated Minecraft route. Refresh the world before reconnecting.');
+  }
+  // This is an explicit manual reconnect instruction, never an attempt to
+  // migrate an existing game TCP session or launch an unverified process.
+  showInline('worldNotice', `Open Minecraft Java Multiplayer and connect to ${route.connectionTarget}. Disconnect from the old server first.`, 'safe');
+}
+
 async function refreshMigrationState(world) {
   if (!world || !backend.migration.capabilities.status) {
     renderMigration(null);
@@ -420,7 +515,9 @@ function refreshVisibleMigration() {
 function renderHostReadiness(readiness) {
   const panel = $('hostReadinessPanel');
   if (!panel) return;
-  const state = readiness?.state || 'unknown';
+  const claimed = readiness?.state || 'unknown';
+  const state = (claimed === 'safe' || claimed === 'sleeping') && readiness?.safeToShutdown !== true
+    ? 'unknown' : claimed;
   const copy = {
     safe: ['Safe to shut down this PC', 'Another ready device can take over this world.'],
     sleeping: ['Safe to shut down this PC', 'This world is durably stopped and its latest checkpoint is saved.'],
@@ -589,6 +686,9 @@ async function openModsFolder() {
 }
 
 function selectWorld(world, { focusDetail = false } = {}) {
+  gameRouteRequestGeneration += 1;
+  gameRouteState = UNVERIFIED_GAME_ROUTE;
+  if (selectedWorldId !== world.id) localCheckpointVerification = null;
   selectedWorldId = world.id;
   $('world').value = world.id;
   // The candidate now renders read-only selected-world metadata directly
@@ -628,7 +728,9 @@ function selectWorld(world, { focusDetail = false } = {}) {
   updatePlayState(world);
   updateDiagnosticsContext();
   renderMigration(null);
+  renderGameRoute();
   refreshMigrationState(world);
+  refreshGameRoute(world);
   refreshHostReadiness(world);
   refreshWorldMods(world);
   if (focusDetail) $('selectedName').scrollIntoView({ block: 'nearest' });
@@ -1097,7 +1199,16 @@ async function worldPeers() {
 }
 
 async function verifyWorld() {
-  await run('Verifying replica…', () => backend.verifyWorld(worldId()), { successMessage: 'Replica verification completed.' });
+  const requestedWorldId = worldId();
+  localCheckpointVerification = null;
+  renderGameRoute();
+  await run('Verifying replica…', () => backend.verifyWorld(requestedWorldId), { successMessage: 'Replica verification completed.' });
+  // Successful CLI exit verifies local storage integrity, not a signed live
+  // canonical authority, game route, or permission to start Minecraft.
+  if (requestedWorldId === selectedWorldId && selectedWorld()?.status?.['Latest snapshot']) {
+    localCheckpointVerification = { worldId: requestedWorldId, checkpoint: selectedWorld().status['Latest snapshot'] };
+  }
+  renderGameRoute();
   showInline('worldNotice', 'Replica verification completed. Detailed output is available in Activity.', 'safe');
 }
 
@@ -1114,6 +1225,7 @@ function openSleepDialog() {
 }
 
 async function sleepWorld() {
+  invalidateGameRoute();
   await run('Stopping local Minecraft runtime…', () => backend.stopHost(worldId()), {
     successMessage: 'World runtime stopped gracefully. Replica storage can continue separately.',
   });
@@ -1134,6 +1246,9 @@ async function performLeaveWorld() {
   $('leaveDialog').close();
   selectedWorldId = '';
   migrationRequestGeneration += 1;
+  gameRouteRequestGeneration += 1;
+  gameRouteState = UNVERIFIED_GAME_ROUTE;
+  localCheckpointVerification = null;
   $('world').value = '';
   await refreshWorlds();
 }
@@ -1158,6 +1273,7 @@ function showRuntimeValidation(issue) {
 }
 
 async function hostWorld() {
+  invalidateGameRoute();
   const issue = runtimeValidationIssue();
   if (issue) {
     showRuntimeValidation(issue);
@@ -1181,6 +1297,7 @@ async function hostWorld() {
 }
 
 async function stopHost() {
+  invalidateGameRoute();
   await run('Stopping Minecraft runtime…', () => backend.stopHost(worldId()), { successMessage: 'World stopped safely. Latest world state is checkpointed and sleeping.' });
 }
 
@@ -1193,6 +1310,7 @@ async function startDaemon() {
 }
 
 async function stopDaemon() {
+  invalidateGameRoute();
   await run('Stopping networking…', () => backend.stopDaemon(), { successMessage: 'Desktop-owned networking daemon stopped.' });
   setServiceWarning('Networking is stopped for this Desktop session. Start networking to restore replication and automatic migration supervision.');
 }
@@ -1218,12 +1336,14 @@ async function recoverWorld() {
 }
 
 async function transferHost() {
+  invalidateGameRoute();
   if (!backend.migration.capabilities.transfer) return;
   await run('Preparing host transfer…', () => backend.migration.transferAuthority(worldId()));
   await refreshMigrationState(selectedWorld());
 }
 
 async function wakeWorld() {
+  invalidateGameRoute();
   if (!backend.migration.capabilities.wake) return;
   await run('Waking world…', () => backend.migration.wakeWorld(worldId()));
   await refreshMigrationState(selectedWorld());
@@ -1238,6 +1358,7 @@ if (window.__swarmcraftSvelteCreateOwned === true
     || window.__swarmcraftSvelteImportOwned === true
     || window.__swarmcraftSvelteLeaveOwned === true) {
 window.__swarmcraftAfterSvelteLeave = async () => {
+  invalidateGameRoute();
   $('leaveDialog').close();
   selectedWorldId = '';
   migrationRequestGeneration += 1;
@@ -1287,6 +1408,7 @@ if (window.__swarmcraftSvelteNetworkingOwned === true) {
   window.__swarmcraftAfterSvelteNetworkingChange = async (outcome) => {
     ++connectivityGeneration;
     if (outcome === 'stopped' || outcome === 'unknown') {
+      invalidateGameRoute();
       networkStoppedBySvelte = true;
       setServiceWarning(outcome === 'stopped'
         ? 'Networking is stopped for this Desktop session. Replication and automatic migration supervision may be unavailable.'
@@ -1401,10 +1523,15 @@ bindAction('exportWorld', exportWorld);
 bindAction('recoverWorld', recoverWorld);
 bindAction('transferHost', transferHost);
 bindAction('wakeWorld', wakeWorld);
+document.addEventListener('click', (event) => {
+  if (!event.target?.closest?.('[data-reconnect-world]')) return;
+  try { reconnectWorld(); } catch (error) { showInline('worldNotice', String(error), 'danger'); }
+});
 
 showView(currentView, { focus: false });
 updateWorldSpecificControls();
 renderMigration(null);
+renderGameRoute();
 window.swarmcraftRetryStartup = () => {
   if (startupInProgress) return;
   startup().catch((error) => {
@@ -1417,7 +1544,9 @@ window.swarmcraftRetryStartup = () => {
 };
 window.swarmcraftRetryStartup();
 document.addEventListener('visibilitychange', refreshVisibleMigration);
+document.addEventListener('visibilitychange', refreshVisibleGameRoute);
 setInterval(refreshVisibleMigration, MIGRATION_REFRESH_MS);
+setInterval(refreshVisibleGameRoute, MIGRATION_REFRESH_MS);
 setInterval(refreshVisibleHostReadiness, MIGRATION_REFRESH_MS);
 setInterval(() => {
   if (!document.hidden) refreshConnectivityDiagnostics({ logFailure: false }).catch(() => {});

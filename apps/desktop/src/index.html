@@ -186,6 +186,14 @@
                       <p id="clientContinuityDetail" role="status" aria-live="polite">SwarmCraft cannot yet verify a Minecraft client connection after host migration.</p>
                     </div>
                   </div>
+                  <div class="game-route-actions" aria-label="Verified Minecraft reconnect">
+                    <div>
+                      <span class="section-label">Local Minecraft address</span>
+                      <strong data-verified-gateway-address class="machine-line">No verified address</strong>
+                      <p data-verified-gateway-hint class="field-help">A signed game-route proof is required before connecting.</p>
+                    </div>
+                    <button data-reconnect-world class="button button-secondary" type="button" disabled>Reconnect instructions</button>
+                  </div>
                   <div class="compact-actions">
                     <button id="wakeWorld" class="button button-secondary migration-wake" type="button" disabled>Wake world</button>
                     <button id="sleepWorld" class="button button-subtle world-required" type="button">Stop world…</button>
