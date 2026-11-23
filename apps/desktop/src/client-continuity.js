@@ -6,6 +6,8 @@
  * This is intentionally presentation-only: no socket, auto-join or endpoint
  * selection may be derived from the migration status on this path.
  */
+import { isUsableGameRoute } from './game-route-status.js';
+
 const outcome = (state, title, detail, tone = 'warning', connectionTarget = null) => Object.freeze({
   state,
   title,
@@ -62,10 +64,7 @@ export function clientContinuityFromMigration(status, expectedWorldId, safety, r
   // that report can describe an old host even after the new one is verified.
   // This is only reachable via the independently validated native route API,
   // never through migration_status.game_endpoint or a manually entered IP.
-  if (route?.verified === true && /^canonical$/i.test(String(safety || '').trim())
-      && typeof route.connectionTarget === 'string'
-      && /^127\.0\.0\.1:[1-9]\d{0,4}$/.test(route.connectionTarget)
-      && Number.isSafeInteger(route.validUntil) && route.validUntil > Date.now()) {
+  if (isUsableGameRoute(route, expectedWorldId, safety)) {
     return outcome(
       'route_verified',
       'Authenticated Minecraft route verified',

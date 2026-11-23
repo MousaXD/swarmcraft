@@ -374,7 +374,11 @@ export function registerTransferWizard(backend) {
         if (isSource) {
           const select = document.getElementById('transferTargetPeer');
           select.replaceChildren();
-          const recommended = readiness?.handoffCandidatePeerId || readiness?.successorPeerId || '';
+          // A signed candidate is not an endorsed safe takeover merely
+          // because it appears in an old or blocked readiness report.
+          const recommended = readiness?.safeToShutdown === true
+            ? readiness.successorPeerId || ''
+            : '';
           for (const peer of peers) {
             const option = document.createElement('option');
             option.value = peer.peerId;

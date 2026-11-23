@@ -1,7 +1,7 @@
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
 import { createImportRequest, parseImportResult } from './import-flow.js';
 import { clientContinuityFromMigration, ensureClientContinuityPanel } from './client-continuity.js';
-import { UNVERIFIED_GAME_ROUTE, ensureGameReconnectActions, gameReadinessCheckpoints, updateGameReadinessChecklist } from './game-route-status.js';
+import { UNVERIFIED_GAME_ROUTE, ensureGameReconnectActions, gameReadinessCheckpoints, isUsableGameRoute, updateGameReadinessChecklist } from './game-route-status.js';
 
 const $ = (id) => document.getElementById(id);
 const invoke = window.__TAURI__?.core?.invoke;
@@ -410,9 +410,7 @@ function renderGameRoute() {
   }));
   ensureGameReconnectActions(document);
   const route = gameRouteState;
-  const routeVerified = route.verified === true
-    && Number.isSafeInteger(route.validUntil) && route.validUntil > Date.now()
-    && /^canonical$/i.test(String(selectedWorld()?.status?.Safety || ''));
+  const routeVerified = isUsableGameRoute(route, selectedWorldId, selectedWorld()?.status?.Safety);
   const reconnect = document.querySelector('[data-reconnect-world]');
   if (reconnect) reconnect.disabled = !selectedWorldId || !routeVerified;
   const target = document.querySelector('[data-verified-gateway-address]');
@@ -453,6 +451,15 @@ async function refreshGameRoute(world) {
     const result = await backend.gameRouteStatus(requestedWorldId);
     if (requestedWorldId !== selectedWorldId || generation !== gameRouteRequestGeneration) return;
     gameRouteState = result;
+    if (result.verified === true && Number.isSafeInteger(result.validUntil)) {
+      // Invalidate at the earlier proof expiry, even when a poll is delayed.
+      // The generation guard prevents older timers from revoking newer proof.
+      setTimeout(() => {
+        if (generation === gameRouteRequestGeneration && gameRouteState === result) {
+          invalidateGameRoute();
+        }
+      }, Math.max(0, result.validUntil - Date.now()) + 1);
+    }
   } catch (_) {
     if (requestedWorldId !== selectedWorldId || generation !== gameRouteRequestGeneration) return;
     gameRouteState = UNVERIFIED_GAME_ROUTE;
@@ -476,9 +483,7 @@ function refreshVisibleGameRoute() {
 
 function reconnectWorld() {
   const route = gameRouteState;
-  if (!selectedWorld() || route.verified !== true
-      || !Number.isSafeInteger(route.validUntil) || route.validUntil <= Date.now()
-      || !/^canonical$/i.test(String(selectedWorld()?.status?.Safety || ''))) {
+  if (!isUsableGameRoute(route, selectedWorldId, selectedWorld()?.status?.Safety)) {
     gameRouteState = UNVERIFIED_GAME_ROUTE;
     renderGameRoute();
     throw new Error('No current authenticated Minecraft route. Refresh the world before reconnecting.');

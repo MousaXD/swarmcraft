@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { createBackendAdapter } from '../src/backend-adapter.js';
 import { clientContinuityFromMigration } from '../src/client-continuity.js';
-import { ensureGameReconnectActions, gameReadinessCheckpoints, normalizeGameRouteStatus, UNVERIFIED_GAME_ROUTE, updateGameReadinessChecklist } from '../src/game-route-status.js';
+import { ensureGameReconnectActions, gameReadinessCheckpoints, isUsableGameRoute, normalizeGameRouteStatus, UNVERIFIED_GAME_ROUTE, updateGameReadinessChecklist } from '../src/game-route-status.js';
 
 const WORLD = 'scworld:1111111111111111111111111111111111111111111111111111111111111111';
 const NOW = Date.now();
@@ -62,6 +62,23 @@ test('verified route enables only a new manual session, never automatic reconnec
   assert.equal(continuity.automaticReconnect, false);
   assert.equal(clientContinuityFromMigration(null, WORLD, 'Conflict', route).connectionTarget, null);
   assert.equal(clientContinuityFromMigration(null, WORLD, 'Degraded', route).connectionTarget, null);
+});
+
+test('proof age caps a longer route ticket and binds it to the world being displayed', async () => {
+  const route = normalizeGameRouteStatus(live(), WORLD, NOW);
+  assert.equal(route.worldId, WORLD);
+  assert.equal(route.validUntil, NOW + 4_900);
+  assert.equal(isUsableGameRoute(route, WORLD, 'Canonical', NOW + 4_899), true);
+  assert.equal(isUsableGameRoute(route, WORLD, 'Canonical', NOW + 4_900), false);
+  assert.equal(isUsableGameRoute(route, 'scworld:other', 'Canonical', NOW), false);
+  assert.equal(isUsableGameRoute(route, WORLD, 'SoloUnreplicated', NOW), false);
+  assert.equal(isUsableGameRoute(route, WORLD, 'Conflict', NOW), false);
+  const wrongWorld = { id: 'scworld:other', snapshots: 1, status: { Safety: 'Canonical' } };
+  assert.match(gameReadinessCheckpoints({ world: wrongWorld, route }, NOW)[5].value, /not verified/i);
+  const source = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
+  assert.match(source, /isUsableGameRoute\(route, selectedWorldId/);
+  assert.match(source, /result\.validUntil - Date\.now\(\)/);
+  assert.match(source, /generation === gameRouteRequestGeneration && gameRouteState === result/);
 });
 
 test('checkpoint, quorum, consent, runtime and route are distinct', () => {

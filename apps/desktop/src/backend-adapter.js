@@ -404,8 +404,12 @@ export function normalizeHostReadiness(raw, expectedWorldId = null, now = Date.n
   const state = fresh && worldMatches && (!(reported === 'safe' || reported === 'sleeping') || positive)
     ? reported : 'unknown';
   const mapped = HOST_READINESS_STATES[state] || HOST_READINESS_STATES.unknown;
+  const usableReport = state !== 'unknown' && Boolean(HOST_READINESS_STATES[state]);
+  const validPeer = (peer) => typeof peer === 'string' && /^scpeer:[a-f\d]{64}$/i.test(peer)
+    ? peer : null;
+  const safeSuccessor = usableReport && positive && state === 'safe';
   return {
-    available: state !== 'unknown' && Boolean(HOST_READINESS_STATES[state]),
+    available: usableReport,
     state: HOST_READINESS_STATES[state] ? state : 'unknown',
     kind: mapped.kind,
     label: mapped.label,
@@ -413,11 +417,13 @@ export function normalizeHostReadiness(raw, expectedWorldId = null, now = Date.n
       ? 'SwarmCraft has not verified current shutdown safety for this world. Keep hosting until a fresh report is available.'
       : String(source.detail || '').trim() || 'SwarmCraft has not yet proven whether this computer may safely shut down.',
     safeToShutdown: positive && state === reported,
-    successorPeerId: source.successor_peer_id ?? source.successorPeerId ?? null,
-    handoffCandidatePeerId: source.handoff_candidate_peer_id ?? source.handoffCandidatePeerId ?? null,
-    worldDataReplicated: Boolean(source.world_data_replicated ?? source.worldDataReplicated),
-    peers: Array.isArray(source.peers) ? source.peers : [],
-    raw: source,
+    // A stale/unknown or unsafe report must not recommend a successor in the
+    // signed manual transfer wizard, even if it contains plausible peer IDs.
+    successorPeerId: safeSuccessor ? validPeer(source.successor_peer_id) : null,
+    handoffCandidatePeerId: usableReport ? validPeer(source.handoff_candidate_peer_id) : null,
+    worldDataReplicated: usableReport && source.world_data_replicated === true,
+    peers: usableReport && Array.isArray(source.peers) ? source.peers : [],
+    raw: usableReport ? source : {},
   };
 }
 

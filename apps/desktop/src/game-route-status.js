@@ -30,6 +30,14 @@ const isLocalPort = (value) => {
   return Boolean(match && Number(match[1]) <= 65535);
 };
 
+/** Do not outlive the independent five-second authority proof. */
+export function isUsableGameRoute(route, expectedWorldId, safety, now = Date.now()) {
+  return Boolean(expectedWorldId && route?.worldId === expectedWorldId
+    && route.verified === true && isLocalPort(route.connectionTarget)
+    && Number.isSafeInteger(route.validUntil) && route.validUntil > now
+    && /^canonical$/i.test(String(safety || '').trim()));
+}
+
 export function normalizeGameRouteStatus(report, expectedWorldId, now = Date.now()) {
   if (!report || typeof report !== 'object' || Array.isArray(report)) return UNVERIFIED_GAME_ROUTE;
   if (!expectedWorldId || report.world_id !== expectedWorldId) {
@@ -58,13 +66,19 @@ export function normalizeGameRouteStatus(report, expectedWorldId, now = Date.now
       || expiry - proofTime > 15000) {
     throw new Error('Game-route proof is missing, stale, expired or not loopback-only');
   }
+  const effectiveUntil = Math.min(expiry, proofTime + 5000);
+  if (effectiveUntil <= now) {
+    throw new Error('The game-route proof is no longer fresh');
+  }
   return Object.freeze({
     state: 'verified',
+    worldId: expectedWorldId,
     label: 'Authenticated game route verified',
     detail: `Minecraft Multiplayer address: ${report.local_gateway}. Reconnect manually after a host change; the gateway verifies each new connection. This does not confirm a Minecraft login.`,
     verified: true,
     connectionTarget: report.local_gateway,
-    validUntil: expiry,
+    // Never extend the live authority proof using a longer route ticket TTL.
+    validUntil: effectiveUntil,
     automaticReconnect: false,
   });
 }
@@ -77,10 +91,7 @@ export function gameReadinessCheckpoints({ world = null, route = UNVERIFIED_GAME
   const conflict = /conflict|divergen/i.test(safety);
   const degraded = /solo|degraded/i.test(safety);
   const canonical = /^canonical$/i.test(safety);
-  const live = route?.verified === true
-    && Number.isSafeInteger(route.validUntil) && route.validUntil > now
-    && isLocalPort(route.connectionTarget)
-    && canonical && !conflict && !degraded;
+  const live = isUsableGameRoute(route, world?.id, safety, now);
   const localCheckCompleted = localVerification?.worldId === world?.id
     && localVerification?.checkpoint === world?.status?.['Latest snapshot'];
 
