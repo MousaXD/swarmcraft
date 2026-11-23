@@ -657,22 +657,26 @@ impl SwarmNode {
                     self.pending_challenges.remove(&peer_id);
                     debug!(transport_peer = %peer_id, %connection_id, %num_established, relayed = endpoint.is_relayed(), ?path_kind, "peer connected");
 
-                    // request-response selects by peer ID. During replacement races,
-                    // close the superseded route before issuing a fresh receiver
-                    // challenge so proof traffic can only use the canonical connection.
-                    let previous = self.active_connections.insert(peer_id, connection_id);
-                    let defer_challenge = previous
-                        .filter(|previous| *previous != connection_id && num_established.get() > 1)
-                        .is_some_and(|previous| self.swarm.close_connection(previous));
-                    // Explicitly configured relay/bootstrap infrastructure
-                    // does not speak the SwarmCraft application PeerHello
-                    // protocol. Requiring that handshake then closing a
-                    // silent infrastructure peer would tear down its relay
-                    // reservation and prevent game traffic over NAT relays.
-                    // These connections remain UNAUTHENTICATED to worlds:
-                    // never add them to the application or game peer maps.
-                    if !defer_challenge && application_path {
-                        self.issue_auth_challenge(peer_id, connection_id)?;
+                    if application_path {
+                        // Application request-response selects by peer ID.
+                        // Replace a superseded application connection before
+                        // issuing the new connection-bound PeerHello challenge.
+                        let previous = self.active_connections.insert(peer_id, connection_id);
+                        let defer_challenge = previous
+                            .filter(|previous| *previous != connection_id && num_established.get() > 1)
+                            .is_some_and(|previous| self.swarm.close_connection(previous));
+                        if !defer_challenge {
+                            self.issue_auth_challenge(peer_id, connection_id)?;
+                        }
+                    } else {
+                        // Relay/bootstrap infrastructure peers can legitimately
+                        // have multiple concurrent connections supporting
+                        // different reservations/circuits. Closing one simply
+                        // because another appeared can tear down live game
+                        // circuits and trip libp2p request-response connection
+                        // accounting during host failures. NEVER apply the
+                        // one-application-connection policy to infrastructure.
+                        // Neither connection is authorized as a world member.
                     }
                     return Ok(NetworkEvent::Connected { transport_peer: peer_id });
                 }
@@ -754,7 +758,18 @@ impl SwarmNode {
                     warn!(transport_peer = ?peer_id, error = %error, "outgoing connection failed");
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
-                    if let Some((peer, address)) = peers.into_iter().next() {
+                    // mDNS is a LOCAL discovery hint, not an alternate
+                    // relay-circuit dialer. A host already advertising its
+                    // explicit /p2p-circuit route must not be auto-dialled
+                    // through that circuit by an unrelated local peer:
+                    // duplicate in-flight dials can disrupt a reservation
+                    // or the connection-bound authentication registry during
+                    // host crashes. Relay circuits are negotiated only by
+                    // the authenticated explicit/known-peer dial flow.
+                    if let Some((peer, address)) = peers
+                        .into_iter()
+                        .find(|(_, address)| !address.iter().any(|p| matches!(p, Protocol::P2pCircuit)))
+                    {
                         debug!(transport_peer = %peer, %address, "mDNS discovered peer");
                         self.swarm.behaviour_mut().kad.add_address(&peer, address.clone());
                         if !self.swarm.is_connected(&peer) {
