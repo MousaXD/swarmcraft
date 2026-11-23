@@ -493,6 +493,93 @@ fn corrupt_previous_transfer_cannot_be_replaced_by_new_prepared_transfer() {
 }
 
 #[test]
+fn inbound_recovery_lease_and_sleep_are_fenced_by_durable_signed_transfer() {
+    let fixture = fixture();
+    let mut current = fixture.storage.load_epoch_record(fixture.world).unwrap();
+    let original_hash = epoch_record_hash(&current).unwrap();
+    current.epoch_number = 1;
+    current.fencing_token = 1;
+    current.previous_epoch_hash = Some(original_hash);
+    current.signature = fixture.authority.sign(&current.signing_bytes().unwrap());
+    fixture.storage.save_epoch_record(&current).unwrap();
+
+    let source = fixture._temp.path().join("inbound-transfer-fence-source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("level.dat"), b"accepted-transfer-snapshot").unwrap();
+    let mut latest = fixture
+        .storage
+        .snapshot_directory(
+            &source,
+            SnapshotContext {
+                world: fixture.world,
+                snapshot_number: 1,
+                epoch: current.epoch_number,
+                sequence: 1,
+                previous_snapshot_hash: None,
+                authority_peer_id: fixture.authority.peer_id(),
+                authority_public_key: fixture.authority.public_key(),
+            },
+        )
+        .unwrap();
+    fixture.authority.sign_snapshot(&mut latest).unwrap();
+    fixture.storage.commit_snapshot(&latest).unwrap();
+    let checkpoint_hash = latest.manifest_hash().unwrap();
+
+    assert!(ensure_no_competing_authority_during_transfer(&fixture.storage, fixture.world, None).is_ok());
+
+    let mut transfer = AuthorityTransferV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: fixture.world,
+        from_peer_id: fixture.authority.peer_id(),
+        to_peer_id: fixture.member.peer_id(),
+        base_snapshot_hash: checkpoint_hash,
+        next_epoch: current.epoch_number + 1,
+        next_fencing_token: current.fencing_token + 1,
+        phase: TransferPhase::Prepared,
+        signer_peer_id: fixture.authority.peer_id(),
+        signer_public_key: fixture.authority.public_key(),
+        signature: Vec::new(),
+    };
+    fixture.authority.sign_transfer(&mut transfer).unwrap();
+    fixture.storage.save_transfer_record(&transfer).unwrap();
+    let mut successor = EpochRecordV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: fixture.world,
+        epoch_number: transfer.next_epoch,
+        previous_epoch_hash: Some(epoch_record_hash(&current).unwrap()),
+        base_state_hash: latest.state_root,
+        authority_peer_id: fixture.member.peer_id(),
+        authority_public_key: fixture.member.public_key(),
+        mode: EpochMode::Quorum,
+        fencing_token: transfer.next_fencing_token,
+        reason: "signed transfer acceptance".into(),
+        signature: Vec::new(),
+    };
+    successor.signature = fixture.member.sign(&successor.signing_bytes().unwrap());
+    for phase in [TransferPhase::Prepared, TransferPhase::Accepted, TransferPhase::Committed] {
+        transfer.phase = phase;
+        let signer = if phase == TransferPhase::Accepted { &fixture.member } else { &fixture.authority };
+        transfer.signer_peer_id = signer.peer_id();
+        transfer.signer_public_key = signer.public_key();
+        signer.sign_transfer(&mut transfer).unwrap();
+        fixture.storage.save_transfer_record(&transfer).unwrap();
+        assert!(ensure_no_competing_authority_during_transfer(&fixture.storage, fixture.world, None).is_err());
+        let inbound_epoch =
+            ensure_no_competing_authority_during_transfer(&fixture.storage, fixture.world, Some(&successor));
+        assert_eq!(inbound_epoch.is_ok(), phase == TransferPhase::Committed);
+        let mut competing = successor.clone();
+        competing.authority_peer_id = fixture.authority.peer_id();
+        competing.authority_public_key = fixture.authority.public_key();
+        assert!(
+            ensure_no_competing_authority_during_transfer(&fixture.storage, fixture.world, Some(&competing),).is_err()
+        );
+    }
+    fixture.storage.save_epoch_record(&successor).unwrap();
+    // Signed successor epoch now releases the transfer fence.
+    assert!(ensure_no_competing_authority_during_transfer(&fixture.storage, fixture.world, None).is_ok());
+}
+
+#[test]
 fn tampered_durable_recovery_signatures_block_cached_and_inbound_authority() {
     let fixture = fixture();
     let (ballot, vote) = signed_recovery_ballot_and_vote(&fixture);

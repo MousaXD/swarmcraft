@@ -743,6 +743,52 @@ fn active_signed_transfer_fences_authority(
     Ok(fenced)
 }
 
+/// The lease tick isn't the only path capable of changing authority: a peer
+/// can send a valid-looking signed lease, recovery ballot/certificate, sleep,
+/// or competing epoch while a prepared handoff is in progress. Guard those
+/// inbound entry points against the SAME durable signed transfer fence.
+///
+/// The one exception is the exact signed successor epoch that completes an
+/// already committed transfer. Its signature, membership, checkpoint and
+/// parent-generation checks still run in the regular Epoch handler.
+fn transfer_allows_inbound_epoch(
+    transfer: &AuthorityTransferV1,
+    accepted: &EpochRecordV1,
+    incoming: &EpochRecordV1,
+) -> Result<bool> {
+    Ok(transfer.phase == TransferPhase::Committed
+        && transfer.world_id == incoming.world_id
+        && transfer.from_peer_id == accepted.authority_peer_id
+        && transfer.to_peer_id == incoming.authority_peer_id
+        && incoming.mode == EpochMode::Quorum
+        && transfer.next_epoch == incoming.epoch_number
+        && transfer.next_fencing_token == incoming.fencing_token
+        && incoming.previous_epoch_hash == Some(epoch_record_hash(accepted)?))
+}
+
+fn ensure_no_competing_authority_during_transfer(
+    storage: &Storage,
+    world: WorldId,
+    incoming_epoch: Option<&EpochRecordV1>,
+) -> Result<()> {
+    let transfer = match storage.load_transfer_record(world) {
+        Ok(record) => record,
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let descriptor = storage.load_world_descriptor(world)?;
+    let accepted = storage.load_epoch_record(world)?;
+    if !active_signed_transfer_fences_authority(storage, &descriptor, &accepted)? {
+        return Ok(());
+    }
+    if let Some(incoming) = incoming_epoch {
+        if transfer_allows_inbound_epoch(&transfer, &accepted, incoming)? {
+            return Ok(());
+        }
+    }
+    Err(anyhow!("pending signed authority transfer blocks conflicting lease, recovery, sleep or epoch request"))
+}
+
 struct ActivatedTransferContext<'a> {
     paths: &'a DataPaths,
     storage: &'a Storage,
@@ -2633,6 +2679,7 @@ fn handle_request(
         }
         WireRequest::RecoveryBallot(ballot) => {
             let ballot = *ballot;
+            ensure_no_competing_authority_during_transfer(storage, ballot.world_id, None)?;
             ensure_no_membership_prepare(storage, ballot.world_id)?;
             if application_peer != ballot.candidate_peer_id {
                 return Err(anyhow!("recovery ballot sender is not the signed candidate"));
@@ -2739,6 +2786,7 @@ fn handle_request(
         }
         WireRequest::RecoveryEpoch { record, certificate } => {
             let certificate = *certificate;
+            ensure_no_competing_authority_during_transfer(storage, record.world_id, None)?;
             ensure_no_membership_prepare(storage, record.world_id)?;
             validate_recovery_epoch(storage, application_peer, &record, &certificate)?;
             ensure_local_recovery_promise_allows_certificate(storage, &certificate.ballot)?;
@@ -2777,6 +2825,7 @@ fn handle_request(
             )?;
         }
         WireRequest::Epoch(record) => {
+            ensure_no_competing_authority_during_transfer(storage, record.world_id, Some(&record))?;
             ensure_no_membership_prepare(storage, record.world_id)?;
             if record.mode == EpochMode::Recovery {
                 return Err(anyhow!("recovery epoch requires a durable quorum certificate"));
@@ -2832,6 +2881,7 @@ fn handle_request(
             node.respond(channel, WireResponse::TransferAccepted)?;
         }
         WireRequest::LeaseGrant(lease) => {
+            ensure_no_competing_authority_during_transfer(storage, lease.world_id, None)?;
             ensure_no_membership_prepare(storage, lease.world_id)?;
             verify_lease_signature(&lease)?;
             if application_peer != lease.authority_peer_id {
@@ -2870,6 +2920,7 @@ fn handle_request(
             )?;
         }
         WireRequest::Sleep(record) => {
+            ensure_no_competing_authority_during_transfer(storage, record.world_id, None)?;
             ensure_no_membership_prepare(storage, record.world_id)?;
             if application_peer != record.authority_peer_id {
                 return Err(anyhow!("sleep sender is not the signed authority"));
@@ -4485,6 +4536,35 @@ mod automatic_transfer_delivery_tests {
         let mut same_authority = transfer(TransferPhase::Prepared);
         same_authority.to_peer_id = peer(1);
         assert!(transfer_fences_epoch(&same_authority, &old).is_err());
+    }
+
+    #[test]
+    fn inbound_epoch_may_only_finish_an_exact_committed_transfer() {
+        let old = old_authority_epoch();
+        let mut successor = successor_epoch();
+        successor.previous_epoch_hash = Some(epoch_record_hash(&old).unwrap());
+        assert!(transfer_allows_inbound_epoch(&transfer(TransferPhase::Committed), &old, &successor).unwrap());
+        for phase in [TransferPhase::Prepared, TransferPhase::Accepted] {
+            assert!(!transfer_allows_inbound_epoch(&transfer(phase), &old, &successor).unwrap());
+        }
+        let mut wrong = successor.clone();
+        wrong.authority_peer_id = peer(3);
+        assert!(!transfer_allows_inbound_epoch(&transfer(TransferPhase::Committed), &old, &wrong).unwrap());
+        wrong = successor.clone();
+        wrong.epoch_number += 1;
+        assert!(!transfer_allows_inbound_epoch(&transfer(TransferPhase::Committed), &old, &wrong).unwrap());
+        wrong = successor.clone();
+        wrong.fencing_token += 1;
+        assert!(!transfer_allows_inbound_epoch(&transfer(TransferPhase::Committed), &old, &wrong).unwrap());
+        wrong = successor.clone();
+        wrong.previous_epoch_hash = Some(Hash32([12; 32]));
+        assert!(!transfer_allows_inbound_epoch(&transfer(TransferPhase::Committed), &old, &wrong).unwrap());
+        wrong = successor.clone();
+        wrong.mode = EpochMode::Recovery;
+        assert!(!transfer_allows_inbound_epoch(&transfer(TransferPhase::Committed), &old, &wrong).unwrap());
+        wrong = successor;
+        wrong.world_id = WorldId([12; 32]);
+        assert!(!transfer_allows_inbound_epoch(&transfer(TransferPhase::Committed), &old, &wrong).unwrap());
     }
 }
 

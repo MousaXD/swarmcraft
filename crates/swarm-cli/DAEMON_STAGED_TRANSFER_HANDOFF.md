@@ -59,6 +59,16 @@ once the exact committed successor epoch, or a later independently signed
 canonical epoch, has superseded the transfer. This prevents a stopped source
 from reacquiring its hosting permit between handoff phases.
 
+That fence also applies to **inbound** signed RecoveryBallot, RecoveryEpoch,
+LeaseGrant and Sleep requests. Inbound ordinary Epoch requests are refused
+during a prepared/accepted handoff, except for the exact successor epoch
+named by the already committed transfer, with the expected next epoch,
+fencing token, canonical parent hash and quorum mode. The existing Epoch
+handler still independently validates the successor signature, membership,
+base state and parent generation. A persisted signed-transfer regression
+checks each phase and verifies that only accepting the successor epoch
+releases the fence.
+
 This implementation intentionally requires all currently authorized active
 members to acknowledge the final checkpoint and relevant transfer stages.
 This is **stricter than quorum**: offline non-banned members may delay a
@@ -116,7 +126,7 @@ flock -x /tmp/swarmcraft-sabathon-cargo.lock sh -c \
    CARGO_BUILD_JOBS=2 cargo clippy -p swarm-cli --bin swarmcraft --offline --jobs 2 -- -D warnings'
 ```
 
-On 23 Nov 2026 the full `swarmcraft` binary unit suite passed **35/35**
+On 23 Nov 2026 the full `swarmcraft` binary unit suite passed **37/37**
 and strict `swarmcraft` binary Clippy passed on the Agent 3 worktree.
 These tests include phase ordering, witness gate, replay/redelivery,
 checkpoint-ack identity, exact activated successor generation, and the
