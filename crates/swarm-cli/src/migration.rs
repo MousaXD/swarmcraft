@@ -1151,6 +1151,11 @@ async fn wait_for_runtime_exit(
     let mut permit_watch =
         PermitWatch::new(AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token });
     loop {
+        // Observe the live majority-backed heartbeat continuously. The first
+        // observation alone is never authority: only a strictly advancing
+        // heartbeat becomes fresh, and every challenge still rechecks it.
+        // A corrupt/missing permit resets the watch and makes proof deny.
+        let _ = permit_watch.observe(paths, epoch.world_id, Instant::now());
         if let Some(status) = child.try_wait()? {
             if !status.success() {
                 if let Err(error) = retire_live_runtime(
@@ -1420,6 +1425,12 @@ async fn challenge_live_supervised_runtime(
         bail!("hosting consent, permit or stop state changed during Fabric challenge");
     }
     Ok(verified)
+}
+
+/// Denial-only last-mile check for responses queued while the signed authority
+/// was stopping or preparing a transfer. Never grants permission by itself.
+pub fn no_local_route_transition_pending(paths: &DataPaths, epoch: &EpochRecordV1) -> Result<bool> {
+    Ok(!load_stop_intent(paths, epoch)? && load_transfer_intent(paths, epoch)?.is_none())
 }
 
 pub fn prepare_manual_transfer(

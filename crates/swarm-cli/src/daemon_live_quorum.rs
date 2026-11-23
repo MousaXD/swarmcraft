@@ -62,12 +62,10 @@ pub(super) struct CollectVotesCommand {
 /// from the daemon's asynchronous network event loop. The queue and deadline
 /// are hard bounds; dead, overloaded or unscheduled daemons never return votes.
 #[derive(Clone)]
-#[allow(dead_code)] // The live Fabric proof provider has not been integrated.
 pub(super) struct LiveQuorumClient {
     sender: mpsc::Sender<CollectVotesCommand>,
 }
 
-#[allow(dead_code)] // Called only after Agent 1's real proof provider is wired.
 impl LiveQuorumClient {
     pub fn collect_blocking(&self, challenge: DiscoveryFreshnessChallengeV1) -> Result<Vec<DiscoveryFreshnessVoteV1>> {
         let (response, receiver) = sync_mpsc::sync_channel(1);

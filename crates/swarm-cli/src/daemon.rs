@@ -2,12 +2,14 @@ use anyhow::{anyhow, Context, Result};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Debug,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use swarm_cli::{
     authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
     host_readiness::{self, PeerReadinessObservation},
     hosting_budget, launch_guard,
+    live_authority::SignedLiveAuthoritySource,
     live_runtime_registry::LiveFabricRuntimeRegistry,
     migration::{self, clear_world_wake_request, world_wake_requested},
 };
@@ -27,9 +29,14 @@ use swarm_core::{
     verify_snapshot_signature, verify_transfer_signature, DataPaths, PeerIdentity,
 };
 use swarm_network::{
-    game_route_control::{
-        GameRouteControlEvent, GameRouteControlRequestV1, GameRouteControlResponseV1, GameRouteRefusalV1,
+    game_route::FreshAuthoritySource,
+    game_route_control::{GameRouteControlResponseV1, GameRouteRefusalV1},
+    game_route_host::AuthenticatedGameRouteHostSigner,
+    game_route_host_controller::{
+        GameRouteHostControlService, GameRouteHostReplyAction, MAX_PENDING_HOST_ROUTE_ACTIONS,
     },
+    game_route_host_service::BoundedGameRouteHostResponder,
+    game_transport::GameStreamReceiver,
     load_or_create_transport_key, validate_invite_dial_address, BlobResumeV1, HostCapabilityV1, HostRuntimeReadinessV1,
     NetworkEvent, ReplicaAckV1, ResponseChannel, ServerModsReadinessV1, SwarmNode, TransportPeerId, WireRequest,
     WireResponse, MAX_BLOB_CHUNK,
@@ -45,12 +52,20 @@ use swarm_storage::{
     DurableMembershipPromiseV1, DurableRecoveryPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage,
     StorageError,
 };
-use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinHandle,
+};
 use tracing::{info, warn};
 
 #[path = "daemon_live_quorum.rs"]
 mod live_quorum;
+#[path = "daemon_local_live_authority.rs"]
+mod local_live_authority;
+
+#[cfg(test)]
+use swarm_network::game_route_control::GameRouteControlRequestV1;
 
 const AUTHORITY_LEASE_DURATION_MS: u64 = 5_000;
 const RECOVERY_SETTLE_DELAY: Duration = Duration::from_secs(2);
@@ -186,7 +201,7 @@ pub async fn run(
     paths: &DataPaths,
     storage: &Storage,
     listen: &str,
-    _live_runtime_registry: LiveFabricRuntimeRegistry,
+    live_runtime_registry: LiveFabricRuntimeRegistry,
 ) -> Result<()> {
     let identity = PeerIdentity::load_or_create(paths)?;
     let transport_key = load_or_create_transport_key(&paths.transport_key())?;
@@ -207,11 +222,10 @@ pub async fn run(
         "host-readiness-v1".into(),
     ])?;
     let mut node = SwarmNode::new(transport_key, hello, identity.network_signing_key())?;
-    // One bounded subscriber is mandatory for route-control RPCs. Until the
-    // daemon can inject a real current-quorum plus live Fabric verifier, this
-    // subscriber explicitly refuses every route instead of timing out. It
-    // MUST NOT sign even an Offer from persisted migration Ready data.
-    let mut game_route_events =
+    // Only the existing signed live quorum collector plus SAME supervised
+    // token-authenticated FabricSession can authorize a host route. Missing
+    // quorum/consent/fencing/IPC refuses, never falls back to migration Ready.
+    let game_route_events =
         node.take_game_route_control_events().context("authenticated game-route control subscription already owned")?;
     node.listen(listen.parse().context("invalid listen multiaddress")?)?;
     dial_pending_invite_bootstraps(storage, &mut node)?;
@@ -220,12 +234,39 @@ pub async fn run(
     let mut pending_manifests: HashMap<WorldId, SnapshotManifestV1> = HashMap::new();
     let mut outbound: HashMap<String, OutboundContext> = HashMap::new();
     let mut leases = LeaseRuntime::default();
-    // Agent 1's live Fabric proof provider will receive the command-side
-    // client when the actual managed FabricSession becomes available. For now
-    // the only active route responder explicitly refuses every game route;
-    // this bounded queue cannot itself authorize or sign a route.
-    let (_live_quorum_client, mut live_quorum_commands) = live_quorum::channel();
+    let (live_quorum_client, mut live_quorum_commands) = live_quorum::channel();
     let mut live_quorum_driver = live_quorum::LiveQuorumDriver::default();
+    let provider = Arc::new(local_live_authority::DaemonLocalLiveAuthority::new(
+        paths.clone(),
+        identity.peer_id(),
+        node.local_transport_peer_id(),
+        live_quorum_client,
+        live_runtime_registry.clone(),
+        tokio::runtime::Handle::current(),
+    ));
+    let authority = Arc::new(SignedLiveAuthoritySource::new(
+        paths.clone(),
+        identity.peer_id(),
+        node.local_transport_peer_id(),
+        node.game_authenticated_peers(),
+        provider,
+    ));
+    let signer = Arc::new(AuthenticatedGameRouteHostSigner::new(
+        identity.network_signing_key(),
+        node.local_transport_peer_id(),
+        authority.clone(),
+        paths.root.join("game-route-offer-sequences"),
+    ));
+    let responder = Arc::new(BoundedGameRouteHostResponder::new(signer));
+    let (route_reply_tx, mut route_replies) = mpsc::channel::<GameRouteHostReplyAction>(MAX_PENDING_HOST_ROUTE_ACTIONS);
+    let (route_shutdown, route_shutdown_rx) = watch::channel(false);
+    let route_control_task = tokio::spawn(
+        GameRouteHostControlService::new(responder, game_route_events).run(route_reply_tx, route_shutdown_rx),
+    );
+    // On daemon exit dropping route_shutdown closes the controller's watch;
+    // detached proof tasks cannot enqueue a route once its receiver closes.
+    let _route_control_ownership = (route_shutdown, route_control_task);
+    let mut game_stream_receiver: Option<ActiveGameReceiver> = None;
     let (transfer_done_tx, mut transfer_done_rx) = mpsc::channel::<CompletedTransferStep>(MAX_IN_FLIGHT_TRANSFER_STEPS);
     let mut transfer_steps_in_flight = HashSet::new();
     let mut lease_tick = tokio::time::interval(PERMIT_HEARTBEAT_INTERVAL);
@@ -236,24 +277,25 @@ pub async fn run(
             Some(command) = live_quorum_commands.recv() => {
                 live_quorum_driver.start(storage, &identity, &mut node, &mut outbound, &leases, command);
             }
-            Some(event) = game_route_events.recv() => {
-                match event {
-                    GameRouteControlEvent::Inbound { transport_peer, application_peer, request, channel } => {
-                        let authenticated = node.application_peer(&transport_peer) == Some(application_peer);
-                        let response = disabled_game_route_response(&request, authenticated);
-                        if let Err(error) = node.respond_game_route(channel, response) {
-                            tracing::debug!(%transport_peer, %error, "game route denial could not be delivered");
-                        }
-                    }
-                    GameRouteControlEvent::Response { transport_peer, .. } => {
-                        tracing::debug!(%transport_peer, "unexpected game route response while authority provider is disabled");
-                    }
-                    GameRouteControlEvent::OutboundFailure { transport_peer, error, .. } => {
-                        tracing::debug!(%transport_peer, %error, "game route request failed while authority provider is disabled");
-                    }
+            Some(action) = route_replies.recv() => {
+                let authenticated = node.application_peer(&action.transport_peer) == Some(action.application_peer);
+                let safe = authenticated && queued_game_route_response_current(
+                    paths, storage, &identity, &live_runtime_registry, &action.response,
+                );
+                let response = if safe {
+                    action.response
+                } else {
+                    GameRouteControlResponseV1::Refused(GameRouteRefusalV1::FencedOrConsentWithdrawn)
+                };
+                if let Err(error) = node.respond_game_route(action.channel, response) {
+                    tracing::debug!(%error, "game route response could not be delivered on authenticated connection");
                 }
             }
             _ = lease_tick.tick() => {
+                maintain_game_stream_receiver(
+                    paths, storage, &identity, &node, &live_runtime_registry,
+                    &authority, &mut game_stream_receiver,
+                );
                 live_quorum_driver.expire(Instant::now());
                 retry_due_replication(
                     storage,
@@ -441,10 +483,8 @@ pub async fn run(
     }
 }
 
-/// This is a security boundary, not a placeholder success path. Production
-/// route signing, host game streams and local Minecraft gateways stay
-/// disabled until the daemon owns independently verified signed quorum,
-/// membership/consent/fence and a live authenticated Fabric challenge.
+/// Assert the typed refusal contract in tests without granting a route.
+#[cfg(test)]
 fn disabled_game_route_response(
     request: &GameRouteControlRequestV1,
     authenticated: bool,
@@ -457,6 +497,138 @@ fn disabled_game_route_response(
         GameRouteRefusalV1::QuorumUnavailable
     };
     GameRouteControlResponseV1::Refused(reason)
+}
+
+/// Last-mile denial-only fence: a proof can finish concurrently with a
+/// transfer, consent withdrawal or disconnect while waiting in the reply
+/// channel. Recheck before sending. This MUST NOT replace the signer's full
+/// fresh-quorum and authenticated Fabric proof checks.
+fn queued_game_route_response_current(
+    paths: &DataPaths,
+    storage: &Storage,
+    identity: &PeerIdentity,
+    registry: &LiveFabricRuntimeRegistry,
+    response: &GameRouteControlResponseV1,
+) -> bool {
+    let (world, epoch_number, fencing_token, authority_peer, consent_revision) = match response {
+        GameRouteControlResponseV1::Offer(offer) => {
+            (offer.world_id, offer.epoch, offer.fencing_token, offer.authority_peer_id, Some(offer.consent_revision))
+        }
+        GameRouteControlResponseV1::ChallengeResponse(reply) => {
+            (reply.challenge.world_id, reply.epoch, reply.fencing_token, reply.authority_peer_id, None)
+        }
+        GameRouteControlResponseV1::Refused(_) => return true,
+    };
+    authority_peer == identity.peer_id()
+        && local_host_generation_eligible(
+            paths,
+            storage,
+            identity,
+            registry,
+            HostRouteGeneration { world, epoch_number, fencing_token, consent_revision },
+        )
+}
+
+struct HostRouteGeneration {
+    world: WorldId,
+    epoch_number: u64,
+    fencing_token: u64,
+    consent_revision: Option<u64>,
+}
+
+/// Denial-only final generation check. A fresh signed proof is still mandatory
+/// for every offer, challenge and Minecraft stream, regardless of this result.
+fn local_host_generation_eligible(
+    paths: &DataPaths,
+    storage: &Storage,
+    identity: &PeerIdentity,
+    registry: &LiveFabricRuntimeRegistry,
+    generation: HostRouteGeneration,
+) -> bool {
+    let HostRouteGeneration { world, epoch_number, fencing_token, consent_revision } = generation;
+    let Ok(epoch) = storage.load_epoch_record(world) else { return false };
+    if epoch.mode != EpochMode::Quorum
+        || epoch.authority_peer_id != identity.peer_id()
+        || epoch.authority_public_key != identity.public_key()
+        || epoch.epoch_number != epoch_number
+        || epoch.fencing_token != fencing_token
+        || !registry.currently_registered_generation(world, AuthorityGeneration { epoch: epoch_number, fencing_token })
+    {
+        return false;
+    }
+    if !matches!(hosting_budget::load_consent(paths, world), Ok(Some(consent)) if
+        consent.enabled && consent.peer_id == identity.peer_id()
+            && consent_revision.is_none_or(|revision| revision == consent.revision))
+    {
+        return false;
+    }
+    if !matches!(migration::no_local_route_transition_pending(paths, &epoch), Ok(true))
+        || !matches!(launch_guard::load_sleep_record_fail_closed(storage, world), Ok(None))
+    {
+        return false;
+    }
+    let Ok(descriptor) = storage.load_world_descriptor(world) else { return false };
+    matches!(active_signed_transfer_fences_authority(storage, &descriptor, &epoch), Ok(false))
+}
+
+struct ActiveGameReceiver {
+    runtime: swarm_cli::live_runtime_registry::LiveRuntimeIdentity,
+    shutdown: watch::Sender<bool>,
+    task: JoinHandle<Result<(), swarm_network::game_transport::GameTransportError>>,
+}
+
+/// Exactly one owned JVM may receive the process-wide game substream protocol.
+/// On a generation change, transfer, consent withdrawal or lost supervisor,
+/// stop the old receiver and all its sessions before admitting a new runtime.
+fn maintain_game_stream_receiver(
+    paths: &DataPaths,
+    storage: &Storage,
+    identity: &PeerIdentity,
+    node: &SwarmNode,
+    registry: &LiveFabricRuntimeRegistry,
+    authority: &Arc<SignedLiveAuthoritySource>,
+    running: &mut Option<ActiveGameReceiver>,
+) {
+    let desired = registry.unique_supervised_runtime().filter(|entry| {
+        local_host_generation_eligible(
+            paths,
+            storage,
+            identity,
+            registry,
+            HostRouteGeneration {
+                world: entry.world,
+                epoch_number: entry.generation.epoch,
+                fencing_token: entry.generation.fencing_token,
+                consent_revision: None,
+            },
+        )
+    });
+    if running.as_ref().is_some_and(|active| Some(active.runtime) == desired && !active.task.is_finished()) {
+        return;
+    }
+    if let Some(old) = running.take() {
+        let _ = old.shutdown.send(true);
+        old.task.abort();
+    }
+    let Some(runtime) = desired else { return };
+    let evidence: Arc<dyn FreshAuthoritySource> = authority.clone();
+    let receiver = match GameStreamReceiver::new(
+        runtime.world,
+        node.local_transport_peer_id(),
+        runtime.managed_port,
+        evidence,
+        node.game_authenticated_peers(),
+        paths.root.join("game-stream-replay"),
+    ) {
+        Ok(receiver) => Arc::new(receiver),
+        Err(error) => {
+            warn!(world = %runtime.world, %error, "refusing game stream receiver startup");
+            return;
+        }
+    };
+    let (shutdown, rx) = watch::channel(false);
+    let task = tokio::spawn(receiver.serve(node.game_stream_control(), rx));
+    *running = Some(ActiveGameReceiver { runtime, shutdown, task });
 }
 
 struct CurrentLiveVoteContext<'a> {

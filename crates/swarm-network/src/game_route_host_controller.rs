@@ -12,7 +12,9 @@ use crate::{
     game_route_host_service::BoundedGameRouteHostResponder,
 };
 use libp2p::request_response;
+use libp2p::PeerId as TransportPeerId;
 use std::sync::Arc;
+use swarm_protocol::PeerId;
 use tokio::{
     sync::{mpsc, watch},
     task::JoinSet,
@@ -25,6 +27,10 @@ use tracing::{debug, warn};
 pub const MAX_PENDING_HOST_ROUTE_ACTIONS: usize = 16;
 
 pub struct GameRouteHostReplyAction {
+    /// Must still match the live authenticated connection on send; signing
+    /// may take several seconds while a peer disconnects or gets rotated.
+    pub transport_peer: TransportPeerId,
+    pub application_peer: PeerId,
     pub channel: request_response::ResponseChannel<GameRouteControlResponseV1>,
     pub response: GameRouteControlResponseV1,
 }
@@ -94,6 +100,8 @@ impl GameRouteHostControlService {
                     };
                     if jobs.len() >= MAX_PENDING_HOST_ROUTE_ACTIONS {
                         let _ = replies.try_send(GameRouteHostReplyAction {
+                            transport_peer,
+                            application_peer,
                             channel,
                             response: GameRouteControlResponseV1::Refused(GameRouteRefusalV1::RateLimited),
                         });
@@ -118,7 +126,9 @@ impl GameRouteHostControlService {
                         };
                         // No blocking send; a stalled daemon must cause a
                         // bounded denial/time-out, not an unbounded backlog.
-                        let _ = replies.try_send(GameRouteHostReplyAction { channel, response });
+                        let _ = replies.try_send(GameRouteHostReplyAction {
+                            transport_peer, application_peer, channel, response,
+                        });
                     });
                 }
             }

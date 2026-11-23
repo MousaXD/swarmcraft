@@ -76,6 +76,26 @@ impl Drop for LiveRuntimeRegistration {
 }
 
 impl LiveFabricRuntimeRegistry {
+    /// A synchronous denial-only sanity check for a queued signed response.
+    /// Registration is not evidence of readiness, quorum or authorization.
+    pub fn currently_registered_generation(&self, world: WorldId, generation: AuthorityGeneration) -> bool {
+        self.entries
+            .lock()
+            .ok()
+            .and_then(|entries| entries.get(&world).map(|entry| entry.identity.generation == generation))
+            == Some(true)
+    }
+
+    /// A denial-only hint for starting a host receiver. Multiple concurrent
+    /// registrations are ambiguous; never select a destination by iteration.
+    /// Each actual game stream must independently re-prove signed authority.
+    pub fn unique_supervised_runtime(&self) -> Option<LiveRuntimeIdentity> {
+        let entries = self.entries.lock().ok()?;
+        if entries.len() != 1 {
+            return None;
+        }
+        entries.values().next().map(|entry| entry.identity)
+    }
     pub fn register(
         &self,
         identity: LiveRuntimeIdentity,
@@ -166,6 +186,22 @@ mod tests {
         let (_registration, _rx) = registry.register(identity()).unwrap();
         assert!(registry.challenge(identity().world, [0; 32]).await.is_err());
         assert!(registry.register(identity()).is_err());
+        assert_eq!(registry.unique_supervised_runtime(), Some(identity()));
+    }
+
+    #[tokio::test]
+    async fn multiple_live_worlds_never_select_an_ambiguous_game_destination() {
+        let registry = LiveFabricRuntimeRegistry::default();
+        assert!(registry.unique_supervised_runtime().is_none());
+        let (one, _rx_one) = registry.register(identity()).unwrap();
+        let mut second = identity();
+        second.world = WorldId([6; 32]);
+        let (two, _rx_two) = registry.register(second).unwrap();
+        assert!(registry.unique_supervised_runtime().is_none());
+        drop(one);
+        assert_eq!(registry.unique_supervised_runtime(), Some(second));
+        drop(two);
+        assert!(registry.unique_supervised_runtime().is_none());
     }
 
     #[tokio::test]
