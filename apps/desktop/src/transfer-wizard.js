@@ -276,6 +276,7 @@ export function registerTransferWizard(backend) {
     document.getElementById('prepareTransfer').addEventListener('click', () => runStep('prepareTransfer', async () => {
       const target = document.getElementById('transferTargetPeer').value;
       if (!target) throw new Error('No authority-eligible transfer target is available.');
+      window.__swarmcraftInvalidateTransientSafety?.(currentWorld);
       const token = await backend.migration.transferPrepare(currentWorld, target);
       document.getElementById('preparedTransferToken').value = token;
       document.getElementById('preparedTransferWrap').hidden = false;
@@ -285,6 +286,7 @@ export function registerTransferWizard(backend) {
     document.getElementById('commitTransfer').addEventListener('click', () => runStep('commitTransfer', async () => {
       const token = document.getElementById('acceptedTransferToken').value.trim();
       if (!token) throw new Error('Paste the accepted token returned by the target device.');
+      window.__swarmcraftInvalidateTransientSafety?.(currentWorld);
       const committed = await backend.migration.transferCommit(currentWorld, token);
       document.getElementById('committedTransferToken').value = committed;
       document.getElementById('committedTransferWrap').hidden = false;
@@ -294,6 +296,7 @@ export function registerTransferWizard(backend) {
     document.getElementById('observeTransfer').addEventListener('click', () => runStep('observeTransfer', async () => {
       const token = document.getElementById('successorEpochToken').value.trim();
       if (!token) throw new Error('Paste the signed successor epoch returned by the new host.');
+      window.__swarmcraftInvalidateTransientSafety?.(currentWorld);
       const result = await backend.migration.transferObserve(currentWorld, token);
       const complete = document.getElementById('sourceTransferComplete');
       complete.textContent = OBSERVE_GUIDANCE;
@@ -306,6 +309,7 @@ export function registerTransferWizard(backend) {
     document.getElementById('acceptTransfer').addEventListener('click', () => runStep('acceptTransfer', async () => {
       const token = document.getElementById('incomingPreparedTransfer').value.trim();
       if (!token) throw new Error('Paste the prepared transfer token from the current host.');
+      window.__swarmcraftInvalidateTransientSafety?.(currentWorld);
       const accepted = await backend.migration.transferAccept(currentWorld, token);
       document.getElementById('outgoingAcceptedTransfer').value = accepted;
       document.getElementById('acceptedTransferWrap').hidden = false;
@@ -315,6 +319,7 @@ export function registerTransferWizard(backend) {
     document.getElementById('activateTransfer').addEventListener('click', () => runStep('activateTransfer', async () => {
       const token = document.getElementById('incomingCommittedTransfer').value.trim();
       if (!token) throw new Error('Paste the committed transfer token from the current host.');
+      window.__swarmcraftInvalidateTransientSafety?.(currentWorld);
       const epoch = await backend.migration.transferActivate(currentWorld, token);
       document.getElementById('outgoingEpochTransfer').value = epoch;
       document.getElementById('epochTransferWrap').hidden = false;

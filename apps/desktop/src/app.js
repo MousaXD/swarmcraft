@@ -610,6 +610,15 @@ function invalidateHostReadiness() {
   }
 }
 
+// The signed-transfer wizard and Svelte hosting-consent controls are mounted
+// separately from this legacy controller. They may revoke stale presentation
+// claims before native mutations, but they may never manufacture authority.
+window.__swarmcraftInvalidateTransientSafety = (world) => {
+  if (!selectedWorldId || world !== selectedWorldId) return;
+  invalidateGameRoute();
+  invalidateHostReadiness();
+};
+
 function modComponent(runtimeStatus, id) {
   return runtimeStatus?.components?.find((component) => component.id === id) || null;
 }

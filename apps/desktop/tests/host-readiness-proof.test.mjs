@@ -75,3 +75,23 @@ test('shipping renderer refuses a false safe shutdown state even after normaliza
   assert.match(source, /function invalidateHostReadiness\(\)/);
   assert.match(source, /document\.addEventListener\('visibilitychange', refreshVisibleHostReadiness\)/);
 });
+
+test('manual signed transfer and hosting-consent mutations revoke visible proofs before native action', async () => {
+  const [app, wizard, contribution, typeBridge] = await Promise.all([
+    readFile(new URL('../src/app.js', import.meta.url), 'utf8'),
+    readFile(new URL('../src/transfer-wizard.js', import.meta.url), 'utf8'),
+    readFile(new URL('../frontend/src/components/HostingContributionPanel.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../frontend/src/vite-env.d.ts', import.meta.url), 'utf8'),
+  ]);
+  assert.match(app, /window\.__swarmcraftInvalidateTransientSafety = \(world\) => \{/);
+  assert.match(app, /if \(!selectedWorldId \|\| world !== selectedWorldId\) return;/);
+  assert.match(typeBridge, /__swarmcraftInvalidateTransientSafety\?: \(world: string\) => void/);
+  for (const method of ['transferPrepare', 'transferCommit', 'transferObserve', 'transferAccept', 'transferActivate']) {
+    const pattern = new RegExp('window\\.__swarmcraftInvalidateTransientSafety\\?\\.\\(currentWorld\\);\\s+const [^\\n]+ = await backend\\.migration\\.' + method + '\\(');
+    assert.match(wizard, pattern, `${method} must revoke stale UX before invoking Rust`);
+  }
+  for (const budget of ['heapMib', '0']) {
+    const pattern = new RegExp('window\\.__swarmcraftInvalidateTransientSafety\\?\\.\\(world\\);\\s+const response = await saveHostingContribution\\(world, ' + budget + '\\)');
+    assert.match(contribution, pattern, `hosting budget ${budget} must revoke stale UX`);
+  }
+});
