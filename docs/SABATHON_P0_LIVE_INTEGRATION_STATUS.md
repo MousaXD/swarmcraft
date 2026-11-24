@@ -595,3 +595,27 @@ still requires immutable historical epoch, transition certificate and
 config records and a verified replay protocol. Pruned history, actual
 Minecraft client login/inventory, and independent-device field acceptance
 are not certified by this change.
+
+### Historical authority replay foundations (25 November)
+
+Canonical control publication now preserves the exact replaced epoch and
+world-config records, staged transfer phases, and cleared sleep boundaries
+in an immutable local authority-history namespace. Before replacing a
+recovery epoch, it also preserves the matching accepted recovery certificate
+if present, not an unaccepted pending candidate. Archive publication is
+serialized by the same world transaction lock as the live record. Conflicting
+or corrupt archive entries and a symlinked history directory fail closed.
+Live control reads never fall back to this history.
+
+Read-only epoch/config history collectors verify each record signature,
+exact predecessor hashes and counters, original creator identity, and
+the genesis checkpoint bytes or compatibility fingerprint respectively.
+Both collectors refuse histories beyond 256 records; missing older legacy
+records are not reconstructed or silently skipped. They return signed
+historical records, NOT a certified transition or a live authority grant.
+Before cross-generation replication can be enabled, a receiver must still
+verify the exact historical membership and transfer/recovery/sleep proofs
+against each checkpoint boundary, and persist them through a replay-specific
+state machine that cannot activate a retired generation. No wire replay,
+late join after migration, or physical gameplay certification is claimed
+by the archive implementation.

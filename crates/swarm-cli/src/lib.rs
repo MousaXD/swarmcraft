@@ -1,6 +1,7 @@
 pub mod authority_permit;
 pub mod discovery;
 pub mod game_route_api;
+pub mod historical_authority;
 pub mod host_readiness;
 pub mod hosting_budget;
 pub mod launch_guard;

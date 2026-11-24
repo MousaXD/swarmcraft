@@ -3,7 +3,7 @@ use crate::{
     Storage, StorageError,
 };
 use std::io;
-use swarm_protocol::{EpochMode, EpochRecordV1, RecoveryCertificateV1, WorldId};
+use swarm_protocol::{EpochMode, EpochRecordV1, Hash32, RecoveryCertificateV1, WorldId};
 
 const CERTIFICATE: &str = "recovery-certificate.postcard";
 const PENDING_CERTIFICATE: &str = "recovery-certificate-pending.postcard";
@@ -90,6 +90,55 @@ impl Storage {
         latest_certificate(&certificates).cloned().ok_or_else(|| {
             io_error(self.world_dir(world).join("metadata").join(CERTIFICATE), io::ErrorKind::NotFound.into())
         })
+    }
+
+    /// Called under the world lock before replacing the accepted epoch.
+    /// Pending certificates for unsuccessful candidates are not archived as
+    /// accepted proofs. Legacy missing proofs remain missing, not invented.
+    pub(crate) fn archive_recovery_epoch_proof_locked(&self, epoch: &EpochRecordV1) -> Result<(), StorageError> {
+        if epoch.mode != EpochMode::Recovery {
+            return Ok(());
+        }
+        let certificates = self.load_recovery_certificates(epoch.world_id)?;
+        if let Some(proof) = certificate_for_epoch(&certificates, epoch)? {
+            self.archive_history_locked(
+                epoch.world_id,
+                &format!("recovery-{}.postcard", epoch.record_hash()?),
+                &postcard::to_allocvec(proof)?,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Exact proof for a persisted epoch, not the newest pending ballot.
+    /// Historical proofs still require full membership and quorum validation
+    /// by the caller; this function cannot grant recovery authority.
+    pub fn load_recovery_certificate_for_epoch(
+        &self,
+        world: WorldId,
+        epoch_hash: Hash32,
+    ) -> Result<RecoveryCertificateV1, StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
+        let epoch = self.load_epoch_by_hash_locked(world, epoch_hash)?;
+        if epoch.mode != EpochMode::Recovery {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        let name = format!("recovery-{epoch_hash}.postcard");
+        let proof: RecoveryCertificateV1 = match self.read_history_locked(world, &name)? {
+            Some(bytes) => postcard::from_bytes(&bytes)?,
+            None => {
+                if self.load_epoch_record(world)? != epoch {
+                    return Err(StorageError::WorldMetadataMismatch);
+                }
+                let certificates = self.load_recovery_certificates(world)?;
+                certificate_for_epoch(&certificates, &epoch)?.cloned().ok_or(StorageError::WorldMetadataMismatch)?
+            }
+        };
+        validate_stored_certificate(&proof, world)?;
+        if !matches_recovery_epoch(&proof, &epoch) {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(proof)
     }
 
     pub(crate) fn load_recovery_certificates(
@@ -380,6 +429,21 @@ mod tests {
         third.ballot.target_fencing_token += 1;
         reopened.save_recovery_certificate(&third).unwrap();
         assert_eq!(reopened.load_recovery_certificate(world).unwrap(), next);
+        assert_eq!(
+            reopened
+                .load_recovery_certificate_for_epoch(world, accepted_epoch_for(&current).record_hash().unwrap())
+                .unwrap(),
+            current
+        );
+        assert_eq!(
+            reopened
+                .load_recovery_certificate_for_epoch(world, accepted_epoch_for(&next).record_hash().unwrap())
+                .unwrap(),
+            next
+        );
+        assert!(reopened
+            .load_recovery_certificate_for_epoch(world, accepted_epoch_for(&third).record_hash().unwrap())
+            .is_err());
         assert_eq!(reopened.load_recovery_certificates(world).unwrap(), [Some(next), Some(third)]);
     }
 

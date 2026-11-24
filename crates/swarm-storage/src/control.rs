@@ -1,9 +1,11 @@
 use crate::{
-    transaction::{canonical_file_exists, durable_atomic_write, durable_remove, read_canonical_file},
+    transaction::{canonical_file_exists, durable_atomic_write, durable_remove, io_error, read_canonical_file},
     Storage, StorageError,
 };
-use std::path::PathBuf;
-use swarm_protocol::{AuthorityLeaseGrantV1, AuthorityTransferV1, EpochRecordV1, SleepRecordV1, WorldId};
+use std::{fs, io, path::PathBuf};
+use swarm_protocol::{
+    AuthorityLeaseGrantV1, AuthorityTransferV1, EpochRecordV1, Hash32, SleepRecordV1, TransferPhase, WorldId,
+};
 
 impl Storage {
     pub fn save_epoch_record(&self, record: &EpochRecordV1) -> Result<(), StorageError> {
@@ -23,6 +25,15 @@ impl Storage {
                 }
                 return Err(StorageError::WorldMetadataMismatch);
             }
+            // Preserve only the previously accepted record, never a proposed
+            // successor whose canonical publication might still fail. A crash
+            // after this archive but before publication cannot advance authority.
+            self.archive_recovery_epoch_proof_locked(&existing)?;
+            self.archive_history_locked(
+                existing.world_id,
+                &format!("epoch-{}.postcard", existing.record_hash()?),
+                &postcard::to_allocvec(&existing)?,
+            )?;
         }
         let bytes = postcard::to_allocvec(record)?;
         durable_atomic_write(&path, &bytes)
@@ -36,6 +47,30 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
         record.validate_semantics()?;
+        Ok(record)
+    }
+
+    /// Read exact persisted history, not a live authority grant. The caller
+    /// must independently verify signatures, ancestry and transition evidence.
+    pub fn load_epoch_by_hash(&self, world: WorldId, hash: Hash32) -> Result<EpochRecordV1, StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
+        self.load_epoch_by_hash_locked(world, hash)
+    }
+
+    pub(crate) fn load_epoch_by_hash_locked(
+        &self,
+        world: WorldId,
+        hash: Hash32,
+    ) -> Result<EpochRecordV1, StorageError> {
+        let name = format!("epoch-{hash}.postcard");
+        let record: EpochRecordV1 = match self.read_history_locked(world, &name)? {
+            Some(bytes) => postcard::from_bytes(&bytes)?,
+            None => self.load_epoch_record(world)?,
+        };
+        record.validate_semantics()?;
+        if record.world_id != world || record.record_hash()? != hash {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
         Ok(record)
     }
 
@@ -98,7 +133,15 @@ impl Storage {
         // An existing canonical transfer may be at a later protocol phase.
         // Never replace it if corruption makes its phase/generation unreadable.
         if canonical_file_exists(&path)? {
-            self.load_transfer_record(transfer.world_id)?;
+            let existing = self.load_transfer_record(transfer.world_id)?;
+            if existing == *transfer {
+                return Ok(());
+            }
+            self.archive_history_locked(
+                existing.world_id,
+                &transfer_history_name(&existing, existing.phase),
+                &postcard::to_allocvec(&existing)?,
+            )?;
         }
         let bytes = postcard::to_allocvec(transfer)?;
         durable_atomic_write(&path, &bytes)
@@ -115,11 +158,40 @@ impl Storage {
         Ok(record)
     }
 
+    /// Locate a specific persisted phase of the same signed transfer, even
+    /// after a later transfer replaces the live control record. Historical
+    /// phases do not bypass the live source/witness/target delivery protocol.
+    pub fn load_transfer_phase(
+        &self,
+        transcript: &AuthorityTransferV1,
+        phase: TransferPhase,
+    ) -> Result<AuthorityTransferV1, StorageError> {
+        let world = transcript.world_id;
+        let _guard = self.lock_world_transaction(world)?;
+        let name = transfer_history_name(transcript, phase);
+        let record: AuthorityTransferV1 = match self.read_history_locked(world, &name)? {
+            Some(bytes) => postcard::from_bytes(&bytes)?,
+            None => self.load_transfer_record(world)?,
+        };
+        record.validate_semantics()?;
+        if record.world_id != world || record.phase != phase || transfer_history_name(&record, phase) != name {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(record)
+    }
+
     pub fn save_sleep_record(&self, record: &SleepRecordV1) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(record.world_id)?;
         record.validate_semantics()?;
-        let bytes = postcard::to_allocvec(record)?;
-        durable_atomic_write(&self.control_path(record.world_id, "sleep.postcard"), &bytes)
+        let path = self.control_path(record.world_id, "sleep.postcard");
+        if canonical_file_exists(&path)? {
+            let existing = self.load_sleep_record(record.world_id)?;
+            if existing == *record {
+                return Ok(());
+            }
+            self.archive_sleep_locked(&existing)?;
+        }
+        durable_atomic_write(&path, &postcard::to_allocvec(record)?)
     }
 
     pub fn load_sleep_record(&self, world: WorldId) -> Result<SleepRecordV1, StorageError> {
@@ -135,13 +207,110 @@ impl Storage {
 
     pub fn clear_sleep_record(&self, world: WorldId) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(world)?;
-        durable_remove(&self.control_path(world, "sleep.postcard"))?;
+        let path = self.control_path(world, "sleep.postcard");
+        if canonical_file_exists(&path)? {
+            self.archive_sleep_locked(&self.load_sleep_record(world)?)?;
+        }
+        durable_remove(&path)?;
         Ok(())
+    }
+
+    fn archive_sleep_locked(&self, record: &SleepRecordV1) -> Result<(), StorageError> {
+        self.archive_history_locked(
+            record.world_id,
+            &sleep_history_name(record.epoch, record.fencing_token, record.latest_snapshot_hash),
+            &postcard::to_allocvec(record)?,
+        )
+    }
+
+    pub fn load_sleep_boundary(
+        &self,
+        epoch: &EpochRecordV1,
+        checkpoint: Hash32,
+    ) -> Result<SleepRecordV1, StorageError> {
+        let world = epoch.world_id;
+        let _guard = self.lock_world_transaction(world)?;
+        let name = sleep_history_name(epoch.epoch_number, epoch.fencing_token, checkpoint);
+        let record: SleepRecordV1 = match self.read_history_locked(world, &name)? {
+            Some(bytes) => postcard::from_bytes(&bytes)?,
+            None => self.load_sleep_record(world)?,
+        };
+        record.validate_semantics()?;
+        if record.world_id != world
+            || record.epoch != epoch.epoch_number
+            || record.fencing_token != epoch.fencing_token
+            || record.authority_peer_id != epoch.authority_peer_id
+            || record.authority_public_key != epoch.authority_public_key
+            || record.latest_snapshot_hash != checkpoint
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(record)
+    }
+
+    /// Serialize immutable historical publication with the existing world
+    /// transaction lock. Archive files are never inputs to live control reads.
+    pub(crate) fn archive_history_locked(&self, world: WorldId, name: &str, bytes: &[u8]) -> Result<(), StorageError> {
+        let path = self.history_path(world, name)?;
+        if canonical_file_exists(&path)? {
+            if read_canonical_file(&path)? != bytes {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+            return Ok(());
+        }
+        durable_atomic_write(&path, bytes)
+    }
+
+    pub(crate) fn read_history_locked(&self, world: WorldId, name: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        let path = self.history_path(world, name)?;
+        if !canonical_file_exists(&path)? {
+            return Ok(None);
+        }
+        Ok(Some(read_canonical_file(&path)?))
+    }
+
+    fn history_path(&self, world: WorldId, name: &str) -> Result<PathBuf, StorageError> {
+        let directory = self.control_path(world, "authority-history");
+        match fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(StorageError::SymlinkUnsupported(directory));
+            }
+            Ok(metadata) if !metadata.is_dir() => return Err(StorageError::WorldMetadataMismatch),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(&directory, error)),
+        }
+        Ok(directory.join(name))
     }
 
     fn control_path(&self, world: WorldId, name: &str) -> PathBuf {
         self.world_dir(world).join("metadata").join(name)
     }
+}
+
+fn transfer_history_name(record: &AuthorityTransferV1, phase: TransferPhase) -> String {
+    let phase = match phase {
+        TransferPhase::Prepared => "prepared",
+        TransferPhase::Accepted => "accepted",
+        TransferPhase::Committed => "committed",
+    };
+    // Hash the immutable transition identity, not the phase's signer.
+    let key = Hash32::from_domain_bytes(
+        b"swarmcraft/transfer-history-key/v1\0",
+        &[
+            record.from_peer_id.0.as_slice(),
+            record.to_peer_id.0.as_slice(),
+            record.base_snapshot_hash.0.as_slice(),
+            &record.next_epoch.to_le_bytes(),
+            &record.next_fencing_token.to_le_bytes(),
+        ]
+        .concat(),
+    );
+    format!("transfer-{key}-{phase}.postcard")
+}
+
+fn sleep_history_name(epoch: u64, fence: u64, checkpoint: Hash32) -> String {
+    format!("sleep-{epoch:020}-{fence:020}-{checkpoint}.postcard")
 }
 
 #[cfg(test)]
@@ -208,6 +377,130 @@ mod tests {
         let conflicting = epoch_record(world, 3, 8, 12);
         assert!(matches!(store.save_epoch_record(&conflicting), Err(StorageError::WorldMetadataMismatch)));
         assert_eq!(store.load_epoch_record(world).unwrap(), accepted);
+    }
+
+    #[test]
+    fn replaced_epochs_remain_exactly_addressable_after_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0x81; 32]);
+        let first = epoch_record(world, 2, 1, 1);
+        let mut second = epoch_record(world, 3, 2, 2);
+        second.previous_epoch_hash = Some(first.record_hash().unwrap());
+        let mut third = epoch_record(world, 4, 3, 3);
+        third.previous_epoch_hash = Some(second.record_hash().unwrap());
+        store.save_epoch_record(&first).unwrap();
+        store.save_epoch_record(&second).unwrap();
+        store.save_epoch_record(&third).unwrap();
+        drop(store);
+        let store = Storage::open(temp.path()).unwrap();
+        assert_eq!(store.load_epoch_record(world).unwrap(), third);
+        for expected in [first, second, third] {
+            assert_eq!(store.load_epoch_by_hash(world, expected.record_hash().unwrap()).unwrap(), expected);
+        }
+        assert!(store.load_epoch_by_hash(world, Hash32([0x88; 32])).is_err());
+    }
+
+    #[test]
+    fn corrupt_epoch_archive_cannot_be_used_or_overwritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0x82; 32]);
+        let first = epoch_record(world, 2, 1, 1);
+        let next = epoch_record(world, 3, 2, 2);
+        store.save_epoch_record(&first).unwrap();
+        let hash = first.record_hash().unwrap();
+        let path = store.history_path(world, &format!("epoch-{hash}.postcard")).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"corrupt archive").unwrap();
+        assert!(store.load_epoch_by_hash(world, hash).is_err());
+        assert!(store.save_epoch_record(&next).is_err());
+        assert_eq!(store.load_epoch_record(world).unwrap(), first);
+        assert_eq!(fs::read(path).unwrap(), b"corrupt archive");
+    }
+
+    #[test]
+    fn transfer_phases_survive_a_subsequent_transfer_without_becoming_live() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0x83; 32]);
+        let prepared = AuthorityTransferV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            from_peer_id: PeerId([2; 32]),
+            to_peer_id: PeerId([3; 32]),
+            base_snapshot_hash: Hash32([4; 32]),
+            next_epoch: 2,
+            next_fencing_token: 2,
+            phase: TransferPhase::Prepared,
+            signer_peer_id: PeerId([2; 32]),
+            signer_public_key: [2; 32],
+            signature: vec![2; 64],
+        };
+        let accepted = AuthorityTransferV1 {
+            phase: TransferPhase::Accepted,
+            signer_peer_id: PeerId([3; 32]),
+            signer_public_key: [3; 32],
+            signature: vec![3; 64],
+            ..prepared.clone()
+        };
+        let committed = AuthorityTransferV1 { phase: TransferPhase::Committed, ..prepared.clone() };
+        let later = AuthorityTransferV1 { next_epoch: 3, next_fencing_token: 3, ..prepared.clone() };
+        for record in [&prepared, &accepted, &committed, &later] {
+            store.save_transfer_record(record).unwrap();
+        }
+        drop(store);
+        let store = Storage::open(temp.path()).unwrap();
+        assert_eq!(store.load_transfer_record(world).unwrap(), later);
+        for record in [prepared, accepted, committed] {
+            assert_eq!(store.load_transfer_phase(&record, record.phase).unwrap(), record);
+        }
+        assert!(store.load_transfer_phase(&later, TransferPhase::Committed).is_err());
+    }
+
+    #[test]
+    fn cleared_sleep_boundary_is_history_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path()).unwrap();
+        let world = WorldId([0x84; 32]);
+        let epoch = epoch_record(world, 2, 1, 1);
+        store.save_epoch_record(&epoch).unwrap();
+        let boundary = SleepRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            latest_snapshot_hash: Hash32([3; 32]),
+            epoch: epoch.epoch_number,
+            fencing_token: epoch.fencing_token,
+            authority_peer_id: epoch.authority_peer_id,
+            authority_public_key: epoch.authority_public_key,
+            signature: vec![2; 64],
+        };
+        store.save_sleep_record(&boundary).unwrap();
+        store.clear_sleep_record(world).unwrap();
+        assert!(store.load_sleep_record(world).is_err());
+        assert_eq!(store.load_sleep_boundary(&epoch, boundary.latest_snapshot_hash).unwrap(), boundary);
+        assert!(store.load_sleep_boundary(&epoch, Hash32([9; 32])).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_history_namespace_refuses_publication() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let store = Storage::open(temp.path().join("store")).unwrap();
+        let world = WorldId([0x85; 32]);
+        let first = epoch_record(world, 2, 1, 1);
+        store.save_epoch_record(&first).unwrap();
+        let directory = store.control_path(world, "authority-history");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, &directory).unwrap();
+        assert!(matches!(
+            store.save_epoch_record(&epoch_record(world, 3, 2, 2)),
+            Err(StorageError::SymlinkUnsupported(path)) if path == directory
+        ));
+        assert_eq!(store.load_epoch_record(world).unwrap(), first);
+        assert_eq!(fs::read_dir(outside).unwrap().count(), 0);
     }
 
     #[cfg(unix)]

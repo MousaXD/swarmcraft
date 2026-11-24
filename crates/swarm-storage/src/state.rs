@@ -4,7 +4,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
-use swarm_protocol::{peer_id_from_public_key, RecoveryBallotV1, RecoveryVoteV1, SoloBranchV1, WorldConfigV1, WorldId};
+use swarm_protocol::{
+    peer_id_from_public_key, Hash32, RecoveryBallotV1, RecoveryVoteV1, SoloBranchV1, WorldConfigV1, WorldId,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DurableRecoveryPromiseV1 {
@@ -160,6 +162,16 @@ impl Storage {
             }
         }
 
+        // Keep the exact signed predecessor under its chain-link hash before
+        // replacing the canonical value. Historical config never changes
+        // the authority used for the live config validation above.
+        if let Some(previous) = existing.as_ref() {
+            self.archive_history_locked(
+                previous.world_id,
+                &format!("config-{}.postcard", previous.config_hash()?),
+                &postcard::to_allocvec(previous)?,
+            )?;
+        }
         let bytes = postcard::to_allocvec(&config)?;
         durable_atomic_write(&self.control_path_v2(config.world_id, "world-config.postcard"), &bytes)
     }
@@ -172,6 +184,20 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
         config.validate_semantics()?;
+        Ok(config)
+    }
+
+    pub fn load_world_config_by_hash(&self, world: WorldId, hash: Hash32) -> Result<WorldConfigV1, StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
+        let name = format!("config-{hash}.postcard");
+        let config: WorldConfigV1 = match self.read_history_locked(world, &name)? {
+            Some(bytes) => postcard::from_bytes(&bytes)?,
+            None => self.load_world_config(world)?,
+        };
+        config.validate_semantics()?;
+        if config.world_id != world || config.config_hash()? != hash {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
         Ok(config)
     }
 
@@ -534,6 +560,14 @@ mod tests {
         let current_authority = world_config(world, 7, 2, Some(previous));
         store.save_world_config(&current_authority).unwrap();
         assert_eq!(store.load_world_config(world).unwrap(), current_authority);
+        drop(store);
+        let store = Storage::open(temp.path()).unwrap();
+        assert_eq!(store.load_world_config_by_hash(world, previous).unwrap(), first);
+        assert_eq!(
+            store.load_world_config_by_hash(world, current_authority.config_hash().unwrap()).unwrap(),
+            current_authority
+        );
+        assert!(store.load_world_config_by_hash(world, stale_authority.config_hash().unwrap()).is_err());
     }
 
     #[test]

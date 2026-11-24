@@ -227,6 +227,11 @@ pub struct EpochRecordV1 {
 }
 
 impl EpochRecordV1 {
+    /// Hash of the complete signed epoch record, used by its successor.
+    pub fn record_hash(&self) -> Result<Hash32, ProtocolError> {
+        Ok(Hash32::from_domain_bytes(b"swarmcraft/epoch-record/v1\0", &postcard::to_allocvec(self)?))
+    }
+
     pub fn signing_bytes(&self) -> Result<Vec<u8>, ProtocolError> {
         let unsigned = (
             self.protocol_version,

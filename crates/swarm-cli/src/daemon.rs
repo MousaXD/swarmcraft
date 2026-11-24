@@ -5089,8 +5089,7 @@ fn replica_ack_matches_manifest(ack: &ReplicaAckV1, manifest: &SnapshotManifestV
 }
 
 fn epoch_record_hash(record: &EpochRecordV1) -> Result<Hash32> {
-    let encoded = postcard::to_allocvec(record)?;
-    Ok(Hash32::from_domain_bytes(b"swarmcraft/epoch-record/v1\0", &encoded))
+    Ok(record.record_hash()?)
 }
 
 fn world_status(storage: &Storage, world: WorldId, local_peer: PeerId) -> Result<Option<WorldStatusV1>> {
