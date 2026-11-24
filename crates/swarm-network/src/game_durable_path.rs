@@ -20,14 +20,7 @@ use std::{
 /// and after durable directory creation. Missing suffix components are fine
 /// before creation; their creator must set private permissions.
 pub(crate) fn validate_durable_ancestors(path: &Path) -> io::Result<()> {
-    // Apple's /var and /tmp are immutable OS-owned aliases into /private.
-    // Validate their exact canonical destinations, and then walk all actual
-    // path components using the ordinary strict owner/mode/symlink checks.
-    // No other symlink (including one under a user-controlled temp dir) is
-    // followed or trusted.
-    #[cfg(target_os = "macos")]
-    return validate_durable_ancestors_for_uid(&resolve_macos_system_alias(path)?, effective_uid());
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(unix)]
     return validate_durable_ancestors_for_uid(path, effective_uid());
     #[cfg(not(unix))]
     return validate_ancestor_components(path, |_| Ok(()));
@@ -37,6 +30,8 @@ pub(crate) fn validate_durable_ancestors(path: &Path) -> io::Result<()> {
 fn resolve_macos_system_alias(path: &Path) -> io::Result<PathBuf> {
     use std::os::unix::fs::MetadataExt;
 
+    let absolute = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir()?.join(path) };
+    let path = absolute.as_path();
     for (alias, expected) in [("/var", "/private/var"), ("/tmp", "/private/tmp")] {
         let alias = Path::new(alias);
         if let Ok(suffix) = path.strip_prefix(alias) {
@@ -66,6 +61,13 @@ fn effective_uid() -> u32 {
 
 #[cfg(unix)]
 fn validate_durable_ancestors_for_uid(path: &Path, effective_uid: u32) -> io::Result<()> {
+    // Apple's /var and /tmp are OS-owned aliases into /private.
+    // Keep this in the shared UID-aware validator, so the ownership tests
+    // exercise exactly the same checks as production.
+    #[cfg(target_os = "macos")]
+    let resolved = resolve_macos_system_alias(path)?;
+    #[cfg(target_os = "macos")]
+    let path = resolved.as_path();
     validate_ancestor_components(path, |metadata| {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let mode = metadata.permissions().mode();
@@ -90,6 +92,11 @@ fn validate_ancestor_components(
     mut validate_metadata: impl FnMut(&fs::Metadata) -> io::Result<()>,
 ) -> io::Result<()> {
     let absolute = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir()?.join(path) };
+    // Check the entire lexical path before walking existing components:
+    // traversal after a missing component must not escape validation.
+    if absolute.components().any(|component| component == Component::ParentDir) {
+        return Err(untrusted_ancestor());
+    }
     let mut current = PathBuf::new();
     for component in absolute.components() {
         match component {
@@ -147,6 +154,11 @@ mod tests {
     fn rejects_parent_traversal() {
         assert_eq!(
             validate_durable_ancestors(Path::new("../world-ports")).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            validate_durable_ancestors(&temp.path().join("missing/../world-ports")).unwrap_err().kind(),
             io::ErrorKind::PermissionDenied
         );
     }

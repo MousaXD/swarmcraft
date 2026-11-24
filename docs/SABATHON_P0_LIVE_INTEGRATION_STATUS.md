@@ -105,6 +105,32 @@ checks, not a completed release or hypothetical Minecraft sessions.
 
 ## Local verification performed
 
+### Final macOS Rust regressions from `ece4b1f` (24 November 2026)
+
+- GitHub Required Validation run `45277228605` completed with **18 successful
+  jobs**, including Linux and Windows full Rust suites, process-level
+  acceptance, installed Linux GUI smoke, all four desktop packaging targets,
+  dependency audits, and the clean-machine Minecraft/Fabric journey. Only
+  the macOS Rust job failed; consequently the aggregate required validation
+  gate also failed. The optional sustained network soak was skipped.
+- Both failures were in `swarm-network`: the foreign-owner ancestry test
+  called the internal UID-aware validator directly, bypassing the previously
+  added macOS alias handling, and the stalled route-verifier capacity test
+  depended on an unreliable fixed sleep before asserting worker recovery.
+- Moved Apple's narrowly scoped alias handling into the shared UID-aware
+  validator. All real ancestry ownership, mode, and symlink checks remain
+  enforced. Reject parent traversal in the complete lexical path even if a
+  nonexistent ancestor would otherwise terminate the filesystem walk.
+- Replaced the capacity test's fixed sleep with an explicit verifier release
+  and observation of the recovered semaphore permit. The stalled request
+  still times out and the occupied slot still refuses further requests; the
+  next worker independently refuses absent quorum proof. No production
+  deadline, worker limit, or authority requirement was relaxed.
+- Local verification: **111/111** network library tests passed, strict
+  network all-target/all-feature Clippy passed, and workspace formatting and
+  diff checks passed. The updated macOS behavior requires an independent
+  exact-SHA GitHub result.
+
 ### CI cross-platform regressions from `5287081` (24 November 2026)
 
 - Required Validation run `45270169979` passed process-level acceptance,

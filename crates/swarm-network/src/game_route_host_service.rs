@@ -89,6 +89,7 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use libp2p::identity::Keypair;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Condvar, Mutex};
     use swarm_protocol::{peer_id_from_public_key, Hash32, WorldId};
 
     struct SlowUnavailableAuthority {
@@ -109,18 +110,41 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ControlledUnavailableAuthority {
+        started: AtomicBool,
+        released: Mutex<bool>,
+        release: Condvar,
+    }
+
+    impl FreshAuthoritySource for ControlledUnavailableAuthority {
+        fn verify_fresh(
+            &self,
+            _world: WorldId,
+            _requester: PeerId,
+            _nonce: [u8; 32],
+        ) -> Result<FreshAuthorityEvidence, GameRouteError> {
+            self.started.store(true, Ordering::SeqCst);
+            // Test-only gate. The emergency timeout prevents orphaned
+            // threads if the test panics before signaling release.
+            let released = self.released.lock().unwrap();
+            let _guard =
+                self.release.wait_timeout_while(released, Duration::from_secs(10), |released| !*released).unwrap();
+            Err(GameRouteError::UnverifiedAuthority)
+        }
+    }
+
     #[tokio::test]
     async fn stalled_quorum_verifier_does_not_block_reactor_or_unbound_worker_count() {
         let root = tempfile::tempdir().unwrap();
-        let source =
-            Arc::new(SlowUnavailableAuthority { started: AtomicBool::new(false), delay: Duration::from_millis(180) });
+        let source = Arc::new(ControlledUnavailableAuthority::default());
         let signer = Arc::new(AuthenticatedGameRouteHostSigner::new(
             SigningKey::from_bytes(&[12; 32]),
             Keypair::generate_ed25519().public().to_peer_id(),
             source.clone(),
             root.path().join("unused-host-sequences"),
         ));
-        let service = Arc::new(BoundedGameRouteHostResponder {
+        let mut service = Arc::new(BoundedGameRouteHostResponder {
             signer,
             workers: Arc::new(Semaphore::new(1)),
             max_wait: Duration::from_millis(35),
@@ -134,7 +158,7 @@ mod tests {
             let request = request.clone();
             async move { service.answer(requester, transport, request).await }
         });
-        timeout(Duration::from_millis(300), async {
+        timeout(Duration::from_secs(3), async {
             while !source.started.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
@@ -144,7 +168,7 @@ mod tests {
         let second = service.answer(requester, transport, request.clone()).await.unwrap();
         assert_eq!(second, GameRouteControlResponseV1::Refused(GameRouteRefusalV1::RateLimited));
 
-        let first = timeout(Duration::from_millis(160), worker).await.unwrap().unwrap().unwrap();
+        let first = timeout(Duration::from_secs(3), worker).await.unwrap().unwrap().unwrap();
         assert_eq!(first, GameRouteControlResponseV1::Refused(GameRouteRefusalV1::Unavailable));
         // A timed-out worker is NOT interrupted, and its permit remains
         // consumed until it exits. Exhaustion must remain fail-closed.
@@ -153,11 +177,24 @@ mod tests {
             GameRouteControlResponseV1::Refused(GameRouteRefusalV1::RateLimited)
         );
 
-        tokio::time::sleep(Duration::from_millis(210)).await;
-        // Once the original verifier finishes, the worker slot recovers;
-        // an independently verified refusal still cannot become an offer.
+        // Release the verifier explicitly and observe its actual semaphore
+        // return rather than assuming an OS thread ran during a fixed sleep.
+        *source.released.lock().unwrap() = true;
+        source.release.notify_all();
+        timeout(Duration::from_secs(3), async {
+            while service.workers.available_permits() != 1 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the released verifier must return its worker slot");
+        // The next request can now acquire the slot, but a verifier that
+        // supplies no proof must still refuse it. Give this post-release
+        // assertion enough scheduling time on a loaded CI machine; the
+        // actual stalled-request deadline above remains 35 milliseconds.
+        Arc::get_mut(&mut service).expect("test owns the responder").max_wait = Duration::from_secs(3);
         let recovered = service.answer(requester, transport, request).await.unwrap();
-        assert_eq!(recovered, GameRouteControlResponseV1::Refused(GameRouteRefusalV1::Unavailable));
+        assert_eq!(recovered, GameRouteControlResponseV1::Refused(GameRouteRefusalV1::QuorumUnavailable));
     }
 
     #[tokio::test]
