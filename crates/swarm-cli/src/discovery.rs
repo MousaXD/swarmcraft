@@ -920,13 +920,20 @@ fn retry_due_providers(
     let now = Instant::now();
     let due: Vec<_> = queued.iter().filter_map(|(peer, at)| (*at <= now).then_some(*peer)).collect();
     for peer in due {
-        queued.remove(&peer);
         if node.is_authenticated(&peer) {
+            queued.remove(&peer);
             let id = node.send_request(&peer, request.clone())?;
             pending.insert(format!("{id:?}"), peer);
             requested.insert(peer);
-        } else if let Err(error) = node.dial_peer(peer) {
-            debug!(transport_peer = %peer, %error, "explicit discovery retry dial failed");
+        } else {
+            // A dial may fail before it produces an application event. Keep
+            // driving the same reserved attempt within the overall deadline.
+            // DiscoveryNode suppresses duplicate pending connections; no
+            // application request budget is consumed until one is sent.
+            queued.insert(peer, now + DISCOVERY_RETRY_DELAY);
+            if let Err(error) = node.dial_peer(peer) {
+                debug!(transport_peer = %peer, %error, "explicit discovery retry dial failed");
+            }
         }
     }
     Ok(())
@@ -963,6 +970,8 @@ pub async fn search_public_worlds(
             let request_id =
                 node.send_request(&transport_peer, WireRequest::DiscoveryPublic { filter: filter.clone() })?;
             pending.insert(format!("{request_id:?}"), transport_peer);
+        } else if !requested.contains(&transport_peer) {
+            queued_retries.insert(transport_peer, Instant::now() + DISCOVERY_RETRY_DELAY);
         }
     }
     if !bootstrap_order.is_empty() {
@@ -1022,6 +1031,25 @@ pub async fn search_public_worlds(
                     let key = format!("{request_id:?}");
                     if pending.get(&key) != Some(&transport_peer) {
                         continue;
+                    }
+                    if let WireResponse::Error { code, message } = &response {
+                        network_error.get_or_insert_with(|| format!("{code}: {message}"));
+                        // Our receiver can finish verifying the provider's
+                        // proof just before the provider finishes verifying
+                        // ours. Never interpret that refusal as an empty
+                        // directory or skip the existing bounded retry path.
+                        if matches!(code.as_str(), "HANDSHAKE_REQUIRED" | "AUTH_CONNECTION_RETRY")
+                            && reserve_matching_explicit_provider_retry(
+                                &mut pending,
+                                &mut retry_attempts,
+                                transport_peer,
+                                request_id,
+                                &bootstrap_peers,
+                            )
+                        {
+                            requested.remove(&transport_peer);
+                            queued_retries.insert(transport_peer, Instant::now() + DISCOVERY_RETRY_DELAY);
+                        }
                     }
                     pending.remove(&key);
                     if let WireResponse::DiscoveryWorlds(values) = response {
@@ -1168,6 +1196,8 @@ pub async fn resolve_world(
         if node.application_peer(&transport_peer).is_some() && requested.insert(transport_peer) {
             let request_id = node.send_request(&transport_peer, WireRequest::DiscoveryResolve { world_id: world })?;
             pending.insert(format!("{request_id:?}"), transport_peer);
+        } else if !requested.contains(&transport_peer) {
+            queued_retries.insert(transport_peer, Instant::now() + DISCOVERY_RETRY_DELAY);
         }
     }
     if !bootstrap_order.is_empty() {
@@ -1225,6 +1255,21 @@ pub async fn resolve_world(
                     // delayed results from a previous failed request.
                     if pending.get(&key) != Some(&transport_peer) {
                         continue;
+                    }
+                    if let WireResponse::Error { code, message } = &response {
+                        detail.get_or_insert_with(|| format!("{code}: {message}"));
+                        if matches!(code.as_str(), "HANDSHAKE_REQUIRED" | "AUTH_CONNECTION_RETRY")
+                            && reserve_matching_explicit_provider_retry(
+                                &mut pending,
+                                &mut retry_attempts,
+                                transport_peer,
+                                request_id,
+                                &bootstrap_peers,
+                            )
+                        {
+                            requested.remove(&transport_peer);
+                            queued_retries.insert(transport_peer, Instant::now() + DISCOVERY_RETRY_DELAY);
+                        }
                     }
                     pending.remove(&key);
                     if let WireResponse::DiscoveryResolved(Some(value)) = response {

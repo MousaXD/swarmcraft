@@ -83,28 +83,71 @@ export function normalizeGameRouteStatus(report, expectedWorldId, now = Date.now
   });
 }
 
+function checkpointDiagnostics(world, readiness, now) {
+  const fresh = readiness?.worldId === world?.id && isSafeInt(readiness?.validUntil)
+    && readiness.validUntil > now;
+  const report = fresh ? readiness.raw?.checkpoint : null;
+  const cachedNumber = world?.status?.['Latest snapshot'];
+  const cachedBytes = world?.status?.['Checkpoint bytes'];
+  const cachedHash = world?.status?.['Checkpoint manifest'];
+  const parseCounter = (value) => /^\d+$/.test(String(value ?? '')) && isSafeInt(Number(value)) ? Number(value) : null;
+  const current = report && isHash(report.manifest_hash) && isSafeInt(report.snapshot_number)
+    ? report : null;
+  const hash = current?.manifest_hash || (isHash(cachedHash) ? cachedHash : null);
+  const number = current?.snapshot_number ?? parseCounter(cachedNumber);
+  const bytes = current ? current.logical_bytes : parseCounter(cachedBytes);
+  const ack = current?.last_replica_ack;
+  const knownAck = ack && isHash(ack.manifest_hash) && isSafeInt(ack.snapshot_number)
+    && isSafeInt(ack.age_ms) && /^scpeer:[a-f\d]{64}$/i.test(ack.peer_id);
+  const exact = knownAck && number === ack.snapshot_number && hash === ack.manifest_hash;
+  let gap = 'Replica lag unknown';
+  if (exact) gap = 'Latest checkpoint acknowledged';
+  else if (knownAck && number > ack.snapshot_number) gap = `${number - ack.snapshot_number} checkpoint numbers ahead of last acknowledgment`;
+  else if (knownAck) gap = 'Acknowledgment does not match the current head';
+  const age = knownAck ? Math.floor((ack.age_ms + Math.max(0, now - readiness.raw.generated_unix_ms)) / 1000) : null;
+  return {
+    hash,
+    fresh: Boolean(current),
+    rows: [
+      { label: 'Accepted checkpoint', value: hash && number !== null
+        ? `#${number} · ${hash.slice(0, 12)}…${isSafeInt(bytes) ? ` · ${(bytes / 1048576).toFixed(2)} MiB` : ' · size unknown'}${current ? '' : ' · last local read'}`
+        : 'Exact checkpoint unavailable', kind: 'neutral', title: hash || undefined },
+      { label: 'Replica acknowledgment', value: knownAck
+        ? `#${ack.snapshot_number} · ${ack.manifest_hash.slice(0, 12)}… · ${Number.isFinite(age) ? `${age}s ago` : 'age unknown'} · ${gap}. Historical receipt, not current recovery proof.`
+        : 'No exact acknowledgment observed in the current daemon session', kind: exact ? 'neutral' : 'warning', title: knownAck ? `${ack.peer_id} · ${ack.manifest_hash}` : undefined },
+      { label: 'Progress at risk', value: knownAck
+        ? `${gap}. Changes after the last replica-acknowledged checkpoint may be lost; unsaved gameplay progress is not measured.`
+        : 'No replica-acknowledged recovery point is known. Local-only saves and unsaved gameplay may be at risk.', kind: 'warning' },
+    ],
+  };
+}
+
 /** Presence, local verification and live authority are deliberately separate. */
 export function gameReadinessCheckpoints({ world = null, route = UNVERIFIED_GAME_ROUTE,
-  localVerification = null } = {}, now = Date.now()) {
+  localVerification = null, readiness = null } = {}, now = Date.now()) {
   const snapshots = world?.snapshots;
   const safety = String(world?.status?.Safety || '').trim();
   const conflict = /conflict|divergen/i.test(safety);
   const degraded = /solo|degraded/i.test(safety);
   const canonical = /^canonical$/i.test(safety);
   const live = isUsableGameRoute(route, world?.id, safety, now);
-  const localCheckCompleted = localVerification?.worldId === world?.id
-    && localVerification?.checkpoint === world?.status?.['Latest snapshot'];
+  const diagnostics = checkpointDiagnostics(world, readiness, now);
+  const localCheckCompleted = Boolean(world?.id && localVerification?.worldId === world.id
+    && !localVerification?.manifestHash && localVerification?.checkpoint === world.status?.['Latest snapshot']);
+  const exactLocalCheck = Boolean(world?.id && localVerification?.worldId === world.id
+    && diagnostics.hash && localVerification?.manifestHash === diagnostics.hash);
 
   const checkpoint = Number.isSafeInteger(snapshots) && snapshots > 0
     ? `${snapshots} stored · not proof of current head`
     : 'No stored copy reported';
   return Object.freeze([
     { label: 'Saved copy', value: checkpoint, kind: snapshots > 0 ? 'neutral' : 'warning' },
-    { label: 'Local integrity', value: localCheckCompleted ? 'Local check completed · exact head not independently bound' : 'Not checked this session', kind: 'neutral' },
+    { label: 'Local integrity', value: exactLocalCheck ? `${diagnostics.fresh ? 'Exact' : 'Last-read'} checkpoint checked locally · not live recovery proof` : localCheckCompleted ? 'Local check completed · exact head not independently bound' : 'Current checkpoint not checked this session', kind: 'neutral' },
     { label: 'Canonical quorum', value: conflict ? 'Conflicting history' : degraded ? 'Reduced safety' : live ? 'Fresh quorum verified' : canonical ? 'History reported · live quorum unverified' : 'Not verified', kind: conflict ? 'danger' : degraded ? 'warning' : live ? 'safe' : 'neutral' },
     { label: 'Hosting consent', value: live ? 'Verified for current host' : 'Current host consent unverified', kind: live ? 'safe' : 'neutral' },
     { label: 'Live Fabric server', value: live ? 'Fresh runtime proof verified' : 'Not verified by live IPC', kind: live ? 'safe' : 'neutral' },
     { label: 'Minecraft route', value: live ? `Verified · ${route.connectionTarget}` : conflict ? 'Not verified · conflicting history' : degraded ? 'Not verified · reduced safety' : route?.verified ? 'Not verified for this world safety state' : route?.label || 'Not verified', kind: live ? 'safe' : route?.state === 'blocked' || conflict ? 'danger' : degraded ? 'warning' : 'neutral' },
+    ...(world?.id ? diagnostics.rows : []),
   ]);
 }
 
@@ -168,6 +211,7 @@ export function updateGameReadinessChecklist(doc, checkpoints) {
     const value = doc.createElement('dd');
     value.textContent = checkpoint.value;
     value.dataset.tone = checkpoint.kind;
+    if (checkpoint.title) value.title = checkpoint.title;
     row.append(key, value);
     list.append(row);
   }

@@ -86,6 +86,7 @@ test('checkpoint, quorum, consent, runtime and route are distinct', () => {
   const withoutProof = gameReadinessCheckpoints({ world });
   assert.deepEqual(withoutProof.map((item) => item.label), [
     'Saved copy', 'Local integrity', 'Canonical quorum', 'Hosting consent', 'Live Fabric server', 'Minecraft route',
+    'Accepted checkpoint', 'Replica acknowledgment', 'Progress at risk',
   ]);
   assert.match(withoutProof[2].value, /unverified/i);
   assert.match(withoutProof[5].value, /not verified/i);
@@ -96,6 +97,27 @@ test('checkpoint, quorum, consent, runtime and route are distinct', () => {
   assert.match(gameReadinessCheckpoints({ world, route: normalizeGameRouteStatus(live(), WORLD, NOW) }, NOW + 11_000)[5].value, /not verified/i);
   assert.match(gameReadinessCheckpoints({ world: { ...world, status: { Safety: 'Conflict' } },
     route: normalizeGameRouteStatus(live(), WORLD, NOW) })[5].value, /not verified/i);
+});
+
+test('replica receipts distinguish exact head, older checkpoint, and expired or wrong-world evidence', () => {
+  const hash = 'a'.repeat(64);
+  const world = { id: WORLD, snapshots: 4, status: { Safety: 'Canonical', 'Latest snapshot': '4', 'Checkpoint manifest': hash, 'Checkpoint bytes': '1048576' } };
+  const receipt = { snapshot_number: 4, manifest_hash: hash, peer_id: `scpeer:${'b'.repeat(64)}`, age_ms: 1500 };
+  const raw = { generated_unix_ms: NOW - 500, checkpoint: { snapshot_number: 4, manifest_hash: hash, logical_bytes: 1048576, last_replica_ack: receipt } };
+  const readiness = { worldId: WORLD, validUntil: NOW + 5000, raw };
+  const read = (value, verification = null, now = NOW) => gameReadinessCheckpoints({ world, readiness: value, localVerification: verification }, now);
+  const current = read(readiness, { worldId: WORLD, manifestHash: hash });
+  assert.match(current[1].value, /Exact checkpoint checked locally/);
+  assert.match(current[6].value, /#4.*1\.00 MiB/);
+  assert.match(current[7].value, /2s ago.*Latest checkpoint acknowledged/);
+  assert.equal(current[7].kind, 'neutral');
+  assert.match(current[8].value, /unsaved gameplay progress is not measured/);
+  const older = read({ ...readiness, raw: { ...raw, checkpoint: { ...raw.checkpoint, last_replica_ack: { ...receipt, snapshot_number: 2, manifest_hash: 'c'.repeat(64) } } } });
+  assert.match(older[7].value, /2 checkpoint numbers ahead/);
+  assert.equal(older[7].kind, 'warning');
+  assert.match(read({ ...readiness, worldId: 'wrong-world' })[7].value, /No exact acknowledgment/);
+  assert.match(read(readiness, null, NOW + 6000)[7].value, /No exact acknowledgment/);
+  assert.match(read(readiness, { worldId: WORLD, manifestHash: 'd'.repeat(64) })[1].value, /not checked/);
 });
 
 test('native route bridge uses only a verified command and never game_endpoint', async () => {

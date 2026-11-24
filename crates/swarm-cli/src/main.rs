@@ -493,6 +493,11 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             match latest {
                 Some(snapshot) => {
                     println!("Latest snapshot: {}", snapshot.snapshot_number);
+                    let checkpoint = host_readiness::CheckpointProgress::from_manifest(&snapshot)?;
+                    println!("Checkpoint manifest: {}", checkpoint.manifest_hash);
+                    if let Some(bytes) = checkpoint.logical_bytes {
+                        println!("Checkpoint bytes: {bytes}");
+                    }
                     println!("Epoch: {}", snapshot.epoch);
                     println!("Sequence: {}", snapshot.sequence);
                     println!("State root: {}", snapshot.state_root);
@@ -850,6 +855,7 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 verify_snapshot_signature(&manifest)?;
                 previous_hash = Some(manifest.manifest_hash()?);
                 println!("OK snapshot #{} {}", manifest.snapshot_number, manifest.state_root);
+                println!("Verified checkpoint: {}", previous_hash.context("verified manifest hash missing")?);
             }
         }
         WorldCommand::Recover { world, snapshot, destination } => {

@@ -19,6 +19,7 @@ let gatewaySelectionQueue = Promise.resolve();
 let gameRouteState = UNVERIFIED_GAME_ROUTE;
 let latestMigrationState = null;
 let localCheckpointVerification = null;
+let latestHostReadiness = null;
 let modsRequestGeneration = 0;
 let connectivityRefreshInFlight = false;
 let connectivityGeneration = 0;
@@ -413,6 +414,7 @@ function renderGameRoute() {
   updateGameReadinessChecklist(document, gameReadinessCheckpoints({
     world: selectedWorld(), route: gameRouteState,
     localVerification: localCheckpointVerification,
+    readiness: latestHostReadiness,
   }));
   ensureGameReconnectActions(document);
   const route = gameRouteState;
@@ -525,6 +527,8 @@ function refreshVisibleMigration() {
 
 
 function renderHostReadiness(readiness) {
+  latestHostReadiness = readiness;
+  renderGameRoute();
   const panel = $('hostReadinessPanel');
   if (!panel) return;
   const claimed = readiness?.state || 'unknown';
@@ -577,7 +581,7 @@ async function refreshHostReadiness(world) {
     const readiness = await backend.hostReadiness(requestedWorldId);
     if (selectedWorldId === requestedWorldId && requestGeneration === hostReadinessRequestGeneration) {
       renderHostReadiness(readiness);
-      if (readiness.safeToShutdown === true && Number.isSafeInteger(readiness.validUntil)) {
+      if (Number.isSafeInteger(readiness.validUntil)) {
         setTimeout(() => {
           if (selectedWorldId === requestedWorldId && requestGeneration === hostReadinessRequestGeneration) {
             renderHostReadiness(null);
@@ -1268,11 +1272,13 @@ async function verifyWorld() {
   const requestedWorldId = worldId();
   localCheckpointVerification = null;
   renderGameRoute();
-  await run('Verifying replica…', () => backend.verifyWorld(requestedWorldId), { successMessage: 'Replica verification completed.' });
+  const result = await run('Verifying replica…', () => backend.verifyWorld(requestedWorldId));
   // Successful CLI exit verifies local storage integrity, not a signed live
   // canonical authority, game route, or permission to start Minecraft.
-  if (requestedWorldId === selectedWorldId && selectedWorld()?.status?.['Latest snapshot']) {
-    localCheckpointVerification = { worldId: requestedWorldId, checkpoint: selectedWorld().status['Latest snapshot'] };
+  if (requestedWorldId === selectedWorldId) {
+    const hashes = [...String(result ?? '').matchAll(/^Verified checkpoint: ([a-f\d]{64})\s*$/gim)];
+    const manifestHash = hashes.at(-1)?.[1];
+    if (manifestHash) localCheckpointVerification = { worldId: requestedWorldId, manifestHash };
   }
   renderGameRoute();
   showInline('worldNotice', 'Replica verification completed. Detailed output is available in Activity.', 'safe');

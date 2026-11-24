@@ -145,13 +145,39 @@ The original `SABATHON_IMPLEMENTATION_PLAN.md` is an historical audit and
 its status labels are not automatically updated by these code changes.
 Items 2, 3, 12, 19, 20 and the baseline of 26 have integrated code and
 automated checks; item 4 now has the default Desktop automation path.
-Items 1, 5 and 6 still need the installed multi-device player journey;
-item 28 needs the complete checkpoint/replica acknowledgment and
-progress-at-risk presentation. Item 13 is the independent field-evidence
+Items 1, 5 and 6 still need the installed multi-device player journey.
+Item 28 now has the shipping Desktop checkpoint and replica diagnostics:
+the local accepted manifest, logical save size, last exact authenticated
+replica receipt in the daemon session, elapsed receipt age, checkpoint-number
+gap, and explicit progress-at-risk warnings. The local integrity check binds
+the manifest hash returned by the verifier, rather than a cached snapshot
+number. Receipt age is not the original save time or proof of current
+recoverability; actual unsaved gameplay loss still needs field measurement.
+Item 13 is the independent field-evidence
 gate, not a unit-test checkbox. Item 49 needs reconciliation against main
 after an authorized merge. Release-gate items 37 and 50 and the P1/P2
 backlog are separate from the Sabathon P0 implementation slice. No field
 acceptance or production release is claimed from this branch report.
+
+### Automatic handoff and checkpoint verification follow-up (24 November)
+
+- Exact `ca83afc` local three-daemon process gate passed both scenarios:
+  signed manual transfer and automatic transfer waiting for an independent
+  witness and explicit target hosting consent. The three replicas converged
+  without manual token exchange. Strict targeted CLI Clippy also passed.
+- A receipt retained for diagnostics after disconnect cannot replace the
+  independently cleared authenticated transfer acknowledgments or quorum
+  evidence. Stale/wrong-world reports never show current replica receipts.
+  The sleep readiness path now requires a signature-verified sleep record,
+  signed accepted epoch, eligible authority, matching fence, exact verified
+  saved manifest and conflict-free history before displaying Sleeping.
+- Required Validation `45387692037` found an intermittent Ubuntu discovery
+  failure where the explicit exact-resolve provider received zero application
+  requests. The query now re-drives reserved explicit dial attempts within
+  its existing deadline and treats provider error responses as incomplete
+  discovery. A handshake-not-yet-complete refusal uses the same existing
+  two-retry per-request budget, with exact request/peer binding. No
+  authentication, quorum verification or request-count limit is relaxed.
 
 ### Final macOS Rust regressions from `ece4b1f` (24 November 2026)
 

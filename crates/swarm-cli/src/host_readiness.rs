@@ -11,7 +11,8 @@ use swarm_consensus::has_quorum;
 use swarm_core::{protocol_v2::verify_world_config_signature, verify_snapshot_signature, DataPaths};
 use swarm_network::{HostCapabilityV1, HostRuntimeReadinessV1, ServerModsReadinessV1};
 use swarm_protocol::{
-    EpochMode, EpochRecordV1, Hash32, PeerId, SnapshotManifestV1, WorldDescriptorV1, WorldId, WorldStatusV1,
+    EpochMode, EpochRecordV1, Hash32, PeerId, SleepRecordV1, SnapshotManifestV1, WorldDescriptorV1, WorldId,
+    WorldStatusV1,
 };
 use swarm_storage::Storage;
 
@@ -66,6 +67,42 @@ pub struct HostReadinessReport {
     pub world_data_replicated: bool,
     pub detail: String,
     pub peers: Vec<HostPeerReadiness>,
+    /// Presentation-only evidence, not authority or recovery permission.
+    #[serde(default)]
+    pub checkpoint: Option<CheckpointProgress>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CheckpointProgress {
+    pub snapshot_number: u64,
+    pub manifest_hash: String,
+    /// Logical file bytes, not compressed network or on-disk allocation.
+    pub logical_bytes: Option<u64>,
+    /// Last exact canonical-head acknowledgement observed by this daemon.
+    /// It is historical evidence, not proof that the peer is still reachable.
+    pub last_replica_ack: Option<ReplicaAcknowledgment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicaAcknowledgment {
+    pub peer_id: String,
+    pub snapshot_number: u64,
+    pub manifest_hash: String,
+    pub age_ms: u64,
+}
+
+impl CheckpointProgress {
+    pub fn from_manifest(manifest: &SnapshotManifestV1) -> Result<Self> {
+        Ok(Self {
+            snapshot_number: manifest.snapshot_number,
+            manifest_hash: manifest.manifest_hash()?.to_string(),
+            logical_bytes: manifest
+                .entries
+                .iter()
+                .try_fold(0u64, |total, entry| total.checked_add(entry.blob.uncompressed_size)),
+            last_replica_ack: None,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -352,21 +389,6 @@ pub fn evaluate_from_storage(
             return Ok(unknown_report(world, local_peer, None, format!("Authority state is unavailable: {error}")))
         }
     };
-    if storage.load_sleep_record(world).is_ok() {
-        return Ok(HostReadinessReport {
-            world_id: world.to_string(),
-            generated_unix_ms: unix_millis()?,
-            local_peer_id: local_peer.to_string(),
-            current_host_peer_id: Some(epoch.authority_peer_id.to_string()),
-            state: HostReadinessState::Sleeping,
-            safe_to_shutdown: true,
-            successor_peer_id: None,
-            handoff_candidate_peer_id: None,
-            world_data_replicated: observations.iter().any(|peer| peer.status.is_some()),
-            detail: "This world is already durably sleeping. Powering off this device will not interrupt a running Minecraft server.".into(),
-            peers: Vec::new(),
-        });
-    }
     let latest = match storage.latest_snapshot(world)? {
         Some(value) => value,
         None => {
@@ -395,7 +417,58 @@ pub fn evaluate_from_storage(
         ));
     }
     let has_conflicts = !storage.list_solo_conflicts(world)?.is_empty();
-    evaluate_host_readiness(local_peer, &descriptor, &epoch, &latest, has_conflicts, observations)
+    let mut report = evaluate_host_readiness(local_peer, &descriptor, &epoch, &latest, has_conflicts, observations)?;
+    // A readable sleep file alone is not a shutdown proof. Bind the signed
+    // boundary to the exact verified checkpoint and accepted authority.
+    match crate::launch_guard::load_sleep_record_fail_closed(storage, world) {
+        Ok(Some(sleep))
+            if !has_conflicts
+                && sleep_boundary_matches(&sleep, &descriptor, &epoch, &latest)?
+                && swarm_core::verify_signature(
+                    epoch.authority_peer_id,
+                    epoch.authority_public_key,
+                    &epoch.signing_bytes()?,
+                    &epoch.signature,
+                )
+                .is_ok() =>
+        {
+            report.state = HostReadinessState::Sleeping;
+            report.safe_to_shutdown = true;
+            report.successor_peer_id = None;
+            report.handoff_candidate_peer_id = None;
+            report.detail =
+                "The signed sleep boundary matches the verified saved checkpoint. The world is durably sleeping."
+                    .into();
+        }
+        Ok(None) => {}
+        _ => {
+            report.state = HostReadinessState::Unknown;
+            report.safe_to_shutdown = false;
+            report.successor_peer_id = None;
+            report.handoff_candidate_peer_id = None;
+            report.detail = "The sleep boundary is invalid, stale, or conflicts with the accepted checkpoint. Shutdown safety is unverified.".into();
+        }
+    }
+    Ok(report)
+}
+
+fn sleep_boundary_matches(
+    sleep: &SleepRecordV1,
+    descriptor: &WorldDescriptorV1,
+    epoch: &EpochRecordV1,
+    latest: &SnapshotManifestV1,
+) -> Result<bool> {
+    Ok(sleep.world_id == descriptor.world_id
+        && sleep.world_id == epoch.world_id
+        && sleep.world_id == latest.world_id
+        && sleep.epoch == epoch.epoch_number
+        && sleep.fencing_token == epoch.fencing_token
+        && sleep.authority_peer_id == epoch.authority_peer_id
+        && sleep.authority_public_key == epoch.authority_public_key
+        && descriptor.member(sleep.authority_peer_id).is_some_and(|member| {
+            member.public_key == sleep.authority_public_key && member.authority_eligible && !member.banned
+        })
+        && sleep.latest_snapshot_hash == latest.manifest_hash()?)
 }
 
 pub fn evaluate_host_readiness(
@@ -448,6 +521,7 @@ pub fn evaluate_host_readiness(
     peers.sort_by(|left, right| left.peer_id.cmp(&right.peer_id));
     let world_data_replicated = peers.iter().any(|peer| peer.current_state);
     let generated_unix_ms = unix_millis()?;
+    let checkpoint = CheckpointProgress::from_manifest(latest)?;
 
     let base = |state: HostReadinessState,
                 safe_to_shutdown: bool,
@@ -465,6 +539,7 @@ pub fn evaluate_host_readiness(
         world_data_replicated,
         detail,
         peers: peers.clone(),
+        checkpoint: Some(checkpoint.clone()),
     };
 
     if local_peer != epoch.authority_peer_id {
@@ -592,6 +667,7 @@ pub fn load_host_readiness_report(paths: &DataPaths, world: WorldId) -> Result<H
         report.safe_to_shutdown = false;
         report.successor_peer_id = None;
         report.handoff_candidate_peer_id = None;
+        report.checkpoint = None;
         report.detail = "Host-readiness data is stale. Keep SwarmCraft running and reconnect peers before deciding whether to shut down.".into();
         for peer in &mut report.peers {
             peer.reachable = false;
@@ -621,6 +697,7 @@ pub fn unknown_report(
         world_data_replicated: false,
         detail,
         peers: Vec::new(),
+        checkpoint: None,
     }
 }
 
@@ -811,6 +888,53 @@ mod tests {
                 recovery_quorum_without_authority: recovery_quorum,
             }),
         }
+    }
+
+    #[test]
+    fn checkpoint_diagnostics_bind_the_exact_manifest_and_logical_size() {
+        let (_, _, mut latest) = fixture(3);
+        latest.entries = vec![swarm_protocol::SnapshotEntry {
+            path: "level.dat".into(),
+            blob: swarm_protocol::BlobDescriptor {
+                hash: Hash32([3; 32]),
+                uncompressed_size: 1_048_576,
+                encoded_size: 512,
+                encoding: swarm_protocol::BlobEncoding::Zstd,
+            },
+        }];
+        let report = CheckpointProgress::from_manifest(&latest).unwrap();
+        assert_eq!(report.manifest_hash, latest.manifest_hash().unwrap().to_string());
+        assert_eq!(report.snapshot_number, latest.snapshot_number);
+        assert_eq!(report.logical_bytes, Some(1_048_576));
+        assert!(report.last_replica_ack.is_none());
+        latest.entries.push(latest.entries[0].clone());
+        latest.entries[1].blob.uncompressed_size = u64::MAX;
+        assert_eq!(CheckpointProgress::from_manifest(&latest).unwrap().logical_bytes, None);
+    }
+
+    #[test]
+    fn sleep_boundary_requires_current_generation_checkpoint_and_eligible_authority() {
+        let (mut descriptor, epoch, latest) = fixture(3);
+        let sleep = SleepRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: epoch.world_id,
+            latest_snapshot_hash: latest.manifest_hash().unwrap(),
+            epoch: epoch.epoch_number,
+            fencing_token: epoch.fencing_token,
+            authority_peer_id: epoch.authority_peer_id,
+            authority_public_key: epoch.authority_public_key,
+            signature: Vec::new(),
+        };
+        // This helper binds fields; production also verifies the record signature.
+        assert!(sleep_boundary_matches(&sleep, &descriptor, &epoch, &latest).unwrap());
+        let stale = SleepRecordV1 { epoch: epoch.epoch_number - 1, ..sleep.clone() };
+        assert!(!sleep_boundary_matches(&stale, &descriptor, &epoch, &latest).unwrap());
+        let stale = SleepRecordV1 { fencing_token: epoch.fencing_token - 1, ..sleep.clone() };
+        assert!(!sleep_boundary_matches(&stale, &descriptor, &epoch, &latest).unwrap());
+        let wrong = SleepRecordV1 { latest_snapshot_hash: Hash32([0; 32]), ..sleep.clone() };
+        assert!(!sleep_boundary_matches(&wrong, &descriptor, &epoch, &latest).unwrap());
+        descriptor.members[0].banned = true;
+        assert!(!sleep_boundary_matches(&sleep, &descriptor, &epoch, &latest).unwrap());
     }
 
     #[test]

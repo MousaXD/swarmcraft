@@ -216,6 +216,8 @@ struct LeaseRuntime {
     replications: HashMap<(TransportPeerId, WorldId), ReplicationState>,
     transfer_acks: Vec<TransferDeliveryAck>,
     transfer_replica_acks: HashMap<(WorldId, PeerId), Hash32>,
+    // Historical diagnostics only; never used by transfer or quorum gates.
+    last_checkpoint_ack: HashMap<WorldId, (PeerId, ReplicaAckV1, Instant)>,
     transfer_manifest_requests: HashMap<(WorldId, PeerId), (Hash32, Instant)>,
     live_quorum_vote_nonces: HashMap<(WorldId, PeerId, [u8; 32]), u64>,
 }
@@ -2507,7 +2509,17 @@ fn publish_host_readiness_snapshot(
         .load_world_descriptor(world)
         .map(|descriptor| peer_readiness_observations(&descriptor, identity.peer_id(), runtime, now))
         .unwrap_or_default();
-    let report = host_readiness::evaluate_from_storage(storage, identity.peer_id(), world, &observations)?;
+    let mut report = host_readiness::evaluate_from_storage(storage, identity.peer_id(), world, &observations)?;
+    if let (Some(checkpoint), Some((peer, ack, observed_at))) =
+        (&mut report.checkpoint, runtime.last_checkpoint_ack.get(&world))
+    {
+        checkpoint.last_replica_ack = Some(host_readiness::ReplicaAcknowledgment {
+            peer_id: peer.to_string(),
+            snapshot_number: ack.snapshot_number,
+            manifest_hash: ack.manifest_hash.to_string(),
+            age_ms: now.saturating_duration_since(*observed_at).as_millis().try_into().unwrap_or(u64::MAX),
+        });
+    }
     host_readiness::publish_report(paths, world, &report)
 }
 
@@ -3234,6 +3246,9 @@ fn handle_request(
                     && current.state_root == ack.state_root
                 {
                     state.leases.transfer_replica_acks.insert((ack.world_id, application_peer), ack.manifest_hash);
+                    // A historical receipt survives a disconnect for display,
+                    // but the separate transfer gate is still cleared above.
+                    state.leases.last_checkpoint_ack.insert(ack.world_id, (application_peer, ack.clone(), state.now));
                 }
             }
             info!(peer = %application_peer, world = %ack.world_id, snapshot = ack.snapshot_number, "replica verified snapshot");
