@@ -188,8 +188,21 @@ fn move_file_write_through(source: &Path, destination: &Path, replace_existing: 
         fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
     }
 
-    let source = source.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
-    let destination = destination.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    // Rust's filesystem APIs support long Windows paths, but calling the
+    // raw Win32 rename API with an ordinary absolute path does not reliably
+    // do so. Canonicalize only the existing parent: the destination may not
+    // exist, and the leaf must remain the entry we are actually renaming.
+    // Windows canonicalize produces a verbatim (extended-length) path.
+    fn native_path(path: &Path) -> std::io::Result<Vec<u16>> {
+        let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let name = path
+            .file_name()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing transaction filename"))?;
+        let absolute = fs::canonicalize(parent)?.join(name);
+        Ok(absolute.as_os_str().encode_wide().chain(std::iter::once(0)).collect())
+    }
+    let source = native_path(source)?;
+    let destination = native_path(destination)?;
     let mut flags = MOVEFILE_WRITE_THROUGH;
     if replace_existing {
         flags |= MOVEFILE_REPLACE_EXISTING;
@@ -219,4 +232,29 @@ pub(crate) fn sync_parent(parent: &Path) -> Result<(), StorageError> {
 
 pub(crate) fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
     StorageError::Io { path: path.into(), source }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn atomic_publication_and_removal_support_deep_import_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp
+            .path()
+            .join(".import-staging")
+            .join("a".repeat(64))
+            .join("worlds")
+            .join("b".repeat(64))
+            .join("metadata/membership-history");
+        let path = parent.join(format!("{}.postcard", "c".repeat(64)));
+        assert!(path.as_os_str().to_string_lossy().len() > 260);
+        durable_atomic_write(&path, b"first").unwrap();
+        assert_eq!(read_canonical_file(&path).unwrap(), b"first");
+        durable_atomic_write(&path, b"replacement").unwrap();
+        assert_eq!(read_canonical_file(&path).unwrap(), b"replacement");
+        assert!(durable_remove(&path).unwrap());
+        assert!(!canonical_file_exists(&path).unwrap());
+    }
 }

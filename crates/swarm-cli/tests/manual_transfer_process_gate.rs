@@ -512,7 +512,7 @@ mod hosted_live {
     };
     use swarm_cli::game_route_api::GameRouteStatusV1;
 
-    struct LiveDaemon(Child);
+    struct LiveDaemon(Child, std::path::PathBuf);
 
     impl Drop for LiveDaemon {
         fn drop(&mut self) {
@@ -520,11 +520,21 @@ mod hosted_live {
             // Kill its JVM too on a failed assertion or a simulated crash.
             let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", self.0.id())]).status();
             let _ = self.0.wait();
+            if std::thread::panicking() {
+                let log = fs::read_to_string(&self.1).unwrap_or_default();
+                let lines = log.lines().rev().take(100).collect::<Vec<_>>();
+                eprintln!(
+                    "hosted daemon tail ({}):\n{}",
+                    self.1.display(),
+                    lines.into_iter().rev().collect::<Vec<_>>().join("\n")
+                );
+            }
         }
     }
 
     fn spawn(peer: &PeerFixture, port: u16, addresses: &[String]) -> LiveDaemon {
-        let log = fs::File::create(peer.paths.root.join("hosted-daemon.log")).unwrap();
+        let log_path = peer.paths.root.join("hosted-daemon.log");
+        let log = fs::File::create(&log_path).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_swarmcraft"));
         command
             .arg("--data-dir")
@@ -532,14 +542,14 @@ mod hosted_live {
             .arg("daemon")
             .arg("--listen")
             .arg(format!("/ip4/127.0.0.1/udp/{port}/quic-v1"))
-            .env("RUST_LOG", "info")
+            .env("RUST_LOG", "info,swarm_network::game_transport=debug,swarm_cli::live_authority=debug")
             .stdout(log.try_clone().unwrap())
             .stderr(log)
             .process_group(0);
         for address in addresses {
             command.arg("--peer").arg(address);
         }
-        LiveDaemon(command.spawn().unwrap())
+        LiveDaemon(command.spawn().unwrap(), log_path)
     }
 
     fn runtime(peer: &PeerFixture, args: &[&str]) -> String {

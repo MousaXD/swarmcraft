@@ -331,12 +331,18 @@ impl GameStreamReceiver {
         }
         verify_response_signature(&frame.offer, &frame.response)?;
         validate_timestamps(&frame.offer, &frame.response, now)?;
+        // The signed response challenge was already used by the host route
+        // signer. Obtain a new independent quorum/Fabric proof for admission
+        // instead of replaying that consumed nonce. The durable replay ledger
+        // below STILL consumes the original signed transcript challenge.
+        let mut admission_nonce = [0; 32];
+        OsRng.fill_bytes(&mut admission_nonce);
         validate_live_evidence_bounded(
             Arc::clone(&self.evidence),
             Arc::clone(&self.proof_workers),
             &frame.offer,
             app_peer,
-            frame.response.challenge.nonce,
+            admission_nonce,
             now,
         )
         .await?;

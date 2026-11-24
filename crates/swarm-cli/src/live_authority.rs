@@ -621,14 +621,15 @@ impl FreshAuthoritySource for SignedLiveAuthoritySource {
         let started = Instant::now();
         let deadline =
             started.checked_add(Duration::from_millis(MAX_FRESH_PROOF_MS)).ok_or(GameRouteError::StaleAuthority)?;
-        let observed = self
-            .provider
-            .acquire(world, requester, challenge, deadline)
-            .map_err(|_| GameRouteError::UnverifiedAuthority)?;
+        let observed = self.provider.acquire(world, requester, challenge, deadline).map_err(|error| {
+            tracing::debug!(%world, %error, "independent live authority acquisition refused");
+            GameRouteError::UnverifiedAuthority
+        })?;
         require_monotonic_proof_deadline(started)?;
-        let verified = self
-            .verify_current(world, requester, challenge, &observed)
-            .map_err(|_| GameRouteError::UnverifiedAuthority)?;
+        let verified = self.verify_current(world, requester, challenge, &observed).map_err(|error| {
+            tracing::debug!(%world, %error, "independent live authority verification refused");
+            GameRouteError::UnverifiedAuthority
+        })?;
         // Local snapshot verification and certificate validation are also
         // part of the proof budget. Wall-clock expiry alone is not enough:
         // a backwards clock jump must not authorize a slow/stale proof.

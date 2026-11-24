@@ -5,10 +5,11 @@
 use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
 use std::{
+    collections::HashSet,
     net::{Ipv4Addr, SocketAddrV4, TcpListener as StdTcpListener},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -65,6 +66,7 @@ struct SyntheticQuorum {
     offer: MinecraftRouteOfferV1,
     player: PeerId,
     quorum_ready: AtomicBool,
+    used_nonces: Mutex<HashSet<[u8; 32]>>,
 }
 
 /// Only the client-side verifier is delayed. The real authenticated host
@@ -100,7 +102,12 @@ impl FreshAuthoritySource for SyntheticQuorum {
         requester: PeerId,
         nonce: [u8; 32],
     ) -> Result<FreshAuthorityEvidence, GameRouteError> {
-        if !self.quorum_ready.load(Ordering::SeqCst) || world != self.offer.world_id || requester != self.player {
+        if !self.quorum_ready.load(Ordering::SeqCst)
+            || world != self.offer.world_id
+            || requester != self.player
+            || nonce == [0; 32]
+            || !self.used_nonces.lock().unwrap().insert(nonce)
+        {
             return Err(GameRouteError::UnverifiedAuthority);
         }
         let now = unix_ms();
@@ -251,6 +258,7 @@ async fn network_resolver_requires_signed_host_challenge_and_fresh_independent_e
             offer: offer.clone(),
             player: player_app,
             quorum_ready: AtomicBool::new(true),
+            used_nonces: Mutex::new(HashSet::new()),
         });
         let delayed_client_proof = Arc::new(DelayedClientProof {
             source: Arc::clone(&quorum),

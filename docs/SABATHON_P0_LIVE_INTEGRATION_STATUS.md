@@ -392,3 +392,24 @@ or that the release has passed. Do not replace it with configured
   establish the fresh invitation/bootstrap journey, real Microsoft account
   login, independent machines/WAN, or in-game inventory continuity. Those
   gates remain open. No security or memory-admission rule was relaxed.
+
+### First real gateway gate findings (24 November)
+
+Required Validation `45396688375` on `226c4751` passed Linux Rust,
+process-level acceptance and the package builds, but the new real Minecraft
+status exchange reset its initial connection. Windows import tests also
+failed on long membership-history paths. The raw Windows write-through rename
+now uses extended-length paths derived from canonical existing parents;
+replacement and removal have a dedicated deep-path Windows regression.
+
+The host signer, route verifier and incoming stream admission had reused one
+signed transcript nonce for separate independent quorum collections. The
+production collector correctly rejects duplicate live nonces; the old
+synthetic source did not. The verifier and host stream admission now use
+separate unpredictable fresh evidence nonces, while preserving exact signed
+transcript binding, single-use verification and the durable replay ledger.
+The real QUIC resolver-to-gateway regression now rejects every repeated
+proof nonce across the signer, verifier and stream endpoints, and passed
+locally. No freshness deadline or quorum requirement was relaxed. The hosted
+gate prints bounded daemon diagnostics on failure. Windows and actual
+Minecraft verification of these repairs require the new CI run.

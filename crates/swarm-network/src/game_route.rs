@@ -388,8 +388,15 @@ impl RouteVerifier {
         let signature = Signature::from_slice(&response.signature).map_err(|_| GameRouteError::InvalidSignature)?;
         key.verify(&response.signing_bytes()?, &signature).map_err(|_| GameRouteError::InvalidSignature)?;
 
-        let evidence =
-            source.verify_fresh(expected_world, response.challenge.requester_peer_id, response.challenge.nonce)?;
+        // The host already used the signed transcript challenge to collect
+        // its own evidence. Reusing it here (especially on the self-host
+        // path) makes a genuine nonce-rejecting quorum collector refuse the
+        // verifier. The transcript is still verified and consumed exactly
+        // once above; this separate unpredictable nonce requests an
+        // independent proof of every signed canonical field below.
+        let mut proof_nonce = [0; 32];
+        OsRng.fill_bytes(&mut proof_nonce);
+        let evidence = source.verify_fresh(expected_world, response.challenge.requester_peer_id, proof_nonce)?;
         if evidence.world_id != offer.world_id
             || evidence.realm_hash != offer.realm_hash
             || evidence.authority_peer_id != offer.authority_peer_id
@@ -406,7 +413,7 @@ impl RouteVerifier {
             || evidence.consent_revision != offer.consent_revision
             || evidence.runtime_instance_nonce != offer.runtime_instance_nonce
             || evidence.runtime_ready_proof_hash != offer.runtime_ready_proof_hash
-            || evidence.challenge_nonce != response.challenge.nonce
+            || evidence.challenge_nonce != proof_nonce
         {
             return Err(GameRouteError::WrongAuthority);
         }
