@@ -170,6 +170,10 @@ pub enum WireRequest {
     // These are only accepted for the exact locally staged signed invitation.
     JoinMembershipProposal(Box<DiscoveryMembershipProofV1>),
     JoinMembershipCommit(Box<DiscoveryMembershipProofV1>),
+    // Append-only; authenticated data-only history exchange.
+    HistoricalReplayProof {
+        world_id: WorldId,
+    },
 }
 
 impl WireRequest {
@@ -200,7 +204,8 @@ impl WireRequest {
             | Self::MissingBlobs { world_id, .. }
             | Self::BlobChunk { world_id, .. }
             | Self::HostCapability { world_id }
-            | Self::HostFabricChallenge { world_id, .. } => Some(*world_id),
+            | Self::HostFabricChallenge { world_id, .. }
+            | Self::HistoricalReplayProof { world_id } => Some(*world_id),
             Self::LeaveRequest(request) => Some(request.world_id),
             Self::SnapshotManifest(manifest) => Some(manifest.world_id),
             Self::ReplicaAck(ack) => Some(ack.world_id),
@@ -274,6 +279,9 @@ impl WireRequest {
             Self::HostFabricChallenge { world_id, nonce } if *world_id == WorldId::default() || *nonce == [0; 32] => {
                 Err(WireLimitError::InvalidHostFabricChallenge)
             }
+            Self::HistoricalReplayProof { world_id } if *world_id == WorldId::default() => {
+                Err(WireLimitError::InvalidHistoricalReplayWorld)
+            }
             _ => Ok(()),
         }
     }
@@ -315,6 +323,9 @@ pub enum WireResponse {
     // Signed bytes are decoded and verified by the independent authority
     // source; the wire response itself does not assert readiness or authority.
     HostFabricAttestation(Option<Vec<u8>>),
+    // An absent proof is an explicit refusal, not permission to bootstrap
+    // a latest epoch without validating the historical transition chain.
+    HistoricalReplayProof(Option<Vec<u8>>),
 }
 
 fn validate_membership_proof_size(proof: &DiscoveryMembershipProofV1) -> Result<(), WireLimitError> {
@@ -367,6 +378,11 @@ impl WireResponse {
             Self::HostFabricAttestation(Some(bytes)) if bytes.len() > MAX_HOST_FABRIC_ATTESTATION_BYTES => {
                 Err(WireLimitError::HostFabricAttestationTooLarge(bytes.len()))
             }
+            Self::HistoricalReplayProof(Some(bytes))
+                if bytes.is_empty() || bytes.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES =>
+            {
+                Err(WireLimitError::HistoricalReplayProofTooLarge(bytes.len()))
+            }
             _ => Ok(()),
         }
     }
@@ -393,6 +409,10 @@ fn validate_announcement_size(value: &WorldAnnouncementV1) -> Result<(), WireLim
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WireLimitError {
+    #[error("historical replay query lacks a valid world")]
+    InvalidHistoricalReplayWorld,
+    #[error("historical replay proof is empty or exceeds the encoded byte limit: {0}")]
+    HistoricalReplayProofTooLarge(usize),
     #[error("host Fabric challenge lacks a valid world or fresh nonce")]
     InvalidHostFabricChallenge,
     #[error("host Fabric attestation is {0} bytes; maximum is {MAX_HOST_FABRIC_ATTESTATION_BYTES}")]
@@ -448,6 +468,23 @@ mod tests {
             finished: false,
         };
         assert_eq!(request.validate_limits(), Err(WireLimitError::BlobChunkTooLarge(MAX_BLOB_CHUNK + 1)));
+    }
+
+    #[test]
+    fn historical_replay_wire_limits_and_membership_scope() {
+        let world = WorldId([17; 32]);
+        let request = WireRequest::HistoricalReplayProof { world_id: world };
+        assert_eq!(request.membership_world_id(), Some(world));
+        assert!(request.validate_limits().is_ok());
+        assert!(WireRequest::HistoricalReplayProof { world_id: WorldId::default() }.validate_limits().is_err());
+        assert!(WireResponse::HistoricalReplayProof(None).validate_limits().is_ok());
+        assert!(WireResponse::HistoricalReplayProof(Some(vec![])).validate_limits().is_err());
+        assert!(WireResponse::HistoricalReplayProof(Some(vec![0; swarm_protocol::MAX_REPLAY_PROOF_BYTES]))
+            .validate_limits()
+            .is_ok());
+        assert!(WireResponse::HistoricalReplayProof(Some(vec![0; swarm_protocol::MAX_REPLAY_PROOF_BYTES + 1]))
+            .validate_limits()
+            .is_err());
     }
 
     #[test]

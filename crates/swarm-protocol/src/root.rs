@@ -20,6 +20,9 @@ pub use v2::*;
 mod discovery;
 pub use discovery::*;
 
+mod historical_replay;
+pub use historical_replay::*;
+
 mod semantics;
 
 use serde::{Deserialize, Serialize};

@@ -269,6 +269,57 @@ impl Storage {
         Ok(Some(read_canonical_file(&path)?))
     }
 
+    /// Store a data-only replay envelope after the caller verifies its
+    /// signatures and transition evidence. It is tied to the exact already
+    /// committed membership and is never read by live authority admission.
+    pub fn stage_historical_replay_proof(
+        &self,
+        world: WorldId,
+        membership_hash: Hash32,
+        encoded: &[u8],
+    ) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
+        if encoded.is_empty()
+            || encoded.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES
+            || canonical_file_exists(&self.control_path(world, "epoch.postcard"))?
+            || self.load_membership_record(world)?.record_hash()? != membership_hash
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        let path = self.control_path(world, &format!("pending-replay-{membership_hash}.postcard"));
+        // Keep the first verified replay target for this membership until
+        // catch-up is finished. A new save may advance the sender's head;
+        // it must not replace a partially downloaded replay's commitment.
+        if canonical_file_exists(&path)? {
+            return if read_canonical_file(&path)? == encoded {
+                Ok(())
+            } else {
+                Err(StorageError::WorldMetadataMismatch)
+            };
+        }
+        durable_atomic_write(&path, encoded)
+    }
+
+    pub fn load_staged_historical_replay_proof(
+        &self,
+        world: WorldId,
+        membership_hash: Hash32,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
+        if self.load_membership_record(world)?.record_hash()? != membership_hash {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        let path = self.control_path(world, &format!("pending-replay-{membership_hash}.postcard"));
+        if !canonical_file_exists(&path)? {
+            return Ok(None);
+        }
+        let bytes = read_canonical_file(&path)?;
+        if bytes.is_empty() || bytes.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(Some(bytes))
+    }
+
     fn history_path(&self, world: WorldId, name: &str) -> Result<PathBuf, StorageError> {
         let directory = self.control_path(world, "authority-history");
         match fs::symlink_metadata(&directory) {

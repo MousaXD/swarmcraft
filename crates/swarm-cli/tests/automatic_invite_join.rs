@@ -253,3 +253,83 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
     assert_eq!(c.storage.load_membership_record(world).unwrap(), committed);
     assert_eq!(c.storage.load_world_descriptor(world).unwrap().members, committed.members);
 }
+
+#[test]
+fn late_join_after_signed_wake_receives_verified_historical_proof_without_live_epoch() {
+    let a = peer_fixture();
+    let b = peer_fixture();
+    let local_ip = local_non_loopback_ipv4();
+    let output = run_cli(
+        &a,
+        &["world", "create", "--name", "historical-replay-join", "--minecraft", "26.1.2", "--fabric-loader", "0.19.3"],
+    );
+    let world: WorldId = output.lines().find_map(|line| line.strip_prefix("World ID: ")).unwrap().parse().unwrap();
+    let first = a.storage.load_epoch_record(world).unwrap();
+    let base = a.storage.latest_snapshot(world).unwrap().unwrap();
+    // Exercise a genuine signed sleep boundary and promoted checkpoint,
+    // without starting a Minecraft JVM or weakening the RAM admission gate.
+    let mut sleep = swarm_protocol::SleepRecordV1 {
+        protocol_version: swarm_protocol::PROTOCOL_VERSION,
+        world_id: world,
+        latest_snapshot_hash: base.manifest_hash().unwrap(),
+        epoch: first.epoch_number,
+        fencing_token: first.fencing_token,
+        authority_peer_id: a.identity.peer_id(),
+        authority_public_key: a.identity.public_key(),
+        signature: Vec::new(),
+    };
+    sleep.signature = a.identity.sign(&sleep.signing_bytes().unwrap());
+    a.storage.save_sleep_record(&sleep).unwrap();
+    let mut next = swarm_protocol::EpochRecordV1 {
+        epoch_number: first.epoch_number + 1,
+        fencing_token: first.fencing_token + 1,
+        previous_epoch_hash: Some(first.record_hash().unwrap()),
+        reason: "wake from durable sleep".into(),
+        signature: Vec::new(),
+        ..first.clone()
+    };
+    next.signature = a.identity.sign(&next.signing_bytes().unwrap());
+    a.storage.save_epoch_record(&next).unwrap();
+    a.storage.clear_sleep_record(world).unwrap();
+    swarm_cli::migration::ensure_authority_artifacts(&a.storage, &a.identity, &next).unwrap();
+    assert_eq!(a.storage.latest_snapshot(world).unwrap().unwrap().epoch, next.epoch_number);
+    let diagnostics = ConnectivityDiagnosticsV1 {
+        local_addresses: vec![automatic_transport_address(&a, local_ip)],
+        ..Default::default()
+    };
+    fs::write(a.paths.root.join(DEFAULT_CONNECTIVITY_DIAGNOSTICS_JSON_FILE), serde_json::to_vec(&diagnostics).unwrap())
+        .unwrap();
+    let token = run_cli(&a, &["invite", "create", &world.to_string()]);
+    let _daemon_a = spawn_daemon(&a, local_ip);
+    let daemon_b = spawn_daemon(&b, local_ip);
+    thread::sleep(Duration::from_secs(1));
+    assert!(run_cli(&b, &["world", "join", &token]).contains("Join request staged"));
+    wait_until("authenticated historical replay proof staged", Duration::from_secs(60), || {
+        let Ok(membership) = b.storage.load_membership_record(world) else { return false };
+        let Ok(hash) = membership.record_hash() else { return false };
+        b.storage.load_staged_historical_replay_proof(world, hash).is_ok_and(|proof| proof.is_some())
+    });
+    let membership = b.storage.load_membership_record(world).unwrap();
+    assert_eq!(membership.epoch, 2);
+    let membership_hash = membership.record_hash().unwrap();
+    let bytes = b.storage.load_staged_historical_replay_proof(world, membership_hash).unwrap().unwrap();
+    let proof: swarm_protocol::HistoricalReplayProofV1 = postcard::from_bytes(&bytes).unwrap();
+    let verified = swarm_cli::historical_authority::verify_replay_proof(
+        proof,
+        &b.storage.load_world(world).unwrap().genesis,
+        &membership,
+    )
+    .unwrap();
+    assert_eq!(verified.proof().epochs, vec![first, next]);
+    assert_eq!(verified.proof().checkpoints.len(), 2);
+    // Metadata proof receipt must never become a live epoch, checkpoint
+    // receipt, config, or implicit hosting consent.
+    assert!(b.storage.load_epoch_record(world).is_err());
+    assert!(b.storage.latest_snapshot(world).unwrap().is_none());
+    assert!(b.storage.load_world_config(world).is_err());
+    assert!(swarm_cli::hosting_budget::load_consent(&b.paths, world).unwrap().is_none());
+    drop(daemon_b);
+    let reopened = Storage::open(b.paths.root.clone()).unwrap();
+    assert_eq!(reopened.load_staged_historical_replay_proof(world, membership_hash).unwrap(), Some(bytes));
+    assert!(reopened.load_epoch_record(world).is_err());
+}

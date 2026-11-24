@@ -619,3 +619,36 @@ against each checkpoint boundary, and persist them through a replay-specific
 state machine that cannot activate a retired generation. No wire replay,
 late join after migration, or physical gameplay certification is claimed
 by the archive implementation.
+
+### Certified replay proof exchange (25 November)
+
+The bounded V1 historical proof now includes the complete signed membership
+and configuration chains, all epoch records, exact checkpoint references,
+and one transition proof per successor. Validation requires all three
+signed transfer phases, or the recovery certificate with unique valid
+historical voter signatures and a majority, or an exact creator-signed
+sole-member sleep boundary. Checkpoint number, sequence, state root and
+promotion continuity must match. Solo/divergent histories and incomplete
+or pruned ancestry fail closed. Each actual checkpoint manifest still
+requires independent signature, parent and blob verification.
+
+The daemon now automatically requests the proof for newly committed
+members of migrated worlds. Only a connection-authenticated current
+member may request it from the accepted authority. Bounded workers
+collect/verify the proof off the lease event loop; the authority rechecks
+the requester, membership and generation before sending. The receiver
+binds the envelope to its exact committed membership and durably stages
+it without creating a live epoch, config, snapshot or replica receipt.
+Ordinary first-contact/live snapshot and epoch admission is blocked
+until the signed join and any required replay complete.
+
+Regression: a real two-daemon invitation after a signed sole-member
+sleep/wake stages the verified two-epoch proof, survives reopening
+storage, and never grants live authority or hosting consent. Separate
+fixtures verify a manual transfer followed by majority recovery, rejecting
+wrong transfer bases, insufficient recovery votes, and missing joint
+membership certificates. This is proof exchange, not full cross-generation
+checkpoint replication: the remaining step is authenticated resumable
+manifest/blob replay and crash-safe publication of the final verified
+canonical head and control state, with a fresh live quorum still required
+for routing. No field certification is claimed.
