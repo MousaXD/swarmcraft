@@ -525,3 +525,38 @@ These are same-runner processes and real server protocol status exchanges,
 not authenticated player login, actual inventory continuity, or independent
 physical-device field acceptance. The updated complete three-peer public
 Create/Invite/Join test had passed locally on `9765afb` in 13.47 seconds.
+
+### First-play quorum-of-one and CI fixture ordering (24 November)
+
+The subsequent exact-SHA Required Validation `45420043497` on
+`54603b9` passed the entire hosted live Minecraft workflow, including
+the three standalone success-marker assertions. Linux/macOS Rust then
+failed during fixture construction: configuration publication preceded
+the accepted membership/epoch on which its signer validation depends.
+The fixture now writes its signed genesis epoch and membership before
+configuration and preserves every partition safety assertion.
+
+Audit of first Play found a distinct product gap. The Fabric guard
+previously treated one-member descriptors as exempt from live authority
+permits even when the world had a signed quorum-of-one generation.
+That prevented the first signed route and left the runtime policy tied to
+an unsigned member count. The supervisor now requires a live advancing
+permit for signed quorum worlds, including new one-member worlds and
+one-member wake generations, and passes the guard policy explicitly to
+Fabric. The legacy exclusive solo path remains distinct and rechecks its
+sole signed membership while running and before checkpoint publication.
+The clean-machine acceptance script now exercises the actual daemon-owned
+gateway, verifies signed route evidence and Minecraft status at genesis
+and after an explicit wake on a restarted daemon, asserts the stable
+gateway address and retains real managed Java installation, EULA,
+hosting consent, checkpoint and save-marker checks.
+
+The changed Rust and Fabric code and revised real-player gate require
+new exact-SHA CI evidence. Formatting, diff, shell syntax and embedded
+Python syntax checks passed locally. The late-join audit also identified
+an unresolved gap for worlds beyond their first checkpoint: the initial
+replica push currently offers the latest manifest despite direct-parent
+validation, and an epoch must be installed at its exact base. A bounded
+parent-by-parent history sync (including historical epochs/config where
+applicable) is still required. Do not relax snapshot ancestry validation
+or count a late join as playable before verified catch-up.

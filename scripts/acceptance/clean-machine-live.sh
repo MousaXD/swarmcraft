@@ -8,6 +8,7 @@ DATA="${SWARMCRAFT_ACCEPTANCE_DATA_DIR:-$(mktemp -d)}"
 LOG_DIR="${SWARMCRAFT_ACCEPTANCE_LOG_DIR:-$(mktemp -d)}"
 KEEP_DATA="${SWARMCRAFT_ACCEPTANCE_KEEP_DATA:-0}"
 LAUNCH_PID=""
+FIRST_GATEWAY=""
 
 cleanup() {
   if [[ -n "$LAUNCH_PID" ]] && kill -0 "$LAUNCH_PID" 2>/dev/null; then
@@ -92,30 +93,134 @@ wait_phase() {
   return 1
 }
 
+# Query actual Minecraft through the daemon-owned stable gateway. Status
+# is deliberately distinct from authenticated account login or gameplay.
+probe_minecraft_status() {
+  python3 - "$1" <<'PYTHON'
+import json
+import socket
+import struct
+import sys
+
+host, port = sys.argv[1].rsplit(":", 1)
+assert host == "127.0.0.1"
+port = int(port)
+assert 0 < port <= 65535
+
+def varint(value):
+    encoded = bytearray()
+    while True:
+        part = value & 127
+        value >>= 7
+        encoded.append(part | (128 if value else 0))
+        if not value:
+            return bytes(encoded)
+
+def read_varint(stream):
+    value = 0
+    for shift in range(0, 35, 7):
+        part = stream.read(1)
+        if not part:
+            raise EOFError("truncated Minecraft status response")
+        value |= (part[0] & 127) << shift
+        if not part[0] & 128:
+            return value
+    raise ValueError("invalid Minecraft status VarInt")
+
+with socket.create_connection((host, port), timeout=5) as sock:
+    sock.settimeout(25)
+    name = b"localhost"
+    handshake = (b"\x00" + varint(0xffffffff) + varint(len(name))
+                 + name + struct.pack(">H", port) + b"\x01")
+    sock.sendall(varint(len(handshake)) + handshake + b"\x01\x00")
+    with sock.makefile("rb") as stream:
+        length = read_varint(stream)
+        assert 1 <= length <= 1048576
+        import io
+        packet = io.BytesIO(stream.read(length))
+        assert len(packet.getbuffer()) == length
+        assert read_varint(packet) == 0
+        body_length = read_varint(packet)
+        body = packet.read()
+        assert len(body) == body_length
+        status = json.loads(body)
+        assert "26.1.2" in status["version"]["name"], status
+        print(json.dumps(status))
+PYTHON
+}
+
+verify_live_gateway() {
+  local label="$1" expected_epoch="$2" raw endpoint selected=false
+  local deadline=$((SECONDS + 180))
+  while (( SECONDS < deadline )); do
+    kill -0 "$LAUNCH_PID" 2>/dev/null || return 1
+    if [[ "$selected" == false ]] && "$CLI" --data-dir "$DATA" world game-route-select "$WORLD" >/dev/null 2>&1; then
+      selected=true
+    fi
+    if [[ "$selected" == true ]]; then
+      raw="$("$CLI" --data-dir "$DATA" world game-route-status "$WORLD" --json 2>/dev/null || true)"
+      if [[ -n "$raw" ]] && endpoint="$(python3 -c '
+import json, sys
+s = json.load(sys.stdin)
+assert s["world_id"] == sys.argv[1]
+assert s["state"] == "verified"
+assert all(s[key] is True for key in (
+    "quorum_verified", "hosting_consent_verified", "server_ready", "route_verified"))
+assert s["epoch"] == int(sys.argv[2])
+assert s["fencing_token"] == int(sys.argv[2])
+assert s["authority_peer_id"] and s["snapshot_hash"]
+assert s["valid_until_unix_ms"] > s["verified_at_unix_ms"]
+assert s["local_gateway"].startswith("127.0.0.1:")
+print(s["local_gateway"])
+' "$WORLD" "$expected_epoch" <<<"$raw" 2>/dev/null)"; then
+        printf '%s\n' "$raw" >"$LOG_DIR/$label.route.json"
+        # Once a route is verified, a failed real status exchange is a
+        # product failure, not a reason to retry until a green sample.
+        probe_minecraft_status "$endpoint" >"$LOG_DIR/$label.minecraft-status.json" || return 1
+        if [[ -z "$FIRST_GATEWAY" ]]; then
+          FIRST_GATEWAY="$endpoint"
+        else
+          [[ "$FIRST_GATEWAY" == "$endpoint" ]] || {
+            printf 'Gateway address changed after restart: %s -> %s\n' "$FIRST_GATEWAY" "$endpoint" >&2
+            return 1
+          }
+        fi
+        printf 'Verified signed gateway and real Minecraft status: %s epoch=%s\n' "$endpoint" "$expected_epoch"
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  printf 'No verified live gateway for %s at epoch %s\n' "$WORLD" "$expected_epoch" >&2
+  return 1
+}
+
 start_runtime_and_wait_ready() {
-  local label="$1"
-  "$RUNTIME" --data-dir "$DATA" launch "$WORLD" >"$LOG_DIR/$label.stdout" 2>"$LOG_DIR/$label.stderr" &
+  local label="$1" expected_epoch="$2"
+  # A signed quorum-of-one is still a quorum. The actual owner must be the
+  # daemon, not a detached standalone Java launcher with no live registry.
+  if [[ "$expected_epoch" != "1" ]]; then
+    "$CLI" --data-dir "$DATA" world wake "$WORLD"
+  fi
+  "$CLI" --data-dir "$DATA" daemon --listen /ip4/127.0.0.1/udp/0/quic-v1 >"$LOG_DIR/$label.stdout" 2>"$LOG_DIR/$label.stderr" &
   LAUNCH_PID=$!
-  wait_phase ready 240 || {
+  if ! wait_phase ready 240 || ! verify_live_gateway "$label" "$expected_epoch"; then
     cat "$LOG_DIR/$label.stdout" >&2 || true
     cat "$LOG_DIR/$label.stderr" >&2 || true
     return 1
-  }
+  fi
 }
 
 stop_runtime_safely() {
   "$CLI" --data-dir "$DATA" world stop "$WORLD"
   wait_phase sleeping 180
   if [[ -n "$LAUNCH_PID" ]]; then
-    local deadline=$((SECONDS + 90))
-    while kill -0 "$LAUNCH_PID" 2>/dev/null && (( SECONDS < deadline )); do
-      sleep 1
-    done
-    if kill -0 "$LAUNCH_PID" 2>/dev/null; then
-      printf 'Managed runtime did not exit after safe sleep\n' >&2
-      return 1
-    fi
-    wait "$LAUNCH_PID"
+    # Sleeping is published only after Java exits and the signed
+    # checkpoint is committed. The daemon itself is intentionally
+    # long-lived; stop it now to exercise a real process restart.
+    kill -0 "$LAUNCH_PID" 2>/dev/null
+    kill "$LAUNCH_PID"
+    wait "$LAUNCH_PID" 2>/dev/null || true
     LAUNCH_PID=""
   fi
 }
@@ -210,7 +315,7 @@ print("true" if java.get("managed") else "false")
 }
 
 printf '== first real Minecraft/Fabric launch ==\n'
-start_runtime_and_wait_ready first-launch
+start_runtime_and_wait_ready first-launch 1
 WORLD_DIR="$(find "$DATA/runtime" -mindepth 2 -maxdepth 2 -type d -name world -print -quit)"
 [[ -n "$WORLD_DIR" && -s "$WORLD_DIR/level.dat" ]] || {
   printf 'Minecraft reached Ready but did not create a usable level.dat\n' >&2
@@ -229,7 +334,7 @@ RESTART_STATUS="$(runtime_status)"
 [[ "$(json_field "$RESTART_STATUS" ready)" == "true" ]]
 [[ "$(json_field "$RESTART_STATUS" eula_accepted)" == "true" ]]
 [[ "$(json_field "$RESTART_STATUS" launch_configured)" == "true" ]]
-start_runtime_and_wait_ready second-launch
+start_runtime_and_wait_ready second-launch 2
 WORLD_DIR="$(find "$DATA/runtime" -mindepth 2 -maxdepth 2 -type d -name world -print -quit)"
 [[ -s "$WORLD_DIR/level.dat" ]]
 grep -q '^persisted through canonical checkpoint$' "$WORLD_DIR/swarmcraft-clean-machine-marker.txt"

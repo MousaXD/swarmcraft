@@ -101,7 +101,7 @@ public final class SwarmCraftMod implements ModInitializer {
 
         private static PermitGuard createIfRequired(MinecraftServer server, String worldDirectory) throws IOException {
             if (worldDirectory.isBlank()) {
-                return null;
+                throw new IOException("managed SwarmCraft runtime has no world directory");
             }
             Path world = Path.of(worldDirectory).toAbsolutePath().normalize();
             Path worldIdDirectory = world.getParent();
@@ -112,11 +112,21 @@ public final class SwarmCraftMod implements ModInitializer {
             }
             String worldHex = worldIdDirectory.getFileName().toString();
             Path descriptor = dataRoot.resolve("worlds").resolve(worldHex).resolve("metadata").resolve("descriptor.json");
-            if (countMembers(descriptor) <= 1) {
+            // The owning Rust supervisor supplies the policy from the
+            // accepted signed epoch. A daemon-managed quorum-of-one MUST
+            // have a live permit too; otherwise its first route can never
+            // be proven and a subsequent membership expansion is unguarded.
+            String policy = System.getenv("SWARMCRAFT_REQUIRE_AUTHORITY_PERMIT");
+            if (policy != null && !policy.equals("true") && !policy.equals("false")) {
+                throw new IOException("invalid SwarmCraft authority permit policy");
+            }
+            // Older launchers retain the previous conservative multi-member
+            // protection. An explicit false cannot exempt a shared world.
+            if (!"true".equals(policy) && countMembers(descriptor) <= 1) {
                 return null;
             }
             Path permit = dataRoot.resolve("control").resolve(worldHex).resolve("authority.permit");
-            LOGGER.info("SwarmCraft authority permit guard enabled for multi-member world {}", worldHex);
+            LOGGER.info("SwarmCraft authority permit guard enabled for managed world {}", worldHex);
             return new PermitGuard(server, permit);
         }
 

@@ -289,7 +289,6 @@ fn build_seed<'a>(
         signature: Vec::new(),
     };
     sign_world_config(&authority.identity, &mut config).unwrap();
-    authority.storage.save_world_config(&config).unwrap();
     let mut descriptor = WorldDescriptorV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
@@ -335,6 +334,7 @@ fn build_seed<'a>(
     epoch.signature = authority.identity.sign(&epoch.signing_bytes().unwrap());
     authority.storage.save_epoch_record(&epoch).unwrap();
     authority.storage.save_membership_record(&genesis_membership).unwrap();
+    authority.storage.save_world_config(&config).unwrap();
 
     let mut membership = MembershipRecordV1 {
         protocol_version: PROTOCOL_VERSION,
@@ -374,9 +374,9 @@ fn install_seed(peer: &PeerFixture, seed: &Seed<'_>) {
     if peer.storage.load_world(seed.metadata.world_id).is_err() {
         peer.storage.create_world(seed.metadata).unwrap();
     }
-    peer.storage.save_world_config(seed.config).unwrap();
     peer.storage.save_world_descriptor(seed.descriptor).unwrap();
     peer.storage.save_epoch_record(seed.epoch).unwrap();
+    peer.storage.save_world_config(seed.config).unwrap();
     if peer.storage.load_membership_record(seed.metadata.world_id).is_err() {
         let genesis = seed.authority.storage.load_genesis_membership(seed.metadata.world_id).unwrap();
         peer.storage.save_membership_record(&genesis).unwrap();

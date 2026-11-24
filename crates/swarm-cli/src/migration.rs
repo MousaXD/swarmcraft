@@ -686,7 +686,7 @@ async fn wait_until_launch_safe(
     config: &RuntimeLaunchConfig,
 ) -> Result<bool> {
     let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
-    if member_count <= 1 {
+    if member_count <= 1 && epoch.mode == EpochMode::Solo {
         return Ok(true);
     }
     let generation = AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token };
@@ -816,11 +816,16 @@ pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options
     let descriptor = storage.load_world_descriptor(options.world)?;
     let member_count = descriptor.members.iter().filter(|member| !member.banned).count();
     let sleep_record = launch_guard::load_sleep_record_fail_closed(storage, options.world)?;
-    if member_count > 1 {
+    let accepted_epoch = match storage.load_epoch_record(options.world) {
+        Ok(epoch) => Some(epoch),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if member_count > 1 || accepted_epoch.as_ref().is_some_and(|epoch| epoch.mode != EpochMode::Solo) {
         if sleep_record.is_some() {
-            bail!("multi-member sleeping worlds must be woken through the migration supervisor");
+            bail!("signed quorum sleeping worlds must be woken through the migration supervisor");
         }
-        let epoch = storage.load_epoch_record(options.world)?;
+        let epoch = accepted_epoch.context("shared world requires an accepted signed authority epoch")?;
         if epoch.authority_peer_id != identity.peer_id() || epoch.authority_public_key != identity.public_key() {
             bail!("local peer does not hold the accepted authority generation");
         }
@@ -831,7 +836,13 @@ pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options
             accept_eula: options.accept_eula,
             game_endpoint: None,
         };
-        if !wait_until_launch_safe(paths, storage, &identity, options.world, &descriptor, &epoch, &config).await? {
+        if !timeout(
+            crate::authority_permit::PERMIT_START_TIMEOUT,
+            wait_until_launch_safe(paths, storage, &identity, options.world, &descriptor, &epoch, &config),
+        )
+        .await
+        .context("no advancing signed quorum permit; start the daemon and use verified Play")??
+        {
             bail!("authority generation changed while waiting for launch safety");
         }
     }
@@ -883,7 +894,7 @@ async fn run_authority_runtime_inner(
     let latest = storage.latest_snapshot(options.world)?.context("authority transition lost its canonical snapshot")?;
     storage.verify_snapshot(&latest)?;
     verify_snapshot_signature(&latest)?;
-    ensure_authority_generation(storage, &identity, &epoch)?;
+    ensure_runtime_generation(storage, &identity, &epoch)?;
     let world_config =
         storage.load_world_config(options.world).context("canonical runtime profile is not synchronized")?;
     validate_runtime_selection(
@@ -942,10 +953,37 @@ async fn run_authority_runtime_inner(
         None,
     )?;
     storage.restore_snapshot(&latest, &world_dir)?;
-    ensure_authority_generation(storage, &identity, &epoch)?;
+    ensure_runtime_generation(storage, &identity, &epoch)?;
 
+    let descriptor = storage.load_world_descriptor(options.world)?;
+    let require_permit = runtime_registry.is_some()
+        || epoch.mode != EpochMode::Solo
+        || descriptor.members.iter().filter(|member| !member.banned).count() > 1;
+    if require_permit {
+        let config = RuntimeLaunchConfig {
+            java: options.java.clone(),
+            server_jar: options.server_jar.clone(),
+            mod_jar: options.mod_jar.clone(),
+            accept_eula: options.accept_eula,
+            game_endpoint: game_endpoint.clone(),
+        };
+        // The wake path may have just installed a new quorum-of-one
+        // epoch. Wait for its own advancing permit after restoring the
+        // exact checkpoint, rather than inheriting the sleeping generation.
+        if !timeout(
+            crate::authority_permit::PERMIT_START_TIMEOUT,
+            wait_until_launch_safe(paths, storage, &identity, options.world, &descriptor, &epoch, &config),
+        )
+        .await
+        .context("fresh signed quorum permit is unavailable before Java spawn")??
+        {
+            bail!("authority or hosting consent changed before Java spawn");
+        }
+    }
     let listener = FabricBridgeListener::bind().await?;
     let launch = listener.launch_config()?;
+    let mut fabric_environment = launch.environment().to_vec();
+    fabric_environment.push(("SWARMCRAFT_REQUIRE_AUTHORITY_PERMIT".into(), require_permit.to_string()));
     publish_status(
         paths,
         storage,
@@ -971,7 +1009,7 @@ async fn run_authority_runtime_inner(
             &runtime,
             &world_dir,
             metadata.genesis.compatibility_fingerprint,
-            &launch.environment(),
+            &fabric_environment,
         )
     })?;
     // Any failed publish, verification, or IPC handshake before Ready must
@@ -1009,7 +1047,7 @@ async fn run_authority_runtime_inner(
     ) {
         return Err(anyhow!("managed Minecraft server listener on 127.0.0.1:{managed_port} is unavailable: {error}"));
     }
-    if let Err(error) = ensure_authority_generation(storage, &identity, &epoch) {
+    if let Err(error) = ensure_runtime_generation(storage, &identity, &epoch) {
         terminate_child(&mut *startup.child);
         publish_status(
             paths,
@@ -1151,7 +1189,7 @@ async fn run_authority_runtime_inner(
         Some(latest.manifest_hash()?),
         None,
     )?;
-    ensure_authority_generation(storage, &identity, &epoch)?;
+    ensure_runtime_generation(storage, &identity, &epoch)?;
     let expected_head = storage.canonical_snapshot_head(options.world)?.head;
     let number = storage.next_snapshot_number(options.world)?;
     let previous_hash = Some(latest.manifest_hash()?);
@@ -1167,7 +1205,7 @@ async fn run_authority_runtime_inner(
             authority_public_key: identity.public_key(),
         },
     )?;
-    ensure_authority_generation(storage, &identity, &epoch)?;
+    ensure_runtime_generation(storage, &identity, &epoch)?;
     identity.sign_snapshot(&mut final_manifest)?;
     storage.commit_snapshot_fenced(
         &final_manifest,
@@ -1280,7 +1318,8 @@ async fn wait_for_runtime_exit(
             }
             return Ok(RuntimeDisposition::Sleep);
         }
-        if let Err(error) = ensure_authority_generation(storage, identity, epoch) {
+        let authority_current = ensure_runtime_generation(storage, identity, epoch);
+        if let Err(error) = authority_current {
             if let Err(report_error) = retire_live_runtime(
                 paths,
                 epoch.world_id,
@@ -2240,6 +2279,27 @@ fn ensure_authority_generation(storage: &Storage, identity: &PeerIdentity, expec
     Ok(())
 }
 
+fn ensure_runtime_generation(storage: &Storage, identity: &PeerIdentity, epoch: &EpochRecordV1) -> Result<()> {
+    ensure_authority_generation(storage, identity, epoch)?;
+    if epoch.mode == EpochMode::Solo {
+        let descriptor = storage.load_world_descriptor(epoch.world_id)?;
+        let membership = storage.load_membership_record(epoch.world_id)?;
+        swarm_core::verify_membership_signature(&membership)?;
+        if membership.members != descriptor.members
+            || membership.members.iter().filter(|member| !member.banned).count() != 1
+            || !membership.members.iter().any(|member| {
+                member.peer_id == identity.peer_id()
+                    && member.public_key == identity.public_key()
+                    && member.authority_eligible
+                    && !member.banned
+            })
+        {
+            bail!("exclusive solo authority no longer has its sole signed member");
+        }
+    }
+    Ok(())
+}
+
 fn launch_server(
     java: &Path,
     server_jar: &Path,
@@ -2247,7 +2307,7 @@ fn launch_server(
     runtime: &Path,
     world_dir: &Path,
     compatibility: Hash32,
-    ipc_environment: &[(String, String); 3],
+    ipc_environment: &[(String, String)],
 ) -> Result<Child> {
     let mut command = Command::new(java);
     command.arg(format!("-Xmx{heap_mib}m")).arg("-jar").arg(server_jar).arg("nogui").current_dir(runtime);
