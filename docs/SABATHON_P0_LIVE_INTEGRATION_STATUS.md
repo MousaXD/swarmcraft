@@ -413,3 +413,34 @@ proof nonce across the signer, verifier and stream endpoints, and passed
 locally. No freshness deadline or quorum requirement was relaxed. The hosted
 gate prints bounded daemon diagnostics on failure. Windows and actual
 Minecraft verification of these repairs require the new CI run.
+
+### Independent proof lifetime and stream admission (24 November)
+
+Required Validation `45398307104` on `5af60851` passed the Rust
+suites on Linux, Windows and macOS, all four native desktop package
+builds, and process-level acceptance. The real Minecraft gate still reset
+the initial connection: Fabric reached ready, the route status verified,
+and the player gateway then logged `verified route is stale`.
+
+The signer previously capped the entire offer/challenge negotiation at the
+expiry of an earlier short-lived observation. The additional mandatory
+admission proofs could therefore exhaust that observation even after a
+fresh proof succeeded. The offer and response now retain their existing
+bounded transcript maximum ages (15 seconds and 5 seconds), separate from
+the live authority lease. The signer checks evidence freshness after
+collection, the verifier still consumes a one-use challenge, and every
+stream must enter with a fresh verified capability. Admission must prove
+all immutable signed fields independently again; the transcript must remain
+unexpired. Forwarding is additionally bounded by the latest independently
+proven monotonic expiry, with copying paused during renewal and shutdown or
+identity loss failing closed. No proof validity window, quorum, membership,
+consent or replay protection is removed. The delayed-proof local gateway
+regression, host signer security tests (3), and real QUIC resolver test
+passed. Actual Minecraft handoff/recovery must still pass the hosted gate.
+
+Fresh invitation audit (not yet implemented): new worlds can lack an
+accepted epoch before the first runtime launch; the ordinary Join path
+requests storage-only membership rather than a host candidate. The existing
+live-join test seeds the accepted epoch manually and does not prove a full
+three-device Create/Invite/Join/Play flow. These remain P0 gaps, along with
+complete first-contact signed history and epoch synchronization checks.

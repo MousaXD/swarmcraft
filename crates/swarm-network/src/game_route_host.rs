@@ -26,7 +26,7 @@ use std::{
     io::{Read, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use swarm_protocol::{peer_id_from_public_key, Hash32, PeerId, WorldId};
 
@@ -214,8 +214,12 @@ impl AuthenticatedGameRouteHostSigner {
         nonce: [u8; 32],
         now: u64,
     ) -> Result<FreshAuthorityEvidence, GameRouteRefusalV1> {
+        let started = Instant::now();
         let evidence =
             self.authority.verify_fresh(world, requester, nonce).map_err(|_| GameRouteRefusalV1::QuorumUnavailable)?;
+        let now = unix_ms()
+            .map_err(|_| GameRouteRefusalV1::ExpiredOrMalformed)?
+            .max(now.saturating_add(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)));
         if evidence.world_id != world
             || evidence.challenge_nonce != nonce
             || evidence.authority_peer_id != self.application_peer
@@ -281,11 +285,13 @@ impl AuthenticatedGameRouteHostSigner {
         if !same_authority_state(&evidence, &post_commit) {
             return Ok(GameRouteControlResponseV1::Refused(GameRouteRefusalV1::FencedOrConsentWithdrawn));
         }
-        let expires = signed_at
-            .saturating_add(MAX_ROUTE_OFFER_AGE_MS)
-            .min(evidence.valid_until_unix_ms)
-            .min(post_commit.valid_until_unix_ms);
-        if expires <= signed_at {
+        // A signed offer is a bounded negotiation transcript, NOT a live
+        // authority lease. Every subsequent challenge, verification and
+        // admission independently proves all of these immutable fields.
+        // Do not spend the first proof's lease on unrelated later checks.
+        let signed_at = unix_ms()?;
+        let expires = signed_at.saturating_add(MAX_ROUTE_OFFER_AGE_MS);
+        if post_commit.valid_until_unix_ms <= signed_at || expires <= signed_at {
             return Ok(GameRouteControlResponseV1::Refused(GameRouteRefusalV1::ExpiredOrMalformed));
         }
         let mut offer_id = [0; 32];
@@ -375,9 +381,12 @@ impl AuthenticatedGameRouteHostSigner {
         {
             return Ok(GameRouteControlResponseV1::Refused(GameRouteRefusalV1::FencedOrConsentWithdrawn));
         }
-        let expires =
-            now.saturating_add(MAX_ROUTE_RESPONSE_AGE_MS).min(offer.expires_unix_ms).min(evidence.valid_until_unix_ms);
-        if expires <= now {
+        // The response authenticates the single-use transcript. Its
+        // bounded lifetime does not authorize traffic: the requester and
+        // receiver must collect independent live proofs at admission.
+        let now = unix_ms()?;
+        let expires = now.saturating_add(MAX_ROUTE_RESPONSE_AGE_MS).min(offer.expires_unix_ms);
+        if evidence.valid_until_unix_ms <= now || expires <= now {
             return Ok(GameRouteControlResponseV1::Refused(GameRouteRefusalV1::ExpiredOrMalformed));
         }
         let mut response = MinecraftRouteResponseV1 {

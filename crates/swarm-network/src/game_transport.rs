@@ -36,7 +36,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore},
     task::{self, JoinSet},
-    time::{interval, timeout},
+    time::{sleep_until, timeout},
 };
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{debug, warn};
@@ -370,7 +370,7 @@ impl GameStreamReceiver {
         OsRng.fill_bytes(&mut post_dial_challenge);
         let post_dial_now = unix_ms()?;
         validate_timestamps(&frame.offer, &frame.response, post_dial_now)?;
-        validate_live_evidence_bounded(
+        let mut proof_deadline = validate_live_evidence_bounded(
             Arc::clone(&self.evidence),
             Arc::clone(&self.proof_workers),
             &frame.offer,
@@ -383,15 +383,19 @@ impl GameStreamReceiver {
         // already-expired signed route. Its blocking validation can consume
         // the remaining host handshake lease; recheck at the forwarding edge.
         validate_timestamps(&frame.offer, &frame.response, unix_ms()?)?;
-        if *shutdown.borrow() || authenticated_peer(&self.authenticated, remote) != Some(app_peer) {
+        if *shutdown.borrow()
+            || Instant::now() >= proof_deadline
+            || authenticated_peer(&self.authenticated, remote) != Some(app_peer)
+        {
             return Err(GameTransportError::StaleRoute);
         }
         timeout(MAX_GAME_HEADER_WAIT, stream.write_all(&[GAME_ACK]))
             .await
             .map_err(|_| GameTransportError::Timeout)??;
         let mut stream = stream.compat();
-        let mut heartbeat = interval(GAME_REVALIDATE_INTERVAL);
-        heartbeat.tick().await;
+        if Instant::now() >= proof_deadline {
+            return Err(GameTransportError::StaleRoute);
+        }
         // Preserve copy state between heartbeat ticks; recreating
         // copy_bidirectional would silently discard buffered Minecraft bytes.
         let copying = tokio::io::copy_bidirectional(&mut stream, &mut server);
@@ -399,23 +403,24 @@ impl GameStreamReceiver {
         let transfer = async {
             loop {
                 tokio::select! {
+                    biased;
                     changed = shutdown.changed() => {
                         if changed.is_err() || *shutdown.borrow() { return Err(GameTransportError::StaleRoute); }
                     }
-                    copied = &mut copying => {
-                        copied?;
-                        return Ok(());
-                    }
-                    _ = heartbeat.tick() => {
+                    _ = sleep_until(next_proof_check(proof_deadline)) => {
                         if authenticated_peer(&self.authenticated, remote) != Some(app_peer) {
                             return Err(GameTransportError::Unauthorized);
                         }
                         let mut fresh_nonce = [0; 32];
                         OsRng.fill_bytes(&mut fresh_nonce);
-                        validate_live_evidence_bounded(
+                        proof_deadline = validate_live_evidence_bounded(
                             Arc::clone(&self.evidence), Arc::clone(&self.proof_workers),
                             &frame.offer, app_peer, fresh_nonce, unix_ms()?,
                         ).await?;
+                    }
+                    copied = &mut copying => {
+                        copied?;
+                        return Ok(());
                     }
                 }
             }
@@ -584,7 +589,7 @@ fn validate_live_evidence(
     requester: PeerId,
     nonce: [u8; 32],
     now: u64,
-) -> Result<(), GameTransportError> {
+) -> Result<Instant, GameTransportError> {
     let started = Instant::now();
     let proof: FreshAuthorityEvidence = source.verify_fresh(offer.world_id, requester, nonce)?;
     // Never authorize an expired runtime/quorum lease merely because the
@@ -630,7 +635,8 @@ fn validate_live_evidence(
     {
         return Err(GameTransportError::StaleRoute);
     }
-    Ok(())
+    let remaining = Duration::from_millis(proof.valid_until_unix_ms - effective_now);
+    Instant::now().checked_add(remaining).ok_or(GameTransportError::StaleRoute)
 }
 
 /// Separate the synchronous authority, membership and authenticated Fabric
@@ -645,7 +651,7 @@ async fn validate_live_evidence_bounded(
     requester: PeerId,
     nonce: [u8; 32],
     sampled_unix_ms: u64,
-) -> Result<(), GameTransportError> {
+) -> Result<Instant, GameTransportError> {
     let slot = workers.try_acquire_owned().map_err(|_| GameTransportError::Overloaded)?;
     let offer = offer.clone();
     // A permanently stuck external IPC verifier must not hold a Tokio
@@ -660,10 +666,18 @@ async fn validate_live_evidence_bounded(
             let _ = reply_tx.send(validate_live_evidence(evidence.as_ref(), &offer, requester, nonce, sampled_unix_ms));
         })
         .map_err(|_| GameTransportError::Unavailable)?;
-    timeout(MAX_GAME_LIVE_PROOF_WAIT, reply_rx)
+    let deadline = timeout(MAX_GAME_LIVE_PROOF_WAIT, reply_rx)
         .await
         .map_err(|_| GameTransportError::Timeout)?
-        .map_err(|_| GameTransportError::Unavailable)?
+        .map_err(|_| GameTransportError::Unavailable)??;
+    if Instant::now() >= deadline {
+        return Err(GameTransportError::StaleRoute);
+    }
+    Ok(deadline)
+}
+
+fn next_proof_check(deadline: Instant) -> tokio::time::Instant {
+    tokio::time::Instant::from_std(deadline.min(Instant::now() + GAME_REVALIDATE_INTERVAL))
 }
 
 /// Gateway side of a dedicated authenticated game stream. The caller must
@@ -767,17 +781,14 @@ impl GameStreamClient {
         // the gateway's short-lived verified route. Re-check the capability,
         // authenticated host identity and current canonical/runtime evidence
         // before forwarding any Minecraft payload, not only before dialing.
-        if *shutdown.borrow()
-            || !route.is_fresh()
-            || authenticated_peer(&self.authenticated, target) != Some(route.authority_peer_id())
-        {
+        if *shutdown.borrow() || authenticated_peer(&self.authenticated, target) != Some(route.authority_peer_id()) {
             return Err(GameTransportError::StaleRoute);
         }
         let post_ack_now = unix_ms()?;
         validate_timestamps(&frame.offer, &frame.response, post_ack_now)?;
         let mut post_ack_nonce = [0; 32];
         OsRng.fill_bytes(&mut post_ack_nonce);
-        validate_live_evidence_bounded(
+        let mut proof_deadline = validate_live_evidence_bounded(
             Arc::clone(&self.evidence),
             Arc::clone(&self.proof_workers),
             &frame.offer,
@@ -786,41 +797,41 @@ impl GameStreamClient {
             post_ack_now,
         )
         .await?;
-        // Closing the last proof/IPC read also closes the opportunity to
-        // forward bytes under an expired one-time route capability.
-        if *shutdown.borrow()
-            || !route.is_fresh()
-            || authenticated_peer(&self.authenticated, target) != Some(route.authority_peer_id())
-        {
+        // The new independent proof replaces the earlier short-lived
+        // observation, not the signed transcript. The transcript must
+        // still be unexpired and the connection identity unchanged.
+        if *shutdown.borrow() || authenticated_peer(&self.authenticated, target) != Some(route.authority_peer_id()) {
             return Err(GameTransportError::StaleRoute);
         }
         validate_timestamps(&frame.offer, &frame.response, unix_ms()?)?;
         minecraft_client.set_nodelay(true)?;
         let mut upstream = game_stream.compat();
-        let mut heartbeat = interval(GAME_REVALIDATE_INTERVAL);
-        heartbeat.tick().await;
+        if Instant::now() >= proof_deadline {
+            return Err(GameTransportError::StaleRoute);
+        }
         let copying = tokio::io::copy_bidirectional(&mut minecraft_client, &mut upstream);
         tokio::pin!(copying);
         let transfer = async {
             loop {
                 tokio::select! {
+                    biased;
                     changed = shutdown.changed() => {
                         if changed.is_err() || *shutdown.borrow() { return Err(GameTransportError::StaleRoute); }
                     }
-                    copied = &mut copying => {
-                        copied?;
-                        return Ok(());
-                    }
-                    _ = heartbeat.tick() => {
+                    _ = sleep_until(next_proof_check(proof_deadline)) => {
                         if authenticated_peer(&self.authenticated, target) != Some(route.authority_peer_id()) {
                             return Err(GameTransportError::Unauthorized);
                         }
                         let mut fresh_nonce = [0; 32];
                         OsRng.fill_bytes(&mut fresh_nonce);
-                        validate_live_evidence_bounded(
+                        proof_deadline = validate_live_evidence_bounded(
                             Arc::clone(&self.evidence), Arc::clone(&self.proof_workers),
                             &frame.offer, self.application_peer, fresh_nonce, unix_ms()?,
                         ).await?;
+                    }
+                    copied = &mut copying => {
+                        copied?;
+                        return Ok(());
                     }
                 }
             }
@@ -837,7 +848,6 @@ impl GameStreamClient {
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), GameTransportError> {
         if *shutdown.borrow()
-            || !route.is_fresh()
             || route.transport_peer() != self.transport_peer
             || route.authority_peer_id() != self.application_peer
             || frame.offer.authority_transport_peer != self.transport_peer.to_bytes()
@@ -855,7 +865,7 @@ impl GameStreamClient {
             .map_err(|_| GameTransportError::Timeout)??;
         let mut post_dial_nonce = [0; 32];
         OsRng.fill_bytes(&mut post_dial_nonce);
-        validate_live_evidence_bounded(
+        let mut proof_deadline = validate_live_evidence_bounded(
             Arc::clone(&self.evidence),
             Arc::clone(&self.proof_workers),
             &frame.offer,
@@ -864,35 +874,39 @@ impl GameStreamClient {
             unix_ms()?,
         )
         .await?;
-        if *shutdown.borrow() || !route.is_fresh() {
+        if *shutdown.borrow() {
             return Err(GameTransportError::StaleRoute);
         }
+        // Fresh post-dial proof was mandatory; only the signed transcript
+        // deadline remains binding from the initial route verification.
         validate_timestamps(&frame.offer, &frame.response, unix_ms()?)?;
         minecraft_client.set_nodelay(true)?;
         server.set_nodelay(true)?;
-        let mut heartbeat = interval(GAME_REVALIDATE_INTERVAL);
-        heartbeat.tick().await;
+        if Instant::now() >= proof_deadline {
+            return Err(GameTransportError::StaleRoute);
+        }
         let copying = tokio::io::copy_bidirectional(&mut minecraft_client, &mut server);
         tokio::pin!(copying);
         let transfer = async {
             loop {
                 tokio::select! {
+                    biased;
                     changed = shutdown.changed() => {
                         if changed.is_err() || *shutdown.borrow() {
                             return Err(GameTransportError::StaleRoute);
                         }
                     }
-                    copied = &mut copying => {
-                        copied?;
-                        return Ok(());
-                    }
-                    _ = heartbeat.tick() => {
+                    _ = sleep_until(next_proof_check(proof_deadline)) => {
                         let mut fresh_nonce = [0; 32];
                         OsRng.fill_bytes(&mut fresh_nonce);
-                        validate_live_evidence_bounded(
+                        proof_deadline = validate_live_evidence_bounded(
                             Arc::clone(&self.evidence), Arc::clone(&self.proof_workers),
                             &frame.offer, self.application_peer, fresh_nonce, unix_ms()?,
                         ).await?;
+                    }
+                    copied = &mut copying => {
+                        copied?;
+                        return Ok(());
                     }
                 }
             }
@@ -1388,6 +1402,9 @@ mod tests {
                 {
                     return Err(GameRouteError::UnverifiedAuthority);
                 }
+                // A realistic sequence of independent observations can
+                // outlast the initial proof lease without relying on it.
+                std::thread::sleep(Duration::from_millis(200));
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
                 Ok(FreshAuthorityEvidence {
                     world_id: world,
@@ -1413,7 +1430,7 @@ mod tests {
                     runtime_ready_proof_hash: Hash32([9; 32]),
                     challenge_nonce: challenge,
                     verified_at_unix_ms: now,
-                    valid_until_unix_ms: now + 4_000,
+                    valid_until_unix_ms: now + 300,
                 })
             }
         }
