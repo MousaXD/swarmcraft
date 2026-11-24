@@ -1,12 +1,51 @@
 use crate::{
     transaction::{canonical_file_exists, durable_atomic_write, durable_remove, io_error, read_canonical_file},
-    Storage, StorageError,
+    CanonicalSnapshotRefV1, Storage, StorageError,
 };
+use serde::{Deserialize, Serialize};
 use std::{fs, io, path::PathBuf};
 use swarm_protocol::{
     AuthorityLeaseGrantV1, AuthorityTransferV1, EpochMode, EpochRecordV1, Hash32, HistoricalCheckpointV1,
-    HistoricalReplayProofV1, HistoricalTransitionV1, SleepRecordV1, TransferPhase, WorldId,
+    HistoricalReplayProofV1, HistoricalTransitionV1, MembershipRecordV1, SleepRecordV1, TransferPhase, WorldConfigV1,
+    WorldDescriptorV1, WorldId,
 };
+
+/// Exact signed local control state and canonical data boundary. This is a
+/// compare-and-swap anchor, not authority to install a successor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleReplayAnchorV1 {
+    pub epoch: EpochRecordV1,
+    pub membership: MembershipRecordV1,
+    pub config: WorldConfigV1,
+    pub descriptor: WorldDescriptorV1,
+    pub head: CanonicalSnapshotRefV1,
+}
+
+impl StaleReplayAnchorV1 {
+    pub fn is_extended_by(&self, proof: &HistoricalReplayProofV1) -> bool {
+        let epoch_index = self.epoch.epoch_number.checked_sub(1).and_then(|value| usize::try_from(value).ok());
+        let membership_index = usize::try_from(self.membership.sequence).ok();
+        let config_index = self.config.sequence.checked_sub(1).and_then(|value| usize::try_from(value).ok());
+        let head_index = self.head.snapshot_number.checked_sub(1).and_then(|value| usize::try_from(value).ok());
+        proof.world_id == self.epoch.world_id
+            && proof.epochs.last().is_some_and(|epoch| epoch.epoch_number > self.epoch.epoch_number)
+            && epoch_index.and_then(|index| proof.epochs.get(index)) == Some(&self.epoch)
+            && membership_index.and_then(|index| proof.membership.get(index)) == Some(&self.membership)
+            && config_index.and_then(|index| proof.configs.get(index)) == Some(&self.config)
+            && head_index.and_then(|index| proof.checkpoints.get(index)).is_some_and(|checkpoint| {
+                checkpoint.snapshot_number == self.head.snapshot_number
+                    && checkpoint.manifest_hash == self.head.manifest_hash
+                    && checkpoint.epoch == self.head.epoch
+                    && checkpoint.sequence == self.head.sequence
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StagedStaleReplayV1 {
+    anchor: StaleReplayAnchorV1,
+    proof: HistoricalReplayProofV1,
+}
 
 impl Storage {
     pub fn save_epoch_record(&self, record: &EpochRecordV1) -> Result<(), StorageError> {
@@ -305,6 +344,96 @@ impl Storage {
             return Ok(None);
         }
         Ok(Some(read_canonical_file(&path)?))
+    }
+
+    /// Capture a fully synchronized, already accepted local generation.
+    /// Partially promoted or corrupt control state is not a replay anchor.
+    pub fn stale_replay_anchor(&self, world: WorldId) -> Result<StaleReplayAnchorV1, StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
+        self.stale_replay_anchor_locked(world)
+    }
+
+    fn stale_replay_anchor_locked(&self, world: WorldId) -> Result<StaleReplayAnchorV1, StorageError> {
+        let epoch = self.load_epoch_record(world)?;
+        let membership = self.load_membership_record(world)?;
+        let config = self.load_world_config(world)?;
+        let descriptor = self.load_world_descriptor(world)?;
+        let head =
+            self.load_or_initialize_canonical_head_locked(world)?.head.ok_or(StorageError::WorldMetadataMismatch)?;
+        if epoch.mode == EpochMode::Solo
+            || epoch.epoch_number == 0
+            || head.epoch != epoch.epoch_number
+            || membership.epoch != epoch.epoch_number
+            || membership.authority_peer_id != epoch.authority_peer_id
+            || membership.authority_public_key != epoch.authority_public_key
+            || config.authority_peer_id != epoch.authority_peer_id
+            || config.authority_public_key != epoch.authority_public_key
+            || descriptor.members != membership.members
+            || config.compatibility_fingerprint()? != descriptor.compatibility_fingerprint
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(StaleReplayAnchorV1 { epoch, membership, config, descriptor, head })
+    }
+
+    /// Pin an independently verified successor envelope for a stale replica.
+    /// This file is intentionally separate from first-contact replay and
+    /// never used by live admission. No canonical record is replaced here.
+    /// The caller must verify signatures, transition proofs and all local
+    /// retained manifests before calling this compare-and-swap operation.
+    pub fn stage_stale_replay_proof(
+        &self,
+        anchor: &StaleReplayAnchorV1,
+        proof: &HistoricalReplayProofV1,
+    ) -> Result<(), StorageError> {
+        let world = anchor.epoch.world_id;
+        let _guard = self.lock_world_transaction(world)?;
+        if self.stale_replay_anchor_locked(world)? != *anchor
+            || !anchor.is_extended_by(proof)
+            || proof.genesis != self.load_world(world)?.genesis
+            || postcard::to_allocvec(proof)?.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        let path = self.control_path(world, "stale-replay-proof.postcard");
+        if canonical_file_exists(&path)? {
+            let previous: StagedStaleReplayV1 = postcard::from_bytes(&read_canonical_file(&path)?)?;
+            // Even if ordinary synchronization advanced the anchor, do not
+            // replace a pinned proof with an incompatible branch. A replay
+            // conflict must be explicitly resolved, not silently discarded.
+            if !proof.extends_replay_history(&previous.proof) {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+            if previous.anchor == *anchor && previous.proof == *proof {
+                return Ok(());
+            }
+        }
+        let staged = StagedStaleReplayV1 { anchor: anchor.clone(), proof: proof.clone() };
+        durable_atomic_write(&path, &postcard::to_allocvec(&staged)?)
+    }
+
+    pub fn load_staged_stale_replay_proof(
+        &self,
+        world: WorldId,
+    ) -> Result<Option<(StaleReplayAnchorV1, HistoricalReplayProofV1)>, StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
+        let path = self.control_path(world, "stale-replay-proof.postcard");
+        if !canonical_file_exists(&path)? {
+            return Ok(None);
+        }
+        let staged: StagedStaleReplayV1 = postcard::from_bytes(&read_canonical_file(&path)?)?;
+        if staged.anchor.epoch.world_id != world
+            || !staged.anchor.is_extended_by(&staged.proof)
+            || postcard::to_allocvec(&staged.proof)?.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        if self.stale_replay_anchor_locked(world)? != staged.anchor {
+            // The candidate is no longer bound to the current control
+            // state. It remains historical evidence but cannot be resumed.
+            return Ok(None);
+        }
+        Ok(Some((staged.anchor, staged.proof)))
     }
 
     /// Store a data-only replay envelope after the caller verifies its

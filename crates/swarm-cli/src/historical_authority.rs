@@ -1,7 +1,6 @@
-//! Read-only collection of signed historical records for a future verified
-//! checkpoint replay protocol. A signed chain is NOT a certified authority
-//! transition: membership, transfer/recovery/sleep proofs and exact
-//! checkpoint boundaries still have to be validated before replay.
+//! Signed history collection and data-only checkpoint replay verification.
+//! A signed chain is NOT a live authority grant. Membership, transition
+//! proofs, checkpoint boundaries and independent live freshness are required.
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use swarm_consensus::{membership::validate_membership_certificate_shape, validate_recovery_certificate_shape};
@@ -15,7 +14,7 @@ use swarm_protocol::{
     WorldConfigV1, WorldGenesisV1, WorldId, MAX_REPLAY_CHECKPOINTS, MAX_REPLAY_CONFIGS, MAX_REPLAY_EPOCHS,
     MAX_REPLAY_MEMBERSHIP_RECORDS, MAX_REPLAY_PROOF_BYTES, PROTOCOL_VERSION,
 };
-use swarm_storage::Storage;
+use swarm_storage::{control::StaleReplayAnchorV1, Storage};
 
 // Bounded independently of peer-supplied record counts. Large or legacy
 // histories are explicitly unsupported, never silently truncated.
@@ -142,6 +141,70 @@ pub fn load_staged_replay(storage: &Storage, world: WorldId) -> Result<Option<Ve
     };
     let proof: HistoricalReplayProofV1 = postcard::from_bytes(&bytes)?;
     Ok(Some(verify_replay_proof(proof, &storage.load_world(world)?.genesis, &membership)?))
+}
+
+/// Verify an authenticated newer authority's complete history against the
+/// exact already accepted local generation. A valid genesis signature by
+/// itself is insufficient: a signed alternate branch is never a catch-up.
+/// The result remains data-only until a separate fenced replay transaction.
+pub fn verify_and_stage_stale_replay(
+    storage: &Storage,
+    local: &PeerIdentity,
+    source: swarm_protocol::PeerId,
+    anchor: &StaleReplayAnchorV1,
+    proof: HistoricalReplayProofV1,
+) -> Result<()> {
+    let world = anchor.epoch.world_id;
+    if storage.stale_replay_anchor(world)? != *anchor
+        || anchor.epoch.authority_peer_id == local.peer_id()
+        || source == local.peer_id()
+        || !anchor.membership.members.iter().any(|member| {
+            !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key()
+        })
+        || !anchor
+            .membership
+            .members
+            .iter()
+            .any(|member| !member.banned && member.authority_eligible && member.peer_id == source)
+        || !anchor.is_extended_by(&proof)
+    {
+        bail!("stale replay is not an exact successor of an accepted non-authority replica");
+    }
+    let target = proof.membership.last().context("stale replay lacks final membership")?.clone();
+    if target.authority_peer_id != source
+        || !target.members.iter().any(|member| {
+            !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key()
+        })
+    {
+        bail!("stale replay source or recipient is not bound to final signed membership");
+    }
+    let verified = verify_replay_proof(proof, &storage.load_world(world)?.genesis, &target)?;
+    // Preserve every locally retained canonical manifest, not just the
+    // endpoint. Each signature and the underlying bytes must verify.
+    let manifests = storage.list_snapshots(world)?;
+    if manifests.last().map(|manifest| manifest.manifest_hash()).transpose()? != Some(anchor.head.manifest_hash) {
+        bail!("local retained history does not reach the exact stale replay anchor");
+    }
+    for manifest in &manifests {
+        verified.verify_manifest(manifest)?;
+        storage.verify_snapshot(manifest)?;
+    }
+    for certificate in storage.load_membership_certificate_chain(world)? {
+        if !verified.proof.membership_certificates.contains(&certificate) {
+            bail!("stale replay replaces locally accepted joint membership evidence");
+        }
+    }
+    if anchor.epoch.mode == EpochMode::Recovery {
+        let index = usize::try_from(anchor.epoch.epoch_number.checked_sub(2).context("invalid recovery generation")?)?;
+        let Some(HistoricalTransitionV1::Recovery(certificate)) = verified.proof.transitions.get(index) else {
+            bail!("stale replay omits the local accepted recovery certificate");
+        };
+        if storage.load_recovery_certificate(world)? != **certificate {
+            bail!("stale replay changes the local accepted recovery certificate");
+        }
+    }
+    storage.stage_stale_replay_proof(anchor, verified.proof())?;
+    Ok(())
 }
 
 /// Strictly data-only proof validation. The expected membership must be the
@@ -843,15 +906,22 @@ mod tests {
         let (_temp, storage, alice, first) = fixture();
         let bob = PeerIdentity::from_secret_bytes([22; 32]);
         let carol = PeerIdentity::from_secret_bytes([23; 32]);
+        let dave = PeerIdentity::from_secret_bytes([27; 32]);
         let world = first.world_id;
         let genesis = storage.load_world(world).unwrap().genesis;
         let initial = signed_membership(&first, &alice, vec![member(&alice)], None);
         storage.save_membership_record(&initial).unwrap();
         let config = initial_config(&storage, &alice, world);
-        let admitted =
-            signed_membership(&first, &alice, vec![member(&alice), member(&bob), member(&carol)], Some(&initial));
+        let mut dave_member = member(&dave);
+        dave_member.authority_eligible = false;
+        let admitted = signed_membership(
+            &first,
+            &alice,
+            vec![member(&alice), member(&bob), member(&carol), dave_member],
+            Some(&initial),
+        );
         let proposal = MembershipProposalV1 { previous: initial, proposed: admitted.clone() };
-        let votes = [&alice, &bob]
+        let votes = [&alice, &bob, &carol]
             .iter()
             .map(|voter| {
                 let mut vote = MembershipVoteV1 {
@@ -872,6 +942,38 @@ mod tests {
         storage.save_membership_record(&admitted).unwrap();
 
         let base = storage.latest_snapshot(world).unwrap().unwrap();
+        // Preserve a fully accepted replica at epoch one before either
+        // signed transition. It will never install an intermediate epoch
+        // merely because it learns about a valid newer history.
+        let stale_dir = tempfile::tempdir().unwrap();
+        let stale = Storage::open(stale_dir.path()).unwrap();
+        stale.create_world(&storage.load_world(world).unwrap()).unwrap();
+        for entry in &base.entries {
+            let blob = &entry.blob;
+            if stale.has_complete_blob(world, blob) {
+                continue;
+            }
+            let (data, finished) =
+                storage.read_encoded_blob_chunk(world, blob, 0, usize::try_from(blob.encoded_size).unwrap()).unwrap();
+            assert!(finished);
+            stale.receive_blob_chunk(world, blob, 0, &data, true).unwrap();
+        }
+        stale.finalize_replica(&base).unwrap();
+        stale.save_epoch_record(&first).unwrap();
+        stale.save_membership_record(&storage.load_genesis_membership(world).unwrap()).unwrap();
+        stale.save_membership_certificate(&storage.load_membership_certificate(world).unwrap()).unwrap();
+        stale.save_membership_record(&admitted).unwrap();
+        stale.save_world_config(&config).unwrap();
+        stale
+            .save_world_descriptor(&swarm_protocol::WorldDescriptorV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id: world,
+                compatibility_fingerprint: genesis.compatibility_fingerprint,
+                members: admitted.members.clone(),
+                preferred_replication_factor: 3,
+            })
+            .unwrap();
+        let anchor = stale.stale_replay_anchor(world).unwrap();
         let second = successor(&first, &bob);
         let mut phase = AuthorityTransferV1 {
             protocol_version: PROTOCOL_VERSION,
@@ -899,6 +1001,22 @@ mod tests {
         let proof = collect_replay_proof(&storage, &bob, world).unwrap();
         assert_eq!(proof.transitions.len(), 1);
         assert!(matches!(proof.transitions[0], HistoricalTransitionV1::Transfer { .. }));
+        assert!(verify_and_stage_stale_replay(&stale, &dave, carol.peer_id(), &anchor, proof.clone()).is_err());
+        assert!(verify_and_stage_stale_replay(&stale, &alice, bob.peer_id(), &anchor, proof.clone()).is_err());
+        let mut wrong_anchor = anchor.clone();
+        wrong_anchor.head.manifest_hash = Hash32([42; 32]);
+        assert!(verify_and_stage_stale_replay(&stale, &dave, bob.peer_id(), &wrong_anchor, proof.clone()).is_err());
+        let mut fork = proof.clone();
+        fork.epochs[0].reason = "a different signed genesis epoch".into();
+        fork.epochs[0].signature = alice.sign(&fork.epochs[0].signing_bytes().unwrap());
+        fork.epochs[1].previous_epoch_hash = Some(fork.epochs[0].record_hash().unwrap());
+        fork.epochs[1].signature = bob.sign(&fork.epochs[1].signing_bytes().unwrap());
+        fork.signature = bob.sign(&fork.signing_bytes().unwrap());
+        assert!(verify_replay_proof(fork.clone(), &genesis, &membership2).is_ok());
+        assert!(verify_and_stage_stale_replay(&stale, &dave, bob.peer_id(), &anchor, fork).is_err());
+        assert!(stale.load_staged_stale_replay_proof(world).unwrap().is_none());
+        verify_and_stage_stale_replay(&stale, &dave, bob.peer_id(), &anchor, proof.clone()).unwrap();
+        let first_pinned = proof.clone();
         let verified = verify_replay_proof(proof, &genesis, &membership2).unwrap();
         for manifest in storage.list_snapshots(world).unwrap() {
             verified.verify_manifest(&manifest).unwrap();
@@ -924,7 +1042,7 @@ mod tests {
             signature: Vec::new(),
         };
         ballot.signature = carol.sign(&ballot.signing_bytes().unwrap());
-        let votes = [&alice, &carol]
+        let votes = [&alice, &bob, &carol]
             .iter()
             .map(|voter| {
                 let mut vote = RecoveryVoteV1 {
@@ -950,6 +1068,17 @@ mod tests {
         assert_eq!(proof.checkpoints.len(), 3);
         assert_eq!(proof.membership.last(), Some(&membership3));
         assert!(matches!(proof.transitions[1], HistoricalTransitionV1::Recovery(_)));
+        assert!(proof.extends_replay_history(&first_pinned));
+        verify_and_stage_stale_replay(&stale, &dave, carol.peer_id(), &anchor, proof.clone()).unwrap();
+        assert!(verify_and_stage_stale_replay(&stale, &dave, bob.peer_id(), &anchor, first_pinned.clone()).is_err());
+        drop(stale);
+        let stale = Storage::open(stale_dir.path()).unwrap();
+        assert_eq!(stale.load_staged_stale_replay_proof(world).unwrap(), Some((anchor.clone(), proof.clone())));
+        assert_eq!(stale.stale_replay_anchor(world).unwrap(), anchor);
+        assert_eq!(stale.load_epoch_record(world).unwrap(), first);
+        assert_eq!(stale.latest_snapshot(world).unwrap().unwrap(), base);
+        assert!(stale.load_transfer_record(world).is_err());
+        assert!(stale.load_recovery_certificate(world).is_err());
         let verified = verify_replay_proof(proof.clone(), &genesis, &membership3).unwrap();
         for manifest in storage.list_snapshots(world).unwrap() {
             verified.verify_manifest(&manifest).unwrap();
@@ -984,7 +1113,7 @@ mod tests {
         members.push(player.clone());
         let admitted = signed_membership(&third, &carol, members, Some(&membership3));
         let proposal = MembershipProposalV1 { previous: membership3.clone(), proposed: admitted.clone() };
-        let votes = [&alice, &carol, &dan]
+        let votes = [&alice, &bob, &carol, &dan]
             .iter()
             .map(|voter| {
                 let mut vote = MembershipVoteV1 {
@@ -1014,6 +1143,9 @@ mod tests {
         storage.save_world_descriptor(&descriptor).unwrap();
         crate::live_authority::verify_playable_epoch(&storage, &third).unwrap();
         let envelope = collect_replay_proof(&storage, &carol, world).unwrap();
+        verify_and_stage_stale_replay(&stale, &dave, carol.peer_id(), &anchor, envelope.clone()).unwrap();
+        assert_eq!(stale.load_staged_stale_replay_proof(world).unwrap(), Some((anchor.clone(), envelope.clone())));
+        assert_eq!(stale.stale_replay_anchor(world).unwrap(), anchor);
         let verified = verify_replay_proof(envelope.clone(), &genesis, &admitted).unwrap();
 
         // Build the real storage first-contact path with a signed invite,

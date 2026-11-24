@@ -63,17 +63,21 @@ fn automatic_transport_address(peer: &PeerFixture, ip: Ipv4Addr) -> String {
 }
 
 fn spawn_daemon(peer: &PeerFixture, listen_ip: Ipv4Addr) -> ManagedChild {
-    let child = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+    spawn_daemon_with_peers(peer, listen_ip, &[])
+}
+
+fn spawn_daemon_with_peers(peer: &PeerFixture, listen_ip: Ipv4Addr, addresses: &[String]) -> ManagedChild {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_swarmcraft"));
+    command
         .arg("--data-dir")
         .arg(&peer.paths.root)
         .arg("daemon")
         .arg("--listen")
-        .arg(format!("/ip4/{listen_ip}/udp/{}/quic-v1", peer.port))
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
+        .arg(format!("/ip4/{listen_ip}/udp/{}/quic-v1", peer.port));
+    for address in addresses {
+        command.arg("--peer").arg(address);
+    }
+    let child = command.env("RUST_LOG", "info").stdout(Stdio::inherit()).stderr(Stdio::inherit()).spawn().unwrap();
     ManagedChild(child)
 }
 
@@ -252,6 +256,82 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
     assert!(run_cli(&c, &["world", "join", &token, "--host-candidate"]).contains("Already a signed member"));
     assert_eq!(c.storage.load_membership_record(world).unwrap(), committed);
     assert_eq!(c.storage.load_world_descriptor(world).unwrap().members, committed.members);
+
+    // The player disconnects before the old authority's final save and
+    // misses the signed transfer. Exercise real authenticated RPC between
+    // the newer authority and the already admitted stale player. The
+    // historical envelope may be staged but must not advance live state.
+    drop((_daemon_a, _daemon_b, _daemon_c));
+    let anchor = c.storage.stale_replay_anchor(world).unwrap();
+    fs::write(source.path().join("level.dat"), b"last checkpoint before transfer").unwrap();
+    let mut boundary = b
+        .storage
+        .snapshot_directory(
+            source.path(),
+            SnapshotContext {
+                world,
+                snapshot_number: 4,
+                sequence: head.sequence + 1,
+                epoch: epoch.epoch_number,
+                previous_snapshot_hash: Some(head.manifest_hash().unwrap()),
+                authority_peer_id: a.identity.peer_id(),
+                authority_public_key: a.identity.public_key(),
+            },
+        )
+        .unwrap();
+    a.identity.sign_snapshot(&mut boundary).unwrap();
+    b.storage.commit_snapshot(&boundary).unwrap();
+    let mut next = swarm_protocol::EpochRecordV1 {
+        epoch_number: epoch.epoch_number + 1,
+        fencing_token: epoch.fencing_token + 1,
+        previous_epoch_hash: Some(epoch.record_hash().unwrap()),
+        base_state_hash: boundary.state_root,
+        authority_peer_id: b.identity.peer_id(),
+        authority_public_key: b.identity.public_key(),
+        reason: "certified transfer after disconnected player".into(),
+        signature: Vec::new(),
+        ..epoch.clone()
+    };
+    next.signature = b.identity.sign(&next.signing_bytes().unwrap());
+    let mut transfer = swarm_protocol::AuthorityTransferV1 {
+        protocol_version: swarm_protocol::PROTOCOL_VERSION,
+        world_id: world,
+        from_peer_id: a.identity.peer_id(),
+        to_peer_id: b.identity.peer_id(),
+        base_snapshot_hash: boundary.manifest_hash().unwrap(),
+        next_epoch: next.epoch_number,
+        next_fencing_token: next.fencing_token,
+        phase: swarm_protocol::TransferPhase::Prepared,
+        signer_peer_id: a.identity.peer_id(),
+        signer_public_key: a.identity.public_key(),
+        signature: Vec::new(),
+    };
+    for (phase, signer) in [
+        (swarm_protocol::TransferPhase::Prepared, &a.identity),
+        (swarm_protocol::TransferPhase::Accepted, &b.identity),
+        (swarm_protocol::TransferPhase::Committed, &a.identity),
+    ] {
+        transfer.phase = phase;
+        transfer.signer_peer_id = signer.peer_id();
+        transfer.signer_public_key = signer.public_key();
+        transfer.signature = signer.sign(&transfer.signing_bytes().unwrap());
+        b.storage.save_transfer_record(&transfer).unwrap();
+    }
+    b.storage.save_epoch_record(&next).unwrap();
+    swarm_cli::migration::ensure_authority_artifacts(&b.storage, &b.identity, &next).unwrap();
+    let expected = swarm_cli::historical_authority::collect_replay_proof(&b.storage, &b.identity, world).unwrap();
+    assert_eq!(expected.checkpoints.len(), 5);
+    let _new_host = spawn_daemon(&b, local_ip);
+    let _stale_player = spawn_daemon_with_peers(&c, local_ip, &[automatic_transport_address(&b, local_ip)]);
+    wait_until("authenticated newer authority proof pinned to older accepted replica", Duration::from_secs(60), || {
+        c.storage.load_staged_stale_replay_proof(world).ok().flatten().as_ref()
+            == Some(&(anchor.clone(), expected.clone()))
+    });
+    assert_eq!(c.storage.stale_replay_anchor(world).unwrap(), anchor);
+    assert_eq!(c.storage.load_epoch_record(world).unwrap(), epoch);
+    assert_eq!(c.storage.latest_snapshot(world).unwrap().unwrap(), head);
+    assert_eq!(c.storage.load_membership_record(world).unwrap(), committed);
+    assert!(swarm_cli::hosting_budget::load_consent(&c.paths, world).unwrap().is_none());
 }
 
 #[test]

@@ -708,3 +708,44 @@ joint-history signature validation only when the fully verified ballot
 roster has an exact signed promotion with no intervening admissions.
 The first local reconnect and transport suite passed; exact-SHA hosted
 validation is required before marking the macOS and Minecraft gates green.
+
+The corrective commit b1dd6b9 passed required validation run 45507603759:
+all 20 selected jobs succeeded, including macOS Rust, the hosted real
+Minecraft initial connection/handoff/recovery, and installed Linux GUI.
+The optional network soak was skipped. The expanded local tests and strict
+Clippy also succeeded.
+
+### Stale-replica successor proof discovery and anchoring (25 November)
+
+Existing non-authority replicas (including player-only members) request a
+signed historical replay proof when an authenticated known host candidate
+reports a newer generation. The status itself is only a discovery hint.
+Status polling and consumption use the one-second lease tick, rather than
+the five-second invitation tick that would outlive the three-second
+status freshness bound for player-only peers.
+The complete envelope must authenticate its final authority, include the
+recipient in its committed membership, and verify every transition and
+joint certificate. The replica captures an exact signed local epoch,
+membership, config, descriptor and canonical checkpoint anchor before
+the request. It verifies all retained local manifests and blob bytes
+against the returned history. Genesis-valid forks, different local
+checkpoint anchors, substituted certificates and rollback are refused.
+
+The candidate is durably stored separately from live canonical state.
+The storage transaction rechecks the entire anchor; a normal replication
+or authority change racing the verification invalidates it. A later
+authority may extend a pinned candidate only by preserving its complete
+epoch, membership, certificate, config, checkpoint and transition prefix.
+Neither pinning nor replacing a candidate creates a replica receipt,
+installs a live epoch, changes membership, removes a durable fence, or
+permits hosting. Source selection currently requires a known locally
+eligible member, and excludes a replica that is itself the old authority.
+
+Tests exercise signed transfer followed by recovery and joint admission,
+rejecting a validly signed divergent genesis epoch and an older envelope.
+The daemon integration extends the ordinary invite/replication scenario
+with a player that misses a checkpoint and transfer, then receives the
+newer authority's proof over an authenticated connection. Isolated
+checkpoint downloads for this stale-replica path and crash-safe final
+publication over existing accepted control state remain open. The
+first-contact replay path is unchanged.

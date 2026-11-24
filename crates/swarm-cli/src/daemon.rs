@@ -9,7 +9,9 @@ use std::{
 use swarm_cli::{
     authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
     game_route_api::{GameRouteApiOperation, GameRouteApiReply, GameRouteApiServer, GameRouteStatusV1},
-    historical_authority::{collect_replay_proof, load_staged_replay, verify_replay_proof},
+    historical_authority::{
+        collect_replay_proof, load_staged_replay, verify_and_stage_stale_replay, verify_replay_proof,
+    },
     host_readiness::{self, PeerReadinessObservation},
     hosting_budget, launch_guard,
     live_authority::{SignedHostFabricAttestation, SignedLiveAuthoritySource},
@@ -53,8 +55,8 @@ use swarm_protocol::{
     SnapshotManifestV1, TransferPhase, WorldDescriptorV1, WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{
-    DurableMembershipPromiseV1, DurableRecoveryPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage,
-    StorageError,
+    control::StaleReplayAnchorV1, DurableMembershipPromiseV1, DurableRecoveryPromiseV1, MembershipPromiseResult,
+    RecoveryPromiseResult, Storage, StorageError,
 };
 use tokio::time::MissedTickBehavior;
 use tokio::{
@@ -75,6 +77,7 @@ mod remote_fabric;
 const MAX_IN_FLIGHT_HOST_FABRIC_RPC: usize = 4;
 const MAX_HOST_FABRIC_RPC_WAIT: Duration = Duration::from_millis(2_450);
 const MAX_HISTORICAL_REPLAY_WORKERS: usize = 2;
+const STALE_REPLAY_RETRY: Duration = Duration::from_secs(15);
 
 struct HistoricalReplayReply {
     channel: ResponseChannel<WireResponse>,
@@ -162,6 +165,7 @@ enum OutboundContext {
     Sleep { peer: PeerId, record: SleepRecordV1 },
     LiveQuorum { id: u64, peer: PeerId },
     HistoricalReplayProof { world: WorldId, peer: PeerId, membership_hash: Hash32 },
+    StaleReplayProof { peer: PeerId, anchor: Box<StaleReplayAnchorV1> },
     HistoricalReplayNext { world: WorldId },
 }
 
@@ -250,6 +254,7 @@ struct LeaseRuntime {
     transfer_manifest_requests: HashMap<(WorldId, PeerId), (Hash32, Instant)>,
     live_quorum_vote_nonces: HashMap<(WorldId, PeerId, [u8; 32]), u64>,
     historical_inbound: HashMap<WorldId, HistoricalInboundReplica>,
+    stale_replay_requests: HashMap<(WorldId, PeerId), Instant>,
 }
 
 struct HandlerContext<'a> {
@@ -583,6 +588,12 @@ pub async fn run(
                 }
             }
             _ = lease_tick.tick() => {
+                // Status hints expire after three seconds. The slower
+                // invitation retry tick (five seconds) cannot reliably
+                // consume a player-only peer's previous status response.
+                if let Err(error) = request_stale_replay_proofs(storage, &identity, &mut node, &mut outbound, &mut leases) {
+                    warn!(%error, "stale replica proof request deferred");
+                }
                 pending_remote_fabric.retain(|_, pending| {
                     if pending.started.elapsed() >= remote_fabric::REMOTE_HOST_RPC_TIMEOUT {
                         let _ = pending.response.try_send(Err(anyhow!("remote signed Fabric IPC proof timed out")));
@@ -809,6 +820,33 @@ pub async fn run(
                                     }
                                 }
                             }
+                            Some(OutboundContext::StaleReplayProof { peer, anchor }) => {
+                                if node.application_peer(&transport_peer) != Some(peer)
+                                    || leases.authenticated_peers.get(&transport_peer) != Some(&peer)
+                                    || response.validate_limits().is_err()
+                                {
+                                    continue;
+                                }
+                                if let WireResponse::HistoricalReplayProof(Some(bytes)) = response {
+                                    if let Ok(slot) = Arc::clone(&replay_workers).try_acquire_owned() {
+                                        let storage = storage.clone();
+                                        let local = PeerIdentity::from_secret_bytes(identity.network_signing_key().to_bytes());
+                                        replay_tasks.spawn_blocking(move || {
+                                            let _slot = slot;
+                                            let world = anchor.epoch.world_id;
+                                            let result = (|| -> Result<()> {
+                                                let proof: HistoricalReplayProofV1 = postcard::from_bytes(&bytes)?;
+                                                verify_and_stage_stale_replay(&storage, &local, peer, &anchor, proof)
+                                            })();
+                                            if let Err(error) = result {
+                                                warn!(%world, %peer, %error, "stale replica history rejected");
+                                            } else {
+                                                info!(%world, %peer, "signed successor history pinned to stale replica; canonical state unchanged");
+                                            }
+                                        });
+                                    }
+                                }
+                            }
                             other => handle_response(
                                 &HandlerContext { paths, identity: &identity, storage },
                                 &mut node,
@@ -851,7 +889,7 @@ pub async fn run(
                                     live_quorum_driver.fail(id, anyhow!("fresh-quorum signature RPC failed"));
                                 }
                                 OutboundContext::Manifest { .. } => {}
-                                OutboundContext::HistoricalReplayProof { .. } | OutboundContext::HistoricalReplayNext { .. } => {}
+                                OutboundContext::HistoricalReplayProof { .. } | OutboundContext::HistoricalReplayNext { .. } | OutboundContext::StaleReplayProof { .. } => {}
                                 OutboundContext::BlobChunk { world, .. } => {
                                     leases.replications.remove(&(transport_peer, world));
                                 }
@@ -880,6 +918,7 @@ pub async fn run(
                             leases.transfer_manifest_requests.retain(|(_, peer), _| *peer != application_peer);
                             leases.canonical_payload_sent.retain(|(_, peer), _| *peer != application_peer);
                             leases.historical_inbound.retain(|_, replica| replica.transport != transport_peer);
+                            leases.stale_replay_requests.retain(|(_, peer), _| *peer != application_peer);
                         }
                         leases.replications.retain(|(peer, _), _| *peer != transport_peer);
                         info!(transport = %transport_peer, "peer disconnected");
@@ -3222,8 +3261,12 @@ fn request_historical_replay_proofs(
     outbound: &mut HashMap<String, OutboundContext>,
     runtime: &LeaseRuntime,
 ) -> Result<()> {
-    let mut pending =
-        outbound.values().filter(|context| matches!(context, OutboundContext::HistoricalReplayProof { .. })).count();
+    let mut pending = outbound
+        .values()
+        .filter(|context| {
+            matches!(context, OutboundContext::HistoricalReplayProof { .. } | OutboundContext::StaleReplayProof { .. })
+        })
+        .count();
     for metadata in storage.list_worlds()? {
         if pending >= MAX_HISTORICAL_REPLAY_WORKERS {
             break;
@@ -3282,6 +3325,87 @@ fn verify_and_stage_replay_proof(
     let verified = verify_replay_proof(proof, &metadata.genesis, &membership)?;
     let canonical_bytes = postcard::to_allocvec(verified.proof())?;
     storage.stage_historical_replay_proof(world, membership_hash, &canonical_bytes)?;
+    Ok(())
+}
+
+/// A remote status is an untrusted discovery hint. Request a signed
+/// successor envelope only from a connection-authenticated known member;
+/// never infer a new epoch or change membership from the status itself.
+fn request_stale_replay_proofs(
+    storage: &Storage,
+    identity: &PeerIdentity,
+    node: &mut SwarmNode,
+    outbound: &mut HashMap<String, OutboundContext>,
+    runtime: &mut LeaseRuntime,
+) -> Result<()> {
+    let now = Instant::now();
+    runtime.stale_replay_requests.retain(|_, sent| now.saturating_duration_since(*sent) < STALE_REPLAY_RETRY);
+    let mut pending = outbound
+        .values()
+        .filter(|context| {
+            matches!(context, OutboundContext::HistoricalReplayProof { .. } | OutboundContext::StaleReplayProof { .. })
+        })
+        .count();
+    for metadata in storage.list_worlds()? {
+        let world = metadata.world_id;
+        let Ok(epoch) = storage.load_epoch_record(world) else { continue };
+        if epoch.epoch_number == 0 || epoch.mode == EpochMode::Solo || epoch.authority_peer_id == identity.peer_id() {
+            continue;
+        }
+        let Ok(descriptor) = storage.load_world_descriptor(world) else { continue };
+        if !descriptor
+            .member(identity.peer_id())
+            .is_some_and(|member| !member.banned && member.public_key == identity.public_key())
+        {
+            continue;
+        }
+        // Player-only peers also need discovery of a newer authority even
+        // though they never enter the hosting recovery election.
+        request_world_statuses(storage, node, outbound, runtime, &descriptor, identity.peer_id())?;
+        if pending >= MAX_HISTORICAL_REPLAY_WORKERS
+            || outbound.values().any(|context| {
+                matches!(context,
+                    OutboundContext::StaleReplayProof { anchor, .. } if anchor.epoch.world_id == world
+                )
+            })
+        {
+            continue;
+        }
+        let minimum = storage
+            .load_staged_stale_replay_proof(world)?
+            .and_then(|(_, proof)| proof.epochs.last().map(|target| target.epoch_number))
+            .unwrap_or(epoch.epoch_number);
+        let candidate = runtime
+            .authenticated_peers
+            .iter()
+            .filter_map(|(transport, peer)| {
+                if node.application_peer(transport) != Some(*peer)
+                    || !descriptor.member(*peer).is_some_and(|member| !member.banned && member.authority_eligible)
+                    || runtime.stale_replay_requests.contains_key(&(world, *peer))
+                {
+                    return None;
+                }
+                let observed = runtime.peer_status.get(&(world, *peer))?;
+                if observed.status.epoch <= minimum
+                    || observed.status.latest_snapshot.is_none()
+                    || observed.status.compatibility_fingerprint != descriptor.compatibility_fingerprint
+                    || now.saturating_duration_since(observed.observed_at) >= STATUS_FRESHNESS
+                {
+                    return None;
+                }
+                Some((*transport, *peer, observed.status.epoch))
+            })
+            .max_by_key(|(_, peer, generation)| (*generation, *peer));
+        let Some((transport, peer, _)) = candidate else { continue };
+        let Ok(anchor) = storage.stale_replay_anchor(world) else { continue };
+        if anchor.epoch != epoch {
+            continue;
+        }
+        let request = node.send_request(&transport, WireRequest::HistoricalReplayProof { world_id: world })?;
+        outbound.insert(request_key(&request), OutboundContext::StaleReplayProof { peer, anchor: Box::new(anchor) });
+        runtime.stale_replay_requests.insert((world, peer), now);
+        pending += 1;
+    }
     Ok(())
 }
 

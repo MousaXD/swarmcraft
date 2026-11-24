@@ -67,6 +67,21 @@ pub struct HistoricalReplayProofV1 {
 }
 
 impl HistoricalReplayProofV1 {
+    /// A later authority may extend a pinned data-only commitment, never
+    /// replace its history with a different signed fork. The envelope
+    /// signature itself changes when its contents or signer changes.
+    pub fn extends_replay_history(&self, previous: &Self) -> bool {
+        self.protocol_version == previous.protocol_version
+            && self.world_id == previous.world_id
+            && self.genesis == previous.genesis
+            && self.epochs.starts_with(&previous.epochs)
+            && self.membership.starts_with(&previous.membership)
+            && self.membership_certificates.starts_with(&previous.membership_certificates)
+            && self.configs.starts_with(&previous.configs)
+            && self.checkpoints.starts_with(&previous.checkpoints)
+            && self.transitions.starts_with(&previous.transitions)
+    }
+
     pub fn signing_bytes(&self) -> Result<Vec<u8>, ProtocolError> {
         let unsigned = (
             self.protocol_version,
