@@ -359,3 +359,36 @@ game-route verification all succeed. The mere presence of a bound localhost
 gateway does **not** mean a Minecraft client connected, that a host is ready,
 or that the release has passed. Do not replace it with configured
 `game_endpoint`, cached migration Ready or synthetic field results.
+
+### Recovered-authority routing and real gateway gate (24 November)
+
+- Required Validation `45389218911` passed **21/21 jobs** on exact baseline
+  `27229b4aea6edbe7115faa4d3adb86c02ee0c978`, including the 2 GiB interrupted
+  network soak, Windows/Linux/macOS, Desktop packages and installed Linux GUI,
+  and official Minecraft/Fabric startup.
+- The successor route now independently verifies the durable recovery
+  certificate against the exact archived pre-promotion signed membership.
+  Newly accepted authority metadata inherits and re-signs the existing world
+  configuration without changing policy. Recovery is not permission to bypass
+  a fresh canonical quorum or authenticated Fabric proof. Old or corrupt
+  history and incomplete handoffs remain fail-closed.
+- Exact-generation lease acknowledgments drive bounded retries of successor
+  configuration, membership, and direct checkpoint extensions. Signed sleep
+  replication requires the exact verified checkpoint receipt before sending
+  the sleep record; the source does not report shutdown safety while an active
+  member has not acknowledged that boundary.
+- Local signed-recovery regression, both transfer process tests and the
+  hard-kill three-daemon recovery/resynchronization test passed. Strict
+  all-target/all-feature CLI and storage Clippy passed. The process fixtures
+  explicitly create private temporary ancestors; the production registry
+  correctly refused the previous group-writable fixture under umask 0002.
+- The required hosted player-journey workflow now explicitly executes a new
+  three-daemon test with official Minecraft, the candidate Fabric artifact,
+  real authenticated IPC and real Minecraft status packets via the persistent
+  player gateway. It asserts the initial route, signed handoff, restored save
+  marker, crash recovery, and replicated sleep boundary. Its compilation is
+  checked locally; the live test is deliberately run in CI, not claimed as
+  passed here. The test seeds a canonical three-member genesis; it does not
+  establish the fresh invitation/bootstrap journey, real Microsoft account
+  login, independent machines/WAN, or in-game inventory continuity. Those
+  gates remain open. No security or memory-admission rule was relaxed.

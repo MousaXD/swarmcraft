@@ -13,6 +13,7 @@
 use std::{
     fs,
     net::UdpSocket,
+    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Child, Command, Output, Stdio},
     thread,
@@ -59,6 +60,10 @@ fn hosting_capacity_for_process_test() -> bool {
             false
         }
     }
+}
+
+fn private_peer_dir() -> TempDir {
+    tempfile::Builder::new().permissions(fs::Permissions::from_mode(0o700)).tempdir().unwrap()
 }
 
 fn peer(temp: TempDir) -> PeerFixture {
@@ -113,6 +118,7 @@ fn snapshot(
     authority: &PeerIdentity,
     world: WorldId,
     source: &Path,
+    epoch: u64,
 ) -> swarm_protocol::SnapshotManifestV1 {
     let mut manifest = storage
         .snapshot_directory(
@@ -120,7 +126,7 @@ fn snapshot(
             SnapshotContext {
                 world,
                 snapshot_number: 1,
-                epoch: 0,
+                epoch,
                 sequence: 1,
                 previous_snapshot_hash: None,
                 authority_peer_id: authority.peer_id(),
@@ -133,7 +139,12 @@ fn snapshot(
     manifest.manifest().clone()
 }
 
-fn initialize_peer_world(alice: &PeerFixture, others: &[&PeerFixture], source: &Path) -> SharedWorld {
+fn initialize_peer_world(
+    alice: &PeerFixture,
+    others: &[&PeerFixture],
+    source: &Path,
+    initial_epoch: u64,
+) -> SharedWorld {
     let peers = std::iter::once(alice).chain(others.iter().copied()).collect::<Vec<_>>();
     let replica_count = peers.len().try_into().unwrap();
     let compatibility = RuntimeCompatibilityManifestV1 {
@@ -147,13 +158,17 @@ fn initialize_peer_world(alice: &PeerFixture, others: &[&PeerFixture], source: &
         datapacks: Vec::new(),
     };
     let fingerprint = compatibility.fingerprint().unwrap();
-    let (world, genesis) = create_world_genesis_with_fingerprint(
+    let (_, mut genesis) = create_world_genesis_with_fingerprint(
         &alice.identity,
         compatibility.minecraft_version.clone(),
         compatibility.loader_version.clone(),
         fingerprint,
     )
     .unwrap();
+    // Initially configured voters must be anchored in world genesis.
+    genesis.initial_membership = peers.iter().map(|peer| peer.identity.peer_id()).collect();
+    genesis.initial_membership.sort();
+    let world = genesis.world_id().unwrap();
     let metadata = WorldMetadataV1 {
         storage_schema_version: STORAGE_SCHEMA_VERSION,
         display_name: "transfer-process-gate".into(),
@@ -220,16 +235,16 @@ fn initialize_peer_world(alice: &PeerFixture, others: &[&PeerFixture], source: &
         peer.storage.save_world_config(&config).unwrap();
     }
 
-    let alice_snapshot = snapshot(&alice.storage, &alice.identity, world, source);
+    let alice_snapshot = snapshot(&alice.storage, &alice.identity, world, source, initial_epoch);
     for peer in others {
-        let replica = snapshot(&peer.storage, &alice.identity, world, source);
+        let replica = snapshot(&peer.storage, &alice.identity, world, source, initial_epoch);
         assert_eq!(alice_snapshot.manifest_hash().unwrap(), replica.manifest_hash().unwrap());
     }
 
     let mut epoch = EpochRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
-        epoch_number: 0,
+        epoch_number: initial_epoch,
         previous_epoch_hash: None,
         base_state_hash: alice_snapshot.state_root,
         authority_peer_id: alice.identity.peer_id(),
@@ -242,6 +257,16 @@ fn initialize_peer_world(alice: &PeerFixture, others: &[&PeerFixture], source: &
     epoch.signature = alice.identity.sign(&epoch.signing_bytes().unwrap());
     for peer in &peers {
         peer.storage.save_epoch_record(&epoch).unwrap();
+    }
+    if initial_epoch != 0 {
+        let mut promoted = membership.clone();
+        promoted.epoch = initial_epoch;
+        promoted.sequence += 1;
+        promoted.previous_membership_hash = Some(membership.record_hash().unwrap());
+        alice.identity.sign_membership(&mut promoted).unwrap();
+        for peer in &peers {
+            peer.storage.save_membership_record(&promoted).unwrap();
+        }
     }
     SharedWorld { world, epoch }
 }
@@ -268,15 +293,15 @@ fn manual_transfer_stages_run_as_separate_sidecar_processes_without_minecraft() 
     if !hosting_capacity_for_process_test() {
         return;
     }
-    let alice = peer(tempfile::tempdir().unwrap());
-    let bob = peer(tempfile::tempdir().unwrap());
+    let alice = peer(private_peer_dir());
+    let bob = peer(private_peer_dir());
 
     let source_temp = tempfile::tempdir().unwrap();
     let source = source_temp.path().join("world");
     fs::create_dir_all(&source).unwrap();
     fs::write(source.join("level.dat"), b"canonical-before-transfer\n").unwrap();
 
-    let shared = initialize_peer_world(&alice, &[&bob], &source);
+    let shared = initialize_peer_world(&alice, &[&bob], &source, 0);
     swarm_cli::hosting_budget::set_contribution(&alice.paths, shared.world, 512).unwrap();
     swarm_cli::hosting_budget::set_contribution(&bob.paths, shared.world, 512).unwrap();
     save_sleep(&alice, shared.world);
@@ -404,12 +429,12 @@ fn automatic_handoff_waits_for_witness_and_consent_then_converges_without_tokens
     if !hosting_capacity_for_process_test() {
         return;
     }
-    let alice = peer(tempfile::tempdir().unwrap());
-    let bob = peer(tempfile::tempdir().unwrap());
-    let carol = peer(tempfile::tempdir().unwrap());
+    let alice = peer(private_peer_dir());
+    let bob = peer(private_peer_dir());
+    let carol = peer(private_peer_dir());
     let source = tempfile::tempdir().unwrap();
     fs::write(source.path().join("level.dat"), b"canonical-network-handoff\n").unwrap();
-    let shared = initialize_peer_world(&alice, &[&bob, &carol], source.path());
+    let shared = initialize_peer_world(&alice, &[&bob, &carol], source.path(), 0);
     let world = shared.world;
     let world_hex = world.to_hex();
     let target = bob.identity.peer_id();
@@ -470,5 +495,256 @@ fn automatic_handoff_waits_for_witness_and_consent_then_converges_without_tokens
         // No real Java runtime was configured: a successful transfer of
         // authority must not pretend that Minecraft is already playable.
         assert!(!load_migration_status(&peer.paths, world).is_ok_and(|status| status.runtime_ready));
+    }
+}
+
+// This is deliberately a separate hosted gate: it uses official Minecraft,
+// a real candidate Fabric JAR, real daemon-owned IPC, and the actual gateway.
+// A status handshake exercises game bytes without pretending that a Microsoft
+// account logged in or that these local processes are independent machines.
+#[cfg(target_os = "linux")]
+mod hosted_live {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpStream,
+        os::unix::process::CommandExt,
+    };
+    use swarm_cli::game_route_api::GameRouteStatusV1;
+
+    struct LiveDaemon(Child);
+
+    impl Drop for LiveDaemon {
+        fn drop(&mut self) {
+            // This process group was created solely for this disposable peer.
+            // Kill its JVM too on a failed assertion or a simulated crash.
+            let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", self.0.id())]).status();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn spawn(peer: &PeerFixture, port: u16, addresses: &[String]) -> LiveDaemon {
+        let log = fs::File::create(peer.paths.root.join("hosted-daemon.log")).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_swarmcraft"));
+        command
+            .arg("--data-dir")
+            .arg(&peer.paths.root)
+            .arg("daemon")
+            .arg("--listen")
+            .arg(format!("/ip4/127.0.0.1/udp/{port}/quic-v1"))
+            .env("RUST_LOG", "info")
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .process_group(0);
+        for address in addresses {
+            command.arg("--peer").arg(address);
+        }
+        LiveDaemon(command.spawn().unwrap())
+    }
+
+    fn runtime(peer: &PeerFixture, args: &[&str]) -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_swarmcraft-runtime"))
+            .arg("--data-dir")
+            .arg(&peer.paths.root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "runtime {args:?}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn eventually(label: &str, peers: &[&PeerFixture], mut predicate: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(180);
+        while Instant::now() < deadline {
+            if predicate() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+        for peer in peers {
+            let log = fs::read_to_string(peer.paths.root.join("hosted-daemon.log")).unwrap_or_default();
+            let lines = log.lines().rev().take(50).collect::<Vec<_>>();
+            eprintln!(
+                "peer {} last daemon messages:\n{}",
+                peer.identity.peer_id(),
+                lines.into_iter().rev().collect::<Vec<_>>().join("\n")
+            );
+        }
+        panic!("timed out waiting for {label}");
+    }
+
+    fn verified_route(
+        player: &PeerFixture,
+        world: WorldId,
+        authority: &PeerFixture,
+        epoch: u64,
+        peers: &[&PeerFixture],
+    ) -> String {
+        let mut endpoint = None;
+        eventually("live signed route to expected authority", peers, || {
+            let output = run_cli(player, &["world", "game-route-status", &world.to_string(), "--json"]);
+            let Ok(status) = serde_json::from_slice::<GameRouteStatusV1>(&output.stdout) else { return false };
+            if !output.status.success()
+                || status.world_id != world.to_string()
+                || status.state != "verified"
+                || !status.quorum_verified
+                || !status.hosting_consent_verified
+                || !status.server_ready
+                || !status.route_verified
+                || status.authority_peer_id.as_deref() != Some(authority.identity.peer_id().to_string().as_str())
+                || status.epoch != Some(epoch)
+                || status.snapshot_hash.is_none()
+            {
+                return false;
+            }
+            endpoint = status.local_gateway;
+            endpoint.is_some()
+        });
+        endpoint.unwrap()
+    }
+
+    fn put_varint(mut value: u32, bytes: &mut Vec<u8>) {
+        loop {
+            let next = (value & 0x7f) as u8;
+            value >>= 7;
+            bytes.push(if value == 0 { next } else { next | 0x80 });
+            if value == 0 {
+                break;
+            }
+        }
+    }
+
+    fn get_varint(reader: &mut impl Read) -> u32 {
+        let mut value = 0;
+        for offset in (0..35).step_by(7) {
+            let mut byte = [0u8];
+            reader.read_exact(&mut byte).expect("Minecraft response truncated");
+            value |= u32::from(byte[0] & 0x7f) << offset;
+            if byte[0] & 0x80 == 0 {
+                return value;
+            }
+        }
+        panic!("invalid Minecraft VarInt");
+    }
+
+    fn minecraft_status(endpoint: &str) {
+        let address: std::net::SocketAddr = endpoint.parse().unwrap();
+        assert!(address.ip().is_loopback());
+        let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(25))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut handshake = vec![0]; // packet id 0
+        put_varint(u32::MAX, &mut handshake); // status protocol version negotiation
+        put_varint(9, &mut handshake);
+        handshake.extend_from_slice(b"localhost");
+        handshake.extend_from_slice(&address.port().to_be_bytes());
+        handshake.push(1); // next state: status
+        let mut packet = Vec::new();
+        put_varint(handshake.len().try_into().unwrap(), &mut packet);
+        packet.extend(handshake);
+        packet.extend([1, 0]); // framed status request
+        stream.write_all(&packet).unwrap();
+        let length = get_varint(&mut stream) as usize;
+        assert!((1..=1_048_576).contains(&length));
+        let mut bytes = vec![0; length];
+        stream.read_exact(&mut bytes).unwrap();
+        let mut body = bytes.as_slice();
+        assert_eq!(get_varint(&mut body), 0);
+        let json_length = get_varint(&mut body) as usize;
+        assert_eq!(json_length, body.len());
+        let response: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert!(
+            response["version"]["name"].as_str().unwrap().contains("26.1.2"),
+            "unexpected real server status {response}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires official managed Minecraft and candidate Fabric artifact; run explicitly in hosted live CI"]
+    fn real_minecraft_gateway_handoff_and_recovery() {
+        assert!(hosting_capacity_for_process_test(), "hosted live gate must have enough memory; never skip");
+        assert!(std::env::var_os("SWARMCRAFT_FABRIC_MOD_JAR").is_some(), "candidate Fabric artifact is mandatory");
+        let alice = peer(private_peer_dir());
+        let bob = peer(private_peer_dir());
+        let carol = peer(private_peer_dir());
+        let source = tempfile::tempdir().unwrap();
+        let shared = initialize_peer_world(&alice, &[&bob, &carol], source.path(), 1);
+        let world = shared.world;
+        let world_id = world.to_string();
+        let peers = [&alice, &bob, &carol];
+        for host in [&alice, &bob] {
+            swarm_cli::hosting_budget::set_contribution(&host.paths, world, 512).unwrap();
+            runtime(host, &["install", &world_id, "--accept-eula"]);
+            let verified: serde_json::Value = serde_json::from_str(&runtime(host, &["verify", &world_id])).unwrap();
+            assert_eq!(verified["ready"], true);
+        }
+        assert!(swarm_cli::hosting_budget::load_consent(&carol.paths, world).unwrap().is_none());
+        let sockets = (0..3).map(|_| UdpSocket::bind("127.0.0.1:0").unwrap()).collect::<Vec<_>>();
+        let ports = sockets.iter().map(|socket| socket.local_addr().unwrap().port()).collect::<Vec<_>>();
+        let addresses = peers.iter().zip(&ports).map(|(peer, port)| daemon_address(peer, *port)).collect::<Vec<_>>();
+        drop(sockets);
+        let _alice = spawn(&alice, ports[0], &[]);
+        let bob_daemon = spawn(&bob, ports[1], &addresses[..1]);
+        let _carol = spawn(&carol, ports[2], &addresses[..2]);
+        eventually("player gateway selection", &peers, || {
+            run_cli(&carol, &["world", "game-route-select", &world_id]).status.success()
+        });
+        let endpoint = verified_route(&carol, world, &alice, 1, &peers);
+        minecraft_status(&endpoint);
+        assert!(!carol.paths.root.join("runtime").join(world.to_hex()).exists());
+        println!("HOSTED_LIVE_GATEWAY_INITIAL_PASS");
+
+        let relative =
+            Path::new("runtime").join(world.to_hex()).join("world").join("swarmcraft-hosted-gateway-marker.txt");
+        fs::write(alice.paths.root.join(&relative), b"real Fabric save before signed handoff\n").unwrap();
+        run_cli_ok(&alice, &["world", "transfer-start", &world_id, &bob.identity.peer_id().to_string(), "1"]);
+        let successor = verified_route(&carol, world, &bob, 2, &peers);
+        assert_eq!(successor, endpoint, "player's permanent loopback address changed");
+        minecraft_status(&successor);
+        assert_eq!(fs::read(bob.paths.root.join(&relative)).unwrap(), b"real Fabric save before signed handoff\n");
+        println!("HOSTED_LIVE_GATEWAY_HANDOFF_PASS");
+
+        // Re-verify Alice's installed runtime after releasing her old host.
+        // This is the actual managed artifact verifier, not a cached Ready.
+        let verified: serde_json::Value = serde_json::from_str(&runtime(&alice, &["verify", &world_id])).unwrap();
+        assert_eq!(verified["ready"], true);
+        let accepted = bob.storage.latest_snapshot(world).unwrap().unwrap().manifest_hash().unwrap();
+        eventually("all replicas hold the exact successor checkpoint", &peers, || {
+            peers.iter().all(|peer| {
+                peer.storage
+                    .latest_snapshot(world)
+                    .is_ok_and(|m| m.is_some_and(|m| m.manifest_hash().ok() == Some(accepted)))
+                    && peer.storage.load_membership_record(world).is_ok_and(|m| m.epoch == 2)
+                    && peer
+                        .storage
+                        .load_world_config(world)
+                        .is_ok_and(|c| c.authority_peer_id == bob.identity.peer_id())
+            })
+        });
+        drop(bob_daemon); // Simulated host crash, including its real JVM.
+        let recovered = verified_route(&carol, world, &alice, 3, &peers);
+        assert_eq!(recovered, endpoint);
+        minecraft_status(&recovered);
+        assert_eq!(fs::read(alice.paths.root.join(&relative)).unwrap(), b"real Fabric save before signed handoff\n");
+        let epoch = alice.storage.load_epoch_record(world).unwrap();
+        assert_eq!(epoch.mode, EpochMode::Recovery);
+        swarm_cli::live_authority::verify_playable_epoch(&alice.storage, &epoch).unwrap();
+        run_cli_ok(&alice, &["world", "stop", &world_id]);
+        eventually("real recovered JVM safe checkpoint", &peers, || alice.storage.load_sleep_record(world).is_ok());
+        let saved = alice.storage.load_sleep_record(world).unwrap();
+        eventually("surviving voter receives exact signed sleep and checkpoint", &peers, || {
+            carol.storage.load_sleep_record(world).is_ok_and(|record| record == saved)
+                && carol.storage.latest_snapshot(world).is_ok_and(|head| {
+                    head.is_some_and(|head| head.manifest_hash().ok() == Some(saved.latest_snapshot_hash))
+                })
+        });
+        let report = swarm_cli::host_readiness::load_host_readiness_report(&alice.paths, world).unwrap();
+        assert!(!report.safe_to_shutdown, "offline voter has not acknowledged the sleep boundary");
+        println!("HOSTED_LIVE_GATEWAY_RECOVERY_PASS");
     }
 }

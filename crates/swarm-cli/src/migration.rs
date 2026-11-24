@@ -2096,8 +2096,11 @@ fn prepare_authority_epoch(
     }
 }
 
-fn ensure_authority_artifacts(storage: &Storage, identity: &PeerIdentity, epoch: &EpochRecordV1) -> Result<()> {
+pub fn ensure_authority_artifacts(storage: &Storage, identity: &PeerIdentity, epoch: &EpochRecordV1) -> Result<()> {
+    ensure_authority_generation(storage, identity, epoch)?;
+    verify_signature(epoch.authority_peer_id, epoch.authority_public_key, &epoch.signing_bytes()?, &epoch.signature)?;
     let latest = storage.latest_snapshot(epoch.world_id)?.context("accepted authority epoch has no base snapshot")?;
+    verify_snapshot_signature(&latest)?;
     if latest.epoch < epoch.epoch_number {
         if latest.epoch.checked_add(1).context("snapshot epoch counter exhausted during authority promotion")?
             != epoch.epoch_number
@@ -2131,12 +2134,33 @@ fn ensure_authority_artifacts(storage: &Storage, identity: &PeerIdentity, epoch:
     } else if latest.epoch != epoch.epoch_number
         || latest.authority_peer_id != identity.peer_id()
         || latest.authority_public_key != identity.public_key()
-        || latest.state_root != epoch.base_state_hash
     {
         bail!("latest snapshot conflicts with the accepted authority epoch");
+    } else if latest.state_root != epoch.base_state_hash {
+        // The first checkpoint of this generation binds the epoch's base.
+        // Subsequent legitimate saves may change the state root, but they
+        // cannot replace that signed base or its canonical ancestry.
+        let base = storage
+            .list_snapshots(epoch.world_id)?
+            .into_iter()
+            .find(|snapshot| snapshot.epoch == epoch.epoch_number)
+            .context("accepted authority epoch has no retained base checkpoint")?;
+        verify_snapshot_signature(&base)?;
+        if base.state_root != epoch.base_state_hash
+            || base.authority_peer_id != epoch.authority_peer_id
+            || base.authority_public_key != epoch.authority_public_key
+        {
+            bail!("canonical snapshot history does not descend from the accepted authority base");
+        }
     }
 
-    if let Ok(membership) = storage.load_membership_record(epoch.world_id) {
+    {
+        let membership = storage.load_membership_record(epoch.world_id)?;
+        swarm_core::verify_membership_signature(&membership)?;
+        let descriptor = storage.load_world_descriptor(epoch.world_id)?;
+        if membership.members != descriptor.members {
+            bail!("accepted membership differs from the authority descriptor");
+        }
         if membership.epoch > epoch.epoch_number {
             bail!("membership is ahead of the accepted authority epoch");
         }
@@ -2159,6 +2183,26 @@ fn ensure_authority_artifacts(storage: &Storage, identity: &PeerIdentity, epoch:
             storage.save_membership_record(&promoted)?;
         }
     }
+    refresh_authority_config(storage, identity, epoch)?;
+    Ok(())
+}
+
+/// The new accepted authority inherits the exact prior signed configuration;
+/// re-signing does not change the compatibility, privacy or authority policy.
+fn refresh_authority_config(storage: &Storage, identity: &PeerIdentity, epoch: &EpochRecordV1) -> Result<()> {
+    ensure_authority_generation(storage, identity, epoch)?;
+    let mut config = storage.load_world_config(epoch.world_id)?;
+    swarm_core::protocol_v2::verify_world_config_signature(&config)?;
+    if config.compatibility_fingerprint()? != storage.load_world(epoch.world_id)?.genesis.compatibility_fingerprint {
+        bail!("inherited world configuration conflicts with the signed genesis");
+    }
+    if config.authority_peer_id == identity.peer_id() && config.authority_public_key == identity.public_key() {
+        return Ok(());
+    }
+    config.previous_config_hash = Some(config.config_hash()?);
+    config.sequence = config.sequence.checked_add(1).context("world configuration sequence exhausted")?;
+    swarm_core::sign_world_config(identity, &mut config)?;
+    storage.save_world_config(&config)?;
     Ok(())
 }
 
@@ -2375,6 +2419,7 @@ fn publish_failure(
     config: &RuntimeLaunchConfig,
     error: &anyhow::Error,
 ) -> Result<()> {
+    warn!(%world, %error, "authority runtime transition failed");
     publish_status(
         paths,
         storage,

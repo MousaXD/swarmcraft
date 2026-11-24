@@ -695,12 +695,95 @@ fn canonical_route_requires_signed_majority_and_current_host_consent() {
     // it was correctly signed and its snapshot bytes remain intact.
     let original_proof = signed.read().unwrap().clone();
     assert!(require_current_canonical_generation(&storage, world, &original_proof).is_ok());
+    // Model the *actual* durable recovery transition, including the old
+    // membership hash in the ballot and the newly promoted membership.
+    let base_membership = original_proof.membership.current_membership.clone();
+    let mut ballot = swarm_protocol::RecoveryBallotV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        base_epoch: original_proof.epoch.epoch_number,
+        base_fencing_token: original_proof.epoch.fencing_token,
+        target_epoch: original_proof.epoch.epoch_number + 1,
+        target_fencing_token: original_proof.epoch.fencing_token + 1,
+        round: 1,
+        candidate_peer_id: bob.peer_id(),
+        candidate_public_key: bob.public_key(),
+        base_snapshot_hash: original_proof.snapshot.manifest_hash().unwrap(),
+        base_state_hash: original_proof.snapshot.state_root,
+        membership_hash: base_membership.record_hash().unwrap(),
+        signature: Vec::new(),
+    };
+    swarm_core::protocol_v2::sign_recovery_ballot(&bob, &mut ballot).unwrap();
+    let recovery_votes = [&bob, &carol]
+        .iter()
+        .map(|voter| {
+            let mut vote = swarm_protocol::RecoveryVoteV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id: world,
+                ballot_hash: ballot.ballot_hash().unwrap(),
+                base_epoch: ballot.base_epoch,
+                target_epoch: ballot.target_epoch,
+                round: ballot.round,
+                candidate_peer_id: bob.peer_id(),
+                voter_peer_id: voter.peer_id(),
+                voter_public_key: voter.public_key(),
+                signature: Vec::new(),
+            };
+            swarm_core::protocol_v2::sign_recovery_vote(voter, &mut vote).unwrap();
+            vote
+        })
+        .collect();
+    let certificate = swarm_protocol::RecoveryCertificateV1 { ballot: ballot.clone(), votes: recovery_votes };
+    storage.save_recovery_certificate(&certificate).unwrap();
     let mut next_epoch = original_proof.epoch.clone();
-    next_epoch.epoch_number += 1;
-    next_epoch.fencing_token += 1;
-    next_epoch.reason = "superseded while verifying route authority".into();
-    next_epoch.signature = alice.sign(&next_epoch.signing_bytes().unwrap());
+    next_epoch.epoch_number = ballot.target_epoch;
+    next_epoch.fencing_token = ballot.target_fencing_token;
+    next_epoch.previous_epoch_hash = Some(Hash32::from_domain_bytes(
+        b"swarmcraft/epoch-record/v1\0",
+        &postcard::to_allocvec(&original_proof.epoch).unwrap(),
+    ));
+    next_epoch.authority_peer_id = bob.peer_id();
+    next_epoch.authority_public_key = bob.public_key();
+    next_epoch.mode = EpochMode::Recovery;
+    next_epoch.reason = "certified successor while verifying route authority".into();
+    next_epoch.signature = bob.sign(&next_epoch.signing_bytes().unwrap());
     storage.save_epoch_record(&next_epoch).unwrap();
     assert!(require_current_canonical_generation(&storage, world, &original_proof).is_err());
     assert!(source.verify_fresh(world, bob.peer_id(), nonce).is_err());
+    assert!(verify_playable_epoch(&storage, &next_epoch).is_err(), "epoch alone is not enough");
+    let mut next_membership = base_membership.clone();
+    next_membership.epoch = next_epoch.epoch_number;
+    next_membership.sequence += 1;
+    next_membership.previous_membership_hash = Some(base_membership.record_hash().unwrap());
+    next_membership.authority_peer_id = bob.peer_id();
+    next_membership.authority_public_key = bob.public_key();
+    bob.sign_membership(&mut next_membership).unwrap();
+    storage.save_membership_record(&next_membership).unwrap();
+    assert_ne!(next_membership.record_hash().unwrap(), ballot.membership_hash);
+    assert_eq!(storage.load_membership_by_hash(world, ballot.membership_hash).unwrap(), base_membership);
+    assert_eq!(storage.load_genesis_membership(world).unwrap(), original_proof.membership.initial_membership);
+    verify_playable_epoch(&storage, &next_epoch).unwrap();
+
+    // Missing or corrupt historic evidence must not be silently replaced by
+    // the new current membership. A majority certificate is not a cache.
+    let history_path = storage
+        .world_dir(world)
+        .join("metadata/membership-history")
+        .join(format!("{}.postcard", ballot.membership_hash));
+    let history = fs::read(&history_path).unwrap();
+    fs::write(&history_path, b"corrupt former voter record").unwrap();
+    assert!(verify_playable_epoch(&storage, &next_epoch).is_err());
+    fs::write(&history_path, history).unwrap();
+    verify_playable_epoch(&storage, &next_epoch).unwrap();
+    let certificate_path = storage.world_dir(world).join("metadata/recovery-certificate-pending.postcard");
+    let certificate_path = if certificate_path.exists() {
+        certificate_path
+    } else {
+        storage.world_dir(world).join("metadata/recovery-certificate.postcard")
+    };
+    let certificate_bytes = fs::read(&certificate_path).unwrap();
+    fs::remove_file(&certificate_path).unwrap();
+    assert!(verify_playable_epoch(&storage, &next_epoch).is_err());
+    fs::write(certificate_path, certificate_bytes).unwrap();
+    verify_playable_epoch(&storage, &next_epoch).unwrap();
 }

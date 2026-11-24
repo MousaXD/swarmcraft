@@ -3,7 +3,7 @@ use crate::{
     Storage, StorageError,
 };
 use std::path::PathBuf;
-use swarm_protocol::{JoinRequestV1, LeaveRequestV1, MembershipRecordV1, WorldDescriptorV1, WorldId};
+use swarm_protocol::{Hash32, JoinRequestV1, LeaveRequestV1, MembershipRecordV1, WorldDescriptorV1, WorldId};
 
 impl Storage {
     pub fn save_world_descriptor(&self, descriptor: &WorldDescriptorV1) -> Result<(), StorageError> {
@@ -37,7 +37,7 @@ impl Storage {
         if canonical_file_exists(&membership_path)? {
             let current = self.load_membership_record(record.world_id)?;
             if record == &current {
-                return Ok(());
+                return self.archive_membership_locked(&current);
             }
             let expected_sequence =
                 current.sequence.checked_add(1).ok_or(StorageError::CounterExhausted("membership sequence"))?;
@@ -65,6 +65,8 @@ impl Storage {
             {
                 return Err(StorageError::WorldMetadataMismatch);
             }
+            // Preserve the exact signed predecessor before replacing it.
+            self.archive_membership_locked(&current)?;
         } else {
             let certified_bootstrap = self.certified_membership_bootstrap(record)?;
             if !certified_bootstrap && (record.sequence != 0 || record.previous_membership_hash.is_some()) {
@@ -87,7 +89,82 @@ impl Storage {
             }
         }
         let bytes = postcard::to_allocvec(record)?;
+        self.archive_membership_locked(record)?;
         durable_atomic_write(&membership_path, &bytes)
+    }
+
+    fn archive_membership_locked(&self, record: &MembershipRecordV1) -> Result<(), StorageError> {
+        let path = self
+            .world_protocol_path(record.world_id, &format!("membership-history/{}.postcard", record.record_hash()?));
+        let bytes = postcard::to_allocvec(record)?;
+        if canonical_file_exists(&path)? {
+            if read_canonical_file(&path)? != bytes {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+        } else {
+            durable_atomic_write(&path, &bytes)?;
+        }
+        // Keep the original signed record across same-voter epoch changes.
+        if record.sequence == 0 && record.previous_membership_hash.is_none() {
+            let genesis_path = self.world_protocol_path(record.world_id, "membership-genesis.postcard");
+            if canonical_file_exists(&genesis_path)? {
+                if read_canonical_file(&genesis_path)? != bytes {
+                    return Err(StorageError::WorldMetadataMismatch);
+                }
+            } else {
+                durable_atomic_write(&genesis_path, &bytes)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read exact historical membership evidence. Never replace a corrupt
+    /// record with the current voter list or infer one from an unsigned file.
+    pub fn load_membership_by_hash(&self, world: WorldId, hash: Hash32) -> Result<MembershipRecordV1, StorageError> {
+        let path = self.world_protocol_path(world, &format!("membership-history/{hash}.postcard"));
+        let record: MembershipRecordV1 = match read_canonical_file(&path) {
+            Ok(bytes) => postcard::from_bytes(&bytes)?,
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                // Compatibility for older data: the current record and
+                // certificate endpoints are already durable signed evidence.
+                let current = self.load_membership_record(world)?;
+                if current.record_hash()? == hash {
+                    return Ok(current);
+                }
+                for certificate in self.load_membership_certificate_chain(world)? {
+                    for record in [certificate.proposal.previous, certificate.proposal.proposed] {
+                        if record.record_hash()? == hash {
+                            return Ok(record);
+                        }
+                    }
+                }
+                return Err(StorageError::Io { path, source });
+            }
+            Err(error) => return Err(error),
+        };
+        if record.world_id != world || record.record_hash()? != hash {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        record.validate_semantics()?;
+        Ok(record)
+    }
+
+    pub fn load_genesis_membership(&self, world: WorldId) -> Result<MembershipRecordV1, StorageError> {
+        let path = self.world_protocol_path(world, "membership-genesis.postcard");
+        let record: MembershipRecordV1 = match read_canonical_file(&path) {
+            Ok(bytes) => postcard::from_bytes(&bytes)?,
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => self
+                .load_membership_certificate_chain(world)?
+                .first()
+                .map(|certificate| certificate.proposal.previous.clone())
+                .unwrap_or(self.load_membership_record(world)?),
+            Err(error) => return Err(error),
+        };
+        if record.world_id != world || record.sequence != 0 || record.previous_membership_hash.is_some() {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        record.validate_semantics()?;
+        Ok(record)
     }
 
     fn certified_membership_bootstrap(&self, record: &MembershipRecordV1) -> Result<bool, StorageError> {

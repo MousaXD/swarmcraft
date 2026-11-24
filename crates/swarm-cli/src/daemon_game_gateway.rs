@@ -25,7 +25,7 @@ use swarm_network::{
     },
     SwarmNode, TransportPeerId,
 };
-use swarm_protocol::{EpochMode, PeerId, WorldId};
+use swarm_protocol::{PeerId, WorldId};
 use swarm_storage::Storage;
 use tokio::{
     sync::{oneshot, watch, Semaphore},
@@ -56,9 +56,7 @@ impl GameRouteCandidateSource for CanonicalRouteCandidates {
             let storage = Storage::open(self.paths.root.clone())?;
             let epoch = storage.load_epoch_record(world)?;
             let descriptor = storage.load_world_descriptor(world)?;
-            if epoch.mode != EpochMode::Quorum {
-                bail!("no accepted quorum-mode authority for the selected game world");
-            }
+            swarm_cli::live_authority::verify_playable_epoch(&storage, &epoch)?;
             verify_signature(
                 epoch.authority_peer_id,
                 epoch.authority_public_key,
@@ -238,9 +236,8 @@ impl GatewayRouteResolver for SelectedWorldResolver {
         Box::pin(async move {
             let storage = Storage::open(self.paths.root.clone()).map_err(|_| GameTransportError::StaleRoute)?;
             let epoch = storage.load_epoch_record(world).map_err(|_| GameTransportError::StaleRoute)?;
-            if epoch.mode != EpochMode::Quorum {
-                return Err(GameTransportError::StaleRoute);
-            }
+            swarm_cli::live_authority::verify_playable_epoch(&storage, &epoch)
+                .map_err(|_| GameTransportError::StaleRoute)?;
             if epoch.authority_peer_id == self.requester {
                 self.local.resolve(world).await
             } else {

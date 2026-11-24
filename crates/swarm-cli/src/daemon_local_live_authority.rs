@@ -15,8 +15,8 @@ use swarm_cli::{
 use swarm_core::{DataPaths, PeerIdentity};
 use swarm_network::TransportPeerId;
 use swarm_protocol::{
-    DiscoveryCanonicalHeadV1, DiscoveryFreshnessChallengeV1, DiscoveryMembershipProofV1, EpochMode, EpochRecordV1,
-    PeerId, SnapshotManifestV1, WorldConfigV1, WorldId, PROTOCOL_VERSION,
+    DiscoveryCanonicalHeadV1, DiscoveryFreshnessChallengeV1, DiscoveryMembershipProofV1, EpochRecordV1, PeerId,
+    SnapshotManifestV1, WorldConfigV1, WorldId, PROTOCOL_VERSION,
 };
 use swarm_storage::{Storage, StorageError};
 use tokio::runtime::Handle;
@@ -59,10 +59,7 @@ impl DaemonLocalLiveAuthority {
         let metadata = storage.load_world(world)?;
         let current_membership = storage.load_membership_record(world)?;
         let membership_certificates = storage.load_membership_certificate_chain(world)?;
-        let initial_membership = membership_certificates
-            .first()
-            .map(|certificate| certificate.proposal.previous.clone())
-            .unwrap_or_else(|| current_membership.clone());
+        let initial_membership = storage.load_genesis_membership(world)?;
         let pending_membership = match storage.load_membership_promise(world) {
             Ok(_) => bail!("pending canonical membership change blocks game routing"),
             Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
@@ -80,9 +77,7 @@ impl DaemonLocalLiveAuthority {
         let epoch = storage.load_epoch_record(world)?;
         let config = storage.load_world_config(world)?;
         let snapshot = storage.latest_snapshot(world)?.context("no accepted canonical checkpoint")?;
-        if epoch.mode != EpochMode::Quorum {
-            bail!("game routing requires a signed quorum authority generation");
-        }
+        swarm_cli::live_authority::verify_playable_epoch(storage, &epoch)?;
         let accepted = storage.canonical_snapshot_head(world)?.head.context("no accepted canonical snapshot head")?;
         let head = DiscoveryCanonicalHeadV1 {
             snapshot_number: accepted.snapshot_number,

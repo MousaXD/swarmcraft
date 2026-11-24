@@ -291,10 +291,7 @@ impl LiveQuorumDriver {
         let metadata = storage.load_world(challenge.world_id)?;
         let membership = storage.load_membership_record(challenge.world_id)?;
         let certificates = storage.load_membership_certificate_chain(challenge.world_id)?;
-        let initial = certificates
-            .first()
-            .map(|certificate| certificate.proposal.previous.clone())
-            .unwrap_or_else(|| membership.clone());
+        let initial = storage.load_genesis_membership(challenge.world_id)?;
         let proof = DiscoveryMembershipProofV1 {
             protocol_version: PROTOCOL_VERSION,
             world_id: challenge.world_id,

@@ -11,7 +11,7 @@ jobs:
   clean-machine-live:
     name: Clean machine live artifacts + Minecraft
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-05
@@ -103,6 +103,16 @@ jobs:
             echo "Official artifact HTTP error; bounded retry with fresh clean-machine state"
             sleep $((5 * attempt * attempt))
           done
+      - name: Authenticated real Minecraft gateway handoff and recovery
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/swarmcraft-clean-machine-logs/hosted-gateway.log"
+          cargo test -p swarm-cli --test manual_transfer_process_gate --locked hosted_live::real_minecraft_gateway_handoff_and_recovery -- --ignored --nocapture --test-threads=1 2>&1 | tee "$log"
+          grep -q '^HOSTED_LIVE_GATEWAY_INITIAL_PASS$' "$log"
+          grep -q '^HOSTED_LIVE_GATEWAY_HANDOFF_PASS$' "$log"
+          grep -q '^HOSTED_LIVE_GATEWAY_RECOVERY_PASS$' "$log"
       - name: Upload clean-machine evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

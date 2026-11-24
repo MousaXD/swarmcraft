@@ -144,6 +144,7 @@ enum OutboundContext {
     Status { world: WorldId, peer: PeerId },
     HostCapability { world: WorldId, peer: PeerId },
     Transfer { peer: PeerId, record: AuthorityTransferV1 },
+    Sleep { peer: PeerId, record: SleepRecordV1 },
     LiveQuorum { id: u64, peer: PeerId },
 }
 
@@ -212,10 +213,12 @@ struct LeaseRuntime {
     peer_status: HashMap<(WorldId, PeerId), ObservedStatus>,
     peer_capability: HashMap<(WorldId, PeerId), ObservedCapability>,
     recovery_not_before: HashMap<WorldId, Instant>,
-    recovery_replication_sent: HashSet<(WorldId, PeerId)>,
+    // Bounded retry bookkeeping, not replica or authority evidence.
+    canonical_payload_sent: HashMap<(WorldId, PeerId), (AuthorityGeneration, Instant)>,
     replications: HashMap<(TransportPeerId, WorldId), ReplicationState>,
     transfer_acks: Vec<TransferDeliveryAck>,
     transfer_replica_acks: HashMap<(WorldId, PeerId), Hash32>,
+    sleep_acks: HashMap<(WorldId, PeerId), SleepRecordV1>,
     // Historical diagnostics only; never used by transfer or quorum gates.
     last_checkpoint_ack: HashMap<WorldId, (PeerId, ReplicaAckV1, Instant)>,
     transfer_manifest_requests: HashMap<(WorldId, PeerId), (Hash32, Instant)>,
@@ -394,7 +397,7 @@ pub async fn run(
             }
             Some(command) = remote_fabric_commands.recv() => {
                 let eligible = storage.load_epoch_record(command.world).is_ok_and(|epoch| {
-                    epoch.mode == EpochMode::Quorum && epoch.authority_peer_id == command.authority
+                    swarm_cli::live_authority::verify_playable_epoch(storage, &epoch).is_ok() && epoch.authority_peer_id == command.authority
                 }) && authorize_member(storage, command.world, command.authority).is_ok()
                     && command.authority != identity.peer_id()
                     && command.nonce != [0; 32]
@@ -665,7 +668,7 @@ pub async fn run(
                                 OutboundContext::HostCapability { world, peer } => {
                                     leases.peer_capability.remove(&(world, peer));
                                 }
-                                OutboundContext::Transfer { .. } => {}
+                                OutboundContext::Transfer { .. } | OutboundContext::Sleep { .. } => {}
                                 OutboundContext::LiveQuorum { id, .. } => {
                                     live_quorum_driver.fail(id, anyhow!("fresh-quorum signature RPC failed"));
                                 }
@@ -694,7 +697,9 @@ pub async fn run(
                             leases.peer_capability.retain(|(_, peer), _| *peer != application_peer);
                             leases.transfer_acks.retain(|ack| ack.peer != application_peer);
                             leases.transfer_replica_acks.retain(|(_, peer), _| *peer != application_peer);
+                            leases.sleep_acks.retain(|(_, peer), _| *peer != application_peer);
                             leases.transfer_manifest_requests.retain(|(_, peer), _| *peer != application_peer);
+                            leases.canonical_payload_sent.retain(|(_, peer), _| *peer != application_peer);
                         }
                         leases.replications.retain(|(peer, _), _| *peer != transport_peer);
                         info!(transport = %transport_peer, "peer disconnected");
@@ -836,7 +841,7 @@ fn verify_remote_host_fabric_rpc(
     }
     let epoch = storage.load_epoch_record(pending.world)?;
     let snapshot = storage.latest_snapshot(pending.world)?.context("missing accepted local checkpoint")?;
-    if epoch.mode != EpochMode::Quorum
+    if swarm_cli::live_authority::verify_playable_epoch(storage, &epoch).is_err()
         || epoch.authority_peer_id != pending.authority
         || epoch.epoch_number != signed.canonical.epoch
         || epoch.fencing_token != signed.canonical.fencing_token
@@ -896,7 +901,7 @@ fn current_verified_route_status_matches(
     // A membership revocation during an asynchronous proof invalidates even
     // an otherwise correctly signed old route before Desktop sees it.
     let member = descriptor.member(proof.authority_peer_id());
-    if epoch.mode != EpochMode::Quorum
+    if swarm_cli::live_authority::verify_playable_epoch(storage, &epoch).is_err()
         || epoch.authority_peer_id != proof.authority_peer_id()
         || epoch.epoch_number != proof.epoch()
         || epoch.fencing_token != proof.fencing_token()
@@ -931,7 +936,7 @@ fn local_host_generation_eligible(
 ) -> bool {
     let HostRouteGeneration { world, epoch_number, fencing_token, consent_revision } = generation;
     let Ok(epoch) = storage.load_epoch_record(world) else { return false };
-    if epoch.mode != EpochMode::Quorum
+    if swarm_cli::live_authority::verify_playable_epoch(storage, &epoch).is_err()
         || epoch.authority_peer_id != identity.peer_id()
         || epoch.authority_public_key != identity.public_key()
         || epoch.epoch_number != epoch_number
@@ -1118,7 +1123,7 @@ fn sign_local_live_quorum_vote(
     let epoch = storage.load_epoch_record(world)?;
     epoch.validate_semantics()?;
     verify_signature(epoch.authority_peer_id, epoch.authority_public_key, &epoch.signing_bytes()?, &epoch.signature)?;
-    if epoch.mode != EpochMode::Quorum
+    if swarm_cli::live_authority::verify_playable_epoch(storage, &epoch).is_err()
         || epoch.world_id != world
         || membership.authority_peer_id != epoch.authority_peer_id
         || membership.authority_public_key != epoch.authority_public_key
@@ -1412,7 +1417,21 @@ fn announce_activated_transfer_epoch(
     }
     let latest = storage.latest_snapshot(world)?.context("successor lacks the signed canonical checkpoint")?;
     verify_snapshot_signature(&latest)?;
-    if latest.manifest_hash()? != record.base_snapshot_hash || epoch.base_state_hash != latest.state_root {
+    if latest.manifest_hash()? != record.base_snapshot_hash {
+        let promoted = storage
+            .list_snapshots(world)?
+            .into_iter()
+            .find(|snapshot| snapshot.epoch == epoch.epoch_number)
+            .context("successor lacks its promoted transfer checkpoint")?;
+        verify_snapshot_signature(&promoted)?;
+        if promoted.previous_snapshot_hash != Some(record.base_snapshot_hash)
+            || promoted.authority_peer_id != epoch.authority_peer_id
+            || promoted.authority_public_key != epoch.authority_public_key
+            || promoted.state_root != epoch.base_state_hash
+        {
+            return Err(anyhow!("successor snapshot does not descend from the signed transfer checkpoint"));
+        }
+    } else if epoch.base_state_hash != latest.state_root {
         return Err(anyhow!("successor epoch base differs from the signed transfer checkpoint"));
     }
     // A signed epoch does not override local voluntary consent. Its recipients
@@ -1464,10 +1483,6 @@ fn authorize_transfer_delivery(record: &AuthorityTransferV1, sender: PeerId) -> 
     Ok(())
 }
 
-fn transfer_checkpoint_acknowledged(runtime: &LeaseRuntime, record: &AuthorityTransferV1, peer: PeerId) -> bool {
-    runtime.transfer_replica_acks.get(&(record.world_id, peer)) == Some(&record.base_snapshot_hash)
-}
-
 /// The final Fabric save barrier produces a *new* canonical checkpoint. It is
 /// not enough to send a Prepared token to an already-connected peer: the
 /// peer's transfer validator requires the exact verified snapshot. Drive the
@@ -1485,17 +1500,36 @@ fn replicate_transfer_checkpoint(
     descriptor: &WorldDescriptorV1,
     record: &AuthorityTransferV1,
 ) -> Result<bool> {
-    let world = record.world_id;
+    replicate_exact_checkpoint(
+        storage,
+        node,
+        outbound,
+        runtime,
+        descriptor,
+        (record.from_peer_id, record.base_snapshot_hash),
+    )
+}
+
+fn replicate_exact_checkpoint(
+    storage: &Storage,
+    node: &mut SwarmNode,
+    outbound: &mut HashMap<String, OutboundContext>,
+    runtime: &mut LeaseRuntime,
+    descriptor: &WorldDescriptorV1,
+    boundary: (PeerId, Hash32),
+) -> Result<bool> {
+    let (source, expected_hash) = boundary;
+    let world = descriptor.world_id;
     let checkpoint = storage.latest_snapshot(world)?.context("prepared transfer lacks a canonical checkpoint")?;
     verify_snapshot_signature(&checkpoint)?;
-    if checkpoint.manifest_hash()? != record.base_snapshot_hash {
-        return Err(anyhow!("prepared transfer no longer references the exact final checkpoint"));
+    if checkpoint.manifest_hash()? != expected_hash {
+        return Err(anyhow!("signed boundary no longer references the exact final checkpoint"));
     }
     let mut all_replicated = true;
     let now = Instant::now();
-    for member in descriptor.members.iter().filter(|member| !member.banned && member.peer_id != record.from_peer_id) {
+    for member in descriptor.members.iter().filter(|member| !member.banned && member.peer_id != source) {
         let peer = member.peer_id;
-        if transfer_checkpoint_acknowledged(runtime, record, peer) {
+        if checkpoint_acknowledged(runtime, world, expected_hash, peer) {
             continue;
         }
         all_replicated = false;
@@ -1504,7 +1538,7 @@ fn replicate_transfer_checkpoint(
         };
         if runtime.replications.contains_key(&(*transport, world))
             || runtime.transfer_manifest_requests.get(&(world, peer)).is_some_and(|(hash, when)| {
-                *hash == record.base_snapshot_hash && now.saturating_duration_since(*when) < TRANSFER_MANIFEST_RETRY
+                *hash == expected_hash && now.saturating_duration_since(*when) < TRANSFER_MANIFEST_RETRY
             })
         {
             continue;
@@ -1515,12 +1549,59 @@ fn replicate_transfer_checkpoint(
                     request_key(&id),
                     OutboundContext::Manifest { world, snapshot_number: checkpoint.snapshot_number },
                 );
-                runtime.transfer_manifest_requests.insert((world, peer), (record.base_snapshot_hash, now));
+                runtime.transfer_manifest_requests.insert((world, peer), (expected_hash, now));
             }
             Err(error) => warn!(%world, %peer, %error, "final transfer checkpoint replication deferred"),
         }
     }
     Ok(all_replicated)
+}
+
+fn checkpoint_acknowledged(runtime: &LeaseRuntime, world: WorldId, hash: Hash32, peer: PeerId) -> bool {
+    runtime.transfer_replica_acks.get(&(world, peer)) == Some(&hash)
+}
+
+/// Sleeping revokes authority immediately, but the network service must
+/// continue to distribute the final verified save and its signed boundary.
+/// A recipient may acknowledge Sleep only after accepting that exact save.
+fn replicate_sleep_boundary(
+    storage: &Storage,
+    node: &mut SwarmNode,
+    outbound: &mut HashMap<String, OutboundContext>,
+    runtime: &mut LeaseRuntime,
+    descriptor: &WorldDescriptorV1,
+    record: &SleepRecordV1,
+) -> Result<()> {
+    let world = record.world_id;
+    let epoch = storage.load_epoch_record(world)?;
+    let latest = storage.latest_snapshot(world)?.context("sleep checkpoint missing")?;
+    validate_sleep_recovery_base(record, &epoch, &latest)?;
+    verify_snapshot_signature(&latest)?;
+    ensure_no_membership_prepare(storage, world)?;
+    ensure_no_competing_authority_during_transfer(storage, world, None)?;
+    replicate_exact_checkpoint(
+        storage,
+        node,
+        outbound,
+        runtime,
+        descriptor,
+        (record.authority_peer_id, record.latest_snapshot_hash),
+    )?;
+    for (transport, peer) in &runtime.authenticated_peers {
+        if *peer == record.authority_peer_id
+            || authorized_descriptor_member(descriptor, *peer).is_err()
+            || runtime.transfer_replica_acks.get(&(world, *peer)) != Some(&record.latest_snapshot_hash)
+            || runtime.sleep_acks.get(&(world, *peer)) == Some(record)
+            || outbound.values().any(
+                |request| matches!(request, OutboundContext::Sleep { peer: p, record: r } if p == peer && r == record),
+            )
+        {
+            continue;
+        }
+        let id = node.send_request(transport, WireRequest::Sleep(record.clone()))?;
+        outbound.insert(request_key(&id), OutboundContext::Sleep { peer: *peer, record: record.clone() });
+    }
+    Ok(())
 }
 
 fn launch_automated_transfer_step(
@@ -1707,6 +1788,14 @@ fn maintain_authority_leases(
             clear_permit(paths, world)?;
             clear_sleeping_world(runtime, world);
             if let Ok(descriptor) = storage.load_world_descriptor(world) {
+                if let Some(record) =
+                    sleep_record.as_ref().filter(|record| record.authority_peer_id == identity.peer_id())
+                {
+                    if let Err(error) = replicate_sleep_boundary(storage, node, outbound, runtime, &descriptor, record)
+                    {
+                        warn!(%world, %error, "signed sleep replication deferred");
+                    }
+                }
                 request_world_statuses(storage, node, outbound, runtime, &descriptor, identity.peer_id())?;
                 request_host_capabilities(node, outbound, runtime, &descriptor, identity.peer_id())?;
             }
@@ -1774,8 +1863,15 @@ fn maintain_authority_leases(
             && epoch.authority_peer_id == identity.peer_id()
             && epoch.authority_public_key == identity.public_key()
         {
-            if epoch.mode == EpochMode::Recovery {
-                ensure_recovery_artifacts(storage, identity, &epoch)?;
+            if epoch.mode == EpochMode::Recovery || (epoch.mode == EpochMode::Quorum && epoch.epoch_number > 0) {
+                if let Err(error) = migration::ensure_authority_artifacts(storage, identity, &epoch) {
+                    // The supervisor may be finishing the exact same
+                    // promotion. Do not crash the daemon or grant a lease
+                    // until the durable artifacts agree with this epoch.
+                    clear_permit(paths, world)?;
+                    warn!(%world, %error, "authority artifacts are not yet synchronized; withholding permit");
+                    continue;
+                }
             }
             request_world_statuses(storage, node, outbound, runtime, &descriptor, identity.peer_id())?;
             request_host_capabilities(node, outbound, runtime, &descriptor, identity.peer_id())?;
@@ -2112,7 +2208,7 @@ fn drive_recovery_ballot(
     runtime.lease_acks.retain(|(ack_world, _), _| *ack_world != world);
     runtime.epoch_acks.retain(|(ack_world, _), _| *ack_world != world);
     runtime.inbound_leases.remove(&world);
-    runtime.recovery_replication_sent.retain(|(replica_world, _)| *replica_world != world);
+    runtime.canonical_payload_sent.retain(|(replica_world, _), _| *replica_world != world);
     runtime.recovery_ballots.remove(&world);
     runtime.recovery_votes.retain(|(vote_world, _), _| *vote_world != world);
 
@@ -2510,6 +2606,23 @@ fn publish_host_readiness_snapshot(
         .map(|descriptor| peer_readiness_observations(&descriptor, identity.peer_id(), runtime, now))
         .unwrap_or_default();
     let mut report = host_readiness::evaluate_from_storage(storage, identity.peer_id(), world, &observations)?;
+    if report.state == host_readiness::HostReadinessState::Sleeping {
+        if let Ok(Some(record)) = launch_guard::load_sleep_record_fail_closed(storage, world) {
+            if record.authority_peer_id == identity.peer_id() {
+                let descriptor = storage.load_world_descriptor(world)?;
+                let pending = descriptor
+                    .members
+                    .iter()
+                    .filter(|member| !member.banned && member.peer_id != identity.peer_id())
+                    .filter(|member| runtime.sleep_acks.get(&(world, member.peer_id)) != Some(&record))
+                    .count();
+                if pending != 0 {
+                    report.safe_to_shutdown = false;
+                    report.detail = format!("Saved and sleeping locally; waiting for {pending} active peer(s) to acknowledge the exact saved checkpoint and signed sleep boundary. Keep networking online.");
+                }
+            }
+        }
+    }
     if let (Some(checkpoint), Some((peer, ack, observed_at))) =
         (&mut report.checkpoint, runtime.last_checkpoint_ack.get(&world))
     {
@@ -2567,68 +2680,6 @@ fn promote_recovery_epoch(
     Ok(next)
 }
 
-fn ensure_recovery_artifacts(storage: &Storage, identity: &PeerIdentity, epoch: &EpochRecordV1) -> Result<()> {
-    let latest = storage.latest_snapshot(epoch.world_id)?.context("recovery epoch has no base snapshot")?;
-    if latest.epoch < epoch.epoch_number {
-        if latest.epoch.checked_add(1) != Some(epoch.epoch_number) || latest.state_root != epoch.base_state_hash {
-            return Err(anyhow!("recovery epoch does not directly promote the latest canonical snapshot"));
-        }
-        let mut promoted = SnapshotManifestV1 {
-            protocol_version: PROTOCOL_VERSION,
-            world_id: epoch.world_id,
-            snapshot_number: storage.next_snapshot_number(epoch.world_id)?,
-            epoch: epoch.epoch_number,
-            sequence: latest.sequence.checked_add(1).context("snapshot sequence counter exhausted")?,
-            previous_snapshot_hash: Some(latest.manifest_hash()?),
-            entries: latest.entries.clone(),
-            state_root: latest.state_root,
-            authority_peer_id: identity.peer_id(),
-            authority_public_key: identity.public_key(),
-            signature: Vec::new(),
-        };
-        identity.sign_snapshot(&mut promoted)?;
-        let promoted_expected_head = storage.canonical_snapshot_head(promoted.world_id)?.head;
-        storage.commit_snapshot_fenced(
-            &promoted,
-            swarm_storage::SnapshotCommitFence {
-                expected_epoch: epoch.epoch_number,
-                expected_fencing_token: epoch.fencing_token,
-                expected_head: promoted_expected_head,
-            },
-        )?;
-    } else if latest.epoch != epoch.epoch_number
-        || latest.authority_peer_id != identity.peer_id()
-        || latest.authority_public_key != identity.public_key()
-        || latest.state_root != epoch.base_state_hash
-    {
-        return Err(anyhow!("latest snapshot conflicts with the accepted recovery epoch"));
-    }
-
-    let membership = storage.load_membership_record(epoch.world_id)?;
-    if membership.epoch > epoch.epoch_number {
-        return Err(anyhow!("membership is ahead of the accepted recovery epoch"));
-    }
-    if membership.epoch != epoch.epoch_number
-        || membership.authority_peer_id != identity.peer_id()
-        || membership.authority_public_key != identity.public_key()
-    {
-        let mut promoted = MembershipRecordV1 {
-            protocol_version: membership.protocol_version,
-            world_id: epoch.world_id,
-            epoch: epoch.epoch_number,
-            sequence: membership.sequence.checked_add(1).context("membership sequence counter exhausted")?,
-            previous_membership_hash: Some(membership.record_hash()?),
-            members: membership.members.clone(),
-            authority_peer_id: identity.peer_id(),
-            authority_public_key: identity.public_key(),
-            signature: Vec::new(),
-        };
-        identity.sign_membership(&mut promoted)?;
-        storage.save_membership_record(&promoted)?;
-    }
-    Ok(())
-}
-
 fn clear_sleeping_world(runtime: &mut LeaseRuntime, world: WorldId) {
     runtime.lease_acks.retain(|(ack_world, _), _| *ack_world != world);
     runtime.recovery_ballots.remove(&world);
@@ -2639,7 +2690,7 @@ fn clear_sleeping_world(runtime: &mut LeaseRuntime, world: WorldId) {
     runtime.permit_heartbeats.remove(&world);
     runtime.inbound_leases.remove(&world);
     runtime.recovery_not_before.remove(&world);
-    runtime.recovery_replication_sent.retain(|(replica_world, _)| *replica_world != world);
+    runtime.canonical_payload_sent.retain(|(replica_world, _), _| *replica_world != world);
 }
 
 fn clear_runtime_world(runtime: &mut LeaseRuntime, world: WorldId) {
@@ -2654,7 +2705,7 @@ fn clear_runtime_world(runtime: &mut LeaseRuntime, world: WorldId) {
     runtime.permit_heartbeats.remove(&world);
     runtime.inbound_leases.remove(&world);
     runtime.recovery_not_before.remove(&world);
-    runtime.recovery_replication_sent.retain(|(replica_world, _)| *replica_world != world);
+    runtime.canonical_payload_sent.retain(|(replica_world, _), _| *replica_world != world);
 }
 
 fn lease_request_pending(
@@ -3818,17 +3869,68 @@ fn handle_response(
             validate_generation_response(generation, epoch, fencing_token, "lease")?;
             runtime.lease_acks.insert((world, peer), LeaseAck { generation, observed_at: now });
             if let Ok(epoch_record) = storage.load_epoch_record(world) {
-                if epoch_record.mode == EpochMode::Recovery
+                if epoch_record.mode != EpochMode::Solo
                     && epoch_record.epoch_number == generation.epoch
                     && epoch_record.fencing_token == generation.fencing_token
-                    && runtime.recovery_replication_sent.insert((world, peer))
+                    && runtime.authenticated_peers.get(transport_peer) == Some(&peer)
+                    && !runtime.canonical_payload_sent.get(&(world, peer)).is_some_and(|(sent_generation, when)| {
+                        *sent_generation == generation && now.saturating_duration_since(*when) < Duration::from_secs(5)
+                    })
                 {
+                    runtime.canonical_payload_sent.insert((world, peer), (generation, now));
+                    // A lease acknowledgement proves the recipient accepted
+                    // this exact epoch. Retry its canonical metadata after
+                    // packet loss, rather than sending recovery metadata once.
                     if let Ok(membership) = storage.load_membership_record(world) {
-                        node.send_request(transport_peer, WireRequest::Membership(membership))?;
+                        if membership.epoch == generation.epoch
+                            && membership.authority_peer_id == epoch_record.authority_peer_id
+                        {
+                            node.send_request(transport_peer, WireRequest::Membership(membership))?;
+                        }
                     }
-                    if let Some(manifest) = storage.latest_snapshot(world)? {
-                        if manifest.epoch == generation.epoch {
-                            node.send_request(transport_peer, WireRequest::SnapshotManifest(manifest))?;
+                    if let Ok(config) = storage.load_world_config(world) {
+                        if config.authority_peer_id == epoch_record.authority_peer_id {
+                            node.send_request(transport_peer, WireRequest::WorldConfig(Box::new(config)))?;
+                        }
+                    }
+                    // A recipient must receive a direct canonical extension,
+                    // never the newest manifest blindly if it missed a save.
+                    if !runtime.replications.contains_key(&(*transport_peer, world)) {
+                        if let Some(observed) = runtime.peer_status.get(&(world, peer)) {
+                            if observed.status.epoch == generation.epoch
+                                && now.saturating_duration_since(observed.observed_at) < STATUS_FRESHNESS
+                            {
+                                let parent = observed.status.latest_snapshot;
+                                let next_sequence = observed.status.sequence.checked_add(1);
+                                let next = storage.list_snapshots(world)?.into_iter().find(|manifest| {
+                                    manifest.epoch == generation.epoch
+                                        && Some(manifest.sequence) == next_sequence
+                                        && manifest.previous_snapshot_hash == parent
+                                });
+                                if let Some(manifest) = next {
+                                    verify_snapshot_signature(&manifest)?;
+                                    if !runtime.transfer_manifest_requests.get(&(world, peer)).is_some_and(
+                                        |(hash, sent)| {
+                                            manifest.manifest_hash().is_ok_and(|value| *hash == value)
+                                                && now.saturating_duration_since(*sent) < TRANSFER_MANIFEST_RETRY
+                                        },
+                                    ) {
+                                        let hash = manifest.manifest_hash()?;
+                                        let id = node.send_request(
+                                            transport_peer,
+                                            WireRequest::SnapshotManifest(manifest.clone()),
+                                        )?;
+                                        outbound.insert(
+                                            request_key(&id),
+                                            OutboundContext::Manifest {
+                                                world,
+                                                snapshot_number: manifest.snapshot_number,
+                                            },
+                                        );
+                                        runtime.transfer_manifest_requests.insert((world, peer), (hash, now));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -3914,6 +4016,16 @@ fn handle_response(
                 }
                 runtime.transfer_acks.push(TransferDeliveryAck { peer, record });
             }
+        }
+        (Some(OutboundContext::Sleep { peer, record }), WireResponse::SleepAccepted { epoch, fencing_token }) => {
+            if runtime.authenticated_peers.get(transport_peer) != Some(&peer)
+                || record.epoch != epoch
+                || record.fencing_token != fencing_token
+                || !matches!(launch_guard::load_sleep_record_fail_closed(storage, record.world_id), Ok(Some(current)) if current == record)
+            {
+                return Err(anyhow!("sleep acknowledgement is stale or not from its authenticated recipient"));
+            }
+            runtime.sleep_acks.insert((record.world_id, peer), record);
         }
         (Some(OutboundContext::Status { world, peer }), WireResponse::WorldStatus(Some(status))) => {
             if status.world_id != world {
@@ -5191,14 +5303,14 @@ mod automatic_transfer_delivery_tests {
     fn transfer_checkpoint_requires_exact_ack_from_each_authenticated_replica() {
         let record = transfer(TransferPhase::Prepared);
         let mut runtime = LeaseRuntime::default();
-        assert!(!transfer_checkpoint_acknowledged(&runtime, &record, peer(2)));
+        assert!(!checkpoint_acknowledged(&runtime, record.world_id, record.base_snapshot_hash, peer(2)));
         runtime.transfer_replica_acks.insert((record.world_id, peer(2)), Hash32([12; 32]));
-        assert!(!transfer_checkpoint_acknowledged(&runtime, &record, peer(2)));
+        assert!(!checkpoint_acknowledged(&runtime, record.world_id, record.base_snapshot_hash, peer(2)));
         runtime.transfer_replica_acks.insert((record.world_id, peer(2)), record.base_snapshot_hash);
-        assert!(transfer_checkpoint_acknowledged(&runtime, &record, peer(2)));
-        assert!(!transfer_checkpoint_acknowledged(&runtime, &record, peer(3)));
+        assert!(checkpoint_acknowledged(&runtime, record.world_id, record.base_snapshot_hash, peer(2)));
+        assert!(!checkpoint_acknowledged(&runtime, record.world_id, record.base_snapshot_hash, peer(3)));
         let newer = AuthorityTransferV1 { base_snapshot_hash: Hash32([13; 32]), ..record };
-        assert!(!transfer_checkpoint_acknowledged(&runtime, &newer, peer(2)));
+        assert!(!checkpoint_acknowledged(&runtime, newer.world_id, newer.base_snapshot_hash, peer(2)));
     }
 
     fn successor_epoch() -> EpochRecordV1 {

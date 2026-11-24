@@ -528,6 +528,7 @@ fn require_current_canonical_generation(
     proof: &LiveAuthorityObservation,
 ) -> Result<CanonicalSnapshotRefV1> {
     if storage.load_world(world)?.genesis != proof.membership.genesis
+        || storage.load_genesis_membership(world)? != proof.membership.initial_membership
         || storage.load_membership_record(world)? != proof.membership.current_membership
         || storage.load_membership_certificate_chain(world)? != proof.membership.membership_certificates
         || storage.load_epoch_record(world)? != proof.epoch
@@ -589,10 +590,16 @@ fn require_current_canonical_generation(
     match storage.load_transfer_record(world) {
         Ok(transfer) => {
             swarm_core::verify_transfer_signature(&transfer)?;
-            if transfer.phase == swarm_protocol::TransferPhase::Committed
-                && transfer.from_peer_id == proof.epoch.authority_peer_id
-            {
-                bail!("the source authority has already committed a transfer");
+            // Every active phase fences its exact source generation. A
+            // historical completed handoff cannot fence a later authority
+            // simply because its former source was elected again.
+            let accepted = (proof.epoch.epoch_number, proof.epoch.fencing_token);
+            let successor = (transfer.next_epoch, transfer.next_fencing_token);
+            let completed = transfer.phase == swarm_protocol::TransferPhase::Committed
+                && ((accepted == successor && proof.epoch.authority_peer_id == transfer.to_peer_id)
+                    || (accepted.0 > successor.0 && accepted.1 > successor.1));
+            if !completed {
+                bail!("active, incomplete or inconsistent signed handoff fences this game route");
             }
         }
         Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
@@ -668,6 +675,9 @@ pub fn canonical_quorum_hash(
 }
 
 fn verify_genesis_anchored_membership(proof: &DiscoveryMembershipProofV1) -> Result<()> {
+    if proof.protocol_version != PROTOCOL_VERSION || proof.genesis.world_id()? != proof.world_id {
+        bail!("membership proof does not match signed world genesis");
+    }
     // Refuse overlarge and noncanonical histories BEFORE expensive signature
     // checks, including on worlds which have not been publicly advertised.
     // The private-world route follows the same maximum proof envelope as
@@ -738,7 +748,7 @@ fn verify_membership_record_and_keys(record: &MembershipRecordV1) -> Result<()> 
     Ok(())
 }
 
-fn verify_current_recovery_certificate(
+pub fn verify_current_recovery_certificate(
     storage: &Storage,
     epoch: &EpochRecordV1,
     membership: &DiscoveryMembershipProofV1,
@@ -746,27 +756,96 @@ fn verify_current_recovery_certificate(
     let certificate = storage.load_recovery_certificate(epoch.world_id)?;
     let ballot = &certificate.ballot;
     swarm_core::protocol_v2::verify_recovery_ballot_signature(ballot)?;
-    for vote in &certificate.votes {
-        swarm_core::protocol_v2::verify_recovery_vote_signature(vote)?;
-    }
-    let voters = membership
-        .current_membership
+    // A recovery ballot is signed BEFORE promotion of the membership
+    // authority/epoch. Its hash must refer to that exact archived record,
+    // not the successor's newly signed membership record.
+    let base = storage.load_membership_by_hash(epoch.world_id, ballot.membership_hash)?;
+    verify_membership_record_and_keys(&base)?;
+    let base_proof = DiscoveryMembershipProofV1 {
+        current_membership: base.clone(),
+        membership_certificates: membership
+            .membership_certificates
+            .iter()
+            .filter(|certificate| certificate.proposal.proposed.sequence <= base.sequence)
+            .cloned()
+            .collect(),
+        pending_membership: None,
+        ..membership.clone()
+    };
+    verify_genesis_anchored_membership(&base_proof)?;
+    let candidate = base
         .members
         .iter()
-        .filter(|member| !member.banned)
-        .map(|member| member.peer_id)
-        .collect::<Vec<_>>();
+        .find(|member| member.peer_id == ballot.candidate_peer_id)
+        .context("recovery candidate was not in the certified voter set")?;
+    if candidate.banned || !candidate.authority_eligible || candidate.public_key != ballot.candidate_public_key {
+        bail!("recovery candidate was not eligible in the certified voter set");
+    }
+    let mut seen = BTreeSet::new();
+    for vote in &certificate.votes {
+        swarm_core::protocol_v2::verify_recovery_vote_signature(vote)?;
+        if !seen.insert(vote.voter_peer_id)
+            || !base.members.iter().any(|member| {
+                !member.banned && member.peer_id == vote.voter_peer_id && member.public_key == vote.voter_public_key
+            })
+        {
+            bail!("recovery vote does not identify a unique canonical voter");
+        }
+    }
+    let voters = base.members.iter().filter(|member| !member.banned).map(|member| member.peer_id).collect::<Vec<_>>();
     validate_recovery_certificate_shape(&certificate, &voters)?;
     if ballot.world_id != epoch.world_id
         || ballot.target_epoch != epoch.epoch_number
         || ballot.target_fencing_token != epoch.fencing_token
         || ballot.candidate_peer_id != epoch.authority_peer_id
         || ballot.candidate_public_key != epoch.authority_public_key
-        || ballot.membership_hash != membership.current_membership.record_hash()?
+        || ballot.base_state_hash != epoch.base_state_hash
+        || base.epoch != ballot.base_epoch
+        || base.record_hash()? != ballot.membership_hash
+        // P0 recovery keeps the original voter set. A later membership
+        // transition requires a separately certified playable generation.
+        || base.members != membership.current_membership.members
+        || membership.current_membership.epoch != epoch.epoch_number
+        || membership.current_membership.previous_membership_hash != Some(ballot.membership_hash)
+        || base.sequence.checked_add(1) != Some(membership.current_membership.sequence)
     {
         bail!("recovery certificate does not authorize this canonical generation");
     }
     Ok(())
+}
+
+/// Shared denial-only generation gate. Recovery is playable only with the
+/// original durable certificate, the exact pre-promotion membership and the
+/// genesis-anchored current membership. Callers must STILL collect fresh
+/// quorum votes and live authenticated Fabric evidence for every route.
+pub fn verify_playable_epoch(storage: &Storage, epoch: &EpochRecordV1) -> Result<()> {
+    if storage.load_epoch_record(epoch.world_id)? != *epoch {
+        bail!("playable epoch is no longer the locally accepted generation");
+    }
+    verify_signature(epoch.authority_peer_id, epoch.authority_public_key, &epoch.signing_bytes()?, &epoch.signature)?;
+    if epoch.mode == EpochMode::Quorum {
+        return Ok(());
+    }
+    if epoch.mode != EpochMode::Recovery {
+        bail!("solo authority cannot grant a multiplayer route");
+    }
+    let world = epoch.world_id;
+    let proof = DiscoveryMembershipProofV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        genesis: storage.load_world(world)?.genesis,
+        initial_membership: storage.load_genesis_membership(world)?,
+        membership_certificates: storage.load_membership_certificate_chain(world)?,
+        current_membership: storage.load_membership_record(world)?,
+        pending_membership: None,
+    };
+    verify_genesis_anchored_membership(&proof)?;
+    if proof.current_membership.authority_peer_id != epoch.authority_peer_id
+        || proof.current_membership.authority_public_key != epoch.authority_public_key
+    {
+        bail!("recovery membership does not match the accepted authority");
+    }
+    verify_current_recovery_certificate(storage, epoch, &proof)
 }
 
 fn unix_ms() -> Result<u64> {

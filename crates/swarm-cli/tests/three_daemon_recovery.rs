@@ -88,7 +88,7 @@ fn hosting_capacity_for_process_test() -> bool {
 }
 
 fn peer_fixture() -> PeerFixture {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::Builder::new().permissions(fs::Permissions::from_mode(0o700)).tempdir().unwrap();
     let paths = DataPaths::from_root(temp.path().join("data"));
     let storage = Storage::open(paths.root.clone()).unwrap();
     let identity = PeerIdentity::load_or_create(&paths).unwrap();
@@ -110,7 +110,7 @@ fn spawn_daemon(peer: &PeerFixture, application_peers: &[String]) -> ManagedChil
         .arg("--listen")
         .arg(format!("/ip4/127.0.0.1/udp/{}/quic-v1", peer.port))
         .env("RUST_LOG", "warn")
-        .stdout(Stdio::null())
+        .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     // These are world voters, NOT bootstrap infrastructure. Bootstrap peers
     // intentionally do not receive authenticated application PeerHello.

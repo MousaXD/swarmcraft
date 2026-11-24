@@ -499,10 +499,7 @@ fn build_discovery_membership_proof(storage: &Storage, world: WorldId) -> Result
     let current = storage.load_membership_record(world)?;
     verify_membership_signature(&current)?;
     let certificates = storage.load_membership_certificate_chain(world)?;
-    let initial = certificates
-        .first()
-        .map(|certificate| certificate.proposal.previous.clone())
-        .unwrap_or_else(|| current.clone());
+    let initial = storage.load_genesis_membership(world)?;
     let pending = match storage.load_membership_promise(world) {
         Ok(promise) => Some(promise.proposal),
         Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
