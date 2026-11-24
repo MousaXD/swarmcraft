@@ -503,7 +503,7 @@ export function createBackendAdapter(invoke) {
       serverMods: payload.serverMods,
       noServerMods: payload.noServerMods === true,
     }),
-    joinWorld: (invite) => call('join_world', { invite }),
+    joinWorld: (invite, hostCandidate = false) => call('join_world', { invite, hostCandidate: hostCandidate === true }),
     leaveWorld: (world) => call('leave_world', { world }),
     createInvite: (payload) => call('create_invite', payload),
     worldStatus: (world) => call('world_status', { world }),

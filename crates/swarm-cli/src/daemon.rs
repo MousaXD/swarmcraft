@@ -46,10 +46,10 @@ use swarm_network::{
 };
 use swarm_protocol::{
     peer_id_from_public_key, AuthorityLeaseGrantV1, AuthorityTransferV1, BlobDescriptor, DiscoveryCanonicalHeadV1,
-    DiscoveryFreshnessChallengeV1, DiscoveryFreshnessVoteV1, EpochMode, EpochRecordV1, Hash32, MembershipCertificateV1,
-    MembershipProposalV1, MembershipRecordV1, MembershipVoteV1, PeerId, RecoveryBallotV1, RecoveryCertificateV1,
-    RecoveryVoteV1, SleepRecordV1, SnapshotManifestV1, TransferPhase, WorldDescriptorV1, WorldId, WorldStatusV1,
-    PROTOCOL_VERSION,
+    DiscoveryFreshnessChallengeV1, DiscoveryFreshnessVoteV1, DiscoveryMembershipProofV1, EpochMode, EpochRecordV1,
+    Hash32, MembershipCertificateV1, MembershipProposalV1, MembershipRecordV1, MembershipVoteV1, PeerId,
+    RecoveryBallotV1, RecoveryCertificateV1, RecoveryVoteV1, SleepRecordV1, SnapshotManifestV1, TransferPhase,
+    WorldDescriptorV1, WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{
     DurableMembershipPromiseV1, DurableRecoveryPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage,
@@ -281,7 +281,7 @@ pub async fn run(
         node.take_game_route_control_events().context("authenticated game-route control subscription already owned")?;
     node.listen(listen.parse().context("invalid listen multiaddress")?)?;
     dial_explicit_application_peers(&mut node, explicit_application_peers)?;
-    dial_pending_invite_bootstraps(storage, &mut node)?;
+    dial_pending_invite_bootstraps(storage, &mut node, &HashMap::new())?;
     info!(peer = %identity.peer_id(), %listen, "SwarmCraft daemon starting");
 
     let mut pending_manifests: HashMap<WorldId, SnapshotManifestV1> = HashMap::new();
@@ -340,6 +340,8 @@ pub async fn run(
     let mut transfer_steps_in_flight = HashSet::new();
     let mut lease_tick = tokio::time::interval(PERMIT_HEARTBEAT_INTERVAL);
     lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut join_retry_tick = tokio::time::interval(Duration::from_secs(5));
+    join_retry_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -462,6 +464,20 @@ pub async fn run(
                 };
                 if let Err(error) = node.respond_game_route(action.channel, response) {
                     tracing::debug!(%error, "game route response could not be delivered on authenticated connection");
+                }
+            }
+            _ = join_retry_tick.tick() => {
+                // Desktop stages invitations while its daemon is already running.
+                // Retry only signed, unexpired requests to authenticated inviters.
+                if let Err(error) = dial_pending_invite_bootstraps(storage, &mut node, &leases.authenticated_peers) {
+                    warn!(%error, "pending invite dial deferred");
+                }
+                for (transport, peer) in &leases.authenticated_peers {
+                    if node.application_peer(transport) == Some(*peer) {
+                        if let Err(error) = push_pending_membership_requests(storage, &mut node, transport, *peer) {
+                            warn!(%peer, %error, "pending membership delivery deferred");
+                        }
+                    }
                 }
             }
             _ = lease_tick.tick() => {
@@ -1770,7 +1786,12 @@ fn maintain_authority_leases(
     let recovery_initial_delay = Duration::from_millis(AUTHORITY_LEASE_DURATION_MS) + RECOVERY_SETTLE_DELAY;
     for metadata in storage.list_worlds()? {
         let world = metadata.world_id;
-        recover_committed_membership(storage, identity, world)?;
+        if let Err(error) = recover_committed_membership(storage, identity, world) {
+            clear_permit(paths, world)?;
+            clear_runtime_world(runtime, world);
+            warn!(%world, %error, "committed membership recovery blocked");
+            continue;
+        }
         if let Err(error) = publish_host_readiness_snapshot(paths, storage, identity, runtime, world, now) {
             warn!(%world, %error, "host-readiness snapshot could not be published");
         }
@@ -1813,7 +1834,9 @@ fn maintain_authority_leases(
         if let Some(promise) = membership_promise.as_ref() {
             clear_permit(paths, world)?;
             runtime.permit_heartbeats.remove(&world);
-            maintain_membership_transition(storage, identity, node, outbound, runtime, promise)?;
+            if let Err(error) = maintain_membership_transition(storage, identity, node, outbound, runtime, promise) {
+                warn!(%world, %error, "membership transition blocked; retaining durable prepare");
+            }
             continue;
         }
 
@@ -2860,9 +2883,20 @@ mod explicit_application_dial_tests {
     }
 }
 
-fn dial_pending_invite_bootstraps(storage: &Storage, node: &mut SwarmNode) -> Result<()> {
+fn dial_pending_invite_bootstraps(
+    storage: &Storage,
+    node: &mut SwarmNode,
+    authenticated: &HashMap<TransportPeerId, PeerId>,
+) -> Result<()> {
     for metadata in storage.list_worlds()? {
         let Ok(request) = storage.load_pending_join(metadata.world_id) else { continue };
+        if verify_join_request_signature(&request).is_err()
+            || verify_invite_signature(&request.invite).is_err()
+            || crate::invite::validate_invite_expiry(request.invite.expires_unix_ms, unix_millis()?).is_err()
+            || authenticated.values().any(|peer| *peer == request.invite.inviter_peer_id)
+        {
+            continue;
+        }
         for value in request.invite.bootstrap_addrs {
             match value.parse() {
                 Ok(address) => {
@@ -2889,7 +2923,11 @@ fn push_pending_membership_requests(
 ) -> Result<()> {
     for metadata in storage.list_worlds()? {
         if let Ok(join) = storage.load_pending_join(metadata.world_id) {
-            if join.invite.inviter_peer_id == application_peer {
+            if join.invite.inviter_peer_id == application_peer
+                && verify_join_request_signature(&join).is_ok()
+                && verify_invite_signature(&join.invite).is_ok()
+                && crate::invite::validate_invite_expiry(join.invite.expires_unix_ms, unix_millis()?).is_ok()
+            {
                 node.send_request(transport_peer, WireRequest::JoinRequest(Box::new(join)))?;
             }
         }
@@ -2926,7 +2964,8 @@ fn push_known_worlds(
                 if certificate.proposal.proposed.record_hash()? == membership.record_hash()?
                     && proposal_member(&certificate.proposal, application_peer).is_some()
                 {
-                    let id = node.send_request(transport_peer, WireRequest::MembershipCommit(Box::new(certificate)))?;
+                    let request = membership_commit_request(storage, &certificate, application_peer)?;
+                    let id = node.send_request(transport_peer, request)?;
                     outbound.insert(
                         request_key(&id),
                         OutboundContext::MembershipCommit {
@@ -3091,7 +3130,7 @@ fn handle_request(
                 {
                     let id = node.send_request(
                         &transport_peer,
-                        WireRequest::MembershipProposal(Box::new(promise.proposal.clone())),
+                        membership_proposal_request(storage, &promise.proposal, application_peer)?,
                     )?;
                     state.outbound.insert(
                         request_key(&id),
@@ -3126,6 +3165,7 @@ fn handle_request(
             identity.sign_membership(&mut next)?;
             let proposal = MembershipProposalV1 { previous: current, proposed: next };
             validate_membership_proposal_shape(&proposal)?;
+            let request = membership_proposal_request(storage, &proposal, application_peer)?;
             let vote = sign_membership_vote(identity, &proposal)?;
             match storage.promise_membership_proposal(&proposal, &vote)? {
                 MembershipPromiseResult::Accepted | MembershipPromiseResult::Idempotent => {}
@@ -3136,7 +3176,7 @@ fn handle_request(
             state.leases.membership_votes.insert((world, identity.peer_id()), vote);
             clear_permit(context.paths, world)?;
             state.leases.permit_heartbeats.remove(&world);
-            let id = node.send_request(&transport_peer, WireRequest::MembershipProposal(Box::new(proposal.clone())))?;
+            let id = node.send_request(&transport_peer, request)?;
             state.outbound.insert(
                 request_key(&id),
                 OutboundContext::MembershipProposal {
@@ -3300,13 +3340,40 @@ fn handle_request(
                     // A historical receipt survives a disconnect for display,
                     // but the separate transfer gate is still cleared above.
                     state.leases.last_checkpoint_ack.insert(ack.world_id, (application_peer, ack.clone(), state.now));
+                    // A new replica must have verified the epoch base before
+                    // accepting the signed epoch. Retry after its exact receipt.
+                    if let Some(epoch) = load_optional_epoch_record(storage, ack.world_id)? {
+                        let generation =
+                            AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token };
+                        if epoch.mode != EpochMode::Recovery
+                            && epoch.authority_peer_id == identity.peer_id()
+                            && epoch.authority_public_key == identity.public_key()
+                            && epoch.base_state_hash == current.state_root
+                            && state.leases.epoch_acks.get(&(ack.world_id, application_peer)) != Some(&generation)
+                            && !epoch_request_pending(state.outbound, ack.world_id, application_peer, generation)
+                        {
+                            let id = node.send_request(&transport_peer, WireRequest::Epoch(epoch))?;
+                            state.outbound.insert(
+                                request_key(&id),
+                                OutboundContext::Epoch { world: ack.world_id, peer: application_peer, generation },
+                            );
+                        }
+                    }
                 }
             }
             info!(peer = %application_peer, world = %ack.world_id, snapshot = ack.snapshot_number, "replica verified snapshot");
             node.respond(channel, WireResponse::ReplicaAckAccepted)?;
         }
-        WireRequest::MembershipProposal(proposal) => {
-            let proposal = *proposal;
+        request @ (WireRequest::MembershipProposal(_) | WireRequest::JoinMembershipProposal(_)) => {
+            let proposal = match request {
+                WireRequest::MembershipProposal(proposal) => *proposal,
+                WireRequest::JoinMembershipProposal(proof) => {
+                    let proposal = proof.pending_membership.clone().context("missing join membership proposal")?;
+                    accept_join_history(storage, identity, application_peer, &proof, &proposal, false)?;
+                    proposal
+                }
+                _ => unreachable!("matched membership proposal variants"),
+            };
             if application_peer != proposal.proposed.authority_peer_id {
                 return Err(anyhow!("membership proposal sender is not its signed authority"));
             }
@@ -3328,8 +3395,17 @@ fn handle_request(
             state.leases.permit_heartbeats.remove(&proposal.proposed.world_id);
             node.respond(channel, WireResponse::MembershipVote(Box::new(durable_vote)))?;
         }
-        WireRequest::MembershipCommit(certificate) => {
-            let certificate = *certificate;
+        request @ (WireRequest::MembershipCommit(_) | WireRequest::JoinMembershipCommit(_)) => {
+            let certificate = match request {
+                WireRequest::MembershipCommit(certificate) => *certificate,
+                WireRequest::JoinMembershipCommit(proof) => {
+                    let certificate =
+                        proof.membership_certificates.last().cloned().context("missing join membership certificate")?;
+                    accept_join_history(storage, identity, application_peer, &proof, &certificate.proposal, true)?;
+                    certificate
+                }
+                _ => unreachable!("matched membership commit variants"),
+            };
             let world = certificate.proposal.proposed.world_id;
             if application_peer != certificate.proposal.proposed.authority_peer_id {
                 return Err(anyhow!("membership commit sender is not its signed authority"));
@@ -4086,6 +4162,133 @@ fn proposal_member(proposal: &MembershipProposalV1, peer: PeerId) -> Option<&swa
         .find(|member| member.peer_id == peer && !member.banned)
 }
 
+fn membership_history_proof(
+    storage: &Storage,
+    current: MembershipRecordV1,
+    pending: Option<MembershipProposalV1>,
+) -> Result<DiscoveryMembershipProofV1> {
+    let world = current.world_id;
+    let proof = DiscoveryMembershipProofV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        genesis: storage.load_world(world)?.genesis,
+        initial_membership: storage.load_genesis_membership(world)?,
+        membership_certificates: storage
+            .load_membership_certificate_chain(world)?
+            .into_iter()
+            .filter(|certificate| certificate.proposal.proposed.sequence <= current.sequence)
+            .collect(),
+        current_membership: current,
+        pending_membership: pending,
+    };
+    swarm_cli::live_authority::verify_genesis_anchored_membership(&proof)?;
+    Ok(proof)
+}
+
+fn membership_proposal_request(
+    storage: &Storage,
+    proposal: &MembershipProposalV1,
+    peer: PeerId,
+) -> Result<WireRequest> {
+    if proposal.previous.members.iter().any(|member| member.peer_id == peer && !member.banned) {
+        return Ok(WireRequest::MembershipProposal(Box::new(proposal.clone())));
+    }
+    let request = WireRequest::JoinMembershipProposal(Box::new(membership_history_proof(
+        storage,
+        proposal.previous.clone(),
+        Some(proposal.clone()),
+    )?));
+    request.validate_limits()?;
+    Ok(request)
+}
+
+fn membership_commit_request(
+    storage: &Storage,
+    certificate: &MembershipCertificateV1,
+    peer: PeerId,
+) -> Result<WireRequest> {
+    if certificate.proposal.previous.members.iter().any(|member| member.peer_id == peer && !member.banned) {
+        return Ok(WireRequest::MembershipCommit(Box::new(certificate.clone())));
+    }
+    let proof = membership_history_proof(storage, certificate.proposal.proposed.clone(), None)?;
+    if proof.membership_certificates.last() != Some(certificate) {
+        bail!("join certificate does not match the archived canonical history");
+    }
+    let request = WireRequest::JoinMembershipCommit(Box::new(proof));
+    request.validate_limits()?;
+    Ok(request)
+}
+
+fn validate_pending_join_for_proposal(
+    storage: &Storage,
+    identity: &PeerIdentity,
+    proposal: &MembershipProposalV1,
+) -> Result<()> {
+    let world = proposal.proposed.world_id;
+    let join = storage.load_pending_join(world).context("new member has no locally staged signed invitation")?;
+    verify_join_request_signature(&join)?;
+    verify_invite_signature(&join.invite)?;
+    crate::invite::validate_invite_expiry(join.invite.expires_unix_ms, unix_millis()?)?;
+    if join.invite.genesis != storage.load_world(world)?.genesis
+        || join.joining_member.peer_id != identity.peer_id()
+        || join.joining_member.public_key != identity.public_key()
+        || join.joining_member.banned
+        || proposal.previous.members.iter().any(|member| member.peer_id == identity.peer_id())
+        || proposal.proposed.members.iter().find(|m| m.peer_id == identity.peer_id()) != Some(&join.joining_member)
+        || join.invite.inviter_peer_id != proposal.previous.authority_peer_id
+        || join.invite.inviter_public_key != proposal.previous.authority_public_key
+    {
+        bail!("membership proposal does not match the locally staged join");
+    }
+    Ok(())
+}
+
+/// Accept historical evidence ONLY from the authenticated inviter for this
+/// exact locally pending membership. Archiving cannot grant voting or game
+/// access. The ordinary durable promise and joint-certificate gate follows.
+fn accept_join_history(
+    storage: &Storage,
+    identity: &PeerIdentity,
+    sender: PeerId,
+    proof: &DiscoveryMembershipProofV1,
+    proposal: &MembershipProposalV1,
+    committed: bool,
+) -> Result<()> {
+    if sender != proposal.proposed.authority_peer_id
+        || proof.world_id != proposal.proposed.world_id
+        || proof.genesis != storage.load_world(proof.world_id)?.genesis
+        || (committed && (proof.current_membership != proposal.proposed || proof.pending_membership.is_some()))
+        || (!committed
+            && (proof.current_membership != proposal.previous || proof.pending_membership.as_ref() != Some(proposal)))
+    {
+        bail!("join history is not bound to the exact authenticated proposal");
+    }
+    swarm_cli::live_authority::verify_genesis_anchored_membership(proof)?;
+    match storage.load_membership_record(proof.world_id) {
+        Ok(current) => {
+            // Exact committed replay is idempotent; it cannot replace local
+            // signed history or silently adopt a different voter set.
+            verify_membership_signature(&current)?;
+            if !committed || current != proposal.proposed || membership_history_proof(storage, current, None)? != *proof
+            {
+                bail!("first-contact proof conflicts with already committed membership");
+            }
+            Ok(())
+        }
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            validate_pending_join_for_proposal(storage, identity, proposal)?;
+            if let Some(promise) = load_optional_membership_promise(storage, proof.world_id)? {
+                if promise.proposal != *proposal {
+                    bail!("join history conflicts with a durable membership prepare");
+                }
+            }
+            storage.archive_join_membership_history(proof)?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn validate_membership_proposal_for_local(
     storage: &Storage,
     identity: &PeerIdentity,
@@ -4095,30 +4298,25 @@ fn validate_membership_proposal_for_local(
     let local_member = proposal_member(proposal, identity.peer_id())
         .context("local peer is not an active voter in either membership configuration")?;
     if local_member.public_key != identity.public_key() {
-        return Err(anyhow!("local peer key does not match the membership proposal"));
+        bail!("local peer key does not match the membership proposal");
     }
-    if let Ok(current) = storage.load_membership_record(world) {
-        verify_membership_signature(&current)?;
-        if current.record_hash()? != proposal.previous.record_hash()? {
-            return Err(anyhow!("membership proposal does not extend the locally committed configuration"));
+    match storage.load_membership_record(world) {
+        Ok(current) => {
+            verify_membership_signature(&current)?;
+            if current.record_hash()? != proposal.previous.record_hash()? {
+                bail!("membership proposal does not extend the locally committed configuration");
+            }
         }
-        return Ok(());
-    }
-    let join = storage
-        .load_pending_join(world)
-        .context("new membership voter has neither committed membership nor a pending join")?;
-    verify_join_request_signature(&join)?;
-    verify_invite_signature(&join.invite)?;
-    if join.invite.expires_unix_ms < unix_millis()? {
-        return Err(anyhow!("pending join invite expired before membership commit"));
-    }
-    if join.joining_member.peer_id != identity.peer_id()
-        || join.joining_member.public_key != identity.public_key()
-        || proposal.proposed.members.iter().find(|m| m.peer_id == identity.peer_id()) != Some(&join.joining_member)
-        || join.invite.inviter_peer_id != proposal.previous.authority_peer_id
-        || join.invite.inviter_public_key != proposal.previous.authority_public_key
-    {
-        return Err(anyhow!("membership proposal does not match the locally staged join"));
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            validate_pending_join_for_proposal(storage, identity, proposal)?;
+            // An isolated signed proposal is not sufficient first contact.
+            // Reconstruct and verify the entire archived genesis lineage.
+            membership_history_proof(storage, proposal.previous.clone(), Some(proposal.clone()))?;
+            if storage.load_membership_by_hash(world, proposal.previous.record_hash()?)? != proposal.previous {
+                bail!("join predecessor is not durably archived");
+            }
+        }
+        Err(error) => return Err(error.into()),
     }
     Ok(())
 }
@@ -4141,13 +4339,17 @@ fn validate_membership_certificate_for_local(
     validate_membership_certificate_signatures(certificate)?;
     let proposal = &certificate.proposal;
     let world = proposal.proposed.world_id;
-    if let Ok(current) = storage.load_membership_record(world) {
-        verify_membership_signature(&current)?;
-        if current != proposal.proposed && current.record_hash()? != proposal.previous.record_hash()? {
-            return Err(anyhow!("membership certificate does not extend the locally committed configuration"));
+    match storage.load_membership_record(world) {
+        Ok(current) => {
+            verify_membership_signature(&current)?;
+            if current != proposal.proposed && current.record_hash()? != proposal.previous.record_hash()? {
+                bail!("membership certificate does not extend the locally committed configuration");
+            }
         }
-    } else {
-        validate_membership_proposal_for_local(storage, identity, proposal)?;
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            validate_membership_proposal_for_local(storage, identity, proposal)?;
+        }
+        Err(error) => return Err(error.into()),
     }
     if let Some(promise) = load_optional_membership_promise(storage, world)? {
         if promise.proposal.proposal_hash()? != proposal.proposal_hash()? {
@@ -4209,7 +4411,21 @@ fn recover_committed_membership(storage: &Storage, identity: &PeerIdentity, worl
     if let Ok(current) = storage.load_membership_record(world) {
         verify_membership_signature(&current)?;
         if current == certificate.proposal.proposed {
+            // Recover an interruption between the canonical membership write
+            // and its descriptor/pending-intent cleanup. Never rewrite a newer generation.
+            let descriptor = storage.load_world_descriptor(world)?;
+            if descriptor.members != current.members {
+                // A newer durable prepare is not a conflict with the
+                // already committed predecessor. Repair only the descriptor
+                // bound to the current signed record, leaving that prepare intact.
+                validate_membership_certificate_signatures(&certificate)?;
+                let mut repaired = descriptor;
+                repaired.members = current.members.clone();
+                repaired.normalize();
+                storage.save_world_descriptor(&repaired)?;
+            }
             let _ = storage.clear_membership_promise_after_commit(world, current.record_hash()?)?;
+            clear_satisfied_pending_membership(storage, &storage.load_world_descriptor(world)?)?;
             return Ok(());
         }
         if (current.epoch, current.sequence)
@@ -4277,7 +4493,8 @@ fn maintain_membership_transition(
         if membership_proposal_request_pending(outbound, world, member.peer_id, proposal_hash) {
             continue;
         }
-        let id = node.send_request(transport_peer, WireRequest::MembershipProposal(Box::new(proposal.clone())))?;
+        let request = membership_proposal_request(storage, proposal, member.peer_id)?;
+        let id = node.send_request(transport_peer, request)?;
         outbound.insert(
             request_key(&id),
             OutboundContext::MembershipProposal { world, peer: member.peer_id, proposal_hash },
@@ -4315,7 +4532,8 @@ fn maintain_membership_transition(
         else {
             continue;
         };
-        let id = node.send_request(transport_peer, WireRequest::MembershipCommit(Box::new(certificate.clone())))?;
+        let request = membership_commit_request(storage, &certificate, member.peer_id)?;
+        let id = node.send_request(transport_peer, request)?;
         outbound.insert(
             request_key(&id),
             OutboundContext::MembershipCommit {

@@ -178,10 +178,14 @@ async fn import_world(
     run_import_cli(&app, arguments).await
 }
 
-#[tauri::command]
-async fn join_world(app: AppHandle, invite: String) -> Result<String, String> {
+#[tauri::command(rename_all = "camelCase")]
+async fn join_world(app: AppHandle, invite: String, host_candidate: Option<bool>) -> Result<String, String> {
     let invite = require_value(invite, "Invite")?;
-    run_cli(&app, vec!["world".into(), "join".into(), invite]).await
+    let mut args = vec!["world".into(), "join".into(), invite];
+    if host_candidate == Some(true) {
+        args.push("--host-candidate".into());
+    }
+    run_cli(&app, args).await
 }
 
 #[tauri::command]

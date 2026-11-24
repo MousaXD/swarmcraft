@@ -16,8 +16,8 @@ export function nativeWorldBackend(): WorldActionsBackend {
     importWorld(request) {
       return native.invoke('import_world', request);
     },
-    joinWorld(invite) {
-      return native.invoke('join_world', { invite });
+    joinWorld(invite, hostCandidate = false) {
+      return native.invoke('join_world', { invite, hostCandidate: hostCandidate === true });
     },
     createInvite(request) {
       return native.invoke('create_invite', request);

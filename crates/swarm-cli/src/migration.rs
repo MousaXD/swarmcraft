@@ -2040,6 +2040,27 @@ fn prepare_authority_epoch(
             bail!("local replica is stale and cannot wake the sleeping world");
         }
         let previous = storage.load_epoch_record(world)?;
+        verify_signature(
+            previous.authority_peer_id,
+            previous.authority_public_key,
+            &previous.signing_bytes()?,
+            &previous.signature,
+        )?;
+        let membership = storage.load_membership_record(world)?;
+        swarm_core::verify_membership_signature(&membership)?;
+        if membership.members != descriptor.members
+            || membership.members.iter().filter(|member| !member.banned).count() != 1
+            || membership.authority_peer_id != identity.peer_id()
+            || membership.authority_public_key != identity.public_key()
+            || previous.authority_peer_id != identity.peer_id()
+            || previous.authority_public_key != identity.public_key()
+            || sleep_record.authority_peer_id != previous.authority_peer_id
+            || sleep_record.authority_public_key != previous.authority_public_key
+            || sleep_record.epoch != previous.epoch_number
+            || sleep_record.fencing_token != previous.fencing_token
+        {
+            bail!("direct wake requires the sole signed member and exact sleeping authority generation");
+        }
         let mut next = EpochRecordV1 {
             protocol_version: PROTOCOL_VERSION,
             world_id: world,
@@ -2048,7 +2069,7 @@ fn prepare_authority_epoch(
             base_state_hash: latest.state_root,
             authority_peer_id: identity.peer_id(),
             authority_public_key: identity.public_key(),
-            mode: EpochMode::Solo,
+            mode: if previous.mode == EpochMode::Quorum { EpochMode::Quorum } else { EpochMode::Solo },
             fencing_token: previous
                 .fencing_token
                 .checked_add(1)
@@ -2071,8 +2092,9 @@ fn prepare_authority_epoch(
             ensure_authority_artifacts(storage, identity, &epoch)?;
             Ok(epoch)
         }
-        Err(_)
-            if latest.authority_peer_id == identity.peer_id()
+        Err(StorageError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound
+                && latest.authority_peer_id == identity.peer_id()
                 && latest.authority_public_key == identity.public_key() =>
         {
             let mut epoch = EpochRecordV1 {

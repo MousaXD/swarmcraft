@@ -44,7 +44,9 @@ describe('world actions preserve native contracts', () => {
   it('leaves signed membership checks to Rust and passes invite unchanged except whitespace', async () => {
     const native = backend();const actions = createWorldActions(native);
     expect(await actions.join(' signed-token ')).toBe('Joined');
-    expect(native.joinWorld).toHaveBeenCalledWith('signed-token');
+    expect(native.joinWorld).toHaveBeenCalledWith('signed-token', false);
+    await actions.join('signed-token', true);
+    expect(native.joinWorld).toHaveBeenLastCalledWith('signed-token', true);
   });
   it('creates an invite using current Rust payload and rejects invalid duration', async () => {
     const native = backend();const actions = createWorldActions(native);

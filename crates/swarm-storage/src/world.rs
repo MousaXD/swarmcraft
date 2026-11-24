@@ -93,7 +93,7 @@ impl Storage {
         durable_atomic_write(&membership_path, &bytes)
     }
 
-    fn archive_membership_locked(&self, record: &MembershipRecordV1) -> Result<(), StorageError> {
+    pub(crate) fn archive_membership_locked(&self, record: &MembershipRecordV1) -> Result<(), StorageError> {
         let path = self
             .world_protocol_path(record.world_id, &format!("membership-history/{}.postcard", record.record_hash()?));
         let bytes = postcard::to_allocvec(record)?;

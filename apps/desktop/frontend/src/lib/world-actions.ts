@@ -36,7 +36,7 @@ export type ImportResult = { worldId: string; result: Record<string, unknown> };
 export interface WorldActionsBackend {
   createWorld(request: NewWorldInput): Promise<string>;
   importWorld(request: NativeImportRequest): Promise<string | Record<string, unknown>>;
-  joinWorld(invite: string): Promise<string>;
+  joinWorld(invite: string, hostCandidate?: boolean): Promise<string>;
   createInvite(request: { world: string; expiresMinutes: number; bootstrapAddrs: string[] }): Promise<string>;
 }
 export class WorldFormError extends Error {
@@ -125,10 +125,10 @@ export function createWorldActions(backend: WorldActionsBackend) {
       const request = validateImport(input);
       return once('Import world', async () => parseImportedWorld(await backend.importWorld(request)));
     },
-    join(invite: string): Promise<string> {
+    join(invite: string, hostCandidate = false): Promise<string> {
       const value = required(invite, 'joinInvite', 'A signed invite is required.');
       // Canonical membership and signed-invite validation remain in Rust.
-      return once('Join world', () => backend.joinWorld(value));
+      return once('Join world', () => backend.joinWorld(value, hostCandidate === true));
     },
     invite(world: string, expiresMinutes: number, bootstrapAddrs: readonly string[]): Promise<string> {
       const id = required(world, 'inviteWorld', 'Select a world before creating an invite.');

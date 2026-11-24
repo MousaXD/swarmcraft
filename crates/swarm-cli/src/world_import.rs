@@ -1,4 +1,4 @@
-use crate::server_mods;
+use crate::{server_mods, world_genesis};
 use anyhow::{bail, Context, Result};
 #[cfg(windows)]
 use fs2::FileExt;
@@ -160,10 +160,31 @@ fn stage_and_publish(
     };
     staged.save_world_descriptor(&descriptor)?;
 
+    // `_source_quiescence` in import_world_inner remains alive throughout this
+    // call, so snapshot_directory cannot race a live Minecraft writer.
+    let mut snapshot = staged.snapshot_directory(
+        &request.source,
+        SnapshotContext {
+            world,
+            snapshot_number: 1,
+            epoch: world_genesis::GENESIS_EPOCH,
+            sequence: 1,
+            previous_snapshot_hash: None,
+            authority_peer_id: identity.peer_id(),
+            authority_public_key: identity.public_key(),
+        },
+    )?;
+    identity.sign_snapshot(&mut snapshot)?;
+    staged.commit_snapshot(&snapshot)?;
+    staged.verify_snapshot(&snapshot)?;
+    swarm_core::verify_snapshot_signature(&snapshot)?;
+
+    world_genesis::establish_initial_epoch(&staged, identity, &snapshot)?;
+
     let mut membership = MembershipRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
-        epoch: 0,
+        epoch: world_genesis::GENESIS_EPOCH,
         sequence: 0,
         previous_membership_hash: None,
         members: descriptor.members.clone(),
@@ -199,25 +220,6 @@ fn stage_and_publish(
     };
     sign_world_config(identity, &mut world_config)?;
     staged.save_world_config(&world_config)?;
-
-    // `_source_quiescence` in import_world_inner remains alive throughout this
-    // call, so snapshot_directory cannot race a live Minecraft writer.
-    let mut snapshot = staged.snapshot_directory(
-        &request.source,
-        SnapshotContext {
-            world,
-            snapshot_number: 1,
-            epoch: 0,
-            sequence: 1,
-            previous_snapshot_hash: None,
-            authority_peer_id: identity.peer_id(),
-            authority_public_key: identity.public_key(),
-        },
-    )?;
-    identity.sign_snapshot(&mut snapshot)?;
-    staged.commit_snapshot(&snapshot)?;
-    staged.verify_snapshot(&snapshot)?;
-    swarm_core::verify_snapshot_signature(&snapshot)?;
 
     if faults.after_snapshot_commit {
         bail!("injected existing-world import interruption after snapshot commit");

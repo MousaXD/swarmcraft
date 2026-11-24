@@ -41,11 +41,13 @@ describe('Svelte native world actions bridge', () => {
     });
     await backend.createInvite({world:'scworld:real',expiresMinutes:60,bootstrapAddrs:[]});
     expect(invoke.mock.calls.map(call=>call[0])).toEqual(['join_world','import_world','create_invite']);
-    expect(invoke.mock.calls[0][1]).toEqual({invite:'signed invite token'});
+    expect(invoke.mock.calls[0][1]).toEqual({invite:'signed invite token', hostCandidate:false});
     expect(invoke.mock.calls[1][1]).not.toHaveProperty('acceptEula');
     expect(invoke.mock.calls[2][1]).toEqual({
       world:'scworld:real',expiresMinutes:60,bootstrapAddrs:[],
     });
+    await backend.joinWorld('signed invite token', true);
+    expect(invoke).toHaveBeenLastCalledWith('join_world', {invite:'signed invite token', hostCandidate:true});
   });
 });
 

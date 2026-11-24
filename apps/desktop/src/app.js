@@ -1175,7 +1175,7 @@ async function joinWorld() {
   showInline('joinError', '');
   let result;
   try {
-    result = await run('Joining world…', () => backend.joinWorld(invite));
+    result = await run('Joining world…', () => backend.joinWorld(invite, $('joinHostCandidate').checked));
   } catch (error) {
     showInline('joinError', `Could not join world: ${String(error)}`, 'danger');
     return;
@@ -1183,6 +1183,7 @@ async function joinWorld() {
   const match = String(result).match(/World ID:\s*(scworld:[^\s]+)/);
   if (match) selectedWorldId = match[1];
   $('joinInvite').value = '';
+  $('joinHostCandidate').checked = false;
   await refreshWorlds();
   showView('worlds');
 }

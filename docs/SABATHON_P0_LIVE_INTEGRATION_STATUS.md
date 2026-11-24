@@ -444,3 +444,55 @@ requests storage-only membership rather than a host candidate. The existing
 live-join test seeds the accepted epoch manually and does not prove a full
 three-device Create/Invite/Join/Play flow. These remain P0 gaps, along with
 complete first-contact signed history and epoch synchronization checks.
+
+### Hosted handoff milestone and fresh invitation work (24 November)
+
+Required Validation run `45399615046` on `6577f523` logged
+`HOSTED_LIVE_GATEWAY_INITIAL_PASS` and `HOSTED_LIVE_GATEWAY_HANDOFF_PASS`.
+The planned transfer restored the saved marker and the same player loopback
+endpoint served the successor's actual Minecraft status protocol. After
+crash recovery the real Fabric JVM became ready, but the next player
+connection reset. This is not yet a full hosted acceptance pass, an
+authenticated Minecraft login, inventory proof, or physical-machine field
+certification. Linux also failed the automatic invite regression.
+
+The gateway now uses the already independently verified, still-fresh,
+single-use route capability for its initial control-only admission step,
+instead of immediately spending another live proof before opening the
+transport. The host's independent admission and the client's independent
+post-ACK/post-local-dial proof remain mandatory before forwarding Minecraft
+bytes. No signed transcript deadline or live lease is extended. Added
+specific expiry diagnostics and flushed the signed host admission ACK.
+
+Fresh Create/Import now records a signed genesis quorum-of-one at epoch 1
+bound to the exact first checkpoint. This intentionally uses the signed
+daemon route rather than creating a new standalone writable solo branch.
+Existing worlds are not automatically rewritten. A sole signed member's
+direct wake preserves a prior quorum-of-one generation and checks the exact
+sleeping authority; a corrupted epoch is not a missing epoch.
+
+Ordinary Join remains player-only by default. An explicitly selected
+host-candidate role is bound into the signed request and approved through
+the same joint membership certificate, without creating hosting consent or
+accepting the EULA. Both legacy and Svelte Desktop routes carry the option.
+A repeat join cannot overwrite an existing committed descriptor or silently
+change a pending role. Already-running daemons retry signed, unexpired
+invitations; first-contact proposal/commit messages carry the bounded
+genesis-anchored certificate chain. History is archived without advancing
+canonical membership; the exact joint commit is still required. The
+receiver retries the signed epoch after the exact verified base snapshot
+receipt, and interrupted membership descriptor publication can be repaired
+without deleting a newer durable prepare.
+
+Local evidence during this change: the focused signed local route/consent
+regression passed; the original two-peer invite test passed after binding
+both peers to the real fixture LAN interface; 56 Desktop source/contract
+tests passed. The expanded fresh Create -> Invite -> two sequential Join
+test verified the first join, epoch, config and checkpoint, then exposed a
+conflict with the next durable membership prepare. The repair preserves
+that prepare. A new run is required to certify the complete three-peer
+flow. Typed Svelte tests could not execute in this worktree because its
+frontend dependencies are absent; the updated native payload tests and
+full hosted validation must run in CI. The LAN fixture seeds diagnostics
+with a concrete reachable listener, so it does not prove automatic
+interface discovery on independent machines.

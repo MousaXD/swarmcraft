@@ -389,9 +389,12 @@ impl GameStreamReceiver {
         {
             return Err(GameTransportError::StaleRoute);
         }
-        timeout(MAX_GAME_HEADER_WAIT, stream.write_all(&[GAME_ACK]))
-            .await
-            .map_err(|_| GameTransportError::Timeout)??;
+        timeout(MAX_GAME_HEADER_WAIT, async {
+            stream.write_all(&[GAME_ACK]).await?;
+            stream.flush().await
+        })
+        .await
+        .map_err(|_| GameTransportError::Timeout)??;
         let mut stream = stream.compat();
         if Instant::now() >= proof_deadline {
             return Err(GameTransportError::StaleRoute);
@@ -573,6 +576,12 @@ fn validate_timestamps(
         || now < response.issued_unix_ms.saturating_sub(2_000)
         || now >= response.expires_unix_ms
     {
+        debug!(
+            now,
+            offer_expires = offer.expires_unix_ms,
+            response_expires = response.expires_unix_ms,
+            "signed game handshake expired or not yet valid"
+        );
         return Err(GameTransportError::StaleRoute);
     }
     Ok(())
@@ -616,6 +625,7 @@ fn validate_live_evidence(
         || proof.runtime_ready_proof_hash != offer.runtime_ready_proof_hash
         || proof.challenge_nonce != nonce
     {
+        debug!("fresh game evidence does not match the signed canonical route");
         return Err(GameTransportError::StaleRoute);
     }
     if !proof.requester_is_member
@@ -633,6 +643,7 @@ fn validate_live_evidence(
         || proof.valid_until_unix_ms <= effective_now
         || proof.valid_until_unix_ms > effective_now.saturating_add(MAX_FRESH_EVIDENCE_LEASE_MS)
     {
+        debug!(effective_now, proof_expires = proof.valid_until_unix_ms, "fresh game proof expired or out of bounds");
         return Err(GameTransportError::StaleRoute);
     }
     let remaining = Duration::from_millis(proof.valid_until_unix_ms - effective_now);
@@ -735,16 +746,14 @@ impl GameStreamClient {
         validate_timestamps(&offer, &response, now)?;
         let mut nonce = [0; 32];
         OsRng.fill_bytes(&mut nonce);
-        validate_live_evidence_bounded(
-            Arc::clone(&self.evidence),
-            Arc::clone(&self.proof_workers),
-            &offer,
-            self.application_peer,
-            nonce,
-            now,
-        )
-        .await?;
-
+        // RouteVerifier has already independently verified every canonical
+        // field, persisted the generation floor, and supplied a still-fresh
+        // one-use capability. Use that proof only to begin the authenticated
+        // control handshake. Repeating the same pre-dial proof here used up
+        // the response's hard five-second lifetime before host admission on
+        // larger recovered worlds. No Minecraft bytes are forwarded until
+        // the host has independently admitted the stream AND the client has
+        // obtained a separate fresh post-ACK (or post-local-dial) proof.
         let frame = GameStreamOpenV1 {
             version: 1,
             offer,
@@ -762,6 +771,12 @@ impl GameStreamClient {
             return self.forward_local_authority(minecraft_client, route, frame, shutdown).await;
         }
         let target = route.transport_peer();
+        if !route.is_fresh()
+            || *shutdown.borrow()
+            || authenticated_peer(&self.authenticated, target) != Some(route.authority_peer_id())
+        {
+            return Err(GameTransportError::StaleRoute);
+        }
         let mut game_stream =
             timeout(MAX_GAME_HEADER_WAIT, control.open_stream(target, StreamProtocol::new(GAME_STREAM_PROTOCOL)))
                 .await
@@ -848,6 +863,7 @@ impl GameStreamClient {
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), GameTransportError> {
         if *shutdown.borrow()
+            || !route.is_fresh()
             || route.transport_peer() != self.transport_peer
             || route.authority_peer_id() != self.application_peer
             || frame.offer.authority_transport_peer != self.transport_peer.to_bytes()

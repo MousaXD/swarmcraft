@@ -166,6 +166,10 @@ pub enum WireRequest {
         world_id: WorldId,
         nonce: [u8; 32],
     },
+    // First contact must carry the entire genesis-anchored membership history.
+    // These are only accepted for the exact locally staged signed invitation.
+    JoinMembershipProposal(Box<DiscoveryMembershipProofV1>),
+    JoinMembershipCommit(Box<DiscoveryMembershipProofV1>),
 }
 
 impl WireRequest {
@@ -185,6 +189,8 @@ impl WireRequest {
             | Self::FriendPresence { .. }
             | Self::MembershipProposal(_)
             | Self::MembershipCommit(_)
+            | Self::JoinMembershipProposal(_)
+            | Self::JoinMembershipCommit(_)
             | Self::HelloChallenge { .. }
             | Self::HelloProof(_)
             | Self::DiscoveryFreshnessContext { .. }
@@ -242,6 +248,9 @@ impl WireRequest {
             }
             Self::MembershipCommit(certificate) if certificate.votes.len() > MAX_MEMBERSHIP_VOTES => {
                 Err(WireLimitError::TooManyMembershipVotes(certificate.votes.len()))
+            }
+            Self::JoinMembershipProposal(proof) | Self::JoinMembershipCommit(proof) => {
+                validate_membership_proof_size(proof)
             }
             Self::WorldConfig(config) => {
                 let artifacts = config.compatibility.required_server_mods.len()
@@ -308,6 +317,39 @@ pub enum WireResponse {
     HostFabricAttestation(Option<Vec<u8>>),
 }
 
+fn validate_membership_proof_size(proof: &DiscoveryMembershipProofV1) -> Result<(), WireLimitError> {
+    if proof.membership_certificates.len() > MAX_DISCOVERY_MEMBERSHIP_CERTIFICATES {
+        return Err(WireLimitError::TooManyDiscoveryMembershipCertificates(proof.membership_certificates.len()));
+    }
+    let member_count = proof
+        .membership_certificates
+        .iter()
+        .flat_map(|certificate| {
+            [certificate.proposal.previous.members.len(), certificate.proposal.proposed.members.len()]
+        })
+        .chain([proof.initial_membership.members.len(), proof.current_membership.members.len()])
+        .chain(
+            proof
+                .pending_membership
+                .iter()
+                .flat_map(|proposal| [proposal.previous.members.len(), proposal.proposed.members.len()]),
+        )
+        .max()
+        .unwrap_or(0);
+    if member_count > MAX_WORLD_MEMBERS {
+        return Err(WireLimitError::TooManyMembers(member_count));
+    }
+    let vote_count = proof.membership_certificates.iter().map(|certificate| certificate.votes.len()).max().unwrap_or(0);
+    if vote_count > MAX_MEMBERSHIP_VOTES {
+        return Err(WireLimitError::TooManyMembershipVotes(vote_count));
+    }
+    let bytes = serde_json::to_vec(proof).map_err(|_| WireLimitError::DiscoveryMembershipProofTooLarge(usize::MAX))?;
+    if bytes.len() > MAX_DISCOVERY_MEMBERSHIP_PROOF_BYTES {
+        return Err(WireLimitError::DiscoveryMembershipProofTooLarge(bytes.len()));
+    }
+    Ok(())
+}
+
 impl WireResponse {
     pub fn validate_limits(&self) -> Result<(), WireLimitError> {
         match self {
@@ -321,42 +363,7 @@ impl WireResponse {
                 Ok(())
             }
             Self::DiscoveryResolved(Some(value)) => validate_announcement_size(value),
-            Self::DiscoveryFreshnessContext(Some(proof)) => {
-                if proof.membership_certificates.len() > MAX_DISCOVERY_MEMBERSHIP_CERTIFICATES {
-                    return Err(WireLimitError::TooManyDiscoveryMembershipCertificates(
-                        proof.membership_certificates.len(),
-                    ));
-                }
-                let member_count = proof
-                    .membership_certificates
-                    .iter()
-                    .flat_map(|certificate| {
-                        [certificate.proposal.previous.members.len(), certificate.proposal.proposed.members.len()]
-                    })
-                    .chain([proof.initial_membership.members.len(), proof.current_membership.members.len()])
-                    .chain(
-                        proof
-                            .pending_membership
-                            .iter()
-                            .flat_map(|proposal| [proposal.previous.members.len(), proposal.proposed.members.len()]),
-                    )
-                    .max()
-                    .unwrap_or(0);
-                if member_count > MAX_WORLD_MEMBERS {
-                    return Err(WireLimitError::TooManyMembers(member_count));
-                }
-                let vote_count =
-                    proof.membership_certificates.iter().map(|certificate| certificate.votes.len()).max().unwrap_or(0);
-                if vote_count > MAX_MEMBERSHIP_VOTES {
-                    return Err(WireLimitError::TooManyMembershipVotes(vote_count));
-                }
-                let bytes = serde_json::to_vec(proof.as_ref())
-                    .map_err(|_| WireLimitError::DiscoveryMembershipProofTooLarge(usize::MAX))?;
-                if bytes.len() > MAX_DISCOVERY_MEMBERSHIP_PROOF_BYTES {
-                    return Err(WireLimitError::DiscoveryMembershipProofTooLarge(bytes.len()));
-                }
-                Ok(())
-            }
+            Self::DiscoveryFreshnessContext(Some(proof)) => validate_membership_proof_size(proof),
             Self::HostFabricAttestation(Some(bytes)) if bytes.len() > MAX_HOST_FABRIC_ATTESTATION_BYTES => {
                 Err(WireLimitError::HostFabricAttestationTooLarge(bytes.len()))
             }

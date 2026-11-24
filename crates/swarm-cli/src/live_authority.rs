@@ -675,7 +675,7 @@ pub fn canonical_quorum_hash(
     ))
 }
 
-fn verify_genesis_anchored_membership(proof: &DiscoveryMembershipProofV1) -> Result<()> {
+pub fn verify_genesis_anchored_membership(proof: &DiscoveryMembershipProofV1) -> Result<()> {
     if proof.protocol_version != PROTOCOL_VERSION || proof.genesis.world_id()? != proof.world_id {
         bail!("membership proof does not match signed world genesis");
     }
@@ -712,7 +712,14 @@ fn verify_genesis_anchored_membership(proof: &DiscoveryMembershipProofV1) -> Res
         bail!("membership history is not anchored to world genesis");
     }
     verify_membership_record_and_keys(initial)?;
+    let mut previous = initial;
     for certificate in &proof.membership_certificates {
+        if certificate.proposal.previous.members != previous.members
+            || (certificate.proposal.previous.sequence == previous.sequence
+                && certificate.proposal.previous != *previous)
+        {
+            bail!("membership roles or keys changed outside a joint certificate");
+        }
         verify_membership_record_and_keys(&certificate.proposal.previous)?;
         verify_membership_record_and_keys(&certificate.proposal.proposed)?;
         let mut seen_voters = BTreeSet::new();
@@ -729,6 +736,12 @@ fn verify_genesis_anchored_membership(proof: &DiscoveryMembershipProofV1) -> Res
             }
             verify_signature(vote.voter_peer_id, vote.voter_public_key, &vote.signing_bytes()?, &vote.signature)?;
         }
+        previous = &certificate.proposal.proposed;
+    }
+    if proof.current_membership.members != previous.members
+        || (proof.current_membership.sequence == previous.sequence && proof.current_membership != *previous)
+    {
+        bail!("current membership is inconsistent with certified member roles");
     }
     verify_membership_record_and_keys(&proof.current_membership)?;
     if let Some(pending) = &proof.pending_membership {

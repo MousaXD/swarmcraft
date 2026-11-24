@@ -4,7 +4,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
-use swarm_protocol::{MembershipCertificateV1, MembershipProposalV1, MembershipVoteV1, WorldId};
+use swarm_protocol::{
+    DiscoveryMembershipProofV1, MembershipCertificateV1, MembershipProposalV1, MembershipVoteV1, WorldId,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DurableMembershipPromiseV1 {
@@ -80,17 +82,54 @@ impl Storage {
         let world = certificate.proposal.proposed.world_id;
         let _guard = self.lock_world_transaction(world)?;
         let encoded = postcard::to_allocvec(certificate)?;
+        self.archive_membership_certificate_locked(certificate, &encoded)?;
+        durable_atomic_write(&self.world_dir(world).join("metadata/membership-certificate.postcard"), &encoded)
+    }
+
+    fn archive_membership_certificate_locked(
+        &self,
+        certificate: &MembershipCertificateV1,
+        encoded: &[u8],
+    ) -> Result<(), StorageError> {
+        let world = certificate.proposal.proposed.world_id;
         let history_path = self
             .world_dir(world)
             .join("metadata/membership-certificates")
             .join(format!("{:020}.postcard", certificate.proposal.proposed.sequence));
-        if !durable_create_once(&history_path, &encoded)? {
-            let existing = fs::read(&history_path).map_err(|error| io_error(&history_path, error))?;
-            if existing != encoded {
+        if !durable_create_once(&history_path, encoded)? && read_canonical_file(&history_path)? != encoded {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(())
+    }
+
+    /// Archive a fully signature/quorum-verified first-contact proof. The
+    /// caller MUST verify signatures and invitation binding before invoking.
+    /// Never write the canonical current membership or certificate pointer:
+    /// only the independently validated joint commit may install them.
+    pub fn archive_join_membership_history(&self, proof: &DiscoveryMembershipProofV1) -> Result<(), StorageError> {
+        let world = proof.world_id;
+        let _guard = self.lock_world_transaction(world)?;
+        let pending = self.load_pending_join(world)?;
+        if pending.invite.genesis != proof.genesis
+            || self.load_world(world)?.genesis != proof.genesis
+            || proof.initial_membership.world_id != world
+            || proof.current_membership.world_id != world
+            || proof.initial_membership.sequence != 0
+            || proof.initial_membership.previous_membership_hash.is_some()
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        self.archive_membership_locked(&proof.initial_membership)?;
+        for certificate in &proof.membership_certificates {
+            if certificate.proposal.previous.world_id != world || certificate.proposal.proposed.world_id != world {
                 return Err(StorageError::WorldMetadataMismatch);
             }
+            self.archive_membership_locked(&certificate.proposal.previous)?;
+            self.archive_membership_locked(&certificate.proposal.proposed)?;
+            self.archive_membership_certificate_locked(certificate, &postcard::to_allocvec(certificate)?)?;
         }
-        durable_atomic_write(&self.world_dir(world).join("metadata/membership-certificate.postcard"), &encoded)
+        self.archive_membership_locked(&proof.current_membership)?;
+        Ok(())
     }
 
     pub fn load_membership_certificate_chain(

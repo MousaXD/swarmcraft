@@ -14,6 +14,7 @@ pub mod runtime_installer;
 pub mod runtime_layout;
 pub mod runtime_process_guard;
 pub mod server_mods;
+pub mod world_genesis;
 pub mod world_import;
 
 pub use package_provider::*;

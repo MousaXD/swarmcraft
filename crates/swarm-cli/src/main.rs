@@ -8,7 +8,7 @@ use swarm_cli::game_route_api::{call_live_daemon, GameRouteApiOperation, GameRou
 use swarm_cli::live_runtime_registry::LiveFabricRuntimeRegistry;
 use swarm_cli::migration::{self, RuntimeLaunchConfig, TransferPrepareResult};
 use swarm_cli::server_mods;
-use swarm_cli::{host_readiness, hosting_budget};
+use swarm_cli::{host_readiness, hosting_budget, world_genesis};
 use swarm_core::{
     create_world_genesis_with_fingerprint, random_nonce, sign_world_config, verify_membership_signature,
     verify_snapshot_signature, DataPaths, PeerIdentity,
@@ -18,7 +18,7 @@ use swarm_protocol::{
     PeerId, RuntimeCompatibilityManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1,
     WorldPresentationV1, WorldSafetyLevelV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
-use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
+use swarm_storage::{SnapshotContext, Storage, StorageError, WorldMetadataV1};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -117,7 +117,12 @@ enum WorldCommand {
         command: HostingCommand,
     },
     /// Stage a signed authority-mediated join request from a scinvite token.
-    Join { invite: String },
+    Join {
+        invite: String,
+        /// Request host-candidate membership. This never enables hosting, grants a lease or accepts EULA.
+        #[arg(long)]
+        host_candidate: bool,
+    },
     /// Stage a signed authority-mediated leave request without deleting replicated data.
     Leave { world: String },
     /// List locally known worlds.
@@ -304,10 +309,32 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 preferred_replication_factor: 2,
             };
             storage.save_world_descriptor(&descriptor)?;
+            // Seed an initial empty canonical snapshot. The shared authority runtime restores this
+            // empty directory and Minecraft creates the actual world on first launch; from then on
+            // all state is checkpointed through the normal canonical snapshot path.
+            let initial_source = paths.root.join("initial-world").join(world_id.to_hex());
+            std::fs::create_dir_all(&initial_source)?;
+            let mut initial_snapshot = storage.snapshot_directory(
+                &initial_source,
+                swarm_storage::SnapshotContext {
+                    world: world_id,
+                    snapshot_number: 1,
+                    epoch: world_genesis::GENESIS_EPOCH,
+                    sequence: 1,
+                    previous_snapshot_hash: None,
+                    authority_peer_id: identity.peer_id(),
+                    authority_public_key: identity.public_key(),
+                },
+            )?;
+            identity.sign_snapshot(&mut initial_snapshot)?;
+            storage.commit_snapshot(&initial_snapshot)?;
+            let _ = std::fs::remove_dir_all(&initial_source);
+            world_genesis::establish_initial_epoch(storage, &identity, &initial_snapshot)?;
+
             let mut membership = MembershipRecordV1 {
                 protocol_version: PROTOCOL_VERSION,
                 world_id,
-                epoch: 0,
+                epoch: world_genesis::GENESIS_EPOCH,
                 sequence: 0,
                 previous_membership_hash: None,
                 members: descriptor.members.clone(),
@@ -343,44 +370,61 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             sign_world_config(&identity, &mut config)?;
             storage.save_world_config(&config)?;
 
-            // Seed an initial empty canonical snapshot. The shared authority runtime restores this
-            // empty directory and Minecraft creates the actual world on first launch; from then on
-            // all state is checkpointed through the normal canonical snapshot path.
-            let initial_source = paths.root.join("initial-world").join(world_id.to_hex());
-            std::fs::create_dir_all(&initial_source)?;
-            let mut initial_snapshot = storage.snapshot_directory(
-                &initial_source,
-                swarm_storage::SnapshotContext {
-                    world: world_id,
-                    snapshot_number: 1,
-                    epoch: 0,
-                    sequence: 1,
-                    previous_snapshot_hash: None,
-                    authority_peer_id: identity.peer_id(),
-                    authority_public_key: identity.public_key(),
-                },
-            )?;
-            identity.sign_snapshot(&mut initial_snapshot)?;
-            storage.commit_snapshot(&initial_snapshot)?;
-            let _ = std::fs::remove_dir_all(&initial_source);
-            // initial empty canonical snapshot
-
             for source in &server_mod {
                 server_mods::add_local_mod(paths, world_id, &config.compatibility, source)?;
             }
             println!("Created world: {name}");
             println!("World ID: {world_id}");
         }
-        WorldCommand::Join { invite: value } => {
+        WorldCommand::Join { invite: value, host_candidate } => {
             let invite = invite::decode(&value)?;
             let identity = PeerIdentity::load_or_create(paths)?;
-            if storage.load_world(invite.world_id).is_err() {
-                storage.create_world(&WorldMetadataV1 {
+            match storage.load_world(invite.world_id) {
+                Ok(metadata) => {
+                    if metadata.genesis != invite.genesis {
+                        bail!("invite conflicts with the existing local world genesis");
+                    }
+                    match storage.load_membership_record(invite.world_id) {
+                        Ok(committed) => {
+                            verify_membership_signature(&committed)?;
+                            if committed.members.iter().any(|member| {
+                                member.peer_id == identity.peer_id()
+                                    && member.public_key == identity.public_key()
+                                    && !member.banned
+                            }) {
+                                println!("Already a signed member of: {}", invite.display_name);
+                                println!("World ID: {}", invite.world_id);
+                                return Ok(());
+                            }
+                            bail!("existing local membership must be resolved before rejoining; no signed records were changed");
+                        }
+                        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                    match storage.load_pending_join(invite.world_id) {
+                        Ok(pending) => {
+                            if pending.invite == invite
+                                && pending.joining_member.peer_id == identity.peer_id()
+                                && pending.joining_member.public_key == identity.public_key()
+                                && pending.joining_member.authority_eligible == host_candidate
+                            {
+                                println!("Join request already staged for: {}", invite.display_name);
+                                println!("World ID: {}", invite.world_id);
+                                return Ok(());
+                            }
+                            bail!("a different join request is already staged; refusing to replace its signed membership role");
+                        }
+                        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Err(StorageError::WorldNotFound(_)) => storage.create_world(&WorldMetadataV1 {
                     storage_schema_version: STORAGE_SCHEMA_VERSION,
                     display_name: invite.display_name.clone(),
                     world_id: invite.world_id,
                     genesis: invite.genesis.clone(),
-                })?;
+                })?,
+                Err(error) => return Err(error.into()),
             }
             let descriptor = WorldDescriptorV1 {
                 protocol_version: PROTOCOL_VERSION,
@@ -399,7 +443,7 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 protocol_version: PROTOCOL_VERSION,
                 world_id: invite.world_id,
                 invite: invite.clone(),
-                joining_member: local_storage_member(&identity),
+                joining_member: if host_candidate { local_member(&identity) } else { local_storage_member(&identity) },
                 nonce: random_nonce(),
                 signature: Vec::new(),
             };

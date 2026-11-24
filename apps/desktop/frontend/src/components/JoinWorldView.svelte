@@ -9,6 +9,7 @@
   let worldIdTone = $state('neutral');
   let busy = $state(false);
   let error = $state('');
+  let hostCandidate = $state(false);
 
   async function join(event: SubmitEvent) {
     event.preventDefault();
@@ -23,12 +24,13 @@
     try {
       // The Rust command verifies the entire signed invite and membership.
       // Neither the plaintext invite nor signing material is logged here.
-      const response = await nativeWorldActions().join(inviteInput?.value ?? '');
+      const response = await nativeWorldActions().join(inviteInput?.value ?? '', hostCandidate);
       nativeSucceeded = true;
       // Rust finished the native join command; clearing its token before a
       // UI refresh failure avoids unintended duplicate submissions. Only
       // canonical membership status can confirm whether joining is complete.
       if (inviteInput) inviteInput.value = '';
+      hostCandidate = false;
       const match = String(response).match(/World ID:\s*(scworld:[^\s]+)/);
       // A valid Rust join can succeed without an ID in older CLI output:
       // still refresh the actual world list, never fabricate a membership.
@@ -92,6 +94,10 @@
                 <label for="joinInvite">Invite</label>
                 <textarea id="joinInvite" bind:this={inviteInput} rows="7" placeholder="scinvite:…" required spellcheck="false"></textarea>
               </div>
+              <label class="field field-wide" for="joinHostCandidate">
+                <span><input id="joinHostCandidate" type="checkbox" bind:checked={hostCandidate} disabled={busy} /> Allow this device to be a hosting candidate</span>
+                <span class="muted">This requests eligibility only. Hosting stays disabled until you explicitly contribute memory and meet the signed authority and quorum requirements.</span>
+              </label>
               <div id="joinError" class="form-error field-wide" role="alert" hidden={!error}>{error}</div>
               <div class="form-actions field-wide">
                 <button id="cancelJoin" class="button button-secondary" type="button" disabled={busy}>Cancel</button>
