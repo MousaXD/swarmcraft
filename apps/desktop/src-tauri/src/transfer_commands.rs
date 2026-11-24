@@ -1,5 +1,5 @@
-use crate::{require_value, run_cli};
-use tauri::AppHandle;
+use crate::{require_value, run_cli, RuntimeProcesses};
+use tauri::{AppHandle, State};
 
 const TRANSFER_WAIT_ATTEMPTS: usize = 160;
 const TRANSFER_WAIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -43,6 +43,37 @@ pub async fn transfer_supported(app: &AppHandle) -> bool {
         }
     }
     true
+}
+
+pub async fn automatic_transfer_supported(app: &AppHandle) -> bool {
+    for command in ["transfer-start", "transfer-status"] {
+        if run_cli(app, vec!["world".into(), command.into(), "--help".into()]).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn start_automatic_transfer(
+    app: AppHandle,
+    processes: State<'_, RuntimeProcesses>,
+    world: String,
+    target: String,
+    source_epoch: u64,
+) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    let target = require_value(target, "Transfer target peer ID")?;
+    // The daemon, not the Desktop, advances the signed stages. Ensure the
+    // existing networking service is running before submitting the intent.
+    processes.ensure_daemon_running(&app, "/ip4/0.0.0.0/udp/0/quic-v1".into())?;
+    run_cli(&app, vec!["world".into(), "transfer-start".into(), world, target, source_epoch.to_string()]).await
+}
+
+#[tauri::command]
+pub async fn transfer_progress(app: AppHandle, world: String) -> Result<String, String> {
+    let world = require_value(world, "World ID")?;
+    run_cli(&app, vec!["world".into(), "transfer-status".into(), world]).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

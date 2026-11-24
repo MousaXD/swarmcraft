@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
-use swarm_core::{DataPaths, PeerIdentity};
+use swarm_core::{create_private_dir_all, DataPaths, PeerIdentity};
 
 use crate::{host_readiness, runtime_process_guard};
 use swarm_protocol::{PeerId, WorldId};
@@ -91,7 +91,7 @@ fn control_path(paths: &DataPaths) -> PathBuf {
 
 fn open_lock(path: &Path) -> Result<File> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        create_private_dir_all(parent)?;
     }
     OpenOptions::new()
         .read(true)
@@ -184,7 +184,7 @@ fn persist_contribution(paths: &DataPaths, world: WorldId, heap_mib: u64) -> Res
 
 fn atomic_write(path: &Path, value: &HostingConsentV1) -> Result<()> {
     let dir = path.parent().context("hosting consent path has no parent")?;
-    fs::create_dir_all(dir)?;
+    create_private_dir_all(dir)?;
     let tmp = path.with_extension(format!("json.{}.{}.tmp", std::process::id(), value.revision));
     let result = (|| -> Result<()> {
         let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;

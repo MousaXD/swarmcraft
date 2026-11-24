@@ -760,9 +760,21 @@ async fn authenticated_quic_stream_drop_is_observable_for_browse_and_exact_resol
             }
         });
         let provider_peer = client.add_bootstrap_address(address.parse().unwrap()).unwrap();
-        timeout(Duration::from_secs(10), async {
+        timeout(Duration::from_secs(30), async {
+            let mut redrive = tokio::time::interval(Duration::from_millis(250));
+            redrive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             while !client.is_authenticated(&provider_peer) {
-                client.next_event().await.expect("client should authenticate provider");
+                tokio::select! {
+                    _ = redrive.tick() => {
+                        // The test injects a request failure, not an initial
+                        // dial failure. Re-drive the actual single-flight
+                        // connection just as the discovery resolver does.
+                        client.dial_peer(provider_peer).expect("redrive provider dial");
+                    }
+                    event = client.next_event() => {
+                        event.expect("client should authenticate provider");
+                    }
+                }
             }
         })
         .await

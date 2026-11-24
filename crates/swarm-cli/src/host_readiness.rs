@@ -709,7 +709,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
 fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
     let parent = path.parent().context("control file has no parent directory")?;
-    fs::create_dir_all(parent)?;
+    swarm_core::create_private_dir_all(parent)?;
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, bytes)?;
     #[cfg(windows)]

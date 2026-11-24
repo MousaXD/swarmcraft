@@ -67,6 +67,43 @@ const OBSERVE_GUIDANCE =
 const OBSERVE_POLL_INTERVAL_MS = 3000;
 const OBSERVE_POLL_ATTEMPTS = 20;
 
+const AUTOMATIC_PHASES = Object.freeze({
+  idle: 'No handoff has been requested on this device.',
+  checkpoint_requested: 'Saving the final checkpoint. Keep the current host and networking online.',
+  prepared: 'Final checkpoint recorded. Waiting for the recipient to verify the save and accept with hosting consent.',
+  accepted: 'Recipient acceptance recorded. Waiting for the signed commitment and quorum witnesses.',
+  committed: 'Handoff committed. Waiting for the successor epoch to be observed. Do not turn off yet.',
+  successor_observed: 'Successor epoch recorded locally. This does not prove live quorum or Minecraft readiness. Check Host Readiness and the verified game route before turning off.',
+  superseded: 'This handoff belongs to an earlier generation. Inspect current world status.',
+});
+
+export function normalizeTransferProgress(raw, world) {
+  const peer = value => typeof value === 'string' && /^scpeer:[a-f0-9]{64}$/i.test(value);
+  const epoch = value => Number.isSafeInteger(value) && value >= 0;
+  if (!raw || raw.world_id !== world || !Object.hasOwn(AUTOMATIC_PHASES, raw.phase)
+      || !peer(raw.current_authority) || !epoch(raw.current_epoch)) {
+    throw new Error('Handoff progress is malformed or belongs to another world.');
+  }
+  if (raw.phase !== 'idle'
+      && (!peer(raw.source_peer) || !peer(raw.target_peer) || raw.source_peer === raw.target_peer
+        || !epoch(raw.source_epoch))) {
+    throw new Error('Handoff participant or generation is invalid.');
+  }
+  if (['checkpoint_requested', 'prepared', 'accepted', 'committed'].includes(raw.phase)
+      && (raw.current_authority !== raw.source_peer || raw.current_epoch !== raw.source_epoch)) {
+    throw new Error('Handoff progress no longer matches the source generation.');
+  }
+  if (raw.phase === 'successor_observed'
+      && (raw.current_authority !== raw.target_peer || raw.current_epoch !== raw.source_epoch + 1)) {
+    throw new Error('Handoff successor does not match the recorded generation.');
+  }
+  if (!['idle', 'checkpoint_requested'].includes(raw.phase)
+      && !/^[a-f0-9]{64}$/i.test(String(raw.checkpoint_hash || ''))) {
+    throw new Error('Handoff checkpoint reference is invalid.');
+  }
+  return raw;
+}
+
 const TRANSFER_TOKEN_FIELD_IDS = [
   'preparedTransferToken',
   'acceptedTransferToken',
@@ -136,6 +173,7 @@ function ensureDialog() {
 
       <div id="transferWizardError" class="form-error" role="alert" hidden></div>
       <p id="transferRoleNote" class="helper"></p>
+      <div id="automaticTransferProgress" class="inline-notice" role="status" hidden></div>
 
       <section id="transferSourceFlow" hidden>
         <div class="field">
@@ -143,6 +181,11 @@ function ensureDialog() {
           <select id="transferTargetPeer"></select>
           <p id="transferTargetHint" class="field-help">Choose an authority-eligible member. SwarmCraft highlights the backend-recommended handoff candidate when one is available.</p>
         </div>
+        <div id="automaticTransferActions" class="compact-actions" hidden>
+          <button id="startAutomaticTransfer" class="button button-primary" type="button" disabled>Start safe handoff</button>
+        </div>
+        <details id="manualSourceTransfer">
+        <summary>Advanced: manual signed token exchange</summary>
         <div class="compact-actions">
           <button id="prepareTransfer" class="button button-primary" type="button">Prepare safe handoff</button>
         </div>
@@ -174,9 +217,12 @@ function ensureDialog() {
           <button id="observeTransfer" class="button button-secondary" type="button">Observe new host epoch</button>
         </div>
         <p id="sourceTransferComplete" class="inline-notice" hidden></p>
+        </details>
       </section>
 
       <section id="transferTargetFlow" hidden>
+        <details id="manualTargetTransfer">
+        <summary>Advanced: manual signed token exchange</summary>
         <p class="helper">This device is not the current host. It can accept a handoff only when the signed token names this peer and the exact canonical checkpoint is already present locally.</p>
         <div class="field">
           <label for="incomingPreparedTransfer">1. Prepared token from the current host</label>
@@ -204,6 +250,7 @@ function ensureDialog() {
           <button id="copyEpochTransfer" class="button button-secondary" type="button">Copy successor epoch</button>
           <p class="field-help">Return this token to the previous host and any other quorum peers. Minecraft starts only after normal backend quorum/runtime checks pass.</p>
         </div>
+        </details>
       </section>
 
       <div class="dialog-actions">
@@ -251,6 +298,14 @@ export function registerTransferWizard(backend) {
     let sessionGeneration = 0;
     let sourceEpoch = null;
     let preparedSuccessor = '';
+    let automaticTimer = null;
+    let automaticInFlight = null;
+    let automaticRevision = 0;
+    let automaticState = null;
+    let automaticLocalPeer = '';
+    const autoButton = document.getElementById('startAutomaticTransfer');
+    const autoDetail = document.getElementById('automaticTransferProgress');
+    const autoActions = document.getElementById('automaticTransferActions');
     const activeSession = (world, generation) => dialog.open
       && currentWorld === world && dialog.dataset.world === world && generation === sessionGeneration;
 
@@ -261,6 +316,7 @@ export function registerTransferWizard(backend) {
     dialog.addEventListener('close', () => {
       sessionGeneration += 1;
       stopObservePolling();
+      stopAutomaticPolling();
     });
 
     let observeTimer = null;
@@ -324,6 +380,87 @@ export function registerTransferWizard(backend) {
     };
 
     const inFlightSteps = new Set();
+
+    const stopAutomaticPolling = () => {
+      if (automaticTimer !== null) clearInterval(automaticTimer);
+      automaticTimer = null;
+      automaticRevision += 1;
+      automaticInFlight = null;
+      automaticState = null;
+      if (autoButton) autoButton.disabled = true;
+    };
+
+    const renderAutomatic = (raw, world) => {
+      const progress = normalizeTransferProgress(raw, world);
+      automaticState = progress;
+      autoDetail.hidden = false;
+      autoDetail.textContent = AUTOMATIC_PHASES[progress.phase]
+        + (progress.target_peer ? ` Target: ${progress.target_peer}.` : '')
+        + (progress.checkpoint_hash ? ` Checkpoint: ${progress.checkpoint_hash}.` : '');
+      autoDetail.dataset.tone = 'neutral';
+      // Local durable progress is NEVER a safe-to-shutdown or route proof.
+      autoButton.disabled = inFlightSteps.has('startAutomaticTransfer')
+        || !document.getElementById('transferTargetPeer').value
+        || progress.current_authority !== automaticLocalPeer
+        || !['idle', 'superseded', 'successor_observed'].includes(progress.phase);
+      return progress;
+    };
+
+    const pollAutomatic = async (world, generation) => {
+      if (!activeSession(world, generation) || automaticInFlight
+          || inFlightSteps.has('startAutomaticTransfer')) return;
+      const revision = automaticRevision;
+      const request = { generation, revision };
+      automaticInFlight = request;
+      const current = () => activeSession(world, generation) && revision === automaticRevision;
+      try {
+        const progress = await backend.migration.transferProgress(world);
+        if (current()) renderAutomatic(progress, world);
+      } catch (error) {
+        if (!current()) return;
+        automaticState = null;
+        autoButton.disabled = true;
+        autoDetail.hidden = false;
+        autoDetail.dataset.tone = 'neutral';
+        autoDetail.textContent = `Handoff progress unavailable. Keep networking online. ${error?.message || error}`;
+      } finally {
+        if (automaticInFlight === request) automaticInFlight = null;
+      }
+    };
+
+    autoButton?.addEventListener('click', async () => {
+      const world = currentWorld;
+      const generation = sessionGeneration;
+      if (!activeSession(world, generation) || !automaticState || autoButton.disabled) return;
+      const target = document.getElementById('transferTargetPeer').value;
+      const source = automaticState;
+      if (!target || target === automaticLocalPeer || source.current_authority !== automaticLocalPeer
+          || !['idle', 'superseded', 'successor_observed'].includes(source.phase)) return;
+      setError('');
+      // An idle poll started before the action must never overwrite the
+      // durable result or re-enable the request button after submission.
+      automaticRevision += 1;
+      automaticInFlight = null;
+      automaticState = null;
+      inFlightSteps.add('startAutomaticTransfer');
+      setBusy(autoButton, true);
+      window.__swarmcraftInvalidateTransientSafety?.(world);
+      try {
+        const progress = await backend.migration.startAutomaticTransfer(world, target, source.current_epoch);
+        if (activeSession(world, generation)) renderAutomatic(progress, world);
+      } catch (error) {
+        if (activeSession(world, generation)) {
+          setError(`Handoff request outcome is uncertain. Refreshing durable progress before any retry. ${error?.message || error}`);
+        }
+      } finally {
+        inFlightSteps.delete('startAutomaticTransfer');
+        autoButton.removeAttribute('aria-busy');
+        if (activeSession(world, generation)) {
+          autoButton.disabled = true;
+          await pollAutomatic(world, generation);
+        }
+      }
+    });
 
     document.getElementById('prepareTransfer').addEventListener('click', () => runStep('prepareTransfer', async (world, isCurrent) => {
       const target = document.getElementById('transferTargetPeer').value;
@@ -402,6 +539,7 @@ export function registerTransferWizard(backend) {
       event.preventDefault();
       event.stopImmediatePropagation();
       const generation = ++sessionGeneration;
+      stopAutomaticPolling();
       setError('');
       currentWorld = document.getElementById('world')?.value.trim() || '';
       const requestedWorld = currentWorld;
@@ -434,6 +572,14 @@ export function registerTransferWizard(backend) {
         sourceEpoch = statusEpoch(statusText);
         const isSource = Boolean(localPeer && authority && localPeer === authority);
         const peers = parseTransferPeers(peerText, localPeer);
+        const automatic = backend.migration.capabilities.automaticTransfer === true && autoButton && autoDetail;
+        automaticLocalPeer = localPeer;
+        if (autoActions) autoActions.hidden = !automatic || !isSource;
+        if (autoDetail) autoDetail.hidden = !automatic;
+        for (const id of ['manualSourceTransfer', 'manualTargetTransfer']) {
+          const details = document.getElementById(id);
+          if (details) details.open = !automatic;
+        }
 
         for (const buttonId of [
           'prepareTransfer', 'commitTransfer', 'observeTransfer',
@@ -443,7 +589,11 @@ export function registerTransferWizard(backend) {
         }
 
         document.getElementById('transferDialogTitle').textContent = isSource ? 'Transfer host safely' : 'Receive host handoff';
-        document.getElementById('transferRoleNote').textContent = roleCopy(isSource, localPeer, authority);
+        document.getElementById('transferRoleNote').textContent = automatic
+          ? (isSource
+            ? 'Choose the new host and start the signed handoff. The daemon saves, replicates and advances the transfer automatically; keep all required peers online.'
+            : 'The daemon receives and advances signed handoffs only when this device has the verified checkpoint, eligible membership and explicit hosting consent. No token exchange is needed.')
+          : roleCopy(isSource, localPeer, authority);
         document.getElementById('transferSourceFlow').hidden = !isSource;
         document.getElementById('transferTargetFlow').hidden = isSource;
         restoreTransferResults();
@@ -475,6 +625,11 @@ export function registerTransferWizard(backend) {
         }
 
         if (!dialog.open) dialog.showModal();
+        if (automatic) {
+          autoDetail.textContent = 'Reading durable handoff progress…';
+          automaticTimer = setInterval(() => pollAutomatic(requestedWorld, generation), OBSERVE_POLL_INTERVAL_MS);
+          await pollAutomatic(requestedWorld, generation);
+        }
       } catch (error) {
         if (generation !== sessionGeneration || currentWorld !== requestedWorld
             || dialog.dataset.world !== requestedWorld) return;

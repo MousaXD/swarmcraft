@@ -92,10 +92,23 @@ impl DataPaths {
 
     pub fn ensure(&self) -> Result<(), CoreError> {
         for path in [self.identity_dir(), self.worlds_dir()] {
-            fs::create_dir_all(&path).map_err(|e| io_error(path, e))?;
+            create_private_dir_all(&path).map_err(|e| io_error(path, e))?;
         }
         Ok(())
     }
+}
+
+/// Create new machine-local directories privately, regardless of the user's
+/// umask. Never silently change permissions on existing directories.
+pub fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
 }
 
 pub struct PeerIdentity {

@@ -166,6 +166,10 @@ enum WorldCommand {
     Wake { world: String },
     /// Request a final checkpoint and prepare a manual authority transfer.
     TransferPrepare { world: String, to: String },
+    /// Request a daemon-driven transfer for the exact displayed source epoch.
+    TransferStart { world: String, to: String, source_epoch: u64 },
+    /// Read durable local handoff progress; never grants shutdown or game access.
+    TransferStatus { world: String },
     /// Export the locally durable signed transfer token.
     TransferExport { world: String },
     /// Accept a prepared transfer as its target and print the accepted token.
@@ -632,6 +636,26 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 }
                 TransferPrepareResult::Prepared(token) => println!("{token}"),
             }
+        }
+        WorldCommand::TransferStart { world, to, source_epoch } => {
+            let world = parse_world(&world)?;
+            let target = PeerId::from_str(&to).with_context(|| format!("invalid peer ID: {to}"))?;
+            println!(
+                "{}",
+                serde_json::to_string(&migration::request_automatic_transfer(
+                    paths,
+                    storage,
+                    world,
+                    target,
+                    source_epoch
+                )?)?
+            );
+        }
+        WorldCommand::TransferStatus { world } => {
+            println!(
+                "{}",
+                serde_json::to_string(&migration::transfer_progress(paths, storage, parse_world(&world)?)?)?
+            );
         }
         WorldCommand::TransferExport { world } => {
             println!("{}", migration::export_transfer(storage, parse_world(&world)?)?);

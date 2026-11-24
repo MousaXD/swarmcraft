@@ -73,6 +73,8 @@ export interface NativeCommandTable {
   migration_capabilities: { args: Record<string, never>; result: string };
   migration_status: { args: { world: string }; result: string };
   manual_transfer_step: { args: { world: string; action: string; value: string | null }; result: string };
+  start_automatic_transfer: { args: { world: string; target: string; sourceEpoch: number }; result: string };
+  transfer_progress: { args: { world: string }; result: string };
   wake_world: { args: { world: string }; result: string };
   configure_world_runtime: { args: { world: string; java: string; serverJar: string; modJar: string; acceptEula: boolean; gameEndpoint: string | null }; result: string };
   runtime_status: { args: { world: string }; result: string };

@@ -186,9 +186,9 @@ test('manual transfer remains unavailable without one safe backend orchestration
     }
     return 'ok';
   });
-  assert.deepEqual(backend.migration.capabilities, { status: false, transfer: false, wake: false });
+  assert.deepEqual(backend.migration.capabilities, { status: false, transfer: false, automaticTransfer: false, wake: false });
   await backend.listWorlds();
-  assert.deepEqual(backend.migration.capabilities, { status: true, transfer: false, wake: true });
+  assert.deepEqual(backend.migration.capabilities, { status: true, transfer: false, automaticTransfer: false, wake: true });
   const state = await backend.migration.readState('scworld:test');
   assert.equal(state.phase, 'waiting_for_authority');
   await backend.migration.wakeWorld('scworld:test');

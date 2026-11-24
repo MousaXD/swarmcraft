@@ -176,7 +176,7 @@ fn record_path(paths: &DataPaths, world: WorldId) -> PathBuf {
 
 fn atomic_write(path: &PathBuf, record: &RuntimeProcessRecord) -> Result<()> {
     let parent = path.parent().context("runtime process record has no parent directory")?;
-    fs::create_dir_all(parent)
+    swarm_core::create_private_dir_all(parent)
         .with_context(|| format!("cannot create runtime process record directory {}", parent.display()))?;
     let temporary = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(record)?;

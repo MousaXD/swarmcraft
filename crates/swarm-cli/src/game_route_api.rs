@@ -200,7 +200,7 @@ fn open_private(path: &Path) -> Result<OpenOptions> {
 
 fn prepare_private_directory(paths: &DataPaths) -> Result<PathBuf> {
     let dir = control_directory(paths);
-    fs::create_dir_all(&dir)?;
+    swarm_core::create_private_dir_all(&dir)?;
     let metadata = fs::symlink_metadata(&dir)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         bail!("private game-route control directory is unsafe");

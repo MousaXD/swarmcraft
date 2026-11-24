@@ -452,7 +452,7 @@ export function createBackendAdapter(invoke) {
     }
   };
 
-  const migrationCapabilities = { status: false, transfer: false, wake: false };
+  const migrationCapabilities = { status: false, transfer: false, automaticTransfer: false, wake: false };
   let migrationCapabilityProbe = null;
   const ensureMigrationCapabilities = () => {
     if (!migrationCapabilityProbe) {
@@ -462,6 +462,7 @@ export function createBackendAdapter(invoke) {
           const supported = new Set(String(raw || '').split(',').map(slug).filter(Boolean));
           migrationCapabilities.status = supported.has('status');
           migrationCapabilities.transfer = supported.has('transfer');
+          migrationCapabilities.automaticTransfer = migrationCapabilities.transfer && supported.has('automatic-transfer');
           migrationCapabilities.wake = supported.has('wake');
           return migrationCapabilities;
         })
@@ -612,6 +613,19 @@ export function createBackendAdapter(invoke) {
         }
       },
       transferPrepare: (world, target) => transferStep(world, 'prepare', target),
+      startAutomaticTransfer: async (world, target, sourceEpoch) => {
+        await ensureMigrationCapabilities();
+        if (!migrationCapabilities.automaticTransfer) throw unavailable('Automatic host transfer');
+        if (!Number.isSafeInteger(sourceEpoch) || sourceEpoch < 0) throw new Error('A valid source epoch is required');
+        const raw = await call('start_automatic_transfer', { world, target, sourceEpoch });
+        return typeof raw === 'string' ? JSON.parse(raw) : raw;
+      },
+      transferProgress: async (world) => {
+        await ensureMigrationCapabilities();
+        if (!migrationCapabilities.automaticTransfer) throw unavailable('Automatic host transfer progress');
+        const raw = await call('transfer_progress', { world });
+        return typeof raw === 'string' ? JSON.parse(raw) : raw;
+      },
       transferAccept: (world, token) => transferStep(world, 'accept', token),
       transferCommit: (world, token) => transferStep(world, 'commit', token),
       transferActivate: (world, token) => transferStep(world, 'activate', token),

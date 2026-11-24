@@ -105,6 +105,54 @@ checks, not a completed release or hypothetical Minecraft sessions.
 
 ## Local verification performed
 
+### Automatic Desktop handoff and transport admission (24 November)
+
+- Required Validation run `45381070672` on `9a8a5b4` passed 19 jobs,
+  including macOS/Linux Rust, all four Desktop package builds, installed Linux
+  GUI acceptance, live Minecraft/Fabric startup and the 2 GiB interrupted
+  QUIC soak. Windows Rust failed a discovery-fixture authentication deadline;
+  the dependent aggregate gate also failed. This was not a fully green run.
+- The shipping Desktop wizard now calls `world transfer-start <world> <target>
+  <source_epoch>` through its native command, ensures the daemon is running,
+  and polls `world transfer-status <world>` for durable signed-stage progress.
+  The manual signed-token workflow remains an advanced compatibility option.
+  Automatic requests are bound to the displayed epoch and serialized; a
+  conflicting target cannot overwrite an outstanding intent. Duplicate
+  requests read the same durable stage. Reopening the wizard or stale
+  asynchronous responses cannot create a second transfer. An observed
+  successor is **not** a live route, runtime readiness, or shutdown proof.
+- Discovery reconnection tests now re-drive authentication with the same
+  single-flight dial path used by discovery. A real repeated-disconnect run
+  also exposed phantom request-response connection state: a composite
+  libp2p behaviour registered a handler before its later limits behaviour
+  rejected the connection. Admission limits are now first in both swarms;
+  a deterministic rejection regression and all five real discovery tests
+  passed. No connection limit or authentication rule was weakened.
+- Fresh private data and control directories are created with owner-only
+  Unix permissions even under umask `0002`; previously that normal umask
+  could make a newly created data root fail the authority-permit guard.
+  Existing unsafe directories remain subject to the fail-closed guards.
+  No recursive permissions repair of existing user data is performed.
+- All **133 Desktop JS tests passed**, including three real Chrome
+  viewport smoke checks and the exact native IPC command table. The
+  process-level transfer gate exercises both separate manual CLI stages
+  and automatic exchange over three independent daemon processes. These
+  tests are not three-machine Minecraft client gameplay.
+
+### Current implementation-plan residuals
+
+The original `SABATHON_IMPLEMENTATION_PLAN.md` is an historical audit and
+its status labels are not automatically updated by these code changes.
+Items 2, 3, 12, 19, 20 and the baseline of 26 have integrated code and
+automated checks; item 4 now has the default Desktop automation path.
+Items 1, 5 and 6 still need the installed multi-device player journey;
+item 28 needs the complete checkpoint/replica acknowledgment and
+progress-at-risk presentation. Item 13 is the independent field-evidence
+gate, not a unit-test checkbox. Item 49 needs reconciliation against main
+after an authorized merge. Release-gate items 37 and 50 and the P1/P2
+backlog are separate from the Sabathon P0 implementation slice. No field
+acceptance or production release is claimed from this branch report.
+
 ### Final macOS Rust regressions from `ece4b1f` (24 November 2026)
 
 - GitHub Required Validation run `45277228605` completed with **18 successful

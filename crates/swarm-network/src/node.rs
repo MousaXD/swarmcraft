@@ -56,6 +56,9 @@ mod generated_behaviour {
 
     #[derive(NetworkBehaviour)]
     pub(super) struct Behaviour {
+        // Reject over-limit connections before stateful handlers register
+        // them. A denied connection never receives ConnectionClosed.
+        pub(super) limits: connection_limits::Behaviour,
         pub(super) request_response: cbor::Behaviour<WireRequest, WireResponse>,
         pub(super) game_route_control: cbor::Behaviour<GameRouteControlRequestV1, GameRouteControlResponseV1>,
         pub(super) game_stream: stream::Behaviour,
@@ -66,7 +69,6 @@ mod generated_behaviour {
         pub(super) relay_client: relay::client::Behaviour,
         pub(super) dcutr: dcutr::Behaviour,
         pub(super) auto_nat: autonat::Behaviour,
-        pub(super) limits: connection_limits::Behaviour,
     }
 }
 use generated_behaviour::{Behaviour, BehaviourEvent};

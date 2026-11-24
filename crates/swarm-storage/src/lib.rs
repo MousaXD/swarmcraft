@@ -117,7 +117,16 @@ pub struct Storage {
 impl Storage {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, StorageError> {
         let this = Self { root: root.into() };
-        fs::create_dir_all(this.worlds_dir()).map_err(|error| io_error(this.worlds_dir(), error))?;
+        // The data root can later contain authority permits and local
+        // identities. Do not create it group-writable under umask 0002.
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(this.worlds_dir()).map_err(|error| io_error(this.worlds_dir(), error))?;
         this.recover_abandoned_snapshot_publications()?;
         Ok(this)
     }

@@ -31,7 +31,7 @@ use swarm_protocol::{
     validate_runtime_selection, AuthorityTransferV1, EpochMode, EpochRecordV1, Hash32, MembershipRecordV1, PeerId,
     SleepRecordV1, SnapshotManifestV1, TransferPhase, WorldId, PROTOCOL_VERSION,
 };
-use swarm_storage::{SnapshotContext, Storage};
+use swarm_storage::{SnapshotContext, Storage, StorageError};
 use tokio::{
     sync::mpsc,
     task::JoinHandle,
@@ -190,6 +190,113 @@ pub struct MigrationStatus {
 pub enum TransferPrepareResult {
     CheckpointRequested,
     Prepared(String),
+}
+
+/// A local durable progress report, NOT a current quorum, route, or shutdown
+/// proof. Read after restart without carrying signed tokens in the UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferProgressPhase {
+    Idle,
+    CheckpointRequested,
+    Prepared,
+    Accepted,
+    Committed,
+    SuccessorObserved,
+    Superseded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferProgress {
+    pub world_id: String,
+    pub phase: TransferProgressPhase,
+    pub current_authority: String,
+    pub current_epoch: u64,
+    pub source_peer: Option<String>,
+    pub target_peer: Option<String>,
+    pub source_epoch: Option<u64>,
+    pub checkpoint_hash: Option<String>,
+}
+
+pub fn transfer_progress(paths: &DataPaths, storage: &Storage, world: WorldId) -> Result<TransferProgress> {
+    let epoch = storage.load_epoch_record(world)?;
+    verify_signature(epoch.authority_peer_id, epoch.authority_public_key, &epoch.signing_bytes()?, &epoch.signature)?;
+    let mut progress = TransferProgress {
+        world_id: world.to_string(),
+        phase: TransferProgressPhase::Idle,
+        current_authority: epoch.authority_peer_id.to_string(),
+        current_epoch: epoch.epoch_number,
+        source_peer: None,
+        target_peer: None,
+        source_epoch: None,
+        checkpoint_hash: None,
+    };
+    let record = match storage.load_transfer_record(world) {
+        Ok(record) => Some(record),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(record) = record {
+        verify_transfer_signature(&record)?;
+        let source_generation = transfer_is_source_generation(&record, &epoch);
+        let successor_generation = transfer_is_successor_generation(&record, &epoch, epoch.authority_peer_id);
+        if source_generation || successor_generation {
+            let descriptor = storage.load_world_descriptor(world)?;
+            let from = descriptor.member(record.from_peer_id).context("transfer source is not a member")?;
+            let to = descriptor.member(record.to_peer_id).context("transfer target is not a member")?;
+            let signer = if record.phase == TransferPhase::Accepted { to } else { from };
+            if from.banned
+                || to.banned
+                || !to.authority_eligible
+                || signer.peer_id != record.signer_peer_id
+                || signer.public_key != record.signer_public_key
+                || (source_generation && from.public_key != epoch.authority_public_key)
+                || (successor_generation && to.public_key != epoch.authority_public_key)
+            {
+                bail!("transfer progress does not match accepted membership");
+            }
+        }
+        progress.phase = if source_generation {
+            match record.phase {
+                TransferPhase::Prepared => TransferProgressPhase::Prepared,
+                TransferPhase::Accepted => TransferProgressPhase::Accepted,
+                TransferPhase::Committed => TransferProgressPhase::Committed,
+            }
+        } else if successor_generation && epoch.mode == EpochMode::Quorum && epoch.previous_epoch_hash.is_some() {
+            TransferProgressPhase::SuccessorObserved
+        } else {
+            TransferProgressPhase::Superseded
+        };
+        progress.source_peer = Some(record.from_peer_id.to_string());
+        progress.target_peer = Some(record.to_peer_id.to_string());
+        progress.source_epoch = record.next_epoch.checked_sub(1);
+        progress.checkpoint_hash = Some(record.base_snapshot_hash.to_string());
+        if source_generation {
+            return Ok(progress);
+        }
+    }
+    // A new local intent may follow a completed or superseded older handoff.
+    if let Some(target) = load_transfer_intent(paths, &epoch)? {
+        progress.phase = TransferProgressPhase::CheckpointRequested;
+        progress.source_peer = Some(epoch.authority_peer_id.to_string());
+        progress.target_peer = Some(target.to_string());
+        progress.source_epoch = Some(epoch.epoch_number);
+        progress.checkpoint_hash = None;
+    }
+    Ok(progress)
+}
+
+/// Begin a daemon-driven handoff on the exact epoch displayed to the user.
+/// Reopening the wizard reads progress; no UI token is required to resume.
+pub fn request_automatic_transfer(
+    paths: &DataPaths,
+    storage: &Storage,
+    world: WorldId,
+    target: PeerId,
+    source_epoch: u64,
+) -> Result<TransferProgress> {
+    prepare_transfer(paths, storage, world, target, Some(source_epoch))?;
+    transfer_progress(paths, storage, world)
 }
 
 pub fn save_runtime_config(paths: &DataPaths, world: WorldId, config: &RuntimeLaunchConfig) -> Result<()> {
@@ -1439,22 +1546,59 @@ pub fn prepare_manual_transfer(
     world: WorldId,
     target: PeerId,
 ) -> Result<TransferPrepareResult> {
+    prepare_transfer(paths, storage, world, target, None)
+}
+
+fn prepare_transfer(
+    paths: &DataPaths,
+    storage: &Storage,
+    world: WorldId,
+    target: PeerId,
+    expected_epoch: Option<u64>,
+) -> Result<TransferPrepareResult> {
+    storage.load_world(world)?;
+    // Serialize foreground requests across Desktop/CLI processes. This lock
+    // covers target selection, not the long-running save or network transfer.
+    let control = control_dir(paths, world);
+    prepare_control_parent(&control)?;
+    let _request_lock = lock_control_file(&control.join("transfer-request.lock"))?;
     let identity = PeerIdentity::load_or_create(paths)?;
     let epoch = storage.load_epoch_record(world)?;
+    if expected_epoch.is_some() {
+        verify_signature(
+            epoch.authority_peer_id,
+            epoch.authority_public_key,
+            &epoch.signing_bytes()?,
+            &epoch.signature,
+        )?;
+    }
     ensure_authority_generation(storage, &identity, &epoch)?;
+    if expected_epoch.is_some_and(|expected| expected != epoch.epoch_number) {
+        bail!("authority generation changed; reopen the transfer wizard");
+    }
     validate_transfer_target(storage, &identity, world, target)?;
     let latest = storage.latest_snapshot(world)?.context("cannot transfer authority without a canonical snapshot")?;
     storage.verify_snapshot(&latest)?;
     verify_snapshot_signature(&latest)?;
 
+    // Read the intent before the record: the supervisor publishes the signed
+    // prepared record before clearing the intent. A retry cannot overwrite a
+    // checkpoint already in flight for a different target.
+    let pending_target = load_transfer_intent(paths, &epoch)?;
     if let Some(existing) = active_transfer_for_current_generation(storage, world)? {
         if existing.from_peer_id == identity.peer_id()
             && existing.to_peer_id == target
-            && existing.phase == TransferPhase::Prepared
+            && (existing.phase == TransferPhase::Prepared || expected_epoch.is_some())
         {
             return Ok(TransferPrepareResult::Prepared(encode_transfer(&existing)?));
         }
         bail!("another authority transfer is already active for this authority generation");
+    }
+    if let Some(pending_target) = pending_target {
+        if pending_target == target {
+            return Ok(TransferPrepareResult::CheckpointRequested);
+        }
+        bail!("a checkpoint for another transfer target is already requested");
     }
 
     if let Some(sleep_record) = launch_guard::load_sleep_record_fail_closed(storage, world)? {
@@ -1704,11 +1848,13 @@ pub fn observe_manual_transfer_epoch(paths: &DataPaths, storage: &Storage, world
 fn active_transfer_for_current_generation(storage: &Storage, world: WorldId) -> Result<Option<AuthorityTransferV1>> {
     let current = match storage.load_epoch_record(world) {
         Ok(current) => current,
-        Err(_) => return Ok(None),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
     };
     let transfer = match storage.load_transfer_record(world) {
         Ok(transfer) => transfer,
-        Err(_) => return Ok(None),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
     };
     if !transfer_is_source_generation(&transfer, &current) {
         return Ok(None);
@@ -2418,49 +2564,9 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 
 fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("control file has no parent directory")?;
-    // Control/status files can be written by the foreground CLI while the
-    // supervisor publishes progress. Give every writer a distinct temporary
-    // file; never truncate a shared .tmp or remove the old Windows destination
-    // before the replacement is committed.
-    for directory in [parent.parent(), Some(parent)].into_iter().flatten() {
-        if let Ok(metadata) = fs::symlink_metadata(directory) {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                bail!("control path has an unsafe symlink or non-directory ancestor: {}", directory.display());
-            }
-        }
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)?;
-    }
-    #[cfg(not(unix))]
-    fs::create_dir_all(parent)?;
-    if fs::symlink_metadata(parent)?.file_type().is_symlink() {
-        bail!("control path directory was replaced by an unsafe symlink");
-    }
-    // CLI, Desktop and daemon supervisors can publish the same status from
-    // separate processes. Windows ReplaceFileW must not race another writer
-    // on the same destination. A private, durable cross-process lock covers
-    // the entire validation + staged replacement, without a delete gap.
-    let lock_path = path.with_extension("publish.lock");
-    if let Ok(metadata) = fs::symlink_metadata(&lock_path) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!("control publication lock is an unsafe symlink or non-regular file");
-        }
-    }
-    let mut lock_options = fs::OpenOptions::new();
-    lock_options.read(true).write(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        lock_options.mode(0o600);
-    }
-    let lock = lock_options.open(&lock_path)?;
-    FileExt::lock_exclusive(&lock)?;
-    if fs::symlink_metadata(&lock_path)?.file_type().is_symlink() {
-        bail!("control publication lock became an unsafe symlink");
-    }
+    prepare_control_parent(parent)?;
+    // Serialize concurrent publishers without removing the previous record.
+    let _lock = lock_control_file(&path.with_extension("publish.lock"))?;
     if let Ok(metadata) = fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             bail!("control file path is an unsafe symlink or non-regular file: {}", path.display());
@@ -2489,6 +2595,53 @@ fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     result
+}
+
+fn prepare_control_parent(parent: &Path) -> Result<()> {
+    // Control/status files can be written by the foreground CLI while the
+    // supervisor publishes progress. Give every writer a distinct temporary
+    // file; never truncate a shared .tmp or remove the old Windows destination
+    // before the replacement is committed.
+    for directory in [parent.parent(), Some(parent)].into_iter().flatten() {
+        if let Ok(metadata) = fs::symlink_metadata(directory) {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!("control path has an unsafe symlink or non-directory ancestor: {}", directory.display());
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(parent)?;
+    if fs::symlink_metadata(parent)?.file_type().is_symlink() {
+        bail!("control path directory was replaced by an unsafe symlink");
+    }
+    Ok(())
+}
+
+fn lock_control_file(lock_path: &Path) -> Result<fs::File> {
+    if let Ok(metadata) = fs::symlink_metadata(lock_path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("control publication lock is an unsafe symlink or non-regular file");
+        }
+    }
+    let mut lock_options = fs::OpenOptions::new();
+    lock_options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        lock_options.mode(0o600);
+    }
+    let lock = lock_options.open(lock_path)?;
+    FileExt::lock_exclusive(&lock)?;
+    let metadata = fs::symlink_metadata(lock_path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("control publication lock became an unsafe symlink");
+    }
+    Ok(lock)
 }
 
 #[cfg(not(windows))]

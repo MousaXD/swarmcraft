@@ -42,12 +42,15 @@ mod generated_behaviour {
 
     #[derive(NetworkBehaviour)]
     pub(super) struct DiscoveryBehaviour {
+        // Derived behaviours admit connections in declaration order. The
+        // limits gate must run before request-response preloads its handler;
+        // otherwise a rejected duplicate leaves phantom connection state.
+        pub(super) limits: connection_limits::Behaviour,
         pub(super) request_response: cbor::Behaviour<WireRequest, WireResponse>,
         pub(super) mdns: mdns::tokio::Behaviour,
         pub(super) identify: identify::Behaviour,
         pub(super) ping: ping::Behaviour,
         pub(super) kad: kad::Behaviour<MemoryStore>,
-        pub(super) limits: connection_limits::Behaviour,
     }
 }
 use generated_behaviour::{DiscoveryBehaviour, DiscoveryBehaviourEvent};
@@ -872,7 +875,7 @@ fn transport_peer_from_address(address: &Multiaddr) -> Option<TransportPeerId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer, SigningKey};
     use rand_core::OsRng;
     use swarm_protocol::{peer_id_from_public_key, PeerHelloV1};
 
@@ -900,5 +903,33 @@ mod tests {
             signature: vec![0; 64],
         };
         assert!(DiscoveryNode::new(Keypair::generate_ed25519(), hello, SigningKey::generate(&mut OsRng)).is_err());
+    }
+
+    #[tokio::test]
+    async fn denied_connection_does_not_preload_request_response_state() {
+        let key = SigningKey::generate(&mut OsRng);
+        let public_key = key.verifying_key().to_bytes();
+        let mut hello = PeerHelloV1 {
+            peer_id: peer_id_from_public_key(&public_key),
+            public_key,
+            protocol_versions: vec![PROTOCOL_VERSION],
+            capabilities: vec!["discovery-v1".into()],
+            nonce: [0; 32],
+            signature: Vec::new(),
+        };
+        hello.signature = key.sign(&hello.signing_bytes().unwrap()).to_bytes().to_vec();
+        let mut node = DiscoveryNode::new(Keypair::generate_ed25519(), hello, key).unwrap();
+        let behaviour = node.swarm.behaviour_mut();
+        // Force admission denial deterministically, without needing to race
+        // several real duplicate connections against the QUIC event loop.
+        behaviour.limits = connection_limits::Behaviour::new(
+            connection_limits::ConnectionLimits::default().with_max_established_per_peer(Some(0)),
+        );
+        let remote = Keypair::generate_ed25519().public().to_peer_id();
+        let address: Multiaddr = "/ip4/127.0.0.1/udp/40000/quic-v1".parse().unwrap();
+        assert!(behaviour
+            .handle_established_inbound_connection(ConnectionId::new_unchecked(1), remote, &address, &address)
+            .is_err());
+        assert!(!behaviour.request_response.is_connected(&remote));
     }
 }
