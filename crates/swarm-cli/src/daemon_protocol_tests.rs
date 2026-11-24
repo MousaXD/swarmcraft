@@ -307,6 +307,107 @@ fn signed_recovery_ballot_and_vote(fixture: &Fixture) -> (RecoveryBallotV1, Reco
 }
 
 #[test]
+fn accepted_recovery_retry_consumes_only_the_certified_predecessor_sleep() {
+    let fixture = fixture();
+    let storage = &fixture.storage;
+    let world = fixture.world;
+    let source = fixture._temp.path().join("retry-boundary");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("level.dat"), b"before recovery").unwrap();
+    let mut base = storage
+        .snapshot_directory(
+            &source,
+            SnapshotContext {
+                world,
+                snapshot_number: 1,
+                epoch: 0,
+                sequence: 1,
+                previous_snapshot_hash: None,
+                authority_peer_id: fixture.authority.peer_id(),
+                authority_public_key: fixture.authority.public_key(),
+            },
+        )
+        .unwrap();
+    fixture.authority.sign_snapshot(&mut base).unwrap();
+    storage.commit_snapshot(&base).unwrap();
+    let prior = storage.load_epoch_record(world).unwrap();
+    let mut sleep = SleepRecordV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        latest_snapshot_hash: base.manifest_hash().unwrap(),
+        epoch: 0,
+        fencing_token: 0,
+        authority_peer_id: prior.authority_peer_id,
+        authority_public_key: prior.authority_public_key,
+        signature: Vec::new(),
+    };
+    fixture.authority.sign_sleep_record(&mut sleep).unwrap();
+    storage.save_sleep_record(&sleep).unwrap();
+    let (mut ballot, mut vote) = signed_recovery_ballot_and_vote(&fixture);
+    ballot.base_snapshot_hash = base.manifest_hash().unwrap();
+    ballot.base_state_hash = base.state_root;
+    sign_recovery_ballot(&fixture.authority, &mut ballot).unwrap();
+    vote.ballot_hash = ballot.ballot_hash().unwrap();
+    sign_recovery_vote(&fixture.authority, &mut vote).unwrap();
+    let mut second_vote = vote.clone();
+    second_vote.voter_peer_id = fixture.member.peer_id();
+    second_vote.voter_public_key = fixture.member.public_key();
+    sign_recovery_vote(&fixture.member, &mut second_vote).unwrap();
+    let certificate = RecoveryCertificateV1 { ballot, votes: vec![vote, second_vote] };
+    let mut epoch = EpochRecordV1 {
+        epoch_number: 1,
+        fencing_token: 1,
+        previous_epoch_hash: Some(epoch_record_hash(&prior).unwrap()),
+        mode: EpochMode::Recovery,
+        base_state_hash: base.state_root,
+        reason: "certified retry".into(),
+        signature: Vec::new(),
+        ..prior
+    };
+    epoch.signature = fixture.authority.sign(&epoch.signing_bytes().unwrap());
+    storage.save_recovery_certificate(&certificate).unwrap();
+    storage.save_epoch_record(&epoch).unwrap();
+    let mut membership = storage.load_membership_record(world).unwrap();
+    membership.previous_membership_hash = Some(membership.record_hash().unwrap());
+    membership.epoch = 1;
+    membership.sequence += 1;
+    fixture.authority.sign_membership(&mut membership).unwrap();
+    storage.save_membership_record(&membership).unwrap();
+    std::fs::write(source.join("level.dat"), b"after recovery").unwrap();
+    let mut head = storage
+        .snapshot_directory(
+            &source,
+            SnapshotContext {
+                world,
+                snapshot_number: 2,
+                epoch: 1,
+                sequence: 2,
+                previous_snapshot_hash: Some(base.manifest_hash().unwrap()),
+                authority_peer_id: fixture.authority.peer_id(),
+                authority_public_key: fixture.authority.public_key(),
+            },
+        )
+        .unwrap();
+    fixture.authority.sign_snapshot(&mut head).unwrap();
+    storage.commit_snapshot(&head).unwrap();
+
+    validate_accepted_recovery_replay(storage, fixture.authority.peer_id(), &epoch, &certificate).unwrap();
+    assert!(validate_accepted_recovery_replay(storage, fixture.member.peer_id(), &epoch, &certificate).is_err());
+    let mut wrong = certificate.clone();
+    wrong.votes.pop();
+    assert!(validate_accepted_recovery_replay(storage, fixture.authority.peer_id(), &epoch, &wrong).is_err());
+    assert!(finish_recovery_retry_sleep_cleanup(storage, &epoch, &certificate).unwrap());
+    assert!(launch_guard::load_sleep_record_fail_closed(storage, world).unwrap().is_none());
+    sleep.epoch = 1;
+    sleep.fencing_token = 1;
+    sleep.latest_snapshot_hash = head.manifest_hash().unwrap();
+    fixture.authority.sign_sleep_record(&mut sleep).unwrap();
+    storage.save_sleep_record(&sleep).unwrap();
+    assert!(!finish_recovery_retry_sleep_cleanup(storage, &epoch, &certificate).unwrap());
+    assert_eq!(storage.load_sleep_record(world).unwrap(), sleep);
+}
+
+#[test]
 fn cached_recovery_ballot_must_match_readable_durable_promise_before_certification() {
     let fixture = fixture();
     let (ballot, vote) = signed_recovery_ballot_and_vote(&fixture);

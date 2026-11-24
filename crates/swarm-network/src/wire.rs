@@ -174,6 +174,17 @@ pub enum WireRequest {
     HistoricalReplayProof {
         world_id: WorldId,
     },
+    // Receiver-driven continuation of a verified, pinned replay proof.
+    HistoricalReplayNext {
+        world_id: WorldId,
+        membership_hash: Hash32,
+        snapshot_number: u64,
+        manifest_hash: Hash32,
+    },
+    HistoricalReplayManifest {
+        membership_hash: Hash32,
+        manifest: Box<SnapshotManifestV1>,
+    },
 }
 
 impl WireRequest {
@@ -205,9 +216,11 @@ impl WireRequest {
             | Self::BlobChunk { world_id, .. }
             | Self::HostCapability { world_id }
             | Self::HostFabricChallenge { world_id, .. }
-            | Self::HistoricalReplayProof { world_id } => Some(*world_id),
+            | Self::HistoricalReplayProof { world_id }
+            | Self::HistoricalReplayNext { world_id, .. } => Some(*world_id),
             Self::LeaveRequest(request) => Some(request.world_id),
             Self::SnapshotManifest(manifest) => Some(manifest.world_id),
+            Self::HistoricalReplayManifest { manifest, .. } => Some(manifest.world_id),
             Self::ReplicaAck(ack) => Some(ack.world_id),
             Self::Membership(record) => Some(record.world_id),
             Self::Epoch(record) => Some(record.world_id),
@@ -282,6 +295,23 @@ impl WireRequest {
             Self::HistoricalReplayProof { world_id } if *world_id == WorldId::default() => {
                 Err(WireLimitError::InvalidHistoricalReplayWorld)
             }
+            Self::HistoricalReplayNext { world_id, membership_hash, snapshot_number, manifest_hash }
+                if *world_id == WorldId::default()
+                    || *membership_hash == Hash32::default()
+                    || *snapshot_number == 0
+                    || *snapshot_number > swarm_protocol::MAX_REPLAY_CHECKPOINTS as u64
+                    || *manifest_hash == Hash32::default() =>
+            {
+                Err(WireLimitError::InvalidHistoricalReplayWorld)
+            }
+            Self::HistoricalReplayManifest { membership_hash, manifest }
+                if *membership_hash == Hash32::default()
+                    || manifest.world_id == WorldId::default()
+                    || manifest.snapshot_number == 0
+                    || manifest.snapshot_number > swarm_protocol::MAX_REPLAY_CHECKPOINTS as u64 =>
+            {
+                Err(WireLimitError::InvalidHistoricalReplayWorld)
+            }
             _ => Ok(()),
         }
     }
@@ -326,6 +356,7 @@ pub enum WireResponse {
     // An absent proof is an explicit refusal, not permission to bootstrap
     // a latest epoch without validating the historical transition chain.
     HistoricalReplayProof(Option<Vec<u8>>),
+    HistoricalReplayScheduled,
 }
 
 fn validate_membership_proof_size(proof: &DiscoveryMembershipProofV1) -> Result<(), WireLimitError> {

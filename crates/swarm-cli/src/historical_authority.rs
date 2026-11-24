@@ -118,6 +118,30 @@ impl VerifiedReplayProof {
         }
         Ok(())
     }
+
+    /// This is the only replay publication path. No epoch, lease, or
+    /// canonical config is installed during download. Storage binds the
+    /// signed proof and all verified checkpoints again under its locks.
+    pub fn publish(&self, storage: &Storage) -> Result<()> {
+        let manifests = storage.list_snapshots(self.proof.world_id)?;
+        if manifests.len() != self.proof.checkpoints.len() {
+            bail!("historical replay has not downloaded every committed checkpoint");
+        }
+        for manifest in &manifests {
+            self.verify_manifest(manifest)?;
+        }
+        storage.publish_verified_historical_replay(&self.proof)?;
+        Ok(())
+    }
+}
+
+pub fn load_staged_replay(storage: &Storage, world: WorldId) -> Result<Option<VerifiedReplayProof>> {
+    let membership = storage.load_membership_record(world)?;
+    let Some(bytes) = storage.load_staged_historical_replay_proof(world, membership.record_hash()?)? else {
+        return Ok(None);
+    };
+    let proof: HistoricalReplayProofV1 = postcard::from_bytes(&bytes)?;
+    Ok(Some(verify_replay_proof(proof, &storage.load_world(world)?.genesis, &membership)?))
 }
 
 /// Strictly data-only proof validation. The expected membership must be the
@@ -949,6 +973,151 @@ mod tests {
         assert!(verify_replay_proof(missing_joint, &genesis, &membership3).is_err());
         assert!(verify_replay_proof(proof, &genesis, &membership2).is_err());
         assert_eq!(storage.load_epoch_record(world).unwrap(), third);
+
+        // A new player joins *after* both a host transfer and a certified
+        // crash recovery. Its new membership must preserve the original
+        // ballot roster and extend the promoted membership by a joint quorum.
+        let dan = PeerIdentity::from_secret_bytes([24; 32]);
+        let mut player = member(&dan);
+        player.authority_eligible = false;
+        let mut members = membership3.members.clone();
+        members.push(player.clone());
+        let admitted = signed_membership(&third, &carol, members, Some(&membership3));
+        let proposal = MembershipProposalV1 { previous: membership3.clone(), proposed: admitted.clone() };
+        let votes = [&alice, &carol, &dan]
+            .iter()
+            .map(|voter| {
+                let mut vote = MembershipVoteV1 {
+                    protocol_version: PROTOCOL_VERSION,
+                    world_id: world,
+                    previous_membership_hash: proposal.previous.record_hash().unwrap(),
+                    proposed_membership_hash: proposal.proposed.record_hash().unwrap(),
+                    proposed_sequence: proposal.proposed.sequence,
+                    voter_peer_id: voter.peer_id(),
+                    voter_public_key: voter.public_key(),
+                    signature: Vec::new(),
+                };
+                vote.signature = voter.sign(&vote.signing_bytes().unwrap());
+                vote
+            })
+            .collect();
+        let admission = MembershipCertificateV1 { proposal, votes };
+        storage.save_membership_certificate(&admission).unwrap();
+        storage.save_membership_record(&admitted).unwrap();
+        let descriptor = swarm_protocol::WorldDescriptorV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            compatibility_fingerprint: genesis.compatibility_fingerprint,
+            members: admitted.members.clone(),
+            preferred_replication_factor: 3,
+        };
+        storage.save_world_descriptor(&descriptor).unwrap();
+        crate::live_authority::verify_playable_epoch(&storage, &third).unwrap();
+        let envelope = collect_replay_proof(&storage, &carol, world).unwrap();
+        let verified = verify_replay_proof(envelope.clone(), &genesis, &admitted).unwrap();
+
+        // Build the real storage first-contact path with a signed invite,
+        // committed certificate, and descriptor, but no authority epoch.
+        let replica_dir = tempfile::tempdir().unwrap();
+        let replica = Storage::open(replica_dir.path()).unwrap();
+        replica.create_world(&storage.load_world(world).unwrap()).unwrap();
+        let mut invite = swarm_protocol::InviteV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            display_name: "recovery late join".into(),
+            genesis: genesis.clone(),
+            inviter_peer_id: carol.peer_id(),
+            inviter_public_key: carol.public_key(),
+            bootstrap_addrs: Vec::new(),
+            expires_unix_ms: u64::MAX,
+            nonce: [25; 32],
+            signature: Vec::new(),
+        };
+        carol.sign_invite(&mut invite).unwrap();
+        let mut join = swarm_protocol::JoinRequestV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            invite,
+            joining_member: player,
+            nonce: [26; 32],
+            signature: Vec::new(),
+        };
+        dan.sign_join_request(&mut join).unwrap();
+        replica.save_pending_join(&join).unwrap();
+        let membership_proof = swarm_protocol::DiscoveryMembershipProofV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            genesis: genesis.clone(),
+            initial_membership: envelope.membership[0].clone(),
+            membership_certificates: envelope.membership_certificates.clone(),
+            current_membership: admitted.clone(),
+            pending_membership: None,
+        };
+        crate::live_authority::verify_genesis_anchored_membership(&membership_proof).unwrap();
+        replica.archive_join_membership_history(&membership_proof).unwrap();
+        replica.save_membership_certificate(&admission).unwrap();
+        replica.save_membership_record(&admitted).unwrap();
+        replica.save_world_descriptor(&descriptor).unwrap();
+        replica.clear_pending_join(world).unwrap();
+        let encoded = postcard::to_allocvec(&envelope).unwrap();
+        replica.stage_historical_replay_proof(world, admitted.record_hash().unwrap(), &encoded).unwrap();
+        let manifests = storage.list_snapshots(world).unwrap();
+        for (index, manifest) in manifests.iter().enumerate() {
+            verified.verify_manifest(manifest).unwrap();
+            for entry in &manifest.entries {
+                let blob = &entry.blob;
+                if replica.has_complete_blob(world, blob) {
+                    continue;
+                }
+                let (data, finished) = storage
+                    .read_encoded_blob_chunk(world, blob, 0, usize::try_from(blob.encoded_size).unwrap())
+                    .unwrap();
+                assert!(finished);
+                replica.receive_blob_chunk(world, blob, 0, &data, true).unwrap();
+            }
+            replica.finalize_replica(manifest).unwrap();
+            assert!(replica.load_epoch_record(world).is_err());
+            if index + 1 < manifests.len() {
+                assert!(verified.publish(&replica).is_err());
+            }
+        }
+        // Inject an interruption after some historical evidence could
+        // already have been written. A conflicting existing config must
+        // prevent the final epoch commit, never be replaced silently.
+        let path = replica.world_dir(world).join("metadata/world-config.postcard");
+        std::fs::write(&path, b"conflicting config").unwrap();
+        assert!(verified.publish(&replica).is_err());
+        assert!(replica.load_epoch_record(world).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"conflicting config");
+        std::fs::remove_file(&path).unwrap();
+        drop(replica);
+        let replica = Storage::open(replica_dir.path()).unwrap();
+        load_staged_replay(&replica, world).unwrap().unwrap().publish(&replica).unwrap();
+        assert_eq!(replica.load_epoch_record(world).unwrap(), third);
+        assert_eq!(replica.list_snapshots(world).unwrap(), manifests);
+        assert_eq!(replica.load_world_config(world).unwrap(), storage.load_world_config(world).unwrap());
+        assert_eq!(replica.load_epoch_by_hash(world, first.record_hash().unwrap()).unwrap(), first);
+        assert_eq!(replica.load_epoch_by_hash(world, second.record_hash().unwrap()).unwrap(), second);
+        assert_eq!(replica.load_membership_by_hash(world, membership2.record_hash().unwrap()).unwrap(), membership2);
+        assert_eq!(
+            replica.load_recovery_certificate(world).unwrap(),
+            storage.load_recovery_certificate(world).unwrap()
+        );
+        assert!(replica.load_transfer_record(world).is_err(), "retired transfer must not become a live fence");
+        assert_eq!(replica.load_transfer_phase(&phase, TransferPhase::Committed).unwrap(), phase);
+        crate::live_authority::verify_playable_epoch(&replica, &third).unwrap();
+        // The current membership alone cannot replace the old ballot or the
+        // intervening signed joint admission certificate.
+        let latest = replica.load_membership_certificate_chain(world).unwrap().last().unwrap().clone();
+        let cert_path = replica
+            .world_dir(world)
+            .join("metadata/membership-certificates")
+            .join(format!("{:020}.postcard", latest.proposal.proposed.sequence));
+        let saved = std::fs::read(&cert_path).unwrap();
+        std::fs::remove_file(&cert_path).unwrap();
+        assert!(crate::live_authority::verify_playable_epoch(&replica, &third).is_err());
+        std::fs::write(cert_path, saved).unwrap();
+        crate::live_authority::verify_playable_epoch(&replica, &third).unwrap();
     }
 
     #[test]

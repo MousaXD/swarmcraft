@@ -138,7 +138,7 @@ impl Storage {
         self.validate_no_orphan_manifests_locked(world, head.head)
     }
 
-    fn load_or_initialize_canonical_head_locked(
+    pub(crate) fn load_or_initialize_canonical_head_locked(
         &self,
         world: WorldId,
     ) -> Result<CanonicalSnapshotHeadV1, StorageError> {
@@ -223,7 +223,7 @@ impl Storage {
         Ok(())
     }
 
-    fn validate_no_orphan_manifests_locked(
+    pub(crate) fn validate_no_orphan_manifests_locked(
         &self,
         world: WorldId,
         head: Option<CanonicalSnapshotRefV1>,

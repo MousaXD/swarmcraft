@@ -816,16 +816,52 @@ pub fn verify_current_recovery_certificate(
         || ballot.base_state_hash != epoch.base_state_hash
         || base.epoch != ballot.base_epoch
         || base.record_hash()? != ballot.membership_hash
-        // P0 recovery keeps the original voter set. A later membership
-        // transition requires a separately certified playable generation.
-        || base.members != membership.current_membership.members
         || membership.current_membership.epoch != epoch.epoch_number
-        || membership.current_membership.previous_membership_hash != Some(ballot.membership_hash)
-        || base.sequence.checked_add(1) != Some(membership.current_membership.sequence)
+        || membership.current_membership.authority_peer_id != epoch.authority_peer_id
+        || membership.current_membership.authority_public_key != epoch.authority_public_key
     {
         bail!("recovery certificate does not authorize this canonical generation");
     }
-    Ok(())
+    // The initial promotion must preserve the exact voter set in the
+    // recovery ballot. Subsequent admission/removal is allowed ONLY by
+    // replaying every exact signed joint-consensus certificate back to
+    // that promotion, not by treating the newer voter list as the ballot's.
+    verify_genesis_anchored_membership(membership)?;
+    let mut record = membership.current_membership.clone();
+    for _ in 0..swarm_protocol::MAX_REPLAY_MEMBERSHIP_RECORDS {
+        verify_membership_record_and_keys(&record)?;
+        if record.world_id != epoch.world_id
+            || record.epoch != epoch.epoch_number
+            || record.authority_peer_id != epoch.authority_peer_id
+            || record.authority_public_key != epoch.authority_public_key
+        {
+            bail!("recovery membership history changed authority");
+        }
+        if base.sequence.checked_add(1) == Some(record.sequence) {
+            if record.previous_membership_hash == Some(ballot.membership_hash) && record.members == base.members {
+                return Ok(());
+            }
+            bail!("recovery promotion changed the original certified voters");
+        }
+        let prior_hash = record.previous_membership_hash.context("recovery membership predecessor is absent")?;
+        let prior = storage.load_membership_by_hash(epoch.world_id, prior_hash)?;
+        if prior.sequence.checked_add(1) != Some(record.sequence) || prior.epoch != epoch.epoch_number {
+            bail!("recovery membership skips the signed promotion chain");
+        }
+        let mut certificates = membership
+            .membership_certificates
+            .iter()
+            .filter(|certificate| certificate.proposal.proposed.sequence == record.sequence);
+        let certificate = certificates.next().context("recovery membership change lacks a joint quorum certificate")?;
+        if certificates.next().is_some()
+            || certificate.proposal.previous != prior
+            || certificate.proposal.proposed != record
+        {
+            bail!("recovery membership certificate does not bind the exact signed predecessor");
+        }
+        record = prior;
+    }
+    bail!("recovery membership history exceeds supported verification limit");
 }
 
 /// Shared denial-only generation gate. Recovery is playable only with the

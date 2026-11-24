@@ -4,7 +4,8 @@ use crate::{
 };
 use std::{fs, io, path::PathBuf};
 use swarm_protocol::{
-    AuthorityLeaseGrantV1, AuthorityTransferV1, EpochRecordV1, Hash32, SleepRecordV1, TransferPhase, WorldId,
+    AuthorityLeaseGrantV1, AuthorityTransferV1, EpochMode, EpochRecordV1, Hash32, HistoricalCheckpointV1,
+    HistoricalReplayProofV1, HistoricalTransitionV1, SleepRecordV1, TransferPhase, WorldId,
 };
 
 impl Storage {
@@ -12,6 +13,22 @@ impl Storage {
         let _guard = self.lock_world_transaction(record.world_id)?;
         record.validate_semantics()?;
         let path = self.control_path(record.world_id, "epoch.postcard");
+        if !canonical_file_exists(&path)? {
+            // A staged replay can publish only through its dedicated final
+            // transaction, never by installing an ordinary inbound epoch.
+            match self.load_membership_record(record.world_id) {
+                Ok(membership) => {
+                    if canonical_file_exists(&self.control_path(
+                        record.world_id,
+                        &format!("pending-replay-{}.postcard", membership.record_hash()?),
+                    ))? {
+                        return Err(StorageError::WorldMetadataMismatch);
+                    }
+                }
+                Err(StorageError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
         if canonical_file_exists(&path)? {
             let existing = self.load_epoch_record(record.world_id)?;
             let existing_generation = (existing.epoch_number, existing.fencing_token);
@@ -215,6 +232,27 @@ impl Storage {
         Ok(())
     }
 
+    /// A recovery retry may finish consuming its predecessor's sleep boundary,
+    /// but must never remove a subsequent sleep record or act on a newer epoch.
+    pub fn clear_sleep_record_if_exact(
+        &self,
+        epoch: &EpochRecordV1,
+        expected: &SleepRecordV1,
+    ) -> Result<bool, StorageError> {
+        let world = epoch.world_id;
+        let _guard = self.lock_world_transaction(world)?;
+        let path = self.control_path(world, "sleep.postcard");
+        if self.load_epoch_record(world)? != *epoch
+            || !canonical_file_exists(&path)?
+            || self.load_sleep_record(world)? != *expected
+        {
+            return Ok(false);
+        }
+        self.archive_sleep_locked(expected)?;
+        durable_remove(&path)?;
+        Ok(true)
+    }
+
     fn archive_sleep_locked(&self, record: &SleepRecordV1) -> Result<(), StorageError> {
         self.archive_history_locked(
             record.world_id,
@@ -320,6 +358,149 @@ impl Storage {
         Ok(Some(bytes))
     }
 
+    /// Publish an already cryptographically verified replay. The caller
+    /// MUST independently verify the staged envelope and all manifest
+    /// signatures before invoking this transaction. Storage repeats the
+    /// exact durable membership/head/blob checks under GC then world lock.
+    /// All historical artifacts are written immutably and the *only* live
+    /// epoch write is the final operation. Partial writes are exact replay
+    /// idempotent and never authorize an earlier generation.
+    pub fn publish_verified_historical_replay(&self, proof: &HistoricalReplayProofV1) -> Result<(), StorageError> {
+        let world = proof.world_id;
+        let _gc_guard = self.lock_blob_gc_for_snapshot_commit(world)?;
+        let _guard = self.lock_world_transaction(world)?;
+        let epoch = proof.epochs.last().ok_or(StorageError::WorldMetadataMismatch)?;
+        let membership = proof.membership.last().ok_or(StorageError::WorldMetadataMismatch)?;
+        let config = proof.configs.last().ok_or(StorageError::WorldMetadataMismatch)?;
+        let target = proof.checkpoints.last().ok_or(StorageError::WorldMetadataMismatch)?;
+        let epoch_path = self.control_path(world, "epoch.postcard");
+        let encoded = postcard::to_allocvec(proof)?;
+        let pending_path = self.control_path(world, &format!("pending-replay-{}.postcard", membership.record_hash()?));
+        if encoded.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES
+            || read_canonical_file(&pending_path)? != encoded
+            || self.load_world(world)?.genesis != proof.genesis
+            || self.load_membership_record(world)? != *membership
+            || self.load_world_descriptor(world)?.members != membership.members
+            || epoch.world_id != world
+            || membership.world_id != world
+            || config.world_id != world
+            || epoch.epoch_number != membership.epoch
+            || epoch.epoch_number != target.epoch
+            || epoch.authority_peer_id != membership.authority_peer_id
+            || epoch.authority_public_key != membership.authority_public_key
+            || epoch.authority_peer_id != config.authority_peer_id
+            || epoch.authority_public_key != config.authority_public_key
+            || epoch.mode == EpochMode::Solo
+            || proof.transitions.len() != proof.epochs.len() - 1
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        if canonical_file_exists(&epoch_path)? {
+            return if self.load_epoch_record(world)? == *epoch {
+                Ok(())
+            } else {
+                Err(StorageError::WorldMetadataMismatch)
+            };
+        }
+        // Never erase or overwrite an existing fencing decision, conflict
+        // ledger, or newer membership/recovery promise to finish replay.
+        for name in [
+            "sleep.postcard",
+            "transfer.postcard",
+            "recovery-promise.postcard",
+            "recovery-reservation.postcard",
+            "membership-promise.postcard",
+            "solo-branch.postcard",
+            "recovery-certificate-pending.postcard",
+        ] {
+            if canonical_file_exists(&self.control_path(world, name))? {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+        }
+        if !self.list_solo_conflicts(world)?.is_empty() {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        let head =
+            self.load_or_initialize_canonical_head_locked(world)?.head.ok_or(StorageError::WorldMetadataMismatch)?;
+        if head.snapshot_number != target.snapshot_number
+            || head.sequence != target.sequence
+            || head.epoch != target.epoch
+            || head.manifest_hash != target.manifest_hash
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        let manifests = self.raw_snapshot_manifests(world)?;
+        if manifests.len() != proof.checkpoints.len() {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        let mut previous = None;
+        for (manifest, expected) in manifests.iter().zip(&proof.checkpoints) {
+            if HistoricalCheckpointV1::from_manifest(manifest)? != *expected
+                || manifest.previous_snapshot_hash != previous
+            {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+            self.verify_snapshot_streaming(manifest)?;
+            previous = Some(expected.manifest_hash);
+        }
+        for historical in &proof.epochs {
+            self.archive_history_locked(
+                world,
+                &format!("epoch-{}.postcard", historical.record_hash()?),
+                &postcard::to_allocvec(historical)?,
+            )?;
+        }
+        for historical in &proof.configs {
+            self.archive_history_locked(
+                world,
+                &format!("config-{}.postcard", historical.config_hash()?),
+                &postcard::to_allocvec(historical)?,
+            )?;
+        }
+        for historical in &proof.membership {
+            self.archive_membership_locked(historical)?;
+        }
+        for certificate in &proof.membership_certificates {
+            self.archive_membership_certificate_locked(certificate, &postcard::to_allocvec(certificate)?)?;
+        }
+        let mut final_recovery = None;
+        for (index, transition) in proof.transitions.iter().enumerate() {
+            match transition {
+                HistoricalTransitionV1::Transfer { prepared, accepted, committed } => {
+                    for phase in [prepared, accepted, committed] {
+                        self.archive_history_locked(
+                            world,
+                            &transfer_history_name(phase, phase.phase),
+                            &postcard::to_allocvec(phase.as_ref())?,
+                        )?;
+                    }
+                }
+                HistoricalTransitionV1::Recovery(certificate) => {
+                    let successor = &proof.epochs[index + 1];
+                    let bytes = postcard::to_allocvec(certificate.as_ref())?;
+                    self.archive_history_locked(
+                        world,
+                        &format!("recovery-{}.postcard", successor.record_hash()?),
+                        &bytes,
+                    )?;
+                    if successor == epoch {
+                        final_recovery = Some(bytes);
+                    }
+                }
+                HistoricalTransitionV1::SoleMemberWake(record) => self.archive_sleep_locked(record)?,
+            }
+        }
+        let recovery_path = self.control_path(world, "recovery-certificate.postcard");
+        if epoch.mode == EpochMode::Recovery {
+            write_exact_or_absent(&recovery_path, &final_recovery.ok_or(StorageError::WorldMetadataMismatch)?)?;
+        } else if canonical_file_exists(&recovery_path)? {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        write_exact_or_absent(&self.control_path(world, "world-config.postcard"), &postcard::to_allocvec(config)?)?;
+        // The epoch file is the commit marker. It is deliberately last.
+        durable_atomic_write(&epoch_path, &postcard::to_allocvec(epoch)?)
+    }
+
     fn history_path(&self, world: WorldId, name: &str) -> Result<PathBuf, StorageError> {
         let directory = self.control_path(world, "authority-history");
         match fs::symlink_metadata(&directory) {
@@ -337,6 +518,16 @@ impl Storage {
     fn control_path(&self, world: WorldId, name: &str) -> PathBuf {
         self.world_dir(world).join("metadata").join(name)
     }
+}
+
+fn write_exact_or_absent(path: &std::path::Path, bytes: &[u8]) -> Result<(), StorageError> {
+    if canonical_file_exists(path)? {
+        if read_canonical_file(path)? != bytes {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        return Ok(());
+    }
+    durable_atomic_write(path, bytes)
 }
 
 fn transfer_history_name(record: &AuthorityTransferV1, phase: TransferPhase) -> String {

@@ -57,6 +57,28 @@ impl Storage {
         fs::metadata(&path).map(|metadata| metadata.len()).map_err(|source| StorageError::Io { path, source }.into())
     }
 
+    /// A process may exit after syncing the last partial bytes but before
+    /// renaming them into the complete blob namespace. Verify and promote
+    /// that exact partial instead of reporting an unfinishable EOF offset.
+    pub fn resume_historical_blob(
+        &self,
+        world: WorldId,
+        descriptor: &BlobDescriptor,
+    ) -> Result<Option<u64>, ReplicationError> {
+        if self.has_complete_blob(world, descriptor) {
+            return Ok(None);
+        }
+        let offset = self.partial_blob_offset(world, descriptor)?;
+        if offset > descriptor.encoded_size {
+            return Err(ReplicationError::SizeMismatch { expected: descriptor.encoded_size, received: offset });
+        }
+        if offset == descriptor.encoded_size {
+            self.receive_blob_chunk(world, descriptor, offset, &[], true)?;
+            return Ok(None);
+        }
+        Ok(Some(offset))
+    }
+
     pub fn read_encoded_blob_chunk(
         &self,
         world: WorldId,

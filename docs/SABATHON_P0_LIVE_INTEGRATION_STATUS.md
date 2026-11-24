@@ -652,3 +652,34 @@ checkpoint replication: the remaining step is authenticated resumable
 manifest/blob replay and crash-safe publication of the final verified
 canonical head and control state, with a fresh live quorum still required
 for routing. No field certification is claimed.
+
+### Resumable cross-generation checkpoint replay (25 November)
+
+First-contact replay now requests the next exact checkpoint from the
+durably staged proof. The current authenticated authority verifies the
+committed membership and checkpoint hash before serving data. The
+receiver checks every signed manifest against the pinned proof, enforces
+direct ancestry, and resumes durable partial blobs after a restart,
+including the fully written partial-file boundary. Historical checkpoints
+do not produce live replica acknowledgements or advertise a recovery
+candidate while the final epoch is absent.
+
+Final publication checks the complete checkpoint chain and blob bytes
+under the world/GC locks, archives the historical control records, and
+publishes the final accepted epoch last. Conflicting metadata, pending
+authority decisions, or missing evidence fail closed. Only completion
+produces a replica receipt; live routing still requires fresh quorum,
+fencing, consent and authenticated Fabric evidence. The recovery proof
+continues to use its original ballot roster: later admissions require
+each exact signed joint-membership certificate. Exact recovery retries
+cannot consume a newer signed sleep record.
+
+The two-daemon test covers a newly admitted replica after a signed wake,
+restart with partial checkpoint data, verified resume, and final epoch
+publication. Signed fixtures cover transfer followed by majority recovery,
+later joint admission, interrupted publication, and missing/corrupt proof
+rejection. This is retained-history first-contact replay; already accepted
+stale replicas, authority changes during a pinned replay, pruned history,
+and oversized histories are not certified by this test. Independent-device
+Minecraft login, gameplay, inventory, and hosting acceptance remain
+separate field gates.

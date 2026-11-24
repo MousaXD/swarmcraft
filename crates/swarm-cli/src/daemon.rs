@@ -9,7 +9,7 @@ use std::{
 use swarm_cli::{
     authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
     game_route_api::{GameRouteApiOperation, GameRouteApiReply, GameRouteApiServer, GameRouteStatusV1},
-    historical_authority::{collect_replay_proof, verify_replay_proof},
+    historical_authority::{collect_replay_proof, load_staged_replay, verify_replay_proof},
     host_readiness::{self, PeerReadinessObservation},
     hosting_budget, launch_guard,
     live_authority::{SignedHostFabricAttestation, SignedLiveAuthoritySource},
@@ -84,6 +84,11 @@ struct HistoricalReplayReply {
     result: Option<(Hash32, Hash32, Vec<u8>)>,
 }
 
+struct HistoricalReplayPublication {
+    world: WorldId,
+    result: Result<(PeerId, ReplicaAckV1)>,
+}
+
 struct HostFabricReplyAction {
     channel: ResponseChannel<WireResponse>,
     transport_peer: TransportPeerId,
@@ -144,7 +149,7 @@ const MAX_IN_MEMORY_LIVE_QUORUM_VOTES: usize = 1_024;
 
 #[derive(Debug, Clone)]
 enum OutboundContext {
-    Manifest { world: WorldId, transport: TransportPeerId, snapshot_number: u64 },
+    Manifest { world: WorldId, transport: TransportPeerId, snapshot_number: u64, historical_membership: Option<Hash32> },
     BlobChunk { world: WorldId, snapshot_number: u64, hash: Hash32, next_offset: u64, finished: bool },
     Lease { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
     RecoveryBallot { world: WorldId, peer: PeerId, ballot_hash: Hash32 },
@@ -157,6 +162,7 @@ enum OutboundContext {
     Sleep { peer: PeerId, record: SleepRecordV1 },
     LiveQuorum { id: u64, peer: PeerId },
     HistoricalReplayProof { world: WorldId, peer: PeerId, membership_hash: Hash32 },
+    HistoricalReplayNext { world: WorldId },
 }
 
 #[derive(Debug, Clone)]
@@ -205,9 +211,18 @@ struct ObservedCapability {
 #[derive(Debug, Clone)]
 struct ReplicationState {
     snapshot_number: u64,
+    historical_membership: Option<Hash32>,
     pending: VecDeque<BlobResumeV1>,
     in_flight: bool,
     retry_at: Option<Instant>,
+}
+
+#[derive(Debug)]
+struct HistoricalInboundReplica {
+    transport: TransportPeerId,
+    authority: PeerId,
+    membership_hash: Hash32,
+    manifest_hash: Hash32,
 }
 
 #[derive(Debug, Default)]
@@ -234,6 +249,7 @@ struct LeaseRuntime {
     last_checkpoint_ack: HashMap<WorldId, (PeerId, ReplicaAckV1, Instant)>,
     transfer_manifest_requests: HashMap<(WorldId, PeerId), (Hash32, Instant)>,
     live_quorum_vote_nonces: HashMap<(WorldId, PeerId, [u8; 32]), u64>,
+    historical_inbound: HashMap<WorldId, HistoricalInboundReplica>,
 }
 
 struct HandlerContext<'a> {
@@ -340,6 +356,9 @@ pub async fn run(
     let (replay_reply_tx, mut replay_replies) = mpsc::channel::<HistoricalReplayReply>(MAX_HISTORICAL_REPLAY_WORKERS);
     let replay_workers = Arc::new(Semaphore::new(MAX_HISTORICAL_REPLAY_WORKERS));
     let mut replay_tasks = tokio::task::JoinSet::new();
+    let (replay_publication_tx, mut replay_publications) =
+        mpsc::channel::<HistoricalReplayPublication>(MAX_HISTORICAL_REPLAY_WORKERS);
+    let mut replay_publications_in_flight = HashSet::new();
     let mut game_stream_receiver: Option<ActiveGameReceiver> = None;
     let api_server = GameRouteApiServer::bind(paths).await?;
     let (game_api_tx, mut game_api_requests) = mpsc::channel(8);
@@ -451,6 +470,25 @@ pub async fn run(
                     warn!(%error, "historical replay worker failed");
                 }
             }
+            Some(publication) = replay_publications.recv() => {
+                replay_publications_in_flight.remove(&publication.world);
+                match publication.result {
+                    Ok((peer, ack)) => {
+                        // Completion is only a replica receipt. It cannot
+                        // create a lease or bypass the live freshness quorum.
+                        if storage.load_epoch_record(publication.world).is_ok_and(|epoch| epoch.authority_peer_id == peer)
+                            && storage.latest_snapshot(publication.world).ok().flatten().is_some_and(|manifest| replica_ack_matches_manifest(&ack, &manifest).unwrap_or(false))
+                            && authorize_member(storage, publication.world, peer).is_ok()
+                        {
+                            if let Some((transport, _)) = leases.authenticated_peers.iter().find(|(transport, app)| **app == peer && node.application_peer(transport) == Some(peer)) {
+                                let _ = node.send_request(transport, WireRequest::ReplicaAck(ack));
+                            }
+                        }
+                        info!(world = %publication.world, "historical replay fully published; fresh live quorum remains required");
+                    }
+                    Err(error) => warn!(world = %publication.world, %error, "historical replay publication deferred"),
+                }
+            }
             Some(reply) = replay_replies.recv() => {
                 // Recheck the authenticated connection and exact canonical
                 // membership/epoch AFTER the worker finishes. Historical
@@ -525,6 +563,23 @@ pub async fn run(
                 }
                 if let Err(error) = request_historical_replay_proofs(storage, &identity, &mut node, &mut outbound, &leases) {
                     warn!(%error, "historical replay proof request deferred");
+                }
+                match drive_historical_replay_downloads(storage, &identity, &mut node, &mut outbound, &leases) {
+                    Ok(ready) => {
+                        for world in ready {
+                            if replay_publications_in_flight.contains(&world) { continue; }
+                            let Ok(slot) = Arc::clone(&replay_workers).try_acquire_owned() else { break };
+                            replay_publications_in_flight.insert(world);
+                            let storage = storage.clone();
+                            let replies = replay_publication_tx.clone();
+                            replay_tasks.spawn_blocking(move || {
+                                let _slot = slot;
+                                let result = publish_historical_replay(&storage, world);
+                                let _ = replies.blocking_send(HistoricalReplayPublication { world, result });
+                            });
+                        }
+                    }
+                    Err(error) => warn!(%error, "historical replay download deferred"),
                 }
             }
             _ = lease_tick.tick() => {
@@ -796,7 +851,7 @@ pub async fn run(
                                     live_quorum_driver.fail(id, anyhow!("fresh-quorum signature RPC failed"));
                                 }
                                 OutboundContext::Manifest { .. } => {}
-                                OutboundContext::HistoricalReplayProof { .. } => {}
+                                OutboundContext::HistoricalReplayProof { .. } | OutboundContext::HistoricalReplayNext { .. } => {}
                                 OutboundContext::BlobChunk { world, .. } => {
                                     leases.replications.remove(&(transport_peer, world));
                                 }
@@ -824,6 +879,7 @@ pub async fn run(
                             leases.sleep_acks.retain(|(_, peer), _| *peer != application_peer);
                             leases.transfer_manifest_requests.retain(|(_, peer), _| *peer != application_peer);
                             leases.canonical_payload_sent.retain(|(_, peer), _| *peer != application_peer);
+                            leases.historical_inbound.retain(|_, replica| replica.transport != transport_peer);
                         }
                         leases.replications.retain(|(peer, _), _| *peer != transport_peer);
                         info!(transport = %transport_peer, "peer disconnected");
@@ -1699,6 +1755,7 @@ fn replicate_exact_checkpoint(
                         world,
                         transport: *transport,
                         snapshot_number: checkpoint.snapshot_number,
+                        historical_membership: None,
                     },
                 );
                 runtime.transfer_manifest_requests.insert((world, peer), (expected_hash, now));
@@ -3190,6 +3247,123 @@ fn verify_and_stage_replay_proof(
     Ok(())
 }
 
+/// Request exactly the next checkpoint from the pinned proof. The durable
+/// canonical head, not an in-memory cursor, determines restart progress.
+/// These decoded references are only request hints; manifest admission and
+/// final publication independently verify the entire signed envelope.
+fn drive_historical_replay_downloads(
+    storage: &Storage,
+    identity: &PeerIdentity,
+    node: &mut SwarmNode,
+    outbound: &mut HashMap<String, OutboundContext>,
+    runtime: &LeaseRuntime,
+) -> Result<Vec<WorldId>> {
+    let mut ready = Vec::new();
+    let mut pending =
+        outbound.values().filter(|context| matches!(context, OutboundContext::HistoricalReplayNext { .. })).count();
+    for metadata in storage.list_worlds()? {
+        let world = metadata.world_id;
+        if !requires_historical_replay(storage, world)? {
+            continue;
+        }
+        let membership = storage.load_membership_record(world)?;
+        if !membership.members.iter().any(|member| {
+            !member.banned && member.peer_id == identity.peer_id() && member.public_key == identity.public_key()
+        }) {
+            continue;
+        }
+        let membership_hash = membership.record_hash()?;
+        let Some(bytes) = storage.load_staged_historical_replay_proof(world, membership_hash)? else { continue };
+        let proof: HistoricalReplayProofV1 = postcard::from_bytes(&bytes)?;
+        if proof.world_id != world
+            || proof.membership.last() != Some(&membership)
+            || proof.checkpoints.is_empty()
+            || proof.checkpoints.len() > swarm_protocol::MAX_REPLAY_CHECKPOINTS
+        {
+            bail!("staged replay target no longer matches committed membership");
+        }
+        let head = storage.canonical_snapshot_head(world)?.head;
+        let index = match head {
+            None => 0,
+            Some(head) => {
+                let position = usize::try_from(head.snapshot_number.checked_sub(1).context("invalid replay head")?)?;
+                let expected = proof.checkpoints.get(position).context("replay head outside pinned proof")?;
+                if expected.manifest_hash != head.manifest_hash
+                    || expected.epoch != head.epoch
+                    || expected.sequence != head.sequence
+                {
+                    bail!("durable replay head differs from pinned checkpoint");
+                }
+                position + 1
+            }
+        };
+        if index == proof.checkpoints.len() {
+            ready.push(world);
+            continue;
+        }
+        if pending >= MAX_HISTORICAL_REPLAY_WORKERS || outbound.values().any(|context| matches!(context, OutboundContext::HistoricalReplayNext { world: existing } if *existing == world)) {
+            continue;
+        }
+        let Some((transport, _)) = runtime.authenticated_peers.iter().find(|(transport, app)| {
+            **app == membership.authority_peer_id
+                && node.application_peer(transport) == Some(membership.authority_peer_id)
+        }) else {
+            continue;
+        };
+        let checkpoint = &proof.checkpoints[index];
+        let request = node.send_request(
+            transport,
+            WireRequest::HistoricalReplayNext {
+                world_id: world,
+                membership_hash,
+                snapshot_number: checkpoint.snapshot_number,
+                manifest_hash: checkpoint.manifest_hash,
+            },
+        )?;
+        outbound.insert(request_key(&request), OutboundContext::HistoricalReplayNext { world });
+        pending += 1;
+    }
+    Ok(ready)
+}
+
+fn publish_historical_replay(storage: &Storage, world: WorldId) -> Result<(PeerId, ReplicaAckV1)> {
+    let verified = load_staged_replay(storage, world)?.context("staged historical replay proof is missing")?;
+    let proof = verified.proof();
+    let epoch = proof.epochs.last().context("missing final historical epoch")?;
+    let target = proof.checkpoints.last().context("missing final historical checkpoint")?;
+    verified.publish(storage)?;
+    Ok((
+        epoch.authority_peer_id,
+        ReplicaAckV1 {
+            world_id: world,
+            snapshot_number: target.snapshot_number,
+            manifest_hash: target.manifest_hash,
+            state_root: target.state_root,
+            complete: true,
+        },
+    ))
+}
+
+fn authorize_historical_manifest(
+    storage: &Storage,
+    application_peer: PeerId,
+    membership_hash: Hash32,
+    manifest: &SnapshotManifestV1,
+) -> Result<()> {
+    let world = manifest.world_id;
+    if !requires_historical_replay(storage, world)? {
+        bail!("historical manifest arrived outside first-contact replay");
+    }
+    let membership = storage.load_membership_record(world)?;
+    if membership.record_hash()? != membership_hash || membership.authority_peer_id != application_peer {
+        bail!("historical manifest source is not the exact committed authority");
+    }
+    let verified = load_staged_replay(storage, world)?.context("no verified replay proof for manifest")?;
+    verified.verify_manifest(manifest)?;
+    storage.validate_replica_history(manifest)?;
+    Ok(())
+}
+
 fn push_known_worlds(
     storage: &Storage,
     node: &mut SwarmNode,
@@ -3296,6 +3470,7 @@ fn push_committed_world_payload(
                     world,
                     transport: *transport_peer,
                     snapshot_number: manifest.snapshot_number,
+                    historical_membership: None,
                 },
             );
         }
@@ -3452,7 +3627,12 @@ fn drive_genesis_catchup(
     let id = node.send_request(transport_peer, WireRequest::SnapshotManifest(manifest.clone()))?;
     outbound.insert(
         request_key(&id),
-        OutboundContext::Manifest { world, transport: *transport_peer, snapshot_number: manifest.snapshot_number },
+        OutboundContext::Manifest {
+            world,
+            transport: *transport_peer,
+            snapshot_number: manifest.snapshot_number,
+            historical_membership: None,
+        },
     );
     runtime.transfer_manifest_requests.insert((world, peer), (hash, now));
     Ok(())
@@ -3471,17 +3651,22 @@ fn handle_request(
     let storage = context.storage;
     if let Some(world_id) = request.membership_world_id() {
         authorize_member(storage, world_id, application_peer)?;
+        let awaiting_join = awaiting_committed_join(storage, world_id)?;
+        let replay_required = requires_historical_replay(storage, world_id)?;
         if matches!(
             &request,
             WireRequest::SnapshotManifest(_)
-                | WireRequest::BlobChunk { .. }
                 | WireRequest::Epoch(_)
                 | WireRequest::RecoveryEpoch { .. }
                 | WireRequest::WorldConfig(_)
                 | WireRequest::AuthorityTransfer(_)
                 | WireRequest::Sleep(_)
                 | WireRequest::SoloBranch(_)
-        ) && (awaiting_committed_join(storage, world_id)? || requires_historical_replay(storage, world_id)?)
+                | WireRequest::LeaseGrant(_)
+                | WireRequest::RecoveryBallot(_)
+        ) && (awaiting_join || replay_required)
+            || awaiting_join
+                && matches!(&request, WireRequest::BlobChunk { .. } | WireRequest::HistoricalReplayManifest { .. })
         {
             node.respond(
                 channel,
@@ -3718,6 +3903,86 @@ fn handle_request(
             );
             node.respond(channel, WireResponse::LeaveAccepted { membership_sequence: proposal.proposed.sequence })?;
         }
+        WireRequest::HistoricalReplayNext { world_id, membership_hash, snapshot_number, manifest_hash } => {
+            let membership = storage.load_membership_record(world_id)?;
+            verify_membership_signature(&membership)?;
+            let epoch = storage.load_epoch_record(world_id)?;
+            if membership.record_hash()? != membership_hash
+                || membership.authority_peer_id != identity.peer_id()
+                || membership.authority_public_key != identity.public_key()
+                || epoch.authority_peer_id != identity.peer_id()
+                || epoch.authority_public_key != identity.public_key()
+                || epoch.epoch_number != membership.epoch
+                || !membership.members.iter().any(|member| !member.banned && member.peer_id == application_peer)
+            {
+                bail!("historical checkpoint request no longer matches accepted authority and signed membership");
+            }
+            if !state.leases.replications.contains_key(&(transport_peer, world_id))
+                && !manifest_request_pending(state.outbound, world_id, &transport_peer)
+            {
+                let manifest = storage.load_snapshot(world_id, snapshot_number)?;
+                verify_snapshot_signature(&manifest)?;
+                if manifest.manifest_hash()? != manifest_hash || manifest.epoch > epoch.epoch_number {
+                    bail!("requested historical checkpoint is not exact canonical history");
+                }
+                let id = node.send_request(
+                    &transport_peer,
+                    WireRequest::HistoricalReplayManifest { membership_hash, manifest: Box::new(manifest) },
+                )?;
+                state.outbound.insert(
+                    request_key(&id),
+                    OutboundContext::Manifest {
+                        world: world_id,
+                        transport: transport_peer,
+                        snapshot_number,
+                        historical_membership: Some(membership_hash),
+                    },
+                );
+            }
+            node.respond(channel, WireResponse::HistoricalReplayScheduled)?;
+        }
+        WireRequest::HistoricalReplayManifest { membership_hash, manifest } => {
+            let manifest = *manifest;
+            authorize_historical_manifest(storage, application_peer, membership_hash, &manifest)?;
+            let world = manifest.world_id;
+            let manifest_hash = manifest.manifest_hash()?;
+            // A duplicate negotiation may resume partial blob offsets; a
+            // conflicting in-flight manifest must never replace the cursor.
+            if let Some(prior) = state.pending_manifests.get(&world) {
+                if prior != &manifest
+                    && state.leases.historical_inbound.get(&world).is_some_and(|pending| {
+                        pending.membership_hash == membership_hash && pending.transport == transport_peer
+                    })
+                {
+                    bail!("historical checkpoint overlaps an unfinished negotiation");
+                }
+            }
+            let mut missing = Vec::new();
+            for descriptor in storage.missing_blobs(&manifest) {
+                if let Some(offset) = storage.resume_historical_blob(world, &descriptor)? {
+                    missing.push(BlobResumeV1 { hash: descriptor.hash, offset });
+                }
+            }
+            state.pending_manifests.insert(world, manifest.clone());
+            state.leases.historical_inbound.insert(
+                world,
+                HistoricalInboundReplica {
+                    transport: transport_peer,
+                    authority: application_peer,
+                    membership_hash,
+                    manifest_hash,
+                },
+            );
+            node.respond(
+                channel,
+                WireResponse::ManifestAccepted { snapshot_number: manifest.snapshot_number, missing: missing.clone() },
+            )?;
+            if missing.is_empty() {
+                storage.finalize_replica(&manifest)?;
+                state.pending_manifests.remove(&world);
+                state.leases.historical_inbound.remove(&world);
+            }
+        }
         WireRequest::SnapshotManifest(manifest) => {
             authorize_manifest(storage, application_peer, &manifest)?;
             let missing = storage
@@ -3744,6 +4009,25 @@ fn handle_request(
             authorize_member(storage, world_id, application_peer)?;
             let manifest =
                 state.pending_manifests.get(&world_id).context("blob chunk arrived without a negotiated manifest")?;
+            let historical = requires_historical_replay(storage, world_id)?;
+            if historical {
+                let pending = state
+                    .leases
+                    .historical_inbound
+                    .get(&world_id)
+                    .context("historical chunk lacks a verified negotiation")?;
+                let membership = storage.load_membership_record(world_id)?;
+                if pending.transport != transport_peer
+                    || pending.authority != application_peer
+                    || membership.authority_peer_id != application_peer
+                    || membership.record_hash()? != pending.membership_hash
+                    || manifest.manifest_hash()? != pending.manifest_hash
+                {
+                    bail!("historical chunk is not bound to the authenticated replay negotiation");
+                }
+            } else if state.leases.historical_inbound.contains_key(&world_id) {
+                bail!("historical chunk arrived after replay publication");
+            }
             let descriptor =
                 find_descriptor(manifest, hash).context("blob hash is not referenced by negotiated manifest")?;
             if descriptor.encoding != encoding {
@@ -3753,7 +4037,16 @@ fn handle_request(
             node.respond(channel, WireResponse::BlobChunkAccepted { hash, next_offset })?;
             if finished && storage.missing_blobs(manifest).is_empty() {
                 let manifest = manifest.clone();
-                finalize_and_ack(storage, node, &transport_peer, &manifest)?;
+                if historical {
+                    // Recheck the exact proof after the download and before
+                    // publishing the durable checkpoint. No historical ack.
+                    let membership_hash = state.leases.historical_inbound[&world_id].membership_hash;
+                    authorize_historical_manifest(storage, application_peer, membership_hash, &manifest)?;
+                    storage.finalize_replica(&manifest)?;
+                    state.leases.historical_inbound.remove(&world_id);
+                } else {
+                    finalize_and_ack(storage, node, &transport_peer, &manifest)?;
+                }
                 state.pending_manifests.remove(&world_id);
             }
         }
@@ -4083,14 +4376,15 @@ fn handle_request(
             let certificate = *certificate;
             ensure_no_competing_authority_during_transfer(storage, record.world_id, None)?;
             ensure_no_membership_prepare(storage, record.world_id)?;
-            validate_recovery_epoch(storage, application_peer, &record, &certificate)?;
             ensure_local_recovery_promise_allows_certificate(storage, &certificate.ballot)?;
             if let Some(current) = load_optional_epoch_record(storage, record.world_id)? {
                 if record == current {
-                    storage.save_recovery_certificate(&certificate)?;
-                    storage.clear_sleep_record(record.world_id)?;
-                    clear_world_wake_request(context.paths, record.world_id)?;
-                    let _ = storage.clear_recovery_promise_after_epoch_advance(record.world_id, record.epoch_number)?;
+                    // A late replica may already have the promoted head
+                    // and later joint admission certificates. A retry of
+                    // the exact durable proof must never clear a current
+                    // sleep or newer fence. Finish only predecessor cleanup.
+                    validate_accepted_recovery_replay(storage, application_peer, &record, &certificate)?;
+                    finish_recovery_retry_sleep_cleanup(storage, &record, &certificate)?;
                     node.respond(
                         channel,
                         WireResponse::EpochAccepted { epoch: record.epoch_number, fencing_token: record.fencing_token },
@@ -4108,6 +4402,7 @@ fn handle_request(
                     return Err(anyhow!("certified recovery epoch does not directly extend the accepted epoch"));
                 }
             }
+            validate_recovery_epoch(storage, application_peer, &record, &certificate)?;
             storage.save_recovery_certificate(&certificate)?;
             storage.save_epoch_record(&record)?;
             storage.clear_sleep_record(record.world_id)?;
@@ -4312,11 +4607,16 @@ fn handle_response(
     let now = Instant::now();
     match (context, response) {
         (
-            Some(OutboundContext::Manifest { world, transport, snapshot_number }),
+            Some(OutboundContext::Manifest { world, transport, snapshot_number, historical_membership }),
             WireResponse::ManifestAccepted { snapshot_number: accepted, missing },
         ) => {
             if accepted != snapshot_number || transport != *transport_peer {
                 return Err(anyhow!("manifest response snapshot number mismatch"));
+            }
+            if let Some(membership_hash) = historical_membership {
+                if !historical_send_is_authorized(storage, node, transport_peer, world, membership_hash) {
+                    return Ok(());
+                }
             }
             let manifest = storage.load_snapshot(world, snapshot_number)?;
             for resume in &missing {
@@ -4333,7 +4633,13 @@ fn handle_response(
             } else {
                 runtime.replications.insert(
                     key,
-                    ReplicationState { snapshot_number, pending: missing.into(), in_flight: false, retry_at: None },
+                    ReplicationState {
+                        snapshot_number,
+                        historical_membership,
+                        pending: missing.into(),
+                        in_flight: false,
+                        retry_at: None,
+                    },
                 );
                 send_next_replication_chunk(storage, node, transport_peer, world, outbound, runtime, now)?;
             }
@@ -4468,6 +4774,7 @@ fn handle_response(
                                                 world,
                                                 transport: *transport_peer,
                                                 snapshot_number: manifest.snapshot_number,
+                                                historical_membership: None,
                                             },
                                         );
                                         runtime.transfer_manifest_requests.insert((world, peer), (hash, now));
@@ -5105,6 +5412,71 @@ fn authorize_manifest(storage: &Storage, sender: PeerId, manifest: &SnapshotMani
     Ok(())
 }
 
+fn validate_accepted_recovery_replay(
+    storage: &Storage,
+    sender: PeerId,
+    record: &EpochRecordV1,
+    certificate: &RecoveryCertificateV1,
+) -> Result<()> {
+    let world = record.world_id;
+    if record.mode != EpochMode::Recovery
+        || sender != record.authority_peer_id
+        || storage.load_epoch_record(world)? != *record
+        || storage.load_recovery_certificate(world)? != *certificate
+    {
+        bail!("recovery replay does not match the exact accepted durable proof");
+    }
+    let descriptor = storage.load_world_descriptor(world)?;
+    let authority = authorized_descriptor_member(&descriptor, sender)?;
+    if !authority.authority_eligible || authority.public_key != record.authority_public_key {
+        bail!("recovery replay authority is no longer an eligible canonical member");
+    }
+    let membership = storage.load_membership_record(world)?;
+    if membership.epoch == record.epoch_number {
+        // Re-verify the original ballot and the full certified membership
+        // chain, including any admissions after the recovery promotion.
+        swarm_cli::live_authority::verify_playable_epoch(storage, record)?;
+    } else {
+        // An acknowledgement lost immediately after epoch publication can
+        // still be retried at the unchanged original recovery boundary.
+        validate_recovery_epoch(storage, sender, record, certificate)?;
+    }
+    Ok(())
+}
+
+fn finish_recovery_retry_sleep_cleanup(
+    storage: &Storage,
+    record: &EpochRecordV1,
+    certificate: &RecoveryCertificateV1,
+) -> Result<bool> {
+    let Some(sleep) = launch_guard::load_sleep_record_fail_closed(storage, record.world_id)? else {
+        return Ok(false);
+    };
+    let ballot = &certificate.ballot;
+    if sleep.epoch != ballot.base_epoch || sleep.fencing_token != ballot.base_fencing_token {
+        return Ok(false);
+    }
+    let predecessor = storage
+        .load_epoch_by_hash(record.world_id, record.previous_epoch_hash.context("recovery predecessor missing")?)?;
+    verify_signature(
+        predecessor.authority_peer_id,
+        predecessor.authority_public_key,
+        &predecessor.signing_bytes()?,
+        &predecessor.signature,
+    )?;
+    if predecessor.epoch_number != ballot.base_epoch || predecessor.fencing_token != ballot.base_fencing_token {
+        bail!("recovery predecessor does not match certified sleep generation");
+    }
+    let boundary = storage
+        .list_snapshots(record.world_id)?
+        .into_iter()
+        .find(|manifest| manifest.manifest_hash().is_ok_and(|hash| hash == ballot.base_snapshot_hash))
+        .context("certified recovery sleep checkpoint is unavailable")?;
+    verify_snapshot_signature(&boundary)?;
+    validate_sleep_recovery_base(&sleep, &predecessor, &boundary)?;
+    Ok(storage.clear_sleep_record_if_exact(record, &sleep)?)
+}
+
 fn validate_recovery_epoch(
     storage: &Storage,
     sender: PeerId,
@@ -5329,6 +5701,19 @@ fn epoch_record_hash(record: &EpochRecordV1) -> Result<Hash32> {
 
 fn world_status(storage: &Storage, world: WorldId, local_peer: PeerId) -> Result<Option<WorldStatusV1>> {
     let Ok(metadata) = storage.load_world(world) else { return Ok(None) };
+    if requires_historical_replay(storage, world)? {
+        // The data-only head is internal progress, not a usable replica
+        // or a candidate for recovery, transfer, or live quorum.
+        return Ok(Some(WorldStatusV1 {
+            world_id: world,
+            epoch: 0,
+            sequence: 0,
+            latest_snapshot: None,
+            state_hash: None,
+            compatibility_fingerprint: metadata.genesis.compatibility_fingerprint,
+            authority_eligible: false,
+        }));
+    }
     let latest = storage.latest_snapshot(world)?;
     let eligible = storage
         .load_world_descriptor(world)
@@ -5349,6 +5734,27 @@ fn world_status(storage: &Storage, world: WorldId, local_peer: PeerId) -> Result
     }))
 }
 
+fn historical_send_is_authorized(
+    storage: &Storage,
+    node: &SwarmNode,
+    transport: &TransportPeerId,
+    world: WorldId,
+    membership_hash: Hash32,
+) -> bool {
+    let Some(peer) = node.application_peer(transport) else { return false };
+    if authorize_member(storage, world, peer).is_err() {
+        return false;
+    }
+    let Ok(membership) = storage.load_membership_record(world) else { return false };
+    let Ok(epoch) = storage.load_epoch_record(world) else { return false };
+    membership.record_hash().ok() == Some(membership_hash)
+        && verify_membership_signature(&membership).is_ok()
+        && membership.members.iter().any(|member| !member.banned && member.peer_id == peer)
+        && membership.epoch == epoch.epoch_number
+        && membership.authority_peer_id == epoch.authority_peer_id
+        && membership.authority_public_key == epoch.authority_public_key
+}
+
 fn send_next_replication_chunk(
     storage: &Storage,
     node: &mut SwarmNode,
@@ -5365,6 +5771,12 @@ fn send_next_replication_chunk(
         };
         if replication.in_flight || replication.retry_at.is_some_and(|retry_at| retry_at > now) {
             return Ok(());
+        }
+        if let Some(membership_hash) = replication.historical_membership {
+            if !historical_send_is_authorized(storage, node, transport_peer, world, membership_hash) {
+                runtime.replications.remove(&key);
+                return Ok(());
+            }
         }
         let snapshot_number = replication.snapshot_number;
         let Some(resume) = replication.pending.front().cloned() else {

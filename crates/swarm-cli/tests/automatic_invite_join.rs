@@ -255,7 +255,7 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
 }
 
 #[test]
-fn late_join_after_signed_wake_receives_verified_historical_proof_without_live_epoch() {
+fn late_join_after_signed_wake_resumes_checkpoints_and_publishes_only_verified_final_epoch() {
     let a = peer_fixture();
     let b = peer_fixture();
     let local_ip = local_non_loopback_ipv4();
@@ -293,6 +293,38 @@ fn late_join_after_signed_wake_receives_verified_historical_proof_without_live_e
     a.storage.clear_sleep_record(world).unwrap();
     swarm_cli::migration::ensure_authority_artifacts(&a.storage, &a.identity, &next).unwrap();
     assert_eq!(a.storage.latest_snapshot(world).unwrap().unwrap().epoch, next.epoch_number);
+    // Include fresh encoded blobs after the epoch promotion, so the
+    // restarted receiver must download real bytes rather than just metadata.
+    let source = tempfile::tempdir().unwrap();
+    let mut randomish = Vec::with_capacity(1024 * 1024);
+    let mut seed = 0xC0FFEE_u64;
+    for _ in 0..1024 * 1024 {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        randomish.push(seed as u8);
+    }
+    fs::write(source.path().join("region.dat"), randomish).unwrap();
+    fs::write(source.path().join("level.dat"), b"post-wake-checkpoint").unwrap();
+    let promoted = a.storage.latest_snapshot(world).unwrap().unwrap();
+    let mut published = a
+        .storage
+        .snapshot_directory(
+            source.path(),
+            SnapshotContext {
+                world,
+                snapshot_number: 3,
+                sequence: promoted.sequence + 1,
+                epoch: next.epoch_number,
+                previous_snapshot_hash: Some(promoted.manifest_hash().unwrap()),
+                authority_peer_id: a.identity.peer_id(),
+                authority_public_key: a.identity.public_key(),
+            },
+        )
+        .unwrap();
+    a.identity.sign_snapshot(&mut published).unwrap();
+    a.storage.commit_snapshot(&published).unwrap();
+    let target = published.manifest().clone();
     let diagnostics = ConnectivityDiagnosticsV1 {
         local_addresses: vec![automatic_transport_address(&a, local_ip)],
         ..Default::default()
@@ -320,8 +352,8 @@ fn late_join_after_signed_wake_receives_verified_historical_proof_without_live_e
         &membership,
     )
     .unwrap();
-    assert_eq!(verified.proof().epochs, vec![first, next]);
-    assert_eq!(verified.proof().checkpoints.len(), 2);
+    assert_eq!(verified.proof().epochs, vec![first.clone(), next.clone()]);
+    assert_eq!(verified.proof().checkpoints.len(), 3);
     // Metadata proof receipt must never become a live epoch, checkpoint
     // receipt, config, or implicit hosting consent.
     assert!(b.storage.load_epoch_record(world).is_err());
@@ -330,6 +362,53 @@ fn late_join_after_signed_wake_receives_verified_historical_proof_without_live_e
     assert!(swarm_cli::hosting_budget::load_consent(&b.paths, world).unwrap().is_none());
     drop(daemon_b);
     let reopened = Storage::open(b.paths.root.clone()).unwrap();
-    assert_eq!(reopened.load_staged_historical_replay_proof(world, membership_hash).unwrap(), Some(bytes));
+    assert_eq!(reopened.load_staged_historical_replay_proof(world, membership_hash).unwrap(), Some(bytes.clone()));
     assert!(reopened.load_epoch_record(world).is_err());
+    assert!(verified.publish(&reopened).is_err(), "an incomplete proof must not publish an epoch");
+    assert!(reopened.save_epoch_record(&next).is_err(), "ordinary epoch writes cannot bypass the staged replay");
+    // Persist a verified first checkpoint plus an interrupted download of
+    // a later blob. These are exactly the on-disk artifacts a killed daemon
+    // leaves; no mock authority or application lease is manufactured.
+    for entry in &base.entries {
+        let blob = &entry.blob;
+        if reopened.has_complete_blob(world, blob) {
+            continue;
+        }
+        let (data, finished) =
+            a.storage.read_encoded_blob_chunk(world, blob, 0, usize::try_from(blob.encoded_size).unwrap()).unwrap();
+        assert!(finished);
+        reopened.receive_blob_chunk(world, blob, 0, &data, true).unwrap();
+    }
+    verified.verify_manifest(&base).unwrap();
+    reopened.finalize_replica(&base).unwrap();
+    let large = &target.entries.iter().max_by_key(|entry| entry.blob.encoded_size).unwrap().blob;
+    assert!(large.encoded_size > 256 * 1024);
+    let (chunk, finished) = a.storage.read_encoded_blob_chunk(world, large, 0, 128 * 1024).unwrap();
+    assert!(!finished);
+    reopened.receive_blob_chunk(world, large, 0, &chunk, false).unwrap();
+    let small = &target.entries.iter().min_by_key(|entry| entry.blob.encoded_size).unwrap().blob;
+    let (chunk, finished) =
+        a.storage.read_encoded_blob_chunk(world, small, 0, usize::try_from(small.encoded_size).unwrap()).unwrap();
+    assert!(finished);
+    reopened.receive_blob_chunk(world, small, 0, &chunk, false).unwrap();
+    assert_eq!(reopened.partial_blob_offset(world, large).unwrap(), 128 * 1024);
+    assert_eq!(reopened.partial_blob_offset(world, small).unwrap(), small.encoded_size);
+    assert!(reopened.load_epoch_record(world).is_err());
+    let _daemon_b = spawn_daemon(&b, local_ip);
+    wait_until("cross-generation replay reaches exact final epoch and checkpoint", Duration::from_secs(90), || {
+        b.storage.load_epoch_record(world).ok().as_ref() == Some(&next)
+            && b.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&target)
+            && b.storage.load_world_config(world).ok() == a.storage.load_world_config(world).ok()
+    });
+    let history = b.storage.list_snapshots(world).unwrap();
+    assert_eq!(history, a.storage.list_snapshots(world).unwrap());
+    for manifest in &history {
+        verified.verify_manifest(manifest).unwrap();
+        b.storage.verify_snapshot(manifest).unwrap();
+    }
+    assert_eq!(b.storage.load_epoch_by_hash(world, first.record_hash().unwrap()).unwrap(), first);
+    assert_eq!(b.storage.load_sleep_boundary(&first, base.manifest_hash().unwrap()).unwrap(), sleep);
+    assert!(b.storage.load_sleep_record(world).is_err());
+    assert!(swarm_cli::hosting_budget::load_consent(&b.paths, world).unwrap().is_none());
+    swarm_cli::live_authority::verify_playable_epoch(&b.storage, &next).unwrap();
 }

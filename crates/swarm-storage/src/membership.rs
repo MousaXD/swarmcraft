@@ -86,7 +86,7 @@ impl Storage {
         durable_atomic_write(&self.world_dir(world).join("metadata/membership-certificate.postcard"), &encoded)
     }
 
-    fn archive_membership_certificate_locked(
+    pub(crate) fn archive_membership_certificate_locked(
         &self,
         certificate: &MembershipCertificateV1,
         encoded: &[u8],
