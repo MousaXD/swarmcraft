@@ -353,7 +353,7 @@ impl Storage {
         self.stale_replay_anchor_locked(world)
     }
 
-    fn stale_replay_anchor_locked(&self, world: WorldId) -> Result<StaleReplayAnchorV1, StorageError> {
+    pub(crate) fn stale_replay_anchor_locked(&self, world: WorldId) -> Result<StaleReplayAnchorV1, StorageError> {
         let epoch = self.load_epoch_record(world)?;
         let membership = self.load_membership_record(world)?;
         let config = self.load_world_config(world)?;
@@ -417,6 +417,13 @@ impl Storage {
         world: WorldId,
     ) -> Result<Option<(StaleReplayAnchorV1, HistoricalReplayProofV1)>, StorageError> {
         let _guard = self.lock_world_transaction(world)?;
+        self.load_staged_stale_replay_proof_locked(world)
+    }
+
+    pub(crate) fn load_staged_stale_replay_proof_locked(
+        &self,
+        world: WorldId,
+    ) -> Result<Option<(StaleReplayAnchorV1, HistoricalReplayProofV1)>, StorageError> {
         let path = self.control_path(world, "stale-replay-proof.postcard");
         if !canonical_file_exists(&path)? {
             return Ok(None);

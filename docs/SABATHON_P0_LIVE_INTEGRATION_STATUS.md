@@ -749,3 +749,31 @@ newer authority's proof over an authenticated connection. Isolated
 checkpoint downloads for this stale-replica path and crash-safe final
 publication over existing accepted control state remain open. The
 first-contact replay path is unchanged.
+
+### Isolated stale-replica checkpoint downloads (25 November)
+
+The accepted replica requests the next exact missing checkpoint from
+the verified successor envelope. Its suffix manifests and new blob bytes
+are staged in a separate namespace keyed by the exact local anchor, not
+the canonical snapshot directory. Existing complete local blobs may be
+reused after verification. Each manifest negotiation validates the signed
+proof and historical signer, and storage repeats the pinned source,
+membership, checkpoint and parent checks. Staging is ordered; neither a
+future manifest nor a superseded authority's negotiation may advance it.
+
+Durable partial encoded offsets and finalized staged manifests survive
+reopening storage, including the interrupted EOF-promotion boundary.
+Later verified proofs may extend the same staged prefix without copying
+it again. An anchor change invalidates the old negotiation. Disconnects
+remove the in-memory historical cursor so it cannot become an ordinary
+canonical blob write; no historical download sends a ReplicaAck.
+
+The acceptance scenarios cover an already admitted player missing a
+checkpoint and transfer, real authenticated transfer of new blob bytes,
+restart with a retained isolated suffix, and the old epoch, membership,
+config and canonical head remaining unchanged. Signed fixtures also
+exercise a superseded source, out-of-order checkpoints, partial byte
+resume and an extended proof through recovery and later admission.
+The final existing-state publication transaction and its crash fencing
+are still required. Pruned histories and missing or corrupt staged data
+must not be treated as a complete canonical replica.

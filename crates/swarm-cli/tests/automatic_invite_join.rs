@@ -264,6 +264,18 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
     drop((_daemon_a, _daemon_b, _daemon_c));
     let anchor = c.storage.stale_replay_anchor(world).unwrap();
     fs::write(source.path().join("level.dat"), b"last checkpoint before transfer").unwrap();
+    // Use incompressible data to force actual blob replication instead of
+    // completing the promoted checkpoint solely from the old blob store.
+    let mut seed = 0x5EED_u64;
+    let data: Vec<u8> = (0..1024 * 1024)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        })
+        .collect();
+    fs::write(source.path().join("offline-region.dat"), data).unwrap();
     let mut boundary = b
         .storage
         .snapshot_directory(
@@ -327,11 +339,37 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
         c.storage.load_staged_stale_replay_proof(world).ok().flatten().as_ref()
             == Some(&(anchor.clone(), expected.clone()))
     });
+    wait_until("complete isolated successor checkpoint suffix", Duration::from_secs(90), || {
+        c.storage
+            .stale_replay_progress(world)
+            .ok()
+            .flatten()
+            .is_some_and(|progress| progress.completed == expected.checkpoints.len())
+    });
+    let suffix = c.storage.verified_stale_replay_suffix(world).unwrap();
+    assert_eq!(suffix, b.storage.list_snapshots(world).unwrap()[3..]);
+    let verified = swarm_cli::historical_authority::verify_replay_proof(
+        expected.clone(),
+        &c.storage.load_world(world).unwrap().genesis,
+        expected.membership.last().unwrap(),
+    )
+    .unwrap();
+    for manifest in &suffix {
+        verified.verify_manifest(manifest).unwrap();
+    }
+    let new_blob = &boundary.entries.iter().max_by_key(|entry| entry.blob.encoded_size).unwrap().blob;
+    assert!(new_blob.encoded_size > 256 * 1024);
+    assert!(!c.storage.has_complete_blob(world, new_blob), "download must not modify canonical blob namespace");
     assert_eq!(c.storage.stale_replay_anchor(world).unwrap(), anchor);
     assert_eq!(c.storage.load_epoch_record(world).unwrap(), epoch);
     assert_eq!(c.storage.latest_snapshot(world).unwrap().unwrap(), head);
     assert_eq!(c.storage.load_membership_record(world).unwrap(), committed);
     assert!(swarm_cli::hosting_budget::load_consent(&c.paths, world).unwrap().is_none());
+    drop(_stale_player);
+    let reopened = Storage::open(c.paths.root.clone()).unwrap();
+    assert_eq!(reopened.stale_replay_anchor(world).unwrap(), anchor);
+    assert_eq!(reopened.verified_stale_replay_suffix(world).unwrap(), suffix);
+    assert_eq!(reopened.list_snapshots(world).unwrap().len(), 3);
 }
 
 #[test]

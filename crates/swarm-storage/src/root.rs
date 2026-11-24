@@ -8,6 +8,7 @@ pub mod recovery_v2;
 pub mod replica;
 pub mod retention;
 pub mod scheduler;
+pub mod stale_replay;
 pub mod state;
 pub mod streaming;
 pub mod world;

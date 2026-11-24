@@ -1023,6 +1023,10 @@ mod tests {
         }
 
         let base2 = storage.latest_snapshot(world).unwrap().unwrap();
+        let previous_download =
+            stale.open_stale_replay_download(bob.peer_id(), membership2.record_hash().unwrap(), &base2).unwrap();
+        assert!(previous_download.missing_blobs().unwrap().is_empty());
+        assert!(previous_download.is_current());
         let mut third = successor(&second, &carol);
         third.mode = EpochMode::Recovery;
         third.signature = carol.sign(&third.signing_bytes().unwrap());
@@ -1070,6 +1074,24 @@ mod tests {
         assert!(matches!(proof.transitions[1], HistoricalTransitionV1::Recovery(_)));
         assert!(proof.extends_replay_history(&first_pinned));
         verify_and_stage_stale_replay(&stale, &dave, carol.peer_id(), &anchor, proof.clone()).unwrap();
+        assert!(!previous_download.is_current());
+        assert!(previous_download.finalize().is_err(), "a superseded source cannot finish a negotiation");
+        assert!(
+            stale
+                .open_stale_replay_download(
+                    carol.peer_id(),
+                    membership3.record_hash().unwrap(),
+                    &storage.load_snapshot(world, 3).unwrap()
+                )
+                .is_err(),
+            "staged checkpoint sequence cannot skip a parent"
+        );
+        stale
+            .open_stale_replay_download(carol.peer_id(), membership3.record_hash().unwrap(), &base2)
+            .unwrap()
+            .finalize()
+            .unwrap();
+        assert_eq!(stale.stale_replay_progress(world).unwrap().unwrap().completed, 2);
         assert!(verify_and_stage_stale_replay(&stale, &dave, bob.peer_id(), &anchor, first_pinned.clone()).is_err());
         drop(stale);
         let stale = Storage::open(stale_dir.path()).unwrap();
@@ -1083,6 +1105,16 @@ mod tests {
         for manifest in storage.list_snapshots(world).unwrap() {
             verified.verify_manifest(&manifest).unwrap();
         }
+        stale
+            .open_stale_replay_download(
+                carol.peer_id(),
+                membership3.record_hash().unwrap(),
+                &storage.load_snapshot(world, 3).unwrap(),
+            )
+            .unwrap()
+            .finalize()
+            .unwrap();
+        assert_eq!(stale.verified_stale_replay_suffix(world).unwrap(), storage.list_snapshots(world).unwrap()[1..]);
         let mut forged = proof.clone();
         if let HistoricalTransitionV1::Recovery(cert) = &mut forged.transitions[1] {
             cert.votes.truncate(1);
@@ -1142,11 +1174,80 @@ mod tests {
         };
         storage.save_world_descriptor(&descriptor).unwrap();
         crate::live_authority::verify_playable_epoch(&storage, &third).unwrap();
+        let parent = storage.latest_snapshot(world).unwrap().unwrap();
+        let fresh = tempfile::tempdir().unwrap();
+        std::fs::write(fresh.path().join("level.dat"), b"new canonical checkpoint after recovery").unwrap();
+        let mut seed = 0xCAFE1234_u64;
+        let bytes: Vec<u8> = (0..1024 * 1024)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect();
+        std::fs::write(fresh.path().join("region.dat"), bytes).unwrap();
+        let mut saved = storage
+            .snapshot_directory(
+                fresh.path(),
+                SnapshotContext {
+                    world,
+                    snapshot_number: parent.snapshot_number + 1,
+                    sequence: parent.sequence + 1,
+                    epoch: third.epoch_number,
+                    previous_snapshot_hash: Some(parent.manifest_hash().unwrap()),
+                    authority_peer_id: carol.peer_id(),
+                    authority_public_key: carol.public_key(),
+                },
+            )
+            .unwrap();
+        carol.sign_snapshot(&mut saved).unwrap();
+        storage.commit_snapshot(&saved).unwrap();
+        let fresh_manifest = saved.manifest().clone();
         let envelope = collect_replay_proof(&storage, &carol, world).unwrap();
         verify_and_stage_stale_replay(&stale, &dave, carol.peer_id(), &anchor, envelope.clone()).unwrap();
         assert_eq!(stale.load_staged_stale_replay_proof(world).unwrap(), Some((anchor.clone(), envelope.clone())));
         assert_eq!(stale.stale_replay_anchor(world).unwrap(), anchor);
         let verified = verify_replay_proof(envelope.clone(), &genesis, &admitted).unwrap();
+        assert_eq!(stale.stale_replay_progress(world).unwrap().unwrap().completed, 3);
+        assert!(stale.verified_stale_replay_suffix(world).is_err());
+        verified.verify_manifest(&fresh_manifest).unwrap();
+        let download = stale
+            .open_stale_replay_download(carol.peer_id(), admitted.record_hash().unwrap(), &fresh_manifest)
+            .unwrap();
+        let large = &fresh_manifest.entries.iter().max_by_key(|entry| entry.blob.encoded_size).unwrap().blob;
+        let small = &fresh_manifest.entries.iter().min_by_key(|entry| entry.blob.encoded_size).unwrap().blob;
+        assert!(large.encoded_size > 256 * 1024);
+        let (chunk, finished) = storage.read_encoded_blob_chunk(world, large, 0, 128 * 1024).unwrap();
+        assert!(!finished);
+        assert_eq!(download.receive_blob_chunk(large, 0, &chunk, false).unwrap(), 128 * 1024);
+        let (chunk, finished) =
+            storage.read_encoded_blob_chunk(world, small, 0, usize::try_from(small.encoded_size).unwrap()).unwrap();
+        assert!(finished);
+        // Model interruption just before promoting an EOF partial.
+        download.receive_blob_chunk(small, 0, &chunk, false).unwrap();
+        assert!(download.finalize().is_err());
+        drop(download);
+        drop(stale);
+        let stale = Storage::open(stale_dir.path()).unwrap();
+        let download = stale
+            .open_stale_replay_download(carol.peer_id(), admitted.record_hash().unwrap(), &fresh_manifest)
+            .unwrap();
+        assert_eq!(download.missing_blobs().unwrap(), vec![(large.hash, 128 * 1024)]);
+        let (chunk, finished) = storage
+            .read_encoded_blob_chunk(world, large, 128 * 1024, usize::try_from(large.encoded_size).unwrap())
+            .unwrap();
+        assert!(finished);
+        download.receive_blob_chunk(large, 128 * 1024, &chunk, true).unwrap();
+        download.finalize().unwrap();
+        let suffix = stale.verified_stale_replay_suffix(world).unwrap();
+        assert_eq!(suffix, storage.list_snapshots(world).unwrap()[1..]);
+        for manifest in &suffix {
+            verified.verify_manifest(manifest).unwrap();
+        }
+        assert_eq!(stale.stale_replay_anchor(world).unwrap(), anchor);
+        assert!(!stale.has_complete_blob(world, large));
+        assert!(!stale.has_complete_blob(world, small));
 
         // Build the real storage first-contact path with a signed invite,
         // committed certificate, and descriptor, but no authority epoch.

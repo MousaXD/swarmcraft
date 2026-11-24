@@ -55,8 +55,8 @@ use swarm_protocol::{
     SnapshotManifestV1, TransferPhase, WorldDescriptorV1, WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{
-    control::StaleReplayAnchorV1, DurableMembershipPromiseV1, DurableRecoveryPromiseV1, MembershipPromiseResult,
-    RecoveryPromiseResult, Storage, StorageError,
+    control::StaleReplayAnchorV1, stale_replay::StaleReplayDownload, DurableMembershipPromiseV1,
+    DurableRecoveryPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage, StorageError,
 };
 use tokio::time::MissedTickBehavior;
 use tokio::{
@@ -227,6 +227,7 @@ struct HistoricalInboundReplica {
     authority: PeerId,
     membership_hash: Hash32,
     manifest_hash: Hash32,
+    stale_download: Option<StaleReplayDownload>,
 }
 
 #[derive(Debug, Default)]
@@ -586,6 +587,17 @@ pub async fn run(
                     }
                     Err(error) => warn!(%error, "historical replay download deferred"),
                 }
+                if let Err(error) = drive_stale_replay_downloads(storage, &identity, &mut node, &mut outbound, &leases) {
+                    warn!(%error, "isolated stale replay download deferred");
+                }
+                leases.historical_inbound.retain(|world, pending| {
+                    if pending.stale_download.as_ref().is_some_and(|download| !download.is_current()) {
+                        pending_manifests.remove(world);
+                        false
+                    } else {
+                        true
+                    }
+                });
             }
             _ = lease_tick.tick() => {
                 // Status hints expire after three seconds. The slower
@@ -917,7 +929,14 @@ pub async fn run(
                             leases.sleep_acks.retain(|(_, peer), _| *peer != application_peer);
                             leases.transfer_manifest_requests.retain(|(_, peer), _| *peer != application_peer);
                             leases.canonical_payload_sent.retain(|(_, peer), _| *peer != application_peer);
-                            leases.historical_inbound.retain(|_, replica| replica.transport != transport_peer);
+                            leases.historical_inbound.retain(|world, replica| {
+                                if replica.transport == transport_peer {
+                                    pending_manifests.remove(world);
+                                    false
+                                } else {
+                                    true
+                                }
+                            });
                             leases.stale_replay_requests.retain(|(_, peer), _| *peer != application_peer);
                         }
                         leases.replications.retain(|(peer, _), _| *peer != transport_peer);
@@ -3506,6 +3525,84 @@ fn publish_historical_replay(storage: &Storage, world: WorldId) -> Result<(PeerI
     ))
 }
 
+/// Stale replicas request only missing suffix checkpoints. Completion is
+/// intentionally data-only; never run first-contact publication over an
+/// existing accepted generation.
+fn drive_stale_replay_downloads(
+    storage: &Storage,
+    identity: &PeerIdentity,
+    node: &mut SwarmNode,
+    outbound: &mut HashMap<String, OutboundContext>,
+    runtime: &LeaseRuntime,
+) -> Result<()> {
+    let mut pending =
+        outbound.values().filter(|context| matches!(context, OutboundContext::HistoricalReplayNext { .. })).count();
+    for metadata in storage.list_worlds()? {
+        let world = metadata.world_id;
+        if pending >= MAX_HISTORICAL_REPLAY_WORKERS {
+            break;
+        }
+        let Some(progress) = storage.stale_replay_progress(world)? else { continue };
+        let membership = progress.proof.membership.last().context("stale replay has no target membership")?;
+        if progress.anchor.epoch.authority_peer_id == identity.peer_id()
+            || !membership.members.iter().any(|member| {
+                !member.banned && member.peer_id == identity.peer_id() && member.public_key == identity.public_key()
+            })
+        {
+            continue;
+        }
+        let Some(checkpoint) = progress.proof.checkpoints.get(progress.completed) else {
+            // All data is staged; a separate publication transaction is
+            // required. No ReplicaAck or lease is generated here.
+            continue;
+        };
+        if outbound.values().any(|context| matches!(context, OutboundContext::HistoricalReplayNext { world: existing } if *existing == world)) {
+            continue;
+        }
+        let Some((transport, _)) = runtime.authenticated_peers.iter().find(|(transport, peer)| {
+            **peer == membership.authority_peer_id && node.application_peer(transport) == Some(**peer)
+        }) else {
+            continue;
+        };
+        let id = node.send_request(
+            transport,
+            WireRequest::HistoricalReplayNext {
+                world_id: world,
+                membership_hash: membership.record_hash()?,
+                snapshot_number: checkpoint.snapshot_number,
+                manifest_hash: checkpoint.manifest_hash,
+            },
+        )?;
+        outbound.insert(request_key(&id), OutboundContext::HistoricalReplayNext { world });
+        pending += 1;
+    }
+    Ok(())
+}
+
+fn authorize_stale_manifest(
+    storage: &Storage,
+    identity: &PeerIdentity,
+    source: PeerId,
+    membership_hash: Hash32,
+    manifest: &SnapshotManifestV1,
+) -> Result<StaleReplayDownload> {
+    let world = manifest.world_id;
+    let (anchor, proof) = storage.load_staged_stale_replay_proof(world)?.context("no pinned stale replay history")?;
+    let membership = proof.membership.last().context("missing stale replay membership")?.clone();
+    if anchor.epoch.authority_peer_id == identity.peer_id()
+        || membership.record_hash()? != membership_hash
+        || membership.authority_peer_id != source
+        || !membership.members.iter().any(|member| {
+            !member.banned && member.peer_id == identity.peer_id() && member.public_key == identity.public_key()
+        })
+    {
+        bail!("stale manifest is not bound to the pinned successor membership");
+    }
+    let verified = verify_replay_proof(proof, &storage.load_world(world)?.genesis, &membership)?;
+    verified.verify_manifest(manifest)?;
+    Ok(storage.open_stale_replay_download(source, membership_hash, manifest)?)
+}
+
 fn authorize_historical_manifest(
     storage: &Storage,
     application_peer: PeerId,
@@ -4105,9 +4202,14 @@ fn handle_request(
         }
         WireRequest::HistoricalReplayManifest { membership_hash, manifest } => {
             let manifest = *manifest;
-            authorize_historical_manifest(storage, application_peer, membership_hash, &manifest)?;
             let world = manifest.world_id;
             let manifest_hash = manifest.manifest_hash()?;
+            let stale_download = if requires_historical_replay(storage, world)? {
+                authorize_historical_manifest(storage, application_peer, membership_hash, &manifest)?;
+                None
+            } else {
+                Some(authorize_stale_manifest(storage, identity, application_peer, membership_hash, &manifest)?)
+            };
             // A duplicate negotiation may resume partial blob offsets; a
             // conflicting in-flight manifest must never replace the cursor.
             if let Some(prior) = state.pending_manifests.get(&world) {
@@ -4119,10 +4221,31 @@ fn handle_request(
                     bail!("historical checkpoint overlaps an unfinished negotiation");
                 }
             }
-            let mut missing = Vec::new();
-            for descriptor in storage.missing_blobs(&manifest) {
-                if let Some(offset) = storage.resume_historical_blob(world, &descriptor)? {
-                    missing.push(BlobResumeV1 { hash: descriptor.hash, offset });
+            let missing = if let Some(download) = &stale_download {
+                download
+                    .missing_blobs()?
+                    .into_iter()
+                    .map(|(hash, offset)| BlobResumeV1 { hash, offset })
+                    .collect::<Vec<_>>()
+            } else {
+                let mut missing = Vec::new();
+                for descriptor in storage.missing_blobs(&manifest) {
+                    if let Some(offset) = storage.resume_historical_blob(world, &descriptor)? {
+                        missing.push(BlobResumeV1 { hash: descriptor.hash, offset });
+                    }
+                }
+                missing
+            };
+            if missing.is_empty() {
+                if let Some(download) = &stale_download {
+                    download.finalize()?;
+                    state.pending_manifests.remove(&world);
+                    state.leases.historical_inbound.remove(&world);
+                    node.respond(
+                        channel,
+                        WireResponse::ManifestAccepted { snapshot_number: manifest.snapshot_number, missing },
+                    )?;
+                    return Ok(());
                 }
             }
             state.pending_manifests.insert(world, manifest.clone());
@@ -4133,6 +4256,7 @@ fn handle_request(
                     authority: application_peer,
                     membership_hash,
                     manifest_hash,
+                    stale_download,
                 },
             );
             node.respond(
@@ -4146,6 +4270,9 @@ fn handle_request(
             }
         }
         WireRequest::SnapshotManifest(manifest) => {
+            if state.leases.historical_inbound.contains_key(&manifest.world_id) {
+                bail!("ordinary manifest cannot replace an active historical negotiation");
+            }
             authorize_manifest(storage, application_peer, &manifest)?;
             let missing = storage
                 .missing_blobs(&manifest)
@@ -4171,6 +4298,29 @@ fn handle_request(
             authorize_member(storage, world_id, application_peer)?;
             let manifest =
                 state.pending_manifests.get(&world_id).context("blob chunk arrived without a negotiated manifest")?;
+            if let Some(pending) = state.leases.historical_inbound.get(&world_id) {
+                if pending.transport != transport_peer
+                    || pending.authority != application_peer
+                    || manifest.manifest_hash()? != pending.manifest_hash
+                {
+                    bail!("historical chunk does not match the authenticated negotiation");
+                }
+                if let Some(download) = &pending.stale_download {
+                    let descriptor =
+                        find_descriptor(manifest, hash).context("blob hash is not referenced by the stale manifest")?;
+                    if descriptor.encoding != encoding {
+                        bail!("stale replay blob encoding differs from negotiated manifest");
+                    }
+                    let next_offset = download.receive_blob_chunk(descriptor, offset, &data, finished)?;
+                    if finished && download.missing_blobs()?.is_empty() {
+                        download.finalize()?;
+                        state.leases.historical_inbound.remove(&world_id);
+                        state.pending_manifests.remove(&world_id);
+                    }
+                    node.respond(channel, WireResponse::BlobChunkAccepted { hash, next_offset })?;
+                    return Ok(());
+                }
+            }
             let historical = requires_historical_replay(storage, world_id)?;
             if historical {
                 let pending = state
