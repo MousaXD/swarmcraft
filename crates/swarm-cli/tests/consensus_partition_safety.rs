@@ -43,7 +43,7 @@ struct Seed<'a> {
     epoch: &'a EpochRecordV1,
     manifest: &'a SnapshotManifestV1,
     source: &'a std::path::Path,
-    authority: &'a PeerIdentity,
+    authority: &'a PeerFixture,
 }
 
 struct ManagedChild(Child);
@@ -146,7 +146,7 @@ fn genesis_membership(metadata: &WorldMetadataV1, authority: &PeerIdentity) -> M
     let mut membership = MembershipRecordV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: metadata.world_id,
-        epoch: 0,
+        epoch: 1,
         sequence: 0,
         previous_membership_hash: None,
         members: vec![WorldMemberV1 {
@@ -265,7 +265,6 @@ fn build_seed<'a>(
     };
     authority.storage.create_world(&metadata).unwrap();
     let genesis_membership = genesis_membership(&metadata, &authority.identity);
-    authority.storage.save_membership_record(&genesis_membership).unwrap();
     let mut config = WorldConfigV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
@@ -335,6 +334,7 @@ fn build_seed<'a>(
     };
     epoch.signature = authority.identity.sign(&epoch.signing_bytes().unwrap());
     authority.storage.save_epoch_record(&epoch).unwrap();
+    authority.storage.save_membership_record(&genesis_membership).unwrap();
 
     let mut membership = MembershipRecordV1 {
         protocol_version: PROTOCOL_VERSION,
@@ -348,6 +348,21 @@ fn build_seed<'a>(
         signature: Vec::new(),
     };
     authority.identity.sign_membership(&mut membership).unwrap();
+    // A first-contact peer now requires a real genesis-anchored certificate
+    // chain. Seed the *historically committed* voter set with joint old/new
+    // votes from its actual test identities, not an unsigned membership jump.
+    let proposal = MembershipProposalV1 { previous: genesis_membership, proposed: membership.clone() };
+    let votes = members
+        .iter()
+        .map(|peer| {
+            let mut vote = membership_vote_for(&proposal, peer.identity.peer_id(), peer.identity.public_key()).unwrap();
+            vote.signature = peer.identity.sign(&vote.signing_bytes().unwrap());
+            vote
+        })
+        .collect();
+    let certificate = swarm_protocol::MembershipCertificateV1 { proposal, votes };
+    swarm_consensus::validate_membership_certificate_shape(&certificate).unwrap();
+    authority.storage.save_membership_certificate(&certificate).unwrap();
     authority.storage.save_membership_record(&membership).unwrap();
     authority.storage.commit_snapshot(&manifest).unwrap();
     configure_host_capability(authority, world);
@@ -359,13 +374,16 @@ fn install_seed(peer: &PeerFixture, seed: &Seed<'_>) {
     if peer.storage.load_world(seed.metadata.world_id).is_err() {
         peer.storage.create_world(seed.metadata).unwrap();
     }
-    if peer.storage.load_membership_record(seed.metadata.world_id).is_err() {
-        let genesis_membership = genesis_membership(seed.metadata, seed.authority);
-        peer.storage.save_membership_record(&genesis_membership).unwrap();
-    }
     peer.storage.save_world_config(seed.config).unwrap();
     peer.storage.save_world_descriptor(seed.descriptor).unwrap();
     peer.storage.save_epoch_record(seed.epoch).unwrap();
+    if peer.storage.load_membership_record(seed.metadata.world_id).is_err() {
+        let genesis = seed.authority.storage.load_genesis_membership(seed.metadata.world_id).unwrap();
+        peer.storage.save_membership_record(&genesis).unwrap();
+    }
+    for certificate in seed.authority.storage.load_membership_certificate_chain(seed.metadata.world_id).unwrap() {
+        peer.storage.save_membership_certificate(&certificate).unwrap();
+    }
     peer.storage.save_membership_record(seed.membership).unwrap();
     if peer.storage.latest_snapshot(seed.metadata.world_id).unwrap().is_none() {
         let mut manifest = peer
@@ -378,12 +396,12 @@ fn install_seed(peer: &PeerFixture, seed: &Seed<'_>) {
                     epoch: seed.manifest.epoch,
                     sequence: seed.manifest.sequence,
                     previous_snapshot_hash: seed.manifest.previous_snapshot_hash,
-                    authority_peer_id: seed.authority.peer_id(),
-                    authority_public_key: seed.authority.public_key(),
+                    authority_peer_id: seed.authority.identity.peer_id(),
+                    authority_public_key: seed.authority.identity.public_key(),
                 },
             )
             .unwrap();
-        seed.authority.sign_snapshot(&mut manifest).unwrap();
+        seed.authority.identity.sign_snapshot(&mut manifest).unwrap();
         assert_eq!(manifest.manifest_hash().unwrap(), seed.manifest.manifest_hash().unwrap());
         peer.storage.commit_snapshot(&manifest).unwrap();
     }
@@ -401,8 +419,14 @@ fn pending_join(new_peer: &PeerFixture, authority: &PeerFixture, metadata: &Worl
         genesis: metadata.genesis.clone(),
         inviter_peer_id: authority.identity.peer_id(),
         inviter_public_key: authority.identity.public_key(),
-        bootstrap_addrs: vec![address(authority)],
-        expires_unix_ms: u64::MAX,
+        // The partition topology is explicitly connected through --peer.
+        // Do not encode a forbidden loopback address into a shareable invite.
+        bootstrap_addrs: Vec::new(),
+        expires_unix_ms: u64::try_from(
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+        )
+        .unwrap()
+            + 3_600_000,
         nonce: random_nonce(),
         signature: Vec::new(),
     };
@@ -465,7 +489,7 @@ fn five_peer_membership_churn_partition_cannot_activate_new_voter_universe() {
         epoch: &epoch,
         manifest: &manifest,
         source: &source,
-        authority: &a.identity,
+        authority: &a,
     };
     install_seed(&b, &seed);
     install_seed(&c, &seed);
@@ -478,14 +502,19 @@ fn five_peer_membership_churn_partition_cannot_activate_new_voter_universe() {
 
     let mut daemon_a = spawn_daemon(&a, &[]);
     thread::sleep(Duration::from_millis(500));
-    let mut daemon_d = spawn_daemon(&d, &[]);
-    let mut daemon_e = spawn_daemon(&e, &[]);
+    let mut daemon_d = spawn_daemon(&d, &[address(&a)]);
+    let mut daemon_e = spawn_daemon(&e, &[address(&a)]);
     wait_until("future-member durable prepares", Duration::from_secs(20), || {
         d.storage.load_membership_promise(metadata.world_id).is_ok()
             && e.storage.load_membership_promise(metadata.world_id).is_ok()
     });
     thread::sleep(Duration::from_secs(2));
-    assert!(a.storage.load_membership_certificate(metadata.world_id).is_err());
+    assert_eq!(
+        a.storage.load_membership_certificate(metadata.world_id).unwrap().proposal.proposed,
+        membership,
+        "the existing certificate must remain the committed configuration"
+    );
+    assert_eq!(a.storage.load_membership_certificate_chain(metadata.world_id).unwrap().len(), 1);
     assert_eq!(a.storage.load_membership_record(metadata.world_id).unwrap(), membership);
     assert!(permit(&a, metadata.world_id).is_none());
     assert!(daemon_a.alive() && daemon_d.alive() && daemon_e.alive());
@@ -523,7 +552,7 @@ fn withdrawn_successors_cannot_receive_recovery_permits_despite_quorum() {
         epoch: &epoch,
         manifest: &manifest,
         source: &source,
-        authority: &alice.identity,
+        authority: &alice,
     };
     install_seed(&bob, &seed);
     install_seed(&carol, &seed);
@@ -591,7 +620,7 @@ fn three_peer_divergent_membership_partition_cannot_form_two_quorums() {
         epoch: &epoch,
         manifest: &manifest,
         source: &source,
-        authority: &a.identity,
+        authority: &a,
     };
     install_seed(&b, &seed);
     pending_join(&c, &a, &metadata);
@@ -599,12 +628,17 @@ fn three_peer_divergent_membership_partition_cannot_form_two_quorums() {
 
     let mut daemon_a = spawn_daemon(&a, &[]);
     thread::sleep(Duration::from_millis(500));
-    let mut daemon_c = spawn_daemon(&c, &[]);
+    let mut daemon_c = spawn_daemon(&c, &[address(&a)]);
     wait_until("new-side prepare", Duration::from_secs(20), || {
         c.storage.load_membership_promise(metadata.world_id).is_ok()
     });
     thread::sleep(Duration::from_secs(2));
-    assert!(a.storage.load_membership_certificate(metadata.world_id).is_err());
+    assert_eq!(
+        a.storage.load_membership_certificate(metadata.world_id).unwrap().proposal.proposed,
+        membership,
+        "the existing certificate must remain the committed configuration"
+    );
+    assert_eq!(a.storage.load_membership_certificate_chain(metadata.world_id).unwrap().len(), 1);
     assert!(permit(&a, metadata.world_id).is_none());
     daemon_a.stop();
     daemon_c.stop();
@@ -635,7 +669,7 @@ fn assert_unclean_quorum_loss_does_not_enter_solo(member_count: usize) {
         epoch: &epoch,
         manifest: &manifest,
         source: &source,
-        authority: &refs[0].identity,
+        authority: refs[0],
     };
     for peer in refs.iter().skip(1) {
         install_seed(peer, &seed);
@@ -710,7 +744,7 @@ fn stale_removed_voter_prepare_blocks_old_quorum_and_receives_revocation() {
         epoch: &epoch,
         manifest: &manifest,
         source: &source,
-        authority: &a.identity,
+        authority: &a,
     };
     for peer in [&b, &c, &d, &e] {
         install_seed(peer, &seed);

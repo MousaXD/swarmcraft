@@ -707,7 +707,9 @@ mod hosted_live {
         let endpoint = verified_route(&carol, world, &alice, 1, &peers);
         minecraft_status(&endpoint);
         assert!(!carol.paths.root.join("runtime").join(world.to_hex()).exists());
-        println!("HOSTED_LIVE_GATEWAY_INITIAL_PASS");
+        // libtest writes the test name without a trailing newline under
+        // --nocapture. Emit a standalone exact marker for the CI gate.
+        println!("\nHOSTED_LIVE_GATEWAY_INITIAL_PASS");
 
         let relative =
             Path::new("runtime").join(world.to_hex()).join("world").join("swarmcraft-hosted-gateway-marker.txt");
@@ -717,7 +719,7 @@ mod hosted_live {
         assert_eq!(successor, endpoint, "player's permanent loopback address changed");
         minecraft_status(&successor);
         assert_eq!(fs::read(bob.paths.root.join(&relative)).unwrap(), b"real Fabric save before signed handoff\n");
-        println!("HOSTED_LIVE_GATEWAY_HANDOFF_PASS");
+        println!("\nHOSTED_LIVE_GATEWAY_HANDOFF_PASS");
 
         // Re-verify Alice's installed runtime after releasing her old host.
         // This is the actual managed artifact verifier, not a cached Ready.
@@ -755,6 +757,6 @@ mod hosted_live {
         });
         let report = swarm_cli::host_readiness::load_host_readiness_report(&alice.paths, world).unwrap();
         assert!(!report.safe_to_shutdown, "offline voter has not acknowledged the sleep boundary");
-        println!("HOSTED_LIVE_GATEWAY_RECOVERY_PASS");
+        println!("\nHOSTED_LIVE_GATEWAY_RECOVERY_PASS");
     }
 }

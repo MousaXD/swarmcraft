@@ -496,3 +496,32 @@ frontend dependencies are absent; the updated native payload tests and
 full hosted validation must run in CI. The LAN fixture seeds diagnostics
 with a concrete reachable listener, so it does not prove automatic
 interface discovery on independent machines.
+
+### Real Minecraft gateway recovery verified (24 November)
+
+Exact-SHA Required Validation run `45402665550` on `9765afb` passed all
+three real Minecraft status exchanges (initial, signed handoff and crash
+recovery), restored the saved marker, verified the recovery certificate and
+replicated the recovered JVM's signed sleep checkpoint. The Rust hosted
+acceptance test completed successfully in 126.71 seconds. The job's separate
+exact-line grep failed because libtest printed its test-name prefix on the
+initial marker line. Emit standalone markers while retaining the three strict
+grep checks and Cargo exit-status enforcement.
+
+That run also passed the multi-GiB interrupted QUIC soak, process acceptance,
+Windows Rust, both RustSec audits, Fabric, specialist and governance checks,
+all four native Desktop package builds and installed Linux GUI smoke. Linux
+and macOS Rust stopped at membership-partition tests: their historical
+membership fixtures skipped the newly required joint genesis certificate,
+used infinite invite expiry and relied on non-shareable loopback bootstrap
+addresses. Replace these with genuinely signed historical certificates,
+bounded invitations and explicit application-peer connections. Preserve the
+partition assertions: new-side prepares must actually exist, the previous
+certificate must remain canonical, and an unavailable old quorum cannot
+activate the proposed universe. The older live-join fixture also uses an
+explicit loopback application hint instead of an invalid shareable invite.
+
+These are same-runner processes and real server protocol status exchanges,
+not authenticated player login, actual inventory continuity, or independent
+physical-device field acceptance. The updated complete three-peer public
+Create/Invite/Join test had passed locally on `9765afb` in 13.47 seconds.

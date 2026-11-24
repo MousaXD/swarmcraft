@@ -54,8 +54,9 @@ fn transport_address(peer: &PeerFixture) -> String {
     format!("/ip4/127.0.0.1/udp/{}/quic-v1/p2p/{}", peer.port, peer.transport_peer)
 }
 
-fn spawn_daemon(peer: &PeerFixture) -> ManagedChild {
-    let child = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+fn spawn_daemon(peer: &PeerFixture, direct_peer: Option<&str>) -> ManagedChild {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_swarmcraft"));
+    command
         .arg("--data-dir")
         .arg(&peer.paths.root)
         .arg("daemon")
@@ -63,10 +64,11 @@ fn spawn_daemon(peer: &PeerFixture) -> ManagedChild {
         .arg(format!("/ip4/127.0.0.1/udp/{}/quic-v1", peer.port))
         .env("RUST_LOG", "warn")
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
-    ManagedChild(child)
+        .stderr(Stdio::inherit());
+    if let Some(address) = direct_peer {
+        command.arg("--peer").arg(address);
+    }
+    ManagedChild(command.spawn().unwrap())
 }
 
 fn wait_until(label: &str, timeout: Duration, mut predicate: impl FnMut() -> bool) {
@@ -184,7 +186,9 @@ fn authority_accepts_live_join_and_replicates_without_reconnect() {
         genesis,
         inviter_peer_id: a.identity.peer_id(),
         inviter_public_key: a.identity.public_key(),
-        bootstrap_addrs: vec![a_address],
+        // Direct operator-configured application hint for this loopback
+        // process fixture; no invalid shareable loopback invite address.
+        bootstrap_addrs: Vec::new(),
         expires_unix_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
             + 3_600_000,
         nonce: random_nonce(),
@@ -202,9 +206,9 @@ fn authority_accepts_live_join_and_replicates_without_reconnect() {
     b.identity.sign_join_request(&mut join).unwrap();
     b.storage.save_pending_join(&join).unwrap();
 
-    let _daemon_a = spawn_daemon(&a);
+    let _daemon_a = spawn_daemon(&a, None);
     thread::sleep(Duration::from_secs(1));
-    let _daemon_b = spawn_daemon(&b);
+    let _daemon_b = spawn_daemon(&b, Some(&a_address));
 
     wait_until("canonical membership on both peers", Duration::from_secs(20), || {
         let Ok(a_membership) = a.storage.load_membership_record(world) else { return false };
