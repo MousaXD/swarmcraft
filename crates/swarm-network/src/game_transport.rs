@@ -50,6 +50,9 @@ pub const MAX_GAME_HEADER_WAIT: Duration = Duration::from_secs(4);
 /// route-verification budget: that would make an honest three-peer route
 /// impossible before the Minecraft client can even send its first packet.
 pub const MAX_GAME_ROUTE_RESOLVE_WAIT: Duration = Duration::from_secs(18);
+// Only a pre-payload stale transcript may be retried, with an entirely new
+// challenge and proof. Once copying starts the application must reconnect.
+const MAX_GAME_ADMISSION_ATTEMPTS: usize = 2;
 pub const MAX_GAME_DIAL_WAIT: Duration = Duration::from_secs(3);
 pub const MAX_GAME_SESSION: Duration = Duration::from_secs(4 * 60 * 60);
 pub const GAME_REVALIDATE_INTERVAL: Duration = Duration::from_secs(1);
@@ -725,8 +728,20 @@ impl GameStreamClient {
         &self,
         mut minecraft_client: TcpStream,
         authorization: VerifiedForwardRoute,
+        control: Control,
+        shutdown: watch::Receiver<bool>,
+    ) -> Result<(), GameTransportError> {
+        let mut payload_started = false;
+        self.forward_attempt(&mut minecraft_client, authorization, control, shutdown, &mut payload_started).await
+    }
+
+    async fn forward_attempt(
+        &self,
+        minecraft_client: &mut TcpStream,
+        authorization: VerifiedForwardRoute,
         mut control: Control,
         mut shutdown: watch::Receiver<bool>,
+        payload_started: &mut bool,
     ) -> Result<(), GameTransportError> {
         if *shutdown.borrow() {
             return Err(GameTransportError::StaleRoute);
@@ -734,13 +749,15 @@ impl GameStreamClient {
         let VerifiedForwardRoute { route, offer, response } = authorization;
         let local_authority =
             route.transport_peer() == self.transport_peer && route.authority_peer_id() == self.application_peer;
-        if !route.is_fresh()
-            || response.challenge.requester_peer_id != self.application_peer
+        if response.challenge.requester_peer_id != self.application_peer
             || response.challenge.requester_transport_peer != self.transport_peer.to_bytes()
             || (!local_authority
                 && authenticated_peer(&self.authenticated, route.transport_peer()) != Some(route.authority_peer_id()))
         {
             return Err(GameTransportError::Unauthorized);
+        }
+        if !route.is_fresh() {
+            return Err(GameTransportError::StaleRoute);
         }
         let now = unix_ms()?;
         validate_timestamps(&offer, &response, now)?;
@@ -768,7 +785,7 @@ impl GameStreamClient {
             // instead this direct 127.0.0.1 hop requires the exact same
             // independently verified signed route and continuous fresh
             // quorum/Fabric/consent checks as a remote game stream.
-            return self.forward_local_authority(minecraft_client, route, frame, shutdown).await;
+            return self.forward_local_authority(minecraft_client, route, frame, shutdown, payload_started).await;
         }
         let target = route.transport_peer();
         if !route.is_fresh()
@@ -824,7 +841,10 @@ impl GameStreamClient {
         if Instant::now() >= proof_deadline {
             return Err(GameTransportError::StaleRoute);
         }
-        let copying = tokio::io::copy_bidirectional(&mut minecraft_client, &mut upstream);
+        // Mark this conservatively before polling any application I/O.
+        // Even a partial write irrevocably ends transparent admission retry.
+        *payload_started = true;
+        let copying = tokio::io::copy_bidirectional(minecraft_client, &mut upstream);
         tokio::pin!(copying);
         let transfer = async {
             loop {
@@ -857,10 +877,11 @@ impl GameStreamClient {
 
     async fn forward_local_authority(
         &self,
-        mut minecraft_client: TcpStream,
+        minecraft_client: &mut TcpStream,
         route: VerifiedGameRoute,
         frame: GameStreamOpenV1,
         mut shutdown: watch::Receiver<bool>,
+        payload_started: &mut bool,
     ) -> Result<(), GameTransportError> {
         if *shutdown.borrow()
             || !route.is_fresh()
@@ -901,7 +922,8 @@ impl GameStreamClient {
         if Instant::now() >= proof_deadline {
             return Err(GameTransportError::StaleRoute);
         }
-        let copying = tokio::io::copy_bidirectional(&mut minecraft_client, &mut server);
+        *payload_started = true;
+        let copying = tokio::io::copy_bidirectional(minecraft_client, &mut server);
         tokio::pin!(copying);
         let transfer = async {
             loop {
@@ -1010,7 +1032,7 @@ impl StableLoopbackGateway {
                     }
                 }
                 accepted = self.listener.accept() => {
-                    let (tcp, _) = accepted?;
+                    let (mut tcp, _) = accepted?;
                     let Ok(slot) = Arc::clone(&slots).try_acquire_owned() else {
                         // Drop immediately; never unboundedly queue join requests.
                         drop(tcp);
@@ -1025,16 +1047,27 @@ impl StableLoopbackGateway {
                         let _slot: OwnedSemaphorePermit = slot;
                         // Verification is bounded and always happens for this
                         // new session, including after planned/crash migration.
-                        let result = timeout(MAX_GAME_ROUTE_RESOLVE_WAIT, resolver.resolve(world_id)).await;
-                        match result {
-                            Ok(Ok(verified)) if verified.world_id() == world_id => {
-                                if let Err(error) = client.forward(tcp, verified, control, stopped).await {
-                                    debug!(%error, "game gateway session ended without fallback");
+                        for attempt in 0..MAX_GAME_ADMISSION_ATTEMPTS {
+                            if *stopped.borrow() { break; }
+                            let result = timeout(MAX_GAME_ROUTE_RESOLVE_WAIT, resolver.resolve(world_id)).await;
+                            match result {
+                                Ok(Ok(verified)) if verified.world_id() == world_id => {
+                                    let mut payload_started = false;
+                                    match client.forward_attempt(&mut tcp, verified, control.clone(), stopped.clone(), &mut payload_started).await {
+                                        Err(GameTransportError::StaleRoute) if !payload_started
+                                            && attempt + 1 < MAX_GAME_ADMISSION_ATTEMPTS && !*stopped.borrow() => {
+                                            debug!("expired pre-payload route; resolving a new signed challenge");
+                                            continue;
+                                        }
+                                        Err(error) => debug!(%error, "game gateway session ended without fallback"),
+                                        Ok(()) => {}
+                                    }
                                 }
+                                Ok(Ok(_)) => warn!("game gateway resolver returned wrong world"),
+                                Ok(Err(error)) => debug!(%error, "game route resolver refused connection"),
+                                Err(_) => debug!("game route resolver timed out"),
                             }
-                            Ok(Ok(_)) => warn!("game gateway resolver returned wrong world"),
-                            Ok(Err(error)) => debug!(%error, "game route resolver refused connection"),
-                            Err(_) => debug!("game route resolver timed out"),
+                            break;
                         }
                     });
                 }
@@ -1384,7 +1417,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_host_gateway_needs_signed_local_route_and_closes_on_live_consent_loss() {
+    async fn same_host_gateway_retries_only_expired_pre_payload_route_and_closes_on_live_consent_loss() {
         use crate::{
             game_route::RouteVerifier,
             game_route_control::{GameRouteControlRequestV1, GameRouteControlResponseV1},
@@ -1451,6 +1484,53 @@ mod tests {
             }
         }
 
+        struct LocalTestResolver {
+            signer: AuthenticatedGameRouteHostSigner,
+            verifier: RouteVerifier,
+            source: Arc<LocalTestAuthority>,
+            attempts: AtomicU64,
+        }
+
+        impl GatewayRouteResolver for LocalTestResolver {
+            fn resolve(
+                &self,
+                world: WorldId,
+            ) -> Pin<Box<dyn Future<Output = Result<VerifiedForwardRoute, GameTransportError>> + Send + '_>>
+            {
+                Box::pin(async move {
+                    let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+                    let local_id = self.source.authority;
+                    let transport = self.source.transport;
+                    let GameRouteControlResponseV1::Offer(offer) = self
+                        .signer
+                        .answer(local_id, transport, GameRouteControlRequestV1::Offer { world_id: world })
+                        .unwrap()
+                    else {
+                        panic!("local host must prove a signed offer")
+                    };
+                    let challenge = self.verifier.issue_challenge(&offer, local_id, transport)?;
+                    let GameRouteControlResponseV1::ChallengeResponse(response) = self
+                        .signer
+                        .answer(local_id, transport, GameRouteControlRequestV1::Challenge(Box::new(challenge)))
+                        .unwrap()
+                    else {
+                        panic!("local host must prove the same signed generation")
+                    };
+                    let now = unix_ms()?;
+                    let capability = self.verifier.verify(&offer, &response, world, now, self.source.as_ref())?;
+                    let forwarded = VerifiedForwardRoute::new(capability, *offer, *response)?;
+                    assert!(forwarded.verified_status(now).is_some());
+                    if attempt == 0 {
+                        // Model a scheduling delay between resolution and
+                        // admission. The first independent proof lease is
+                        // deliberately expired before any Minecraft bytes.
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                    Ok(forwarded)
+                })
+            }
+        }
+
         let root = tempfile::tempdir().unwrap();
         #[cfg(unix)]
         {
@@ -1477,33 +1557,26 @@ mod tests {
             source.clone(),
             root.path().join("signed-offer-sequences"),
         );
-        let verifier = RouteVerifier::new(root.path().join("route-verifier-floor"));
-        let GameRouteControlResponseV1::Offer(offer) =
-            signer.answer(local_id, transport, GameRouteControlRequestV1::Offer { world_id: world }).unwrap()
-        else {
-            panic!("local host must prove a signed offer")
-        };
-        let challenge = verifier.issue_challenge(&offer, local_id, transport).unwrap();
-        let GameRouteControlResponseV1::ChallengeResponse(response) =
-            signer.answer(local_id, transport, GameRouteControlRequestV1::Challenge(Box::new(challenge))).unwrap()
-        else {
-            panic!("local host must prove the same signed generation")
-        };
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-        let capability = verifier.verify(&offer, &response, world, now, source.as_ref()).unwrap();
-        let forwarded = VerifiedForwardRoute::new(capability, *offer, *response).unwrap();
-        assert!(forwarded.verified_status(now).is_some());
+        let resolver = Arc::new(LocalTestResolver {
+            signer,
+            verifier: RouteVerifier::new(root.path().join("route-verifier-floor")),
+            source: source.clone(),
+            attempts: AtomicU64::new(0),
+        });
 
         // A genuine client connects to the permanent *loopback gateway* while
         // its signed authority happens to be the same local process.
         let gateway = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let mut minecraft = TcpStream::connect(gateway.local_addr().unwrap()).await.unwrap();
-        let (local_tcp, _) = gateway.accept().await.unwrap();
+        let gateway = StableLoopbackGateway { listener: gateway, world_id: world };
         let (stop_tx, stop_rx) = watch::channel(false);
-        let client =
-            GameStreamClient::new(local_id, transport, Arc::new(RwLock::new(HashMap::new())), source.clone()).unwrap();
+        let client = Arc::new(
+            GameStreamClient::new(local_id, transport, Arc::new(RwLock::new(HashMap::new())), source.clone()).unwrap(),
+        );
         let game_control = libp2p_stream::Behaviour::new().new_control();
-        let forwarding = tokio::spawn(async move { client.forward(local_tcp, forwarded, game_control, stop_rx).await });
+        let gateway_resolver = resolver.clone();
+        let forwarding =
+            tokio::spawn(async move { gateway.serve(gateway_resolver, client, game_control, stop_rx).await });
         let game = tokio::spawn(async move {
             let (mut server, _) = managed.accept().await.unwrap();
             let mut input = [0u8; 4];
@@ -1514,14 +1587,18 @@ mod tests {
         });
         minecraft.write_all(b"ping").await.unwrap();
         let mut reply = [0u8; 4];
-        timeout(Duration::from_secs(5), minecraft.read_exact(&mut reply)).await.unwrap().unwrap();
+        timeout(Duration::from_secs(8), minecraft.read_exact(&mut reply)).await.unwrap().unwrap();
         assert_eq!(&reply, b"pong");
+        assert_eq!(resolver.attempts.load(Ordering::SeqCst), 2);
 
         // Withdrawal invalidates subsequent live proof and disconnects a
         // running world, despite an otherwise signed, recently valid offer.
         source.consent.store(false, Ordering::SeqCst);
-        assert!(timeout(Duration::from_secs(5), forwarding).await.unwrap().unwrap().is_err());
+        let closed = timeout(Duration::from_secs(5), minecraft.read(&mut reply)).await.unwrap();
+        assert!(matches!(closed, Ok(0) | Err(_)));
         timeout(Duration::from_secs(2), game).await.unwrap().unwrap();
+        assert_eq!(resolver.attempts.load(Ordering::SeqCst), 2, "no retry after application payload");
         let _ = stop_tx.send(true);
+        timeout(Duration::from_secs(2), forwarding).await.unwrap().unwrap().unwrap();
     }
 }

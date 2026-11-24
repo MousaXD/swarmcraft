@@ -683,3 +683,28 @@ stale replicas, authority changes during a pinned replay, pruned history,
 and oversized histories are not certified by this test. Independent-device
 Minecraft login, gameplay, inventory, and hosting acceptance remain
 separate field gates.
+
+### Restart reconnect and route-admission regressions (25 November)
+
+Required validation run 45504966244 on de1f665 passed the Linux and
+Windows Rust tests, all desktop packages and the QUIC resume test, but
+failed macOS automatic-join restart and the hosted Minecraft recovery
+journey. macOS lost its connection after restart while multicast discovery
+reported no route to host. The hosted gateway refused an expired signed
+response after successful initial connection and planned handoff.
+
+The daemon now retains the completed, signed join request separately from
+pending admission. Its addresses are only reconnect hints: both peers must
+remain in signed committed membership, the joining identity must match,
+and ordinary connection-bound authentication and address scope validation
+still apply. Completed invitations are never resent as join requests and
+local membership removal deletes the hint.
+
+A gateway connection may resolve one completely new signed route if an
+earlier attempt expires before any application payload can be copied.
+There is no retry after copying begins, no cached route/IP fallback, and no
+extension of signed deadlines. Recovery verification avoids redundant
+joint-history signature validation only when the fully verified ballot
+roster has an exact signed promotion with no intervening admissions.
+The first local reconnect and transport suite passed; exact-SHA hosted
+validation is required before marking the macOS and Minecraft gates green.

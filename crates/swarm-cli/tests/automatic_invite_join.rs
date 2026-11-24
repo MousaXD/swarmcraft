@@ -360,9 +360,13 @@ fn late_join_after_signed_wake_resumes_checkpoints_and_publishes_only_verified_f
     assert!(b.storage.latest_snapshot(world).unwrap().is_none());
     assert!(b.storage.load_world_config(world).is_err());
     assert!(swarm_cli::hosting_budget::load_consent(&b.paths, world).unwrap().is_none());
+    let completed = b.storage.load_completed_join(world).unwrap();
+    assert_eq!(completed.invite.bootstrap_addrs, vec![automatic_transport_address(&a, local_ip)]);
+    assert!(b.storage.load_pending_join(world).is_err(), "a committed invite must never be resent as a join");
     drop(daemon_b);
     let reopened = Storage::open(b.paths.root.clone()).unwrap();
     assert_eq!(reopened.load_staged_historical_replay_proof(world, membership_hash).unwrap(), Some(bytes.clone()));
+    assert_eq!(reopened.load_completed_join(world).unwrap(), completed);
     assert!(reopened.load_epoch_record(world).is_err());
     assert!(verified.publish(&reopened).is_err(), "an incomplete proof must not publish an epoch");
     assert!(reopened.save_epoch_record(&next).is_err(), "ordinary epoch writes cannot bypass the staged replay");

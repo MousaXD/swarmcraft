@@ -826,6 +826,23 @@ pub fn verify_current_recovery_certificate(
     // recovery ballot. Subsequent admission/removal is allowed ONLY by
     // replaying every exact signed joint-consensus certificate back to
     // that promotion, not by treating the newer voter list as the ballot's.
+    // The common no-admission case is already anchored by the fully
+    // verified base proof above. Avoid verifying every historical joint
+    // signature twice in that case; verify the exact signed promotion.
+    let current = &membership.current_membership;
+    if membership.pending_membership.is_none()
+        && base.sequence.checked_add(1) == Some(current.sequence)
+        && membership.membership_certificates.iter().all(|cert| cert.proposal.proposed.sequence <= base.sequence)
+    {
+        verify_membership_record_and_keys(current)?;
+        if current.world_id == epoch.world_id
+            && current.previous_membership_hash == Some(ballot.membership_hash)
+            && current.members == base.members
+        {
+            return Ok(());
+        }
+        bail!("recovery promotion changed the original certified voters");
+    }
     verify_genesis_anchored_membership(membership)?;
     let mut record = membership.current_membership.clone();
     for _ in 0..swarm_protocol::MAX_REPLAY_MEMBERSHIP_RECORDS {

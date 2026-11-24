@@ -309,7 +309,7 @@ pub async fn run(
         node.take_game_route_control_events().context("authenticated game-route control subscription already owned")?;
     node.listen(listen.parse().context("invalid listen multiaddress")?)?;
     dial_explicit_application_peers(&mut node, explicit_application_peers)?;
-    dial_pending_invite_bootstraps(storage, &mut node, &HashMap::new())?;
+    dial_invite_bootstraps(storage, &identity, &mut node, &HashMap::new())?;
     info!(peer = %identity.peer_id(), %listen, "SwarmCraft daemon starting");
 
     let mut pending_manifests: HashMap<WorldId, SnapshotManifestV1> = HashMap::new();
@@ -551,7 +551,7 @@ pub async fn run(
             _ = join_retry_tick.tick() => {
                 // Desktop stages invitations while its daemon is already running.
                 // Retry only signed, unexpired requests to authenticated inviters.
-                if let Err(error) = dial_pending_invite_bootstraps(storage, &mut node, &leases.authenticated_peers) {
+                if let Err(error) = dial_invite_bootstraps(storage, &identity, &mut node, &leases.authenticated_peers) {
                     warn!(%error, "pending invite dial deferred");
                 }
                 for (transport, peer) in &leases.authenticated_peers {
@@ -3086,19 +3086,57 @@ mod explicit_application_dial_tests {
     }
 }
 
-fn dial_pending_invite_bootstraps(
+fn dial_invite_bootstraps(
     storage: &Storage,
+    identity: &PeerIdentity,
     node: &mut SwarmNode,
     authenticated: &HashMap<TransportPeerId, PeerId>,
 ) -> Result<()> {
     for metadata in storage.list_worlds()? {
-        let Ok(request) = storage.load_pending_join(metadata.world_id) else { continue };
+        let world = metadata.world_id;
+        let (request, pending) = match storage.load_pending_join(world) {
+            Ok(request) => (request, true),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                let Ok(request) = storage.load_completed_join(world) else { continue };
+                (request, false)
+            }
+            Err(error) => {
+                warn!(%world, %error, "unreadable pending invitation; reconnect hint refused");
+                continue;
+            }
+        };
         if verify_join_request_signature(&request).is_err()
             || verify_invite_signature(&request.invite).is_err()
-            || crate::invite::validate_invite_expiry(request.invite.expires_unix_ms, unix_millis()?).is_err()
-            || authenticated.values().any(|peer| *peer == request.invite.inviter_peer_id)
+            || request.invite.genesis != metadata.genesis
+            || request.joining_member.peer_id != identity.peer_id()
+            || request.joining_member.public_key != identity.public_key()
+            || authenticated.iter().any(|(transport, peer)| {
+                *peer == request.invite.inviter_peer_id && node.application_peer(transport) == Some(*peer)
+            })
         {
             continue;
+        }
+        if pending {
+            if crate::invite::validate_invite_expiry(request.invite.expires_unix_ms, unix_millis()?).is_err() {
+                continue;
+            }
+        } else {
+            // An expired invitation is never resent as a JoinRequest. Its
+            // signed addresses can be used only as routing hints for two
+            // still-committed peers. Connection-bound auth remains mandatory.
+            let Ok(membership) = storage.load_membership_record(world) else { continue };
+            if verify_membership_signature(&membership).is_err()
+                || !membership.members.iter().any(|member| {
+                    !member.banned && member.peer_id == identity.peer_id() && member.public_key == identity.public_key()
+                })
+                || !membership.members.iter().any(|member| {
+                    !member.banned
+                        && member.peer_id == request.invite.inviter_peer_id
+                        && member.public_key == request.invite.inviter_public_key
+                })
+            {
+                continue;
+            }
         }
         for value in request.invite.bootstrap_addrs {
             match value.parse() {
@@ -5169,7 +5207,7 @@ fn clear_satisfied_pending_membership(storage: &Storage, descriptor: &WorldDescr
             .member(join.joining_member.peer_id)
             .is_some_and(|m| m.public_key == join.joining_member.public_key && !m.banned)
         {
-            storage.clear_pending_join(descriptor.world_id)?;
+            storage.complete_pending_join(descriptor.world_id)?;
         }
     }
     if let Ok(leave) = storage.load_pending_leave(descriptor.world_id) {

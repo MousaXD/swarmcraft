@@ -226,6 +226,43 @@ impl Storage {
         remove_protocol_file(self, world, "pending-join.postcard")
     }
 
+    /// Preserve a committed invitation as a reconnect hint, not a pending
+    /// admission request. Write the signed hint durably before removing the
+    /// pending request so a restart cannot lose the only bootstrap address.
+    pub fn complete_pending_join(&self, world: WorldId) -> Result<(), StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
+        let request = self.load_pending_join(world)?;
+        let membership = self.load_membership_record(world)?;
+        let descriptor = self.load_world_descriptor(world)?;
+        if request.invite.genesis != self.load_world(world)?.genesis
+            || descriptor.members != membership.members
+            || !membership.members.iter().any(|member| {
+                !member.banned
+                    && member.peer_id == request.joining_member.peer_id
+                    && member.public_key == request.joining_member.public_key
+            })
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        durable_atomic_write(
+            &self.world_protocol_path(world, "completed-join.postcard"),
+            &postcard::to_allocvec(&request)?,
+        )?;
+        remove_protocol_file(self, world, "pending-join.postcard")
+    }
+
+    /// The caller must verify both signatures and current membership before
+    /// dialing. This file is never read by membership admission.
+    pub fn load_completed_join(&self, world: WorldId) -> Result<JoinRequestV1, StorageError> {
+        let path = self.world_protocol_path(world, "completed-join.postcard");
+        let request: JoinRequestV1 = postcard::from_bytes(&read_canonical_file(&path)?)?;
+        request.validate_semantics()?;
+        if request.world_id != world {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(request)
+    }
+
     pub fn save_pending_leave(&self, request: &LeaveRequestV1) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(request.world_id)?;
         request.validate_semantics()?;
@@ -257,6 +294,7 @@ impl Storage {
             "membership-promise.postcard",
             "membership-certificate.postcard",
             "pending-join.postcard",
+            "completed-join.postcard",
             "pending-leave.postcard",
         ] {
             remove_protocol_file(self, world, name)?;
