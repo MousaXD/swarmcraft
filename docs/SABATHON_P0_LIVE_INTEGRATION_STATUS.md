@@ -560,3 +560,38 @@ validation, and an epoch must be installed at its exact base. A bounded
 parent-by-parent history sync (including historical epochs/config where
 applicable) is still required. Do not relax snapshot ancestry validation
 or count a late join as playable before verified catch-up.
+
+### Late join in the original signed generation (25 November)
+
+The original-generation bootstrap no longer blindly offers the newest
+manifest. After committed membership, an authenticated progress query
+selects the creator-signed first checkpoint; its exact verified receipt
+can trigger delivery of the original signed epoch even if the host has
+newer saves. Each further offer must directly extend the recipient's
+reported parent by number, sequence and hash in the same generation.
+The receiver independently verifies signatures, data, ancestry and epoch.
+One outstanding manifest negotiation per connection/world prevents an
+overlapping status-driven offer and final checkpoint offer.
+
+The status report is only a replication scheduling hint. A historical
+genesis receipt cannot satisfy a current-checkpoint transfer or sleep
+barrier. These still require the exact current ReplicaAck from every
+required authenticated member. Original-generation final-save replication
+can query a lagging peer's progress without renewing a fenced lease.
+
+Local three-process Create/Invite/Join acceptance now publishes two
+distinct signed saves after the first peer joins, then admits a third
+player-only peer. All three replicas must verify all three checkpoints,
+their exact parent hashes, signatures, data, current config and signed
+epoch; no hosting consent is granted. The expanded regression and
+existing live join both passed. Six membership/partition regressions
+passed in the preceding local run. Full hosting/transfer process cases
+were not exercised by the local low-memory runner, whose existing
+capacity check refused hosting; use the exact-SHA hosted validation.
+
+This is deliberately limited to a retained original creator-signed quorum
+generation. Late join across a host transfer, recovery or wake generation
+still requires immutable historical epoch, transition certificate and
+config records and a verified replay protocol. Pruned history, actual
+Minecraft client login/inventory, and independent-device field acceptance
+are not certified by this change.

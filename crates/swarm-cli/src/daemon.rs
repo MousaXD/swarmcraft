@@ -134,7 +134,7 @@ const MAX_IN_MEMORY_LIVE_QUORUM_VOTES: usize = 1_024;
 
 #[derive(Debug, Clone)]
 enum OutboundContext {
-    Manifest { world: WorldId, snapshot_number: u64 },
+    Manifest { world: WorldId, transport: TransportPeerId, snapshot_number: u64 },
     BlobChunk { world: WorldId, snapshot_number: u64, hash: Hash32, next_offset: u64, finished: bool },
     Lease { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
     RecoveryBallot { world: WorldId, peer: PeerId, ballot_hash: Hash32 },
@@ -648,7 +648,7 @@ pub async fn run(
                                 );
                             }
                             other => handle_response(
-                                storage,
+                                &HandlerContext { paths, identity: &identity, storage },
                                 &mut node,
                                 &transport_peer,
                                 other,
@@ -1541,6 +1541,17 @@ fn replicate_exact_checkpoint(
     if checkpoint.manifest_hash()? != expected_hash {
         return Err(anyhow!("signed boundary no longer references the exact final checkpoint"));
     }
+    // For an original-generation world, a late replica might be several
+    // checkpoints behind when a transfer or sleep is requested. Keep asking
+    // for progress even though the old authority is no longer renewing a
+    // lease. The status handler offers direct extensions; only the actual
+    // exact final ReplicaAck below can release the signed boundary.
+    let needs_history = checkpoint.snapshot_number > 1
+        && checkpoint.epoch == crate::world_genesis::GENESIS_EPOCH
+        && genesis_bootstrap_base(storage, world)?.is_some();
+    if needs_history {
+        request_world_statuses(storage, node, outbound, runtime, descriptor, source)?;
+    }
     let mut all_replicated = true;
     let now = Instant::now();
     for member in descriptor.members.iter().filter(|member| !member.banned && member.peer_id != source) {
@@ -1552,7 +1563,20 @@ fn replicate_exact_checkpoint(
         let Some((transport, _)) = runtime.authenticated_peers.iter().find(|(_, app)| **app == peer) else {
             continue; // Offline members are never silently counted as verified replicas.
         };
+        if needs_history
+            && !runtime.peer_status.get(&(world, peer)).is_some_and(|observed| {
+                now.saturating_duration_since(observed.observed_at) < STATUS_FRESHNESS
+                    && observed.status.epoch == checkpoint.epoch
+                    && observed.status.sequence == checkpoint.sequence
+                    && observed.status.latest_snapshot == Some(expected_hash)
+                    && observed.status.state_hash == Some(checkpoint.state_root)
+                    && observed.status.compatibility_fingerprint == descriptor.compatibility_fingerprint
+            })
+        {
+            continue;
+        }
         if runtime.replications.contains_key(&(*transport, world))
+            || manifest_request_pending(outbound, world, transport)
             || runtime.transfer_manifest_requests.get(&(world, peer)).is_some_and(|(hash, when)| {
                 *hash == expected_hash && now.saturating_duration_since(*when) < TRANSFER_MANIFEST_RETRY
             })
@@ -1563,7 +1587,11 @@ fn replicate_exact_checkpoint(
             Ok(id) => {
                 outbound.insert(
                     request_key(&id),
-                    OutboundContext::Manifest { world, snapshot_number: checkpoint.snapshot_number },
+                    OutboundContext::Manifest {
+                        world,
+                        transport: *transport,
+                        snapshot_number: checkpoint.snapshot_number,
+                    },
                 );
                 runtime.transfer_manifest_requests.insert((world, peer), (expected_hash, now));
             }
@@ -2791,6 +2819,16 @@ fn status_request_pending(outbound: &HashMap<String, OutboundContext>, world: Wo
     })
 }
 
+fn manifest_request_pending(
+    outbound: &HashMap<String, OutboundContext>,
+    world: WorldId,
+    transport: &TransportPeerId,
+) -> bool {
+    outbound.values().any(|context| {
+        matches!(context, OutboundContext::Manifest { world: w, transport: t, .. } if *w == world && t == transport)
+    })
+}
+
 fn capability_request_pending(outbound: &HashMap<String, OutboundContext>, world: WorldId, peer: PeerId) -> bool {
     outbound.values().any(|context| {
         matches!(context, OutboundContext::HostCapability { world: request_world, peer: request_peer } if *request_world == world && *request_peer == peer)
@@ -2981,7 +3019,7 @@ fn push_known_worlds(
         if authorized_descriptor_member(&descriptor, application_peer).is_err() {
             continue;
         }
-        push_committed_world_payload(storage, node, transport_peer, world, outbound, true)?;
+        push_committed_world_payload(storage, node, transport_peer, application_peer, world, outbound, true)?;
     }
     Ok(())
 }
@@ -2990,26 +3028,30 @@ fn push_committed_world_payload(
     storage: &Storage,
     node: &mut SwarmNode,
     transport_peer: &TransportPeerId,
+    application_peer: PeerId,
     world: WorldId,
     outbound: &mut HashMap<String, OutboundContext>,
     include_membership: bool,
 ) -> Result<()> {
+    let genesis_bootstrap = genesis_bootstrap_base(storage, world)?.is_some();
     if let Ok(config) = storage.load_world_config(world) {
         node.send_request(transport_peer, WireRequest::WorldConfig(Box::new(config)))?;
     }
     if let Ok(branch) = storage.load_solo_branch(world) {
         node.send_request(transport_peer, WireRequest::SoloBranch(Box::new(branch)))?;
     }
-    if let Ok(epoch) = storage.load_epoch_record(world) {
-        if epoch.mode == EpochMode::Recovery {
-            if let Ok(certificate) = storage.load_recovery_certificate(world) {
-                node.send_request(
-                    transport_peer,
-                    WireRequest::RecoveryEpoch { record: epoch, certificate: Box::new(certificate) },
-                )?;
+    if !genesis_bootstrap {
+        if let Ok(epoch) = storage.load_epoch_record(world) {
+            if epoch.mode == EpochMode::Recovery {
+                if let Ok(certificate) = storage.load_recovery_certificate(world) {
+                    node.send_request(
+                        transport_peer,
+                        WireRequest::RecoveryEpoch { record: epoch, certificate: Box::new(certificate) },
+                    )?;
+                }
+            } else {
+                node.send_request(transport_peer, WireRequest::Epoch(epoch))?;
             }
-        } else {
-            node.send_request(transport_peer, WireRequest::Epoch(epoch))?;
         }
     }
     if include_membership {
@@ -3025,12 +3067,184 @@ fn push_committed_world_payload(
     if let Ok(sleep) = storage.load_sleep_record(world) {
         node.send_request(transport_peer, WireRequest::Sleep(sleep))?;
     }
-    if let Some(manifest) = storage.latest_snapshot(world)? {
+    // A newly admitted peer cannot accept an arbitrary latest checkpoint:
+    // it must begin at the retained signed genesis base and accept the
+    // authority epoch there before the existing lease-driven catch-up.
+    // Ask for progress instead of blindly offering the head in this case.
+    if genesis_bootstrap {
+        if !status_request_pending(outbound, world, application_peer) {
+            let id = node.send_request(transport_peer, WireRequest::WorldStatus { world_id: world })?;
+            outbound.insert(request_key(&id), OutboundContext::Status { world, peer: application_peer });
+        }
+    } else if let Some(manifest) = storage.latest_snapshot(world)? {
         verify_snapshot_signature(&manifest)?;
-        let id = node.send_request(transport_peer, WireRequest::SnapshotManifest(manifest.clone()))?;
-        outbound
-            .insert(request_key(&id), OutboundContext::Manifest { world, snapshot_number: manifest.snapshot_number });
+        if !manifest_request_pending(outbound, world, transport_peer) {
+            let id = node.send_request(transport_peer, WireRequest::SnapshotManifest(manifest.clone()))?;
+            outbound.insert(
+                request_key(&id),
+                OutboundContext::Manifest {
+                    world,
+                    transport: *transport_peer,
+                    snapshot_number: manifest.snapshot_number,
+                },
+            );
+        }
     }
+    Ok(())
+}
+
+/// Only the original, creator-signed quorum generation has enough locally
+/// retained history to bootstrap a previously empty replica this way. Later
+/// generations require their historical transition certificates/configs;
+/// never infer those from an arbitrary manifest or the current epoch.
+fn genesis_bootstrap_base(storage: &Storage, world: WorldId) -> Result<Option<(EpochRecordV1, SnapshotManifestV1)>> {
+    let Some(epoch) = load_optional_epoch_record(storage, world)? else { return Ok(None) };
+    if epoch.mode != EpochMode::Quorum
+        || epoch.epoch_number != crate::world_genesis::GENESIS_EPOCH
+        || epoch.fencing_token != 1
+        || epoch.previous_epoch_hash.is_some()
+    {
+        return Ok(None);
+    }
+    let metadata = storage.load_world(world)?;
+    if metadata.genesis.creator_public_key != epoch.authority_public_key
+        || peer_id_from_public_key(&metadata.genesis.creator_public_key) != epoch.authority_peer_id
+    {
+        return Ok(None);
+    }
+    verify_signature(epoch.authority_peer_id, epoch.authority_public_key, &epoch.signing_bytes()?, &epoch.signature)?;
+    let base = match storage.load_snapshot(world, 1) {
+        Ok(base) => base,
+        Err(StorageError::SnapshotNotFound(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    verify_snapshot_signature(&base)?;
+    if base.epoch != epoch.epoch_number
+        || base.previous_snapshot_hash.is_some()
+        || base.authority_peer_id != epoch.authority_peer_id
+        || base.authority_public_key != epoch.authority_public_key
+        || base.state_root != epoch.base_state_hash
+    {
+        return Ok(None);
+    }
+    Ok(Some((epoch, base)))
+}
+
+/// Status is an authenticated routing hint, never a replica receipt or an
+/// authority vote. A recipient still verifies each manifest and its blobs,
+/// persists the exact direct extension, and independently accepts the epoch.
+fn drive_genesis_catchup(
+    context: &HandlerContext<'_>,
+    node: &mut SwarmNode,
+    transport_peer: &TransportPeerId,
+    peer: PeerId,
+    status: &WorldStatusV1,
+    outbound: &mut HashMap<String, OutboundContext>,
+    runtime: &mut LeaseRuntime,
+) -> Result<()> {
+    let world = status.world_id;
+    let storage = context.storage;
+    if status.epoch > crate::world_genesis::GENESIS_EPOCH {
+        return Ok(());
+    }
+    let descriptor = storage.load_world_descriptor(world)?;
+    authorized_descriptor_member(&descriptor, peer)?;
+    authorized_descriptor_member(&descriptor, context.identity.peer_id())?;
+    // Healthy peers already at a later head of the initial generation
+    // need no history scan. This is only a no-send optimization; it cannot
+    // create a receipt or satisfy a transfer/authority gate.
+    if storage.canonical_snapshot_head(world)?.head.is_some_and(|head| {
+        head.snapshot_number > 1
+            && head.epoch == status.epoch
+            && head.sequence == status.sequence
+            && status.latest_snapshot == Some(head.manifest_hash)
+    }) {
+        return Ok(());
+    }
+    let Some((epoch, base)) = genesis_bootstrap_base(storage, world)? else { return Ok(()) };
+    if status.compatibility_fingerprint != descriptor.compatibility_fingerprint
+        || (epoch.authority_peer_id != context.identity.peer_id() && !storage.background_seeding_enabled(world)?)
+    {
+        return Ok(());
+    }
+    let generation = AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token };
+    let now = Instant::now();
+    let base_hash = base.manifest_hash()?;
+    let has_epoch_ack = runtime.epoch_acks.get(&(world, peer)) == Some(&generation)
+        || runtime.lease_acks.get(&(world, peer)).is_some_and(|ack| {
+            ack.generation == generation
+                && now.saturating_duration_since(ack.observed_at) < Duration::from_millis(AUTHORITY_LEASE_DURATION_MS)
+        });
+    let empty =
+        status.epoch == 0 && status.sequence == 0 && status.latest_snapshot.is_none() && status.state_hash.is_none();
+    let at_base = status.epoch == epoch.epoch_number
+        && status.sequence == base.sequence
+        && status.latest_snapshot == Some(base_hash)
+        && status.state_hash == Some(base.state_root);
+    if at_base && !has_epoch_ack {
+        // The exact base may already have been finalized before a lost
+        // ReplicaAck. Re-send the signed epoch, not a new checkpoint or lease.
+        // The receiver's epoch admission still requires its actual local base.
+        if !epoch_request_pending(outbound, world, peer, generation) {
+            let id = node.send_request(transport_peer, WireRequest::Epoch(epoch))?;
+            outbound.insert(request_key(&id), OutboundContext::Epoch { world, peer, generation });
+        }
+        return Ok(());
+    }
+    if runtime.replications.contains_key(&(*transport_peer, world))
+        || manifest_request_pending(outbound, world, transport_peer)
+    {
+        return Ok(());
+    }
+    let manifest = if empty {
+        base
+    } else {
+        if status.epoch != epoch.epoch_number {
+            return Ok(());
+        }
+        let Some(parent_hash) = status.latest_snapshot else { return Ok(()) };
+        let head = storage.canonical_snapshot_head(world)?.head;
+        if head.is_some_and(|reference| reference.manifest_hash == parent_hash && reference.sequence == status.sequence)
+        {
+            return Ok(());
+        }
+        let history = storage.list_snapshots(world)?;
+        let Some(parent) = history.iter().find(|candidate| {
+            candidate.sequence == status.sequence
+                && status.state_hash == Some(candidate.state_root)
+                && candidate.manifest_hash().ok() == Some(parent_hash)
+                && candidate.epoch == epoch.epoch_number
+                && candidate.authority_peer_id == epoch.authority_peer_id
+                && candidate.authority_public_key == epoch.authority_public_key
+        }) else {
+            return Ok(());
+        };
+        verify_snapshot_signature(parent)?;
+        let Some(next) = history.iter().find(|candidate| {
+            Some(candidate.snapshot_number) == parent.snapshot_number.checked_add(1)
+                && Some(candidate.sequence) == parent.sequence.checked_add(1)
+                && candidate.previous_snapshot_hash == Some(parent_hash)
+                && candidate.epoch == epoch.epoch_number
+                && candidate.authority_peer_id == epoch.authority_peer_id
+                && candidate.authority_public_key == epoch.authority_public_key
+        }) else {
+            return Ok(());
+        };
+        next.clone()
+    };
+    verify_snapshot_signature(&manifest)?;
+    let hash = manifest.manifest_hash()?;
+    if runtime.transfer_manifest_requests.get(&(world, peer)).is_some_and(|(previous, sent)| {
+        *previous == hash && now.saturating_duration_since(*sent) < TRANSFER_MANIFEST_RETRY
+    }) {
+        return Ok(());
+    }
+    let id = node.send_request(transport_peer, WireRequest::SnapshotManifest(manifest.clone()))?;
+    outbound.insert(
+        request_key(&id),
+        OutboundContext::Manifest { world, transport: *transport_peer, snapshot_number: manifest.snapshot_number },
+    );
+    runtime.transfer_manifest_requests.insert((world, peer), (hash, now));
     Ok(())
 }
 
@@ -3327,37 +3541,51 @@ fn handle_request(
             if !ack.complete {
                 return Err(anyhow!("incomplete replica acknowledgement rejected"));
             }
+            let current = storage.latest_snapshot(ack.world_id)?;
+            let exact_current = match current.as_ref() {
+                Some(manifest) => replica_ack_matches_manifest(&ack, manifest)?,
+                None => false,
+            };
             // Only a completed replica of the currently signed checkpoint
             // can release transfer staging. An old or unrelated replica ack
             // remains useful for ordinary replication diagnostics but never
             // counts as proof of the final transfer barrier.
-            if let Some(current) = storage.latest_snapshot(ack.world_id)? {
-                if current.snapshot_number == ack.snapshot_number
-                    && current.manifest_hash()? == ack.manifest_hash
-                    && current.state_root == ack.state_root
-                {
-                    state.leases.transfer_replica_acks.insert((ack.world_id, application_peer), ack.manifest_hash);
-                    // A historical receipt survives a disconnect for display,
-                    // but the separate transfer gate is still cleared above.
-                    state.leases.last_checkpoint_ack.insert(ack.world_id, (application_peer, ack.clone(), state.now));
-                    // A new replica must have verified the epoch base before
-                    // accepting the signed epoch. Retry after its exact receipt.
-                    if let Some(epoch) = load_optional_epoch_record(storage, ack.world_id)? {
-                        let generation =
-                            AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token };
-                        if epoch.mode != EpochMode::Recovery
-                            && epoch.authority_peer_id == identity.peer_id()
-                            && epoch.authority_public_key == identity.public_key()
-                            && epoch.base_state_hash == current.state_root
-                            && state.leases.epoch_acks.get(&(ack.world_id, application_peer)) != Some(&generation)
-                            && !epoch_request_pending(state.outbound, ack.world_id, application_peer, generation)
-                        {
-                            let id = node.send_request(&transport_peer, WireRequest::Epoch(epoch))?;
-                            state.outbound.insert(
-                                request_key(&id),
-                                OutboundContext::Epoch { world: ack.world_id, peer: application_peer, generation },
-                            );
-                        }
+            if exact_current {
+                state.leases.transfer_replica_acks.insert((ack.world_id, application_peer), ack.manifest_hash);
+                // A historical receipt survives a disconnect for display,
+                // but the separate transfer gate is still cleared on disconnect.
+                state.leases.last_checkpoint_ack.insert(ack.world_id, (application_peer, ack.clone(), state.now));
+            }
+            // A newly admitted peer may have replicated the original epoch
+            // base while the host has already made newer saves. Its exact
+            // base receipt can trigger signed epoch delivery but must never
+            // count as replication of the current transfer boundary.
+            let bootstrap_base =
+                if ack.snapshot_number == 1 { genesis_bootstrap_base(storage, ack.world_id)? } else { None };
+            let exact_genesis = match bootstrap_base.as_ref() {
+                Some((_, base)) => replica_ack_matches_manifest(&ack, base)?,
+                None => false,
+            };
+            if exact_current || exact_genesis {
+                if let Some(epoch) = load_optional_epoch_record(storage, ack.world_id)? {
+                    let generation =
+                        AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token };
+                    let current_is_base = exact_current
+                        && current.as_ref().is_some_and(|manifest| manifest.state_root == epoch.base_state_hash);
+                    let genesis_is_base =
+                        exact_genesis && bootstrap_base.as_ref().is_some_and(|(accepted, _)| *accepted == epoch);
+                    if epoch.mode != EpochMode::Recovery
+                        && epoch.authority_peer_id == identity.peer_id()
+                        && epoch.authority_public_key == identity.public_key()
+                        && (current_is_base || genesis_is_base)
+                        && state.leases.epoch_acks.get(&(ack.world_id, application_peer)) != Some(&generation)
+                        && !epoch_request_pending(state.outbound, ack.world_id, application_peer, generation)
+                    {
+                        let id = node.send_request(&transport_peer, WireRequest::Epoch(epoch))?;
+                        state.outbound.insert(
+                            request_key(&id),
+                            OutboundContext::Epoch { world: ack.world_id, peer: application_peer, generation },
+                        );
                     }
                 }
             }
@@ -3837,7 +4065,7 @@ fn handle_request(
 }
 
 fn handle_response(
-    storage: &Storage,
+    handler: &HandlerContext<'_>,
     node: &mut SwarmNode,
     transport_peer: &TransportPeerId,
     context: Option<OutboundContext>,
@@ -3845,13 +4073,14 @@ fn handle_response(
     outbound: &mut HashMap<String, OutboundContext>,
     runtime: &mut LeaseRuntime,
 ) -> Result<()> {
+    let storage = handler.storage;
     let now = Instant::now();
     match (context, response) {
         (
-            Some(OutboundContext::Manifest { world, snapshot_number }),
+            Some(OutboundContext::Manifest { world, transport, snapshot_number }),
             WireResponse::ManifestAccepted { snapshot_number: accepted, missing },
         ) => {
-            if accepted != snapshot_number {
+            if accepted != snapshot_number || transport != *transport_peer {
                 return Err(anyhow!("manifest response snapshot number mismatch"));
             }
             let manifest = storage.load_snapshot(world, snapshot_number)?;
@@ -3971,7 +4200,9 @@ fn handle_response(
                     }
                     // A recipient must receive a direct canonical extension,
                     // never the newest manifest blindly if it missed a save.
-                    if !runtime.replications.contains_key(&(*transport_peer, world)) {
+                    if !runtime.replications.contains_key(&(*transport_peer, world))
+                        && !manifest_request_pending(outbound, world, transport_peer)
+                    {
                         if let Some(observed) = runtime.peer_status.get(&(world, peer)) {
                             if observed.status.epoch == generation.epoch
                                 && now.saturating_duration_since(observed.observed_at) < STATUS_FRESHNESS
@@ -4000,6 +4231,7 @@ fn handle_response(
                                             request_key(&id),
                                             OutboundContext::Manifest {
                                                 world,
+                                                transport: *transport_peer,
                                                 snapshot_number: manifest.snapshot_number,
                                             },
                                         );
@@ -4071,7 +4303,7 @@ fn handle_response(
             }
             let descriptor = storage.load_world_descriptor(world)?;
             if descriptor.member(peer).is_some_and(|member| !member.banned) {
-                push_committed_world_payload(storage, node, transport_peer, world, outbound, false)?;
+                push_committed_world_payload(storage, node, transport_peer, peer, world, outbound, false)?;
             }
             info!(world = %world, peer = %peer, sequence, "peer acknowledged committed membership configuration");
         }
@@ -4080,7 +4312,29 @@ fn handle_response(
             WireResponse::EpochAccepted { epoch, fencing_token },
         ) => {
             validate_generation_response(generation, epoch, fencing_token, "epoch")?;
+            if runtime.authenticated_peers.get(transport_peer) != Some(&peer)
+                || node.application_peer(transport_peer) != Some(peer)
+            {
+                return Ok(());
+            }
             runtime.epoch_acks.insert((world, peer), generation);
+            // The base might have been accepted during a sleep/transfer
+            // boundary, where no live leases are renewed. Start the next
+            // direct extension using only the fresh observed routing hint.
+            if generation.epoch == crate::world_genesis::GENESIS_EPOCH {
+                if let Some(status) = runtime
+                    .peer_status
+                    .get(&(world, peer))
+                    .filter(|observed| now.saturating_duration_since(observed.observed_at) < STATUS_FRESHNESS)
+                    .map(|observed| observed.status.clone())
+                {
+                    if let Err(error) =
+                        drive_genesis_catchup(handler, node, transport_peer, peer, &status, outbound, runtime)
+                    {
+                        warn!(%world, %peer, %error, "signed genesis continuation deferred");
+                    }
+                }
+            }
         }
         (Some(OutboundContext::Transfer { peer, record }), WireResponse::TransferAccepted) => {
             if runtime.authenticated_peers.get(transport_peer).copied() != Some(peer) {
@@ -4106,6 +4360,14 @@ fn handle_response(
         (Some(OutboundContext::Status { world, peer }), WireResponse::WorldStatus(Some(status))) => {
             if status.world_id != world {
                 return Err(anyhow!("world status response references the wrong world"));
+            }
+            if runtime.authenticated_peers.get(transport_peer) != Some(&peer)
+                || node.application_peer(transport_peer) != Some(peer)
+            {
+                return Ok(());
+            }
+            if let Err(error) = drive_genesis_catchup(handler, node, transport_peer, peer, &status, outbound, runtime) {
+                warn!(%world, %peer, %error, "signed genesis catch-up deferred");
             }
             runtime.peer_status.insert((world, peer), ObservedStatus { status, observed_at: now });
         }
@@ -4816,6 +5078,14 @@ fn finalize_and_ack(
     };
     node.send_request(transport_peer, WireRequest::ReplicaAck(ack))?;
     Ok(())
+}
+
+fn replica_ack_matches_manifest(ack: &ReplicaAckV1, manifest: &SnapshotManifestV1) -> Result<bool> {
+    Ok(ack.complete
+        && ack.world_id == manifest.world_id
+        && ack.snapshot_number == manifest.snapshot_number
+        && ack.manifest_hash == manifest.manifest_hash()?
+        && ack.state_root == manifest.state_root)
 }
 
 fn epoch_record_hash(record: &EpochRecordV1) -> Result<Hash32> {
@@ -5529,6 +5799,43 @@ mod automatic_transfer_delivery_tests {
         assert!(!checkpoint_acknowledged(&runtime, record.world_id, record.base_snapshot_hash, peer(3)));
         let newer = AuthorityTransferV1 { base_snapshot_hash: Hash32([13; 32]), ..record };
         assert!(!checkpoint_acknowledged(&runtime, newer.world_id, newer.base_snapshot_hash, peer(2)));
+    }
+
+    #[test]
+    fn historical_genesis_receipt_is_not_the_current_checkpoint_receipt() {
+        let base = SnapshotManifestV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: WorldId([7; 32]),
+            snapshot_number: 1,
+            epoch: 1,
+            sequence: 1,
+            previous_snapshot_hash: None,
+            entries: Vec::new(),
+            state_root: Hash32([11; 32]),
+            authority_peer_id: peer(1),
+            authority_public_key: [1; 32],
+            signature: Vec::new(),
+        };
+        let current = SnapshotManifestV1 {
+            snapshot_number: 2,
+            sequence: 2,
+            previous_snapshot_hash: Some(base.manifest_hash().unwrap()),
+            state_root: Hash32([12; 32]),
+            ..base.clone()
+        };
+        let receipt = ReplicaAckV1 {
+            world_id: base.world_id,
+            snapshot_number: base.snapshot_number,
+            manifest_hash: base.manifest_hash().unwrap(),
+            state_root: base.state_root,
+            complete: true,
+        };
+        assert!(replica_ack_matches_manifest(&receipt, &base).unwrap());
+        assert!(!replica_ack_matches_manifest(&receipt, &current).unwrap());
+        let wrong_state = ReplicaAckV1 { state_root: current.state_root, ..receipt.clone() };
+        assert!(!replica_ack_matches_manifest(&wrong_state, &base).unwrap());
+        let incomplete = ReplicaAckV1 { complete: false, ..receipt };
+        assert!(!replica_ack_matches_manifest(&incomplete, &base).unwrap());
     }
 
     fn successor_epoch() -> EpochRecordV1 {

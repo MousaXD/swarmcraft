@@ -12,7 +12,7 @@ use swarm_network::{
     load_or_create_transport_key, ConnectivityDiagnosticsV1, DEFAULT_CONNECTIVITY_DIAGNOSTICS_JSON_FILE,
 };
 use swarm_protocol::{EpochMode, WorldId};
-use swarm_storage::Storage;
+use swarm_storage::{SnapshotContext, Storage};
 use tempfile::TempDir;
 
 const WAIT_STEP: Duration = Duration::from_millis(200);
@@ -165,22 +165,57 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
             && b.storage.verify_snapshot(&manifest).is_ok()
     });
 
+    // The third peer joins an already played world. Publish two distinct
+    // signed direct extensions while the authority generation remains the
+    // original one. A blind latest-manifest push cannot bootstrap this peer:
+    // it must verify checkpoint #1, accept epoch #1 at its base, then catch
+    // up through #2 and #3. No Java or hosting consent is needed to replicate.
+    let source = tempfile::tempdir().unwrap();
+    let mut head = manifest.clone();
+    for number in 2..=3 {
+        fs::write(source.path().join("level.dat"), format!("checkpoint-{number}")).unwrap();
+        let mut next = a
+            .storage
+            .snapshot_directory(
+                source.path(),
+                SnapshotContext {
+                    world,
+                    snapshot_number: number,
+                    epoch: epoch.epoch_number,
+                    sequence: head.sequence + 1,
+                    previous_snapshot_hash: Some(head.manifest_hash().unwrap()),
+                    authority_peer_id: a.identity.peer_id(),
+                    authority_public_key: a.identity.public_key(),
+                },
+            )
+            .unwrap();
+        a.identity.sign_snapshot(&mut next).unwrap();
+        a.storage.commit_snapshot(&next).unwrap();
+        head = next.manifest().clone();
+    }
+    assert_ne!(head.state_root, epoch.base_state_hash);
+    assert!(c.storage.load_world(world).is_err());
+
     assert!(run_cli(&c, &["world", "join", &token]).contains("Join request staged"));
     assert!(!c.storage.load_pending_join(world).unwrap().joining_member.authority_eligible);
-    wait_until("third peer receives full genesis history, epoch and replica", Duration::from_secs(30), || {
-        let Ok(current) = a.storage.load_membership_record(world) else { return false };
-        if current.sequence != 2 {
-            return false;
-        }
-        [&b, &c].iter().all(|peer| {
-            peer.storage.load_membership_record(world).ok().as_ref() == Some(&current)
-                && peer.storage.load_epoch_record(world).ok().as_ref() == Some(&epoch)
-                && peer.storage.load_world_config(world).ok().as_ref() == Some(&config)
-                && peer.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&manifest)
-                && peer.storage.verify_snapshot(&manifest).is_ok()
-                && peer.storage.load_membership_certificate_chain(world).is_ok_and(|chain| chain.len() == 2)
-        })
-    });
+    wait_until(
+        "third peer receives full genesis history, epoch and three checkpoints",
+        Duration::from_secs(90),
+        || {
+            let Ok(current) = a.storage.load_membership_record(world) else { return false };
+            if current.sequence != 2 {
+                return false;
+            }
+            [&b, &c].iter().all(|peer| {
+                peer.storage.load_membership_record(world).ok().as_ref() == Some(&current)
+                    && peer.storage.load_epoch_record(world).ok().as_ref() == Some(&epoch)
+                    && peer.storage.load_world_config(world).ok().as_ref() == Some(&config)
+                    && peer.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&head)
+                    && peer.storage.verify_snapshot(&head).is_ok()
+                    && peer.storage.load_membership_certificate_chain(world).is_ok_and(|chain| chain.len() == 2)
+            })
+        },
+    );
 
     let committed = a.storage.load_membership_record(world).unwrap();
     assert_eq!(committed.members.len(), 3);
@@ -190,6 +225,17 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
         .iter()
         .any(|member| member.peer_id == c.identity.peer_id() && !member.authority_eligible));
     for peer in [&a, &b, &c] {
+        let history = peer.storage.list_snapshots(world).unwrap();
+        assert_eq!(history.len(), 3);
+        for (index, checkpoint) in history.iter().enumerate() {
+            assert_eq!(checkpoint.snapshot_number, index as u64 + 1);
+            assert_eq!(checkpoint, &a.storage.load_snapshot(world, checkpoint.snapshot_number).unwrap());
+            peer.storage.verify_snapshot(checkpoint).unwrap();
+            swarm_core::verify_snapshot_signature(checkpoint).unwrap();
+            if index > 0 {
+                assert_eq!(checkpoint.previous_snapshot_hash, Some(history[index - 1].manifest_hash().unwrap()));
+            }
+        }
         assert!(peer.storage.load_pending_join(world).is_err());
         assert!(swarm_cli::hosting_budget::load_consent(&peer.paths, world).unwrap().is_none());
         let proof = swarm_protocol::DiscoveryMembershipProofV1 {
