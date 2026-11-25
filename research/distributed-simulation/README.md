@@ -24,6 +24,17 @@ See the report for Linux namespace requirements and exact workload
 matrix. Never interpret lab agents as Minecraft players or turn a
 successful lab receipt into authority.
 
+## Resource-aware worker placement (#58, 2026-11-26)
+
+[Placement design](WORKER_PLACEMENT_DESIGN.md) and
+[verification report](WORKER_PLACEMENT_REPORT.md): explicit lab consent
+and revision-bound probes, real Linux CPU/memory enforcement, measured
+path RTT, load-aware selection, and stop-all scale-in from a verified
+in-memory cut. Two experiments executed 208 measured ticks with matching
+serial roots. Service latency improved on spread load, but checked-loop
+throughput did not demonstrate sustained improvement. No production worker
+enrollment or Minecraft regional authority is enabled.
+
 ## Original R0 evidence (2026-11-08)
 
 

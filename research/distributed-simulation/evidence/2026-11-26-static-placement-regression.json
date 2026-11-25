@@ -1,0 +1,1531 @@
+{
+  "classification": "REAL_NETWORKED_CUSTOM_REGION_MODEL_NOT_MINECRAFT_NOT_PHYSICAL_MULTI_HOST",
+  "completed": true,
+  "faults": [
+    {
+      "accepted_cut_unchanged": true,
+      "all_workers_exited": true,
+      "cross_worker_agents_before_fault": 32,
+      "elapsed_until_refusal_ms": 4.051003998029046,
+      "failed_barrier": "EOFError",
+      "fault": "killed_after_prepare",
+      "last_accepted_root": "22b53ad3c77b66b3d9d64533cfafa2a49efd7e70f03a8a1214efaed763ca342f",
+      "last_accepted_tick": 1,
+      "subsequent_tick_and_snapshot_refused": true,
+      "surviving_worker_observation_not_authority": {
+        "op": "status",
+        "phase": "sealed",
+        "tick": 1
+      }
+    },
+    {
+      "accepted_cut_unchanged": true,
+      "all_workers_exited": true,
+      "cross_worker_agents_before_fault": 32,
+      "elapsed_until_refusal_ms": 751.5857900070841,
+      "failed_barrier": "TimeoutError",
+      "fault": "partition_after_seal",
+      "last_accepted_root": "22b53ad3c77b66b3d9d64533cfafa2a49efd7e70f03a8a1214efaed763ca342f",
+      "last_accepted_tick": 1,
+      "subsequent_tick_and_snapshot_refused": true,
+      "surviving_worker_observation_not_authority": {
+        "op": "status",
+        "phase": "idle",
+        "tick": 2
+      }
+    }
+  ],
+  "hardware": {
+    "available_logical_cpus": 12,
+    "coordinator_cpu": 0,
+    "cpu_affinity_not_hard_quota": true,
+    "physical_machine_count": 1,
+    "platform": "Linux-7.2.15-76070215-generic-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "worker_cpus_on_distinct_physical_cores": [
+      2,
+      4,
+      6,
+      8
+    ]
+  },
+  "parameters": {
+    "profiles": [
+      "local",
+      "near"
+    ],
+    "repeats": 1,
+    "ticks": 4,
+    "worker_counts": [
+      1,
+      2,
+      4
+    ]
+  },
+  "scenarios": {
+    "boundary-512": {
+      "agents": 512,
+      "runs": [
+        {
+          "accepted_ticks": 4,
+          "cpu_ms": 2.745577,
+          "cross_region_agents": 2048,
+          "cross_region_resources": 8,
+          "deadline_misses_50ms": 0,
+          "final_root": "710ac49e9fbfa9fee51e4c08c85fd51f1961b521fb3ba0f5280e5bde540c938c",
+          "max_ms": 0.719021,
+          "mean_ms": 0.6704060000000001,
+          "mode": "monolithic_serial",
+          "p50_ms": 0.658566,
+          "p95_ms": 0.719021,
+          "p99_ms": 0.719021,
+          "peak_rss_kib": 20988,
+          "per_tick_roots": [
+            "b692951ba09a8946f142bfddb552fc70aa1cad7f1646a4ddce953f6323849737",
+            "9e246188e575b8508164984cca3009da7e8b51feeb2ee8e62e886ba871f9e9be",
+            "58dd3c55fc3c94d6ca532ba33d72d3e0302bd34f477e4ab412d05ffc9688f39d",
+            "710ac49e9fbfa9fee51e4c08c85fd51f1961b521fb3ba0f5280e5bde540c938c"
+          ],
+          "repetition": 1,
+          "samples_ms": [
+            0.719021,
+            0.700415,
+            0.658566,
+            0.603622
+          ],
+          "seed": 56,
+          "unpaced_service_ticks_per_second": 1491.633428101777
+        },
+        {
+          "accepted_ticks": 4,
+          "agent_count": 512,
+          "all_tick_roots_match_serial": true,
+          "all_workers_exited": true,
+          "application_frame_bytes": [
+            {
+              "rx_bytes": 4434,
+              "tx_bytes": 1858
+            }
+          ],
+          "coordinator_cpu_ms": 1.312435,
+          "coordinator_peak_rss_kib": 21428,
+          "cross_region_agents": 2048,
+          "cross_region_resources": 8,
+          "cross_worker_agents": 0,
+          "cross_worker_resources": 0,
+          "deadline_misses_50ms": 0,
+          "distinct_network_namespaces": 2,
+          "echo_rtt_ms": [
+            [
+              0.115819,
+              0.095681,
+              0.088387,
+              0.077637,
+              0.082927,
+              0.07395
+            ]
+          ],
+          "final_full_state_matches": true,
+          "final_root": "710ac49e9fbfa9fee51e4c08c85fd51f1961b521fb3ba0f5280e5bde540c938c",
+          "max_ms": 2.457609,
+          "mean_ms": 2.10810325,
+          "mode": "local",
+          "one_way_netem_delay_ms": 0,
+          "p50_ms": 1.977271,
+          "p95_ms": 2.457609,
+          "p99_ms": 2.457609,
+          "per_tick_roots": [
+            "b692951ba09a8946f142bfddb552fc70aa1cad7f1646a4ddce953f6323849737",
+            "9e246188e575b8508164984cca3009da7e8b51feeb2ee8e62e886ba871f9e9be",
+            "58dd3c55fc3c94d6ca532ba33d72d3e0302bd34f477e4ab412d05ffc9688f39d",
+            "710ac49e9fbfa9fee51e4c08c85fd51f1961b521fb3ba0f5280e5bde540c938c"
+          ],
+          "repetition": 1,
+          "samples_ms": [
+            2.457609,
+            2.075236,
+            1.922297,
+            1.977271
+          ],
+          "seed": 56,
+          "total_resources": 37438,
+          "unpaced_service_ticks_per_second": 474.3600675156684,
+          "veth_interface_counters": [
+            {
+              "coordinator_qdisc_after": [],
+              "coordinator_qdisc_before": [],
+              "rx_bytes": 5226,
+              "rx_packets": 12,
+              "tx_bytes": 2650,
+              "tx_packets": 12,
+              "worker_qdisc_after": [],
+              "worker_qdisc_before": []
+            }
+          ],
+          "worker_count": 1,
+          "worker_metrics": [
+            {
+              "compute_cpu_ms": 6.190832,
+              "cpu": 2,
+              "peak_rss_kib": 21804,
+              "process_cpu_ms": 7.298461,
+              "region_ids": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7
+              ]
+            }
+          ]
+        },
+        {
+          "accepted_ticks": 4,
+          "agent_count": 512,
+          "all_tick_roots_match_serial": true,
+          "all_workers_exited": true,
+          "application_frame_bytes": [
+            {
+              "rx_bytes": 8259,
+              "tx_bytes": 6502
+            },
+            {
+              "rx_bytes": 7871,
+              "tx_bytes": 6872
+            }
+          ],
+          "coordinator_cpu_ms": 3.309503,
+          "coordinator_peak_rss_kib": 21556,
+          "cross_region_agents": 2048,
+          "cross_region_resources": 8,
+          "cross_worker_agents": 512,
+          "cross_worker_resources": 2,
+          "deadline_misses_50ms": 0,
+          "distinct_network_namespaces": 3,
+          "echo_rtt_ms": [
+            [
+              0.93597,
+              0.813949,
+              0.172396,
+              0.533079,
+              0.092795,
+              0.085171
+            ],
+            [
+              0.134555,
+              0.098687,
+              0.091433,
+              0.088357,
+              0.085451,
+              0.082767
+            ]
+          ],
+          "final_full_state_matches": true,
+          "final_root": "710ac49e9fbfa9fee51e4c08c85fd51f1961b521fb3ba0f5280e5bde540c938c",
+          "max_ms": 2.276436,
+          "mean_ms": 2.13778175,
+          "mode": "local",
+          "one_way_netem_delay_ms": 0,
+          "p50_ms": 2.10885,
+          "p95_ms": 2.276436,
+          "p99_ms": 2.276436,
+          "per_tick_roots": [
+            "b692951ba09a8946f142bfddb552fc70aa1cad7f1646a4ddce953f6323849737",
+            "9e246188e575b8508164984cca3009da7e8b51feeb2ee8e62e886ba871f9e9be",
+            "58dd3c55fc3c94d6ca532ba33d72d3e0302bd34f477e4ab412d05ffc9688f39d",
+            "710ac49e9fbfa9fee51e4c08c85fd51f1961b521fb3ba0f5280e5bde540c938c"
+          ],
+          "repetition": 1,
+          "samples_ms": [
+            2.213367,
+            1.952474,
+            2.10885,
+            2.276436
+          ],
+          "seed": 56,
+          "total_resources": 37438,
+          "unpaced_service_ticks_per_second": 467.7745985996934,
+          "veth_interface_counters": [
+            {
+              "coordinator_qdisc_after": [],
+              "coordinator_qdisc_before": [],
+              "rx_bytes": 9051,
+              "rx_packets": 12,
+              "tx_bytes": 7384,
+              "tx_packets": 13,
+              "worker_qdisc_after": [],
+              "worker_qdisc_before": []
+            },
+            {
+              "coordinator_qdisc_after": [],
+              "coordinator_qdisc_before": [],
+              "rx_bytes": 8663,
+              "rx_packets": 12,
+              "tx_bytes": 7664,
+              "tx_packets": 12,
+              "worker_qdisc_after": [],
+              "worker_qdisc_before": []
+            }
+          ],
+          "worker_count": 2,
+          "worker_metrics": [
+            {
+              "compute_cpu_ms": 3.427664,
+              "cpu": 2,
+              "peak_rss_kib": 21676,
+              "process_cpu_ms": 5.199207,
+              "region_ids": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "compute_cpu_ms": 3.755456,
+              "cpu": 4,
+              "peak_rss_kib": 21876,
+              "process_cpu_ms": 5.51039,
+              "region_ids": [
+                4,
+                5,
+                6,
+                7
+              ]
+            }
+          ]
+        },
+        {
+          "accepted_ticks": 4,
+          "agent_count": 512,
+          "all_tick_roots_match_serial": true,
+          "all_workers_exited": true,
+          "application_frame_bytes": [
+            {
+              "rx_bytes": 7561,
+              "tx_bytes": 6407
+            },
+            {
+              "rx_bytes": 7438,
+              "tx_bytes": 6663
+            },
+            {
+              "rx_bytes": 7439,
+              "tx_bytes": 6661
+            },
+            {
+              "rx_bytes": 7184,
+              "tx_bytes": 6791
+            }
+          ],
+          "coordinator_cpu_ms": 4.849875,
+          "coordinator_peak_rss_kib": 21556,
+          "cross_region_agents": 2048,
+          "cross_region_resources": 8,
+          "cross_worker_agents": 1024,
+          "cross_worker_resources": 4,
+          "deadline_misses_50ms": 0,
+          "distinct_network_namespaces": 5,
+          "echo_rtt_ms": [
+            [
+              0.112573,
+              0.094088,
+              0.086984,
+              0.08429,
+              0.083738,
+              0.080302
+            ],
+            [
+              0.107995,
+              0.092615,
+              0.086524,
+              0.08458,
+              0.081834,
+              0.078729
+            ],
+            [
+              0.108455,
+              0.088878,
+              0.082586,
+              0.081163,
+              0.097805,
+              0.070253
+            ],
+            [
+              0.101322,
+              0.087917,
+              0.083819,
+              0.092054,
+              0.085211,
+              0.0797
+            ]
+          ],
+          "final_full_state_matches": true,
+          "final_root": "710ac49e9fbfa9fee51e4c08c85fd51f1961b521fb3ba0f5280e5bde540c938c",
+          "max_ms": 2.178561,
+          "mean_ms": 1.811026,
+          "mode": "local",
+          "one_way_netem_delay_ms": 0,
+          "p50_ms": 1.704304,
+          "p95_ms": 2.178561,
+          "p99_ms": 2.178561,
+          "per_tick_roots": [
+            "b692951ba09a8946f142bfddb552fc70aa1cad7f1646a4ddce953f6323849737",
+            "9e246188e575b8508164984cca3009da7e8b51feeb2ee8e62e886ba871f9e9be",
+            "58dd3c55fc3c94d6ca532ba33d72d3e0302bd34f477e4ab412d05ffc9688f39d",
+            "710ac49e9fbfa9fee51e4c08c85fd51f1961b521fb3ba0f5280e5bde540c938c"
+          ],
+          "repetition": 1,
+          "samples_ms": [
+            2.178561,
+            1.75487,
+            1.704304,
+            1.606369
+          ],
+          "seed": 56,
+          "total_resources": 37438,
+          "unpaced_service_ticks_per_second": 552.1731880160748,
+          "veth_interface_counters": [
+            {
+              "coordinator_qdisc_after": [],
+              "coordinator_qdisc_before": [],
+              "rx_bytes": 8353,
+              "rx_packets": 12,
+              "tx_bytes": 7199,
+              "tx_packets": 12,
+              "worker_qdisc_after": [],
+              "worker_qdisc_before": []
+            },
+            {
+              "coordinator_qdisc_after": [],
+              "coordinator_qdisc_before": [],
+              "rx_bytes": 8230,
+              "rx_packets": 12,
+              "tx_bytes": 7455,
+              "tx_packets": 12,
+              "worker_qdisc_after": [],
+              "worker_qdisc_before": []
+            },
+            {
+              "coordinator_qdisc_after": [],
+              "coordinator_qdisc_before": [],
+              "rx_bytes": 8231,
+              "rx_packets": 12,
+              "tx_bytes": 7453,
+              "tx_packets": 12,
+              "worker_qdisc_after": [],
+              "worker_qdisc_before": []
+            },
+            {
+              "coordinator_qdisc_after": [],
+              "coordinator_qdisc_before": [],
+              "rx_bytes": 7976,
+              "rx_packets": 12,
+              "tx_bytes": 7673,
+              "tx_packets": 13,
+              "worker_qdisc_after": [],
+              "worker_qdisc_before": []
+            }
+          ],
+          "worker_count": 4,
+          "worker_metrics": [
+            {
+              "compute_cpu_ms": 1.744233,
+              "cpu": 2,
+              "peak_rss_kib": 21680,
+              "process_cpu_ms": 3.32775,
+              "region_ids": [
+                0,
+                1
+              ]
+            },
+            {
+              "compute_cpu_ms": 1.809767,
+              "cpu": 4,
+              "peak_rss_kib": 21648,
+              "process_cpu_ms": 3.403508,
+              "region_ids": [
+                2,
+                3
+              ]
+            },
+            {
+              "compute_cpu_ms": 1.729958,
+              "cpu": 6,
+              "peak_rss_kib": 21632,
+              "process_cpu_ms": 3.294343,
+              "region_ids": [
+                4,
+                5
+              ]
+            },
+            {
+              "compute_cpu_ms": 1.748961,
+              "cpu": 8,
+              "peak_rss_kib": 21648,
+              "process_cpu_ms": 3.396826,
+              "region_ids": [
+                6,
+                7
+              ]
+            }
+          ]
+        },
+        {
+          "accepted_ticks": 4,
+          "agent_count": 512,
+          "all_tick_roots_match_serial": true,
+          "all_workers_exited": true,
+          "application_frame_bytes": [
+            {
+              "rx_bytes": 4434,
+              "tx_bytes": 1858
+            }
+          ],
+          "coordinator_cpu_ms": 2.407604,
+          "coordinator_peak_rss_kib": 21556,
+          "cross_region_agents": 2048,
+          "cross_region_resources": 8,
+          "cross_worker_agents": 0,
+          "cross_worker_resources": 0,
+          "deadline_misses_50ms": 0,
+          "distinct_network_namespaces": 2,
+          "echo_rtt_ms": [
+            [
+              10.305426,
+              10.250893,
+              10.377992,
+              10.285407,
+              10.273065,
+              10.262313
+            ]
+          ],
+          "final_full_state_matches": true,
+          "final_root": "710ac49e9fbfa9fee51e4c08c85fd51f1961b521fb3ba0f5280e5bde540c938c",
+          "max_ms": 33.78842,
+          "mean_ms": 33.70032325,
+          "mode": "near",
+          "one_way_netem_delay_ms": 5,
+          "p50_ms": 33.634368,
+          "p95_ms": 33.78842,
+          "p99_ms": 33.78842,
+          "per_tick_roots": [
+            "b692951ba09a8946f142bfddb552fc70aa1cad7f1646a4ddce953f6323849737",
+            "9e246188e575b8508164984cca3009da7e8b51feeb2ee8e62e886ba871f9e9be",
+            "58dd3c55fc3c94d6ca532ba33d72d3e0302bd34f477e4ab412d05ffc9688f39d",
+            "710ac49e9fbfa9fee51e4c08c85fd51f1961b521fb3ba0f5280e5bde540c938c"
+          ],
+          "repetition": 1,
+          "samples_ms": [
+            33.634368,
+            33.758303,
+            33.620202,
+            33.78842
+          ],
+          "seed": 56,
+          "total_resources": 37438,
+          "unpaced_service_ticks_per_second": 29.67330587845326,
+          "veth_interface_counters": [
+            {
+              "coordinator_qdisc_after": [
+                {
+                  "backlog": 0,
+                  "bytes": 17450,
+                  "drops": 0,
+                  "handle": "8119:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 34,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "coordinator_qdisc_before": [
+                {
+                  "backlog": 0,
+                  "bytes": 14800,
+                  "drops": 0,
+                  "handle": "8119:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 22,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "rx_bytes": 5226,
+              "rx_packets": 12,
+              "tx_bytes": 2650,
+              "tx_packets": 12,
+              "worker_qdisc_after": [
+                {
+                  "backlog": 0,
+                  "bytes": 7554,
+                  "drops": 0,
+                  "handle": "811a:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 28,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "worker_qdisc_before": [
+                {
+                  "backlog": 0,
+                  "bytes": 2328,
+                  "drops": 0,
+                  "handle": "811a:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 16,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ]
+            }
+          ],
+          "worker_count": 1,
+          "worker_metrics": [
+            {
+              "compute_cpu_ms": 9.954774,
+              "cpu": 2,
+              "peak_rss_kib": 21904,
+              "process_cpu_ms": 12.377787,
+              "region_ids": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7
+              ]
+            }
+          ]
+        },
+        {
+          "accepted_ticks": 4,
+          "agent_count": 512,
+          "all_tick_roots_match_serial": true,
+          "all_workers_exited": true,
+          "application_frame_bytes": [
+            {
+              "rx_bytes": 8259,
+              "tx_bytes": 6502
+            },
+            {
+              "rx_bytes": 7871,
+              "tx_bytes": 6872
+            }
+          ],
+          "coordinator_cpu_ms": 5.699511,
+          "coordinator_peak_rss_kib": 21556,
+          "cross_region_agents": 2048,
+          "cross_region_resources": 8,
+          "cross_worker_agents": 512,
+          "cross_worker_resources": 2,
+          "deadline_misses_50ms": 0,
+          "distinct_network_namespaces": 3,
+          "echo_rtt_ms": [
+            [
+              10.404653,
+              10.263266,
+              10.240533,
+              10.401768,
+              10.377081,
+              10.238318
+            ],
+            [
+              10.229291,
+              10.204986,
+              10.20231,
+              10.250742,
+              10.213321,
+              10.227598
+            ]
+          ],
+          "final_full_state_matches": true,
+          "final_root": "710ac49e9fbfa9fee51e4c08c85fd51f1961b521fb3ba0f5280e5bde540c938c",
+          "max_ms": 33.774093,
+          "mean_ms": 33.58696425,
+          "mode": "near",
+          "one_way_netem_delay_ms": 5,
+          "p50_ms": 33.426867,
+          "p95_ms": 33.774093,
+          "p99_ms": 33.774093,
+          "per_tick_roots": [
+            "b692951ba09a8946f142bfddb552fc70aa1cad7f1646a4ddce953f6323849737",
+            "9e246188e575b8508164984cca3009da7e8b51feeb2ee8e62e886ba871f9e9be",
+            "58dd3c55fc3c94d6ca532ba33d72d3e0302bd34f477e4ab412d05ffc9688f39d",
+            "710ac49e9fbfa9fee51e4c08c85fd51f1961b521fb3ba0f5280e5bde540c938c"
+          ],
+          "repetition": 1,
+          "samples_ms": [
+            33.4026,
+            33.426867,
+            33.744297,
+            33.774093
+          ],
+          "seed": 56,
+          "total_resources": 37438,
+          "unpaced_service_ticks_per_second": 29.773455932386028,
+          "veth_interface_counters": [
+            {
+              "coordinator_qdisc_after": [
+                {
+                  "backlog": 0,
+                  "bytes": 15505,
+                  "drops": 0,
+                  "handle": "811b:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 32,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "coordinator_qdisc_before": [
+                {
+                  "backlog": 0,
+                  "bytes": 8211,
+                  "drops": 0,
+                  "handle": "811b:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 20,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "rx_bytes": 9051,
+              "rx_packets": 12,
+              "tx_bytes": 7294,
+              "tx_packets": 12,
+              "worker_qdisc_after": [
+                {
+                  "backlog": 0,
+                  "bytes": 10995,
+                  "drops": 0,
+                  "handle": "811c:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 27,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "worker_qdisc_before": [
+                {
+                  "backlog": 0,
+                  "bytes": 1944,
+                  "drops": 0,
+                  "handle": "811c:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 15,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ]
+            },
+            {
+              "coordinator_qdisc_after": [
+                {
+                  "backlog": 0,
+                  "bytes": 15855,
+                  "drops": 0,
+                  "handle": "811d:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 30,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "coordinator_qdisc_before": [
+                {
+                  "backlog": 0,
+                  "bytes": 8105,
+                  "drops": 0,
+                  "handle": "811d:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 17,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "rx_bytes": 8663,
+              "rx_packets": 12,
+              "tx_bytes": 7750,
+              "tx_packets": 13,
+              "worker_qdisc_after": [
+                {
+                  "backlog": 0,
+                  "bytes": 10597,
+                  "drops": 0,
+                  "handle": "811e:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 27,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "worker_qdisc_before": [
+                {
+                  "backlog": 0,
+                  "bytes": 1934,
+                  "drops": 0,
+                  "handle": "811e:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 15,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ]
+            }
+          ],
+          "worker_count": 2,
+          "worker_metrics": [
+            {
+              "compute_cpu_ms": 5.504589,
+              "cpu": 2,
+              "peak_rss_kib": 21812,
+              "process_cpu_ms": 8.495054,
+              "region_ids": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "compute_cpu_ms": 5.743325,
+              "cpu": 4,
+              "peak_rss_kib": 21744,
+              "process_cpu_ms": 8.907407,
+              "region_ids": [
+                4,
+                5,
+                6,
+                7
+              ]
+            }
+          ]
+        },
+        {
+          "accepted_ticks": 4,
+          "agent_count": 512,
+          "all_tick_roots_match_serial": true,
+          "all_workers_exited": true,
+          "application_frame_bytes": [
+            {
+              "rx_bytes": 7561,
+              "tx_bytes": 6407
+            },
+            {
+              "rx_bytes": 7438,
+              "tx_bytes": 6663
+            },
+            {
+              "rx_bytes": 7439,
+              "tx_bytes": 6661
+            },
+            {
+              "rx_bytes": 7184,
+              "tx_bytes": 6791
+            }
+          ],
+          "coordinator_cpu_ms": 8.585702,
+          "coordinator_peak_rss_kib": 21684,
+          "cross_region_agents": 2048,
+          "cross_region_resources": 8,
+          "cross_worker_agents": 1024,
+          "cross_worker_resources": 4,
+          "deadline_misses_50ms": 0,
+          "distinct_network_namespaces": 5,
+          "echo_rtt_ms": [
+            [
+              10.200537,
+              10.174507,
+              10.199134,
+              11.425665,
+              10.28151,
+              10.193724
+            ],
+            [
+              10.226286,
+              10.282142,
+              10.250711,
+              10.266281,
+              10.237317,
+              10.240472
+            ],
+            [
+              10.324181,
+              10.271622,
+              11.165943,
+              10.346393,
+              10.354088,
+              10.342255
+            ],
+            [
+              10.298382,
+              10.283503,
+              10.393994,
+              10.434971,
+              10.30764,
+              10.329401
+            ]
+          ],
+          "final_full_state_matches": true,
+          "final_root": "710ac49e9fbfa9fee51e4c08c85fd51f1961b521fb3ba0f5280e5bde540c938c",
+          "max_ms": 33.643506,
+          "mean_ms": 33.2737085,
+          "mode": "near",
+          "one_way_netem_delay_ms": 5,
+          "p50_ms": 33.227819,
+          "p95_ms": 33.643506,
+          "p99_ms": 33.643506,
+          "per_tick_roots": [
+            "b692951ba09a8946f142bfddb552fc70aa1cad7f1646a4ddce953f6323849737",
+            "9e246188e575b8508164984cca3009da7e8b51feeb2ee8e62e886ba871f9e9be",
+            "58dd3c55fc3c94d6ca532ba33d72d3e0302bd34f477e4ab412d05ffc9688f39d",
+            "710ac49e9fbfa9fee51e4c08c85fd51f1961b521fb3ba0f5280e5bde540c938c"
+          ],
+          "repetition": 1,
+          "samples_ms": [
+            32.967717,
+            33.643506,
+            33.255792,
+            33.227819
+          ],
+          "seed": 56,
+          "total_resources": 37438,
+          "unpaced_service_ticks_per_second": 30.053758510266448,
+          "veth_interface_counters": [
+            {
+              "coordinator_qdisc_after": [
+                {
+                  "backlog": 0,
+                  "bytes": 12154,
+                  "drops": 0,
+                  "handle": "811f:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 31,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "coordinator_qdisc_before": [
+                {
+                  "backlog": 0,
+                  "bytes": 4955,
+                  "drops": 0,
+                  "handle": "811f:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 19,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "rx_bytes": 8353,
+              "rx_packets": 12,
+              "tx_bytes": 7199,
+              "tx_packets": 12,
+              "worker_qdisc_after": [
+                {
+                  "backlog": 0,
+                  "bytes": 10053,
+                  "drops": 0,
+                  "handle": "8120:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 26,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "worker_qdisc_before": [
+                {
+                  "backlog": 0,
+                  "bytes": 1700,
+                  "drops": 0,
+                  "handle": "8120:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 14,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ]
+            },
+            {
+              "coordinator_qdisc_after": [
+                {
+                  "backlog": 0,
+                  "bytes": 12485,
+                  "drops": 0,
+                  "handle": "8121:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 31,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "coordinator_qdisc_before": [
+                {
+                  "backlog": 0,
+                  "bytes": 5030,
+                  "drops": 0,
+                  "handle": "8121:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 19,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "rx_bytes": 8230,
+              "rx_packets": 12,
+              "tx_bytes": 7455,
+              "tx_packets": 12,
+              "worker_qdisc_after": [
+                {
+                  "backlog": 0,
+                  "bytes": 9844,
+                  "drops": 0,
+                  "handle": "8122:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 25,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "worker_qdisc_before": [
+                {
+                  "backlog": 0,
+                  "bytes": 1614,
+                  "drops": 0,
+                  "handle": "8122:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 13,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ]
+            },
+            {
+              "coordinator_qdisc_after": [
+                {
+                  "backlog": 0,
+                  "bytes": 12488,
+                  "drops": 0,
+                  "handle": "8123:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 31,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "coordinator_qdisc_before": [
+                {
+                  "backlog": 0,
+                  "bytes": 5035,
+                  "drops": 0,
+                  "handle": "8123:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 19,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "rx_bytes": 8231,
+              "rx_packets": 12,
+              "tx_bytes": 7453,
+              "tx_packets": 12,
+              "worker_qdisc_after": [
+                {
+                  "backlog": 0,
+                  "bytes": 9932,
+                  "drops": 0,
+                  "handle": "8124:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 26,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "worker_qdisc_before": [
+                {
+                  "backlog": 0,
+                  "bytes": 1701,
+                  "drops": 0,
+                  "handle": "8124:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 14,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ]
+            },
+            {
+              "coordinator_qdisc_after": [
+                {
+                  "backlog": 66,
+                  "bytes": 12427,
+                  "drops": 0,
+                  "handle": "8125:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 28,
+                  "qlen": 1,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "coordinator_qdisc_before": [
+                {
+                  "backlog": 0,
+                  "bytes": 4844,
+                  "drops": 0,
+                  "handle": "8125:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 16,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "rx_bytes": 8066,
+              "rx_packets": 13,
+              "tx_bytes": 7583,
+              "tx_packets": 12,
+              "worker_qdisc_after": [
+                {
+                  "backlog": 0,
+                  "bytes": 9677,
+                  "drops": 0,
+                  "handle": "8126:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 26,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ],
+              "worker_qdisc_before": [
+                {
+                  "backlog": 0,
+                  "bytes": 1611,
+                  "drops": 0,
+                  "handle": "8126:",
+                  "kind": "netem",
+                  "options": {
+                    "delay": {
+                      "correlation": 0,
+                      "delay": 0.005,
+                      "jitter": 0
+                    },
+                    "ecn": false,
+                    "gap": 0,
+                    "limit": 1000
+                  },
+                  "overlimits": 0,
+                  "packets": 13,
+                  "qlen": 0,
+                  "refcnt": 13,
+                  "requeues": 0,
+                  "root": true
+                }
+              ]
+            }
+          ],
+          "worker_count": 4,
+          "worker_metrics": [
+            {
+              "compute_cpu_ms": 2.115089,
+              "cpu": 2,
+              "peak_rss_kib": 21696,
+              "process_cpu_ms": 4.674586,
+              "region_ids": [
+                0,
+                1
+              ]
+            },
+            {
+              "compute_cpu_ms": 2.224231,
+              "cpu": 4,
+              "peak_rss_kib": 21708,
+              "process_cpu_ms": 4.812044,
+              "region_ids": [
+                2,
+                3
+              ]
+            },
+            {
+              "compute_cpu_ms": 2.302198,
+              "cpu": 6,
+              "peak_rss_kib": 21688,
+              "process_cpu_ms": 4.977033,
+              "region_ids": [
+                4,
+                5
+              ]
+            },
+            {
+              "compute_cpu_ms": 2.429245,
+              "cpu": 8,
+              "peak_rss_kib": 21660,
+              "process_cpu_ms": 5.118767,
+              "region_ids": [
+                6,
+                7
+              ]
+            }
+          ]
+        }
+      ],
+      "shape": "boundary"
+    }
+  }
+}

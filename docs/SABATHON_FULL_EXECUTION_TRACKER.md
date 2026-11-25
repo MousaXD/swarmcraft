@@ -585,12 +585,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #58 — Expansion · Missing
 - Work: Build opt-in worker admission and placement based on usable memory, CPU, network path, and region load
 - Acceptance: A newly admitted machine takes real simulation work only when useful. Inadequate capacity scales down safely. Platform limits and heap versus process memory are visible
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (research-only capped reference-runtime placement, not production worker admission or independent-host Minecraft acceptance)
+- Source: [Worker placement design](../research/distributed-simulation/WORKER_PLACEMENT_DESIGN.md); `worker_placement.py`, `placement_lab.py`, `test_worker_placement.py`, `verify_placement_evidence.py`; isolated research runtime and network harness.
+- Evidence: [Report and raw receipts](../research/distributed-simulation/WORKER_PLACEMENT_REPORT.md). Two real delegated Linux experiments with distinct private worker namespaces and actual kernel CPU/memory limits. 208 measured ticks match independent serial roots; selected second worker executed real region compute, identical-cut p95 service time 13.577→9.479 ms and 13.259→8.821 ms. End-to-end checked-loop speedup not demonstrated. Rejected low memory, low CPU, ~51 ms measured RTT and unhelpful clustered-load worker; zero never spawned. Verified stop-all scale-in with smaller cap, same tick/root continuity; three no-fit cases preserved prior cut. Deliberate leaf CPU policy change froze each experiment and refused new generation. 36 research tests; independent receipt replay, 12 altered-evidence negatives and six real static-network regression measurements plus kill/partition tests passed.
+- Remaining / next action: #59 region-aware runtime/ruleset and real player interaction feasibility; production adoption stays gated. No production #57 preference-to-worker enrollment, live migration, independent-host placement or Minecraft compatibility claim. Estimator uses reference-specific heuristics; checked-loop overhead and reference coordinator trust limit the result.
+- External dependency: Reviewed compatible region runtime, authenticated Minecraft clients, separately enrolled physical worker/control domains, durable certified authority and transactions (#60–62), quantitative field acceptance.
+- Commit: Add resource-aware capped reference worker placement; see git history.
 
 ### #59 — Expansion · Missing
 - Work: Choose or build a region-aware runtime. Keep one world identity as different machines simulate different regions

@@ -122,9 +122,14 @@ class Lab:
             self.close()
             raise
 
+    def worker_command(self, slot):
+        return ["unshare", "--net", sys.executable, str(Path(__file__).resolve()), "--worker"]
+
+    def delay_for(self, slot):
+        return self.delay_ms
+
     def spawn(self, slot):
-        script = str(Path(__file__).resolve())
-        process = subprocess.Popen(["unshare", "--net", sys.executable, script, "--worker"],
+        process = subprocess.Popen(self.worker_command(slot),
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                                         "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1"})
@@ -143,11 +148,12 @@ class Lab:
         command(*prefix, "ip", "addr", "add", f"10.56.{slot}.2/30", "dev", "sc56w")
         command(*prefix, "ip", "link", "set", "sc56w", "up")
         command(*prefix, "ip", "link", "set", "lo", "up")
-        if self.delay_ms:
+        delay_ms = self.delay_for(slot)
+        if delay_ms:
             command("tc", "qdisc", "add", "dev", interface, "root", "netem",
-                    "limit", "1000", "delay", f"{self.delay_ms}ms")
+                    "limit", "1000", "delay", f"{delay_ms}ms")
             command(*prefix, "tc", "qdisc", "add", "dev", "sc56w", "root", "netem",
-                    "limit", "1000", "delay", f"{self.delay_ms}ms")
+                    "limit", "1000", "delay", f"{delay_ms}ms")
         key = secrets.token_bytes(KEY_BYTES)
         process.stdin.write(canonical({"bind": f"10.56.{slot}.2", "key": key.hex(),
                                        "cpu": self.cpus[slot]}) + b"\n")

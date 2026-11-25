@@ -284,16 +284,22 @@ class Worker:
     def handle(self, req):
         require(isinstance(req, dict), "invalid request")
         op = req.get("op")
-        if op == "init":
-            fields(req, "op", "version", "regions")
+        if op in ("init", "init_at"):
+            fields(req, "op", "version", "regions", *("tick",) if op == "init_at" else ())
             require(self.phase == "new" and integer(req["version"], VERSION, VERSION), "invalid init")
+            tick = req.get("tick", 0)
+            require(integer(tick, 0, MAX_TICK), "invalid initial tick")
             owned = [read_region(row) for row in sequence(req["regions"], maximum=REGIONS)]
             require(owned and len({r.rid for r in owned}) == len(owned), "duplicate ownership")
             ids = [a[0] for r in owned for a in r.agents]
             require(len(set(ids)) == len(ids), "duplicate initial ID")
             self.regions = {r.rid: r for r in owned}
+            self.tick = tick
             self.phase = "idle"
-            return {"op": "init", "rows": region_roots(self.regions)}
+            reply = {"op": op, "rows": region_roots(self.regions)}
+            if op == "init_at":
+                reply["tick"] = tick
+            return reply
         if op == "ping":
             fields(req, "op")
             return {"op": "pong"}
@@ -428,28 +434,42 @@ class Channel:
 class Coordinator:
     """Static partition with one accepted in-memory cut; no durable quorum."""
 
-    def __init__(self, channels, regions, timeout=3.0):
-        require(len(channels) in (1, 2, 4), "unsupported worker count")
+    def __init__(self, channels, regions, timeout=3.0, *, placement=None, start_tick=0):
+        # Explicit layouts/resume are research-only. The previous static
+        # lab retains its exact init messages and default partition.
+        require(integer(start_tick, 0, MAX_TICK) and len(channels) in (1, 2, 3, 4),
+                "unsupported worker count or start tick")
+        require(set(regions) == set(range(REGIONS))
+                and all(type(r) is int and regions[r].rid == r for r in regions),
+                "incomplete or inconsistent initial world")
+        if placement is None:
+            require(len(channels) in (1, 2, 4) and start_tick == 0, "explicit placement required")
+            placement = {r: r * len(channels) // REGIONS for r in range(REGIONS)}
+        require(set(placement) == set(range(REGIONS))
+                and all(type(r) is int for r in placement)
+                and all(integer(slot, 0, len(channels)-1) for slot in placement.values())
+                and set(placement.values()) == set(range(len(channels))), "invalid placement")
+        ids = [a[0] for region in regions.values() for a in region.agents]
+        require(len(ids) == len(set(ids)) <= MAX_AGENTS, "duplicate or excessive initial agents")
         self.channels = list(channels)
         self.owned = [set() for _ in channels]
-        self.owner = {}
-        for rid in range(REGIONS):
-            slot = rid * len(channels) // REGIONS
-            self.owner[rid] = slot
+        self.owner = dict(placement)
+        for rid, slot in self.owner.items():
             self.owned[slot].add(rid)
-        self.tick = 0
+        self.tick = start_tick
         self.poisoned = False
         self.timeout = timeout
         rows = region_roots(regions)
         self.invariants = totals(rows)
         self.summaries = checked_summaries(rows, range(REGIONS))
-        self.root = world_root(0, rows)
-        replies = self.exchange([{"op": "init", "version": VERSION,
-                                  "regions": [regions[r].wire() for r in sorted(owned)]}
+        self.root = world_root(start_tick, rows)
+        init = {"op": "init_at", "version": VERSION, "tick": start_tick} if start_tick else {
+            "op": "init", "version": VERSION}
+        replies = self.exchange([{**init, "regions": [regions[r].wire() for r in sorted(owned)]}
                                  for owned in self.owned], time.monotonic() + timeout)
         for slot, reply in enumerate(replies):
-            fields(reply, "op", "rows")
-            require(reply["op"] == "init", "unexpected init receipt")
+            fields(reply, "op", "rows", *("tick",) if start_tick else ())
+            require(reply["op"] == init["op"] and reply.get("tick", 0) == start_tick, "unexpected init receipt")
             require(checked_summaries(reply["rows"], self.owned[slot]) ==
                     {r: self.summaries[r] for r in self.owned[slot]}, "initial state mismatch")
 

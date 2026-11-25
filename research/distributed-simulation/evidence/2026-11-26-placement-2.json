@@ -1,0 +1,2366 @@
+{
+  "classification": "DELEGATED_KERNEL_PLACEMENT_CUSTOM_REFERENCE_NOT_MINECRAFT_NOT_MULTI_HOST",
+  "comparison": {
+    "identical_start_and_end_roots": true,
+    "not_a_sustained_gameplay_benchmark": true,
+    "observed_p50_gain_percent": 43.29500913990812,
+    "observed_p95_gain_percent": 33.469846702641014,
+    "one_worker_p50_ms": 11.589285,
+    "one_worker_p95_ms": 13.259263,
+    "two_worker_p50_ms": 6.571703,
+    "two_worker_p95_ms": 8.821408
+  },
+  "completed": true,
+  "hardware": {
+    "actual_kernel_caps": true,
+    "coordinator_cpu": 0,
+    "physical_machine_count": 1,
+    "platform": "linux",
+    "worker_cpus": [
+      2,
+      4,
+      6,
+      8
+    ]
+  },
+  "policy_fault": {
+    "all_workers_exited": true,
+    "decision": {
+      "best_scores_by_worker_count": {
+        "1": 2508
+      },
+      "plan": {
+        "allocations": {
+          "0": {
+            "estimated_cpu_us": 2124,
+            "estimated_memory_bytes": 50597888,
+            "regions": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7
+            ]
+          }
+        },
+        "estimated_boundary_events": 0,
+        "owner_by_region": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "score_us": 2508
+      },
+      "reasons": {
+        "0": "admitted_for_experiment",
+        "1": "player_only",
+        "2": "player_only",
+        "3": "player_only"
+      }
+    },
+    "decision_ns": 40385397811816,
+    "future_generation_refused": true,
+    "injected_leaf_cpu_change": true,
+    "last_verified_lab_root": "38a716aef581d19dcc9efae6f83b833116092f807f13381593b108f426bed3d0",
+    "last_verified_lab_tick": 1,
+    "load": [
+      {
+        "agents": 32,
+        "cpu_us": 264,
+        "left": 0,
+        "memory_bytes": 2129920,
+        "region": 0,
+        "right": 0
+      },
+      {
+        "agents": 32,
+        "cpu_us": 264,
+        "left": 0,
+        "memory_bytes": 2130944,
+        "region": 1,
+        "right": 0
+      },
+      {
+        "agents": 32,
+        "cpu_us": 267,
+        "left": 1,
+        "memory_bytes": 2129920,
+        "region": 2,
+        "right": 0
+      },
+      {
+        "agents": 32,
+        "cpu_us": 267,
+        "left": 0,
+        "memory_bytes": 2129920,
+        "region": 3,
+        "right": 1
+      },
+      {
+        "agents": 32,
+        "cpu_us": 267,
+        "left": 0,
+        "memory_bytes": 2130944,
+        "region": 4,
+        "right": 1
+      },
+      {
+        "agents": 32,
+        "cpu_us": 264,
+        "left": 0,
+        "memory_bytes": 2130944,
+        "region": 5,
+        "right": 0
+      },
+      {
+        "agents": 32,
+        "cpu_us": 264,
+        "left": 0,
+        "memory_bytes": 2130944,
+        "region": 6,
+        "right": 0
+      },
+      {
+        "agents": 32,
+        "cpu_us": 267,
+        "left": 1,
+        "memory_bytes": 2129920,
+        "region": 7,
+        "right": 0
+      }
+    ],
+    "machine": {
+      "available_memory_bytes": 4761395200,
+      "coordinator_cpu_reserve_millicores": 1000,
+      "effective_cpu_millicores": 12000,
+      "machine_memory_reserve_bytes": 1073741824
+    },
+    "offers": [
+      {
+        "cpu_millicores": 1000,
+        "process_memory_mib": 96,
+        "revision": 1,
+        "slot": 0
+      },
+      {
+        "cpu_millicores": 0,
+        "process_memory_mib": 0,
+        "revision": 1,
+        "slot": 1
+      },
+      {
+        "cpu_millicores": 0,
+        "process_memory_mib": 0,
+        "revision": 1,
+        "slot": 2
+      },
+      {
+        "cpu_millicores": 0,
+        "process_memory_mib": 0,
+        "revision": 1,
+        "slot": 3
+      }
+    ],
+    "probe_only_slots_exited_before_init": [],
+    "probes": {
+      "0": {
+        "coordinator_netem_packets": 0,
+        "echo_rtt_ms": [
+          0.127441,
+          0.095471,
+          0.07927,
+          0.076736,
+          0.07404,
+          0.071695
+        ],
+        "kernel": {
+          "accounting": "linux_cgroup_v2_process_charges",
+          "cpu_usage_usec": 52379,
+          "effective_cpu_millicores": 1000,
+          "java_heap_mib": null,
+          "kernel_memory_current_bytes": 11624448,
+          "kernel_memory_high_bytes": 90595328,
+          "kernel_memory_max_bytes": 100663296,
+          "kernel_memory_peak_bytes": 11624448,
+          "memory_oom_events": 0,
+          "memory_oom_kills": 0,
+          "throttled_periods": 0
+        },
+        "one_way_netem_delay_ms": 0,
+        "pre_admission_phase": "new",
+        "sample": {
+          "effective_cpu_millicores": 1000,
+          "observed_ns": 40385386525415,
+          "revision": 1,
+          "rtt_us": 128,
+          "slot": 0,
+          "usable_memory_bytes": 90595328,
+          "verified_enforcement": true
+        },
+        "veth_rx_bytes": 1281,
+        "veth_tx_bytes": 1324,
+        "worker_netem_packets": 0
+      }
+    },
+    "requested_ticks": 4,
+    "spawned_slots": [
+      0
+    ],
+    "stage_export_refused": true,
+    "start_root": "30c298af302aa1c51c53be2985ae9861badeb65c9b08bdb291b6c14e1191957f",
+    "start_tick": 0
+  },
+  "stages": {
+    "all_player_only": {
+      "accepted_ticks": 0,
+      "all_workers_exited": true,
+      "decision": {
+        "best_scores_by_worker_count": {},
+        "plan": null,
+        "reasons": {
+          "0": "player_only",
+          "1": "player_only",
+          "2": "player_only",
+          "3": "player_only"
+        }
+      },
+      "decision_ns": 40384420057748,
+      "end_root": "39cda156bc8a8666101aeec3032d6e075f39719d579eb46812f7def95f01fd7a",
+      "end_tick": 56,
+      "last_verified_lab_root": "39cda156bc8a8666101aeec3032d6e075f39719d579eb46812f7def95f01fd7a",
+      "last_verified_lab_tick": 56,
+      "load": [
+        {
+          "agents": 2048,
+          "cpu_us": 4398,
+          "left": 15,
+          "memory_bytes": 4227072,
+          "region": 0,
+          "right": 19
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4377,
+          "left": 14,
+          "memory_bytes": 4230144,
+          "region": 1,
+          "right": 13
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4407,
+          "left": 16,
+          "memory_bytes": 4221952,
+          "region": 2,
+          "right": 21
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4374,
+          "left": 14,
+          "memory_bytes": 4229120,
+          "region": 3,
+          "right": 12
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4386,
+          "left": 13,
+          "memory_bytes": 4220928,
+          "region": 4,
+          "right": 17
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4374,
+          "left": 14,
+          "memory_bytes": 4229120,
+          "region": 5,
+          "right": 12
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4389,
+          "left": 17,
+          "memory_bytes": 4224000,
+          "region": 6,
+          "right": 14
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4401,
+          "left": 17,
+          "memory_bytes": 4224000,
+          "region": 7,
+          "right": 18
+        }
+      ],
+      "offers": [
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 5,
+          "slot": 0
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 3,
+          "slot": 1
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 3,
+          "slot": 2
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 3,
+          "slot": 3
+        }
+      ],
+      "probes": {},
+      "requested_ticks": 8,
+      "spawned_slots": [],
+      "start_root": "39cda156bc8a8666101aeec3032d6e075f39719d579eb46812f7def95f01fd7a",
+      "start_tick": 56,
+      "worker_metrics": {}
+    },
+    "clustered": {
+      "accepted_ticks": 16,
+      "all_workers_exited": true,
+      "checked_tick_loop_wall_ms": 551.742893,
+      "cross_worker_agents": 0,
+      "deadline_misses_50ms": 0,
+      "decision": {
+        "best_scores_by_worker_count": {
+          "1": 34695,
+          "2": 29355
+        },
+        "plan": {
+          "allocations": {
+            "1": {
+              "estimated_cpu_us": 34368,
+              "estimated_memory_bytes": 67108864,
+              "regions": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7
+              ]
+            }
+          },
+          "estimated_boundary_events": 0,
+          "owner_by_region": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1
+          ],
+          "score_us": 34695
+        },
+        "reasons": {
+          "0": "no_useful_feasible_placement",
+          "1": "admitted_for_experiment",
+          "2": "player_only",
+          "3": "player_only"
+        }
+      },
+      "decision_ns": 40384658939809,
+      "end_root": "843bee3fbb149b7420d00dd3b467ae4b06d5d6da84a1f29fe93d14c03678c2bb",
+      "end_tick": 16,
+      "full_state_matches_serial": true,
+      "last_verified_lab_root": "843bee3fbb149b7420d00dd3b467ae4b06d5d6da84a1f29fe93d14c03678c2bb",
+      "last_verified_lab_tick": 16,
+      "load": [
+        {
+          "agents": 13926,
+          "cpu_us": 28052,
+          "left": 0,
+          "memory_bytes": 16357376,
+          "region": 0,
+          "right": 0
+        },
+        {
+          "agents": 351,
+          "cpu_us": 902,
+          "left": 0,
+          "memory_bytes": 2456576,
+          "region": 1,
+          "right": 0
+        },
+        {
+          "agents": 351,
+          "cpu_us": 902,
+          "left": 0,
+          "memory_bytes": 2456576,
+          "region": 2,
+          "right": 0
+        },
+        {
+          "agents": 351,
+          "cpu_us": 902,
+          "left": 0,
+          "memory_bytes": 2456576,
+          "region": 3,
+          "right": 0
+        },
+        {
+          "agents": 352,
+          "cpu_us": 904,
+          "left": 0,
+          "memory_bytes": 2457600,
+          "region": 4,
+          "right": 0
+        },
+        {
+          "agents": 351,
+          "cpu_us": 902,
+          "left": 0,
+          "memory_bytes": 2456576,
+          "region": 5,
+          "right": 0
+        },
+        {
+          "agents": 351,
+          "cpu_us": 902,
+          "left": 0,
+          "memory_bytes": 2456576,
+          "region": 6,
+          "right": 0
+        },
+        {
+          "agents": 351,
+          "cpu_us": 902,
+          "left": 0,
+          "memory_bytes": 2456576,
+          "region": 7,
+          "right": 0
+        }
+      ],
+      "machine": {
+        "available_memory_bytes": 4767088640,
+        "coordinator_cpu_reserve_millicores": 1000,
+        "effective_cpu_millicores": 12000,
+        "machine_memory_reserve_bytes": 1073741824
+      },
+      "max_estimated_tick_us": 35049,
+      "max_ms": 12.708712,
+      "mean_ms": 10.7822706875,
+      "minimum_shared_headroom_bytes": 4653543424,
+      "offers": [
+        {
+          "cpu_millicores": 1000,
+          "process_memory_mib": 96,
+          "revision": 1,
+          "slot": 0
+        },
+        {
+          "cpu_millicores": 1000,
+          "process_memory_mib": 96,
+          "revision": 1,
+          "slot": 1
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 1,
+          "slot": 2
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 1,
+          "slot": 3
+        }
+      ],
+      "p50_ms": 10.565788,
+      "p95_ms": 12.708712,
+      "p99_ms": 12.708712,
+      "per_tick_roots": [
+        "830e1c24edc7b2542e5b84be10f9f0481761134f5e9c04e8deb757b945d542a7",
+        "ae423b864219633a5f65059c7df1be79d325b39b8ba70744d39aff172ac450a3",
+        "5f7dea2daa5e80a24b60eb54304e534c30753a2271a4ad6636f4d43876d012cd",
+        "7990468ab84c90ae01906b428190a23b6b6985ea8c79a51a2ade91f10df8d4ce",
+        "112214b4882d088ab0ac12d99917a84ead1d6bf899c63195ba926b8a3e280653",
+        "bbb51aefc041ffeefb07c0b8f4a837f07f4baf80805e46e298e2649b69e55554",
+        "5c9ec2effaa06815a2bb24f2ff1824027863119aa95b72b753ac423dff924eb2",
+        "42adbd3a23d70890f72a7416c46628ff6fe4bd351749cea1a36039adbf5bc510",
+        "9d8bef58eefe51215cb628f21f10a647da3e9db2daa70cf0287ac3779bbeafd6",
+        "23461e53a9adc28ec93eeccd276e34d68f9a23e90d4defc95acbf97af1430491",
+        "57a2656741896751e4787e092a9ca872e9273d17c12313280567a38cfc7800e4",
+        "45f4488a5608add11e6392f094d6f9a6b36e903c25e9f9336fc643437478e638",
+        "25b36dea990de37c0da3b79980782302ed16b60a1ce80b7a5af6497600ab5f05",
+        "fbbf00c90c5f4b53a8f0c5be954ae1ea6ebdac248cead618ef10181f947ebd1d",
+        "e4e2f92f63098941c1b9511e2bbd0e998d5a2f3e2a4401acd3aca5605bc949cf",
+        "843bee3fbb149b7420d00dd3b467ae4b06d5d6da84a1f29fe93d14c03678c2bb"
+      ],
+      "probe_only_slots_exited_before_init": [
+        0
+      ],
+      "probes": {
+        "0": {
+          "coordinator_netem_packets": 0,
+          "echo_rtt_ms": [
+            0.432488,
+            0.12711,
+            0.179981,
+            0.151497,
+            0.153601,
+            0.377945
+          ],
+          "kernel": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 50003,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 11563008,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 11563008,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "one_way_netem_delay_ms": 0,
+          "pre_admission_phase": "new",
+          "sample": {
+            "effective_cpu_millicores": 1000,
+            "observed_ns": 40384636036771,
+            "revision": 1,
+            "rtt_us": 433,
+            "slot": 0,
+            "usable_memory_bytes": 90595328,
+            "verified_enforcement": true
+          },
+          "veth_rx_bytes": 1367,
+          "veth_tx_bytes": 1410,
+          "worker_netem_packets": 0
+        },
+        "1": {
+          "coordinator_netem_packets": 0,
+          "echo_rtt_ms": [
+            0.108215,
+            0.090882,
+            0.086394,
+            0.084019,
+            0.081404,
+            0.091974
+          ],
+          "kernel": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 48008,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 11563008,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 11563008,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "one_way_netem_delay_ms": 0,
+          "pre_admission_phase": "new",
+          "sample": {
+            "effective_cpu_millicores": 1000,
+            "observed_ns": 40384639016278,
+            "revision": 1,
+            "rtt_us": 109,
+            "slot": 1,
+            "usable_memory_bytes": 90595328,
+            "verified_enforcement": true
+          },
+          "veth_rx_bytes": 1281,
+          "veth_tx_bytes": 1324,
+          "worker_netem_packets": 0
+        }
+      },
+      "requested_ticks": 16,
+      "samples_ms": [
+        10.960996,
+        10.599161,
+        10.565788,
+        12.708712,
+        10.41352,
+        10.989049,
+        10.374166,
+        10.917083,
+        10.710031,
+        10.536362,
+        10.464065,
+        10.555288,
+        11.215717,
+        10.716523,
+        10.473093,
+        10.316777
+      ],
+      "spawned_slots": [
+        0,
+        1
+      ],
+      "start_root": "6c780dcb2de3353e5c8c0407176e3425edbc85683851c469dc51ea8b81d080ce",
+      "start_tick": 0,
+      "unpaced_service_ticks_per_second": 92.7448428056356,
+      "worker_metrics": {
+        "1": {
+          "compute_cpu_us": 155411.759,
+          "frame_rx_bytes": 231407,
+          "frame_tx_bytes": 7566,
+          "kernel_after": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 238336,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 16211968,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 16478208,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "kernel_before": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 68109,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 15245312,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 15732736,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "peak_rss_kib": 36820,
+          "process_cpu_us": 170170.033,
+          "regions": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        }
+      }
+    },
+    "cpu_blocked": {
+      "accepted_ticks": 0,
+      "all_workers_exited": true,
+      "decision": {
+        "best_scores_by_worker_count": {},
+        "plan": null,
+        "reasons": {
+          "0": "no_complete_feasible_placement",
+          "1": "player_only",
+          "2": "player_only",
+          "3": "player_only"
+        }
+      },
+      "decision_ns": 40384393992990,
+      "end_root": "39cda156bc8a8666101aeec3032d6e075f39719d579eb46812f7def95f01fd7a",
+      "end_tick": 56,
+      "last_verified_lab_root": "39cda156bc8a8666101aeec3032d6e075f39719d579eb46812f7def95f01fd7a",
+      "last_verified_lab_tick": 56,
+      "load": [
+        {
+          "agents": 2048,
+          "cpu_us": 4398,
+          "left": 15,
+          "memory_bytes": 4227072,
+          "region": 0,
+          "right": 19
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4377,
+          "left": 14,
+          "memory_bytes": 4230144,
+          "region": 1,
+          "right": 13
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4407,
+          "left": 16,
+          "memory_bytes": 4221952,
+          "region": 2,
+          "right": 21
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4374,
+          "left": 14,
+          "memory_bytes": 4229120,
+          "region": 3,
+          "right": 12
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4386,
+          "left": 13,
+          "memory_bytes": 4220928,
+          "region": 4,
+          "right": 17
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4374,
+          "left": 14,
+          "memory_bytes": 4229120,
+          "region": 5,
+          "right": 12
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4389,
+          "left": 17,
+          "memory_bytes": 4224000,
+          "region": 6,
+          "right": 14
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4401,
+          "left": 17,
+          "memory_bytes": 4224000,
+          "region": 7,
+          "right": 18
+        }
+      ],
+      "machine": {
+        "available_memory_bytes": 4755685376,
+        "coordinator_cpu_reserve_millicores": 1000,
+        "effective_cpu_millicores": 12000,
+        "machine_memory_reserve_bytes": 1073741824
+      },
+      "offers": [
+        {
+          "cpu_millicores": 250,
+          "process_memory_mib": 96,
+          "revision": 4,
+          "slot": 0
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 3,
+          "slot": 1
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 3,
+          "slot": 2
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 3,
+          "slot": 3
+        }
+      ],
+      "probe_only_slots_exited_before_init": [
+        0
+      ],
+      "probes": {
+        "0": {
+          "coordinator_netem_packets": 0,
+          "echo_rtt_ms": [
+            0.096914,
+            0.082215,
+            0.076785,
+            0.075483,
+            0.075052,
+            0.071435
+          ],
+          "kernel": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 50508,
+            "effective_cpu_millicores": 250,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 11558912,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 11558912,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 1
+          },
+          "one_way_netem_delay_ms": 0,
+          "pre_admission_phase": "new",
+          "sample": {
+            "effective_cpu_millicores": 250,
+            "observed_ns": 40384383722270,
+            "revision": 4,
+            "rtt_us": 97,
+            "slot": 0,
+            "usable_memory_bytes": 90595328,
+            "verified_enforcement": true
+          },
+          "veth_rx_bytes": 1281,
+          "veth_tx_bytes": 1324,
+          "worker_netem_packets": 0
+        }
+      },
+      "requested_ticks": 8,
+      "spawned_slots": [
+        0
+      ],
+      "start_root": "39cda156bc8a8666101aeec3032d6e075f39719d579eb46812f7def95f01fd7a",
+      "start_tick": 56,
+      "worker_metrics": {}
+    },
+    "memory_blocked": {
+      "accepted_ticks": 0,
+      "all_workers_exited": true,
+      "decision": {
+        "best_scores_by_worker_count": {},
+        "plan": null,
+        "reasons": {
+          "0": "insufficient_memory",
+          "1": "player_only",
+          "2": "player_only",
+          "3": "player_only"
+        }
+      },
+      "decision_ns": 40384195452286,
+      "end_root": "39cda156bc8a8666101aeec3032d6e075f39719d579eb46812f7def95f01fd7a",
+      "end_tick": 56,
+      "last_verified_lab_root": "39cda156bc8a8666101aeec3032d6e075f39719d579eb46812f7def95f01fd7a",
+      "last_verified_lab_tick": 56,
+      "load": [
+        {
+          "agents": 2048,
+          "cpu_us": 4398,
+          "left": 15,
+          "memory_bytes": 4227072,
+          "region": 0,
+          "right": 19
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4377,
+          "left": 14,
+          "memory_bytes": 4230144,
+          "region": 1,
+          "right": 13
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4407,
+          "left": 16,
+          "memory_bytes": 4221952,
+          "region": 2,
+          "right": 21
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4374,
+          "left": 14,
+          "memory_bytes": 4229120,
+          "region": 3,
+          "right": 12
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4386,
+          "left": 13,
+          "memory_bytes": 4220928,
+          "region": 4,
+          "right": 17
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4374,
+          "left": 14,
+          "memory_bytes": 4229120,
+          "region": 5,
+          "right": 12
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4389,
+          "left": 17,
+          "memory_bytes": 4224000,
+          "region": 6,
+          "right": 14
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4401,
+          "left": 17,
+          "memory_bytes": 4224000,
+          "region": 7,
+          "right": 18
+        }
+      ],
+      "machine": {
+        "available_memory_bytes": 4755951616,
+        "coordinator_cpu_reserve_millicores": 1000,
+        "effective_cpu_millicores": 12000,
+        "machine_memory_reserve_bytes": 1073741824
+      },
+      "offers": [
+        {
+          "cpu_millicores": 1000,
+          "process_memory_mib": 32,
+          "revision": 3,
+          "slot": 0
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 3,
+          "slot": 1
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 3,
+          "slot": 2
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 3,
+          "slot": 3
+        }
+      ],
+      "probe_only_slots_exited_before_init": [
+        0
+      ],
+      "probes": {
+        "0": {
+          "coordinator_netem_packets": 0,
+          "echo_rtt_ms": [
+            0.111,
+            0.092565,
+            0.09535,
+            0.090902,
+            0.081594,
+            0.077717
+          ],
+          "kernel": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 48597,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 11440128,
+            "kernel_memory_high_bytes": 30195712,
+            "kernel_memory_max_bytes": 33554432,
+            "kernel_memory_peak_bytes": 11440128,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "one_way_netem_delay_ms": 0,
+          "pre_admission_phase": "new",
+          "sample": {
+            "effective_cpu_millicores": 1000,
+            "observed_ns": 40384184259812,
+            "revision": 3,
+            "rtt_us": 111,
+            "slot": 0,
+            "usable_memory_bytes": 25165824,
+            "verified_enforcement": true
+          },
+          "veth_rx_bytes": 1281,
+          "veth_tx_bytes": 1410,
+          "worker_netem_packets": 0
+        }
+      },
+      "requested_ticks": 8,
+      "spawned_slots": [
+        0
+      ],
+      "start_root": "39cda156bc8a8666101aeec3032d6e075f39719d579eb46812f7def95f01fd7a",
+      "start_tick": 56,
+      "worker_metrics": {}
+    },
+    "one_worker": {
+      "accepted_ticks": 12,
+      "all_workers_exited": true,
+      "checked_tick_loop_wall_ms": 445.866919,
+      "cross_worker_agents": 0,
+      "deadline_misses_50ms": 0,
+      "decision": {
+        "best_scores_by_worker_count": {
+          "1": 35475
+        },
+        "plan": {
+          "allocations": {
+            "0": {
+              "estimated_cpu_us": 35106,
+              "estimated_memory_bytes": 67360768,
+              "regions": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7
+              ]
+            }
+          },
+          "estimated_boundary_events": 0,
+          "owner_by_region": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "score_us": 35475
+        },
+        "reasons": {
+          "0": "admitted_for_experiment",
+          "1": "player_only",
+          "2": "player_only",
+          "3": "player_only"
+        }
+      },
+      "decision_ns": 40379067049313,
+      "end_root": "dd8561c9f54f92444beacc487d446c7713273e51f9f906b3d2202ae20c788e84",
+      "end_tick": 12,
+      "full_state_matches_serial": true,
+      "last_verified_lab_root": "dd8561c9f54f92444beacc487d446c7713273e51f9f906b3d2202ae20c788e84",
+      "last_verified_lab_tick": 12,
+      "load": [
+        {
+          "agents": 2048,
+          "cpu_us": 4398,
+          "left": 15,
+          "memory_bytes": 4227072,
+          "region": 0,
+          "right": 19
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4377,
+          "left": 14,
+          "memory_bytes": 4230144,
+          "region": 1,
+          "right": 13
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4407,
+          "left": 16,
+          "memory_bytes": 4221952,
+          "region": 2,
+          "right": 21
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4374,
+          "left": 14,
+          "memory_bytes": 4229120,
+          "region": 3,
+          "right": 12
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4386,
+          "left": 13,
+          "memory_bytes": 4220928,
+          "region": 4,
+          "right": 17
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4374,
+          "left": 14,
+          "memory_bytes": 4229120,
+          "region": 5,
+          "right": 12
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4389,
+          "left": 17,
+          "memory_bytes": 4224000,
+          "region": 6,
+          "right": 14
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4401,
+          "left": 17,
+          "memory_bytes": 4224000,
+          "region": 7,
+          "right": 18
+        }
+      ],
+      "machine": {
+        "available_memory_bytes": 4739985408,
+        "coordinator_cpu_reserve_millicores": 1000,
+        "effective_cpu_millicores": 12000,
+        "machine_memory_reserve_bytes": 1073741824
+      },
+      "max_estimated_tick_us": 35475,
+      "max_ms": 13.359362,
+      "mean_ms": 11.749437166666667,
+      "minimum_shared_headroom_bytes": 4650889216,
+      "offers": [
+        {
+          "cpu_millicores": 1000,
+          "process_memory_mib": 96,
+          "revision": 1,
+          "slot": 0
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 1,
+          "slot": 1
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 1,
+          "slot": 2
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 1,
+          "slot": 3
+        }
+      ],
+      "p50_ms": 11.628398,
+      "p95_ms": 13.359362,
+      "p99_ms": 13.359362,
+      "per_tick_roots": [
+        "9280a5326a06e6e9154d6c7b61278a371bf1cd026d94d19c4df29f6bb7f590c0",
+        "756428d3b2c40375c124151c45e1cc12dd7593d554b4461cc42fd40b73e757a4",
+        "5dd380115b6dba06090f41490fdfa287db057467c809896fa293341e07693d9c",
+        "ff80abbcc47da29f8cfec134aa68d934679dd40ce0a1423110c231aeff4c765d",
+        "53a7a156dffa9fe5ec5c7d312a5528cd1de33beb70047f85b430a3750f89de3e",
+        "82c72ee58d07f96ae9e30edd23610058f04637b3574c28d05ec2579c997a182c",
+        "a7c94430b0e904c8f57e3280691791f0aa90535dbe539dc9cef3310718b06175",
+        "5904763a3ec9903244e80f80b6f6095037e81eaf0637cb77cb8d7b954b5a4e71",
+        "2ad599be7e415690683847d48f58224211bdf1045b52321c251d328f42c19ce3",
+        "54d63599272e4eff6bf6eb732101cd9bd658920d9eca4f6e43e96da2bf37fe1b",
+        "980144b6e0540edcba705a5a981dc2985937017c49b4d2dccd5263d5395c7e45",
+        "dd8561c9f54f92444beacc487d446c7713273e51f9f906b3d2202ae20c788e84"
+      ],
+      "probe_only_slots_exited_before_init": [],
+      "probes": {
+        "0": {
+          "coordinator_netem_packets": 0,
+          "echo_rtt_ms": [
+            0.106281,
+            0.086253,
+            0.09536,
+            0.085392,
+            0.122943,
+            0.091473
+          ],
+          "kernel": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 49334,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 11567104,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 11567104,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "one_way_netem_delay_ms": 0,
+          "pre_admission_phase": "new",
+          "sample": {
+            "effective_cpu_millicores": 1000,
+            "observed_ns": 40379056335375,
+            "revision": 1,
+            "rtt_us": 123,
+            "slot": 0,
+            "usable_memory_bytes": 90595328,
+            "verified_enforcement": true
+          },
+          "veth_rx_bytes": 1281,
+          "veth_tx_bytes": 1324,
+          "worker_netem_packets": 0
+        }
+      },
+      "requested_ticks": 12,
+      "samples_ms": [
+        11.133301,
+        11.848254,
+        11.759737,
+        13.359362,
+        11.567252,
+        11.584355,
+        11.353198,
+        11.155263,
+        11.887358,
+        11.755529,
+        11.961239,
+        11.628398
+      ],
+      "spawned_slots": [
+        0
+      ],
+      "start_root": "de9c9d9de9300d1de8e0cc5dea8b6cf1c28e963da97767c2e353dc4d1889a08c",
+      "start_tick": 0,
+      "unpaced_service_ticks_per_second": 85.1104598301113,
+      "worker_metrics": {
+        "0": {
+          "compute_cpu_us": 127269.63,
+          "frame_rx_bytes": 237592,
+          "frame_tx_bytes": 5688,
+          "kernel_after": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 209386,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 16793600,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 16912384,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "kernel_before": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 68915,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 15716352,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 16244736,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "peak_rss_kib": 27040,
+          "process_cpu_us": 140437.183,
+          "regions": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        }
+      }
+    },
+    "one_worker_comparison": {
+      "accepted_ticks": 32,
+      "all_workers_exited": true,
+      "checked_tick_loop_wall_ms": 1174.179069,
+      "cross_worker_agents": 0,
+      "deadline_misses_50ms": 0,
+      "decision": {
+        "best_scores_by_worker_count": {
+          "1": 35436
+        },
+        "plan": {
+          "allocations": {
+            "0": {
+              "estimated_cpu_us": 35106,
+              "estimated_memory_bytes": 67360768,
+              "regions": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7
+              ]
+            }
+          },
+          "estimated_boundary_events": 0,
+          "owner_by_region": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "score_us": 35436
+        },
+        "reasons": {
+          "0": "admitted_for_experiment",
+          "1": "player_only",
+          "2": "player_only",
+          "3": "player_only"
+        }
+      },
+      "decision_ns": 40379676430244,
+      "end_root": "95c62403606f15d4f68a6dc71bafa3154f7351ea3514c8c54fb33fd7f11e3d60",
+      "end_tick": 44,
+      "full_state_matches_serial": true,
+      "last_verified_lab_root": "95c62403606f15d4f68a6dc71bafa3154f7351ea3514c8c54fb33fd7f11e3d60",
+      "last_verified_lab_tick": 44,
+      "load": [
+        {
+          "agents": 2048,
+          "cpu_us": 4398,
+          "left": 15,
+          "memory_bytes": 4227072,
+          "region": 0,
+          "right": 19
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4377,
+          "left": 14,
+          "memory_bytes": 4230144,
+          "region": 1,
+          "right": 13
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4407,
+          "left": 16,
+          "memory_bytes": 4221952,
+          "region": 2,
+          "right": 21
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4374,
+          "left": 14,
+          "memory_bytes": 4229120,
+          "region": 3,
+          "right": 12
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4386,
+          "left": 13,
+          "memory_bytes": 4220928,
+          "region": 4,
+          "right": 17
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4374,
+          "left": 14,
+          "memory_bytes": 4229120,
+          "region": 5,
+          "right": 12
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4389,
+          "left": 17,
+          "memory_bytes": 4224000,
+          "region": 6,
+          "right": 14
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4401,
+          "left": 17,
+          "memory_bytes": 4224000,
+          "region": 7,
+          "right": 18
+        }
+      ],
+      "machine": {
+        "available_memory_bytes": 4755304448,
+        "coordinator_cpu_reserve_millicores": 1000,
+        "effective_cpu_millicores": 12000,
+        "machine_memory_reserve_bytes": 1073741824
+      },
+      "max_estimated_tick_us": 35436,
+      "max_ms": 13.381515,
+      "mean_ms": 11.70934828125,
+      "minimum_shared_headroom_bytes": 4656095232,
+      "offers": [
+        {
+          "cpu_millicores": 1000,
+          "process_memory_mib": 96,
+          "revision": 1,
+          "slot": 0
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 1,
+          "slot": 1
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 1,
+          "slot": 2
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 1,
+          "slot": 3
+        }
+      ],
+      "p50_ms": 11.589285,
+      "p95_ms": 13.259263,
+      "p99_ms": 13.381515,
+      "per_tick_roots": [
+        "a6a8f315fb368cca08af3f6fdb8a523d51e37e8da2e239ce2129fbb7bcadd500",
+        "63f11209efd9ee715127fef4ba072e945c412027d49443facdaba0a2e61f5112",
+        "b6b73c6a4b4ab5b8840926a6d2438c5a6fc8ccb5b34ee623eea5e934f07c915d",
+        "59dfd3dc595731a208461028d5c298cdab489d140ca8fd8d91bf11a4c20caf2f",
+        "5ef60fac80b0dc8dcd42b706e90aa630dfe83e118da8bbdce6e1953859bc14f3",
+        "850941fec1316b7d993c6f82e17b630923727583606126ae7381f7b733e6c7c0",
+        "42ef59c5c32521d024e8d790013e4ebf3c2810c14696cbb3520194b1d4fe34f7",
+        "667e14128a852bb49dfa7779c020fe63da2f6b96edb2412ae2ae6471c9477690",
+        "3fe3f861c5b7bd9cfb895a0b015b175b84aeab20d3bf858be699bdd679995a4f",
+        "97ccbfcaaf7e823ceb3933b5cdcc51d81f0688a93a1107fd9f54f70342f0d25b",
+        "8072b31c904cbaf8db619a9f6c5091f27be57eaa0b1139be57a0e90aa24ee165",
+        "bdb4b2f980d3d31bb3cbe925ae9592c569613f89f8858a30676e3fa4086134c5",
+        "81cef992edd81a400af320c2308a7d7b92be85982d0cbcb99aeb27ab03de66be",
+        "66f557bd54273f957b792c3b5b8faf0e89d76d41f1e1f7b9d6b582b9631aaed4",
+        "57f7af970cc7369a2ab851bf2af117fed77b030c2779fc49f76e05aea4b5d5a2",
+        "06164c01d61d0b969a0d9d759adb148fe922ed9c76cc68775b6753396befc0fd",
+        "2e6eb77eed8402d226fcc03572fb26af07515402acb44eef016ae201083e9dd9",
+        "2bf882b37f1aa0d36703800926f24a60911fb3f6c242371a12abff98f97660cc",
+        "4417e56842d2d8d337489e3c00346a8607a9ea0f0911fa858f8d466fee3af2f7",
+        "1bc9a7823a05dcfde8369c6dd873d9467db9331ae5ce7322cab3b6c1c576b150",
+        "5352ee53a604b6ed8eaca8b2939690265224c6dce6295fb3a87e66c5b1ff4acb",
+        "e6f37742ed10426059c7a2b8f9724743dfdb6302ace59f1f2932845faf542e8f",
+        "f86886bb0b0beff99da40bdc75ad69b02a7cf0d5551b94aa1ef65250d1b5bfc2",
+        "0359f86889c72df477a3c0dead342d475f89409e6c684045c1b55804ee0b4312",
+        "95ddab8581c65f5d3dfc7e4daf47ac8fef71b47bd5549b122005264d5227e5f2",
+        "b0bfda03896d9f5c2ec89c54b1721d3fdff1371981fee365bf94c684eb75ddf9",
+        "8692ea16bfeea35598ee0939f1cae67e2f004fdcf73d173a48871570300615cd",
+        "e0740e5b57d3928d1c1e397c60cef2950674d3e13fb5d112a1ec1f12158a3fa6",
+        "b053a90434b1c6883f380dbaf49cdfe55a290e22dc6bd566e0ccae1cbaf4a9bf",
+        "05cd28dbc07e350d9365f58c9f2ef97c5c9d3e9dfe3397eb3bd190580774d64b",
+        "bd6efb026871ab496985581f16170c1fa140ecbdf527a632d40c2837d4a5ffe2",
+        "95c62403606f15d4f68a6dc71bafa3154f7351ea3514c8c54fb33fd7f11e3d60"
+      ],
+      "probe_only_slots_exited_before_init": [],
+      "probes": {
+        "0": {
+          "coordinator_netem_packets": 0,
+          "echo_rtt_ms": [
+            0.109898,
+            0.102775,
+            0.096222,
+            0.07916,
+            0.074681,
+            0.071115
+          ],
+          "kernel": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 49279,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 11563008,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 11563008,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "one_way_netem_delay_ms": 0,
+          "pre_admission_phase": "new",
+          "sample": {
+            "effective_cpu_millicores": 1000,
+            "observed_ns": 40379665339543,
+            "revision": 1,
+            "rtt_us": 110,
+            "slot": 0,
+            "usable_memory_bytes": 90595328,
+            "verified_enforcement": true
+          },
+          "veth_rx_bytes": 1281,
+          "veth_tx_bytes": 1324,
+          "worker_netem_packets": 0
+        }
+      },
+      "requested_ticks": 32,
+      "samples_ms": [
+        11.437988,
+        11.562644,
+        11.699222,
+        13.259263,
+        11.401158,
+        11.712949,
+        11.334232,
+        11.274388,
+        11.60868,
+        11.61384,
+        11.83546,
+        11.168638,
+        11.018595,
+        11.118013,
+        11.18506,
+        11.439802,
+        11.770006,
+        11.40756,
+        11.839397,
+        11.531535,
+        11.589285,
+        11.73509,
+        12.246798,
+        11.880024,
+        11.570158,
+        11.661681,
+        11.564918,
+        13.381515,
+        11.685858,
+        11.478605,
+        11.836142,
+        12.850641
+      ],
+      "spawned_slots": [
+        0
+      ],
+      "start_root": "dd8561c9f54f92444beacc487d446c7713273e51f9f906b3d2202ae20c788e84",
+      "start_tick": 12,
+      "unpaced_service_ticks_per_second": 85.4018495291736,
+      "worker_metrics": {
+        "0": {
+          "compute_cpu_us": 336373.981,
+          "frame_rx_bytes": 261588,
+          "frame_tx_bytes": 15063,
+          "kernel_after": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 433631,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 16777216,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 16887808,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "kernel_before": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 69021,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 15765504,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 16240640,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "peak_rss_kib": 30340,
+          "process_cpu_us": 364573.665,
+          "regions": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        }
+      }
+    },
+    "scale_in": {
+      "accepted_ticks": 12,
+      "all_workers_exited": true,
+      "checked_tick_loop_wall_ms": 489.750967,
+      "cross_worker_agents": 0,
+      "deadline_misses_50ms": 0,
+      "decision": {
+        "best_scores_by_worker_count": {
+          "1": 35514
+        },
+        "plan": {
+          "allocations": {
+            "0": {
+              "estimated_cpu_us": 35106,
+              "estimated_memory_bytes": 67360768,
+              "regions": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7
+              ]
+            }
+          },
+          "estimated_boundary_events": 0,
+          "owner_by_region": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "score_us": 35514
+        },
+        "reasons": {
+          "0": "admitted_for_experiment",
+          "1": "player_only",
+          "2": "player_only",
+          "3": "player_only"
+        }
+      },
+      "decision_ns": 40383540862280,
+      "end_root": "39cda156bc8a8666101aeec3032d6e075f39719d579eb46812f7def95f01fd7a",
+      "end_tick": 56,
+      "full_state_matches_serial": true,
+      "last_verified_lab_root": "39cda156bc8a8666101aeec3032d6e075f39719d579eb46812f7def95f01fd7a",
+      "last_verified_lab_tick": 56,
+      "load": [
+        {
+          "agents": 2048,
+          "cpu_us": 4398,
+          "left": 15,
+          "memory_bytes": 4227072,
+          "region": 0,
+          "right": 19
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4377,
+          "left": 14,
+          "memory_bytes": 4230144,
+          "region": 1,
+          "right": 13
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4407,
+          "left": 16,
+          "memory_bytes": 4221952,
+          "region": 2,
+          "right": 21
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4374,
+          "left": 14,
+          "memory_bytes": 4229120,
+          "region": 3,
+          "right": 12
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4386,
+          "left": 13,
+          "memory_bytes": 4220928,
+          "region": 4,
+          "right": 17
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4374,
+          "left": 14,
+          "memory_bytes": 4229120,
+          "region": 5,
+          "right": 12
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4389,
+          "left": 17,
+          "memory_bytes": 4224000,
+          "region": 6,
+          "right": 14
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4401,
+          "left": 17,
+          "memory_bytes": 4224000,
+          "region": 7,
+          "right": 18
+        }
+      ],
+      "machine": {
+        "available_memory_bytes": 4761108480,
+        "coordinator_cpu_reserve_millicores": 1000,
+        "effective_cpu_millicores": 12000,
+        "machine_memory_reserve_bytes": 1073741824
+      },
+      "max_estimated_tick_us": 35514,
+      "max_ms": 15.51964,
+      "mean_ms": 12.018893666666667,
+      "minimum_shared_headroom_bytes": 4677128192,
+      "offers": [
+        {
+          "cpu_millicores": 1000,
+          "process_memory_mib": 80,
+          "revision": 2,
+          "slot": 0
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 3,
+          "slot": 1
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 3,
+          "slot": 2
+        },
+        {
+          "cpu_millicores": 0,
+          "process_memory_mib": 0,
+          "revision": 3,
+          "slot": 3
+        }
+      ],
+      "p50_ms": 11.557675,
+      "p95_ms": 15.51964,
+      "p99_ms": 15.51964,
+      "per_tick_roots": [
+        "179097ab6d3b04c2e70937aeae75b7f0d16de090f46894af125a04203c21fd6f",
+        "392361f5ac0ed03dd6220308d9bd3b7e678692e4a3ce00b7fb8a42683b61fc51",
+        "dc7b5a329b89eca53246650d9540ccef7d69c7f896fb1166d496062d7af09d3b",
+        "a62402b7df7defb0740c0d3af709f508ef18e5892a56c39a3bde62b8b21fcb9a",
+        "b2d0caf7b3d9e5b7582adcde7645e99e73af0585b9309673a4066080a93013d6",
+        "aafa133723def54302c6d275e19c0acdf82d47fda9a9071a3a3e264699232b17",
+        "e411ae3c31d012342c3e4f1b8eb94c8c7f7f15e1c6e5c26c0bf724c2b2d72da1",
+        "2ec9f5e1b27681798fd5be0d7da4796c8071b29ad31445aa3323291a3735ba2c",
+        "6430811931fa13eee98a20294a730e0febfead8102ee62e7664930779622981f",
+        "95954877585868cb5b440ee0980cec6391391ddb8d180fde7a68992dac3af214",
+        "83b22bbe2216af9ff072a4b1027c8f345cb4690b6c03202b57420ee45ab09180",
+        "39cda156bc8a8666101aeec3032d6e075f39719d579eb46812f7def95f01fd7a"
+      ],
+      "probe_only_slots_exited_before_init": [],
+      "probes": {
+        "0": {
+          "coordinator_netem_packets": 0,
+          "echo_rtt_ms": [
+            0.135527,
+            0.115799,
+            0.135377,
+            0.114116,
+            0.104829,
+            0.099288
+          ],
+          "kernel": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 50142,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 11489280,
+            "kernel_memory_high_bytes": 75497472,
+            "kernel_memory_max_bytes": 83886080,
+            "kernel_memory_peak_bytes": 11489280,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "one_way_netem_delay_ms": 0,
+          "pre_admission_phase": "new",
+          "sample": {
+            "effective_cpu_millicores": 1000,
+            "observed_ns": 40383529398584,
+            "revision": 2,
+            "rtt_us": 136,
+            "slot": 0,
+            "usable_memory_bytes": 75497472,
+            "verified_enforcement": true
+          },
+          "veth_rx_bytes": 1281,
+          "veth_tx_bytes": 1324,
+          "worker_netem_packets": 0
+        }
+      },
+      "requested_ticks": 12,
+      "samples_ms": [
+        11.405446,
+        11.791657,
+        11.557675,
+        13.24711,
+        11.363978,
+        15.51964,
+        11.543347,
+        11.230225,
+        11.388705,
+        11.640552,
+        11.768143,
+        11.770246
+      ],
+      "spawned_slots": [
+        0
+      ],
+      "start_root": "95c62403606f15d4f68a6dc71bafa3154f7351ea3514c8c54fb33fd7f11e3d60",
+      "start_tick": 44,
+      "unpaced_service_ticks_per_second": 83.20233357030283,
+      "worker_metrics": {
+        "0": {
+          "compute_cpu_us": 130440.561,
+          "frame_rx_bytes": 239165,
+          "frame_tx_bytes": 5731,
+          "kernel_after": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 213944,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 16691200,
+            "kernel_memory_high_bytes": 75497472,
+            "kernel_memory_max_bytes": 83886080,
+            "kernel_memory_peak_bytes": 16887808,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "kernel_before": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 69987,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 15638528,
+            "kernel_memory_high_bytes": 75497472,
+            "kernel_memory_max_bytes": 83886080,
+            "kernel_memory_peak_bytes": 16166912,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "peak_rss_kib": 34724,
+          "process_cpu_us": 143934.859,
+          "regions": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        }
+      }
+    },
+    "scale_out": {
+      "accepted_ticks": 32,
+      "all_workers_exited": true,
+      "checked_tick_loop_wall_ms": 1290.072053,
+      "cross_worker_agents": 672,
+      "deadline_misses_50ms": 0,
+      "decision": {
+        "best_scores_by_worker_count": {
+          "1": 35670,
+          "2": 18396
+        },
+        "plan": {
+          "allocations": {
+            "0": {
+              "estimated_cpu_us": 17556,
+              "estimated_memory_bytes": 50462720,
+              "regions": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            "1": {
+              "estimated_cpu_us": 17550,
+              "estimated_memory_bytes": 50452480,
+              "regions": [
+                4,
+                5,
+                6,
+                7
+              ]
+            }
+          },
+          "estimated_boundary_events": 60,
+          "owner_by_region": [
+            0,
+            0,
+            0,
+            0,
+            1,
+            1,
+            1,
+            1
+          ],
+          "score_us": 18396
+        },
+        "reasons": {
+          "0": "admitted_for_experiment",
+          "1": "admitted_for_experiment",
+          "2": "insufficient_memory",
+          "3": "path_too_slow"
+        }
+      },
+      "decision_ns": 40381970760064,
+      "end_root": "95c62403606f15d4f68a6dc71bafa3154f7351ea3514c8c54fb33fd7f11e3d60",
+      "end_tick": 44,
+      "full_state_matches_serial": true,
+      "last_verified_lab_root": "95c62403606f15d4f68a6dc71bafa3154f7351ea3514c8c54fb33fd7f11e3d60",
+      "last_verified_lab_tick": 44,
+      "load": [
+        {
+          "agents": 2048,
+          "cpu_us": 4398,
+          "left": 15,
+          "memory_bytes": 4227072,
+          "region": 0,
+          "right": 19
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4377,
+          "left": 14,
+          "memory_bytes": 4230144,
+          "region": 1,
+          "right": 13
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4407,
+          "left": 16,
+          "memory_bytes": 4221952,
+          "region": 2,
+          "right": 21
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4374,
+          "left": 14,
+          "memory_bytes": 4229120,
+          "region": 3,
+          "right": 12
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4386,
+          "left": 13,
+          "memory_bytes": 4220928,
+          "region": 4,
+          "right": 17
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4374,
+          "left": 14,
+          "memory_bytes": 4229120,
+          "region": 5,
+          "right": 12
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4389,
+          "left": 17,
+          "memory_bytes": 4224000,
+          "region": 6,
+          "right": 14
+        },
+        {
+          "agents": 2048,
+          "cpu_us": 4401,
+          "left": 17,
+          "memory_bytes": 4224000,
+          "region": 7,
+          "right": 18
+        }
+      ],
+      "machine": {
+        "available_memory_bytes": 4777295872,
+        "coordinator_cpu_reserve_millicores": 1000,
+        "effective_cpu_millicores": 12000,
+        "machine_memory_reserve_bytes": 1073741824
+      },
+      "max_estimated_tick_us": 18413,
+      "max_ms": 9.781655,
+      "mean_ms": 6.85672928125,
+      "minimum_shared_headroom_bytes": 4560187392,
+      "offers": [
+        {
+          "cpu_millicores": 1000,
+          "process_memory_mib": 96,
+          "revision": 1,
+          "slot": 0
+        },
+        {
+          "cpu_millicores": 1000,
+          "process_memory_mib": 96,
+          "revision": 2,
+          "slot": 1
+        },
+        {
+          "cpu_millicores": 250,
+          "process_memory_mib": 32,
+          "revision": 2,
+          "slot": 2
+        },
+        {
+          "cpu_millicores": 1000,
+          "process_memory_mib": 96,
+          "revision": 2,
+          "slot": 3
+        }
+      ],
+      "p50_ms": 6.571703,
+      "p95_ms": 8.821408,
+      "p99_ms": 9.781655,
+      "per_tick_roots": [
+        "a6a8f315fb368cca08af3f6fdb8a523d51e37e8da2e239ce2129fbb7bcadd500",
+        "63f11209efd9ee715127fef4ba072e945c412027d49443facdaba0a2e61f5112",
+        "b6b73c6a4b4ab5b8840926a6d2438c5a6fc8ccb5b34ee623eea5e934f07c915d",
+        "59dfd3dc595731a208461028d5c298cdab489d140ca8fd8d91bf11a4c20caf2f",
+        "5ef60fac80b0dc8dcd42b706e90aa630dfe83e118da8bbdce6e1953859bc14f3",
+        "850941fec1316b7d993c6f82e17b630923727583606126ae7381f7b733e6c7c0",
+        "42ef59c5c32521d024e8d790013e4ebf3c2810c14696cbb3520194b1d4fe34f7",
+        "667e14128a852bb49dfa7779c020fe63da2f6b96edb2412ae2ae6471c9477690",
+        "3fe3f861c5b7bd9cfb895a0b015b175b84aeab20d3bf858be699bdd679995a4f",
+        "97ccbfcaaf7e823ceb3933b5cdcc51d81f0688a93a1107fd9f54f70342f0d25b",
+        "8072b31c904cbaf8db619a9f6c5091f27be57eaa0b1139be57a0e90aa24ee165",
+        "bdb4b2f980d3d31bb3cbe925ae9592c569613f89f8858a30676e3fa4086134c5",
+        "81cef992edd81a400af320c2308a7d7b92be85982d0cbcb99aeb27ab03de66be",
+        "66f557bd54273f957b792c3b5b8faf0e89d76d41f1e1f7b9d6b582b9631aaed4",
+        "57f7af970cc7369a2ab851bf2af117fed77b030c2779fc49f76e05aea4b5d5a2",
+        "06164c01d61d0b969a0d9d759adb148fe922ed9c76cc68775b6753396befc0fd",
+        "2e6eb77eed8402d226fcc03572fb26af07515402acb44eef016ae201083e9dd9",
+        "2bf882b37f1aa0d36703800926f24a60911fb3f6c242371a12abff98f97660cc",
+        "4417e56842d2d8d337489e3c00346a8607a9ea0f0911fa858f8d466fee3af2f7",
+        "1bc9a7823a05dcfde8369c6dd873d9467db9331ae5ce7322cab3b6c1c576b150",
+        "5352ee53a604b6ed8eaca8b2939690265224c6dce6295fb3a87e66c5b1ff4acb",
+        "e6f37742ed10426059c7a2b8f9724743dfdb6302ace59f1f2932845faf542e8f",
+        "f86886bb0b0beff99da40bdc75ad69b02a7cf0d5551b94aa1ef65250d1b5bfc2",
+        "0359f86889c72df477a3c0dead342d475f89409e6c684045c1b55804ee0b4312",
+        "95ddab8581c65f5d3dfc7e4daf47ac8fef71b47bd5549b122005264d5227e5f2",
+        "b0bfda03896d9f5c2ec89c54b1721d3fdff1371981fee365bf94c684eb75ddf9",
+        "8692ea16bfeea35598ee0939f1cae67e2f004fdcf73d173a48871570300615cd",
+        "e0740e5b57d3928d1c1e397c60cef2950674d3e13fb5d112a1ec1f12158a3fa6",
+        "b053a90434b1c6883f380dbaf49cdfe55a290e22dc6bd566e0ccae1cbaf4a9bf",
+        "05cd28dbc07e350d9365f58c9f2ef97c5c9d3e9dfe3397eb3bd190580774d64b",
+        "bd6efb026871ab496985581f16170c1fa140ecbdf527a632d40c2837d4a5ffe2",
+        "95c62403606f15d4f68a6dc71bafa3154f7351ea3514c8c54fb33fd7f11e3d60"
+      ],
+      "probe_only_slots_exited_before_init": [
+        2,
+        3
+      ],
+      "probes": {
+        "0": {
+          "coordinator_netem_packets": 0,
+          "echo_rtt_ms": [
+            0.187345,
+            0.183206,
+            0.135847,
+            0.148882,
+            0.115348,
+            0.133372
+          ],
+          "kernel": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 53521,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 11681792,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 11681792,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "one_way_netem_delay_ms": 0,
+          "pre_admission_phase": "new",
+          "sample": {
+            "effective_cpu_millicores": 1000,
+            "observed_ns": 40381510862753,
+            "revision": 1,
+            "rtt_us": 188,
+            "slot": 0,
+            "usable_memory_bytes": 90595328,
+            "verified_enforcement": true
+          },
+          "veth_rx_bytes": 1457,
+          "veth_tx_bytes": 1566,
+          "worker_netem_packets": 0
+        },
+        "1": {
+          "coordinator_netem_packets": 0,
+          "echo_rtt_ms": [
+            0.162146,
+            0.154522,
+            0.187584,
+            0.239173,
+            0.171204,
+            0.117883
+          ],
+          "kernel": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 53490,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 11685888,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 11685888,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "one_way_netem_delay_ms": 0,
+          "pre_admission_phase": "new",
+          "sample": {
+            "effective_cpu_millicores": 1000,
+            "observed_ns": 40381515220567,
+            "revision": 2,
+            "rtt_us": 240,
+            "slot": 1,
+            "usable_memory_bytes": 90595328,
+            "verified_enforcement": true
+          },
+          "veth_rx_bytes": 1457,
+          "veth_tx_bytes": 1566,
+          "worker_netem_packets": 0
+        },
+        "2": {
+          "coordinator_netem_packets": 0,
+          "echo_rtt_ms": [
+            0.181273,
+            0.165172,
+            0.321048,
+            0.135346,
+            0.107453,
+            0.113796
+          ],
+          "kernel": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 58684,
+            "effective_cpu_millicores": 250,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 11681792,
+            "kernel_memory_high_bytes": 30195712,
+            "kernel_memory_max_bytes": 33554432,
+            "kernel_memory_peak_bytes": 11681792,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 1
+          },
+          "one_way_netem_delay_ms": 0,
+          "pre_admission_phase": "new",
+          "sample": {
+            "effective_cpu_millicores": 250,
+            "observed_ns": 40381519318840,
+            "revision": 2,
+            "rtt_us": 322,
+            "slot": 2,
+            "usable_memory_bytes": 25165824,
+            "verified_enforcement": true
+          },
+          "veth_rx_bytes": 1371,
+          "veth_tx_bytes": 1476,
+          "worker_netem_packets": 0
+        },
+        "3": {
+          "coordinator_netem_packets": 14,
+          "echo_rtt_ms": [
+            50.402981,
+            50.353928,
+            50.39693,
+            51.131218,
+            51.000481,
+            50.948853
+          ],
+          "kernel": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 55142,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 11673600,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 11821056,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "one_way_netem_delay_ms": 25,
+          "pre_admission_phase": "new",
+          "sample": {
+            "effective_cpu_millicores": 1000,
+            "observed_ns": 40381876276422,
+            "revision": 2,
+            "rtt_us": 51132,
+            "slot": 3,
+            "usable_memory_bytes": 90595328,
+            "verified_enforcement": true
+          },
+          "veth_rx_bytes": 1281,
+          "veth_tx_bytes": 1500,
+          "worker_netem_packets": 11
+        }
+      },
+      "requested_ticks": 32,
+      "samples_ms": [
+        6.67615,
+        6.414855,
+        6.535023,
+        6.157268,
+        6.11061,
+        6.313163,
+        6.642005,
+        6.571703,
+        6.241077,
+        6.437288,
+        6.212483,
+        9.781655,
+        6.344672,
+        6.31674,
+        6.620595,
+        6.723249,
+        6.72397,
+        8.763519,
+        6.689165,
+        8.779389,
+        6.468858,
+        6.593133,
+        8.821408,
+        6.844979,
+        7.5433,
+        6.893371,
+        6.652094,
+        6.49663,
+        6.426788,
+        6.382394,
+        6.508182,
+        6.729621
+      ],
+      "spawned_slots": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "start_root": "dd8561c9f54f92444beacc487d446c7713273e51f9f906b3d2202ae20c788e84",
+      "start_tick": 12,
+      "unpaced_service_ticks_per_second": 145.84212953172002,
+      "worker_metrics": {
+        "0": {
+          "compute_cpu_us": 173058.378,
+          "frame_rx_bytes": 144040,
+          "frame_tx_bytes": 20483,
+          "kernel_after": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 258528,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 14381056,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 14409728,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "kernel_before": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 63670,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 13627392,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 14045184,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "peak_rss_kib": 32628,
+          "process_cpu_us": 194849.784,
+          "regions": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        "1": {
+          "compute_cpu_us": 176358.289,
+          "frame_rx_bytes": 145616,
+          "frame_tx_bytes": 21090,
+          "kernel_after": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 262203,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 14778368,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 14983168,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "kernel_before": {
+            "accounting": "linux_cgroup_v2_process_charges",
+            "cpu_usage_usec": 63857,
+            "effective_cpu_millicores": 1000,
+            "java_heap_mib": null,
+            "kernel_memory_current_bytes": 13885440,
+            "kernel_memory_high_bytes": 90595328,
+            "kernel_memory_max_bytes": 100663296,
+            "kernel_memory_peak_bytes": 14315520,
+            "memory_oom_events": 0,
+            "memory_oom_kills": 0,
+            "throttled_periods": 0
+          },
+          "peak_rss_kib": 32628,
+          "process_cpu_us": 198304.372,
+          "regions": [
+            4,
+            5,
+            6,
+            7
+          ]
+        }
+      }
+    }
+  }
+}

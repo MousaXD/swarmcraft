@@ -40,6 +40,12 @@ cross-region correctness and freeze on worker loss; it does **not** run
 Minecraft, implement durable regional quorum commits or demonstrate
 physical independent hosts. The Fabric NO-GO remains and no runtime
 has been adopted for production. Treat this as a new runtime track.
+The [#58 capped placement experiment](../research/distributed-simulation/WORKER_PLACEMENT_REPORT.md)
+adds reference-only explicit consent, measured capacity/RTT, useful-work
+selection and clean scale-in. It is not production worker admission.
+The production #57 [resource preference](DEVICE_RESOURCE_CONTRIBUTION.md)
+does not enroll regional workers. No distributed engine or remote authority
+grant is enabled.
 Region scheduling work such as [Folia](https://docs.papermc.io/folia/reference/overview/) is a useful architectural reference for ownership and boundaries, but multi-machine SwarmCraft still requires its own network, consistency, and recovery design.
 
 1. **Choose a supported first runtime and workload.** Start with a narrow Minecraft version, documented mechanics, and approved compatibility set. Run real clients, two physically separate worker machines, and a separate control/voting failure domain where needed. Preserve the existing single-host world mode and its saves.
