@@ -8,7 +8,8 @@ use crate::{
         canonical_file_exists, create_unique_temp, durable_atomic_write, durable_remove, durable_rename_new, io_error,
         read_canonical_file,
     },
-    CanonicalSnapshotHeadV1, CanonicalSnapshotRefV1, Storage, StorageError,
+    CanonicalSnapshotHeadV1, CanonicalSnapshotRefV1, DurableMembershipPromiseV1, DurableRecoveryPromiseV1, Storage,
+    StorageError,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,8 +17,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use swarm_protocol::{
-    BlobDescriptor, BlobEncoding, EpochMode, Hash32, HistoricalReplayProofV1, HistoricalTransitionV1,
-    MembershipCertificateV1, RecoveryCertificateV1, SnapshotManifestV1, WorldId,
+    AuthorityTransferV1, BlobDescriptor, BlobEncoding, EpochMode, Hash32, HistoricalReplayProofV1,
+    HistoricalTransitionV1, MembershipCertificateV1, RecoveryCertificateV1, SnapshotManifestV1, WorldId,
 };
 
 const INTENT: &str = "stale-replay-publish.intent.postcard";
@@ -134,15 +135,12 @@ impl Storage {
         let StalePublicationCandidate { anchor, proof, manifests } = candidate;
         let world = proof.world_id;
         let metadata = self.world_dir(world).join("metadata");
-        // Do not overwrite any local, potentially newer protocol decision.
-        // Handling compatible, already-consumed promises is a separate
-        // operation; an ambiguous decision must remain fenced.
+        // Only exact decisions already incorporated in the verified history
+        // can be consumed. Unrelated, incomplete or corrupt decisions block.
+        consumed_decisions(&metadata, proof)?;
         for name in [
             "sleep.postcard",
-            "transfer.postcard",
-            "recovery-promise.postcard",
             "recovery-reservation.postcard",
-            "membership-promise.postcard",
             "solo-branch.postcard",
             "recovery-certificate-pending.postcard",
             "pending-join.postcard",
@@ -371,9 +369,70 @@ impl Storage {
         {
             return Err(StorageError::WorldMetadataMismatch);
         }
+        // The accepted history durably preserves the exact signed evidence.
+        // Consume only those records while the intent still fences all live
+        // readers and writers. A crash between removals is resumable; no
+        // unrelated or newer promise can be discarded on restart.
+        for name in consumed_decisions(&metadata, proof)? {
+            durable_remove(&metadata.join(name))?;
+        }
         durable_remove(&self.stale_publication_path(world))?;
         Ok(())
     }
+}
+
+/// Compare the complete canonical encoding, not just an epoch or ballot
+/// number. The application has to verify the signed replay envelope before
+/// beginning or finishing publication; equality to that evidence also binds
+/// the signer, vote, checkpoint, generation and membership. A promise not
+/// represented by an exact signed vote remains fenced (even if older).
+fn consumed_decisions(metadata: &Path, proof: &HistoricalReplayProofV1) -> Result<Vec<&'static str>, StorageError> {
+    let mut consumed = Vec::new();
+    let name = "transfer.postcard";
+    let path = metadata.join(name);
+    if canonical_file_exists(&path)? {
+        let bytes = read_canonical_file(&path)?;
+        let record: AuthorityTransferV1 = postcard::from_bytes(&bytes)?;
+        if bytes != postcard::to_allocvec(&record)?
+            || !proof.transitions.iter().any(|transition| {
+                matches!(transition, HistoricalTransitionV1::Transfer { prepared, accepted, committed }
+                    if [prepared.as_ref(), accepted.as_ref(), committed.as_ref()].contains(&&record))
+            })
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        consumed.push(name);
+    }
+    let name = "recovery-promise.postcard";
+    let path = metadata.join(name);
+    if canonical_file_exists(&path)? {
+        let bytes = read_canonical_file(&path)?;
+        let promise: DurableRecoveryPromiseV1 = postcard::from_bytes(&bytes)?;
+        if bytes != postcard::to_allocvec(&promise)?
+            || !proof.transitions.iter().any(|transition| {
+                matches!(transition, HistoricalTransitionV1::Recovery(certificate)
+                    if certificate.ballot == promise.ballot && certificate.votes.contains(&promise.vote))
+            })
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        consumed.push(name);
+    }
+    let name = "membership-promise.postcard";
+    let path = metadata.join(name);
+    if canonical_file_exists(&path)? {
+        let bytes = read_canonical_file(&path)?;
+        let promise: DurableMembershipPromiseV1 = postcard::from_bytes(&bytes)?;
+        if bytes != postcard::to_allocvec(&promise)?
+            || !proof.membership_certificates.iter().any(|certificate| {
+                certificate.proposal == promise.proposal && certificate.votes.contains(&promise.vote)
+            })
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        consumed.push(name);
+    }
+    Ok(consumed)
 }
 
 fn make_intent(

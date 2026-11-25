@@ -1491,11 +1491,50 @@ mod tests {
         assert_eq!(std::fs::read(&fence).unwrap(), b"unreadable durable recovery promise");
         std::fs::remove_file(&fence).unwrap();
 
+        // Only decisions whose exact signed bytes occur in this certified
+        // history can be consumed. A valid but different decision must remain.
+        let mut unrelated = phase.clone();
+        unrelated.base_snapshot_hash = Hash32([99; 32]);
+        unrelated.signature = alice.sign(&unrelated.signing_bytes().unwrap());
+        stale.save_transfer_record(&unrelated).unwrap();
+        let transfer_path = metadata.join("transfer.postcard");
+        assert!(stale.begin_verified_stale_publication(&candidate).is_err());
+        assert_eq!(stale.load_transfer_record(world).unwrap(), unrelated);
+        std::fs::remove_file(&transfer_path).unwrap();
+        stale.save_transfer_record(&phase).unwrap();
+        let HistoricalTransitionV1::Recovery(recovery) = &envelope.transitions[1] else {
+            panic!("expected recovery certificate");
+        };
+        let recovery_promise = swarm_storage::DurableRecoveryPromiseV1 {
+            ballot: recovery.ballot.clone(),
+            vote: recovery.votes[0].clone(),
+        };
+        let mut conflicting = recovery_promise.clone();
+        conflicting.vote.signature[0] ^= 1;
+        std::fs::write(&fence, postcard::to_allocvec(&conflicting).unwrap()).unwrap();
+        assert!(stale.begin_verified_stale_publication(&candidate).is_err());
+        assert!(!stale.stale_publication_pending(world).unwrap());
+        std::fs::write(&fence, postcard::to_allocvec(&recovery_promise).unwrap()).unwrap();
+        let membership_promise = swarm_storage::DurableMembershipPromiseV1 {
+            proposal: admission.proposal.clone(),
+            vote: admission.votes[0].clone(),
+        };
+        let membership_fence = metadata.join("membership-promise.postcard");
+        let mut corrupt_bytes = postcard::to_allocvec(&membership_promise).unwrap();
+        corrupt_bytes.push(0);
+        std::fs::write(&membership_fence, &corrupt_bytes).unwrap();
+        assert!(stale.begin_verified_stale_publication(&candidate).is_err());
+        assert_eq!(std::fs::read(&membership_fence).unwrap(), corrupt_bytes);
+        std::fs::write(&membership_fence, postcard::to_allocvec(&membership_promise).unwrap()).unwrap();
+
         // Simulate process death after durable intent and a subset of the
         // exact canonical writes. No ordinary reader or writer may use
         // this mixed state. Conflicting data cannot be silently replaced.
         stale.begin_verified_stale_publication(&candidate).unwrap();
         assert!(stale.stale_publication_pending(world).unwrap());
+        assert!(transfer_path.exists());
+        assert!(fence.exists());
+        assert!(membership_fence.exists());
         assert!(stale.load_epoch_record(world).is_err());
         assert!(stale.load_membership_record(world).is_err());
         assert!(stale.load_world_descriptor(world).is_err());
@@ -1529,6 +1568,9 @@ mod tests {
         assert_eq!(stale.stale_publication_candidate(world).unwrap(), Some(candidate));
         assert_eq!(publish_stale_replay(&stale, &dave, world).unwrap(), envelope);
         assert!(!stale.stale_publication_pending(world).unwrap());
+        assert!(!transfer_path.exists());
+        assert!(!fence.exists());
+        assert!(!membership_fence.exists());
         assert_eq!(stale.load_epoch_record(world).unwrap(), third);
         assert_eq!(stale.load_membership_record(world).unwrap(), admitted);
         assert_eq!(stale.load_world_descriptor(world).unwrap(), descriptor);

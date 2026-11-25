@@ -4,7 +4,7 @@ Baseline: `2d45f97b5e31118a7074361e141a90b9296eccbd` (2026-11-25).
 
 All 68 original backlog IDs retained. Acceptance text is copied from the two roadmap documents. Historical partial work is not counted as complete. NOT STARTED means not yet started in this execution ledger, not necessarily absent from source. IN PROGRESS includes existing partial work. LOCALLY VERIFIED here is scoped to implemented automated components, not full acceptance. CI VERIFIED requires the current source and complete item-specific evidence; FIELD VERIFIED requires field evidence. No item is marked fully accepted at initialization.
 
-Current CI: [45519415707](https://github.com/MousaXD/swarmcraft/actions/runs/45519415707) in progress at inspection; previous `a7f2326` run 45515921964 passed 20 selected jobs on retry. See [live integration status](SABATHON_P0_LIVE_INTEGRATION_STATUS.md) for scope and residuals.
+Current CI: [45519415707](https://github.com/MousaXD/swarmcraft/actions/runs/45519415707) completed successfully: 20 selected jobs passed, optional soak skipped, exact source commit `2d45f97`. Previous `a7f2326` run 45515921964 passed 20 selected jobs on retry. See [live integration status](SABATHON_P0_LIVE_INTEGRATION_STATUS.md) for scope and residuals.
 
 ## Status accounting
 
@@ -48,7 +48,7 @@ Implementation completion: count only items whose full implementation criteria a
 - State: **IN PROGRESS**
 - Source: crates/swarm-cli/src/daemon.rs; crates/swarm-storage/src/stale_publication.rs
 - Evidence: Live integration status; scoped automated evidence, exact-SHA CI pending.
-- Remaining / next action: Reconcile exact durable fences and retired-authority replay without relaxing publication fencing
+- Remaining / next action: Exact transfer phases and included recovery/membership votes are now consumed only after certified replay publication; continue with guarded retired-authority replay, recovery reservations, sleep and unresolved decisions.
 - External dependency: Not yet established; assess during execution.
 - Commit: 2d45f97 baseline; see live status for individual commits
 
@@ -694,6 +694,12 @@ Implementation completion: count only items whose full implementation criteria a
 
 ## Next checkpoint
 
-Start #4 retired-authority replay and durable fence reconciliation. Keep publication and runtime fail-closed. #9 precedes #8; #23 precedes activation of V2-dependent permissions; #56 precedes distributed-runtime adoption; #64–68 require signed governance and independent acceptance.
+Continue #4: exact certified transfer and voting fences reconciled; retired-authority runtime exclusion, other durable records and previously unknown successor discovery remain. Keep publication and runtime fail-closed. #9 precedes #8; #23 precedes activation of V2-dependent permissions; #56 precedes distributed-runtime adoption; #64–68 require signed governance and independent acceptance.
 
 Initial full-item implementation/acceptance totals: not yet established by item-specific audit; zero items asserted fully accepted by this ledger.
+
+### 25 November: exact certified fence reconciliation
+
+- #4: `stale_publication.rs` now accepts only byte-exact transfer phases and recovery/membership promises represented in the verified history; consumption occurs after all canonical records are written and verified, while the intent still fences ordinary access. Other fences remain blocking.
+- Evidence: expanded signed replay regression passed, storage library 67 passed/1 optional soak ignored, strict storage/CLI all-target/all-feature Clippy passed, formatting and diff checks passed. No complete backlog item is newly claimed.
+- Next: prove retired-authority re-entry using the runtime ownership guard, fail-closed permit/lease and route behavior, and orphan handling; do not merely remove the authority exclusion.

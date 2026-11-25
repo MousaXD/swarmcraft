@@ -877,3 +877,11 @@ retargeting cannot replace an in-progress publication. Same-epoch
 membership changes are validated if a new proof is requested, but
 automatic retarget discovery is driven by a newer epoch. This is not
 independent-machine Minecraft gameplay certification.
+
+### Exact certified local decision reconciliation (25 November)
+
+Required validation 45519415707 on 2d45f97 completed successfully: all 20 selected jobs passed; optional sustained soak skipped.
+
+Existing stale-replica publication now reconciles a local transfer record only if its full canonical encoding matches a signed phase in the verified committed transcript. A recovery or membership promise must match both the exact certified ballot/proposal and an included signed vote. Corrupt, trailing-byte, different or unrepresented records remain blocking. The matched decisions are removed only after exact target history and canonical records are durably installed, with the publication intent still present. The full verified history retains the signed evidence; crash recovery can revalidate and finish the remaining removals.
+
+The signed replay regression covers incompatible and corrupt records, the three matching record types, an interrupted publication with the durable records still present, and successful final consumption. Storage library tests: 67 passed, 1 optional soak ignored. Strict storage/CLI Clippy and formatting passed. Retired local authority, sleep records, recovery reservations, pending decisions and unknown successor discovery still require separate safety work.
