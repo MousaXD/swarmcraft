@@ -19,6 +19,11 @@ export interface HostingContributionReadiness {
   may_host_now: boolean;
   reason: string;
   hard_process_memory_cap_guaranteed: boolean;
+  process_memory?: null |
+    { mode: 'heap_only' } |
+    { mode: 'linux_cgroup_configured'; limit_mib: number } |
+    { mode: 'linux_cgroup_active'; limit_mib: number; current_bytes: number; peak_bytes: number | null } |
+    { mode: 'unavailable'; detail: string };
   consent_revision: string | null;
 }
 

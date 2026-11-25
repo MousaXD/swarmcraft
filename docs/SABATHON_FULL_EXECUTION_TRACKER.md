@@ -222,15 +222,15 @@ Implementation completion: count only items whose full implementation criteria a
 - External dependency: Representative OS installations and local persistent Linux account home.
 - Commit: See hosting process ownership checkpoint in git history.
 
-### #22 — P1 · Missing
+### #22 — P1 · Implemented
 - Work: Add whole-process limits only on platforms that can enforce them. Evaluate delegated Linux cgroups, Windows Job Objects, and macOS capability separately
 - Acceptance: Measurement includes native memory and children. Unsupported enforcement is labeled heap-only. Existing Java heap and memory headroom rules stay in force
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: crates/swarm-cli/src/{host_memory_cap,hosting_budget,runtime_process_guard,migration}.rs; native hosting contribution DTO and panel; [enforcement contract](HOST_MEMORY_ENFORCEMENT.md); scripts/e2e/linux_cgroup_memory_gate.sh
+- Evidence: Real delegated Linux cgroup test measured parent and descendant together (~33 MiB), verified the configured high threshold, and enforced a separate 64 MiB kernel hard-limit/group-OOM experiment; live residual descendant blocks runtime reset and account-wide readmission after the direct child exits. Actual host launcher fixture verified 1536 MiB kernel cap for 512 MiB heap before exec, and restored its saved marker. Core library 151/151 regular tests, host/consent/migration gates, strict Clippy, native DTO 11/11, frontend 82/82 and Svelte check pass.
+- Remaining / next action: Exact-SHA CI (new dedicated transient systemd kernel/launcher gates), representative installed Minecraft/Fabric memory workload, Windows Job Object design and macOS platform evaluation if stronger enforcement is required. Windows/macOS and unconfigured Linux are explicitly heap-only; Linux cgroup charging is not a whole-process RSS guarantee.
+- External dependency: Linux delegation and adequate physical memory; actual installed runtimes/OS devices for field certification.
+- Commit: See managed JVM memory enforcement checkpoint in git history.
 
 ### #23 — P1 · Partial
 - Work: Reconcile V2 transcript, signed consent, voter proof, and admission work from #122/#125. Plan durable migration from V1 separately

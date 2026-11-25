@@ -68,6 +68,15 @@ pub fn validated_set<B: HostingContributionBackend>(
     backend.set(world, heap_mib)
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProcessMemoryReport {
+    HeapOnly {},
+    LinuxCgroupConfigured { limit_mib: u64 },
+    LinuxCgroupActive { limit_mib: u64, current_bytes: u64, peak_bytes: Option<u64> },
+    Unavailable { detail: String },
+}
+
 /// Public-only response from the real packaged Rust hosting CLI. Unknown
 /// fields (including peer identity or private paths) fail closed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -85,6 +94,8 @@ pub struct HostingContributionReadinessReply {
     pub may_host_now: bool,
     pub reason: String,
     pub hard_process_memory_cap_guaranteed: bool,
+    #[serde(default)]
+    pub process_memory: Option<ProcessMemoryReport>,
     pub consent_revision: Option<String>,
 }
 
@@ -105,6 +116,30 @@ pub fn decode_readiness(output: &str, world: WorldId) -> Result<HostingContribut
     }
     if report.hard_process_memory_cap_guaranteed {
         return Err("Whole-process JVM memory limit cannot be guaranteed".into());
+    }
+    if let Some(memory) = &report.process_memory {
+        const MAX_SAFE_JS: u64 = 9_007_199_254_740_991;
+        match memory {
+            ProcessMemoryReport::HeapOnly {} => {}
+            ProcessMemoryReport::LinuxCgroupConfigured { limit_mib } => {
+                if !report.consented || !(1536..=98304).contains(limit_mib) {
+                    return Err("Invalid configured Linux cgroup memory limit".into());
+                }
+            }
+            ProcessMemoryReport::LinuxCgroupActive { limit_mib, current_bytes, peak_bytes } => {
+                if !(1536..=98304).contains(limit_mib)
+                    || *current_bytes > MAX_SAFE_JS
+                    || peak_bytes.is_some_and(|peak| peak > MAX_SAFE_JS)
+                {
+                    return Err("Invalid observed Linux cgroup memory limit or counters".into());
+                }
+            }
+            ProcessMemoryReport::Unavailable { detail } => {
+                if detail.is_empty() || report.may_host_now {
+                    return Err("Unavailable memory enforcement cannot advertise hosting eligibility".into());
+                }
+            }
+        }
     }
     if report.consented && report.consent_revision.is_none() {
         return Err("Persisted hosting consent revision is absent".into());
@@ -281,6 +316,20 @@ mod tests {
         assert_eq!(public["may_host_now"], false);
         assert!(public.get("peer_id").is_none());
         assert!(public.get("private_key").is_none());
+    }
+
+    #[test]
+    fn active_cgroup_is_observation_not_consent_and_rejects_invalid_counters() {
+        let world = validate_world_id(WORLD).unwrap();
+        let mut report: serde_json::Value = serde_json::from_str(&sample_readiness()).unwrap();
+        report["process_memory"] = serde_json::json!({"mode":"linux_cgroup_active", "limit_mib":1536, "current_bytes":4096, "peak_bytes":8192});
+        assert!(decode_readiness(&report.to_string(), world).is_ok());
+        report["process_memory"]["current_bytes"] = serde_json::json!(u64::MAX);
+        assert!(decode_readiness(&report.to_string(), world).is_err());
+        report["process_memory"] = serde_json::json!({"mode":"linux_cgroup_configured", "limit_mib":1536});
+        assert!(decode_readiness(&report.to_string(), world).is_err());
+        report["process_memory"] = serde_json::json!({"mode":"heap_only", "path":"/private"});
+        assert!(decode_readiness(&report.to_string(), world).is_err());
     }
 
     #[test]

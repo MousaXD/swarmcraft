@@ -2,7 +2,10 @@
 //! left behind by a hard-killed supervisor. Linux records bind the PID to
 //! its machine, boot, PID namespace and process birth time; legacy and
 //! unsupported-platform records keep the conservative PID-only policy.
-use crate::machine_hosting::MachineHostingReservation;
+use crate::{
+    host_memory_cap::{HostMemoryCap, MemoryCapIdentity, ProcessMemoryReport},
+    machine_hosting::MachineHostingReservation,
+};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -35,12 +38,16 @@ struct LinuxRuntimeIdentity {
     pid_namespace: u64,
     controller_start_ticks: u64,
     java_start_ticks: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cgroup: Option<MemoryCapIdentity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ownership {
     Quiescent,
     Pending,
+    #[cfg(target_os = "linux")]
+    ResidualProcesses,
     Live(u32),
 }
 
@@ -50,23 +57,29 @@ pub struct RuntimeProcessGuard<'a> {
     path: PathBuf,
     record: RuntimeProcessRecord,
     reservation: Option<&'a MachineHostingReservation>,
+    memory_cap: Option<HostMemoryCap>,
 }
 
 impl<'a> RuntimeProcessGuard<'a> {
     #[cfg(test)]
     fn begin(paths: &DataPaths, world: WorldId) -> Result<Self> {
-        Self::begin_coordinated(paths, world, None)
+        Self::begin_coordinated(paths, world, None, None)
     }
 
     pub(crate) fn begin_coordinated(
         paths: &DataPaths,
         world: WorldId,
         reservation: Option<&'a MachineHostingReservation>,
+        mut memory_cap: Option<HostMemoryCap>,
     ) -> Result<Self> {
         let path = record_path(paths, world);
         clear_quiescent_record(&path)?;
-        let record = RuntimeProcessRecord::pending()?;
-        let guard = Self { path, record, reservation };
+        let mut record = RuntimeProcessRecord::pending()?;
+        if let Some(cap) = memory_cap.as_mut() {
+            record.linux.as_mut().context("missing Linux process identity")?.cgroup = Some(cap.identity().clone());
+            cap.claim_by_record();
+        }
+        let guard = Self { path, record, reservation, memory_cap };
         // The shared record is durable before the local record and before
         // any spawn. A crash between either write cannot create an
         // unaccounted child in a second data root.
@@ -77,12 +90,29 @@ impl<'a> RuntimeProcessGuard<'a> {
         Ok(guard)
     }
 
+    pub(crate) fn memory_cap(&self) -> Option<&HostMemoryCap> {
+        self.memory_cap.as_ref()
+    }
+
+    pub(crate) fn verify_exit_quiescent(&self) -> Result<()> {
+        if let Some(cap) = &self.memory_cap {
+            anyhow::ensure!(
+                !cap.identity().populated()?,
+                "managed Java exited but processes remain in its cgroup; refusing checkpoint"
+            );
+        }
+        Ok(())
+    }
+
     /// Persist the exact spawned child identity immediately. The caller's
     /// startup guard must kill/reap an unverified child if publication fails.
     pub fn record_java(&mut self, pid: u32) -> Result<()> {
         // Mark the in-memory record first, including on inspection failure:
         // Drop must never remove pending ownership while this child lives.
         self.record.java_pid = Some(pid);
+        if let Some(cap) = &self.memory_cap {
+            cap.verify_child(pid)?;
+        }
         #[cfg(target_os = "linux")]
         {
             let birth =
@@ -116,12 +146,16 @@ impl Drop for RuntimeProcessGuard<'_> {
                 }
             }
         };
+        let safe_to_remove = safe_to_remove && self.verify_exit_quiescent().is_ok();
         if safe_to_remove {
             // A failed delete is conservative: the next owner will validate
             // the residual record, never infer capacity from the lock alone.
-            let _ = remove_record(&self.path);
-            if let Some(shared) = self.reservation {
-                let _ = remove_record(&shared.record_path);
+            let local_removed = remove_record(&self.path).is_ok();
+            let shared_removed = self.reservation.is_none_or(|shared| remove_record(&shared.record_path).is_ok());
+            if local_removed && shared_removed {
+                if let Some(cap) = &mut self.memory_cap {
+                    cap.release_after_record_cleanup();
+                }
             }
         }
     }
@@ -253,6 +287,10 @@ fn check_quiescent_record(path: &Path) -> Result<()> {
         Ownership::Pending => {
             bail!("ambiguous prior Minecraft launch at {}; refusing additional JVM admission", path.display())
         }
+        #[cfg(target_os = "linux")]
+        Ownership::ResidualProcesses => {
+            bail!("previous managed JVM left live cgroup descendants; refusing additional admission")
+        }
         Ownership::Live(pid) => bail!(
             "unaccounted Minecraft process PID {pid} remains alive in {}; refusing additional JVM admission",
             path.display()
@@ -266,7 +304,23 @@ pub(crate) fn clear_quiescent_record(path: &Path) -> Result<()> {
     match record.ownership()? {
         Ownership::Quiescent => remove_record(path),
         Ownership::Pending => bail!("a previous authority launch ended before Java ownership was durably recorded; refusing unsafe runtime reset"),
+        #[cfg(target_os = "linux")]
+        Ownership::ResidualProcesses => bail!("previous managed JVM left live cgroup descendants; refusing runtime reset"),
         Ownership::Live(pid) => bail!("previous Minecraft Java process PID {pid} is still alive; refusing to reset its runtime directory"),
+    }
+}
+
+/// Local observation only; a durable record alone does not certify a live cap.
+pub(crate) fn observed_memory(paths: &DataPaths, world: WorldId) -> Result<Option<ProcessMemoryReport>> {
+    let Some(record) = read_record(&record_path(paths, world))? else { return Ok(None) };
+    match record.ownership()? {
+        Ownership::Live(pid) => match record.linux.as_ref().and_then(|identity| identity.cgroup.as_ref()) {
+            Some(cap) => cap.observe(pid).map(Some),
+            None => Ok(Some(ProcessMemoryReport::HeapOnly {})),
+        },
+        #[cfg(target_os = "linux")]
+        Ownership::ResidualProcesses => bail!("previous managed JVM left live cgroup descendants"),
+        Ownership::Pending | Ownership::Quiescent => Ok(None),
     }
 }
 
@@ -394,6 +448,7 @@ mod linux_process {
             pid_namespace,
             controller_start_ticks: controller.start_ticks,
             java_start_ticks: None,
+            cgroup: None,
         })
     }
 
@@ -415,11 +470,17 @@ mod linux_process {
             "cannot prove process absence across Linux PID namespaces"
         );
         let Some(pid) = pid else { return Ok(Ownership::Pending) };
-        let Some(stat) = read_process(pid)? else { return Ok(Ownership::Quiescent) };
-        if Some(stat.start_ticks) != identity.java_start_ticks || matches!(stat.state, b'Z' | b'X' | b'x') {
-            return Ok(Ownership::Quiescent);
+        if read_process(pid)?.is_some_and(|stat| {
+            Some(stat.start_ticks) == identity.java_start_ticks && !matches!(stat.state, b'Z' | b'X' | b'x')
+        }) {
+            return Ok(Ownership::Live(pid));
         }
-        Ok(Ownership::Live(pid))
+        if let Some(cap) = &identity.cgroup {
+            if cap.populated()? {
+                return Ok(Ownership::ResidualProcesses);
+            }
+        }
+        Ok(Ownership::Quiescent)
     }
 
     #[cfg(test)]
@@ -666,7 +727,7 @@ mod tests {
         let root = PathBuf::from(root);
         let reservation = MachineHostingReservation::acquire_at(&root.join("account")).unwrap();
         let paths = DataPaths::from_root(root.join("first-data-root"));
-        let mut guard = RuntimeProcessGuard::begin_coordinated(&paths, world(), Some(&reservation)).unwrap();
+        let mut guard = RuntimeProcessGuard::begin_coordinated(&paths, world(), Some(&reservation), None).unwrap();
         if let Ok(pid) = std::env::var("SWARMCRAFT_TEST_SURVIVING_CHILD") {
             guard.record_java(pid.parse().unwrap()).unwrap();
         }
@@ -733,7 +794,7 @@ mod tests {
         assert!(refuse_unaccounted_runtimes(&first).is_ok());
         assert!(!account_record.exists());
         {
-            let _guard = RuntimeProcessGuard::begin_coordinated(&second, world(), Some(&replacement)).unwrap();
+            let _guard = RuntimeProcessGuard::begin_coordinated(&second, world(), Some(&replacement), None).unwrap();
             assert!(account_record.exists());
             assert!(record_path(&second, world()).exists());
         }
@@ -749,7 +810,7 @@ mod tests {
         let directory = temp.path().join("account");
         let first = DataPaths::from_root(temp.path().join("first-data-root"));
         let reservation = MachineHostingReservation::acquire_at(&directory).unwrap();
-        let guard = RuntimeProcessGuard::begin_coordinated(&first, world(), Some(&reservation)).unwrap();
+        let guard = RuntimeProcessGuard::begin_coordinated(&first, world(), Some(&reservation), None).unwrap();
         std::mem::forget(guard);
         drop(reservation);
         assert!(MachineHostingReservation::acquire_at(&directory).is_err());

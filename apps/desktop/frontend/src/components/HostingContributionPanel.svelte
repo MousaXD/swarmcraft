@@ -119,7 +119,16 @@
       <p class="section-note">
         Java heap: {readiness.selected_heap_mib} MiB · Available memory:
         {readiness.available_mib === null ? 'unknown' : String(readiness.available_mib) + ' MiB'}.
-        Whole-JVM RSS is not hard-capped.
+        {#if readiness.process_memory?.mode === 'linux_cgroup_active'}
+          Linux cgroup charge cap: {readiness.process_memory.limit_mib} MiB;
+          current charges (including descendants): {Math.ceil(readiness.process_memory.current_bytes / 1048576)} MiB.
+        {:else if readiness.process_memory?.mode === 'linux_cgroup_configured'}
+          Linux cgroup charge cap configured: {readiness.process_memory.limit_mib} MiB; not yet verified active.
+        {:else if readiness.process_memory?.mode === 'unavailable'}
+          Memory enforcement unavailable; hosting is blocked.
+        {:else}
+          Heap-only: Whole-JVM RSS is not hard-capped.
+        {/if}
       </p>
     {/if}
 

@@ -1,5 +1,6 @@
 use crate::{
     authority_permit::PermitWatch,
+    host_memory_cap::HostMemoryCap,
     host_readiness, hosting_budget, launch_guard,
     live_fabric_readiness::{challenge_authenticated_session, ExpectedFabricRuntime},
     live_runtime_registry::{LiveFabricRuntimeRegistry, LiveRuntimeIdentity, RuntimeChallengeCommand},
@@ -895,6 +896,7 @@ async fn run_authority_runtime_inner(
     // This admission must happen before authority epoch mutation, runtime reset,
     // snapshot restore, or Java spawn for ALL launch triggers.
     let admission = hosting_budget::admit(paths, options.world)?;
+    let memory_cap = HostMemoryCap::prepare(admission.heap_mib())?;
     let identity = PeerIdentity::load_or_create(paths)?;
     let metadata = storage.load_world(options.world)?;
     let initial = storage.latest_snapshot(options.world)?.context("world has no verified snapshot to host")?;
@@ -955,7 +957,7 @@ async fn run_authority_runtime_inner(
     // verification, including when an orphaned Java PID blocks the reset.
     // A prior launch can never certify a newly restoring Minecraft process.
     host_readiness::invalidate_runtime_verification(paths, options.world)?;
-    let mut runtime_process = admission.begin_runtime_process(paths, options.world)?;
+    let mut runtime_process = admission.begin_runtime_process(paths, options.world, memory_cap)?;
     reset_runtime_directory(&runtime)?;
     fs::create_dir_all(runtime.join("mods"))?;
     fs::copy(&options.mod_jar, runtime.join("mods/swarmcraft-fabric.jar"))
@@ -1030,13 +1032,13 @@ async fn run_authority_runtime_inner(
         // to a fresh port that would silently redirect an existing world.
         managed_server_properties::ensure_port_free(managed_port)?;
         launch_server(
-            &options.java,
-            &options.server_jar,
+            &options,
             admission.heap_mib(),
             &runtime,
             &world_dir,
             metadata.genesis.compatibility_fingerprint,
             &fabric_environment,
+            runtime_process.memory_cap(),
         )
     })?;
     // Any failed publish, verification, or IPC handshake before Ready must
@@ -1100,7 +1102,8 @@ async fn run_authority_runtime_inner(
         accept_eula: options.accept_eula,
         game_endpoint: game_endpoint.clone(),
     };
-    let admission_state = hosting_budget::runtime_withdrawal(paths, options.world, admission.consent());
+    let admission_state =
+        supervised_runtime_withdrawal(paths, options.world, &admission, runtime_process.memory_cap(), startup.pid());
     match admission_state {
         Ok(None) => {
             host_readiness::record_runtime_verified(
@@ -1188,7 +1191,7 @@ async fn run_authority_runtime_inner(
         &world_dir,
         managed_port,
         challenge_commands.as_mut(),
-        RuntimeExitOptions { handle_shutdown_signal, admission: &admission },
+        RuntimeExitOptions { handle_shutdown_signal, admission: &admission, memory_cap: runtime_process.memory_cap() },
     )
     .await
     {
@@ -1201,6 +1204,10 @@ async fn run_authority_runtime_inner(
     // From this point onward there is NO owned live game runtime. Revocation
     // precedes checkpointing, transfer, or publishing any final saved state.
     drop(registration);
+    if let Err(error) = runtime_process.verify_exit_quiescent() {
+        retire_live_runtime(paths, options.world, MigrationPhase::Blocked, Some(&error.to_string()))?;
+        return Err(error);
+    }
 
     publish_status(
         paths,
@@ -1301,6 +1308,26 @@ enum RuntimeDisposition {
 struct RuntimeExitOptions<'a> {
     handle_shutdown_signal: bool,
     admission: &'a hosting_budget::HostingAdmission,
+    memory_cap: Option<&'a HostMemoryCap>,
+}
+
+fn supervised_runtime_withdrawal(
+    paths: &DataPaths,
+    world: WorldId,
+    admission: &hosting_budget::HostingAdmission,
+    memory_cap: Option<&HostMemoryCap>,
+    pid: u32,
+) -> Result<Option<String>> {
+    if let Some(reason) = hosting_budget::runtime_withdrawal(paths, world, admission.consent())? {
+        return Ok(Some(reason));
+    }
+    if let Some(cap) = memory_cap {
+        cap.verify_child(pid)?;
+        if cap.pressure()? {
+            return Ok(Some("managed JVM cgroup memory pressure reached its save-first threshold".into()));
+        }
+    }
+    Ok(None)
 }
 
 // Each argument is an independently authenticated runtime/lifecycle input;
@@ -1459,7 +1486,13 @@ async fn wait_for_runtime_exit(
                 }
             }
         }
-        let withdrawal = match hosting_budget::runtime_withdrawal(paths, epoch.world_id, options.admission.consent()) {
+        let withdrawal = match supervised_runtime_withdrawal(
+            paths,
+            epoch.world_id,
+            options.admission,
+            options.memory_cap,
+            child.id(),
+        ) {
             Ok(reason) => reason,
             Err(error) => Some(format!("cannot revalidate local hosting consent or memory: {error}")),
         };
@@ -1533,7 +1566,7 @@ async fn wait_for_runtime_exit(
                     if let Some(request) = request {
                         let reply = challenge_live_supervised_runtime(
                             paths, storage, identity, epoch, child, session,
-                            world_directory, managed_port, options.admission,
+                            world_directory, managed_port, options.admission, options.memory_cap,
                             &mut permit_watch, request.request_id, request.nonce,
                         ).await;
                         let _ = request.response.send(reply);
@@ -1560,6 +1593,7 @@ async fn challenge_live_supervised_runtime(
     world_directory: &Path,
     managed_port: u16,
     admission: &hosting_budget::HostingAdmission,
+    memory_cap: Option<&HostMemoryCap>,
     permit_watch: &mut PermitWatch,
     request_id: u64,
     nonce: [u8; 32],
@@ -1568,7 +1602,7 @@ async fn challenge_live_supervised_runtime(
         bail!("managed Minecraft JVM has already exited");
     }
     ensure_authority_generation(storage, identity, epoch)?;
-    if hosting_budget::runtime_withdrawal(paths, epoch.world_id, admission.consent())?.is_some() {
+    if supervised_runtime_withdrawal(paths, epoch.world_id, admission, memory_cap, child.id())?.is_some() {
         bail!("hosting consent or memory admission was withdrawn");
     }
     if load_stop_intent(paths, epoch)? || load_transfer_intent(paths, epoch)?.is_some() {
@@ -1590,7 +1624,7 @@ async fn challenge_live_supervised_runtime(
         bail!("managed Minecraft process exited during Fabric challenge");
     }
     ensure_authority_generation(storage, identity, epoch)?;
-    if hosting_budget::runtime_withdrawal(paths, epoch.world_id, admission.consent())?.is_some()
+    if supervised_runtime_withdrawal(paths, epoch.world_id, admission, memory_cap, child.id())?.is_some()
         || load_stop_intent(paths, epoch)?
         || load_transfer_intent(paths, epoch)?.is_some()
         || !permit_watch.observe(paths, epoch.world_id, Instant::now())?
@@ -2328,23 +2362,26 @@ fn ensure_runtime_generation(storage: &Storage, identity: &PeerIdentity, epoch: 
 }
 
 fn launch_server(
-    java: &Path,
-    server_jar: &Path,
+    options: &HostOptions,
     heap_mib: u64,
     runtime: &Path,
     world_dir: &Path,
     compatibility: Hash32,
     ipc_environment: &[(String, String)],
+    memory_cap: Option<&HostMemoryCap>,
 ) -> Result<Child> {
-    let mut command = Command::new(java);
-    command.arg(format!("-Xmx{heap_mib}m")).arg("-jar").arg(server_jar).arg("nogui").current_dir(runtime);
+    let mut command = Command::new(&options.java);
+    command.arg(format!("-Xmx{heap_mib}m")).arg("-jar").arg(&options.server_jar).arg("nogui").current_dir(runtime);
     for (name, value) in ipc_environment {
         command.env(name, value);
     }
     command
         .env("SWARMCRAFT_WORLD_DIR", world_dir.to_string_lossy().as_ref())
         .env("SWARMCRAFT_COMPAT_FINGERPRINT", compatibility.to_string());
-    command.spawn().with_context(|| format!("cannot launch Java runtime {}", java.display()))
+    if let Some(cap) = memory_cap {
+        cap.configure_command(&mut command)?;
+    }
+    command.spawn().with_context(|| format!("cannot launch Java runtime {}", options.java.display()))
 }
 
 fn validate_world_info(

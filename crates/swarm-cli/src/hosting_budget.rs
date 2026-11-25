@@ -11,7 +11,12 @@ use std::{
 };
 use swarm_core::{create_private_dir_all, DataPaths, PeerIdentity};
 
-use crate::{host_readiness, machine_hosting::MachineHostingReservation, runtime_process_guard};
+use crate::{
+    host_memory_cap::{self, HostMemoryCap, ProcessMemoryReport},
+    host_readiness,
+    machine_hosting::MachineHostingReservation,
+    runtime_process_guard,
+};
 use swarm_protocol::{PeerId, WorldId};
 
 const SCHEMA_VERSION: u16 = 1;
@@ -55,8 +60,9 @@ pub struct ContributionReadiness {
     pub daemon_headroom_mib: u64,
     pub may_host_now: bool,
     pub reason: String,
-    /// Heap-only JVM configuration, never a guaranteed whole-process RSS cap.
+    /// Cgroup charges are not a guaranteed whole-process RSS cap.
     pub hard_process_memory_cap_guaranteed: bool,
+    pub process_memory: ProcessMemoryReport,
     /// Decimal string, never a lossy JavaScript number. None is an absent
     /// local preference; zero MiB can have a durable revocation revision.
     pub consent_revision: Option<String>,
@@ -120,8 +126,14 @@ impl HostingAdmission {
         &self,
         paths: &DataPaths,
         world: WorldId,
+        memory_cap: Option<HostMemoryCap>,
     ) -> Result<runtime_process_guard::RuntimeProcessGuard<'_>> {
-        runtime_process_guard::RuntimeProcessGuard::begin_coordinated(paths, world, self.machine_reservation.as_ref())
+        runtime_process_guard::RuntimeProcessGuard::begin_coordinated(
+            paths,
+            world,
+            self.machine_reservation.as_ref(),
+            memory_cap,
+        )
     }
 }
 
@@ -299,6 +311,7 @@ pub fn require_contribution(paths: &DataPaths, world: WorldId) -> Result<Hosting
     if !record.enabled {
         bail!("hosting consent was withdrawn; this device is player-only (0 MiB)");
     }
+    host_memory_cap::validate_configuration()?;
     check_budget(record.heap_mib, memory_snapshot()?)?;
     Ok(record)
 }
@@ -332,6 +345,7 @@ fn revalidate_contribution(paths: &DataPaths, world: WorldId, expected: &Hosting
     if !current.enabled || current != *expected {
         bail!("hosting consent or heap changed; hosting operation denied");
     }
+    host_memory_cap::validate_configuration()?;
     check_budget(current.heap_mib, memory_snapshot()?)
 }
 
@@ -406,7 +420,18 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
         Ok(mem) => (Some(mem.physical_mib), Some(mem.available_mib)),
         Err(_) => (None, None),
     };
-    let (may_host_now, reason) = if let Err(error) = hosting_profile_guard(paths) {
+    let process_memory = match runtime_process_guard::observed_memory(paths, world)
+        .and_then(|observed| observed.map_or_else(|| host_memory_cap::configured_report(heap), Ok))
+    {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(%error, "could not verify local hosting memory enforcement");
+            ProcessMemoryReport::Unavailable { detail: "Cannot verify the configured memory controller or recorded runtime; inspect local diagnostics before retrying".into() }
+        }
+    };
+    let (may_host_now, reason) = if let ProcessMemoryReport::Unavailable { detail } = &process_memory {
+        (false, format!("hosting memory enforcement cannot be verified: {detail}"))
+    } else if let Err(error) = hosting_profile_guard(paths) {
         (false, error.to_string())
     } else if heap == 0 {
         (false, "Player-only; no Minecraft hosting consent".to_string())
@@ -435,6 +460,7 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
         may_host_now,
         reason,
         hard_process_memory_cap_guaranteed: false,
+        process_memory,
         consent_revision,
     })
 }

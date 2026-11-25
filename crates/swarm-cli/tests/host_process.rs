@@ -33,6 +33,10 @@ fn hosting_capacity_for_process_test() -> bool {
 #[tokio::test]
 async fn real_host_process_restores_launches_and_commits_mutated_world() {
     if !hosting_capacity_for_process_test() {
+        assert!(
+            std::env::var_os("SWARMCRAFT_HOST_CGROUP_ROOT").is_none(),
+            "delegated cap integration gate must not skip on low-memory runner"
+        );
         return;
     }
     // Port registries must have private ancestors, even under umask 0002.
@@ -156,6 +160,13 @@ port = int(os.environ["SWARMCRAFT_IPC_PORT"])
 token = os.environ["SWARMCRAFT_IPC_TOKEN"]
 world = os.environ["SWARMCRAFT_WORLD_DIR"]
 fingerprint = os.environ["SWARMCRAFT_COMPAT_FINGERPRINT"]
+if os.environ.get("SWARMCRAFT_HOST_CGROUP_ROOT"):
+    group = pathlib.Path("/sys/fs/cgroup" + pathlib.Path("/proc/self/cgroup").read_text().strip().removeprefix("0::"))
+    assert group.parent == pathlib.Path(os.environ["SWARMCRAFT_HOST_CGROUP_ROOT"])
+    assert group.name.startswith("swarmcraft-jvm-")
+    assert int((group / "memory.max").read_text()) == 1536 * 1024 * 1024
+    assert int((group / "memory.swap.max").read_text()) == 0
+    pathlib.Path(world, "cgroup-verified.txt").write_text("attached-before-exec\n")
 pathlib.Path(world, "swarmcraft-runtime-smoke.txt").write_text("mutated-by-real-host-process\n", encoding="utf-8")
 
 def encoded(value):
@@ -212,6 +223,10 @@ with socket.create_connection((host, port), timeout=5) as connection:
 
     let restored = temp.path().join("restored");
     storage.restore_snapshot(&latest, &restored).unwrap();
+    if std::env::var_os("SWARMCRAFT_HOST_CGROUP_ROOT").is_some() {
+        assert_eq!(fs::read_to_string(restored.join("cgroup-verified.txt")).unwrap(), "attached-before-exec\n");
+        println!("host launch fixture verified kernel cgroup membership and cap before exec");
+    }
     assert_eq!(
         fs::read_to_string(restored.join("swarmcraft-runtime-smoke.txt")).unwrap(),
         "mutated-by-real-host-process\n"

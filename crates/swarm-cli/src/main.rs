@@ -1243,6 +1243,12 @@ fn print_local_hosting_readiness(readiness: &hosting_budget::ContributionReadine
     println!("OS headroom: {} MiB", readiness.os_headroom_mib);
     println!("Minecraft client headroom: {} MiB", readiness.client_headroom_mib);
     println!("Daemon headroom: {} MiB", readiness.daemon_headroom_mib);
+    match &readiness.process_memory {
+        swarm_cli::host_memory_cap::ProcessMemoryReport::HeapOnly {} => println!("Process memory: heap-only; whole-JVM RSS is not hard-capped"),
+        swarm_cli::host_memory_cap::ProcessMemoryReport::LinuxCgroupConfigured { limit_mib } => println!("Process memory: Linux cgroup charge limit configured ({limit_mib} MiB), not yet active"),
+        swarm_cli::host_memory_cap::ProcessMemoryReport::LinuxCgroupActive { limit_mib, current_bytes, peak_bytes } => println!("Process memory: Linux cgroup charge limit {limit_mib} MiB; current {current_bytes} bytes; peak {peak_bytes:?} bytes"),
+        swarm_cli::host_memory_cap::ProcessMemoryReport::Unavailable { detail } => println!("Process memory enforcement unavailable: {detail}"),
+    }
     println!("Hard process RSS cap guaranteed: {}", readiness.hard_process_memory_cap_guaranteed);
     println!("Consent alone does not grant signed world policy, quorum authority, or a running Minecraft server.");
     Ok(())

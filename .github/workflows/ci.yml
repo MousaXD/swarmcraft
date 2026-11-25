@@ -65,6 +65,14 @@ jobs:
         run: cargo test -p swarm-cli --test live_join_replication --locked
       - name: Host process lifecycle
         run: cargo test -p swarm-cli --test host_process --locked
+      - name: Delegated Linux cgroup memory enforcement
+        run: |
+          set -euo pipefail
+          cargo test -p swarm-cli --lib --test host_process --locked --no-run --message-format=json > /tmp/swarmcraft-memory-test-artifacts.jsonl
+          unit_bin="$(python3 -c 'import json,sys; rows=map(json.loads,sys.stdin); print(next(r["executable"] for r in rows if r.get("reason")=="compiler-artifact" and r.get("executable") and r["target"]["name"]=="swarm_cli" and "lib" in r["target"]["kind"]))' < /tmp/swarmcraft-memory-test-artifacts.jsonl)"
+          host_bin="$(python3 -c 'import json,sys; rows=map(json.loads,sys.stdin); print(next(r["executable"] for r in rows if r.get("reason")=="compiler-artifact" and r.get("executable") and r["target"]["name"]=="host_process" and "test" in r["target"]["kind"]))' < /tmp/swarmcraft-memory-test-artifacts.jsonl)"
+          sudo systemd-run --quiet --wait --pipe --collect --unit="swarmcraft-memory-cap-test-unit-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" -p "User=$(id -un)" -p Delegate=memory -p RuntimeMaxSec=90 -p "WorkingDirectory=$PWD" /bin/bash "$PWD/scripts/e2e/linux_cgroup_memory_gate.sh" "$unit_bin" host_memory_cap::linux::tests --ignored --nocapture --test-threads=1
+          sudo systemd-run --quiet --wait --pipe --collect --unit="swarmcraft-memory-cap-test-host-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" -p "User=$(id -un)" -p Delegate=memory -p RuntimeMaxSec=90 -p "WorkingDirectory=$PWD" /bin/bash "$PWD/scripts/e2e/linux_cgroup_memory_gate.sh" "$host_bin" --exact real_host_process_restores_launches_and_commits_mutated_world --nocapture
       - name: Migration orchestration
         run: cargo test -p swarm-cli --test migration_core --locked
       - name: Runtime setup failure hardening
