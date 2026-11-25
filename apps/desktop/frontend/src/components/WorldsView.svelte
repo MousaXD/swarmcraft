@@ -157,6 +157,13 @@
                 </div>
                 <div id="membershipNotice" class="inline-notice" role="status" aria-live="polite" hidden></div>
 
+                <details id="worldListingDetails" class="form-details local-listing-controls">
+                  <summary>Discovery visibility and local publication</summary>
+                  <p id="worldListingState" class="field-help" role="status" aria-live="polite">Select a world to check its signed visibility.</p>
+                  <p class="field-help">Pausing this device withdraws its discovery publications and votes. It may reduce discovery quorum. This does not edit signed visibility, change membership, or delete saves.</p>
+                  <div class="compact-actions"><button id="worldListingRefresh" class="button button-secondary button-small" type="button">Refresh</button><button id="worldListingToggle" class="button button-secondary button-small" type="button" disabled>Pause this device</button></div>
+                </details>
+
                 <!-- The native game-route controller owns this display and
                      both reconnect buttons. This Svelte candidate must never
                      infer a playable route from compatibility or migration. -->

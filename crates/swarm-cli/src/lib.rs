@@ -2,6 +2,7 @@ pub mod authority_permit;
 pub mod checkpoint_backup;
 pub mod client_profile;
 pub mod device_retirement;
+pub mod directory_moderation;
 pub mod discovery;
 pub mod game_route_api;
 pub mod historical_authority;

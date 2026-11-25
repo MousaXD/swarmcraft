@@ -44,8 +44,10 @@ export function normalizeDiscoveryCard(world, now = Date.now(), expected = null)
   };
   return Object.freeze({
     world_id: world.world_id, name: display(world.name, 256) || 'Unnamed listing',
+    config_hash: typeof world.config_hash === 'string' && /^[a-f0-9]{64}$/.test(world.config_hash) ? world.config_hash : null,
+    languages: Array.isArray(world.tags) ? [...new Set(world.tags.filter(tag => typeof tag === 'string' && /^lang:[a-z]{2,3}$/.test(tag)).map(tag => tag.slice(5)))].slice(0, 6) : [],
     visibility: world.visibility, description: display(world.description, 320),
-    tags: Array.isArray(world.tags) ? world.tags.slice(0, 6).map(tag => display(tag, 40)).filter(Boolean) : [],
+    tags: Array.isArray(world.tags) ? world.tags.filter(tag => !(typeof tag === 'string' && /^lang:[a-z]{2,3}$/.test(tag))).slice(0, 6).map(tag => display(tag, 40)).filter(Boolean) : [],
     approximate_region: display(world.approximate_region, 64),
     minecraft_version: display(world.minecraft_version, 64),
     loader_id: display(world.loader_id, 64), loader_version: display(world.loader_version, 64),

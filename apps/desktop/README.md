@@ -51,6 +51,22 @@ The Discover view searches signed public announcements, with at most 32 results 
 
 Configure reachable directory providers as described in [Private infrastructure](../../docs/PRIVATE_INFRASTRUCTURE.md). An unavailable or incomplete directory is not proof that a world does not exist.
 
+## Listing privacy and moderation
+
+New public/unlisted worlds can optionally declare a broad region and a
+listing language; private creation has neither field. These values are
+signed listing metadata, not inferred location or language. Discover supports
+filters, reversible local hiding and minimal local reports. Saved reports
+can be viewed/copied for manual sharing with a trusted directory operator;
+nothing is automatically sent or suppressed. In Worlds, expand **Discovery
+visibility and local publication** to inspect locally verified signed
+visibility and pause/resume this device's publication. Pausing can reduce
+discovery quorum but never changes membership or world history. Arbitrary
+signed visibility edits remain gated on configuration-history sync.
+
+See [World governance](../../docs/WORLD_GOVERNANCE.md) for the operator
+review and suppression commands and the public-rollout boundary.
+
 ## Friends and presence privacy
 
 Add a contact by comparing the complete device peer ID and public key via a

@@ -82,7 +82,12 @@ for directory provider addresses. The runtime CLI also accepts `--query` and
 `providers_seen`, `providers_responded`, `truncated`, and the report state
 describe coverage. `verified_unix_ms` records successful freshness verification,
 not current online status or authorization. Desktop pages that snapshot locally;
-there is no network-wide pagination cursor in discovery V1.
+there is no network-wide pagination cursor in discovery V1. The runtime
+also accepts `--region` and `--language` filters for signed, self-declared
+metadata. Local hide counts are returned separately from network coverage;
+operator browse suppression is scoped to that publisher. See
+[World governance](WORLD_GOVERNANCE.md) for the optional local report/review
+workflow and the distinction from signed canonical policy.
 
 ### Consent-gated friend presence
 

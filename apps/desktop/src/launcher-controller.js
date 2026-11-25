@@ -646,6 +646,8 @@ export function install() {
           request: {
             name,
             visibility,
+            ...(visibility !== 'private' && byId('createListingRegion').value ? { region: byId('createListingRegion').value } : {}),
+            ...(visibility !== 'private' && byId('createListingLanguage').value ? { language: byId('createListingLanguage').value } : {}),
             modpack: {
               minecraftVersion,
               loaderId: 'fabric',

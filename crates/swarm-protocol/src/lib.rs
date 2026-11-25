@@ -3,6 +3,9 @@
 //! Anything hashed or signed is encoded with postcard and a domain separator.
 //! JSON is intentionally not used for canonical bytes.
 
+mod listing_metadata;
+pub use listing_metadata::{listing_language_tag, listing_region, new_listing_presentation, LISTING_REGIONS};
+
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use thiserror::Error;

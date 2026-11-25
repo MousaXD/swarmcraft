@@ -6,7 +6,7 @@ use swarm_catalog::CatalogService;
 use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
 use swarm_protocol::{
     validate_new_world_selection, AuthorityPolicyV1, MembershipPolicyV1, MembershipRecordV1, WorldConfigV1,
-    WorldDescriptorV1, WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    WorldDescriptorV1, WorldMemberV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 
@@ -15,6 +15,10 @@ use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 pub struct CreateCanonicalWorldRequest {
     pub name: String,
     pub visibility: String,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
     pub modpack: CanonicalizeModpackRequest,
 }
 
@@ -33,6 +37,14 @@ pub fn create_canonical_world(
     if name.is_empty() {
         return Err(failure("invalid_world_name", "World name is required"));
     }
+    let visibility = parse_visibility(&request.visibility)?;
+    let presentation = swarm_protocol::new_listing_presentation(
+        name.clone(),
+        visibility,
+        request.region.as_deref(),
+        request.language.as_deref(),
+    )
+    .map_err(|error| failure("invalid_listing_metadata", error))?;
     if !request.modpack.loader_id.trim().eq_ignore_ascii_case("fabric") {
         return Err(failure("unsupported_loader", "SwarmCraft v1 currently supports the Fabric loader contract"));
     }
@@ -50,7 +62,6 @@ pub fn create_canonical_world(
         })?;
     validate_catalog_selection(&request.modpack.minecraft_version, &request.modpack.loader_version)?;
     let canonical = canonicalize_modpack(request.modpack)?;
-    let visibility = parse_visibility(&request.visibility)?;
 
     let paths = DataPaths::discover().map_err(|error| failure("storage_unavailable", error.to_string()))?;
     paths.ensure().map_err(|error| failure("storage_unavailable", error.to_string()))?;
@@ -118,13 +129,7 @@ pub fn create_canonical_world(
             preferred_replication_factor: descriptor.preferred_replication_factor,
         },
         membership_policy: MembershipPolicyV1::InviteOnly,
-        presentation: WorldPresentationV1 {
-            name,
-            description: String::new(),
-            tags: Vec::new(),
-            icon_hash: None,
-            approximate_region: None,
-        },
+        presentation,
         authority_peer_id: identity.peer_id(),
         authority_public_key: identity.public_key(),
         signature: Vec::new(),
@@ -202,6 +207,8 @@ mod tests {
             let error = create_canonical_world(CreateCanonicalWorldRequest {
                 name: "Matrix rejection fixture".into(),
                 visibility: "private".into(),
+                region: None,
+                language: None,
                 modpack: CanonicalizeModpackRequest {
                     minecraft_version: minecraft.into(),
                     loader_id: "fabric".into(),

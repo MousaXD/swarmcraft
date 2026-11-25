@@ -326,6 +326,10 @@ window.__swarmcraftPresenceProcess = false;
 window.__swarmcraftPresenceHold = false;
 window.__swarmcraftReleasePresence = null;
 window.__swarmcraftPresenceState = 'online';
+window.__swarmcraftPolicy={version:1,hidden_worlds:[],directory_suppressions:[],reports:[]};
+window.__swarmcraftDirectoryReportHold=false;
+window.__swarmcraftReleaseReport=null;
+window.__swarmcraftListingPaused={};
 window.__swarmcraftDiscoveryReport = null;
 window.__swarmcraftDiscoveryHold = false;
 window.__swarmcraftReleaseDiscovery = null;
@@ -334,13 +338,13 @@ window.__swarmcraftReleaseResolve = null;
 window.__swarmcraftResolveVisibility = 'public';
 window.__swarmcraftDiscoveryCard = (world, name, overrides = {}) => {
   const now = Date.now();
-  return { world_id: world, name, visibility:'public', membership_policy:'invite_only', join_action:'invite_required',
+  return { world_id: world, name, config_hash:'b'.repeat(64), visibility:'public', membership_policy:'invite_only', join_action:'invite_required',
     minecraft_version:'26.1.2', loader_id:'fabric', loader_version:'0.19.3', issued_unix_ms:now-1000,
     verified_unix_ms:now, expires_unix_ms:now+60_000, ...overrides };
 };
 window.__swarmcraftDirectoryReport = (results, overrides = {}) => ({
   state: results.length ? 'ok' : 'empty', results, providers_seen:2, providers_responded:2,
-  truncated:false, rejected_invalid:0, rejected_stale:0, ...overrides
+  truncated:false, rejected_invalid:0, rejected_stale:0, hidden_results:0, ...overrides
 });
 addEventListener('error', (event) => {
   window.__swarmcraftBrowserErrors.push(String(event.error?.stack || event.message || event.error || 'window error'));
@@ -552,12 +556,40 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
       }
       return {peer_id:args.peer,state:window.__swarmcraftPresenceState,
         observed_unix_ms:Date.now(),expires_unix_ms:Date.now()+500,detail:'raw private address'};
+    case 'directory_policy': return structuredClone(window.__swarmcraftPolicy);
+    case 'directory_hide':
+      window.__swarmcraftPolicy.hidden_worlds=window.__swarmcraftPolicy.hidden_worlds.filter(id=>id!==args.world);
+      if(args.enabled)window.__swarmcraftPolicy.hidden_worlds.push(args.world);
+      return structuredClone(window.__swarmcraftPolicy);
+    case 'directory_report': {
+      if(window.__swarmcraftDirectoryReportHold) {
+        window.__swarmcraftDirectoryReportHold=false;
+        await new Promise(resolve=>window.__swarmcraftReleaseReport=resolve);
+      }
+      const entry={report_id:'f'.repeat(64),world_id:args.world,config_hash:args.configHash,reason:args.reason,
+        verified_unix_ms:Date.now()-1,recorded_unix_ms:Date.now()};
+      window.__swarmcraftPolicy.reports=[entry];
+      return structuredClone(window.__swarmcraftPolicy);
+    }
+    case 'directory_dismiss_report':
+      window.__swarmcraftPolicy.reports=window.__swarmcraftPolicy.reports.filter(r=>r.report_id!==args.report);
+      return structuredClone(window.__swarmcraftPolicy);
+    case 'world_listing':
+      if(typeof args.paused==='boolean')window.__swarmcraftListingPaused[args.world]=args.paused;
+      return {world_id:args.world,locally_paused:window.__swarmcraftListingPaused[args.world]===true,
+        signed_visibility:'public',signed_visibility_changed:false,world_membership_changed:false};
     case 'discovery_search':
       if (window.__swarmcraftDiscoveryHold) {
         window.__swarmcraftDiscoveryHold = false;
         return await new Promise(resolve => { window.__swarmcraftReleaseDiscovery = resolve; });
       }
-      return window.__swarmcraftDiscoveryReport || window.__swarmcraftDirectoryReport([]);
+      {
+        const raw=structuredClone(window.__swarmcraftDiscoveryReport || window.__swarmcraftDirectoryReport([]));
+        const before=raw.results.length;
+        raw.results=raw.results.filter(c=>!window.__swarmcraftPolicy.hidden_worlds.includes(c.world_id));
+        raw.hidden_results+=(before-raw.results.length);
+        return raw;
+      }
     case 'discovery_resolve':
       if (window.__swarmcraftResolveHold) {
         window.__swarmcraftResolveHold = false;
@@ -679,6 +711,20 @@ const scenario = String.raw`(async () => {
   await waitFor(() => document.getElementById('modSearchResults').textContent.includes('Restricted mod'), 'restricted provider search result');
   document.querySelector('#modSearchResults button').click();
   document.getElementById('createName').value = 'Browser smoke world';
+  const setVisibility = value => {
+    const field = document.getElementById('createVisibility');
+    field.value=value;field.dispatchEvent(new Event('change',{bubbles:true}));
+  };
+  require(document.getElementById('createListingMetadata').hidden, 'Private creation exposed public metadata');
+  setVisibility('public');
+  require(!document.getElementById('createListingMetadata').hidden, 'Public listing metadata unavailable');
+  document.getElementById('createListingRegion').value='europe';
+  document.getElementById('createListingLanguage').value='en';
+  setVisibility('private');
+  require(document.getElementById('createListingMetadata').hidden && !document.getElementById('createListingRegion').value && !document.getElementById('createListingLanguage').value, 'Private change retained public metadata');
+  setVisibility('public');
+  document.getElementById('createListingRegion').value='middle-east';
+  document.getElementById('createListingLanguage').value='ar';
   document.getElementById('createForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   await waitFor(() => document.getElementById('manualProviderArtifact0') && document.getElementById('createError').textContent.includes('Manual artifact required'), 'exact manual file selection');
   require(!window.__swarmcraftCalls.some(call => call.command === 'create_canonical_world'), 'World created before restricted artifact was supplied');
@@ -687,7 +733,9 @@ const scenario = String.raw`(async () => {
   await waitFor(() => document.getElementById('createError')?.dataset.createdWorldId === 'scworld:browser-smoke', 'post-create repair state');
 
   require(window.__swarmcraftCalls.filter((call) => call.command === 'create_canonical_world').length === 1, 'Canonical Create was not invoked exactly once');
-  const createdPack = window.__swarmcraftCalls.find(call => call.command === 'create_canonical_world').args.request.modpack.packages;
+  const request = window.__swarmcraftCalls.find(call => call.command === 'create_canonical_world').args.request;
+  require(request.visibility==='public' && request.region==='middle-east' && request.language==='ar', 'Signed creation metadata not passed to native boundary');
+  const createdPack = request.modpack.packages;
   require(createdPack.length === 2, 'Both provider artifacts were not retained');
   require(createdPack.some(pkg => pkg.provider === 'curseforge' && pkg.retrieval === 'manual_required' && pkg.artifactPath === '/fixture/restricted.jar'), 'Manual restriction was lost during canonicalization');
   require(createdPack.some(pkg => pkg.provider === 'modrinth' && pkg.retrieval === 'provider_download'), 'Permitted provider artifact was not retained');
@@ -1240,6 +1288,92 @@ async function runFriendsGate(port,sessionId,width,height,screenshotPath) {
   await writeFile(screenshotPath.replace(/\.png$/,'-friends.png'),png);
 }
 
+const moderationScenario = String.raw`(async()=>{
+  const $=id=>document.getElementById(id);
+  const require=(value,message)=>{if(!value)throw Error(message);};
+  const waitFor=async(predicate,label)=>{
+    for(let i=0;i<240;i++){if(predicate())return;await new Promise(r=>setTimeout(r,25));}
+    throw Error('Timed out: '+label);
+  };
+  const calls=name=>window.__swarmcraftCalls.filter(c=>c.command===name);
+  const id=i=>'scworld:'+i.toString(16).padStart(64,'0');
+  const listing=i=>window.__swarmcraftDiscoveryCard(id(i),'Moderation village '+i,{approximate_region:'middle-east',tags:['lang:ar','survival']});
+  const row=i=>[...$('publicWorldResults').children].find(el=>el.dataset.worldId===id(i));
+  const action=(i,name)=>row(i)?.querySelector('[data-action="'+name+'"]');
+  const set=(field,value)=>{$(field).value=value;$(field).dispatchEvent(new Event('change',{bubbles:true}));};
+  const search=async data=>{
+    window.__swarmcraftDiscoveryReport=window.__swarmcraftDirectoryReport(data);
+    $('publicWorldSearch').click();
+    await waitFor(()=>!$('publicWorldSearch').disabled,'search settled');
+  };
+  const joinCount=calls('join_world').length;
+  $('openDiscover').click();
+  $('publicWorldRegion').closest('details').open=true;
+  set('publicWorldRegion','middle-east');set('publicWorldLanguage','ar');
+  await search([listing(1),listing(2)]);
+  require(row(1)?.textContent.includes('Region: middle-east')&&row(1).textContent.includes('Language: ar'),'Signed metadata not displayed');
+  const args=calls('discovery_search').at(-1).args;
+  require(args.region==='middle-east'&&args.language==='ar','Filter not forwarded to native');
+  action(1,'hide').click();
+  await waitFor(()=>!row(1)&&$('directoryHidden').textContent.includes(id(1)),'local hide');
+  require(row(2)&&$('publicWorldStatus').textContent.includes('1 verified listing(s) hidden on this device'),'Hide count or remaining row wrong');
+  require($('directoryPolicyStatus').textContent.includes('this device only'),'Hide claimed global moderation');
+  await search([listing(1)]);
+  require($('publicWorldResults').children.length===0&&$('publicWorldStatus').textContent.includes('hidden on this device'),'All-hidden native result misrepresented');
+  $('directoryHidden').querySelector('[data-action=restore]').click();
+  await waitFor(()=>$('directoryHidden').textContent.includes('No hidden listings'),'restore');
+  await search([listing(1),listing(2)]);
+  require(row(1)&&row(2),'Restore did not permit fresh search');
+
+  action(1,'report').click();
+  require(!$('directoryReportDraft').hidden&&$('directoryReportTarget').textContent.includes(id(1)),'Report draft not bound to clicked listing');
+  const before=calls('directory_report').length;
+  $('directoryReportCancel').click();
+  require($('directoryReportDraft').hidden&&calls('directory_report').length===before,'Cancel sent report');
+  action(1,'report').click();
+  set('directoryReportReason','spam');
+  window.__swarmcraftDirectoryReportHold=true;
+  $('directoryReportSave').click();
+  await waitFor(()=>typeof window.__swarmcraftReleaseReport==='function','held report');
+  $('directoryReportForm').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
+  require(calls('directory_report').length===before+1&&$('directoryReportSave').disabled,'Duplicate report mutation allowed');
+  const payload=calls('directory_report').at(-1).args;
+  require(JSON.stringify(Object.keys(payload).sort())===JSON.stringify(['configHash','reason','world'])&&payload.world===id(1)&&payload.configHash==='b'.repeat(64),'Report sent more than minimal exact configuration and category');
+  window.__swarmcraftReleaseReport();
+  await waitFor(()=>$('directoryReportDraft').hidden&&$('directoryReports').textContent.includes('Spam'),'saved report');
+  require($('directoryPolicyStatus').textContent.includes('nothing was sent')&&row(1),'Report automatically suppressed or claimed submission');
+  $('directoryReports').querySelector('[data-action=view]').click();
+  const exported=JSON.parse($('directoryExport').value);
+  require(exported.allegation===true&&exported.world_id===id(1)&&exported.reason==='spam'&&!Object.hasOwn(exported,'token'),'Unsafe report export');
+  require(Object.keys(exported).length===8,'Unexpected report export fields');
+  $('directoryReports').querySelector('[data-action=delete]').click();
+  await waitFor(()=>$('directoryReports').textContent.includes('No saved reports')&&$('directoryExportWrap').hidden,'delete local report');
+  require(row(1)&&calls('join_world').length===joinCount,'Moderation mutated membership or listing');
+  $('directoryModeration').open=false;
+  $('publicWorldRegion').closest('details').open=false;
+  set('publicWorldRegion','');set('publicWorldLanguage','');
+  $('joinWorldId').closest('details').open=false;
+  await search([listing(1),listing(2)]);
+  $('discoverPanel').scrollTop=0;
+  require(document.body.scrollWidth<=innerWidth&&$('discoverPanel').scrollWidth<=$('discoverPanel').clientWidth+2,'Moderation UI overflow');
+  return {status:'pass'};
+})()`;
+
+async function runModerationGate(port,sessionId,width,height,screenshotPath) {
+  const result=await executeAsync(port,sessionId,scenarioRunner,[moderationScenario]);
+  assert.equal(result?.ok,true,`Directory moderation failed at ${width}x${height}: ${result?.error}`);
+  assert.equal(result.value?.status,'pass');
+  const png=Buffer.from(await webdriverRequest(port,`/session/${sessionId}/screenshot`),'base64');
+  await writeFile(screenshotPath.replace(/\.png$/,'-moderation.png'),png);
+  // Real keyboard focus must reach the visible per-listing Report action.
+  await tabTo(port,sessionId,'#publicWorldResults [data-action=report]');
+  await keyInput(port,sessionId,'Enter');
+  assert.equal(await execute(port,sessionId,'return !document.getElementById("directoryReportDraft").hidden'),true);
+  const draft=Buffer.from(await webdriverRequest(port,`/session/${sessionId}/screenshot`),'base64');
+  await writeFile(screenshotPath.replace(/\.png$/,'-report-draft.png'),draft);
+  await execute(port,sessionId,'document.getElementById("directoryReportCancel").click()');
+}
+
 const scenarioRunner = String.raw`
 const done = arguments[arguments.length - 1];
 Promise.resolve().then(() => eval(arguments[0])).then(
@@ -1447,6 +1581,7 @@ async function runViewport(port, sessionId, documentHtml, graph, width, height, 
   await runAccessibilityGate(port, sessionId, width, height, screenshotPath);
   await runDiscoveryGate(port, sessionId, width, height, screenshotPath);
   await runFriendsGate(port, sessionId, width, height, screenshotPath);
+  await runModerationGate(port, sessionId, width, height, screenshotPath);
 }
 
 // Exercise the actual compiled Svelte module graph, including its shared
@@ -1527,6 +1662,7 @@ async function runCandidateViewport(port, sessionId, url, width, height, screens
   await runAccessibilityGate(port, sessionId, width, height, screenshotPath);
   await runDiscoveryGate(port, sessionId, width, height, screenshotPath);
   await runFriendsGate(port, sessionId, width, height, screenshotPath);
+  await runModerationGate(port, sessionId, width, height, screenshotPath);
 }
 
 test('current Desktop module graph initializes, owns canonical Create, and renders supported window sizes', async () => {

@@ -1,0 +1,18 @@
+{
+  "scope": "real signed loopback publisher; isolated owner, client and reviewing operator; mDNS disabled",
+  "checks": {
+    "private_metadata_rejected_before_creation": true,
+    "signed_coarse_metadata_public_only": true,
+    "region_and_language_filter": true,
+    "nonpublic_and_mismatched_reports_refused": true,
+    "report_local_minimal_idempotent_not_sent": true,
+    "independent_review_no_automatic_decision": true,
+    "local_hide_is_reversible_and_not_global": true,
+    "publisher_browse_suppression_preserves_exact_lookup": true,
+    "malformed_directory_policy_fails_closed_browse_only": true,
+    "local_publication_pause_and_resume_preserve_signed_visibility": true,
+    "canonical_protocol_files_unchanged": 28,
+    "no_membership_created": true,
+    "report_deletion_independent": true
+  }
+}

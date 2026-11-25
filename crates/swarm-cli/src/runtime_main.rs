@@ -80,6 +80,10 @@ enum RuntimeCommand {
     DiscoverySearch {
         #[arg(long)]
         query: Option<String>,
+        #[arg(long)]
+        region: Option<String>,
+        #[arg(long)]
+        language: Option<String>,
         /// Maximum verified listings in this bounded snapshot (1 through 64).
         #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u16).range(1..=64))]
         limit: u16,
@@ -92,8 +96,54 @@ enum RuntimeCommand {
         #[arg(long = "bootstrap")]
         bootstrap: Vec<String>,
     },
+    /// Local browse preferences, directory suppression and untrusted report records.
+    Moderation {
+        #[command(subcommand)]
+        command: ModerationCommand,
+    },
     /// Launch the persisted managed runtime through the shared Rust authority/migration path.
     Launch { world: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum ModerationCommand {
+    /// Read local state without opening or changing canonical world storage.
+    State,
+    /// Hide/restore a world only in this device's public browse results.
+    Hide {
+        world: String,
+        #[arg(long, action = clap::ArgAction::Set)]
+        enabled: bool,
+    },
+    /// Suppress browse results on this device's directory publisher.
+    Suppress {
+        world: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Restore browse eligibility on this device's directory publisher.
+    Restore { world: String },
+    /// Reverify a public listing and save a minimal local report; never sends it.
+    Report {
+        world: String,
+        #[arg(long)]
+        config: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long = "bootstrap")]
+        bootstrap: Vec<String>,
+    },
+    /// Print a minimal transferable report envelope, never sends it.
+    ExportReport { report: String },
+    /// Independently check an explicitly supplied untrusted report against live public discovery.
+    ReviewReport {
+        #[arg(long)]
+        report_file: PathBuf,
+        #[arg(long = "bootstrap")]
+        bootstrap: Vec<String>,
+    },
+    /// Delete a local report record without changing any policy.
+    Dismiss { report: String },
 }
 
 fn main() -> Result<()> {
@@ -105,10 +155,15 @@ fn main() -> Result<()> {
         Some(root) => DataPaths::from_root(root),
         None => DataPaths::discover()?,
     };
+    let command = match args.command {
+        RuntimeCommand::Moderation { command } => return handle_moderation(&paths, command),
+        other => other,
+    };
     let storage = Storage::open(paths.root.clone())?;
     let installer = RuntimeInstaller::new(&paths, &storage);
 
-    match args.command {
+    match command {
+        RuntimeCommand::Moderation { .. } => unreachable!("moderation is handled before storage opens"),
         RuntimeCommand::CompatibilityMatrix => unreachable!("handled before opening storage"),
         RuntimeCommand::Status { world } => {
             print_json(&installer.inspect(parse_world(&world)?)?)?;
@@ -195,10 +250,19 @@ fn main() -> Result<()> {
                 &bootstrap,
             ))?;
         }
-        RuntimeCommand::DiscoverySearch { query, limit, bootstrap } => {
+        RuntimeCommand::DiscoverySearch { query, region, language, limit, bootstrap } => {
+            let approximate_region =
+                region.as_deref().map(swarm_protocol::listing_region).transpose().map_err(anyhow::Error::msg)?;
+            let tags = language
+                .as_deref()
+                .map(swarm_protocol::listing_language_tag)
+                .transpose()
+                .map_err(anyhow::Error::msg)?
+                .into_iter()
+                .collect();
             let report = tokio::runtime::Runtime::new()?.block_on(discovery::search_public_worlds(
                 &paths,
-                DiscoverySearchInputV1 { query, limit, ..Default::default() },
+                DiscoverySearchInputV1 { query, approximate_region, tags, limit, ..Default::default() },
                 &bootstrap,
             ))?;
             print_json(&report)?;
@@ -251,6 +315,31 @@ fn runtime_platform_ready(status: &RuntimeStatus) -> bool {
     status.components.iter().all(|component| {
         component.kind == RuntimeComponentKind::ServerMods || component.state == RuntimeComponentState::Ready
     })
+}
+
+fn handle_moderation(paths: &DataPaths, command: ModerationCommand) -> Result<()> {
+    use swarm_cli::directory_moderation as policy;
+    let result = match command {
+        ModerationCommand::State => policy::state(paths)?,
+        ModerationCommand::Hide { world, enabled } => policy::set_hidden(paths, parse_world(&world)?, enabled)?,
+        ModerationCommand::Suppress { world, reason } => {
+            policy::set_suppression(paths, parse_world(&world)?, Some(reason.parse()?))?
+        }
+        ModerationCommand::Restore { world } => policy::set_suppression(paths, parse_world(&world)?, None)?,
+        ModerationCommand::Report { world, config, reason, bootstrap } => tokio::runtime::Runtime::new()?.block_on(
+            policy::report_public_listing(paths, parse_world(&world)?, config.parse()?, reason.parse()?, &bootstrap),
+        )?,
+        ModerationCommand::ExportReport { report } => return print_json(&policy::export_report(paths, &report)?),
+        ModerationCommand::ReviewReport { report_file, bootstrap } => {
+            return print_json(&tokio::runtime::Runtime::new()?.block_on(policy::review_report(
+                paths,
+                &report_file,
+                &bootstrap,
+            ))?)
+        }
+        ModerationCommand::Dismiss { report } => policy::dismiss_report(paths, &report)?,
+    };
+    print_json(&result)
 }
 
 fn parse_world(value: &str) -> Result<WorldId> {

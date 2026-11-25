@@ -1,0 +1,52 @@
+{
+  "scope": "extracted Linux Debian packages, real WebKitGTK, real bundled sidecars and signed moderation fixtures",
+  "source_base": "7d518f20163bcc8467be5be139500902ce6c51ea",
+  "variants": {
+    "shipping": {
+      "package_sha256": "6975d46efefc894d07a11aabface722d3e4030c133e70ea9cd62992023bd072c",
+      "files": {
+        "desktop": "08c6893307be7ca0c4d1116ecf4d14bca087c4e864fc8354effc1264c0519b8d",
+        "swarmcraft": "9773d1b0111282370eac765d371a81147505d0f5451f1855919e4bc4f0b86b94",
+        "swarmcraft-host": "19aacce156b4d3f0c523e27a02dc7430cc501ce598ffa6b364b36128cfe1e546",
+        "swarmcraft-runtime": "dc5bdba591f418503a8961ffc902086f4d7500290664e813d79bc03473e395b7",
+        "swarmcraft-import": "7c59fde775e85197691ded91daa9abee07a97daa7acbfa667bc4b06dd50b708c"
+      },
+      "checks": {
+        "boot": true,
+        "local_publication_pause_resume": true,
+        "actual_signed_metadata_filter": true,
+        "layout_980x760": true,
+        "layout_720x560": true,
+        "actual_report_saved_without_auto_moderation": true,
+        "minimal_report_export": true,
+        "persisted_hide_and_fresh_search": true,
+        "local_restore": true,
+        "local_report_deletion": true,
+        "canonical_files_and_remote_policy_unchanged": true
+      }
+    },
+    "candidate": {
+      "package_sha256": "b5630a8d209e7426690ee5d23593976c1ff6aecc5ed28618e3ca3adc978c9928",
+      "files": {
+        "desktop": "ac36c44acd9f4246d526819f702b1f03282686b9e2b0cb29c7dbcd169c5db933",
+        "swarmcraft": "9773d1b0111282370eac765d371a81147505d0f5451f1855919e4bc4f0b86b94",
+        "swarmcraft-host": "19aacce156b4d3f0c523e27a02dc7430cc501ce598ffa6b364b36128cfe1e546",
+        "swarmcraft-runtime": "dc5bdba591f418503a8961ffc902086f4d7500290664e813d79bc03473e395b7",
+        "swarmcraft-import": "7c59fde775e85197691ded91daa9abee07a97daa7acbfa667bc4b06dd50b708c"
+      },
+      "checks": {
+        "boot": true,
+        "local_publication_pause_resume": true,
+        "actual_signed_metadata_filter": true,
+        "layout_980x760": true,
+        "layout_720x560": true,
+        "actual_report_saved_without_auto_moderation": true,
+        "minimal_report_export": true,
+        "persisted_hide_and_fresh_search": true,
+        "local_restore": true,
+        "local_report_deletion": true,
+        "canonical_files_and_remote_policy_unchanged": true
+      }
+    }
+  }
+}

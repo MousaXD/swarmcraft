@@ -475,12 +475,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #47 — P2 · Proposal
 - Work: Add public-world governance and abuse handling once private play is stable
 - Acceptance: Listing visibility, moderation, region/language metadata, report flow, and local filtering work without granting registry veto power over world history
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (non-authoritative directory policy and reporting, actual signed loopback and both packaged Linux frontends; public rollout and signed configuration edits remain gated)
+- Source: crates/swarm-protocol/src/listing_metadata.rs; crates/swarm-cli/src/{directory_moderation,discovery,main,runtime_main}.rs; apps/desktop/src-tauri/src/{directory_commands,canonical_world_commands,launcher_commands,main}.rs; both Desktop frontends and shared directory-moderation.js; scripts/e2e/directory_moderation_smoke.py; scripts/acceptance/native_directory_moderation.py.
+- Evidence: [Report](../research/directory-moderation/REPORT.md), [signed loopback CLI](../research/directory-moderation/evidence/loopback-cli-20261125.json), [native Linux](../research/directory-moderation/evidence/linux-native-20261125.json). Explicit coarse region/language uses existing signed presentation fields, private creation refuses metadata, search filters are signed. Reversible device hide, publisher browse suppression, and local publication pause are distinct and do not alter signed world visibility or authority. Exact fresh public config-bound allegations are stored privately, deduplicated, minimally exported and independently reviewed without automatic submission/adjudication. Malformed policy fails browse closed. Real owner/client/operator scenario passed all checks, preserving 28 canonical protocol files byte-for-byte and creating no membership. Both extracted packages passed 11/11 checks, including native signed search, pause/resume, save/export/delete report and persisted hide/restore at supported sizes. 28 protocol, 5 moderation, 12 discovery library, 7 real-network, 1 native validation, 169 Node, 82 Svelte, 30 source-parity tests, both final Chromium variants, build/check and scoped Clippy passed.
+- Remaining / next action: Public directory deployment/intake/appeals, account moderation, general signed visibility edits (configuration-history sync prerequisite), independent LAN/WAN and installed Windows/macOS field qualification remain outside the local checkpoint. New-world metadata only; actual native GUI creation against an external catalog was not tested (real CLI creation and browser GUI payload were tested). Continue to #48.
+- External dependency: Independently operated platforms/providers and public-rollout governance/qualification; safe signed configuration-history synchronization before widening signed edits.
+- Commit: Non-authoritative directory moderation and report flow; see git history.
 
 ### #48 — P2 · Proposal
 - Work: Add opt-in, redacted diagnostics export and a useful local history of world actions

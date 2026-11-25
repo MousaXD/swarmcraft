@@ -12,6 +12,8 @@ export interface NewWorldInput {
   fabricLoader: string;
   compatibility: CompatibilityProfile;
   visibility: WorldVisibility;
+  region?: string;
+  language?: string;
 }
 export interface ImportWorldInput {
   source: string;
@@ -58,6 +60,8 @@ export function validateCreate(input: NewWorldInput): NewWorldInput {
     fabricLoader: required(input.fabricLoader, 'createLoader', 'Fabric Loader version is required.'),
     compatibility: required(input.compatibility, 'createCompatibility', 'Compatibility profile is required.'),
     visibility: input.visibility,
+    ...(input.visibility !== 'private' && input.region ? { region: input.region } : {}),
+    ...(input.visibility !== 'private' && input.language ? { language: input.language } : {}),
   };
 }
 export function validateImport(input: ImportWorldInput): NativeImportRequest {

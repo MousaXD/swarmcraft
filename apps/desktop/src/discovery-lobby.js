@@ -1,3 +1,4 @@
+import { installDirectoryModeration } from './directory-moderation.js';
 import { discoveryTime, normalizeDiscoveryCard, withDiscoveryDeadline } from './discovery-diagnostics.js';
 
 export const DISCOVERY_RESULT_CAP = 32; // Runtime V1 default; no remote cursor.
@@ -5,27 +6,29 @@ export const DISCOVERY_PAGE_SIZE = 6;
 const STATES = new Set(['ok', 'empty', 'partial', 'network_unavailable', 'provider_unavailable', 'timeout']);
 
 export function normalizePublicSearch(report, now = Date.now()) {
-  if (report?.state === 'timeout') return { cards: [], state: 'timeout', truncated: false };
+  if (report?.state === 'timeout') return { cards: [], state: 'timeout', truncated: false, hiddenResults: 0 };
+  const hidden = report?.hidden_results ?? 0;
   if (!report || !STATES.has(report.state) || !Array.isArray(report.results)
-      || report.results.length > DISCOVERY_RESULT_CAP
+      || !Number.isSafeInteger(hidden) || hidden < 0
+      || report.results.length + hidden > DISCOVERY_RESULT_CAP
       || typeof report.truncated !== 'boolean'
       || !Number.isSafeInteger(report.providers_seen) || report.providers_seen < 0 || report.providers_seen > 64
       || !Number.isSafeInteger(report.providers_responded) || report.providers_responded < 0
       || report.providers_responded > report.providers_seen
       || (['ok', 'empty'].includes(report.state) && (report.providers_responded === 0
         || report.providers_responded !== report.providers_seen || report.truncated))
-      || (report.results.length && report.providers_responded === 0)
-      || (report.state === 'empty' && report.results.length)
-      || (report.state === 'ok' && !report.results.length)
-      || (!['ok', 'partial'].includes(report.state) && report.results.length)) {
-    return { cards: [], state: 'invalid', truncated: false };
+      || (report.results.length + hidden > 0 && report.providers_responded === 0)
+      || (report.state === 'empty' && (report.results.length + hidden > 0))
+      || (report.state === 'ok' && report.results.length + hidden === 0)
+      || (!['ok', 'partial'].includes(report.state) && report.results.length + hidden > 0)) {
+    return { cards: [], state: 'invalid', truncated: false, hiddenResults: 0 };
   }
   const counts = new Map();
   for (const raw of report.results) counts.set(raw?.world_id, (counts.get(raw?.world_id) || 0) + 1);
   const cards = report.results.map(raw => normalizeDiscoveryCard(raw, now))
     .filter(card => card?.visibility === 'public' && counts.get(card.world_id) === 1);
   return {
-    cards, truncated: report.truncated,
+    cards, truncated: report.truncated, hiddenResults: hidden,
     state: cards.length !== report.results.length ? 'partial' : report.state,
     responded: report.providers_responded, seen: report.providers_seen,
   };
@@ -34,9 +37,11 @@ export function normalizePublicSearch(report, now = Date.now()) {
 export function searchSummary(result) {
   const scope = 'Only a bounded directory snapshot, not all worlds.';
   const suffix = result.truncated ? ' Search limit reached; narrow the search or refresh.' : '';
-  if (result.state === 'ok' || (result.state === 'partial' && result.cards.length)) {
+  const hidden = result.hiddenResults || 0;
+  const hideNotice = hidden ? ` ${hidden} verified listing(s) hidden on this device. Manage hidden listings to restore eligibility.` : '';
+  if (result.state === 'ok' || (result.state === 'partial' && (result.cards.length || hidden))) {
     const count = result.cards.length;
-    return `${count} verified public listing${count === 1 ? '' : 's'} · ${result.responded} of ${result.seen} providers responded. ${result.state === 'partial' ? 'Some results could not be verified. ' : ''}${scope}${suffix}`;
+    return `${count} verified public listing${count === 1 ? '' : 's'} · ${result.responded} of ${result.seen} providers responded. ${result.state === 'partial' ? 'Some results could not be verified. ' : ''}${scope}${suffix}${hideNotice}`;
   }
   if (result.state === 'empty') return `No matching public listings from responding providers. Try a different search or browse all. ${scope}`;
   if (result.state === 'partial') return `Discovery incomplete. No verified matching listings were returned; this does not prove none exist.${suffix}`;
@@ -69,6 +74,8 @@ export function installDiscoveryLobby(invoke) {
   if (!form || form.dataset.bound) return;
   form.dataset.bound = 'true';
   const query = byId('publicWorldQuery');
+  const region = byId('publicWorldRegion');
+  const language = byId('publicWorldLanguage');
   const search = byId('publicWorldSearch');
   const status = byId('publicWorldStatus');
   const list = byId('publicWorldResults');
@@ -81,6 +88,7 @@ export function installDiscoveryLobby(invoke) {
   let revision = 0;
   let busy = false;
   let expiryTimer;
+  const moderation = installDirectoryModeration(invoke, () => render());
 
   const report = (message, tone = 'neutral') => {
     if (status.textContent !== message) status.textContent = message;
@@ -94,6 +102,7 @@ export function installDiscoveryLobby(invoke) {
   }
   function reset(message) {
     revision++;
+    moderation.resetDraft();
     clearTimeout(expiryTimer);
     result = null;
     page = 0;
@@ -120,10 +129,15 @@ export function installDiscoveryLobby(invoke) {
     clearTimeout(expiryTimer);
     if (!result) return;
     const now = Date.now();
-    const current = discoveryPage(result.cards, page, now);
+    const active = result.cards.filter(card => card.expires_unix_ms > now);
+    const visible = result.cards.filter(card => !moderation.isHidden(card.world_id));
+    const current = discoveryPage(visible, page, now);
+    const expired = result.cards.length - active.length;
+    const hidden = (result.hiddenResults || 0) + active.filter(card => moderation.isHidden(card.world_id)).length;
     page = current.index;
     const focusedRow = document.activeElement?.closest?.('.discovery-result');
     const focusedId = focusedRow?.dataset.worldId;
+    const focusedAction = document.activeElement?.dataset.action;
     const fragments = document.createDocumentFragment();
     for (const card of current.cards) {
       const item = document.createElement('li');
@@ -138,15 +152,23 @@ export function installDiscoveryLobby(invoke) {
         text('span', `Verified at ${discoveryTime(card.verified_unix_ms)} · Expires ${discoveryTime(card.expires_unix_ms)}`, 'discovery-freshness'),
         text('span', card.world_id, 'machine-line'));
       if (card.description) body.append(text('p', card.description, 'field-help'));
-      const metadata = [card.approximate_region, ...card.tags].filter(Boolean).join(' · ');
+      const metadata = [card.approximate_region ? 'Region: ' + card.approximate_region : '', card.languages.length ? 'Language: ' + card.languages.join(', ') : '', ...card.tags].filter(Boolean).join(' · ');
       if (metadata) body.append(text('p', metadata, 'field-help'));
       const action = document.createElement('div');
       action.className = 'discovery-result-actions';
       const check = text('button', 'Check listing', 'button button-secondary button-small');
       check.type = 'button';
+      check.dataset.action = 'check';
       check.setAttribute('aria-label', 'Check listing for ' + card.name);
       check.addEventListener('click', () => inspect(card));
-      action.append(check, text('span', 'Signed invite required', 'field-help'));
+      const hide = text('button', 'Hide listing', 'button button-subtle button-small');
+      hide.type='button';hide.dataset.action='hide';hide.disabled=moderation.isBusy();hide.setAttribute('aria-label','Hide listing for '+card.name);
+      hide.addEventListener('click',()=>moderation.hide(card));
+      const flag = text('button', 'Report listing', 'button button-subtle button-small');
+      flag.type='button';flag.dataset.action='report';flag.setAttribute('aria-label','Report listing for '+card.name);
+      flag.disabled=!card.config_hash||moderation.isBusy();
+      flag.addEventListener('click',()=>moderation.report(card));
+      action.append(check, hide, flag, text('span', 'Signed invite required', 'field-help'));
       item.append(body, action);
       fragments.append(item);
     }
@@ -155,19 +177,23 @@ export function installDiscoveryLobby(invoke) {
     previous.disabled = page === 0;
     next.disabled = page >= current.pages - 1;
     pageLabel.textContent = `Page ${page + 1} of ${current.pages} · ${current.total} listings`;
-    const shown = { ...result, cards: result.cards.filter(card => card.expires_unix_ms > now) };
-    report(current.expired
-      ? `${searchSummary(shown.state === 'ok' && !shown.cards.length ? { ...shown, state: 'partial' } : shown)} ${current.expired} listing(s) expired. Search again for fresh results.`
-      : searchSummary(shown), current.expired || result.state !== 'ok' && result.state !== 'empty' ? 'warning' : 'neutral');
+    const shown = { ...result, cards: active.filter(card => !moderation.isHidden(card.world_id)), hiddenResults:hidden };
+    report(expired
+      ? `${searchSummary(shown.state === 'ok' && !shown.cards.length && !hidden ? { ...shown, state: 'partial' } : shown)} ${expired} listing(s) expired. Search again for fresh results.`
+      : searchSummary(shown), expired || result.state !== 'ok' && result.state !== 'empty' ? 'warning' : 'neutral');
     // Don't lose keyboard focus when a timer retires the current row/page.
     if (focusedId) {
-      const replacement = [...list.children].find(row => row.dataset.worldId === focusedId)?.querySelector('button');
-      (replacement || search).focus();
+      const row = [...list.children].find(row => row.dataset.worldId === focusedId);
+      const replacement = [...(row?.querySelectorAll('button')||[])].find(button=>button.dataset.action===focusedAction&&!button.disabled);
+      (replacement || row?.querySelector('button') || search).focus();
     }
-    const expiries = shown.cards.map(card => card.expires_unix_ms);
+    const expiries = active.map(card => card.expires_unix_ms);
     if (expiries.length) expiryTimer = setTimeout(render, Math.max(1, Math.min(...expiries) - Date.now() + 1));
   }
-  query.addEventListener('input', () => reset('Search changed. Run the new search for verified listings.'));
+  const changed = () => reset('Search changed. Run the new search for verified listings.');
+  query.addEventListener('input', changed);
+  region.addEventListener('change', changed);
+  language.addEventListener('change', changed);
   document.addEventListener('swarmcraftcontextchanged', () => {
     if (byId('discoverPanel').hidden) reset('Search by name or tag, or leave the field blank to browse.');
   });
@@ -177,6 +203,7 @@ export function installDiscoveryLobby(invoke) {
     event.preventDefault();
     if (busy) return;
     const term = query.value.trim();
+    const selectedRegion=region.value, selectedLanguage=language.value;
     // Bound bytes as well as characters; the full native wire query has
     // its own encoded-size limit. Never pass arbitrary oversized strings.
     if (new TextEncoder().encode(term).length > 128) {
@@ -189,8 +216,8 @@ export function installDiscoveryLobby(invoke) {
     const hadFocus = document.activeElement === search;
     setBusy(true);
     try {
-      const raw = await withDiscoveryDeadline(invoke('discovery_search', { query: term || null }));
-      if (revision !== request || query.value.trim() !== term || byId('discoverPanel').hidden) return;
+      const raw = await withDiscoveryDeadline(invoke('discovery_search', { query: term || null, ...(selectedRegion ? {region:selectedRegion} : {}), ...(selectedLanguage ? {language:selectedLanguage} : {}) }));
+      if (revision !== request || query.value.trim() !== term || region.value !== selectedRegion || language.value !== selectedLanguage || byId('discoverPanel').hidden) return;
       result = normalizePublicSearch(raw);
       render();
     } catch {

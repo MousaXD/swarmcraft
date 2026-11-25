@@ -54,7 +54,7 @@ export interface NativeCommandTable {
   minecraft_versions: { args: { includeSnapshots: boolean; refresh: boolean }; result: unknown };
   fabric_loader_versions: { args: { minecraftVersion: string; refresh: boolean }; result: unknown };
   validate_fabric_selection: { args: { minecraftVersion: string; fabricLoaderVersion: string }; result: void };
-  create_world: { args: { name: string; minecraft: string; fabricLoader: string; compatibility: string; visibility: string }; result: string };
+  create_world: { args: { name: string; minecraft: string; fabricLoader: string; compatibility: string; visibility: string; region?: string; language?: string }; result: string };
   pick_import_folder: { args: Record<string, never>; result: string | null };
   preview_import_world: { args: { source: string; name: string; minecraft: string; fabricLoader: string; visibility: string; serverMods: string[]; noServerMods: boolean }; result: string };
   import_world: { args: { source: string; name: string; minecraft: string; fabricLoader: string; visibility: string; serverMods: string[]; noServerMods: boolean; expectedCompatibility?: string }; result: string };
@@ -120,8 +120,13 @@ export interface NativeCommandTable {
   curseforge_download: { args: { fileId: number; stagingSession: string }; result: unknown };
   provider_staging_dir: { args: Record<string, never>; result: string };
   inspect_mod_artifact: { args: { path: string }; result: unknown };
-  discovery_search: { args: { query: string | null }; result: unknown };
+  discovery_search: { args: { query: string | null; region?: string | null; language?: string | null }; result: unknown };
   discovery_resolve: { args: { world: string }; result: unknown };
+  directory_policy: { args: Record<string, never>; result: unknown };
+  directory_hide: { args: { world: string; enabled: boolean }; result: unknown };
+  directory_report: { args: { world: string; configHash: string; reason: string }; result: unknown };
+  directory_dismiss_report: { args: { report: string }; result: unknown };
+  world_listing: { args: { world: string; paused: boolean | null }; result: unknown };
   friend_settings: { args: Record<string, never>; result: unknown };
   friend_add: { args: { peer: string; publicKey: string; label: string }; result: unknown };
   friend_remove: { args: { peer: string }; result: unknown };

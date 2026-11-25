@@ -31,6 +31,8 @@
         fabricLoader: createLoader?.value ?? '',
         compatibility: createCompatibility?.value ?? '',
         visibility: (createVisibility?.value ?? 'private') as WorldVisibility,
+        region: (document.getElementById('createListingRegion') as HTMLSelectElement | null)?.value || undefined,
+        language: (document.getElementById('createListingLanguage') as HTMLSelectElement | null)?.value || undefined,
       });
       nativeSucceeded = true;
       // Rust created the real world. The established world-list controller
@@ -79,7 +81,17 @@
                   <option value="unlisted">Unlisted</option>
                   <option value="public">Public</option>
                 </select>
+                <p class="field-help">Public is browsable; unlisted is discoverable by exact ID. Both still require a signed invitation.</p>
               </div>
+
+              <details id="createListingMetadata" class="form-details field-wide" hidden>
+                <summary>Public listing details (optional)</summary>
+                <p class="field-help">These values and the world name become signed discovery metadata. Anyone with an exact unlisted ID can also request them. No location or language is inferred. Admission still requires a signed invite.</p>
+                <div class="field-grid details-fields">
+                  <div class="field"><label for="createListingRegion">Broad region</label><select id="createListingRegion"><option value="">Not specified</option><option value="africa">Africa</option><option value="asia">Asia</option><option value="europe">Europe</option><option value="middle-east">Middle East</option><option value="north-america">North America</option><option value="oceania">Oceania</option><option value="south-america">South America</option></select></div>
+                  <div class="field"><label for="createListingLanguage">Listing language</label><select id="createListingLanguage"><option value="">Not specified</option><option value="ar">Arabic</option><option value="zh">Chinese</option><option value="en">English</option><option value="fr">French</option><option value="de">German</option><option value="hi">Hindi</option><option value="id">Indonesian</option><option value="it">Italian</option><option value="ja">Japanese</option><option value="ko">Korean</option><option value="pl">Polish</option><option value="pt">Portuguese</option><option value="ru">Russian</option><option value="es">Spanish</option><option value="tr">Turkish</option><option value="uk">Ukrainian</option></select></div>
+                </div>
+              </details>
 
               <details class="form-details field-wide">
                 <summary>Compatibility settings</summary>

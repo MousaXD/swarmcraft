@@ -135,6 +135,8 @@ pub struct WorldDiscoveryCardV1 {
     pub loader_id: String,
     pub loader_version: String,
     pub compatibility_fingerprint: String,
+    /// The exact signed configuration which the listing projects.
+    pub config_hash: String,
     pub visibility: String,
     pub membership_policy: String,
     /// invite_required for supported V1 worlds. Unsupported membership
@@ -160,6 +162,8 @@ pub struct PublicWorldSearchReportV1 {
     pub truncated: bool,
     pub rejected_invalid: usize,
     pub rejected_stale: usize,
+    /// Number of verified results omitted by this client's local hide list.
+    pub hidden_results: usize,
     pub detail: Option<String>,
 }
 
@@ -592,12 +596,28 @@ fn handle_discovery_request(
 ) -> Result<()> {
     match request {
         WireRequest::DiscoveryPublic { filter } => {
+            // Optional directory moderation is a local browse decision only.
+            // Hold the policy lock through enqueue so completed suppression
+            // cannot be overtaken by a new response using stale policy.
+            let policy = crate::directory_moderation::lock(paths)
+                .and_then(|guard| crate::directory_moderation::read_locked(paths).map(|state| (guard, state)));
+            let Ok((_policy_guard, policy)) = policy else {
+                node.respond(
+                    channel,
+                    WireResponse::Error {
+                        code: "DIRECTORY_POLICY_UNAVAILABLE".into(),
+                        message: "local directory policy could not be verified".into(),
+                    },
+                )?;
+                return Ok(());
+            };
             let now = unix_millis()?;
             let limit = usize::from(filter.limit.clamp(1, MAX_DISCOVERY_RESULTS as u16));
             let mut matching: Vec<_> = state
                 .announcements
                 .values()
                 .filter(|value| matches!(value.visibility, WorldVisibilityV1::Public))
+                .filter(|value| !policy.suppressed(value.world_id))
                 .filter(|value| value.expires_unix_ms > now)
                 .filter(|value| announcement_matches(value, &filter))
                 .collect();
@@ -1519,6 +1539,11 @@ pub async fn search_public_worlds(
         truncated = true;
     }
     values.truncate(usize::from(filter.limit));
+    let _policy_guard = crate::directory_moderation::lock(paths)?;
+    let policy = crate::directory_moderation::read_locked(paths)?;
+    let before_filter = values.len();
+    values.retain(|(value, _)| !policy.hidden(value.world_id));
+    let hidden_results = before_filter - values.len();
     let cards = values
         .into_iter()
         .map(|(value, verified)| WorldDiscoveryCardV1::from_verified(value, verified))
@@ -1534,7 +1559,7 @@ pub async fn search_public_worlds(
         } else {
             "provider_unavailable"
         }
-    } else if cards.is_empty() {
+    } else if cards.is_empty() && hidden_results == 0 {
         // Failed explicit providers are not proof that no public worlds
         // exist. Report incomplete discovery rather than a false empty set.
         if incomplete {
@@ -1555,6 +1580,7 @@ pub async fn search_public_worlds(
         truncated,
         rejected_invalid,
         rejected_stale,
+        hidden_results,
         detail: network_error,
     })
 }
@@ -2084,6 +2110,7 @@ impl WorldDiscoveryCardV1 {
             loader_id: value.compatibility.loader_id,
             loader_version: value.compatibility.loader_version,
             compatibility_fingerprint: value.compatibility.compatibility_fingerprint.to_string(),
+            config_hash: value.config_hash.to_string(),
             visibility: match value.visibility {
                 WorldVisibilityV1::Private => "private",
                 WorldVisibilityV1::Unlisted => "unlisted",

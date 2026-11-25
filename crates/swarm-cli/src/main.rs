@@ -16,7 +16,7 @@ use swarm_core::{
 use swarm_protocol::{
     AuthorityPolicyV1, EpochMode, InviteV1, JoinRequestV1, LeaveRequestV1, MembershipPolicyV1, MembershipRecordV1,
     PeerId, RuntimeCompatibilityManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1,
-    WorldPresentationV1, WorldSafetyLevelV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    WorldSafetyLevelV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, StorageError, WorldMetadataV1};
 use tracing::info;
@@ -212,6 +212,12 @@ enum WorldCommand {
         /// private, unlisted, or public.
         #[arg(long, default_value = "private")]
         visibility: String,
+        /// Optional broad region disclosed by a signed public/unlisted listing.
+        #[arg(long)]
+        region: Option<String>,
+        /// Optional two/three-letter language code disclosed in the signed listing.
+        #[arg(long)]
+        language: Option<String>,
     },
     /// Explicitly manage this device's per-world local hosting preference, never world authority.
     Hosting {
@@ -588,9 +594,25 @@ fn handle_backup(command: BackupCommand, paths: &DataPaths) -> Result<()> {
 
 fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> Result<()> {
     match command {
-        WorldCommand::Create { name, minecraft, fabric_loader, compatibility, server_mod, visibility } => {
-            let identity = PeerIdentity::load_or_create(paths)?;
+        WorldCommand::Create {
+            name,
+            minecraft,
+            fabric_loader,
+            compatibility,
+            server_mod,
+            visibility,
+            region,
+            language,
+        } => {
             let visibility = parse_visibility(&visibility)?;
+            let presentation = swarm_protocol::new_listing_presentation(
+                name.clone(),
+                visibility,
+                region.as_deref(),
+                language.as_deref(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            let identity = PeerIdentity::load_or_create(paths)?;
             // The legacy compatibility text is retained only as a CLI compatibility input.
             // It is not a physical server-mod requirement and must never make a clean world
             // appear to be missing a fictional JAR.
@@ -670,13 +692,7 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                     preferred_replication_factor: descriptor.preferred_replication_factor,
                 },
                 membership_policy: MembershipPolicyV1::InviteOnly,
-                presentation: WorldPresentationV1 {
-                    name: name.clone(),
-                    description: String::new(),
-                    tags: Vec::new(),
-                    icon_hash: None,
-                    approximate_region: None,
-                },
+                presentation,
                 authority_peer_id: identity.peer_id(),
                 authority_public_key: identity.public_key(),
                 signature: Vec::new(),
@@ -873,11 +889,24 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             if let Some(paused) = paused {
                 storage.set_discovery_listing_paused(world, paused)?;
             }
+            let signed_visibility = match storage.load_world_config(world) {
+                Ok(config)
+                    if config.world_id == world && swarm_core::verify_world_config_signature(&config).is_ok() =>
+                {
+                    match config.visibility {
+                        WorldVisibilityV1::Private => "private",
+                        WorldVisibilityV1::Unlisted => "unlisted",
+                        WorldVisibilityV1::Public => "public",
+                    }
+                }
+                _ => "unknown",
+            };
             println!(
                 "{}",
                 serde_json::json!({
                     "world_id": world.to_string(),
                     "locally_paused": storage.discovery_listing_paused(world)?,
+                    "signed_visibility": signed_visibility,
                     "signed_visibility_changed": false,
                     "world_membership_changed": false,
                 })

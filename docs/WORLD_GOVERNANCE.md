@@ -8,7 +8,14 @@ approve a member, change a save, or veto a world's signed history.
 
 The initial visibility is part of the creator-signed world configuration.
 World creation defaults to private; the operator may explicitly select
-`--visibility unlisted` or `--visibility public`.
+`--visibility unlisted` or `--visibility public`. Newly created
+discoverable worlds may explicitly specify `--region middle-east --language ar`
+(or choose the equivalent Desktop fields). Region is a coarse allow-listed
+label; language is a two/three-letter code carried in a reserved signed
+`lang:<code>` presentation tag. Neither is inferred from a device or IP
+address, and neither is proof of location or spoken language. Private creation
+rejects public metadata inputs. Existing imports can still choose visibility;
+region/language editing of existing signed worlds is not enabled.
 
 | Signed visibility | Public browse | Exact-ID discovery | Membership / game access |
 | --- | --- | --- | --- |
@@ -100,10 +107,71 @@ Never skip predecessor verification to make the edit appear to converge.
   or ordinary Minecraft player has no independent world-admin grant.
 - Directory operators can choose not to index or promote a listing. This
   does not revoke membership, ban a Minecraft account, delete remote
-  copies or alter world history. Separate signed moderator/owner roles,
-  reports, moderation reasons/appeals, and authenticated native account
-  bans are future governance/session-policy work. No automatic moderator
-  role is inferred from a display label or directory entry.
+  copies or alter world history. The local directory policy and minimal
+  report/review flow below do not grant these capabilities. Separate signed
+  moderator/owner roles, world-level moderation reasons/appeals, and
+  authenticated native account bans remain future governance/session-policy
+  work. No automatic moderator role is inferred from a label or listing.
+
+## Public browse preferences and operator moderation
+
+There are three separate decisions. None touches canonical world history.
+
+| Action | Effect | Not affected |
+| --- | --- | --- |
+| Hide listing on this device | Filters verified public browse results on this client | Exact lookup, other clients, membership, world data |
+| Suppress listing on this publisher | This publisher omits the ID from public browse responses | Exact lookup, signed freshness votes, other publishers, membership |
+| Pause this device's discovery publication | Withdraws local hints, announcements and discovery votes; may reduce discovery quorum | Signed visibility, gameplay authority, saves, membership |
+
+The Desktop Discover view offers region/language filters, Hide/Restore, and
+Report listing. The Worlds view exposes the existing local publication
+pause/resume and locally verified signed visibility. Private visibility still
+cannot be widened by those controls. The native runtime's policy file is
+bounded, durable and separate from world storage; malformed policy denies
+browse instead of silently ignoring a suppression or hide preference.
+Exact-ID discovery deliberately does not consult browse-only policy.
+
+Example CLI:
+
+```sh
+swarmcraft-runtime discovery-search --region middle-east --language ar --bootstrap '<provider>'
+swarmcraft-runtime moderation hide '<world-id>' --enabled=true
+swarmcraft-runtime moderation hide '<world-id>' --enabled=false
+swarmcraft-runtime moderation state
+
+# Only the local publisher operator chooses its browse policy.
+swarmcraft-runtime moderation suppress '<world-id>' --reason misleading_metadata
+swarmcraft-runtime moderation restore '<world-id>'
+```
+
+A report is a local allegation referencing a **freshly reverified public
+listing** and the exact selected signed configuration hash. The runtime
+rejects stale, unlisted, private, mismatched or unverifiable targets.
+Categories are spam, impersonation, malicious_content, harassment,
+misleading_metadata and other. The record contains only a deterministic
+report ID, public World ID, configuration hash, category, observation and
+recording timestamps. It contains no reporter identity, private address,
+arbitrary text, invitation, membership proof or save data. Reports are
+deduplicated per world/config/category and limited to 128 local records.
+Recording a report does not hide, suppress, send, ban or revoke anything.
+
+```sh
+swarmcraft-runtime moderation report '<world-id>' --config '<config-hash>' --reason spam --bootstrap '<provider>'
+swarmcraft-runtime moderation export-report '<report-id>' > report.json
+# Share this file deliberately with a trusted directory operator.
+swarmcraft-runtime moderation review-report --report-file report.json --bootstrap '<provider>'
+swarmcraft-runtime moderation dismiss '<report-id>'
+```
+
+The receiving operator can independently reverify whether that exact public
+configuration is still discoverable. An exported report is **not a signed
+or authenticated proof of abuse**: timestamps and allegation remain reporter
+claims. Review never automatically accepts a report, writes a ban or
+changes policy. Suppression requires a separate explicit operator decision
+and is reversible. There is no hosted report intake, appeal service,
+global suppression list, reputation score or registry veto. A public rollout
+still needs a reviewed abuse policy, trusted moderation operations, and
+independent network/platform qualification.
 
 ## Reviewable signed history
 

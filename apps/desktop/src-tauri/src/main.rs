@@ -5,6 +5,7 @@ mod canonical_world_commands;
 mod catalog_commands;
 mod curseforge;
 mod desktop_play_route;
+mod directory_commands;
 mod friend_commands;
 mod game_route_commands;
 mod hosting_contribution_commands;
@@ -22,6 +23,7 @@ use curseforge::{
     curseforge_download, curseforge_project, curseforge_provider_status, curseforge_resolve, curseforge_search,
     curseforge_versions,
 };
+use directory_commands::{directory_dismiss_report, directory_hide, directory_policy, directory_report, world_listing};
 use friend_commands::{
     friend_add, friend_presence_mode, friend_probe, friend_remove, friend_service_start, friend_service_status,
     friend_service_stop, friend_settings, friend_share_presence,
@@ -120,6 +122,8 @@ async fn create_world(
     fabric_loader: String,
     compatibility: String,
     visibility: String,
+    region: Option<String>,
+    language: Option<String>,
 ) -> Result<String, String> {
     let name = require_value(name, "World name")?;
     let minecraft = require_value(minecraft, "Minecraft version")?;
@@ -127,24 +131,27 @@ async fn create_world(
     let compatibility = require_value(compatibility, "Compatibility profile")?;
     let visibility = require_value(visibility, "Visibility")?;
     validate_fabric_selection(minecraft.clone(), fabric_loader.clone()).await.map_err(|error| error.to_string())?;
-    run_cli(
-        &app,
-        vec![
-            "world".into(),
-            "create".into(),
-            "--name".into(),
-            name,
-            "--minecraft".into(),
-            minecraft,
-            "--fabric-loader".into(),
-            fabric_loader,
-            "--compatibility".into(),
-            compatibility,
-            "--visibility".into(),
-            visibility,
-        ],
-    )
-    .await
+    let mut args = vec![
+        "world".into(),
+        "create".into(),
+        "--name".into(),
+        name,
+        "--minecraft".into(),
+        minecraft,
+        "--fabric-loader".into(),
+        fabric_loader,
+        "--compatibility".into(),
+        compatibility,
+        "--visibility".into(),
+        visibility,
+    ];
+    if let Some(region) = region {
+        args.push(format!("--region={region}"));
+    }
+    if let Some(language) = language {
+        args.push(format!("--language={language}"));
+    }
+    run_cli(&app, args).await
 }
 
 fn import_arguments(
@@ -873,6 +880,11 @@ fn main() {
             inspect_mod_artifact,
             discovery_search,
             discovery_resolve,
+            directory_policy,
+            directory_hide,
+            directory_report,
+            directory_dismiss_report,
+            world_listing,
             friend_settings,
             friend_add,
             friend_remove,

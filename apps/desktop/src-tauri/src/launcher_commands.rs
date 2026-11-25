@@ -134,13 +134,25 @@ pub(crate) async fn inspect_mod_artifact(app: AppHandle, path: String) -> Result
 }
 
 #[tauri::command]
-pub(crate) async fn discovery_search(app: AppHandle, query: Option<String>) -> Result<Value, String> {
+pub(crate) async fn discovery_search(
+    app: AppHandle,
+    query: Option<String>,
+    region: Option<String>,
+    language: Option<String>,
+) -> Result<Value, String> {
     let mut arguments = vec!["discovery-search".into()];
     if let Some(query) = query.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
         if query.len() > 128 {
             return Err("Discovery search is too long".into());
         }
         arguments.push(format!("--query={query}"));
+    }
+    if let Some(region) = region.filter(|v| !v.trim().is_empty()) {
+        arguments.push(format!("--region={}", swarm_protocol::listing_region(&region).map_err(str::to_owned)?));
+    }
+    if let Some(language) = language.filter(|v| !v.trim().is_empty()) {
+        swarm_protocol::listing_language_tag(&language).map_err(str::to_owned)?;
+        arguments.push(format!("--language={language}"));
     }
     add_discovery_bootstraps(&mut arguments);
     let raw = run_runtime_cli(&app, arguments).await?;

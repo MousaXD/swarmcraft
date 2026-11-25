@@ -413,3 +413,30 @@ input::placeholder, textarea::placeholder { color: #667069; }
   .friend-row { grid-template-columns: minmax(0,1fr); }
   .friend-actions { display: flex; flex-wrap: wrap; justify-content: flex-start; }
 }
+
+/* Directory moderation never changes canonical state. */
+.listing-filters { margin-block: var(--s1); }
+.listing-filters .field-help, #createListingMetadata .field-help { margin-top: var(--s2); }
+.directory-moderation, .directory-report-draft { min-width: 0; display: grid; gap: var(--s2); }
+.directory-moderation:not([open]) { display: block; }
+.directory-moderation[open] > :not(summary) { margin-top: var(--s2); }
+.directory-record-list { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--s2); }
+.directory-record { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--s2); padding: var(--s2) 0; border-bottom: 1px solid var(--border); min-width: 0; }
+.directory-record > span, .directory-record-copy { min-width: 0; flex: 1 1 250px; overflow-wrap: anywhere; }
+.directory-record-copy { display: grid; gap: var(--s1); }
+.directory-record-copy strong { font-size: 12px; }
+.directory-report-draft { padding: var(--s3); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--sidebar); }
+.directory-report-draft .machine-line { overflow-wrap: anywhere; }
+.local-listing-controls { min-width: 0; }
+.local-listing-controls[open] > :not(summary) { margin-top: var(--s2); }
+/* Keep new discovery disclosures compact and helper text consistent. */
+.discovery-shell .discovery-section { gap: var(--s2); }
+.discovery-shell .task-secondary > summary, .discovery-shell .listing-filters > summary { padding-block: var(--s2); }
+.discovery-shell .directory-report-draft .field-help, .discovery-shell .listing-filters .field-help,
+#createListingMetadata .field-help, #createVisibility + .field-help, .local-listing-controls .field-help {
+  color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere;
+}
+@media (max-height: 600px) {
+  .discovery-shell { gap: var(--s2); }
+  .discovery-header p { max-width: 52ch; }
+}

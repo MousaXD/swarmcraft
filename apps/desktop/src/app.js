@@ -1,3 +1,4 @@
+import { installWorldListing, installListingMetadata } from './directory-moderation.js';
 import { installFriends } from './friends.js';
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
 import { createImportRequest, parseImportResult } from './import-flow.js';
@@ -1189,6 +1190,8 @@ async function createWorld() {
       fabricLoader: $('createLoader').value.trim(),
       compatibility: $('createCompatibility').value.trim(),
       visibility: $('createVisibility').value,
+      ...($('createVisibility').value !== 'private' && $('createListingRegion').value ? {region:$('createListingRegion').value} : {}),
+      ...($('createVisibility').value !== 'private' && $('createListingLanguage').value ? {language:$('createListingLanguage').value} : {}),
     }));
   } catch (error) {
     showInline('createError', `Could not create world: ${String(error)}`, 'danger');
@@ -1968,6 +1971,8 @@ const clientPreparation = installClientPreparation($('clientProfilePanel'), back
 window.__swarmcraftTakeImportReview = request => importReview.take(request);
 window.__swarmcraftRefreshImportReview = () => importReview.sync();
 
+installListingMetadata();
+installWorldListing(invoke, () => selectedWorldId);
 installFriends(invoke, () => {
   // Existing signed invitation workflow; the user must select a local world
   // and explicitly issue an invite. No contact ID grants admission.
