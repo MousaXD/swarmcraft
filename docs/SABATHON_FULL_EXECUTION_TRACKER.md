@@ -85,12 +85,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #8 — P1 · Proposal (after #9)
 - Work: Design an explicit two-device **Pass hosting** policy with one writable holder, explicitly specifying online-overlap vs. async-dropbox handoff requirements
 - Acceptance: Both devices can transfer the right to play without a third voter when they overlap online (or via an explicit async dropbox adapter if one is offline). Partition tests prove there is never a second writer
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **IN PROGRESS**
+- Source: docs/rfcs/two-device-exclusive-turn.md; crates/swarm-consensus/src/exclusive_turn_model.rs (test only)
+- Evidence: Reviewed-in-source proposal selects online overlap, durable irreversible release, exact checkpoint receipts, no timeout takeover, and new-world recovery for lost grants. Five test-only model regressions and bounded search of 3,165 independent two-journal states passed. Full consensus suite 51 tests and strict Clippy passed.
+- Remaining / next action: Independent design/threat-model review; real versioned signed records, atomic journal/outbox, process/route fencing and creation-time opt-in. Keep default quorum and old peers unchanged. This model is not an active runtime policy.
+- External dependency: Independent review and two-device actual partition/gameplay acceptance; no safe automatic crash takeover without an independent anchor.
+- Commit: See 25 November exclusive-turn design checkpoint.
 
 ### #9 — P1 · Proposal (recommended first)
 - Work: Provide a supported headless zero-Java third-replica profile (`swarmcraft daemon`) for small private worlds
@@ -694,7 +694,7 @@ Implementation completion: count only items whose full implementation criteria a
 
 ## Next checkpoint
 
-Continue #4: planned and crash-recovered authority re-entry, exact certified voting fences, and durable crash-retirement replay implemented. Targeted successor proof offers and certified retargeting after membership changes are implemented. Pending join/leave and solo conflicts remain conservatively blocked; independent private WAN reachability remains unverified. Item #9 explicit headless profile is locally verified; field certification remains open. Continue #8 design prerequisite, remaining P0 acceptance and other actionable roadmap items. Keep publication and runtime fail-closed. #9 precedes #8; #23 precedes activation of V2-dependent permissions; #56 precedes distributed-runtime adoption; #64–68 require signed governance and independent acceptance.
+Continue #4: planned and crash-recovered authority re-entry, exact certified voting fences, and durable crash-retirement replay implemented. Targeted successor proof offers and certified retargeting after membership changes are implemented. Pending join/leave and solo conflicts remain conservatively blocked; independent private WAN reachability remains unverified. Item #9 explicit headless profile is locally verified; field certification remains open. Item #8 online-overlap RFC and isolated state model implemented, production activation remains gated. Continue #11 recovered-copy workflow and other actionable roadmap items. Keep publication and runtime fail-closed. #9 precedes #8; #23 precedes activation of V2-dependent permissions; #56 precedes distributed-runtime adoption; #64–68 require signed governance and independent acceptance.
 
 Initial full-item implementation/acceptance totals: not yet established by item-specific audit; zero items asserted fully accepted by this ledger.
 
@@ -735,3 +735,9 @@ Initial full-item implementation/acceptance totals: not yet established by item-
 - #9: implemented explicit `swarmcraft daemon --replica-only`. The profile holds exclusive local memory/profile locks and refuses active or ambiguous prior runtime ownership. No migration supervisor is launched, stale permits/readiness are invalidated, and host candidacy/transfer activation/local permit renewal and positive opt-in are denied while the profile is active. Existing consent revisions are preserved; explicit revocation remains available. Ordinary signed replication and voting are unchanged.
 - Evidence: 138 CLI library tests (including positive prior consent, shared/exclusive profile lock and ambiguous runtime negatives), 4 real public CLI consent tests (including two replica-only process starts, stale permit removal and opt-in denial without a JVM), strict CLI all-target/all-feature Clippy, and the real three-daemon recovery/wake process test (31.52s), including signed recovery votes by the replica-only peer, no local runtime/permit, and restart. The host side uses a mock JVM, not field Minecraft.
 - Added dedicated deployment guide and example systemd service; these were not installed on the user's machine. Dedicated low-memory/independent-network operation and real offline handoff remain field acceptance. Next: #8 reviewed exclusive-turn design (no weakening default quorum), and additional locally testable release/UX/replication work.
+
+### 25 November: exclusive-turn design and reference model
+
+- #8: chose explicit online-overlap handoff for a separate, fixed two-member policy, no automatic crash recovery, immutable release after old runtime is quiesced, exact recipient receipt/checkpoint and strictly advancing generation. The design explicitly distinguishes world-data rollback from undetectable complete control-journal rollback and retains new-world recovery for lost grants. Async dropbox is a future transport-only option.
+- Five isolated model regressions passed; bounded exploration checked 3,165 unique independent-journal states with partition, restart, checkpoint loss, canceled attempts, reverse transfer and delayed/duplicate records. All 51 consensus unit/integration tests and strict all-target/all-feature Clippy passed.
+- No live policy, production signing/journal, UI, permit or route changes activated. Independent review and actual two-device field tests remain open. Continue #11 and other locally actionable work without loosening the existing quorum rules.
