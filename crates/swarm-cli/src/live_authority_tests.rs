@@ -255,6 +255,7 @@ fn signed_fabric_attestation_binds_consent_world_nonce_and_port() {
         peer_id: host.peer_id(),
         enabled: true,
         heap_mib: 2_048,
+        cpu_millicores: None,
         revision: 3,
     };
     let consent_path = paths.root.join("control").join(world.to_hex()).join("hosting-consent.json");
@@ -545,6 +546,7 @@ fn canonical_route_requires_signed_majority_and_current_host_consent() {
         peer_id: alice.peer_id(),
         enabled: true,
         heap_mib: 2_048,
+        cpu_millicores: None,
         revision: 123,
     };
     let consent_path = paths.root.join("control").join(world.to_hex()).join("hosting-consent.json");

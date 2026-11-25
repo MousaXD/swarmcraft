@@ -172,6 +172,40 @@
                   </div>
                 </section>
 
+                <section id="hostingContributionPanel" class="player-section" aria-labelledby="hostingContributionTitle" data-consent-state="unknown">
+                  <div class="section-heading"><div>
+                    <h3 id="hostingContributionTitle">Contribute device resources</h3>
+                    <p>Optional on this device. Player-only by default. Your choice does not grant world authority.</p>
+                  </div></div>
+                  <p id="hostingContributionStatus" class="section-note" role="status">Checking saved consent and device capacity…</p>
+                  <p id="hostingContributionReason" class="section-note"></p>
+                  <p id="hostingContributionCpuStatus" class="section-note"></p>
+                  <p class="section-note" data-hosting-memory></p>
+                  <form id="hostingContributionForm">
+                    <div class="field">
+                      <label for="hostingContributionHeap">Java server heap budget (MiB)</label>
+                      <input id="hostingContributionHeap" class="machine-input" type="number" value="4096" min="512" max="65536" step="1" disabled />
+                      <p class="field-help">4096 MiB = 4 GiB. Rust checks native JVM, OS, client and daemon headroom.</p>
+                    </div>
+                    <div class="field">
+                      <label for="hostingContributionCpu">CPU limit (millicores)</label>
+                      <input id="hostingContributionCpu" class="machine-input" type="number" value="1000" min="250" max="64000" step="1" disabled />
+                      <p class="field-help">1000 = one logical CPU equivalent. An explicit cap requires delegated Linux CPU and memory controllers. No distributed hosting is enabled.</p>
+                    </div>
+                    <label class="check-row field-wide" for="hostingContributionConfirm">
+                      <input id="hostingContributionConfirm" type="checkbox" disabled />
+                      <span>I explicitly allow this device to offer the selected Java heap and CPU limit when eligible.</span>
+                    </label>
+                    <div class="compact-actions field-wide">
+                      <button id="hostingContributionOptIn" type="submit" class="button button-secondary" disabled>Save explicit opt-in</button>
+                      <button id="hostingContributionWithdraw" type="button" class="button button-subtle" disabled>Player only — withdraw</button>
+                      <button id="hostingContributionRefresh" type="button" class="button button-subtle">Refresh status</button>
+                    </div>
+                  </form>
+                  <p id="hostingContributionError" class="form-error" role="alert" hidden></p>
+                  <p id="hostingContributionNotice" class="section-note" role="status" hidden></p>
+                </section>
+
                 <section class="player-section" aria-labelledby="localRolesTitle">
                   <div class="section-heading"><div>
                     <h3 id="localRolesTitle">Roles on this device</h3>

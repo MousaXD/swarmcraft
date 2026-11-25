@@ -440,6 +440,7 @@ async fn hosting_contribution_set(
     app: AppHandle,
     world: String,
     heap_mib: u64,
+    cpu_millicores: Option<u64>,
 ) -> Result<hosting_contribution_commands::HostingContributionReadinessReply, String> {
     let history = crate::support_diagnostics::ActionGuard::begin(
         crate::support_diagnostics::Action::HostingPreference,
@@ -448,23 +449,25 @@ async fn hosting_contribution_set(
     let result = async {
         let world = hosting_contribution_commands::validate_world_id(&world)?;
         hosting_contribution_commands::validate_heap_mib(heap_mib)?;
-        let raw = run_cli(
-            &app,
-            vec![
-                "world".into(),
-                "hosting".into(),
-                "set".into(),
-                world.to_string(),
-                "--heap-mib".into(),
-                heap_mib.to_string(),
-                "--json".into(),
-            ],
-        )
-        .await?;
+        hosting_contribution_commands::validate_cpu_millicores(heap_mib, cpu_millicores)?;
+        let mut args = vec![
+            "world".into(),
+            "hosting".into(),
+            "set".into(),
+            world.to_string(),
+            "--heap-mib".into(),
+            heap_mib.to_string(),
+            "--json".into(),
+        ];
+        if let Some(cpu) = cpu_millicores {
+            args.extend(["--cpu-millicores".into(), cpu.to_string()]);
+        }
+        let raw = run_cli(&app, args).await?;
         let report = hosting_contribution_commands::decode_readiness(&raw, world)?;
         if report.selected_heap_mib != heap_mib
             || report.consented != (heap_mib != 0)
             || report.consent_revision.is_none()
+            || cpu_millicores.is_some_and(|cpu| report.selected_cpu_millicores != (cpu != 0).then_some(cpu))
         {
             return Err("Local hosting preference was not confirmed; refresh status".into());
         }

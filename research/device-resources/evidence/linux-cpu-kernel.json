@@ -1,0 +1,18 @@
+{
+  "active_admission_bound_to_revision": true,
+  "changed_consent_refused_for_live_proof": true,
+  "combined_process_cpu_usec": 1496600,
+  "cpu_limit_millicores": 500,
+  "descendant_membership_verified": true,
+  "elapsed_usec": 3000159,
+  "empty_leaf_verified": true,
+  "heap_mib": 512,
+  "kernel_memory_limit_mib": 1536,
+  "period_us": 100000,
+  "prepared_reservation_observed": true,
+  "quota_us": 50000,
+  "scope": "actual kernel cap on two bounded Python fixture processes, not Minecraft",
+  "tampered_cpu_limit_refused": true,
+  "throttled_periods": 30,
+  "withdrawal_preserves_active_observation_until_exit": true
+}

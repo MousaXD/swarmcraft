@@ -3,7 +3,7 @@
 //! its machine, boot, PID namespace and process birth time; legacy and
 //! unsupported-platform records keep the conservative PID-only policy.
 use crate::{
-    host_memory_cap::{HostMemoryCap, MemoryCapIdentity, ProcessMemoryReport},
+    host_memory_cap::{HostMemoryCap, MemoryCapIdentity, ProcessCpuReport, ProcessMemoryReport},
     machine_hosting::MachineHostingReservation,
 };
 use anyhow::{bail, Context, Result};
@@ -329,6 +329,35 @@ pub(crate) fn observed_memory(paths: &DataPaths, world: WorldId) -> Result<Optio
     }
 }
 
+/// Active CPU accounting requires the exact live process and cgroup policy.
+pub(crate) fn observed_cpu(paths: &DataPaths, world: WorldId) -> Result<Option<ProcessCpuReport>> {
+    let Some(record) = read_record(&record_path(paths, world))? else { return Ok(None) };
+    match record.ownership()? {
+        Ownership::Live(pid) => match record.linux.as_ref().and_then(|identity| identity.cgroup.as_ref()) {
+            Some(cap) => cap.observe_cpu(pid).map(Some),
+            None => Ok(Some(ProcessCpuReport::Unspecified {})),
+        },
+        #[cfg(target_os = "linux")]
+        Ownership::ResidualProcesses => bail!("previous managed JVM left live cgroup descendants"),
+        #[cfg(target_os = "linux")]
+        Ownership::Pending => {
+            let Some(identity) = record.linux.as_ref() else { return Ok(None) };
+            let Some(cap) = identity.cgroup.as_ref() else { return Ok(None) };
+            let observation = cap.observe_reserved_cpu()?;
+            if observation.is_some() {
+                anyhow::ensure!(
+                    linux_process::controller_live(record.controller_pid, identity)?,
+                    "pending CPU admission controller is no longer verifiably alive"
+                );
+            }
+            Ok(observation)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Ownership::Pending => Ok(None),
+        Ownership::Quiescent => Ok(None),
+    }
+}
+
 fn remove_record(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => {
@@ -455,6 +484,12 @@ mod linux_process {
             java_start_ticks: None,
             cgroup: None,
         })
+    }
+
+    pub(super) fn controller_live(pid: u32, identity: &LinuxRuntimeIdentity) -> Result<bool> {
+        Ok(read_process(pid)?.is_some_and(|stat| {
+            stat.start_ticks == identity.controller_start_ticks && !matches!(stat.state, b'Z' | b'X' | b'x')
+        }))
     }
 
     pub(super) fn ownership(pid: Option<u32>, identity: &LinuxRuntimeIdentity) -> Result<Ownership> {

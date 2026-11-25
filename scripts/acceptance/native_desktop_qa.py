@@ -199,8 +199,8 @@ ONE_WORLD = text("worldCount", "1 world")
 FAIL = text("status", "Startup failed")
 BANNER = text("startupFailure", "SwarmCraft could not start (", True)
 RETRY = button("retryStartup", "Retry startup")
-PLAYER_ONLY = text("hostingContributionStatus", "Player only — 0 MiB")
-OPTED_IN = text("hostingContributionStatus", "Hosting memory contribution selected")
+PLAYER_ONLY = text("hostingContributionStatus", "Player only — 0 MiB / 0 CPU")
+OPTED_IN = text("hostingContributionStatus", "Hosting resource preference saved")
 
 
 def free_port(kind=socket.SOCK_STREAM, address="127.0.0.1"):
@@ -690,19 +690,19 @@ def run_positive(factory, binary, profile, guest, artifacts, candidate, lan_ip):
         world = create_world(ui, binary, profile)
         if candidate:
             open_hosting_contribution(ui)
-            wait("player-only GUI default", lambda: read_is(ui, PLAYER_ONLY, "Player only — 0 MiB"))
+            wait("player-only GUI default", lambda: read_is(ui, PLAYER_ONLY, "Player only — 0 MiB / 0 CPU"))
             require(consent(binary, profile, world)["consented"] is False, "hosting consent defaulted on")
             opt = button("hostingContributionOptIn", "Save explicit opt-in")
             require(not ui.read(opt)["enabled"], "opt-in possible without explicit confirmation")
             ui.type(field("hostingContributionHeap", "Java server heap budget (MiB)"), "512")
             confirm = Target("#hostingContributionConfirm",
-                             "I explicitly allow this device to offer the selected Java heap when eligible.", CHECK)
+                             "I explicitly allow this device to offer the selected Java heap and CPU limit when eligible.", CHECK)
             require(not ui.read(confirm)["checked"], "hosting checkbox preselected")
             click(ui, confirm)
             require(ui.read(confirm)["checked"], "hosting checkbox not checked by UI")
             click(ui, opt)
             wait("durable host preference", lambda: consent(binary, profile, world)["selected_heap_mib"] == 512)
-            wait("opted-in GUI", lambda: read_is(ui, OPTED_IN, "Hosting memory contribution selected"))
+            wait("opted-in GUI", lambda: read_is(ui, OPTED_IN, "Hosting resource preference saved"))
         stop_network(ui, candidate)
         engine = ui.capabilities
 
@@ -714,11 +714,11 @@ def run_positive(factory, binary, profile, guest, artifacts, candidate, lan_ip):
         select_world(host, world)
         if candidate:
             open_hosting_contribution(host)
-            wait("opt-in persisted in GUI", lambda: read_is(host, OPTED_IN, "Hosting memory contribution selected"))
+            wait("opt-in persisted in GUI", lambda: read_is(host, OPTED_IN, "Hosting resource preference saved"))
             require(consent(binary, profile, world)["selected_heap_mib"] == 512, "opt-in did not persist")
             click(host, button("hostingContributionWithdraw", "Player only — withdraw"))
             wait("durable withdrawal", lambda: consent(binary, profile, world)["selected_heap_mib"] == 0)
-            wait("withdrawn GUI", lambda: read_is(host, PLAYER_ONLY, "Player only — 0 MiB"))
+            wait("withdrawn GUI", lambda: read_is(host, PLAYER_ONLY, "Player only — 0 MiB / 0 CPU"))
         token, port = start_invite_source(host, binary, profile, world, lan_ip, candidate)
         with factory(binary, guest) as joiner:
             ready(joiner, empty=True)
@@ -758,7 +758,7 @@ def run_positive(factory, binary, profile, guest, artifacts, candidate, lan_ip):
             ready(ui, empty=False)
             select_world(ui, world)
             open_hosting_contribution(ui)
-            wait("withdrawal persisted in restarted GUI", lambda: read_is(ui, PLAYER_ONLY, "Player only — 0 MiB"))
+            wait("withdrawal persisted in restarted GUI", lambda: read_is(ui, PLAYER_ONLY, "Player only — 0 MiB / 0 CPU"))
             require(consent(binary, profile, world)["consented"] is False, "withdrawal did not persist")
             stop_network(ui, candidate)
     return {"engine": engine, "boot_create_restart": True, "real_signed_join_checkpoint": True,

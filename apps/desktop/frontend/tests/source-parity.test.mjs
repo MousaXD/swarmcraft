@@ -27,10 +27,6 @@ test('Svelte component split retains every legacy DOM binding and every view', a
   assert.deepEqual(
     additional,
     [
-      'hostingContributionConfirm', 'hostingContributionError', 'hostingContributionForm',
-      'hostingContributionHeap', 'hostingContributionNotice', 'hostingContributionOptIn',
-      'hostingContributionPanel', 'hostingContributionReason', 'hostingContributionRefresh',
-      'hostingContributionStatus', 'hostingContributionTitle', 'hostingContributionWithdraw',
       'networkServiceError', 'networkServiceNotice', 'refreshNativeConnectivity',
     ],
     'Every new Svelte-only control must be explicitly reviewed; legacy IDs cannot silently disappear',
@@ -95,7 +91,7 @@ test('typed frontend IPC table exactly matches every Rust Tauri-registered comma
   assert.ok(commands.includes('hosting_contribution_get'));
   assert.ok(commands.includes('hosting_contribution_set'));
   assert.match(bridge, /hosting_contribution_get:\s*\{\s*args:\s*\{\s*world:\s*string\s*\}/);
-  assert.match(bridge, /hosting_contribution_set:\s*\{\s*args:\s*\{\s*world:\s*string;\s*heapMib:\s*number\s*\}/);
+  assert.match(bridge, /hosting_contribution_set:\s*\{\s*args:\s*\{\s*world:\s*string;\s*heapMib:\s*number;\s*cpuMillicores\?:\s*number\s*\}/);
   assert.deepEqual(new Set(typed), new Set(commands));
   assert.equal(new Set(typed).size, typed.length, 'No duplicate command definitions');
 });

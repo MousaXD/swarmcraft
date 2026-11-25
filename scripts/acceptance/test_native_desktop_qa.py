@@ -240,7 +240,7 @@ class NativeObservationTests(unittest.TestCase):
             def press(self, target):
                 super().press(target)
                 if target.css == "#advancedWorldTools > summary":
-                    self.mapping["#hostingContributionStatus"] = ("Player only — 0 MiB", True)
+                    self.mapping["#hostingContributionStatus"] = ("Player only — 0 MiB / 0 CPU", True)
                     self.mapping["#hostingContributionHeap"] = ("1024", True)
 
         ui = WorldTools({"#advancedWorldTools > summary": ("Advanced world controls", True)})

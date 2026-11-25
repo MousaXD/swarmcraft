@@ -13,10 +13,14 @@ export async function readHostingContribution(world: string): Promise<HostingCon
 }
 
 /** Only an explicit caller may write 0 (withdrawal) or 512..65536 MiB. */
-export async function saveHostingContribution(world: string, heapMib: number): Promise<HostingContributionReadiness> {
+export async function saveHostingContribution(world: string, heapMib: number, cpuMillicores?: number): Promise<HostingContributionReadiness> {
   const id = requireWorld(world);
   if (!Number.isSafeInteger(heapMib) || (heapMib !== 0 && (heapMib < 512 || heapMib > 65_536))) {
     throw new Error('Select 0 (player-only) or a whole-number Java heap between 512 and 65536 MiB.');
   }
-  return nativeBridge().invoke('hosting_contribution_set', { world: id, heapMib });
+  if (cpuMillicores !== undefined && (!Number.isSafeInteger(cpuMillicores)
+      || (heapMib === 0 ? cpuMillicores !== 0 : cpuMillicores < 250 || cpuMillicores > 64_000))) {
+    throw new Error('Select zero CPU with player-only or 250–64000 millicores for hosting.');
+  }
+  return nativeBridge().invoke('hosting_contribution_set', { world: id, heapMib, ...(cpuMillicores === undefined ? {} : { cpuMillicores }) });
 }

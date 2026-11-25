@@ -77,6 +77,38 @@ pub enum ProcessMemoryReport {
     Unavailable { detail: String },
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProcessCpuReport {
+    Unspecified {},
+    LinuxCgroupConfigured {
+        limit_millicores: u64,
+    },
+    LinuxCgroupReserved {
+        limit_millicores: u64,
+        admitted_heap_mib: u64,
+        admitted_consent_revision: String,
+    },
+    LinuxCgroupActive {
+        limit_millicores: u64,
+        admitted_heap_mib: u64,
+        admitted_consent_revision: String,
+        usage_usec: u64,
+    },
+    Unavailable {
+        detail: String,
+    },
+}
+
+pub fn validate_cpu_millicores(heap: u64, cpu: Option<u64>) -> Result<(), String> {
+    if let Some(cpu) = cpu {
+        if !((heap == 0 && cpu == 0) || (heap != 0 && (250..=64000).contains(&cpu))) {
+            return Err("Select zero CPU for player-only or 250–64000 millicores for hosting".into());
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalCheckpointState {
@@ -93,6 +125,12 @@ pub struct HostingContributionReadinessReply {
     pub world_id: String,
     pub consented: bool,
     pub selected_heap_mib: u64,
+    #[serde(default)]
+    pub selected_cpu_millicores: Option<u64>,
+    #[serde(default)]
+    pub cpu_capacity_millicores: Option<u64>,
+    #[serde(default)]
+    pub process_cpu: Option<ProcessCpuReport>,
     pub physical_mib: Option<u64>,
     pub available_mib: Option<u64>,
     pub estimated_native_overhead_mib: u64,
@@ -120,6 +158,76 @@ pub fn decode_readiness(output: &str, world: WorldId) -> Result<HostingContribut
     validate_heap_mib(report.selected_heap_mib)?;
     if report.consented != (report.selected_heap_mib != 0) {
         return Err("Local hosting consent and heap do not agree".into());
+    }
+    validate_cpu_millicores(report.selected_heap_mib, report.selected_cpu_millicores)?;
+    if report.selected_heap_mib == 0 && report.selected_cpu_millicores.is_some()
+        || report.cpu_capacity_millicores.is_some_and(|value| value == 0 || value > 9_007_199_254_740_991)
+    {
+        return Err("Invalid CPU preference or capacity".into());
+    }
+    match &report.process_cpu {
+        Some(ProcessCpuReport::LinuxCgroupConfigured { limit_millicores }) => {
+            validate_cpu_millicores(report.selected_heap_mib, Some(*limit_millicores))?;
+            if !report.consented
+                || report.selected_cpu_millicores != Some(*limit_millicores)
+                || !report.cpu_capacity_millicores.is_some_and(|capacity| capacity >= *limit_millicores)
+            {
+                return Err("Configured CPU limit does not match local preference or capacity".into());
+            }
+        }
+        Some(ProcessCpuReport::LinuxCgroupReserved {
+            limit_millicores,
+            admitted_heap_mib,
+            admitted_consent_revision,
+        }) => {
+            validate_heap_mib(*admitted_heap_mib)?;
+            validate_cpu_millicores(*admitted_heap_mib, Some(*limit_millicores))?;
+            if *admitted_heap_mib == 0
+                || admitted_consent_revision.parse::<u64>().ok().filter(|v| *v != 0).is_none()
+                || report.may_host_now
+            {
+                return Err("Invalid prepared CPU/memory admission observation".into());
+            }
+        }
+        Some(ProcessCpuReport::LinuxCgroupActive {
+            limit_millicores,
+            admitted_heap_mib,
+            admitted_consent_revision,
+            usage_usec,
+        }) => {
+            validate_heap_mib(*admitted_heap_mib)?;
+            validate_cpu_millicores(*admitted_heap_mib, Some(*limit_millicores))?;
+            let expected_cap = admitted_heap_mib + 1024.max(admitted_heap_mib / 2);
+            if *admitted_heap_mib == 0
+                || admitted_consent_revision.parse::<u64>().ok().filter(|v| *v != 0).is_none()
+                || *usage_usec > 9_007_199_254_740_991
+                || report.may_host_now
+                || !matches!(report.process_memory, Some(ProcessMemoryReport::LinuxCgroupActive { limit_mib, .. }) if limit_mib == expected_cap)
+            {
+                return Err("Invalid active CPU/memory admission observation".into());
+            }
+        }
+        Some(ProcessCpuReport::Unavailable { detail }) => {
+            if detail.is_empty() || report.may_host_now {
+                return Err("Unavailable CPU enforcement cannot advertise hosting eligibility".into());
+            }
+        }
+        Some(ProcessCpuReport::Unspecified {}) => {
+            if report.selected_cpu_millicores.is_some() && report.may_host_now {
+                return Err("Unspecified CPU enforcement cannot admit a requested CPU limit".into());
+            }
+        }
+        None if report.selected_cpu_millicores.is_some() => {
+            return Err("Explicit CPU limit lacks an enforcement report".into())
+        }
+        None => {}
+    }
+    if report.may_host_now && report.selected_cpu_millicores.is_some() {
+        let expected_cap = report.selected_heap_mib + 1024.max(report.selected_heap_mib / 2);
+        if !matches!(report.process_memory, Some(ProcessMemoryReport::LinuxCgroupConfigured { limit_mib }) if limit_mib == expected_cap)
+        {
+            return Err("Explicit CPU preflight requires the matching configured memory cap".into());
+        }
     }
     if report.may_host_now && !report.consented {
         return Err("Player-only device cannot advertise hosting eligibility".into());
@@ -366,6 +474,42 @@ mod tests {
         }
         report["may_host_now"] = serde_json::json!(false);
         report["checkpoint_state"] = serde_json::json!("checkpoint_completed_but_unverified");
+        assert!(decode_readiness(&report.to_string(), world).is_err());
+    }
+
+    #[test]
+    fn explicit_cpu_status_requires_matching_enforcement_and_active_revision() {
+        let world = validate_world_id(WORLD).unwrap();
+        let mut report: serde_json::Value = serde_json::from_str(&sample_readiness()).unwrap();
+        report["consented"] = serde_json::json!(true);
+        report["selected_heap_mib"] = serde_json::json!(4096);
+        report["selected_cpu_millicores"] = serde_json::json!(500);
+        report["cpu_capacity_millicores"] = serde_json::json!(12000);
+        report["consent_revision"] = serde_json::json!("123");
+        report["may_host_now"] = serde_json::json!(true);
+        assert!(decode_readiness(&report.to_string(), world).is_err());
+        report["process_cpu"] = serde_json::json!({"mode":"linux_cgroup_configured","limit_millicores":500});
+        assert!(decode_readiness(&report.to_string(), world).is_err());
+        report["process_memory"] = serde_json::json!({"mode":"linux_cgroup_configured","limit_mib":6144});
+        assert!(decode_readiness(&report.to_string(), world).is_ok());
+        report["cpu_capacity_millicores"] = serde_json::json!(250);
+        assert!(decode_readiness(&report.to_string(), world).is_err());
+        report["may_host_now"] = serde_json::json!(false);
+        report["process_cpu"] = serde_json::json!({"mode":"linux_cgroup_reserved","limit_millicores":500,"admitted_heap_mib":4096,"admitted_consent_revision":"123"});
+        assert!(decode_readiness(&report.to_string(), world).is_ok());
+        report["may_host_now"] = serde_json::json!(true);
+        assert!(decode_readiness(&report.to_string(), world).is_err());
+        report["may_host_now"] = serde_json::json!(false);
+        report["process_cpu"] = serde_json::json!({"mode":"linux_cgroup_active","limit_millicores":500,"admitted_heap_mib":4096,"admitted_consent_revision":"123","usage_usec":1234});
+        report["process_memory"] = serde_json::json!({"mode":"linux_cgroup_active","limit_mib":6144,"current_bytes":1048576,"peak_bytes":1048576});
+        assert!(decode_readiness(&report.to_string(), world).is_ok());
+        // Old verified allocation is visible during a save-first withdrawal.
+        report["consented"] = serde_json::json!(false);
+        report["selected_heap_mib"] = serde_json::json!(0);
+        report["selected_cpu_millicores"] = serde_json::Value::Null;
+        report["consent_revision"] = serde_json::json!("124");
+        assert!(decode_readiness(&report.to_string(), world).is_ok());
+        report["process_cpu"]["admitted_consent_revision"] = serde_json::json!("0");
         assert!(decode_readiness(&report.to_string(), world).is_err());
     }
 

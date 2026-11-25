@@ -39,6 +39,25 @@ describe('real native hosting contribution commands', () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
+  it('forwards 4 GiB heap with the exact explicit CPU budget and zero withdrawal', async () => {
+    const invoke = vi.fn(async () => ({}));
+    vi.stubGlobal('window', { __TAURI__: { core: { invoke } } });
+    await saveHostingContribution(WORLD, 4096, 500);
+    expect(invoke).toHaveBeenLastCalledWith('hosting_contribution_set', { world: WORLD, heapMib: 4096, cpuMillicores: 500 });
+    await saveHostingContribution(WORLD, 0, 0);
+    expect(invoke).toHaveBeenLastCalledWith('hosting_contribution_set', { world: WORLD, heapMib: 0, cpuMillicores: 0 });
+  });
+
+  it('rejects invalid CPU limits and nonzero CPU with zero heap', async () => {
+    const invoke = vi.fn(async () => ({}));
+    vi.stubGlobal('window', { __TAURI__: { core: { invoke } } });
+    for (const cpu of [0, 249, 64001, 500.5]) {
+      await expect(saveHostingContribution(WORLD, 4096, cpu)).rejects.toThrow(/CPU/);
+    }
+    await expect(saveHostingContribution(WORLD, 0, 1000)).rejects.toThrow(/CPU/);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it('fails closed if Tauri is unavailable instead of storing browser-only consent', async () => {
     vi.stubGlobal('window', {});
     await expect(readHostingContribution(WORLD)).rejects.toThrow(/Tauri is unavailable/);

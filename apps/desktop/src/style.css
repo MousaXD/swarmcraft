@@ -461,3 +461,17 @@ input::placeholder, textarea::placeholder { color: #667069; }
 .raw-activity-details > :not(summary) { margin-top: var(--s2); }
 .raw-activity-details .activity-console { width: 100%; min-height: 160px; max-height: 300px; }
 .support-diagnostic-link { margin-bottom: var(--s3); }
+
+/* Resource contribution uses the existing dense field/action system in both
+   packaged frontends. Never let the technical labels force overflow. */
+#hostingContributionForm {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s3);
+  margin-top: var(--s3);
+}
+#hostingContributionPanel .section-note { font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+#hostingContributionForm .field-help { color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+@media (max-width: 800px) {
+  #hostingContributionForm { grid-template-columns: minmax(0, 1fr); }
+}

@@ -148,19 +148,19 @@ def check_saved(binary, profile, identity, world, checkpoint, heap):
 def set_consent(ui, binary, profile, world, heap):
     qa.open_hosting_contribution(ui)
     if heap:
-        qa.wait("default player-only preference", lambda: qa.read_is(ui, qa.PLAYER_ONLY, "Player only — 0 MiB"))
+        qa.wait("default player-only preference", lambda: qa.read_is(ui, qa.PLAYER_ONLY, "Player only — 0 MiB / 0 CPU"))
         opt_in = qa.button("hostingContributionOptIn", "Save explicit opt-in")
         qa.require(not ui.read(opt_in)["enabled"], "opt-in was enabled without confirmation")
         ui.type(qa.field("hostingContributionHeap", "Java server heap budget (MiB)"), str(heap))
         confirm = qa.Target("#hostingContributionConfirm",
-                            "I explicitly allow this device to offer the selected Java heap when eligible.", qa.CHECK)
+                            "I explicitly allow this device to offer the selected Java heap and CPU limit when eligible.", qa.CHECK)
         qa.require(not ui.read(confirm)["checked"], "confirmation was preselected")
         qa.click(ui, confirm)
         qa.require(ui.read(confirm)["checked"], "explicit confirmation did not register")
         qa.click(ui, opt_in)
         expected = qa.OPTED_IN
     else:
-        qa.wait("opted-in preference after rollback", lambda: qa.read_is(ui, qa.OPTED_IN, "Hosting memory contribution selected"))
+        qa.wait("opted-in preference after rollback", lambda: qa.read_is(ui, qa.OPTED_IN, "Hosting resource preference saved"))
         qa.click(ui, qa.button("hostingContributionWithdraw", "Player only — withdraw"))
         expected = qa.PLAYER_ONLY
     qa.wait("native consent persisted", lambda: qa.consent(binary, profile, world)["selected_heap_mib"] == heap)

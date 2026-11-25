@@ -1353,7 +1353,8 @@ fn local_host_generation_eligible(
     }
     if !matches!(hosting_budget::load_consent(paths, world), Ok(Some(consent)) if
         consent.enabled && consent.peer_id == identity.peer_id()
-            && consent_revision.is_none_or(|revision| revision == consent.revision))
+            && consent_revision.is_none_or(|revision| revision == consent.revision)
+            && hosting_budget::verify_live_cpu_consent(paths, world, &consent).is_ok())
     {
         return false;
     }

@@ -575,12 +575,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #57 — Expansion · Missing
 - Work: Add per-device CPU and memory contribution, with desired limits, measured capacity, and a player-only choice
 - Acceptance: Joining grants no compute access automatically. A player can select 4 GiB and a CPU limit, change or withdraw it, and see requested, admitted, and active resources. Zero preserves play where available
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (explicit per-device/per-world consent, actual delegated Linux kernel enforcement and native Desktop controls; no distributed runtime or field gameplay certification)
+- Source: [Resource contract](DEVICE_RESOURCE_CONTRIBUTION.md); CLI hosting budget and managed cgroup admission, runtime ownership/live proof checks; native IPC and both Desktop frontends; `scripts/acceptance/native_resource_contribution.py`.
+- Evidence: [Report and receipts](../research/device-resources/REPORT.md). 259 Rust library/binary tests, six public CLI integration tests, one real three-identity authenticated join/replication/recovery test with no implicit consent, 13 native boundary tests, 173 JS and 84 Svelte tests, 30 source parity and 18 harness tests. Explicit delegated kernel test measured 1,496,600 CPU microseconds over 3,000,159 elapsed at 500 millicores; 30 throttled periods, exact process/descendant and revision binding, prepared/active distinction, tamper rejection and withdrawal/exit. Both final native Debian packages 8/8 each: 4096 MiB + CPU preference, denied admission without delegation, revision change, zero withdrawal/restart, unchanged identity/checkpoint and no runtime activation. Both browser variants passed three viewport gates.
+- Remaining / next action: #58 admission/placement research only; no distributed work grant. Actual Minecraft/Fabric with CPU cap, zero-contribution authenticated gameplay, Windows/macOS CPU enforcement and independent-device field acceptance remain unverified. Legacy heap-only CLI compatibility retained; an explicit limit cannot fall back to uncapped execution. Prior delegated memory-only cases not rerun in this milestone.
+- External dependency: Authorized CPU+memory delegation on Linux; tested native enforcement on other OSes; real game clients and independent machines, compatible regional runtime and #56 adoption gates.
+- Commit: Add explicit device CPU and memory contribution controls; see git history.
 
 ### #58 — Expansion · Missing
 - Work: Build opt-in worker admission and placement based on usable memory, CPU, network path, and region load

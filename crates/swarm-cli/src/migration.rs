@@ -916,7 +916,8 @@ async fn run_authority_runtime_inner(
         bail!("previous save-and-stop checkpoint was not confirmed; retained runtime must be recovered or archived before relaunch");
     }
     let admission = hosting_budget::admit(paths, options.world)?;
-    let memory_cap = HostMemoryCap::prepare(admission.heap_mib())?;
+    let memory_cap =
+        HostMemoryCap::prepare(admission.heap_mib(), admission.consent().cpu_millicores, admission.consent().revision)?;
     let identity = PeerIdentity::load_or_create(paths)?;
     let metadata = storage.load_world(options.world)?;
     crate::runtime_installer::verify_managed_launch(

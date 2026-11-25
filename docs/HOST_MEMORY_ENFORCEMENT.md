@@ -56,6 +56,14 @@ enforcement. Observations do not confer hosting authority, and the
 legacy whole-process RSS guarantee field stays false. A missing peak
 counter is shown as unknown.
 
+## Explicit CPU limits (#57)
+
+A CPU-limited consent uses the same memory-enforcement leaf with the CPU
+controller additionally delegated and enabled. See [device resource
+contribution](DEVICE_RESOURCE_CONTRIBUTION.md) for the CLI, observed states,
+revision binding, quota, compatibility, and platform limitations. The
+legacy heap-only mode is not a fallback for an explicit CPU limit.
+
 ## Windows and macOS
 
 Windows remains heap-only. A Windows Job Object design would need

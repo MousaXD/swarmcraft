@@ -10,6 +10,14 @@ export interface HostingContributionReadiness {
   world_id: string;
   consented: boolean;
   selected_heap_mib: number;
+  selected_cpu_millicores?: number | null;
+  cpu_capacity_millicores?: number | null;
+  process_cpu?: null |
+    { mode: 'unspecified' } |
+    { mode: 'linux_cgroup_configured'; limit_millicores: number } |
+    { mode: 'linux_cgroup_reserved'; limit_millicores: number; admitted_heap_mib: number; admitted_consent_revision: string } |
+    { mode: 'linux_cgroup_active'; limit_millicores: number; admitted_heap_mib: number; admitted_consent_revision: string; usage_usec: number } |
+    { mode: 'unavailable'; detail: string };
   physical_mib: number | null;
   available_mib: number | null;
   estimated_native_overhead_mib: number;
@@ -71,7 +79,7 @@ export interface NativeCommandTable {
   game_route_status: { args: { world: string }; result: NativeGameRouteStatus };
   client_profile: { args: { world: string; modsDir: string | null }; result: string };
   hosting_contribution_get: { args: { world: string }; result: HostingContributionReadiness };
-  hosting_contribution_set: { args: { world: string; heapMib: number }; result: HostingContributionReadiness };
+  hosting_contribution_set: { args: { world: string; heapMib: number; cpuMillicores?: number }; result: HostingContributionReadiness };
   world_mods_status: { args: { world: string }; result: string };
   world_mods_acquire: { args: { world: string }; result: string };
   world_mods_add: { args: { world: string; jarPath: string }; result: string };

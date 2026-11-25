@@ -13,6 +13,11 @@ mapfile -t tasks < "$root/cgroup.procs"
 [[ "${#tasks[@]}" -eq 1 && "${tasks[0]}" = "$$" ]]
 mkdir "$root/controller"
 printf '%s\n' "$$" > "$root/controller/cgroup.procs"
-printf '+memory\n' > "$root/cgroup.subtree_control"
+if [[ "${SWARMCRAFT_TEST_CPU_DELEGATION:-0}" = 1 ]]; then
+  grep -qw cpu "$root/cgroup.controllers"
+  printf '+memory +cpu\n' > "$root/cgroup.subtree_control"
+else
+  printf '+memory\n' > "$root/cgroup.subtree_control"
+fi
 export SWARMCRAFT_HOST_CGROUP_ROOT="$root"
 exec "$@"

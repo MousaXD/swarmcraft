@@ -203,6 +203,7 @@ pub fn sign_live_host_fabric_attestation(
     {
         bail!("host Fabric readiness does not match unwithdrawn hosting consent");
     }
+    hosting_budget::verify_live_cpu_consent(paths, fabric.world_id(), &consent)?;
     // Caller-supplied timestamps are not a freshness oracle. Derive issuance
     // immediately before the signature from this machine's current clock.
     let issued_unix_ms = unix_ms()?;
@@ -448,6 +449,7 @@ impl SignedLiveAuthoritySource {
             {
                 bail!("local hosting consent was revised or withdrawn");
             }
+            hosting_budget::verify_live_cpu_consent(&self.paths, world, &consent)?;
         }
         let valid_until = host.expires_unix_ms.min(challenge.expires_unix_ms);
         let certificate_hash = Hash32::from_domain_bytes(
@@ -484,6 +486,7 @@ impl SignedLiveAuthoritySource {
             {
                 bail!("local hosting consent changed during proof verification");
             }
+            hosting_budget::verify_live_cpu_consent(&self.paths, world, &consent)?;
         }
         if proof.epoch.mode == EpochMode::Recovery {
             verify_current_recovery_certificate(&storage, &proof.epoch, &proof.membership)?;

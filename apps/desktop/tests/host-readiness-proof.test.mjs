@@ -90,7 +90,7 @@ test('manual signed transfer and hosting-consent mutations revoke visible proofs
     const pattern = new RegExp('window\\.__swarmcraftInvalidateTransientSafety\\?\\.\\(world\\);\\s+const [^\\n]+ = await backend\\.migration\\.' + method + '\\(');
     assert.match(wizard, pattern, `${method} must revoke stale UX before invoking Rust`);
   }
-  for (const budget of ['heapMib', '0']) {
+  for (const budget of ['heapMib, cpuMillicores', '0, 0']) {
     const pattern = new RegExp('window\\.__swarmcraftInvalidateTransientSafety\\?\\.\\(world\\);\\s+const response = await saveHostingContribution\\(world, ' + budget + '\\)');
     assert.match(contribution, pattern, `hosting budget ${budget} must revoke stale UX`);
   }

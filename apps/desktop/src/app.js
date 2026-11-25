@@ -1,4 +1,5 @@
 import { installSupportHistory } from './support-history.js';
+import { installHostingResources } from './hosting-resources.js';
 import { installWorldListing, installListingMetadata } from './directory-moderation.js';
 import { installFriends } from './friends.js';
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
@@ -1983,6 +1984,7 @@ window.__swarmcraftTakeImportReview = request => importReview.take(request);
 window.__swarmcraftRefreshImportReview = () => importReview.sync();
 
 installSupportHistory(invoke, () => selectedWorldId);
+if (window.__swarmcraftSvelteWorldsOwned !== true) installHostingResources(invoke, () => selectedWorldId);
 installListingMetadata();
 installWorldListing(invoke, () => selectedWorldId);
 installFriends(invoke, () => {

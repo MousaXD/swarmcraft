@@ -198,7 +198,7 @@ function installAdvancedWorldControls(
   const movable = [
     document.querySelector('.world-state-grid'),
     byId('safetyPanel'),
-    document.querySelector('.player-section:not(#migrationCard):not(#modsPanel)'),
+    document.querySelector('.player-section:not(#migrationCard):not(#modsPanel):not(#hostingContributionPanel)'),
     byId('migrationCard'),
     byId('modsPanel'),
     document.querySelector('.details-panel'),

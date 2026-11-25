@@ -7,6 +7,87 @@ use std::{path::PathBuf, process::Command};
 
 pub const HOST_CGROUP_ROOT_ENV: &str = "SWARMCRAFT_HOST_CGROUP_ROOT";
 const MIB: u64 = 1024 * 1024;
+pub const MIN_CPU_MILLICORES: u64 = 250;
+pub const MAX_CPU_MILLICORES: u64 = 64_000;
+const CPU_PERIOD_US: u64 = 100_000;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProcessCpuReport {
+    Unspecified {},
+    LinuxCgroupConfigured {
+        limit_millicores: u64,
+    },
+    LinuxCgroupReserved {
+        limit_millicores: u64,
+        admitted_heap_mib: u64,
+        admitted_consent_revision: String,
+    },
+    LinuxCgroupActive {
+        limit_millicores: u64,
+        admitted_heap_mib: u64,
+        admitted_consent_revision: String,
+        usage_usec: u64,
+    },
+    Unavailable {
+        detail: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CpuLimit {
+    millicores: u64,
+    admitted_heap_mib: u64,
+    consent_revision: u64,
+}
+
+pub fn validate_cpu_request(millicores: u64) -> Result<()> {
+    anyhow::ensure!(
+        (MIN_CPU_MILLICORES..=MAX_CPU_MILLICORES).contains(&millicores),
+        "CPU limit must be between {MIN_CPU_MILLICORES} and {MAX_CPU_MILLICORES} millicores"
+    );
+    Ok(())
+}
+
+/// Logical CPU-equivalent capacity, not free CPU time or a reservation.
+pub(crate) fn cpu_capacity_millicores() -> Result<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::cpu_capacity_millicores()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        bail!("effective CPU controller capacity is not verified on this platform")
+    }
+}
+
+pub(crate) fn require_cpu_configuration(cpu: Option<u64>) -> Result<()> {
+    let Some(cpu) = cpu else { return Ok(()) };
+    validate_cpu_request(cpu)?;
+    let root = configured_root()?.context("explicit CPU cap requires a delegated Linux memory and CPU cgroup")?;
+    #[cfg(target_os = "linux")]
+    {
+        linux::validate_cpu_root(&root)?;
+        anyhow::ensure!(cpu <= cpu_capacity_millicores()?, "requested CPU limit exceeds measured CPU capacity");
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        bail!("explicit CPU enforcement is unavailable on this platform")
+    }
+}
+
+pub(crate) fn configured_cpu_report(cpu: Option<u64>) -> Result<ProcessCpuReport> {
+    match cpu {
+        None => Ok(ProcessCpuReport::Unspecified {}),
+        Some(limit_millicores) => {
+            require_cpu_configuration(cpu)?;
+            Ok(ProcessCpuReport::LinuxCgroupConfigured { limit_millicores })
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
@@ -28,6 +109,8 @@ pub(crate) struct MemoryCapIdentity {
     inode: u64,
     limit_bytes: u64,
     high_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cpu: Option<CpuLimit>,
 }
 
 pub(crate) struct HostMemoryCap {
@@ -36,16 +119,22 @@ pub(crate) struct HostMemoryCap {
 }
 
 impl HostMemoryCap {
-    pub(crate) fn prepare(heap_mib: u64) -> Result<Option<Self>> {
+    pub(crate) fn prepare(heap_mib: u64, cpu: Option<u64>, consent_revision: u64) -> Result<Option<Self>> {
+        require_cpu_configuration(cpu)?;
         let Some(root) = configured_root()? else { return Ok(None) };
         #[cfg(target_os = "linux")]
         {
             let limit = cap_bytes(heap_mib)?;
-            linux::create(&root, limit).map(Some)
+            linux::create_with_cpu(
+                &root,
+                limit,
+                cpu.map(|millicores| CpuLimit { millicores, admitted_heap_mib: heap_mib, consent_revision }),
+            )
+            .map(Some)
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (root, heap_mib);
+            let _ = (root, heap_mib, cpu, consent_revision);
             bail!("whole-process hosting memory enforcement is unavailable on this platform")
         }
     }
@@ -125,6 +214,23 @@ impl MemoryCapIdentity {
         {
             let _ = pid;
             bail!("recorded Linux cgroup process membership cannot be inspected")
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn observe_reserved_cpu(&self) -> Result<Option<ProcessCpuReport>> {
+        linux::observe_reserved_cpu(self)
+    }
+
+    pub(crate) fn observe_cpu(&self, pid: u32) -> Result<ProcessCpuReport> {
+        self.verify_child(pid)?;
+        #[cfg(target_os = "linux")]
+        {
+            linux::observe_cpu(self)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            bail!("recorded CPU accounting unavailable on this platform")
         }
     }
 
@@ -286,6 +392,110 @@ mod linux {
         Ok(())
     }
 
+    pub(super) fn validate_cpu_root(root: &Path) -> Result<()> {
+        validate_delegated_root(root)?;
+        ensure!(
+            fs::read_to_string(root.join("cgroup.subtree_control"))?.split_whitespace().any(|value| value == "cpu"),
+            "CPU controller is not delegated/enabled for hosting leaves"
+        );
+        Ok(())
+    }
+
+    fn parse_cpu_max(value: &str) -> Result<Option<u64>> {
+        let fields: Vec<_> = value.split_whitespace().collect();
+        ensure!(fields.len() == 2, "invalid cpu.max");
+        let period: u64 = fields[1].parse()?;
+        ensure!((1000..=1_000_000).contains(&period), "invalid CPU quota period");
+        if fields[0] == "max" {
+            return Ok(None);
+        }
+        let quota: u64 = fields[0].parse()?;
+        ensure!(quota >= 1000, "invalid CPU quota");
+        Ok(Some(((quota as u128 * 1000) / period as u128).min(u64::MAX as u128) as u64))
+    }
+
+    pub(super) fn cpu_capacity_millicores() -> Result<u64> {
+        let mount = Path::new(CGROUP_MOUNT);
+        crate::hosting_budget::require_visible_cgroup_v2_mount(&fs::read_to_string("/proc/self/mountinfo")?)?;
+        let mut current = unified_path(std::process::id())?;
+        ensure!(current.is_dir() && fs::canonicalize(&current)? == current, "unverifiable CPU hierarchy");
+        // sched_getaffinity gives the actual allowed logical processors,
+        // unlike host CPU count. Ancestor finite quotas further bound it.
+        let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        if unsafe { libc::sched_getaffinity(0, std::mem::size_of_val(&set), &mut set) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("cannot sample CPU affinity");
+        }
+        let mut capacity = (unsafe { libc::CPU_COUNT(&set) } as u64).saturating_mul(1000);
+        loop {
+            match fs::read_to_string(current.join("cpu.max")) {
+                Ok(value) => {
+                    if let Some(limit) = parse_cpu_max(&value)? {
+                        capacity = capacity.min(limit);
+                    }
+                }
+                // A cgroup without the controller enabled has no local
+                // quota; still inspect every visible ancestor.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            if current == mount {
+                break;
+            }
+            current = current.parent().context("CPU hierarchy escaped mount")?.to_path_buf();
+            ensure!(current.starts_with(mount), "CPU hierarchy escaped mount");
+        }
+        ensure!(capacity > 0, "CPU capacity is unavailable");
+        Ok(capacity)
+    }
+
+    fn verify_cpu_limit(identity: &MemoryCapIdentity) -> Result<()> {
+        if let Some(cpu) = &identity.cpu {
+            validate_cpu_request(cpu.millicores)?;
+            ensure!(
+                (crate::hosting_budget::MIN_HEAP_MIB..=crate::hosting_budget::MAX_HEAP_MIB)
+                    .contains(&cpu.admitted_heap_mib)
+                    && cap_bytes(cpu.admitted_heap_mib)? == identity.limit_bytes
+                    && cpu.consent_revision != 0,
+                "invalid CPU admission memory binding"
+            );
+            let expected = format!("{} {}", cpu.millicores * (CPU_PERIOD_US / 1000), CPU_PERIOD_US);
+            ensure!(
+                fs::read_to_string(identity.path.join("cpu.max"))?.trim() == expected,
+                "active hosting cgroup CPU policy changed; refusing runtime proof"
+            );
+            match fs::read_to_string(identity.path.join("cpu.max.burst")) {
+                Ok(value) => ensure!(value.trim() == "0", "active hosting CPU burst policy changed"),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn observe_reserved_cpu(identity: &MemoryCapIdentity) -> Result<Option<ProcessCpuReport>> {
+        let Some(cpu) = &identity.cpu else { return Ok(None) };
+        verify_limits(identity)?;
+        ensure!(!populated(identity)?, "pending CPU reservation already has unverified processes");
+        Ok(Some(ProcessCpuReport::LinuxCgroupReserved {
+            limit_millicores: cpu.millicores,
+            admitted_heap_mib: cpu.admitted_heap_mib,
+            admitted_consent_revision: cpu.consent_revision.to_string(),
+        }))
+    }
+
+    pub(super) fn observe_cpu(identity: &MemoryCapIdentity) -> Result<ProcessCpuReport> {
+        verify_limits(identity)?;
+        match &identity.cpu {
+            None => Ok(ProcessCpuReport::Unspecified {}),
+            Some(cpu) => Ok(ProcessCpuReport::LinuxCgroupActive {
+                limit_millicores: cpu.millicores,
+                admitted_heap_mib: cpu.admitted_heap_mib,
+                admitted_consent_revision: cpu.consent_revision.to_string(),
+                usage_usec: counter(&identity.path.join("cpu.stat"), "usage_usec")?,
+            }),
+        }
+    }
+
     fn high_limit(limit: u64) -> Result<u64> {
         // cgroup-v2 memory values are rounded to the kernel page size.
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
@@ -294,8 +504,16 @@ mod linux {
         Ok((limit.checked_mul(9).context("cgroup high budget overflow")? / 10 / page) * page)
     }
 
+    #[cfg(test)]
     pub(super) fn create(root: &Path, limit_bytes: u64) -> Result<HostMemoryCap> {
+        create_with_cpu(root, limit_bytes, None)
+    }
+
+    pub(super) fn create_with_cpu(root: &Path, limit_bytes: u64, cpu: Option<CpuLimit>) -> Result<HostMemoryCap> {
         validate_delegated_root(root)?;
+        if cpu.is_some() {
+            validate_cpu_root(root)?;
+        }
         ensure!((16 * MIB..=128 * 1024 * MIB).contains(&limit_bytes), "invalid cgroup memory limit");
         let name = format!("{LEAF_PREFIX}{}", hex::encode(swarm_core::random_nonce()));
         let path = root.join(name);
@@ -309,6 +527,7 @@ mod linux {
                 inode: meta.ino(),
                 limit_bytes,
                 high_bytes,
+                cpu,
             };
             ensure!(!populated(&identity)?, "new hosting cgroup unexpectedly contains processes");
             // Hard kernel charge limit covers anonymous/native memory,
@@ -317,6 +536,18 @@ mod linux {
             write_number(&path.join("memory.high"), high_bytes)?;
             write_number(&path.join("memory.swap.max"), 0)?;
             write_number(&path.join("memory.oom.group"), 1)?;
+            if let Some(cpu) = &identity.cpu {
+                validate_cpu_request(cpu.millicores)?;
+                fs::write(
+                    path.join("cpu.max"),
+                    format!(
+                        "{} {}
+",
+                        cpu.millicores * (CPU_PERIOD_US / 1000),
+                        CPU_PERIOD_US
+                    ),
+                )?;
+            }
             // No Java may execute before these settings and attachment are
             // verified. Never mutate the parent's resource configuration.
             verify_limits(&identity)?;
@@ -361,6 +592,7 @@ mod linux {
                 && read_number(&path.join("memory.oom.group"))? == 1,
             "active hosting cgroup memory policy changed; refusing runtime proof"
         );
+        verify_cpu_limit(identity)?;
         Ok(())
     }
 
@@ -449,6 +681,126 @@ mod linux {
             let temp = tempfile::tempdir().unwrap();
             assert!(validate_delegated_root(temp.path()).is_err());
             assert!(validate_delegated_root(Path::new(CGROUP_MOUNT)).is_err());
+        }
+
+        #[test]
+        fn cpu_quota_parser_is_fractional_and_rejects_malformed_values() {
+            assert_eq!(parse_cpu_max("max 100000").unwrap(), None);
+            assert_eq!(parse_cpu_max("50000 100000").unwrap(), Some(500));
+            assert_eq!(parse_cpu_max("150000 100000").unwrap(), Some(1500));
+            for bad in ["max", "max 0", "0 100000", "100000 100000 extra", "bad 100000"] {
+                assert!(parse_cpu_max(bad).is_err());
+            }
+            assert!(validate_cpu_request(0).is_err());
+            assert!(validate_cpu_request(249).is_err());
+            assert!(validate_cpu_request(64001).is_err());
+            assert!(validate_cpu_request(250).is_ok());
+        }
+
+        #[test]
+        #[ignore = "requires disposable delegated cgroup-v2 CPU and memory scope"]
+        fn real_cpu_cap_applies_to_child_and_descendant_and_detects_policy_change() {
+            use crate::{hosting_budget, runtime_process_guard::RuntimeProcessGuard};
+            let temp = tempfile::Builder::new().permissions(fs::Permissions::from_mode(0o700)).tempdir().unwrap();
+            let paths = swarm_core::DataPaths::from_root(temp.path().join("profile"));
+            let world = swarm_protocol::WorldId([57; 32]);
+            let consent = hosting_budget::set_contribution_with_cpu(&paths, world, 512, Some(500)).unwrap();
+            let cap = HostMemoryCap::prepare(512, Some(500), consent.revision)
+                .unwrap()
+                .expect("explicit CPU must have a cap");
+            // This is a scoped process-ownership fixture, not Minecraft host
+            // or canonical authority admission; no machine-wide reservation
+            // is taken and no real world/runtime is touched.
+            let mut guard = RuntimeProcessGuard::begin_coordinated(&paths, world, None, Some(cap)).unwrap();
+            let reserved = hosting_budget::contribution_readiness(&paths, world).unwrap();
+            assert!(!reserved.may_host_now);
+            assert!(matches!(reserved.process_cpu, ProcessCpuReport::LinuxCgroupReserved {
+                limit_millicores:500, admitted_heap_mib:512, ref admitted_consent_revision
+            } if admitted_consent_revision == &consent.revision.to_string()));
+            assert!(hosting_budget::verify_live_cpu_consent(&paths, world, &consent).is_err());
+            let marker = temp.path().join("ready");
+            let stop = temp.path().join("stop");
+            let mut command = Command::new("python3");
+            command.args(["-c", r#"
+import pathlib, subprocess, sys, time
+ready, stop = map(pathlib.Path, sys.argv[1:])
+child = subprocess.Popen([sys.executable, '-c', 'import time; deadline=time.monotonic()+10; exec("while time.monotonic()<deadline: pass")'])
+try:
+    ready.write_text(str(child.pid))
+    deadline = time.monotonic()+10
+    while not stop.exists() and time.monotonic() < deadline: pass
+finally:
+    child.terminate()
+    child.wait(timeout=3)
+"#]).arg(&marker).arg(&stop);
+            guard.memory_cap().unwrap().configure_command(&mut command).unwrap();
+            let mut child = TestChild(command.spawn().unwrap());
+            guard.record_java(child.0.id()).unwrap();
+            let cap = guard.memory_cap().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !marker.exists() {
+                assert!(Instant::now() < deadline && child.0.try_wait().unwrap().is_none());
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let pid = fs::read_to_string(&marker).unwrap().parse().unwrap();
+            cap.verify_child(child.0.id()).unwrap();
+            cap.verify_child(pid).unwrap();
+            let start = Instant::now();
+            let initial = counter(&cap.identity().path.join("cpu.stat"), "usage_usec").unwrap();
+            let throttled_before = counter(&cap.identity().path.join("cpu.stat"), "nr_throttled").unwrap();
+            std::thread::sleep(Duration::from_secs(3));
+            let elapsed = start.elapsed().as_micros() as u64;
+            let used = counter(&cap.identity().path.join("cpu.stat"), "usage_usec").unwrap() - initial;
+            let throttled = counter(&cap.identity().path.join("cpu.stat"), "nr_throttled").unwrap() - throttled_before;
+            assert!(
+                used > 100_000 && used < elapsed * 7 / 10 && throttled > 0,
+                "kernel CPU accounting: {used} / {elapsed} us, throttled={throttled}"
+            );
+            let observation = cap.identity().observe_cpu(child.0.id()).unwrap();
+            assert!(matches!(observation, ProcessCpuReport::LinuxCgroupActive {
+                limit_millicores: 500, admitted_heap_mib:512, ref admitted_consent_revision, ..
+            } if admitted_consent_revision == &consent.revision.to_string()));
+            let active = hosting_budget::contribution_readiness(&paths, world).unwrap();
+            assert!(matches!(active.process_cpu, ProcessCpuReport::LinuxCgroupActive { limit_millicores: 500, .. }));
+            assert!(!active.may_host_now);
+            hosting_budget::verify_live_cpu_consent(&paths, world, &consent).unwrap();
+            let revised = hosting_budget::set_contribution_with_cpu(&paths, world, 512, Some(750)).unwrap();
+            assert!(hosting_budget::runtime_withdrawal(&paths, world, &consent).unwrap().is_some());
+            assert!(hosting_budget::verify_live_cpu_consent(&paths, world, &revised).is_err());
+            let revoked = hosting_budget::set_contribution_with_cpu(&paths, world, 0, Some(0)).unwrap();
+            assert!(!revoked.enabled);
+            let stopping = hosting_budget::contribution_readiness(&paths, world).unwrap();
+            assert!(!stopping.consented && !stopping.may_host_now);
+            assert!(
+                matches!(stopping.process_cpu, ProcessCpuReport::LinuxCgroupActive { limit_millicores: 500, .. }),
+                "withdrawal must not falsely report that the earlier runtime has already exited"
+            );
+            fs::write(cap.identity().path.join("cpu.max"), "max 100000\n").unwrap();
+            assert!(cap.verify_child(child.0.id()).is_err());
+            assert!(cap.identity().observe_cpu(child.0.id()).is_err());
+            // Restore the test-only tampered leaf, then cleanly stop both
+            // disposable processes. No change to parent scope or host.
+            fs::write(cap.identity().path.join("cpu.max"), "50000 100000\n").unwrap();
+            fs::write(&stop, b"stop").unwrap();
+            assert!(child.0.wait().unwrap().success());
+            assert!(!cap.identity().populated().unwrap());
+            drop(guard);
+            let ended = hosting_budget::contribution_readiness(&paths, world).unwrap();
+            assert!(matches!(ended.process_cpu, ProcessCpuReport::Unspecified {}));
+            assert!(!ended.consented && !ended.may_host_now);
+            println!(
+                "cpu_receipt={}",
+                serde_json::json!({
+                    "cpu_limit_millicores":500, "period_us":100000, "quota_us":50000,
+                    "heap_mib":512,"kernel_memory_limit_mib":1536,
+                    "elapsed_usec":elapsed, "combined_process_cpu_usec":used, "throttled_periods":throttled,
+                    "descendant_membership_verified":true,"tampered_cpu_limit_refused":true,
+                    "empty_leaf_verified":true, "prepared_reservation_observed":true,
+                    "active_admission_bound_to_revision":true, "changed_consent_refused_for_live_proof":true,
+                    "withdrawal_preserves_active_observation_until_exit":true,
+                    "scope":"actual kernel cap on two bounded Python fixture processes, not Minecraft"
+                })
+            );
         }
 
         #[test]

@@ -12,7 +12,7 @@ use std::{
 use swarm_core::{create_private_dir_all, DataPaths, PeerIdentity};
 
 use crate::{
-    host_memory_cap::{self, HostMemoryCap, ProcessMemoryReport},
+    host_memory_cap::{self, HostMemoryCap, ProcessCpuReport, ProcessMemoryReport},
     host_readiness,
     machine_hosting::MachineHostingReservation,
     runtime_process_guard,
@@ -38,6 +38,10 @@ pub struct HostingConsentV1 {
     pub peer_id: PeerId,
     pub enabled: bool,
     pub heap_mib: u64,
+    /// Absent only for legacy heap-only consent. A positive explicit CPU
+    /// limit is enforced by the kernel, never just a renderer preference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millicores: Option<u64>,
     pub revision: u64,
 }
 
@@ -60,6 +64,9 @@ pub struct ContributionReadiness {
     pub world_id: String,
     pub consented: bool,
     pub selected_heap_mib: u64,
+    pub selected_cpu_millicores: Option<u64>,
+    pub cpu_capacity_millicores: Option<u64>,
+    pub process_cpu: ProcessCpuReport,
     pub physical_mib: Option<u64>,
     pub available_mib: Option<u64>,
     pub estimated_native_overhead_mib: u64,
@@ -192,6 +199,12 @@ fn verify_record(world: WorldId, peer: PeerId, value: &HostingConsentV1) -> Resu
     {
         bail!("invalid hosting consent or heap budget; hosting disabled");
     }
+    if let Some(cpu) = value.cpu_millicores {
+        if !value.enabled {
+            bail!("player-only consent cannot contain a positive CPU budget");
+        }
+        host_memory_cap::validate_cpu_request(cpu)?;
+    }
     if value.revision == 0 {
         bail!("missing hosting consent revision; hosting disabled");
     }
@@ -220,25 +233,57 @@ pub fn load_consent(paths: &DataPaths, world: WorldId) -> Result<Option<HostingC
 /// creation, joining, daemon startup, or runtime setup calls this automatically.
 /// Choosing zero explicitly revokes permission and invalidates in-flight admissions.
 pub fn set_contribution(paths: &DataPaths, world: WorldId, heap_mib: u64) -> Result<HostingConsentV1> {
+    set_contribution_with_cpu(paths, world, heap_mib, None)
+}
+
+/// Explicit CPU and heap update. The desired preference can be persisted
+/// when enforcement is unavailable; admission will then refuse hosting.
+pub fn set_contribution_with_cpu(
+    paths: &DataPaths,
+    world: WorldId,
+    heap_mib: u64,
+    cpu: Option<u64>,
+) -> Result<HostingConsentV1> {
+    if let Some(cpu) = cpu {
+        if heap_mib == 0 {
+            anyhow::ensure!(cpu == 0, "player-only must select zero CPU");
+        } else {
+            host_memory_cap::validate_cpu_request(cpu)?;
+        }
+    }
     if heap_mib != 0 {
         let _profile = hosting_profile_guard(paths)?;
-        // The user's durable preference may be configured while other apps
-        // are consuming RAM. Check the hard physical limit now; every actual
-        // launch still checks CURRENT available headroom under admission lock.
         let memory = memory_snapshot()?;
         check_budget(
             heap_mib,
             AvailableMemory { physical_mib: memory.physical_mib, available_mib: memory.physical_mib },
         )?;
     }
-    persist_contribution(paths, world, heap_mib)
+    persist_contribution_with_cpu(paths, world, heap_mib, cpu)
 }
 
+#[cfg(test)]
 fn persist_contribution(paths: &DataPaths, world: WorldId, heap_mib: u64) -> Result<HostingConsentV1> {
+    persist_contribution_with_cpu(paths, world, heap_mib, None)
+}
+
+fn persist_contribution_with_cpu(
+    paths: &DataPaths,
+    world: WorldId,
+    heap_mib: u64,
+    cpu: Option<u64>,
+) -> Result<HostingConsentV1> {
     let lock = open_lock(&control_path(paths).join("hosting-consent-write.lock"))?;
     lock.lock_exclusive().context("cannot serialize hosting consent updates")?;
     let _profile = if heap_mib != 0 { Some(hosting_profile_guard(paths)?) } else { None };
     let previous = load_consent(paths, world)?;
+    // An older caller that omits the new CPU field may change the heap,
+    // but cannot silently widen an already-selected CPU limit.
+    let cpu_millicores =
+        if heap_mib == 0 { None } else { cpu.or_else(|| previous.as_ref().and_then(|v| v.cpu_millicores)) };
+    if let Some(cpu) = cpu_millicores {
+        host_memory_cap::validate_cpu_request(cpu)?;
+    }
     let now_nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let next_revision = previous
         .map_or(0, |record| record.revision)
@@ -251,6 +296,7 @@ fn persist_contribution(paths: &DataPaths, world: WorldId, heap_mib: u64) -> Res
         peer_id: PeerIdentity::load_or_create(paths)?.peer_id(),
         enabled: heap_mib != 0,
         heap_mib,
+        cpu_millicores,
         revision: current,
     };
     // Invalidate stale runtime/candidate reports BEFORE the consent revision
@@ -340,8 +386,28 @@ pub fn require_contribution(paths: &DataPaths, world: WorldId) -> Result<Hosting
         bail!("previous local shutdown checkpoint is unconfirmed; hosting denied");
     }
     host_memory_cap::validate_configuration()?;
+    host_memory_cap::require_cpu_configuration(record.cpu_millicores)?;
     check_budget(record.heap_mib, memory_snapshot()?)?;
     Ok(record)
+}
+
+/// New CPU-limited consent requires an observed matching process admission.
+/// Legacy heap-only consent still follows the existing runtime proof path.
+pub fn verify_live_cpu_consent(paths: &DataPaths, world: WorldId, consent: &HostingConsentV1) -> Result<()> {
+    if let Some(cpu) = consent.cpu_millicores {
+        match runtime_process_guard::observed_cpu(paths, world)? {
+            Some(ProcessCpuReport::LinuxCgroupActive {
+                limit_millicores,
+                admitted_heap_mib,
+                admitted_consent_revision,
+                ..
+            }) if limit_millicores == cpu
+                && admitted_heap_mib == consent.heap_mib
+                && admitted_consent_revision == consent.revision.to_string() => {}
+            _ => bail!("live CPU and memory admission does not match current resource consent"),
+        }
+    }
+    Ok(())
 }
 
 /// Acquires the capacity lock BEFORE rereading consent/memory and before any
@@ -371,12 +437,13 @@ fn revalidate_contribution(paths: &DataPaths, world: WorldId, expected: &Hosting
     let _profile = hosting_profile_guard(paths)?;
     let current = load_consent(paths, world)?.context("hosting consent disappeared before the operation")?;
     if !current.enabled || current != *expected {
-        bail!("hosting consent or heap changed; hosting operation denied");
+        bail!("hosting consent or resource budget changed; hosting operation denied");
     }
     if crate::migration::shutdown_checkpoint_pending(paths, world)? {
         bail!("previous local shutdown checkpoint is unconfirmed; hosting denied");
     }
     host_memory_cap::validate_configuration()?;
+    host_memory_cap::require_cpu_configuration(current.cpu_millicores)?;
     check_budget(current.heap_mib, memory_snapshot()?)
 }
 
@@ -497,6 +564,19 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
             ProcessMemoryReport::Unavailable { detail: "Cannot verify the configured memory controller or recorded runtime; inspect local diagnostics before retrying".into() }
         }
     };
+    let cpu = consent.as_ref().and_then(|v| v.cpu_millicores);
+    let cpu_capacity_millicores = host_memory_cap::cpu_capacity_millicores().ok();
+    let process_cpu = match runtime_process_guard::observed_cpu(paths, world)
+        .and_then(|observed| observed.map_or_else(|| host_memory_cap::configured_cpu_report(cpu), Ok))
+    {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(%error, "could not verify local CPU enforcement");
+            ProcessCpuReport::Unavailable {
+                detail: "Requested CPU enforcement or recorded runtime cannot be verified; hosting blocked".into(),
+            }
+        }
+    };
     let checkpoint_state = local_checkpoint_state(paths, world, heap != 0);
     let (may_host_now, reason) = if checkpoint_state == LocalCheckpointState::CheckpointBlocked {
         (false, "Unconfirmed local checkpoint; retain the runtime and review Diagnostics".into())
@@ -504,6 +584,34 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
         (false, "Stopping at checkpoint; local hosting is not eligible until completion".into())
     } else if let ProcessMemoryReport::Unavailable { detail } = &process_memory {
         (false, format!("hosting memory enforcement cannot be verified: {detail}"))
+    } else if let ProcessCpuReport::Unavailable { detail } = &process_cpu {
+        (false, detail.clone())
+    } else if let ProcessCpuReport::LinuxCgroupReserved { .. } = &process_cpu {
+        (false, "A local CPU/memory admission is prepared; no active JVM is verified and no additional admission is available".into())
+    } else if let ProcessCpuReport::LinuxCgroupActive {
+        limit_millicores,
+        admitted_heap_mib,
+        admitted_consent_revision,
+        ..
+    } = &process_cpu
+    {
+        // Live reservation is not a new admission. Revised limits take
+        // effect only after the old managed process completes its stop.
+        (
+            false,
+            if Some(*limit_millicores) == cpu
+                && *admitted_heap_mib == heap
+                && Some(admitted_consent_revision) == consent_revision.as_ref()
+            {
+                "An admitted local runtime is already active; no additional hosting reservation".into()
+            } else {
+                "Previous resource admission is still active; waiting for safe checkpoint and stop".into()
+            },
+        )
+    } else if cpu.is_some() && matches!(runtime_process_guard::runtime_present(paths, world), Ok(true) | Err(_)) {
+        (false, "Previous runtime ownership is not resolved; new resource admission denied".into())
+    } else if cpu.is_some() && matches!(process_cpu, ProcessCpuReport::Unspecified {}) {
+        (false, "Previous heap-only runtime must stop before the new CPU limit can be admitted".into())
     } else if let Err(error) = hosting_profile_guard(paths) {
         (false, error.to_string())
     } else if heap == 0 {
@@ -513,7 +621,7 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
             Ok(mem) => match check_budget(heap, mem) {
                 Ok(()) => (
                     true,
-                    "Consented and passes current conservative memory admission; must be rechecked at launch".into(),
+                    "Consented and passes current resource preflight; not reserved, must be rechecked at launch".into(),
                 ),
                 Err(error) => (false, error.to_string()),
             },
@@ -524,6 +632,9 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
         world_id: world.to_string(),
         consented: heap != 0,
         selected_heap_mib: heap,
+        selected_cpu_millicores: cpu,
+        cpu_capacity_millicores,
+        process_cpu,
         physical_mib,
         available_mib,
         estimated_native_overhead_mib: estimated_native_overhead_mib(heap),
@@ -540,7 +651,7 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
 }
 
 #[cfg(target_os = "linux")]
-fn require_visible_cgroup_v2_mount(mountinfo: &str) -> Result<()> {
+pub(crate) fn require_visible_cgroup_v2_mount(mountinfo: &str) -> Result<()> {
     // Bind mounts of a nested cgroup may hide ancestor limits. Do not use
     // /proc/meminfo as an authority in an opaque mount layout.
     for line in mountinfo.lines() {
@@ -958,6 +1069,7 @@ mod tests {
             peer_id,
             enabled: false,
             heap_mib: 0,
+            cpu_millicores: None,
             revision: u64::MAX,
         };
         atomic_write(&prefs_path(&paths, world), &previous).unwrap();
@@ -978,6 +1090,7 @@ mod tests {
             peer_id: PeerId([0xFF; 32]),
             enabled: true,
             heap_mib: 512,
+            cpu_millicores: None,
             revision: 1,
         };
         assert_ne!(consent.peer_id, current_peer);
@@ -999,6 +1112,38 @@ mod tests {
         assert!(admit(&paths, world).is_err());
     }
     #[test]
+    fn explicit_cpu_preference_is_revision_bound_and_legacy_heap_update_cannot_widen_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let world = WorldId([81; 32]);
+        let legacy = persist_contribution(&paths, world, 512).unwrap();
+        assert!(legacy.cpu_millicores.is_none());
+        assert!(!serde_json::to_value(&legacy).unwrap().as_object().unwrap().contains_key("cpu_millicores"));
+        let first = persist_contribution_with_cpu(&paths, world, 4096, Some(1000)).unwrap();
+        assert_eq!(first.cpu_millicores, Some(1000));
+        assert!(verify_live_cpu_consent(&paths, world, &first).is_err());
+        let second = persist_contribution_with_cpu(&paths, world, 4096, Some(500)).unwrap();
+        assert!(second.revision > first.revision);
+        assert!(runtime_withdrawal(&paths, world, &first).unwrap().is_some());
+        let called = std::cell::Cell::new(false);
+        assert!(with_consent_guarded_operation(&paths, world, &first, || {
+            called.set(true);
+            Ok(())
+        })
+        .is_err());
+        assert!(!called.get());
+        let preserved = persist_contribution(&paths, world, 512).unwrap();
+        assert_eq!(preserved.cpu_millicores, Some(500));
+        let before = fs::read(prefs_path(&paths, world)).unwrap();
+        assert!(set_contribution_with_cpu(&paths, world, 0, Some(500)).is_err());
+        assert!(set_contribution_with_cpu(&paths, world, 512, Some(0)).is_err());
+        assert_eq!(fs::read(prefs_path(&paths, world)).unwrap(), before);
+        let revoked = set_contribution_with_cpu(&paths, world, 0, Some(0)).unwrap();
+        assert!(!revoked.enabled && revoked.cpu_millicores.is_none() && revoked.revision > preserved.revision);
+        assert!(require_contribution(&paths, world).is_err());
+    }
+
+    #[test]
     fn opt_out_invalidates_an_active_admission_generation() {
         let temp = tempfile::tempdir().unwrap();
         let paths = DataPaths::from_root(temp.path().join("data"));
@@ -1013,7 +1158,7 @@ mod tests {
         set_contribution(&paths, world, 0).unwrap();
         assert!(with_consent_guarded_spawn(&paths, world, &admission, || Ok(())).is_err());
         let error = revalidate_admission(&paths, world, &admission).unwrap_err();
-        assert!(error.to_string().contains("hosting consent or heap changed"));
+        assert!(error.to_string().contains("hosting consent or resource budget changed"));
         assert!(runtime_withdrawal(&paths, world, admission.consent()).unwrap().is_some());
         drop(admission);
         assert!(admit(&paths, world).is_err());
@@ -1042,7 +1187,7 @@ mod tests {
             transition_ran.set(true);
             Ok(())
         });
-        assert!(result.unwrap_err().to_string().contains("hosting consent or heap changed"));
+        assert!(result.unwrap_err().to_string().contains("hosting consent or resource budget changed"));
         assert!(!transition_ran.get());
     }
 
@@ -1060,7 +1205,7 @@ mod tests {
             fs::write(&marker, b"committed")?;
             Ok(())
         });
-        assert!(result.unwrap_err().to_string().contains("hosting consent or heap changed"));
+        assert!(result.unwrap_err().to_string().contains("hosting consent or resource budget changed"));
         assert!(!marker.exists());
     }
 

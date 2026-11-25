@@ -225,6 +225,9 @@ enum HostingCommand {
         world: String,
         #[arg(long)]
         heap_mib: u64,
+        /// CPU-equivalent limit: 1000 millicores = one logical CPU. Zero only with zero heap.
+        #[arg(long)]
+        cpu_millicores: Option<u64>,
         #[arg(long)]
         json: bool,
     },
@@ -1208,10 +1211,10 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 let readiness = hosting_budget::contribution_readiness(paths, world)?;
                 print_local_hosting_readiness(&readiness, json)?;
             }
-            HostingCommand::Set { world, heap_mib, json } => {
+            HostingCommand::Set { world, heap_mib, cpu_millicores, json } => {
                 let world = parse_world(&world)?;
                 storage.load_world(world)?;
-                let consent = hosting_budget::set_contribution(paths, world, heap_mib)?;
+                let consent = hosting_budget::set_contribution_with_cpu(paths, world, heap_mib, cpu_millicores)?;
                 let readiness = hosting_budget::contribution_readiness(paths, world)?;
                 if !json {
                     println!(
@@ -1936,7 +1939,10 @@ fn print_local_hosting_readiness(readiness: &hosting_budget::ContributionReadine
     } else {
         println!("Local device preference: Player only (0 MiB)");
     }
-    println!("Current memory admission eligible: {}", readiness.may_host_now);
+    println!("Requested CPU limit (millicores): {:?}", readiness.selected_cpu_millicores);
+    println!("Measured effective CPU capacity (millicores): {:?}", readiness.cpu_capacity_millicores);
+    println!("CPU enforcement: {:?}", readiness.process_cpu);
+    println!("Current resource preflight eligible: {}", readiness.may_host_now);
     println!("Current reason: {}", readiness.reason);
     let physical = readiness.physical_mib.map_or_else(|| "unknown".to_string(), |mib| mib.to_string());
     let available = readiness.available_mib.map_or_else(|| "unknown".to_string(), |mib| mib.to_string());

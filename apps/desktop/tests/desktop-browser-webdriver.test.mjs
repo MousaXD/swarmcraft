@@ -307,6 +307,11 @@ async function setViewport(port, sessionId, width, height) {
 const tauriFixture = String.raw`
 window.__swarmcraftBrowserErrors = [];
 window.__swarmcraftCalls = [];
+window.__hostingPrefs = {};
+window.__hostingActive = false;
+window.__hostingHold = false;
+window.__hostingRelease = null;
+window.__hostingFail = false;
 window.__swarmcraftWorldModFailures = 1;
 window.__swarmcraftRecoveryWorld = null;
 window.__swarmcraftPendingMembership = null;
@@ -494,11 +499,30 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
     case 'identity':
     case 'node_identity': return 'Peer ID: scpeer:' + 'd'.repeat(64);
     case 'ensure_daemon_running': return 12345;
-    case 'hosting_contribution_get': return {
-      world_id: args.world, consented: false, selected_heap_mib: 0, may_host_now: false,
-      reason: 'Player only', available_mib: 8192, physical_mib: 16384,
-      hard_process_memory_cap_guaranteed: false, checkpoint_state: 'no_pending_checkpoint',
-    };
+    case 'hosting_contribution_set':
+    case 'hosting_contribution_get': {
+      if (command === 'hosting_contribution_set') {
+        if (window.__hostingHold) await new Promise(resolve => { window.__hostingRelease = resolve; });
+        if (window.__hostingFail) { window.__hostingFail = false; throw new Error('fixture consent failure'); }
+        if (!Number.isInteger(args.heapMib) || !Number.isInteger(args.cpuMillicores)
+            || (args.heapMib === 0 ? args.cpuMillicores !== 0 : args.cpuMillicores < 250))
+          throw new Error('invalid fixture preference');
+        window.__hostingPrefs[args.world] = {heap:args.heapMib, cpu:args.cpuMillicores || null,
+          revision:String(Number(window.__hostingPrefs[args.world]?.revision || 0)+1)};
+      }
+      const pref = window.__hostingPrefs[args.world] || {heap:0,cpu:null,revision:null};
+      const active = window.__hostingActive && pref.heap > 0;
+      return { world_id: args.world, consented: pref.heap !== 0, selected_heap_mib: pref.heap,
+        selected_cpu_millicores: pref.cpu, cpu_capacity_millicores:12000,
+        process_cpu: active ? {mode:'linux_cgroup_active',limit_millicores:pref.cpu,
+          admitted_heap_mib:pref.heap,admitted_consent_revision:pref.revision,usage_usec:1234567}
+          : pref.heap ? {mode:'linux_cgroup_configured',limit_millicores:pref.cpu} : {mode:'unspecified'},
+        process_memory: active ? {mode:'linux_cgroup_active',limit_mib:pref.heap+Math.max(1024,Math.floor(pref.heap/2)),current_bytes:1048576,peak_bytes:1048576}
+          : pref.heap ? {mode:'linux_cgroup_configured',limit_mib:pref.heap+Math.max(1024,Math.floor(pref.heap/2))} : {mode:'heap_only'},
+        may_host_now: !active && pref.heap > 0, consent_revision:pref.revision,
+        reason: active ? 'An admitted local runtime is active' : pref.heap ? 'Resource preflight passed; not reserved' : 'Player only',
+        available_mib:8192, physical_mib:16384, hard_process_memory_cap_guaranteed:false, checkpoint_state:'no_pending_checkpoint' };
+    }
     case 'migration_capabilities': return { transfer: false, wake: false, reason: 'Browser smoke fixture' };
     case 'host_readiness': return { eligible: false, reason: 'No selected world in browser smoke fixture' };
     case 'connectivity_status': return { state: 'nat_status_unknown' };
@@ -1480,6 +1504,67 @@ async function runSupportGate(port,sessionId,width,height,screenshotPath) {
   assert.equal(await execute(port,sessionId,'return document.getElementById("supportPreviewPanel").hidden'),true);
 }
 
+const contributionScenario = String.raw`(async () => {
+  const $ = id => document.getElementById('hostingContribution'+id);
+  const require = (condition, message) => { if (!condition) throw new Error(message); };
+  const waitFor = async (predicate, label) => {
+    for (let i=0;i<240;i++) { if(predicate()) return; await new Promise(resolve=>setTimeout(resolve,25)); }
+    throw new Error('Timed out waiting for '+label);
+  };
+  const calls = () => window.__swarmcraftCalls.filter(c=>c.command==='hosting_contribution_set');
+  const originalCount=calls().length;
+  window.__swarmcraftAccessibilityFixture=true;
+  document.getElementById('navWorlds').click();
+  document.getElementById('refresh').click();
+  await waitFor(()=>$('Panel') && $('Status').textContent.includes('Player only')&&!$('Heap').disabled,'default player-only');
+  require(calls().length===originalCount && !$('Confirm').checked && $('OptIn').disabled,'viewing or joining granted consent');
+  if ($('Panel').closest('details') && !$('Panel').closest('details').open) $('Panel').closest('details').querySelector('summary').click();
+  function input(name,value) { $(name).value=String(value); $(name).dispatchEvent(new Event('input',{bubbles:true})); }
+  input('Heap',4096); input('Cpu',500);
+  require($('OptIn').disabled,'explicit consent required');
+  $('Confirm').click();
+  await waitFor(() => !$('OptIn').disabled,'valid explicit preference can be saved');
+  window.__hostingHold=true;
+  $('OptIn').click();
+  await waitFor(()=>typeof window.__hostingRelease==='function','held native mutation');
+  require($('OptIn').disabled&&$('Cpu').disabled&&$('Withdraw').disabled,'pending mutation controls not disabled');
+  $('Form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
+  require(calls().length===originalCount+1,'duplicate preference mutation');
+  window.__hostingHold=false;window.__hostingRelease();
+  await waitFor(()=>$('Status').textContent.includes('preference saved')&&!$('Cpu').disabled,'saved explicit CPU');
+  require(calls().at(-1).args.heapMib===4096&&calls().at(-1).args.cpuMillicores===500,'wrong native CPU/heap arguments');
+  require($('CpuStatus').textContent.includes('0.5 CPU equivalents')&&$('CpuStatus').textContent.includes('12 CPU equivalents')
+    &&$('CpuStatus').textContent.includes('no active CPU admission'),'requested and configured states confused');
+  window.__hostingActive=true;
+  $('Refresh').click();
+  await waitFor(()=>$('CpuStatus').textContent.includes('Active admission: 4096 MiB')&&!$('Cpu').disabled,'observed active cap');
+  input('Cpu',1000);
+  await waitFor(() => !$('Confirm').checked&&$('OptIn').disabled,'editing budget requires fresh confirmation');
+  $('Confirm').click();await waitFor(() => !$('OptIn').disabled,'reconfirmed budget');window.__hostingFail=true;$('OptIn').click();
+  await waitFor(()=>$('Error')?.textContent.includes('Could not')&&!$('Refresh').disabled,'failed write');
+  require($('OptIn').disabled&&$('Withdraw').disabled,'unconfirmed mutation still actionable');
+  $('Refresh').click();
+  await waitFor(()=>$('CpuStatus')?.textContent.includes('0.5 CPU equivalents')&&!$('Cpu').disabled,'read confirmed old preference');
+  window.__hostingActive=false;
+  input('Cpu',1000);$('Confirm').click();await waitFor(() => !$('OptIn').disabled,'revised budget confirmed');$('OptIn').click();
+  await waitFor(()=>$('CpuStatus').textContent.includes('Requested CPU: 1 CPU equivalents')&&!$('Withdraw').disabled,'revised CPU preference');
+  $('Withdraw').click();
+  await waitFor(()=>$('Status').textContent.includes('Player only')&&!$('Cpu').disabled,'withdrawn');
+  require(calls().at(-1).args.heapMib===0&&calls().at(-1).args.cpuMillicores===0,'zero withdrawal not explicit');
+  require(!$('Confirm').checked&&$('Withdraw').disabled,'withdrawal not reflected');
+  require(document.body.scrollWidth<=innerWidth && $('Panel').scrollWidth<=$('Panel').clientWidth+2,'resource layout overflow');
+  $('Panel').scrollIntoView({block:'start'});
+  return {status:'pass'};
+})()`;
+
+async function runContributionGate(port,sessionId,width,height,screenshotPath) {
+  const result=await executeAsync(port,sessionId,scenarioRunner,[contributionScenario]);
+  assert.equal(result?.ok,true,`Resource contribution failed at ${width}x${height}: ${result?.error}`);
+  assert.equal(result.value?.status,'pass');
+  const png=Buffer.from(await webdriverRequest(port,`/session/${sessionId}/screenshot`),'base64');
+  await writeFile(screenshotPath.replace(/\.png$/,'-resources.png'),png);
+}
+
 const scenarioRunner = String.raw`
 const done = arguments[arguments.length - 1];
 Promise.resolve().then(() => eval(arguments[0])).then(
@@ -1689,6 +1774,7 @@ async function runViewport(port, sessionId, documentHtml, graph, width, height, 
   await runFriendsGate(port, sessionId, width, height, screenshotPath);
   await runModerationGate(port, sessionId, width, height, screenshotPath);
   await runSupportGate(port, sessionId, width, height, screenshotPath);
+  await runContributionGate(port, sessionId, width, height, screenshotPath);
 }
 
 // Exercise the actual compiled Svelte module graph, including its shared
@@ -1771,6 +1857,7 @@ async function runCandidateViewport(port, sessionId, url, width, height, screens
   await runFriendsGate(port, sessionId, width, height, screenshotPath);
   await runModerationGate(port, sessionId, width, height, screenshotPath);
   await runSupportGate(port, sessionId, width, height, screenshotPath);
+  await runContributionGate(port, sessionId, width, height, screenshotPath);
 }
 
 test('current Desktop module graph initializes, owns canonical Create, and renders supported window sizes', async () => {

@@ -1,0 +1,47 @@
+{
+  "scope": "actual local Debian packages and native WebKitGTK, no delegated CPU cap or Minecraft runtime",
+  "variants": {
+    "shipping": {
+      "package_sha256": "70001bb62fbf6ebccb4b270cf3c4b1307a077bb5e79ee47cbe2b1538565b020e",
+      "files": {
+        "desktop": "0fbbaa05cb8fdfb4578f36bc0c4a5bcbb131dc76be73b6a9454e8c3feccd90e2",
+        "swarmcraft": "5fb21124d7ba69176e2da1a8b3925217052d7514e027eae54eae6957c0813d0e",
+        "swarmcraft-host": "48de580bac5d21892b82c56b1837a407e3050f661183b3b61492f1f02f4bc9d6",
+        "swarmcraft-runtime": "87472ae70ee914979a974c4a3a76a059ff734cafbbbdb3c8fbe4e049e17ab786",
+        "swarmcraft-import": "935c25074476e2102a1f0b868ac991d6dbc79639b2b53aee9137d9a417e1495b"
+      },
+      "checks": {
+        "default_player_only_no_implicit_consent": true,
+        "four_gib_and_half_cpu_saved_but_not_admitted": true,
+        "layout_980x760": true,
+        "layout_720x560": true,
+        "cpu_change_requires_confirmation_and_new_revision": true,
+        "explicit_zero_withdrawal": true,
+        "withdrawal_persisted_after_restart": true,
+        "canonical_world_and_identity_unchanged_no_runtime": true
+      },
+      "sampled_cpu_capacity_millicores": 12000
+    },
+    "candidate": {
+      "package_sha256": "ba0f31545a6d90f0c740ddade76fa37a08329158faffcedbdb8927b7d2b53fd2",
+      "files": {
+        "desktop": "e5d6992c06a1b7a7e7696b8adf1ec3e92ea39ce9b3b9c7a96f64a029dd53fda0",
+        "swarmcraft": "5fb21124d7ba69176e2da1a8b3925217052d7514e027eae54eae6957c0813d0e",
+        "swarmcraft-host": "48de580bac5d21892b82c56b1837a407e3050f661183b3b61492f1f02f4bc9d6",
+        "swarmcraft-runtime": "87472ae70ee914979a974c4a3a76a059ff734cafbbbdb3c8fbe4e049e17ab786",
+        "swarmcraft-import": "935c25074476e2102a1f0b868ac991d6dbc79639b2b53aee9137d9a417e1495b"
+      },
+      "checks": {
+        "default_player_only_no_implicit_consent": true,
+        "four_gib_and_half_cpu_saved_but_not_admitted": true,
+        "layout_980x760": true,
+        "layout_720x560": true,
+        "cpu_change_requires_confirmation_and_new_revision": true,
+        "explicit_zero_withdrawal": true,
+        "withdrawal_persisted_after_restart": true,
+        "canonical_world_and_identity_unchanged_no_runtime": true
+      },
+      "sampled_cpu_capacity_millicores": 12000
+    }
+  }
+}

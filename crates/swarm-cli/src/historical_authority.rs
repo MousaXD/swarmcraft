@@ -1479,6 +1479,7 @@ mod tests {
             peer_id: bob.peer_id(),
             enabled: true,
             heap_mib: 1024,
+            cpu_millicores: None,
             revision: 1,
         };
         std::fs::write(consent_dir.join("hosting-consent.json"), serde_json::to_vec(&consent).unwrap()).unwrap();
