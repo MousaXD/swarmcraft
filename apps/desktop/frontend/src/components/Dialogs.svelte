@@ -113,7 +113,7 @@
       <div class="dialog-heading">
         <div>
           <h2>Invite to <span id="inviteWorldName">world</span></h2>
-          <p>Create a signed invite. The recipient still joins through canonical membership.</p>
+          <p>A signed invite is reusable until it expires or is revoked. Anyone with the token can request admission; signed membership approval is still required.</p>
         </div>
         <button id="closeInvite" class="icon-button" value="cancel" type="submit" disabled={busy} aria-label="Close invite dialog">×</button>
       </div>
@@ -142,6 +142,32 @@
       <div class="dialog-actions">
         <button id="cancelInvite" class="button button-secondary" value="cancel" type="submit" disabled={busy}>Done</button>
         <button id="createInvite" class="button button-primary world-required" type="button" disabled={busy} aria-busy={busy} onclick={createInvite}>Create invite</button>
+      </div>
+    </form>
+  </dialog>
+
+<dialog id="inviteManagementDialog" class="dialog" aria-labelledby="inviteManagementTitle">
+    <form class="dialog-card" method="dialog">
+      <div>
+        <h2 id="inviteManagementTitle">Manage a signed invitation</h2>
+        <p>Inspect or revoke an invitation for the selected world. Keep the complete token private. Revocation does not remove members or erase downloaded saves.</p>
+      </div>
+      <div class="field">
+        <label for="manageInviteToken">Signed invitation</label>
+        <textarea id="manageInviteToken" rows="4" placeholder="scinvite:…" spellcheck="false" autocomplete="off"></textarea>
+      </div>
+      <div class="compact-actions">
+        <button id="inspectInvite" class="button button-secondary" type="button">Inspect invitation</button>
+      </div>
+      <pre id="inviteInspection" class="diagnostic-output" hidden></pre>
+      <label id="revokeInviteConfirmWrap" class="check-row" for="revokeInviteConfirm" hidden>
+        <input id="revokeInviteConfirm" type="checkbox" />
+        <span>Revoke this exact invitation for future admission requests. Existing members keep their membership.</span>
+      </label>
+      <div id="inviteManagementNotice" class="inline-notice" role="status" aria-live="polite" hidden></div>
+      <div class="dialog-actions">
+        <button id="closeInviteManagement" class="button button-secondary" value="cancel" type="submit">Done</button>
+        <button id="revokeInvite" class="button button-warning" type="button" disabled>Revoke invitation</button>
       </div>
     </form>
   </dialog>

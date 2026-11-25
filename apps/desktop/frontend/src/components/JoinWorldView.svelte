@@ -85,7 +85,7 @@
               <button class="back-button" type="button" data-back-worlds aria-label="Back to worlds">←</button>
               <div>
                 <h2 id="joinTitle">Join with an invite</h2>
-                <p>Paste the complete signed invite from a world member. Discovery alone never grants membership.</p>
+                <p>Paste a complete signed invite. Joining stages a request; membership approval and checkpoint synchronization must finish before play. Discovery alone never grants membership.</p>
               </div>
             </div>
 

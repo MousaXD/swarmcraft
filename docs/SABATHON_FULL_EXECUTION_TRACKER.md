@@ -105,10 +105,10 @@ Implementation completion: count only items whose full implementation criteria a
 ### #10 — P1 · Partial
 - Work: Make invite expiry, reuse, membership approval, pending state, and revocation legible. Review a recipient-bound or one-use invite option
 - Acceptance: An expired or revoked grant cannot admit a new device. A removed device cannot fetch newer private snapshots. Existing downloaded copies have clearly documented retention limits
-- State: **IN PROGRESS**
-- Source: crates/swarm-cli/src/{invite,main,daemon,daemon_protocol_tests}.rs; crates/swarm-storage/src/membership.rs; crates/swarm-cli/tests/automatic_invite_join.rs; docs/INVITE_LIFECYCLE.md
-- Evidence: Issuer CLI inspect/revoke, durable exact-token denial, atomic fresh-prepare expiry/revocation, and pending/committed synchronization status implemented. Strict CLI/storage Clippy, 49 daemon/CLI binary tests, 67 storage library tests (1 optional soak ignored), and authenticated three-process revoked-vs-fresh invite regression passed. Earlier recovered-copy commit a6d9fe3 passed all 20 required CI jobs (45527028880).
-- Remaining / next action: Desktop lifecycle management and recipient-bound/one-use policy review. Authenticated diagnostic denial and live removed-member newer-checkpoint denial are implemented. Existing durable prepares are never silently canceled.
+- State: **LOCALLY VERIFIED**
+- Source: crates/swarm-cli/src/{invite,main,daemon,daemon_protocol_tests}.rs; crates/swarm-storage/src/{membership,world}.rs; apps/desktop/src/invite-lifecycle.js; native Desktop inspect/revoke and Svelte parity; crates/swarm-cli/tests/automatic_invite_join.rs; docs/INVITE_LIFECYCLE.md
+- Evidence: CLI issuer revocation, authenticated denial and removed-member replication, exact pinned Desktop inspect/revoke, pending-state refresh, safe fresh-token replacement, and recipient-bound/one-use policy review. 51 daemon/CLI tests, 67 storage tests (one optional soak ignored), real authenticated join/leave/replication regression, strict CLI/storage Clippy, native Tauri check, 140 Desktop tests (including real ChromeDriver at three sizes), 82 Svelte unit tests and 29 source-parity tests pass. Prior issuer-revocation exact-SHA CI passed.
+- Remaining / next action: Exact-SHA CI and installed Desktop field acceptance. V1 remains reusable; recipient-bound/one-use grants require a separately reviewed versioned protocol. Existing durable prepares are never silently canceled.
 - External dependency: Installed Desktop/independent network acceptance; distributed revocation/rollback protection is not claimed.
 - Commit: See 25 November invite lifecycle checkpoint.
 

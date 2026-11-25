@@ -75,9 +75,21 @@ enum InviteCommand {
         bootstrap_addrs: Vec<String>,
     },
     /// Inspect a signed invite without printing the bearer token or bootstrap hints.
-    Inspect { invite: String },
+    Inspect {
+        invite: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Revoke an invite locally as its current issuer, before a durable membership prepare.
-    Revoke { invite: String },
+    Revoke {
+        invite: String,
+        #[arg(long)]
+        expected_world: Option<String>,
+        #[arg(long)]
+        expected_invite_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -450,7 +462,28 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                                 println!("World ID: {}", invite.world_id);
                                 return Ok(());
                             }
-                            bail!("a different join request is already staged; refusing to replace its signed membership role");
+                            swarm_core::lifecycle::verify_join_request_signature(&pending)?;
+                            swarm_core::verify_invite_signature(&pending.invite)?;
+                            let mut replacement = JoinRequestV1 {
+                                protocol_version: PROTOCOL_VERSION,
+                                world_id: invite.world_id,
+                                invite: invite.clone(),
+                                joining_member: if host_candidate {
+                                    local_member(&identity)
+                                } else {
+                                    local_storage_member(&identity)
+                                },
+                                nonce: random_nonce(),
+                                signature: Vec::new(),
+                            };
+                            identity.sign_join_request(&mut replacement)?;
+                            storage.replace_denied_pending_join(&pending, &replacement).context(
+                                "a pending request can only refresh an expired/denied invitation for the same issuer and signed membership role; no durable membership decision may exist"
+                            )?;
+                            println!("Join request refreshed for: {}", invite.display_name);
+                            println!("World ID: {}", invite.world_id);
+                            println!("Waiting for signed membership approval.");
+                            return Ok(());
                         }
                         Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
                         Err(error) => return Err(error.into()),
@@ -1052,26 +1085,61 @@ fn handle_invite(command: InviteCommand, paths: &DataPaths, storage: &Storage) -
             identity.sign_invite(&mut invite)?;
             println!("{}", invite::encode(&invite)?);
         }
-        InviteCommand::Inspect { invite: value } => {
+        InviteCommand::Inspect { invite: value, json } => {
             let grant = invite::decode_verified(&value)?;
             let identity = PeerIdentity::load_or_create(paths)?;
-            println!("Invite ID: {}", grant.record_hash()?);
-            println!("World: {}", grant.world_id);
-            println!("Issuer: {}", grant.inviter_peer_id);
-            println!("Expires (Unix milliseconds): {}", grant.expires_unix_ms);
-            println!("Reuse: reusable bearer grant");
             let locally_issued =
                 grant.inviter_peer_id == identity.peer_id() && grant.inviter_public_key == identity.public_key();
-            if locally_issued && storage.is_invite_revoked(&grant)? {
-                println!("Status: revoked by this issuer");
+            let status = if locally_issued && storage.is_invite_revoked(&grant)? {
+                "revoked"
             } else if invite::validate_invite_expiry(grant.expires_unix_ms, invite::unix_time_ms()?).is_err() {
-                println!("Status: expired or invalid lifetime");
+                "expired"
             } else {
-                println!("Status: lifetime valid; current authority, revocation and membership approval checked at admission");
+                "lifetime_valid"
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "invite_id": grant.record_hash()?.to_string(),
+                        "world_id": grant.world_id.to_string(),
+                        "issuer_peer_id": grant.inviter_peer_id.to_string(),
+                        "expires_unix_ms": grant.expires_unix_ms,
+                        "locally_issued": locally_issued,
+                        "reuse": "reusable",
+                        "status": status,
+                    })
+                );
+            } else {
+                println!("Invite ID: {}", grant.record_hash()?);
+                println!("World: {}", grant.world_id);
+                println!("Issuer: {}", grant.inviter_peer_id);
+                println!("Expires (Unix milliseconds): {}", grant.expires_unix_ms);
+                println!("Reuse: reusable bearer grant");
+                println!(
+                    "Status: {}",
+                    match status {
+                        "revoked" => "revoked by this issuer",
+                        "expired" => "expired or invalid lifetime",
+                        _ =>
+                            "lifetime valid; current authority, revocation and membership approval checked at admission",
+                    }
+                );
             }
         }
-        InviteCommand::Revoke { invite: value } => {
+        InviteCommand::Revoke { invite: value, expected_world, expected_invite_id, json } => {
             let grant = invite::decode_verified(&value)?;
+            if let Some(world) = expected_world {
+                if parse_world(&world)? != grant.world_id {
+                    bail!("selected world does not match the signed invitation");
+                }
+            }
+            if let Some(hash) = expected_invite_id {
+                let hash: swarm_protocol::Hash32 = hash.parse().context("invalid selected invite ID")?;
+                if hash != grant.record_hash()? {
+                    bail!("selected invitation does not match the signed grant");
+                }
+            }
             let identity = PeerIdentity::load_or_create(paths)?;
             if grant.inviter_peer_id != identity.peer_id() || grant.inviter_public_key != identity.public_key() {
                 bail!("only the issuing identity can revoke its invitation");
@@ -1086,8 +1154,22 @@ fn handle_invite(command: InviteCommand, paths: &DataPaths, storage: &Storage) -
                 &epoch.signature,
             )?;
             let created = storage.revoke_invite(&grant)?;
-            println!("Invite {} {}", grant.record_hash()?, if created { "revoked" } else { "already revoked" });
-            println!("Existing committed members retain membership; revocation prevents new admission preparations.");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "invite_id": grant.record_hash()?.to_string(),
+                        "world_id": grant.world_id.to_string(),
+                        "revoked": true,
+                        "newly_revoked": created,
+                    })
+                );
+            } else {
+                println!("Invite {} {}", grant.record_hash()?, if created { "revoked" } else { "already revoked" });
+                println!(
+                    "Existing committed members retain membership; revocation prevents new admission preparations."
+                );
+            }
         }
     }
     Ok(())

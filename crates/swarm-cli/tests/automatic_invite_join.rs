@@ -126,6 +126,28 @@ fn revoked_invite_is_denied_by_restarted_issuer_while_another_grant_works() {
     let old_token = run_cli(&issuer, &["invite", "create", &world_arg, "--bootstrap", &address]);
     let new_token = run_cli(&issuer, &["invite", "create", &world_arg, "--bootstrap", &address]);
     assert_ne!(old_token, new_token);
+    let inspection: serde_json::Value =
+        serde_json::from_str(&run_cli(&issuer, &["invite", "inspect", &old_token, "--json"])).unwrap();
+    assert_eq!(inspection["world_id"], world_arg);
+    assert_eq!(inspection["locally_issued"], true);
+    assert_eq!(inspection["status"], "lifetime_valid");
+    let invite_id = inspection["invite_id"].as_str().unwrap();
+    for (flag, value) in
+        [("--expected-world", WorldId([0x33; 32]).to_string()), ("--expected-invite-id", "00".repeat(32))]
+    {
+        let denied = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+            .arg("--data-dir")
+            .arg(&issuer.paths.root)
+            .args(["invite", "revoke", &old_token, flag, &value, "--json"])
+            .output()
+            .unwrap();
+        assert!(!denied.status.success(), "mismatched confirmation accepted");
+    }
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&run_cli(&issuer, &["invite", "inspect", &old_token, "--json"]))
+            .unwrap()["status"],
+        "lifetime_valid"
+    );
     let wrong_issuer = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
         .arg("--data-dir")
         .arg(&denied.paths.root)
@@ -135,6 +157,15 @@ fn revoked_invite_is_denied_by_restarted_issuer_while_another_grant_works() {
     assert!(!wrong_issuer.status.success());
     assert!(run_cli(&issuer, &["invite", "revoke", &old_token]).contains(" revoked"));
     assert!(run_cli(&issuer, &["invite", "revoke", &old_token]).contains("already revoked"));
+    let receipt: serde_json::Value = serde_json::from_str(&run_cli(
+        &issuer,
+        &["invite", "revoke", &old_token, "--expected-world", &world_arg, "--expected-invite-id", invite_id, "--json"],
+    ))
+    .unwrap();
+    assert_eq!(receipt["invite_id"], invite_id);
+    assert_eq!(receipt["world_id"], world_arg);
+    assert_eq!(receipt["revoked"], true);
+    assert_eq!(receipt["newly_revoked"], false);
     assert!(run_cli(&issuer, &["invite", "inspect", &old_token]).contains("Status: revoked"));
     // New process reads the persisted issuer marker; capture actual denial
     // rather than relying on a timeout or an unreachable peer.
@@ -168,6 +199,36 @@ fn revoked_invite_is_denied_by_restarted_issuer_while_another_grant_works() {
     drop(denied_daemon);
     assert!(run_cli(&denied, &["world", "status", &world_arg])
         .contains("Membership: pending; issuer reported invitation revoked"));
+    let previous = denied.storage.load_pending_join(world).unwrap();
+    // A different role is not a token refresh. Preserve the exact old
+    // request if any durable membership decision exists, even corrupted.
+    let role_change = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+        .arg("--data-dir")
+        .arg(&denied.paths.root)
+        .args(["world", "join", &new_token, "--host-candidate"])
+        .output()
+        .unwrap();
+    assert!(!role_change.status.success());
+    assert_eq!(denied.storage.load_pending_join(world).unwrap(), previous);
+    let promise = denied.storage.world_dir(world).join("metadata/membership-promise.postcard");
+    fs::write(&promise, b"unresolved membership decision").unwrap();
+    let blocked = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+        .arg("--data-dir")
+        .arg(&denied.paths.root)
+        .args(["world", "join", &new_token])
+        .output()
+        .unwrap();
+    assert!(!blocked.status.success());
+    assert_eq!(denied.storage.load_pending_join(world).unwrap(), previous);
+    assert!(promise.exists());
+    fs::remove_file(promise).unwrap();
+    assert!(run_cli(&denied, &["world", "join", &new_token]).contains("Join request refreshed"));
+    let replacement = denied.storage.load_pending_join(world).unwrap();
+    assert_ne!(replacement.nonce, previous.nonce);
+    assert_eq!(replacement.joining_member, previous.joining_member);
+    assert_eq!(denied.storage.pending_join_denial(&replacement).unwrap(), None);
+    assert!(denied.storage.load_membership_record(world).is_err());
+    assert!(denied.storage.latest_snapshot(world).unwrap().is_none());
     assert!(run_cli(&allowed, &["world", "join", &new_token]).contains("Join request staged"));
     wait_until("fresh grant commits and replicates", Duration::from_secs(30), || {
         let Ok(current) = issuer.storage.load_membership_record(world) else {

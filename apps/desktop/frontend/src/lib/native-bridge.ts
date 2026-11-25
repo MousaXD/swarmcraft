@@ -51,6 +51,8 @@ export interface NativeCommandTable {
   join_world: { args: { invite: string; hostCandidate: boolean }; result: string };
   leave_world: { args: { world: string }; result: string };
   create_invite: { args: { world: string; expiresMinutes: number; bootstrapAddrs: string[] }; result: string };
+  inspect_invite: { args: { invite: string }; result: string };
+  revoke_invite: { args: { world: string; invite: string; inviteId: string; confirmRevocation: boolean }; result: string };
   world_status: { args: { world: string }; result: string };
   host_readiness: { args: { world: string }; result: string };
   /** Select exactly one local loopback gateway; this does NOT verify a route. */

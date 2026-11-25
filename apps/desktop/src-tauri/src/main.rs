@@ -211,6 +211,55 @@ async fn create_invite(
     run_cli(&app, arguments).await
 }
 
+fn validate_invite_token(value: String) -> Result<String, String> {
+    let value = value.trim().to_owned();
+    let Some(payload) = value.strip_prefix("scinvite:") else {
+        return Err("Paste a complete signed invitation.".into());
+    };
+    if payload.is_empty()
+        || payload.len() % 2 != 0
+        || value.len() > 32 * 1024
+        || !payload.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("Paste a valid signed invitation.".into());
+    }
+    Ok(value)
+}
+
+#[tauri::command]
+async fn inspect_invite(app: AppHandle, invite: String) -> Result<String, String> {
+    let invite = validate_invite_token(invite)?;
+    run_cli(&app, vec!["invite".into(), "inspect".into(), invite, "--json".into()])
+        .await
+        .map_err(|_| "Could not verify the signed invitation. Check the complete token.".into())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn revoke_invite(
+    app: AppHandle,
+    world: String,
+    invite: String,
+    invite_id: String,
+    confirm_revocation: bool,
+) -> Result<String, String> {
+    if !confirm_revocation {
+        return Err("Explicitly confirm revocation of this signed grant.".into());
+    }
+    let invite = validate_invite_token(invite)?;
+    let world = hosting_contribution_commands::validate_world_id(&world)?;
+    let invite_id: swarm_protocol::Hash32 =
+        invite_id.parse().map_err(|_| "A verified invite ID is required".to_string())?;
+    run_cli(&app, vec!["invite".into(), "revoke".into(), invite,
+        "--expected-world".into(), world.to_string(), "--expected-invite-id".into(), invite_id.to_string(), "--json".into()]).await
+        .map_err(|error| {
+            if error.contains("membership transition is durably prepared") {
+                "A membership decision is already prepared. Resolve it before revoking this grant.".into()
+            } else {
+                "Could not confirm revocation. Check that this device is the current issuer; inspect the grant before retrying.".into()
+            }
+        })
+}
+
 #[tauri::command]
 async fn world_status(app: AppHandle, world: String) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
@@ -630,6 +679,8 @@ fn main() {
             join_world,
             leave_world,
             create_invite,
+            inspect_invite,
+            revoke_invite,
             world_status,
             host_readiness,
             game_route_select,

@@ -506,6 +506,11 @@ export function createBackendAdapter(invoke) {
     joinWorld: (invite, hostCandidate = false) => call('join_world', { invite, hostCandidate: hostCandidate === true }),
     leaveWorld: (world) => call('leave_world', { world }),
     createInvite: (payload) => call('create_invite', payload),
+    inspectInvite: (invite) => call('inspect_invite', { invite }),
+    revokeInvite: (payload) => {
+      if (payload.confirmRevocation !== true) return Promise.reject(new Error('Confirm revocation of the signed grant.'));
+      return call('revoke_invite', payload);
+    },
     worldStatus: (world) => call('world_status', { world }),
     hostReadiness: async (world) => {
       const raw = await call('host_readiness', { world });

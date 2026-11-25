@@ -40,6 +40,9 @@ pub fn decode_verified(value: &str) -> Result<InviteV1> {
     let encoded = value.strip_prefix(PREFIX).ok_or_else(|| anyhow!("invite must start with {PREFIX}"))?;
     let bytes = hex::decode(encoded).context("invite payload is not valid hex")?;
     let invite: InviteV1 = postcard::from_bytes(&bytes).context("invite payload is invalid")?;
+    if postcard::to_allocvec(&invite)? != bytes {
+        return Err(anyhow!("invite payload is not canonical"));
+    }
     if invite.protocol_version != PROTOCOL_VERSION {
         return Err(anyhow!("invite protocol version {} is unsupported", invite.protocol_version));
     }
@@ -183,6 +186,8 @@ mod tests {
         let invite = signed_invite(1, vec!["/ip4/1.1.1.1/udp/4001/quic-v1".into()]);
         let encoded = encode(&invite).unwrap();
         assert!(decode(&encoded).unwrap_err().to_string().contains("expired"));
+        assert_eq!(decode_verified(&encoded).unwrap(), invite);
+        assert!(decode_verified(&(encoded + "00")).is_err());
     }
 
     #[test]

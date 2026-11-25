@@ -11,6 +11,9 @@ existing joint membership approval rules.
 swarmcraft invite create "$WORLD" --expires-minutes 60
 swarmcraft invite inspect "$INVITE"
 swarmcraft invite revoke "$INVITE"
+# Machine-readable, exact-grant confirmation (also used by Desktop):
+swarmcraft invite inspect "$INVITE" --json
+swarmcraft invite revoke "$INVITE" --expected-world "$WORLD" --expected-invite-id "$INVITE_ID" --json
 ```
 
 Keep the token private; do not paste it into public logs. Inspection prints
@@ -33,6 +36,14 @@ does not retroactively erase a signed durable decision either. A
 recipient who has already become a member does not need a fresh invite
 to use that existing membership.
 
+Desktop: select the world, open **Manage invites**, paste the signed
+token and inspect it. The verified receipt shows its world, issuer,
+expiry, reuse policy, and locally known status. Revocation requires an
+explicit confirmation of the exact grant. Editing the token or changing
+worlds invalidates the confirmation. The backend rechecks the selected
+world and grant hash before persisting revocation. Bearer tokens are
+not copied into activity logs.
+
 ## Pending is not admitted
 
 `world join` stages a request. `world status` distinguishes waiting for
@@ -44,7 +55,18 @@ or expired denial only when the response belongs to the exact outstanding
 signed join request and the connection is authenticated as its issuer.
 The persisted response is diagnostic, not proof of admission or a new
 membership record. A late response for a different request is ignored.
-Committed membership takes precedence over the diagnostic.
+Committed membership takes precedence over the diagnostic. Desktop displays
+these pending states and offers a membership refresh; it does not enable
+Play merely because a join request was sent.
+
+A fresh invitation from the same issuer may replace an expired or
+authenticated-denied pending request for the same signed member role.
+Run `world join` with the new token and the same role flag (if any).
+Replacement is refused if a membership promise, certificate, accepted
+membership/epoch, completed join, replay anchor, or canonical snapshot
+exists. The old request is compared under the world transaction lock;
+the new signed request has its own nonce, so an old denial cannot apply
+to it. No durable admission decision or snapshot is discarded.
 
 ## Removal and retained data
 
@@ -72,11 +94,24 @@ need a versioned signed token, durable consumption coordinated with
 membership preparation, and explicit legacy/migration behavior. Do not
 introduce a client-only one-use checkbox.
 
+### Recipient-bound and one-use policy review
+
+Retain V1 as reusable bearer grants. A future recipient-bound version
+would sign the recipient's exact peer identity and public key alongside
+the world, issuer, issuer epoch/fence, grant ID, and expiry. Every voter
+would need to validate that binding; a UI label is insufficient.
+One-use grants additionally require an immutable consumed-grant record
+committed with the initial membership preparation, restart-safe replay
+of the same admission, and an explicit policy for aborted preparations.
+A versioned migration must not reinterpret existing reusable V1 grants
+as single-use. No such new protocol is activated by this change.
+
 The CLI revocation, inspection, and denial feedback paths have local
 process and durability tests. The authenticated process regression also
 exercises reuse of a valid grant, revocation without removing existing
 members, an actual joint-consensus leave, removal followed by a new
 checkpoint, explicit private status/history denial to the removed
 identity, and successful replication to the surviving member. The
-removed device retains its verified old bytes. Dedicated Desktop
-management and independently networked field validation remain.
+removed device retains its verified old bytes. Desktop management is exercised by the browser regression at three
+viewport sizes, with native IPC type/build validation. Installed native
+GUI and independent-network field acceptance remain.

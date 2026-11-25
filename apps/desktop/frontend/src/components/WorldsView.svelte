@@ -151,6 +151,11 @@
 
                 <p id="playAvailability" class="action-reason">Checking whether this device can host the world…</p>
                 <p id="transferAvailability" class="action-reason" hidden></p>
+                <div class="compact-actions">
+                  <button id="manageInvites" class="button button-subtle button-small world-required" type="button">Manage invites</button>
+                  <button id="refreshMembership" class="button button-subtle button-small world-required" type="button" hidden>Check membership</button>
+                </div>
+                <div id="membershipNotice" class="inline-notice" role="status" aria-live="polite" hidden></div>
 
                 <!-- The native game-route controller owns this display and
                      both reconnect buttons. This Svelte candidate must never

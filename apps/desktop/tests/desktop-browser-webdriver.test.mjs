@@ -204,6 +204,8 @@ window.__swarmcraftBrowserErrors = [];
 window.__swarmcraftCalls = [];
 window.__swarmcraftWorldModFailures = 1;
 window.__swarmcraftRecoveryWorld = null;
+window.__swarmcraftPendingMembership = null;
+window.__swarmcraftInviteRevoked = false;
 addEventListener('error', (event) => {
   window.__swarmcraftBrowserErrors.push(String(event.error?.stack || event.message || event.error || 'window error'));
 });
@@ -229,9 +231,22 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
     case 'world_status':
       if (args.world === window.__swarmcraftRecoveryWorld) {
         return ['World: Recovery source', 'World ID: ' + args.world, 'Safety: Canonical',
-          'Latest snapshot: 4', 'Checkpoint manifest: ' + 'c'.repeat(64)].join('\n');
+          'Latest snapshot: 4', 'Checkpoint manifest: ' + 'c'.repeat(64),
+          ...(window.__swarmcraftPendingMembership ? ['Membership: ' + window.__swarmcraftPendingMembership] : [])].join('\n');
       }
       return '';
+    case 'inspect_invite':
+      return JSON.stringify({
+        world_id: args.invite === 'scinvite:ffff' ? 'scworld:' + 'e'.repeat(64) : window.__swarmcraftRecoveryWorld,
+        invite_id: 'c'.repeat(64), issuer_peer_id: 'scpeer:' + 'd'.repeat(64),
+        expires_unix_ms: 1800000000000, reuse: 'reusable',
+        locally_issued: true, status: window.__swarmcraftInviteRevoked ? 'revoked' : 'lifetime_valid',
+      });
+    case 'revoke_invite':
+      if (args.world !== window.__swarmcraftRecoveryWorld || args.invite !== 'scinvite:abcd'
+          || args.inviteId !== 'c'.repeat(64) || args.confirmRevocation !== true) throw new Error('Unexpected revocation target');
+      window.__swarmcraftInviteRevoked = true;
+      return JSON.stringify({ world_id: args.world, invite_id: args.inviteId, revoked: true, newly_revoked: true });
     case 'recover_copy':
       if (args.world !== window.__swarmcraftRecoveryWorld || args.checkpoint !== 'c'.repeat(64)
           || args.confirmNewIdentity !== true) throw new Error('Unexpected recovery selection');
@@ -415,6 +430,69 @@ const recoveryScenario = String.raw`(async () => {
   return { status: 'pass' };
 })()`;
 
+const inviteScenario = String.raw`(async () => {
+  const waitFor = async (predicate, label) => {
+    for (let i = 0; i < 160; i += 1) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    throw new Error('Timed out waiting for ' + label);
+  };
+  const require = (condition, message) => { if (!condition) throw new Error(message); };
+  const $ = id => document.getElementById(id);
+  $('cancelRecoveryCopy').click();
+  await waitFor(() => !$('recoveryCopyDialog').open, 'recovery close');
+  document.querySelector('[data-view="worlds"]').click();
+  $('manageInvites').click();
+  const dialog = $('inviteManagementDialog');
+  await waitFor(() => dialog.open, 'invite management');
+  const changeToken = value => {
+    $('manageInviteToken').value = value;
+    $('manageInviteToken').dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  changeToken('scinvite:ffff');
+  $('inspectInvite').click();
+  await waitFor(() => !$('inviteManagementNotice').hidden, 'wrong world refusal');
+  require($('revokeInvite').disabled, 'Wrong-world receipt enabled revocation');
+  changeToken('scinvite:abcd');
+  $('inspectInvite').click();
+  await waitFor(() => !$('inviteInspection').hidden, 'verified inspection');
+  require($('inviteInspection').textContent.includes('reusable bearer grant'), 'Reuse policy not visible');
+  require($('inviteInspection').textContent.includes('c'.repeat(64)), 'Signed grant hash missing');
+  require($('revokeInvite').disabled, 'Revocation enabled without explicit confirmation');
+  $('revokeInviteConfirm').click();
+  require(!$('revokeInvite').disabled, 'Explicit confirmation did not enable revoke');
+  changeToken('scinvite:beef');
+  require($('revokeInvite').disabled, 'Changed token retained stale confirmation');
+  require(!window.__swarmcraftCalls.some(call => call.command === 'revoke_invite'), 'Revocation dispatched before confirmation');
+  changeToken('scinvite:abcd');
+  $('inspectInvite').click();
+  await waitFor(() => !$('inviteInspection').hidden, 're-inspection');
+  $('revokeInviteConfirm').click();
+  const bounds = dialog.getBoundingClientRect();
+  require(bounds.left >= 0 && bounds.top >= 0 && bounds.right <= innerWidth && bounds.bottom <= innerHeight, 'Invite dialog exceeds viewport');
+  require(dialog.scrollWidth <= dialog.clientWidth + 2, 'Invite dialog has horizontal overflow');
+  $('revokeInvite').click();
+  $('revokeInvite').click();
+  await waitFor(() => $('inviteManagementNotice').dataset.tone === 'safe', 'confirmed revocation');
+  require(window.__swarmcraftCalls.filter(call => call.command === 'revoke_invite').length === 1, 'Revocation dispatched more than once');
+  require($('inviteManagementNotice').textContent.includes('retain membership'), 'Membership retention boundary absent');
+  require(!$('output').textContent.includes('scinvite:abcd'), 'Bearer token leaked to Activity');
+  $('closeInviteManagement').click();
+  await waitFor(() => !dialog.open, 'invite dialog close');
+  window.__swarmcraftPendingMembership = 'pending; issuer reported invitation revoked';
+  $('refresh').click();
+  await waitFor(() => $('membershipNotice').textContent.includes('revoked'), 'pending admission notice');
+  require($('playWorld').disabled, 'Pending invitation became playable');
+  require(!$('refreshMembership').hidden, 'Missing membership refresh control');
+  window.__swarmcraftPendingMembership = 'committed admission; local synchronization pending';
+  $('refreshMembership').click();
+  await waitFor(() => $('membershipNotice').textContent.includes('Membership approved'), 'synchronization pending notice');
+  require($('playWorld').disabled, 'Unverified sync became playable');
+  require(window.__swarmcraftBrowserErrors.length === 0, 'Invite browser errors: ' + window.__swarmcraftBrowserErrors.join(' | '));
+  return { status: 'pass' };
+})()`;
+
 const scenarioRunner = String.raw`
 const done = arguments[arguments.length - 1];
 Promise.resolve().then(() => eval(arguments[0])).then(
@@ -454,6 +532,11 @@ async function runViewport(port, sessionId, documentHtml, graph, width, height, 
   assert.equal(recovery.value?.status, 'pass');
   const recoveryScreenshot = await webdriverRequest(port, `/session/${sessionId}/screenshot`);
   await writeFile(screenshotPath.replace(/\.png$/, '-recovery.png'), Buffer.from(recoveryScreenshot, 'base64'));
+  const invitation = await executeAsync(port, sessionId, scenarioRunner, [inviteScenario]);
+  assert.equal(invitation?.ok, true, `Invite browser scenario failed at ${width}x${height}: ${invitation?.error || JSON.stringify(invitation)}`);
+  assert.equal(invitation.value?.status, 'pass');
+  const inviteScreenshot = await webdriverRequest(port, `/session/${sessionId}/screenshot`);
+  await writeFile(screenshotPath.replace(/\.png$/, '-invitation.png'), Buffer.from(inviteScreenshot, 'base64'));
 }
 
 test('current Desktop module graph initializes, owns canonical Create, and renders supported window sizes', async () => {

@@ -1,6 +1,7 @@
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
 import { createImportRequest, parseImportResult } from './import-flow.js';
 import { recoveryCopySelection, recoveryCopyReceipt } from './recovery-copy.js';
+import { validateInviteToken, inspectInviteReceipt, revocationRequest, revokeInviteReceipt, pendingMembershipMessage } from './invite-lifecycle.js';
 import { clientContinuityFromMigration, ensureClientContinuityPanel } from './client-continuity.js';
 import { UNVERIFIED_GAME_ROUTE, ensureGameReconnectActions, gameReadinessCheckpoints, isUsableGameRoute, updateGameReadinessChecklist, updateGameRouteControls } from './game-route-status.js';
 
@@ -31,6 +32,10 @@ let startupInProgress = false;
 let lastWorldError = null;
 let recoveryCopyTarget = null;
 let recoveryCopyPending = false;
+let inviteManagementWorld = '';
+let inviteManagementSelection = null;
+let inviteManagementBusy = false;
+let membershipRequestGeneration = 0;
 const MIGRATION_REFRESH_MS = 5000;
 const CONNECTIVITY_REFRESH_MS = 10000;
 
@@ -207,6 +212,9 @@ function safetySummary(world) {
 
 function hostingEligibility(world) {
   if (!world) return { enabled: false, reason: 'Choose a world first.' };
+  if (pendingMembershipMessage(world.status?.Membership)) {
+    return { enabled: false, reason: pendingMembershipMessage(world.status.Membership) };
+  }
   if (safetyKind(world.status.Safety) === 'danger') {
     return { enabled: false, reason: 'Play is unavailable while divergent history needs review.' };
   }
@@ -310,6 +318,9 @@ function updateWorldSpecificControls() {
 }
 
 function clearSelection() {
+  membershipRequestGeneration += 1;
+  showInline('membershipNotice', '');
+  if ($('refreshMembership')) $('refreshMembership').hidden = true;
   selectedWorldId = '';
   migrationRequestGeneration += 1;
   hostReadinessRequestGeneration += 1;
@@ -786,6 +797,8 @@ function selectWorld(world, { focusDetail = false } = {}) {
 
   $('noSelection').hidden = true;
   $('selectionContent').hidden = false;
+  membershipRequestGeneration += 1;
+  renderMembershipNotice(world);
   showInline('worldNotice', '');
   showInline('runtimeNotice', '');
   if (window.__swarmcraftSvelteWorldsOwned === true) {
@@ -1201,6 +1214,134 @@ function joinWorldId() {
   const message = `Discovery can look for ${world}, but it does not grant membership. A private world still needs a signed invite.`;
   showInline('joinWorldIdNotice', message);
   setOutput(message, 'World discovery');
+}
+
+function renderMembershipNotice(world) {
+  const message = pendingMembershipMessage(world?.status?.Membership);
+  showInline('membershipNotice', message, 'warning');
+  const refresh = $('refreshMembership');
+  if (refresh) refresh.hidden = !message;
+}
+
+async function refreshMembershipStatus() {
+  const world = selectedWorld();
+  if (!world) return;
+  const generation = ++membershipRequestGeneration;
+  try {
+    const raw = await backend.worldStatus(world.id);
+    if (generation !== membershipRequestGeneration || selectedWorldId !== world.id) return;
+    const status = parseLines(raw);
+    if (status['World ID'] !== world.id) throw new Error('Wrong world status');
+    // Refresh the complete world model if membership has advanced. A
+    // successful status read alone does not establish a playable route.
+    if (!pendingMembershipMessage(status.Membership)) {
+      await refreshWorlds();
+      return;
+    }
+    const current = selectedWorld();
+    if (current) {
+      const updated = { ...current, status };
+      worldCache.set(world.id, updated);
+      renderMembershipNotice(updated);
+      updatePlayState(updated);
+    }
+  } catch (_) {
+    if (generation === membershipRequestGeneration && selectedWorldId === world.id) {
+      showInline('membershipNotice', 'Could not confirm membership status. Refresh the world and check connectivity.', 'warning');
+    }
+  }
+}
+
+function clearInviteInspection() {
+  inviteManagementSelection = null;
+  $('inviteInspection').textContent = '';
+  $('inviteInspection').hidden = true;
+  $('revokeInviteConfirm').checked = false;
+  $('revokeInviteConfirmWrap').hidden = true;
+  $('revokeInvite').disabled = true;
+}
+
+function setInviteManagementBusy(busy) {
+  inviteManagementBusy = busy;
+  for (const id of ['manageInviteToken', 'inspectInvite', 'closeInviteManagement', 'revokeInviteConfirm']) $(id).disabled = busy;
+  $('revokeInvite').disabled = busy || !inviteManagementSelection?.receipt.canRequestRevocation || !$('revokeInviteConfirm').checked;
+}
+
+function openInviteManagement() {
+  const world = selectedWorld();
+  if (!world || inviteManagementBusy || $('inviteManagementDialog').open) return;
+  inviteManagementWorld = world.id;
+  // Begin with an empty token; the backend independently verifies the
+  // signature and selected world, and no bearer is logged.
+  $('manageInviteToken').value = '';
+  clearInviteInspection();
+  showInline('inviteManagementNotice', '');
+  setInviteManagementBusy(false);
+  $('inviteManagementDialog').showModal();
+}
+
+async function inspectManagedInvite() {
+  if (inviteManagementBusy || !$('inviteManagementDialog').open) return;
+  clearInviteInspection();
+  showInline('inviteManagementNotice', '');
+  try {
+    if (selectedWorldId !== inviteManagementWorld) throw new Error('Selection changed');
+    const token = validateInviteToken($('manageInviteToken').value);
+    const world = inviteManagementWorld;
+    setInviteManagementBusy(true);
+    const raw = await backend.inspectInvite(token);
+    if (! $('inviteManagementDialog').open || selectedWorldId !== world || world !== inviteManagementWorld
+        || $('manageInviteToken').value.trim() !== token) return;
+    const receipt = inspectInviteReceipt(world, raw);
+    inviteManagementSelection = Object.freeze({ token, receipt });
+    const states = {
+      lifetime_valid: 'Lifetime valid; admission still requires current authority and membership approval.',
+      expired: 'Expired or invalid lifetime.',
+      revoked: 'Revoked by this issuer.',
+    };
+    $('inviteInspection').textContent = [
+      'Invite ID: ' + receipt.id,
+      'World: ' + receipt.world,
+      'Issuer: ' + receipt.issuer,
+      'Expires: ' + new Date(receipt.expires).toLocaleString(),
+      'Reuse: reusable bearer grant',
+      'Status: ' + states[receipt.status],
+      receipt.locallyIssued ? 'Issued by this device. Revocation checks current authority and any prepared membership decision.'
+        : 'Issued by another device. Only the current issuing identity can revoke it.',
+    ].join('\n');
+    $('inviteInspection').hidden = false;
+    $('revokeInviteConfirmWrap').hidden = !receipt.canRequestRevocation;
+  } catch (_) {
+    showInline('inviteManagementNotice', 'Could not verify an invitation for this selected world. Check the token and try again.', 'warning');
+  } finally {
+    setInviteManagementBusy(false);
+  }
+}
+
+async function revokeManagedInvite() {
+  if (inviteManagementBusy || !$('inviteManagementDialog').open) return;
+  try {
+    if (selectedWorldId !== inviteManagementWorld || !inviteManagementSelection) throw new Error('Selection changed');
+    const selection = inviteManagementSelection;
+    const payload = revocationRequest(selection, $('manageInviteToken').value, $('revokeInviteConfirm').checked);
+    setInviteManagementBusy(true);
+    const raw = await backend.revokeInvite(payload);
+    const newlyRevoked = revokeInviteReceipt(selection.receipt, raw);
+    clearInviteInspection();
+    $('manageInviteToken').value = '';
+    showInline('inviteManagementNotice', newlyRevoked
+      ? 'Invitation revoked. Existing committed members retain membership.'
+      : 'This invitation was already revoked. Existing committed members retain membership.', 'safe');
+    setOutput('Invitation revocation confirmed. Existing membership is unchanged.', 'Invite management');
+  } catch (error) {
+    clearInviteInspection();
+    const prepared = String(error).includes('membership decision is already prepared');
+    showInline('inviteManagementNotice', prepared
+      ? 'A membership decision is already prepared. Resolve it before revoking this grant.'
+      : 'Revocation was not confirmed. Inspect the invitation again before retrying.', 'warning');
+  } finally {
+    setInviteManagementBusy(false);
+  }
 }
 
 function openInviteDialog() {
@@ -1648,6 +1789,29 @@ bindAction('importForm', importWorld, { submit: true });
 bindAction('joinForm', joinWorld, { submit: true });
 bindAction('joinWorldIdButton', joinWorldId);
 bindAction('createInvite', createInvite);
+$('manageInvites')?.addEventListener('click', openInviteManagement);
+$('refreshMembership')?.addEventListener('click', refreshMembershipStatus);
+$('inspectInvite')?.addEventListener('click', inspectManagedInvite);
+$('revokeInvite')?.addEventListener('click', revokeManagedInvite);
+$('manageInviteToken')?.addEventListener('input', () => {
+  if (inviteManagementBusy) return;
+  clearInviteInspection();
+  showInline('inviteManagementNotice', '');
+});
+$('revokeInviteConfirm')?.addEventListener('change', () => setInviteManagementBusy(inviteManagementBusy));
+$('inviteManagementDialog')?.addEventListener('cancel', event => {
+  if (inviteManagementBusy) event.preventDefault();
+});
+$('inviteManagementDialog')?.querySelector('form')?.addEventListener('submit', event => {
+  if (inviteManagementBusy) event.preventDefault();
+});
+$('inviteManagementDialog')?.addEventListener('close', () => {
+  if ($('inviteManagementDialog').open) return;
+  inviteManagementWorld = '';
+  $('manageInviteToken').value = '';
+  clearInviteInspection();
+  showInline('inviteManagementNotice', '');
+});
 bindAction('worldStatus', worldStatus);
 bindAction('worldCompatibility', worldCompatibility);
 bindAction('worldConflicts', worldConflicts);

@@ -3,8 +3,14 @@ use crate::{
     Storage, StorageError,
 };
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use swarm_protocol::{Hash32, JoinRequestV1, LeaveRequestV1, MembershipRecordV1, PeerId, WorldDescriptorV1, WorldId};
+use std::{
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
+use swarm_protocol::{
+    Hash32, JoinRequestV1, LeaveRequestV1, MembershipRecordV1, PeerId, WorldDescriptorV1, WorldId,
+    MAX_INVITE_LIFETIME_MS,
+};
 
 /// Local diagnostic only. Never a membership or authorization record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +248,82 @@ impl Storage {
         request.validate_semantics()?;
         let bytes = postcard::to_allocvec(request)?;
         durable_atomic_write(&self.world_protocol_path(request.world_id, "pending-join.postcard"), &bytes)
+    }
+
+    /// A fresh signed token can replace an expired/revoked pending token
+    /// only for the exact same local member role and issuer. This is not
+    /// cancellation of a membership vote, certificate, or replay anchor.
+    /// The application verifies both complete signed requests independently.
+    pub fn replace_denied_pending_join(
+        &self,
+        previous: &JoinRequestV1,
+        replacement: &JoinRequestV1,
+    ) -> Result<(), StorageError> {
+        let world = previous.world_id;
+        let _guard = self.lock_world_transaction(world)?;
+        replacement.validate_semantics()?;
+        if self.load_pending_join(world)? != *previous
+            || replacement.world_id != world
+            || replacement.joining_member != previous.joining_member
+            || replacement.invite.genesis != previous.invite.genesis
+            || replacement.invite.inviter_peer_id != previous.invite.inviter_peer_id
+            || replacement.invite.inviter_public_key != previous.invite.inviter_public_key
+            || replacement.invite == previous.invite
+            || replacement.nonce == previous.nonce
+            || self.load_world(world)?.genesis != previous.invite.genesis
+            || self.first_contact_replay_pinned_locked(world)?
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        for name in [
+            "membership.postcard",
+            "membership-promise.postcard",
+            "membership-certificate.postcard",
+            "epoch.postcard",
+            "completed-join.postcard",
+            "pending-leave.postcard",
+        ] {
+            if canonical_file_exists(&self.world_protocol_path(world, name))? {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+        }
+        let head = self.load_or_initialize_canonical_head_locked(world)?;
+        self.validate_no_orphan_manifests_locked(world, head.head)?;
+        if head.head.is_some() {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        let now: u64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| StorageError::InviteExpired)?
+            .as_millis()
+            .try_into()
+            .map_err(|_| StorageError::InviteExpired)?;
+        if replacement.invite.expires_unix_ms <= now
+            || replacement.invite.expires_unix_ms - now > MAX_INVITE_LIFETIME_MS
+        {
+            return Err(StorageError::InviteExpired);
+        }
+        if previous.invite.expires_unix_ms > now && self.pending_join_denial(previous)?.is_none() {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        let descriptor = self.load_world_descriptor(world)?;
+        if descriptor.members.len() != 1
+            || !descriptor.members.iter().any(|member| {
+                !member.banned
+                    && member.peer_id == previous.invite.inviter_peer_id
+                    && member.public_key == previous.invite.inviter_public_key
+            })
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        // A crash after this write leaves the old diagnostic inert because
+        // its request nonce and signed invitation hash no longer match.
+        durable_atomic_write(
+            &self.world_protocol_path(world, "pending-join.postcard"),
+            &postcard::to_allocvec(replacement)?,
+        )?;
+        remove_protocol_file(self, world, "pending-join-denial.postcard")?;
+        Ok(())
     }
 
     pub fn load_pending_join(&self, world: WorldId) -> Result<JoinRequestV1, StorageError> {
