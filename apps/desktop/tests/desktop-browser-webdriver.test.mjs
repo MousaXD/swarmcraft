@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import net from 'node:net';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -11,6 +12,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const sourceRoot = path.resolve(here, '../src');
 const evidenceRoot = process.env.SWARMCRAFT_BROWSER_ARTIFACTS || path.resolve(here, '../test-artifacts/agent-7-browser');
 const entryModule = 'app.js';
+const candidateRoot = path.resolve(here, '../frontend/dist');
+const candidateMode = process.env.SWARMCRAFT_BROWSER_VARIANT === 'candidate';
 
 async function existingChromeDriver() {
   const candidates = [
@@ -179,6 +182,11 @@ async function startLocalCdp() {
     return {
       close: cleanup,
       async request(pathname, body) {
+        if (pathname.endsWith('/url')) {
+          const result = await send('Page.navigate', { url: body.url });
+          assert.ok(!result.errorText, 'Candidate browser navigation failed');
+          return null;
+        }
         if (pathname.endsWith('/window/rect')) {
           return send('Emulation.setDeviceMetricsOverride', { width: body.width, height: body.height, deviceScaleFactor: 1, mobile: false });
         }
@@ -315,7 +323,7 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
       return { origin: 'network', versions: [{ version: '0.19.3', stable: true, minecraft_version: args.minecraftVersion, adapter_supported: args.minecraftVersion === '26.1.2' }] };
     case 'list_worlds': return window.__swarmcraftRecoveryWorld
       ? window.__swarmcraftRecoveryWorld + '  Recovery source  snapshots=4'
-      : [];
+      : 'No local worlds.';
     case 'game_route_status': return { world_id: args.world, state: 'unavailable', route_verified: false, diagnostic: 'peer_link_unavailable', recent_session: { state: 'stream_admission_failed', age_ms: 100 } };
     case 'world_status':
       if (args.world === window.__swarmcraftRecoveryWorld) {
@@ -368,8 +376,15 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
         world_id: 'scworld:' + 'b'.repeat(64), snapshot_hash: 'd'.repeat(64),
         display_name: 'Recovered: Recovery source',
       });
+    case 'initialize_node': return 'SwarmCraft initialized';
     case 'identity':
-    case 'node_identity': return { peerId: '12D3KooWBrowserSmoke' };
+    case 'node_identity': return 'Peer ID: scpeer:' + 'd'.repeat(64);
+    case 'ensure_daemon_running': return 12345;
+    case 'hosting_contribution_get': return {
+      world_id: args.world, consented: false, selected_heap_mib: 0, may_host_now: false,
+      reason: 'Player only', available_mib: 8192, physical_mib: 16384,
+      hard_process_memory_cap_guaranteed: false, checkpoint_state: 'no_pending_checkpoint',
+    };
     case 'migration_capabilities': return { transfer: false, wake: false, reason: 'Browser smoke fixture' };
     case 'host_readiness': return { eligible: false, reason: 'No selected world in browser smoke fixture' };
     case 'connectivity_status': return { state: 'nat_status_unknown' };
@@ -471,8 +486,9 @@ const scenario = String.raw`(async () => {
   await waitFor(() => document.getElementById('joinWorldIdNotice').textContent.includes('Browser Public World'), 'local World ID feedback');
   require(!document.getElementById('joinWorldIdNotice').hidden, 'Local World ID feedback stayed hidden');
   require(!document.getElementById('copyDiscoveryDiagnosis').disabled, 'Safe directory diagnosis unavailable');
+  document.getElementById('joinWorldId').value = 'scworld:changed-public';
   document.getElementById('joinWorldId').dispatchEvent(new Event('input', { bubbles: true }));
-  require(document.getElementById('copyDiscoveryDiagnosis').disabled, 'Changed lookup retained stale diagnosis');
+  await waitFor(() => document.getElementById('copyDiscoveryDiagnosis').disabled, 'Changed lookup invalidates stale diagnosis');
   require(!document.getElementById('publicWorldStatus').textContent.includes('Browser Public World'), 'Exact World ID feedback leaked into Public Worlds status');
 
   document.getElementById('openCreate').click();
@@ -749,8 +765,100 @@ async function runViewport(port, sessionId, documentHtml, graph, width, height, 
   await writeFile(screenshotPath.replace(/\.png$/, '-invitation.png'), Buffer.from(inviteScreenshot, 'base64'));
 }
 
+// Exercise the actual compiled Svelte module graph, including its shared
+// controllers and original watchdog, in a real browser. Only the native IPC
+// boundary is mocked. This server is local test-only, never a Desktop asset.
+async function startCandidateFixture() {
+  const html = await readFile(path.join(candidateRoot, 'index.html'), 'utf8');
+  assert.match(html, /<script\b[^>]*type="module"[^>]*src="\/assets\//,
+    'Build the pinned Svelte candidate before running compiled parity');
+  assert.ok(html.includes('/bootstrap.js'), 'Candidate must retain startup watchdog');
+  const types = { '.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html', '.png': 'image/png', '.svg': 'image/svg+xml' };
+  const server = http.createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url, 'http://127.0.0.1');
+      if (url.pathname === '/fixture-ipc.js') {
+        response.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+        response.end(tauriFixture);
+        return;
+      }
+      if (url.pathname === '/') {
+        response.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
+        response.end(html.replace('<head>', '<head><script src="/fixture-ipc.js"></script>'));
+        return;
+      }
+      // Serve only built static assets; never arbitrary repo/user files.
+      if (!/^\/(?:assets\/[A-Za-z0-9_.-]+|[A-Za-z0-9_.-]+)$/.test(url.pathname)
+          || url.pathname.includes('..')) {
+        response.writeHead(404).end(); return;
+      }
+      const type = types[path.extname(url.pathname)];
+      if (!type) { response.writeHead(404).end(); return; }
+      const bytes = await readFile(path.join(candidateRoot, url.pathname.slice(1)));
+      response.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-store' });
+      response.end(bytes);
+    } catch {
+      response.writeHead(404).end();
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  return {
+    url: 'http://127.0.0.1:' + server.address().port + '/',
+    close: () => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }),
+  };
+}
+
+async function runCandidateViewport(port, sessionId, url, width, height, screenshotPath) {
+  await setViewport(port, sessionId, width, height);
+  await webdriverRequest(port, `/session/${sessionId}/url`, { method: 'POST', body: { url } });
+  let state;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    state = await execute(port, sessionId, `
+      return { mounted: window.__swarmcraftSvelteCreateOwned === true,
+        startup: document.documentElement.dataset.swarmcraftStartup,
+        controller: typeof window.__swarmcraftAfterSvelteCreate === 'function',
+        errors: window.__swarmcraftBrowserErrors || [] };
+    `);
+    if (state?.mounted && state.controller && state.startup === 'ready') break;
+    if (state?.startup === 'failed') break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.ok(state?.mounted && state.controller && state.startup === 'ready',
+    'Compiled candidate did not finish real controller boot: ' + JSON.stringify(state));
+  for (const [name, script] of [
+    ['create-provider', scenario], ['recovery', recoveryScenario],
+    ['selection', selectionScenario], ['branch', branchScenario], ['invitation', inviteScenario],
+  ]) {
+    const result = await executeAsync(port, sessionId, scenarioRunner, [script]);
+    assert.equal(result?.ok, true, `Compiled candidate ${name} failed at ${width}x${height}: ${result?.error || JSON.stringify(result)}`);
+    assert.equal(result.value?.status, 'pass');
+    const screenshot = Buffer.from(await webdriverRequest(port, `/session/${sessionId}/screenshot`), 'base64');
+    assert.deepEqual(pngDimensions(screenshot), { width, height });
+    await writeFile(screenshotPath.replace(/\.png$/, `-${name}.png`), screenshot);
+  }
+}
+
 test('current Desktop module graph initializes, owns canonical Create, and renders supported window sizes', async () => {
   await mkdir(evidenceRoot, { recursive: true });
+  if (candidateMode) {
+    // Reuse one isolated browser for all three viewports. Never dispatch
+    // another hosted workflow merely to exercise this explicit local gate.
+    const fixture = await startCandidateFixture();
+    let local;
+    try {
+      local = await startLocalCdp();
+      for (const [width, height] of [[980, 760], [720, 560], [1280, 900]]) {
+        await runCandidateViewport(local, 'local', fixture.url, width, height,
+          path.join(evidenceRoot, `candidate-${width}x${height}.png`));
+      }
+    } finally {
+      try { if (local) await local.close(); } finally { await fixture.close(); }
+    }
+    return;
+  }
   const [documentHtml, graph] = await Promise.all([instrumentedDocument(), collectModuleGraph()]);
   if (process.env.SWARMCRAFT_LOCAL_CDP === '1') {
     const local = await startLocalCdp();

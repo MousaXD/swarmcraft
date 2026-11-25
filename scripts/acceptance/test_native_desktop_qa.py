@@ -137,6 +137,17 @@ class IsolationTests(unittest.TestCase):
         self.assertEqual(target.ax()["label"], qa.WORLD_NAME)
         self.assertEqual(qa.button("createWorld", "Create world").ax()["identifier"], "createWorld")
 
+    @unittest.skipIf(os.name == "nt", "POSIX fixture permissions")
+    def test_fresh_profile_is_private_even_with_permissive_umask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = os.umask(0)
+            try:
+                profile = qa.fresh_profile(Path(directory), "profile")
+            finally:
+                os.umask(original)
+            self.assertEqual(profile.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((profile / "data").stat().st_mode & 0o777, 0o700)
+
 
 class NativeObservationTests(unittest.TestCase):
     class FakeUI:
@@ -224,6 +235,21 @@ class NativeObservationTests(unittest.TestCase):
         self.assertEqual(ui.presses, ["#advancedWorldTools > summary", ".details-panel > summary",
                                       "#openWorldDiagnostics"])
 
+    def test_hosting_preference_opens_advanced_controls_when_hidden(self):
+        class WorldTools(self.FakeUI):
+            def press(self, target):
+                super().press(target)
+                if target.css == "#advancedWorldTools > summary":
+                    self.mapping["#hostingContributionStatus"] = ("Player only — 0 MiB", True)
+                    self.mapping["#hostingContributionHeap"] = ("1024", True)
+
+        ui = WorldTools({"#advancedWorldTools > summary": ("Advanced world controls", True)})
+        qa.open_hosting_contribution(ui)
+        self.assertEqual(ui.presses, ["#advancedWorldTools > summary"])
+        ui.presses.clear()
+        qa.open_hosting_contribution(ui)
+        self.assertEqual(ui.presses, [])
+
     def test_native_webdriver_elements_can_independently_prove_failure(self):
         app = qa.WebDriver(Path("/binary"), Path("/data"), Path("/driver"), Path("/native"))
         app.session = "fixture"
@@ -241,6 +267,36 @@ class NativeObservationTests(unittest.TestCase):
             self.assertTrue(qa.read_is(app, qa.BANNER, "SwarmCraft could not start (", prefix=True))
             replies["/element/banner/displayed"] = False
             self.assertFalse(qa.read_is(app, qa.BANNER, "SwarmCraft could not start (", prefix=True))
+
+    def test_hidden_observation_does_not_fall_back_to_native_click(self):
+        app = qa.WebDriver(Path("/binary"), Path("/data"), Path("/driver"), Path("/native"))
+        app.session = "fixture"
+        target = qa.button("openWorldDiagnostics", "Diagnostics")
+        with patch.object(app, "call", return_value=None) as call:
+            with self.assertRaises(qa.Missing):
+                app.read(target)
+            call.assert_called_once()
+            self.assertIn(qa.RENDERED_CONTROL, call.call_args.args[2]["script"])
+        with patch.object(app, "call", return_value=False) as call:
+            with self.assertRaises(qa.Failure):
+                app.press(target)
+            # A negative geometry/disclosure observation is not a driver
+            # exception. Do not let element/displayed or click override it.
+            call.assert_called_once()
+            self.assertIn(qa.RENDERED_CONTROL, call.call_args.args[2]["script"])
+            self.assertIn("scrollIntoView", call.call_args.args[2]["script"])
+
+    def test_machine_verifier_retains_normal_cli_warnings(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(qa.subprocess, "run") as run:
+            profile = Path(directory)
+            run.return_value.returncode = 0
+            run.return_value.stdout = b'{"consented": false}'
+            with patch.dict(os.environ, {"RUST_LOG": "debug"}):
+                self.assertEqual(qa.cli(profile / "desktop", profile, "world", "hosting", "status",
+                                        "fixture", "--json"), '{"consented": false}')
+                self.assertEqual(run.call_args.kwargs["env"]["RUST_LOG"], "warn")
+                self.assertEqual(os.environ["RUST_LOG"], "debug")
+                self.assertEqual(qa.profile_env(profile)["RUST_LOG"], "warn")
 
 
 if __name__ == "__main__":

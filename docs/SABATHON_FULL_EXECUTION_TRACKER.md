@@ -385,12 +385,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #38 — P1 · Partial
 - Work: Decide Svelte cutover after shipping parity review (post-sabathon)
 - Acceptance: The candidate covers all legacy journeys, including private invite, host transfer, loopback reconnect, safe stop/wake, mod setup, and recovery. Installed builds and rollback prove the packaging switch
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **IN PROGRESS** (defer production Svelte cutover)
+- Source: apps/desktop/SVELTE_MIGRATION.md; apps/desktop/tests/desktop-browser-webdriver.test.mjs; scripts/acceptance/native_frontend_rollback.py; scripts/acceptance/test_native_frontend_rollback.py.
+- Evidence: Compiled Svelte candidate passed five shared real-Chromium scenarios at each of 980x760, 720x560 and 1280x900 with a mocked Rust IPC boundary; legacy browser regression passed at all three sizes. 82 Vitest, 30 source-parity, 23 acceptance-contract, three frontend script and six hosting-consent CLI tests passed; Svelte check, targeted strict Clippy, formatting and workflow policy passed. The initial same-product Linux packages from 7af383f had byte-identical sidecars. Real native rollback passed legacy creation, process closure, and candidate restart with the unchanged identity/world/checkpoint, but the candidate hosting preference was unavailable. Focused packaged repro proved CLI tracing contaminated strict JSON. Production CLI now writes diagnostics to stderr; real corrupt-runtime-record regression preserves the warning, returns valid unavailable JSON, denies hosting and retains the record. Private QA/test directories now respect the production ownership checks even with a permissive umask. Native input opens actual disclosures without DOM mutation. No completed rollback or cross-platform acceptance credited yet.
+- Remaining / next action: Build both same-product Linux packages once with the corrected CLI sidecar, exercise the five-stage native idle rollback and record exact hashes/results. Keep #37 native Diagnostics visibility and full signed join separate from idle rollback. Full live transfer/reconnect/safe stop/wake, installed recovery and Windows/macOS parity remain gates. Continue #39 without changing production frontendDist.
+- External dependency: Native Windows, Intel and Apple Silicon macOS and live multi-peer gameplay environments.
+- Commit: 25 November compiled parity and native CLI output fix checkpoint; see git history.
 
 ### #39 — P1 · Partial
 - Work: Simplify first run and import. Add a native folder picker when supported and show source/runtime requirements before commit

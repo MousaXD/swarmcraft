@@ -11,6 +11,18 @@ use swarm_core::DataPaths;
 use swarm_protocol::WorldId;
 use swarm_storage::Storage;
 
+// These fixtures exercise the real ownership checks under the operator's
+// ordinary umask. Never make production admission tolerate group write.
+fn private_tempdir() -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    temp
+}
+
 fn invoke(data: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
         .arg("--data-dir")
@@ -52,7 +64,7 @@ fn status_json(data: &Path, world: &str) -> serde_json::Value {
 
 #[test]
 fn new_world_is_player_only_until_explicit_public_cli_action() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let data = temp.path().join("data");
     let world = fresh_world(&data);
     let role_status = invoke(&data, &["world", "status", &world]);
@@ -84,7 +96,7 @@ fn new_world_is_player_only_until_explicit_public_cli_action() {
 
 #[test]
 fn invalid_heap_or_world_never_mutates_local_consent() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let data = temp.path().join("data");
     let world = fresh_world(&data);
     for heap in ["-1", "65537", "abc"] {
@@ -102,11 +114,40 @@ fn invalid_heap_or_world_never_mutates_local_consent() {
 }
 
 #[test]
+fn hosting_readiness_json_remains_parseable_when_runtime_observation_warns() {
+    let temp = private_tempdir();
+    let data = temp.path().join("data");
+    let world_text = fresh_world(&data);
+    let world: WorldId = world_text.parse().unwrap();
+    // Invalid process ownership is an intentional, isolated fail-closed
+    // fixture. Do not clear it or invent a live memory observation.
+    let control = data.join("control").join(world.to_hex());
+    swarm_core::create_private_dir_all(&control).unwrap();
+    let record = control.join("runtime-process.json");
+    std::fs::write(&record, b"invalid ownership record").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+        .arg("--data-dir")
+        .arg(&data)
+        .args(["world", "hosting", "status", &world_text, "--json"])
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("stdout is exactly the JSON reply");
+    assert_eq!(report["world_id"], world_text);
+    assert_eq!(report["consented"], false);
+    assert_eq!(report["may_host_now"], false);
+    assert_eq!(report["process_memory"]["mode"], "unavailable");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not verify local hosting memory enforcement"));
+    assert_eq!(std::fs::read(&record).unwrap(), b"invalid ownership record");
+}
+
+#[test]
 fn opt_in_requires_actual_local_world_record() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let data = temp.path().join("data");
     let world = fresh_world(&data);
-    let other = tempfile::tempdir().unwrap();
+    let other = private_tempdir();
     let other_data = other.path().join("other");
     assert_success(&invoke(&other_data, &["init"]));
     let denied = invoke(&other_data, &["world", "hosting", "set", &world, "--heap-mib", "0"]);
@@ -117,7 +158,7 @@ fn opt_in_requires_actual_local_world_record() {
 #[test]
 fn explicit_archive_preserves_retained_bytes_and_never_changes_signed_history() {
     use std::{fs, os::unix::fs::PermissionsExt};
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let data = temp.path().join("data");
     let world_text = fresh_world(&data);
     let world: WorldId = world_text.parse().unwrap();
@@ -262,7 +303,7 @@ fn start_replica_daemon(data: &Path, world: &str, permit: &Path) -> ReplicaDaemo
 
 #[test]
 fn replica_only_daemon_restarts_without_java_and_refuses_public_hosting_opt_in() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let data = temp.path().join("data");
     let world = fresh_world(&data);
     let world_id: WorldId = world.parse().unwrap();

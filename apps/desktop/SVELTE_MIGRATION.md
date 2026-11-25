@@ -262,3 +262,96 @@ The shutdown-readiness display is independently migrated through `host-readiness
 Vitest and source tests cover adversarial and contradictory Rust reports, malformed payloads, stale responses after world changes, timeout/retry and native-only invocation. Installed WebKitGTK QA now demands a fresh Rust host-readiness completion on the selected world, and verifies the Svelte header/name/safety match the actual selected native world row; artifact observations are allowlisted Booleans only, without source values.
 
 **Certification is outstanding** until new exact-head candidate CI, installed Linux GUI negative and positive controls, actual native Windows/macOS and independent Agent 00 review. Full world-detail action parity and signed hosting/consent/recovery systems are not migrated or certified; no production frontendDist cutover, merge or release.
+
+## 2026-11-25: Sabathon #38 — cutover decision and rollback rehearsal
+
+**Decision: defer the production frontend switch.** The legacy package
+remains the default; the Svelte overlay remains an explicit local QA
+build. Do not restore the retired hosted candidate workflows.
+
+The real Chromium harness now has an explicit compiled-Svelte mode
+(`SWARMCRAFT_BROWSER_VARIANT=candidate`). It serves the built Vite
+assets on an isolated loopback fixture server and exercises the shared
+legacy controllers through the same creation/provider, recovery,
+selection, conflict-evidence and invitation scenarios as the shipping
+renderer. Only the Rust IPC boundary is mocked. All five scenarios
+passed at 980x760, 720x560 and 1280x900 in the local candidate run.
+This is browser integration evidence, not an installed-app release
+pass. Live transfer, verified Minecraft reconnect, safe stop/wake and
+the complete native join/recovery journeys remain separate gates.
+
+The initial real debug Debian variants were built from `7af383f` with
+the same package identity/version and identical hashes for all four staged
+Rust sidecars. The new local
+`scripts/acceptance/native_frontend_rollback.py` rehearsal extracts
+both packages into disposable locations and exercises the following
+sequence against one shared private data root:
+
+1. Legacy creation with a verified signed checkpoint and no hosting consent.
+2. Candidate startup and an explicitly confirmed 512 MiB hosting preference.
+3. Legacy restart with unchanged identity, world, checkpoint and preference.
+4. Candidate restart and explicit withdrawal.
+5. Legacy restart with the original signed history and zero hosting preference.
+
+Each stage must close its own native session and verify the disposable
+process group and packaged executables have exited before starting the
+next stage. This is an idle-world frontend replacement rehearsal, not
+OS updater rollback, live hosting shutdown, or authority transfer.
+The deliberate opt-in/rollback sequence is only for the isolated
+fixture. Do not roll a real opted-in host back to a renderer without
+the consent controls; first withdraw consent using a supported control,
+complete any required safe checkpoint/handoff/stop, verify the result
+and preserve the data and recovery evidence. Never restore an older
+data directory as a substitute for a frontend rollback.
+
+### Local continuation
+
+Reuse the existing two installers while their recorded build inputs
+remain unchanged; no additional build is required for harness-only
+changes. Run from the repository root:
+
+```sh
+python3 -m unittest discover -s scripts/acceptance -p 'test_*.py'
+python3 -m unittest discover -s apps/desktop/frontend/scripts -p 'test_*.py'
+python3 scripts/check_workflow_policy.py
+(cd apps/desktop/frontend && npm run check && npm test && npm run test:source)
+SWARMCRAFT_LOCAL_CDP=1 SWARMCRAFT_BROWSER_ARTIFACTS="$LEGACY_EVIDENCE" \
+  node --test apps/desktop/tests/desktop-browser-webdriver.test.mjs
+```
+
+Then, on a fresh authenticated local Xvfb display or disposable OS
+desktop session (not the operator's daily desktop), with the existing
+packages and native driver paths supplied:
+
+```sh
+python3 scripts/acceptance/native_frontend_rollback.py \
+  --shipping "$SHIPPING_DEB" --candidate "$CANDIDATE_DEB" \
+  --build-commit "$BUILD_COMMIT" --driver "$TAURI_DRIVER" \
+  --native-driver "$WEBKIT_DRIVER" --disposable-display \
+  --artifacts "$NEW_ROLLBACK_EVIDENCE"
+```
+
+Require `complete: true` and all five named stages in the resulting
+`result.json`; inspect the native screenshots and package hashes.
+Earlier attempts did not complete: the legacy nested Diagnostics
+disclosure prevented the separate networking-stop journey, and the
+candidate's hosting preference visibly reported an unavailable read.
+A focused packaged repro confirmed that with ordinary warning logging,
+the real CLI returned tracing text before its typed JSON response.
+Disabling logging proved the JSON document itself was valid, but is
+not the fix. The production CLI now routes tracing to stderr, preserving
+all warnings and the strict decoder. The native harness retains warning
+logging, creates private data directories despite a permissive umask,
+and excludes descendants of closed details even when WebKit retains
+layout geometry. The idle rollback path does not use the separately
+gated Diagnostics stop journey.
+
+Local verification: 82 Svelte Vitest tests, 30 source parity tests,
+zero Svelte type warnings/errors, legacy browser regression at all
+three viewports, 23 acceptance-contract tests, three frontend script
+tests, six hosting-consent CLI tests (including the real invalid-record
+warning/JSON separation regression), strict targeted Clippy, formatting,
+and five-workflow policy check passed. The real package rebuild after
+the sidecar fix and the final native rollback remain to be exercised.
+Windows/macOS native installed QA and the complete multi-device
+journeys remain prerequisites for any production cutover.

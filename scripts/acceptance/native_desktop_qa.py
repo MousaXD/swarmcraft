@@ -260,6 +260,31 @@ def profile_env(profile):
     return env
 
 
+# Some WebKit versions retain layout rectangles for clipped descendants of a
+# closed disclosure. A rectangle alone therefore does not establish that a
+# control is reachable. Share this guard across observation and input.
+RENDERED_CONTROL = """
+const e = document.querySelector(arguments[0]);
+function rendered(element) {
+    if (!element || !element.isConnected ||
+        getComputedStyle(element).visibility !== 'visible' ||
+        !Array.from(element.getClientRects()).some(r => r.width > 0 && r.height > 0))
+        return false;
+    for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
+        const style = getComputedStyle(ancestor);
+        if (ancestor.hidden || style.display === 'none' ||
+            style.contentVisibility === 'hidden' || style.opacity === '0')
+            return false;
+        if (ancestor !== element && ancestor.tagName === 'DETAILS' && !ancestor.open) {
+            const summary = Array.from(ancestor.children).find(child => child.tagName === 'SUMMARY');
+            if (!summary || !summary.contains(element)) return false;
+        }
+    }
+    return true;
+}
+"""
+
+
 class WebDriver:
     """Native WebKitGTK on Linux; native WebView2/msedgedriver on Windows."""
     def __init__(self, binary, profile, driver, native):
@@ -362,9 +387,8 @@ class WebDriver:
     def read(self, target):
         # DOM inspection only; all mutations go through native element commands.
         try:
-            value = self.call("/execute/sync", "POST", {"script": """
-          const e = document.querySelector(arguments[0]);
-          if (!e || !e.getClientRects().length || getComputedStyle(e).visibility !== 'visible') return null;
+            value = self.call("/execute/sync", "POST", {"script": RENDERED_CONTROL + """
+          if (!rendered(e)) return null;
           return {value: ('value' in e && e.tagName !== 'BUTTON') ? String(e.value) : e.textContent.trim(),
                   enabled: !e.disabled, checked: e.checked === true};
             """, "args": [target.css]})
@@ -384,13 +408,35 @@ class WebDriver:
         return value
 
     def press(self, target):
+        # WebKitGTK may not scroll a deeply nested disclosure in the
+        # selected-world pane into view on its own. Scroll the real rendered
+        # control before using native WebDriver input; never open hidden
+        # panels or dispatch a synthetic JavaScript click.
+        self.scroll_to_control(target)
         self.call(self.element(target) + "/click", "POST", {})
 
     def type(self, target, value):
+        self.scroll_to_control(target)
         element = self.element(target)
         self.call(element + "/clear", "POST", {})
         self.call(element + "/value", "POST", {"text": value, "value": list(value)})
         require(self.read(target)["value"] == value, "native field input not reflected")
+
+    def scroll_to_control(self, target):
+        try:
+            visible = self.call("/execute/sync", "POST", {"script": RENDERED_CONTROL + """
+                if (!rendered(e)) return false;
+                e.scrollIntoView({behavior: 'auto', block: 'center', inline: 'nearest'});
+                const r = e.getBoundingClientRect();
+                return rendered(e) && r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0
+                    && r.top < innerHeight && r.left < innerWidth;
+            """, "args": [target.css]})
+        except Failure:
+            # A broken-module negative may not permit script evaluation.
+            # Fall back only to the native displayed/enabled proof.
+            element = self.element(target)
+            visible = self.call(element + "/displayed") is True
+        require(visible is True, "native control not visibly reachable")
 
     def screenshot(self, path):
         data = base64.b64decode(self.call("/screenshot"), validate=True)
@@ -470,7 +516,10 @@ def read_is(ui, target, expected, prefix=False):
 def click(ui, target):
     label = target.css if re.fullmatch(r"#[A-Za-z0-9_-]+", target.css) else "selected native control"
     wait("enabled native control " + label, lambda: ui.read(target)["enabled"])
-    ui.press(target)
+    try:
+        ui.press(target)
+    except Failure as error:
+        raise Failure("native click " + label + ": " + str(error)) from None
 
 
 def ready(ui, empty):
@@ -490,8 +539,11 @@ def cli(binary, profile, *args):
         key = profile / "data" / "identity" / "peer.key"
         require(key.is_file() and not key.is_symlink() and key.stat().st_size == 32,
                 "GUI did not initialize a durable identity before inspection")
+    # Keep normal warnings enabled; the CLI must send them to stderr.
+    # Do not strip mixed output or conceal machine-contract regressions.
+    env = profile_env(profile)
     result = subprocess.run([str(sidecar(binary, "swarmcraft")), "--data-dir", str(profile / "data"), *args],
-                            env=profile_env(profile), capture_output=True, timeout=20, check=False)
+                            env=env, capture_output=True, timeout=20, check=False)
     if result.returncode:
         raise Missing("local read-only CLI evidence not available")
     return result.stdout.decode("utf-8", errors="strict").strip()
@@ -538,6 +590,19 @@ def visible(ui, target):
         return True
     except Missing:
         return False
+
+
+def open_hosting_contribution(ui):
+    """Reach the real candidate preference without changing the DOM."""
+    heap = field("hostingContributionHeap", "Java server heap budget (MiB)")
+    disclosure = Target("#advancedWorldTools > summary", "Advanced world controls",
+                        ("AXDisclosureTriangle", "AXButton"), True)
+    wait("hosting preference or advanced controls visible",
+         lambda: visible(ui, heap) or visible(ui, disclosure))
+    if not visible(ui, heap):
+        click(ui, disclosure)
+    # The caller still has to prove the exact persisted consent state.
+    wait("hosting preference visible", lambda: visible(ui, heap))
 
 
 def open_diagnostics(ui, candidate):
@@ -624,6 +689,7 @@ def run_positive(factory, binary, profile, guest, artifacts, candidate, lan_ip):
         ui.screenshot(artifacts / "first-boot.png")
         world = create_world(ui, binary, profile)
         if candidate:
+            open_hosting_contribution(ui)
             wait("player-only GUI default", lambda: read_is(ui, PLAYER_ONLY, "Player only — 0 MiB"))
             require(consent(binary, profile, world)["consented"] is False, "hosting consent defaulted on")
             opt = button("hostingContributionOptIn", "Save explicit opt-in")
@@ -647,6 +713,7 @@ def run_positive(factory, binary, profile, guest, artifacts, candidate, lan_ip):
                 "identity or world changed across process restart")
         select_world(host, world)
         if candidate:
+            open_hosting_contribution(host)
             wait("opt-in persisted in GUI", lambda: read_is(host, OPTED_IN, "Hosting memory contribution selected"))
             require(consent(binary, profile, world)["selected_heap_mib"] == 512, "opt-in did not persist")
             click(host, button("hostingContributionWithdraw", "Player only — withdraw"))
@@ -690,6 +757,7 @@ def run_positive(factory, binary, profile, guest, artifacts, candidate, lan_ip):
         with factory(binary, profile) as ui:
             ready(ui, empty=False)
             select_world(ui, world)
+            open_hosting_contribution(ui)
             wait("withdrawal persisted in restarted GUI", lambda: read_is(ui, PLAYER_ONLY, "Player only — 0 MiB"))
             require(consent(binary, profile, world)["consented"] is False, "withdrawal did not persist")
             stop_network(ui, candidate)
@@ -734,8 +802,10 @@ def copy_missing_sidecar(binary, destination):
 
 def fresh_profile(root, name):
     path = root / name
-    path.mkdir()
-    (path / "data").mkdir()
+    # A permissive desktop umask can create group-writable ancestors,
+    # which the runtime ownership guard correctly refuses to trust.
+    path.mkdir(mode=0o700)
+    (path / "data").mkdir(mode=0o700)
     return path
 
 
