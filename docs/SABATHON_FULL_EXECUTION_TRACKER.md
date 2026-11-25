@@ -595,12 +595,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #59 — Expansion · Missing
 - Work: Choose or build a region-aware runtime. Keep one world identity as different machines simulate different regions
 - Acceptance: Players traverse a continuous world while independent machines tick different regions. The supported Minecraft/protocol/mod matrix is documented and verified
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (continuous custom reference player world only; no Minecraft compatibility or independent physical-host acceptance)
+- Source: [Player runtime and compatibility report](../research/distributed-simulation/PLAYER_RUNTIME_REPORT.md); `region_runtime.py`, `player_runtime.py`, `player_lab.py`, `test_player_runtime.py`, `verify_player_evidence.py`.
+- Evidence: Two paced private TCP experiments, each with two real region-worker processes in separate network namespaces, two active scripted reference client processes and one identity-spoof negative client. 296 accepted ticks, 582 client-observed views including joins, 12 player transitions across workers, 16 across regions; every tick and final full state match the serial reference and independently projected views. Tick-loop p95 4.569/4.224 ms; zero 50 ms schedule misses, small 256-agent fixture. Actual SIGKILL after prepare and veth partition after seal froze tick 1 and refused any later view/input/join/tick; no failed-tick client publication, scoped processes exited. 44 research tests passed, including independent receipt replay and 15 altered-evidence refusals.
+- Remaining / next action: #60 exclusive region writers/generation fencing and global-state ownership; retain the production NO-GO. No actual Minecraft client, native mods, durable authority/recovery, separate physical devices, WAN qualification, or sustained scale proof. The lab protocol and reference ruleset are not Minecraft-compatible.
+- External dependency: Reviewed compatible game runtime, licensed authenticated game clients, independent enrolled worker/control hosts, certified region grants and cross-region transactions (#60–62), sustained comparative gameplay acceptance (#63).
+- Commit: Add continuous reference player world and live fault verification; see git history.
 
 ### #60 — Expansion · Missing
 - Work: Bind every region to a single authorized writer and generation. Define the ownership of global game state
@@ -754,4 +754,4 @@ Initial full-item implementation/acceptance totals: not yet established by item-
 - Private replication uses the current signed membership with a matching descriptor and rechecks the exact authenticated recipient before normal payload, manifest acknowledgement and every blob chunk. A half-installed signed roster denies data instead of trusting an obsolete descriptor. Removed local recipients also refuse normal snapshot bytes. Ordinary unauthorized world requests receive a generic refusal.
 - Evidence: strict CLI/storage Clippy, 51 daemon/CLI binary tests, 67 storage tests (1 optional soak ignored), and actual authenticated invite/leave/replication test passed (19.73s). A reusable grant admitted a third peer; revocation left committed membership intact; joint leave committed; a real network probe authenticated as the removed member received status/history refusal and no newer manifest/blob payload while the remaining member verified a new checkpoint. The old device retained its old verified save. Prior commit 8653c2d required CI completed successfully (run 45585530110). Broader local CLI validation underway; UI and field acceptance remain.
 
-Latest actionable continuation after #56: #57 per-device resource preference and measured capacity, without regional runtime activation. The independent physical and canonical recovery gates above remain open.
+Latest actionable continuation after #59: #60 exclusive regional writer/generation and global-state ownership research, without production regional activation. The independent physical, compatibility and canonical recovery gates above remain open.

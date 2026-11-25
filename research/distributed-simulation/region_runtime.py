@@ -152,12 +152,25 @@ def movement(i, tick):
     return 1 if (i + tick) % 2 == 0 else -1
 
 
-def serial_step(regions, tick, counters=None):
+def checked_controls(rows, resident=None):
+    """Bounded, unique one-cell inputs from the trusted lab coordinator."""
+    result = {}
+    for row in sequence(rows, maximum=MAX_AGENTS):
+        agent, direction = sequence(row, 2)
+        require(integer(agent, 0, MAX_AGENTS - 1) and integer(direction, -1, 1)
+                and agent not in result and (resident is None or agent in resident),
+                "invalid, duplicate or nonresident player control")
+        result[agent] = direction
+    return result
+
+
+def serial_step(regions, tick, counters=None, *, controls=None):
     """Monolithic reference; no event routing, worker state or halo protocol.
 
     Direct whole-world arrays and sorted entities implement the same
     discrete rules independently of partition staging and delivery.
     """
+    controls = {} if controls is None else controls
     old_signals = [s for rid in range(REGIONS) for s in regions[rid].signals]
     banks = [v for rid in range(REGIONS) for v in regions[rid].banks]
     agents = sorted(a for region in regions.values() for a in region.agents)
@@ -172,7 +185,7 @@ def serial_step(regions, tick, counters=None):
         if (i + tick) % 7 == 0 and inventory:
             banks[pos] += 1
             inventory -= 1
-        destination = (pos + movement(i, tick)) % CELLS
+        destination = (pos + controls.get(i, movement(i, tick))) % CELLS
         next_agents[destination // WIDTH].append((i, destination, inventory))
         crossings += destination // WIDTH != pos // WIDTH
     signals = [(2 * old_signals[pos] + old_signals[(pos - 1) % CELLS]
@@ -191,8 +204,9 @@ def serial_step(regions, tick, counters=None):
     }
 
 
-def propose(region, tick, left, right):
+def propose(region, tick, left, right, controls=None):
     """Pure region step. Outgoing messages carry exactly the debited state."""
+    controls = {} if controls is None else controls
     rid = region.rid
     base = rid * WIDTH
     banks = list(region.banks)
@@ -208,7 +222,7 @@ def propose(region, tick, left, right):
         if (i + tick) % 7 == 0 and inventory > 0:
             banks[index] += 1
             inventory -= 1
-        dst = (pos + movement(i, tick)) % CELLS
+        dst = (pos + controls.get(i, movement(i, tick))) % CELLS
         if dst // WIDTH == rid:
             agents.append((i, dst, inventory))
         else:
@@ -306,8 +320,9 @@ class Worker:
         if op == "status":
             fields(req, "op")
             return {"op": "status", "tick": self.tick, "phase": self.phase}
-        if op == "prepare":
-            fields(req, "op", "tick", "halo")
+        if op in ("prepare", "prepare_controlled"):
+            controlled = op == "prepare_controlled"
+            fields(req, "op", "tick", "halo", *("controls",) if controlled else ())
             tick = req["tick"]
             require(self.phase == "idle" and integer(tick, 1, MAX_TICK) and tick == self.tick + 1,
                     "stale or overlapping prepare")
@@ -318,10 +333,20 @@ class Worker:
                         and integer(left, 0, 255) and integer(right, 0, 255), "invalid halo")
                 halo[rid] = left, right
             require(set(halo) == set(self.regions), "missing halo")
+            controls = {}
+            if controlled:
+                seen_regions = set()
+                for item in sequence(req["controls"], maximum=REGIONS):
+                    rid, rows = sequence(item, 2)
+                    require(type(rid) is int and rid in self.regions and rid not in seen_regions,
+                            "invalid control region ownership")
+                    seen_regions.add(rid)
+                    controls.update(checked_controls(rows, {a[0] for a in self.regions[rid].agents}))
+                require(seen_regions == set(self.regions), "missing control region")
             start = time.process_time_ns()
             pending, local, external = {}, [], []
             for rid, region in self.regions.items():
-                next_region, events = propose(region, tick, *halo[rid])
+                next_region, events = propose(region, tick, *halo[rid], controls=controls)
                 pending[rid] = next_region
                 for event in events:
                     (local if event[2] in self.regions else external).append(event)
@@ -479,17 +504,29 @@ class Coordinator:
             channel.send(request, deadline)
         return [channel.recv(deadline) for channel in self.channels]
 
-    def step(self, fault=None):
+    def step(self, fault=None, *, controls=None):
         require(not self.poisoned and self.tick < MAX_TICK, "run frozen")
         start = time.monotonic_ns()
         deadline = time.monotonic() + self.timeout
         tick = self.tick + 1
         try:
-            replies = self.exchange([
+            requests = [
                 {"op": "prepare", "tick": tick,
                  "halo": [[r, self.summaries[(r - 1) % REGIONS][5],
                            self.summaries[(r + 1) % REGIONS][4]] for r in sorted(owned)]}
-                for owned in self.owned], deadline)
+                for owned in self.owned]
+            if controls is not None:
+                require(isinstance(controls, dict) and all(type(r) is int and r in self.owner
+                                                          for r in controls), "invalid control region")
+                seen_inputs = set()
+                for rid, rows in controls.items():
+                    ids = set(checked_controls(rows))
+                    require(not seen_inputs.intersection(ids), "duplicate control across regions")
+                    seen_inputs.update(ids)
+                for request, owned in zip(requests, self.owned):
+                    request["op"] = "prepare_controlled"
+                    request["controls"] = [[rid, controls.get(rid, [])] for rid in sorted(owned)]
+            replies = self.exchange(requests, deadline)
             inboxes = [[] for _ in self.channels]
             seen = set()
             transfers = resources = local_agents = local_resources = 0

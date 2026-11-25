@@ -35,6 +35,16 @@ serial roots. Service latency improved on spread load, but checked-loop
 throughput did not demonstrate sustained improvement. No production worker
 enrollment or Minecraft regional authority is enabled.
 
+## Continuous player world (#59, 2026-11-26)
+
+[Runtime/protocol and verification report](PLAYER_RUNTIME_REPORT.md):
+two real reference client processes traverse worker boundaries while
+retaining one world identity and independently checked inventory and
+views. Two short paced experiments, 296 accepted ticks; real process-kill
+and link-partition cases freeze player-facing publication. The private
+lab protocol is not Minecraft; no production compatibility or regional
+authority is enabled.
+
 ## Original R0 evidence (2026-11-08)
 
 

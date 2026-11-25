@@ -1,0 +1,220 @@
+{
+  "schema": 1,
+  "ruleset": "swarmcraft-reference-ring/player-v1",
+  "faults": [
+    {
+      "kind": "kill_after_prepare",
+      "world": "9f72357ab145910fc64f6c8a9fa1f6f69806dfb966952574a32a3db2053c5e33",
+      "failure": "EOFError",
+      "last_tick": 1,
+      "last_root": "4a3a9b3a16d730aee6373b64624f1a7018f4437db96ea6f31868d0884e7ac41c",
+      "refused": [
+        "view",
+        "advance",
+        "input",
+        "join"
+      ],
+      "client_receipt": {
+        "player": 0,
+        "views": [
+          {
+            "cells": [
+              [
+                509,
+                250,
+                46
+              ],
+              [
+                510,
+                174,
+                19
+              ],
+              [
+                511,
+                227,
+                20
+              ],
+              [
+                512,
+                158,
+                12
+              ],
+              [
+                513,
+                100,
+                43
+              ]
+            ],
+            "inventory": 5,
+            "op": "view",
+            "player": 0,
+            "position": 511,
+            "protocol": 1,
+            "region": 3,
+            "root": "b718a08762a510eb472a87f20c40434d4e4fdd772b46dc78acbb45fd205b684e",
+            "ruleset": "swarmcraft-reference-ring/player-v1",
+            "tick": 0,
+            "world": "9f72357ab145910fc64f6c8a9fa1f6f69806dfb966952574a32a3db2053c5e33"
+          },
+          {
+            "cells": [
+              [
+                510,
+                57,
+                19
+              ],
+              [
+                511,
+                19,
+                19
+              ],
+              [
+                512,
+                131,
+                13
+              ],
+              [
+                513,
+                148,
+                43
+              ],
+              [
+                514,
+                215,
+                51
+              ]
+            ],
+            "inventory": 5,
+            "op": "view",
+            "player": 0,
+            "position": 512,
+            "protocol": 1,
+            "region": 4,
+            "root": "4a3a9b3a16d730aee6373b64624f1a7018f4437db96ea6f31868d0884e7ac41c",
+            "ruleset": "swarmcraft-reference-ring/player-v1",
+            "tick": 1,
+            "world": "9f72357ab145910fc64f6c8a9fa1f6f69806dfb966952574a32a3db2053c5e33"
+          }
+        ],
+        "refused": true
+      },
+      "client_failures": [
+        {
+          "player": 0,
+          "tick": 2,
+          "reason": "world_frozen"
+        }
+      ],
+      "coordinator_poisoned": true,
+      "player_frozen": true,
+      "all_workers_exited": true
+    },
+    {
+      "kind": "partition_after_seal",
+      "world": "d28f7090ddcfaa71d00d642303d9f64e361cc29a40ebd7dcfe65c5df1f6153b5",
+      "failure": "TimeoutError",
+      "last_tick": 1,
+      "last_root": "e0ed683b9d6a6aa03c0c0aed1696a3cfbbd98419d88f6a01521a3e53fd5a39d7",
+      "refused": [
+        "view",
+        "advance",
+        "input",
+        "join"
+      ],
+      "client_receipt": {
+        "player": 0,
+        "views": [
+          {
+            "cells": [
+              [
+                509,
+                250,
+                46
+              ],
+              [
+                510,
+                174,
+                19
+              ],
+              [
+                511,
+                227,
+                20
+              ],
+              [
+                512,
+                158,
+                12
+              ],
+              [
+                513,
+                100,
+                43
+              ]
+            ],
+            "inventory": 5,
+            "op": "view",
+            "player": 0,
+            "position": 511,
+            "protocol": 1,
+            "region": 3,
+            "root": "ae105ad7f2c78d0b12ce3112d601b626206ca22f1a975cbcbe4d561e98821131",
+            "ruleset": "swarmcraft-reference-ring/player-v1",
+            "tick": 0,
+            "world": "d28f7090ddcfaa71d00d642303d9f64e361cc29a40ebd7dcfe65c5df1f6153b5"
+          },
+          {
+            "cells": [
+              [
+                510,
+                57,
+                19
+              ],
+              [
+                511,
+                19,
+                19
+              ],
+              [
+                512,
+                131,
+                13
+              ],
+              [
+                513,
+                148,
+                43
+              ],
+              [
+                514,
+                215,
+                51
+              ]
+            ],
+            "inventory": 5,
+            "op": "view",
+            "player": 0,
+            "position": 512,
+            "protocol": 1,
+            "region": 4,
+            "root": "e0ed683b9d6a6aa03c0c0aed1696a3cfbbd98419d88f6a01521a3e53fd5a39d7",
+            "ruleset": "swarmcraft-reference-ring/player-v1",
+            "tick": 1,
+            "world": "d28f7090ddcfaa71d00d642303d9f64e361cc29a40ebd7dcfe65c5df1f6153b5"
+          }
+        ],
+        "refused": true
+      },
+      "client_failures": [
+        {
+          "player": 0,
+          "tick": 2,
+          "reason": "world_frozen"
+        }
+      ],
+      "coordinator_poisoned": true,
+      "player_frozen": true,
+      "all_workers_exited": true
+    }
+  ]
+}
