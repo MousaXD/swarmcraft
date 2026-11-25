@@ -65,6 +65,16 @@ before and after commit, fresh workers and exact command retries.
 This is trusted local reference evidence, not Minecraft or quorum
 certification.
 
+## Capped worker withdrawal and checkpoint recovery (#62, 2026-11-26)
+
+[Worker recovery report](WORKER_RECOVERY_REPORT.md): durable contribution
+revisions and lifecycle fencing, actual capped-worker scale-in,
+worker SIGKILL and link partition, verified scope cleanup, and
+freshly admitted workers replaying the sealed input from the last
+accepted cut. No-capacity conditions pause rather than overcommit.
+This is stop-all reference-generation recovery under one trusted
+local ledger, not live Minecraft migration or quorum certification.
+
 ## Original R0 evidence (2026-11-08)
 
 

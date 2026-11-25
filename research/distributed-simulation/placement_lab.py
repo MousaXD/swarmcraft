@@ -69,7 +69,7 @@ class Scope:
         raw = os.environ.get("SWARMCRAFT_HOST_CGROUP_ROOT", "")
         self.root = Path(raw)
         require(raw and self.root.resolve() == self.root and MOUNT in self.root.parents
-                and re.fullmatch(r"swarmcraft-memory-cap-test-placement-58-[A-Za-z0-9_-]+\.scope", self.root.name)
+                and re.fullmatch(r"swarmcraft-memory-cap-test-(?:placement-58|recovery-62)-[A-Za-z0-9_-]+\.scope", self.root.name)
                 and group_of(os.getpid()) == self.root/"controller", "refusing non-disposable placement scope")
         require(not (self.root/"cgroup.procs").read_text().strip()
                 and {"memory","cpu"} <= set((self.root/"cgroup.subtree_control").read_text().split()),

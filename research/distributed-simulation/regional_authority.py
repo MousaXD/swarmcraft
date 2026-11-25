@@ -93,6 +93,8 @@ class FencedWorker:
             self.grant = grant
             self.current_root = grant["base_root"]
             return {"op": "bound", "session": grant["session"], "generation": grant["generation"]}
+        if self.grant is None and op in ("ping", "status"):
+            return self.worker.handle(request)
         require(self.grant is not None, "missing regional grant")
         grant = self.grant
         if op in ("init", "init_at"):
@@ -129,6 +131,9 @@ class Authority:
         pass
 
     def _record_candidate(self, current, state, candidate, cut):
+        pass
+
+    def _before_claim(self, current):
         pass
 
     def __init__(self, path):
@@ -296,6 +301,7 @@ class Authority:
             require(not current["claimed"] and all(g["base_tick"] == current["tick"]
                     and g["base_root"] == current["runtime_root"] for g in current["grants"]),
                     "generation already claimed; rotate before worker restart")
+            self._before_claim(current)
             self.db.execute("UPDATE world SET claimed=1 WHERE singleton=1")
             self.db.execute("UPDATE epochs SET claimed=1 WHERE generation=?", (current["generation"],))
             current["claimed"] = True
@@ -395,7 +401,7 @@ class FencedRuntime:
                                        start_tick=current["tick"])
         self.frozen = False
 
-    def advance(self, *, controls=None):
+    def advance(self, *, controls=None, fault=None, before_publish=None):
         require(not self.frozen, "fenced runtime frozen")
         try:
             current = self.authority.read()
@@ -403,11 +409,13 @@ class FencedRuntime:
                     [g["session"] for g in current["grants"]] == self.session_ids and
                     (current["tick"], current["runtime_root"]) ==
                     (self.coordinator.tick, self.coordinator.root), "runtime grant or cut retired")
-            candidate = self.coordinator.step(controls=controls)
+            candidate = self.coordinator.step(fault, controls=controls)
             receipts = candidate_receipts(self.coordinator)
             require(all((r["body"]["tick"], r["body"]["runtime_root"]) ==
                         (candidate["tick"], candidate["root"]) for r in receipts),
                     "worker snapshots differ from staged candidate")
+            if before_publish is not None:
+                before_publish()
             accepted = self.authority.commit(receipts)
             return accepted
         except BaseException:

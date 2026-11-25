@@ -133,12 +133,16 @@ class TransitionAuthority(Authority):
                  if p in commands else [p, 0, 0, None] for p in current["players"]]
         return commands, batch
 
+    def _before_seal(self, current):
+        pass
+
     def seal_next(self, generation, tick, root):
         with self.transaction(write=True):
             cur = self._read()
             require(cur["claimed"] and cur["generation"] == generation and
                     (cur["tick"], cur["runtime_root"]) == (tick, root) and tick < MAX_TICK,
                     "retired runtime cannot seal input")
+            self._before_seal(cur)
             commands, batch = self._commands(cur, tick + 1, cur["cut_root"])
             require(all(result is None for _, result in commands.values()), "pending result already committed")
             existing = self.db.execute("SELECT parent,inputs,result FROM batches WHERE tick=?", (tick + 1,)).fetchone()
@@ -224,10 +228,10 @@ class DurableRuntime:
         c = self.runtime.coordinator
         return self.authority.seal_next(self.runtime.generation, c.tick, c.root)
 
-    def advance(self):
+    def advance(self, *, fault=None, before_publish=None):
         try:
             controls = self.seal()
-            return self.runtime.advance(controls=controls)
+            return self.runtime.advance(controls=controls, fault=fault, before_publish=before_publish)
         except BaseException:
             self.runtime.frozen = self.runtime.coordinator.poisoned = True
             raise

@@ -625,12 +625,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #62 — Expansion · Missing
 - Work: Handle scale-in, loss, and partition. Drain and reassign live work when volunteers leave
 - Acceptance: A graceful exit drains eligible work and releases the device budget. A crash freezes or fails over affected regions from accepted checkpoints without duplicating state
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (capped custom reference runtime with stop-all generation recovery, one trusted local authority; no native Minecraft, independent-host or live partial-region acceptance)
+- Source: [Worker recovery report](../research/distributed-simulation/WORKER_RECOVERY_REPORT.md); `recovery_runtime.py`, `recovery_lab.py`, `verify_recovery_evidence.py`, `test_recovery_runtime.py`; isolated research extensions to `placement_lab.py`, `regional_authority.py`, `transition_runtime.py`.
+- Evidence: Two retained real private-network/cgroup-v2 experiments, 16 worker process instances, 36 TCP client sessions, 12 accepted durable ticks, 24 unique committed commands, 12 fully released scopes. Explicit withdrawal refuses a complete old-generation candidate while old workers remain alive; clean scale-in restores the sealed input on one capped worker. Real worker SIGKILL after prepare and real veth partition after seal (two of each) preserve accepted cuts, disconnect uncommitted client replies and recover only after fresh admission. Insufficient measured fit, all-zero contribution and unavailable workers pause without advancing the cut; unavailable slots remain blocked across reopen until revised consent. 80 research tests passed (nine new); 20 altered evidence cases refused; both final roots match independent serial replay.
+- Remaining / next action: #63 sustained comparative reference-runtime scale envelope, including clustered/degraded cases. This is stop-all, trusted local recovery; not seamless live regional handoff, production resource consent, actual Minecraft, independent remote cleanup or quorum-backed failure recovery. Production regional NO-GO retained.
+- External dependency: Reviewed compatible Minecraft runtime, actual clients and independent enrolled worker/control hosts, durable quorum-backed authority/recovery and sustained gameplay qualification.
+- Commit: Add durable capped worker withdrawal and checkpoint recovery; see git history.
 
 ### #63 — Expansion · Unverified
 - Work: Run real distributed gameplay and publish the scale envelope
@@ -754,4 +754,4 @@ Initial full-item implementation/acceptance totals: not yet established by item-
 - Private replication uses the current signed membership with a matching descriptor and rechecks the exact authenticated recipient before normal payload, manifest acknowledgement and every blob chunk. A half-installed signed roster denies data instead of trusting an obsolete descriptor. Removed local recipients also refuse normal snapshot bytes. Ordinary unauthorized world requests receive a generic refusal.
 - Evidence: strict CLI/storage Clippy, 51 daemon/CLI binary tests, 67 storage tests (1 optional soak ignored), and actual authenticated invite/leave/replication test passed (19.73s). A reusable grant admitted a third peer; revocation left committed membership intact; joint leave committed; a real network probe authenticated as the removed member received status/history refusal and no newer manifest/blob payload while the remaining member verified a new checkpoint. The old device retained its old verified save. Prior commit 8653c2d required CI completed successfully (run 45585530110). Broader local CLI validation underway; UI and field acceptance remain.
 
-Latest actionable continuation after #61: #62 scale-in, contribution withdrawal, worker loss and partition recovery from durable accepted checkpoints, without production regional activation. The independent quorum, physical, compatibility and canonical recovery gates above remain open.
+Latest actionable continuation after #62: #63 sustained comparative reference-runtime scale envelope and clustered/degraded limits, without production regional activation. The independent quorum, physical, compatibility and actual Minecraft gameplay gates remain open.
