@@ -1,0 +1,59 @@
+[17:50:52] [Server thread/INFO]: Starting minecraft server version 26.1.2
+[17:50:56] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[17:50:56] [Server thread/INFO]: There are 0 of a max of 16 players online:
+[17:50:56] [Server thread/INFO]: The game time is 2 tick(s)
+[17:51:00] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 1.3ms (Target: 50.0ms)
+[17:51:06] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 0.4ms (Target: 50.0ms)
+[17:51:12] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 0.3ms (Target: 50.0ms)
+[17:51:12] [Server thread/INFO]: The game time is 324 tick(s)
+[17:51:12] [Server thread/INFO]: There are 0 of a max of 16 players online:
+[17:51:12] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[17:51:15] [Server thread/INFO]: There are 1 of a max of 16 players online: CapacityBot0
+[17:51:15] [Server thread/INFO]: The game time is 388 tick(s)
+[17:51:19] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 6.7ms (Target: 50.0ms)
+[17:51:26] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 5.1ms (Target: 50.0ms)
+[17:51:31] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 3.0ms (Target: 50.0ms)
+[17:51:31] [Server thread/INFO]: The game time is 711 tick(s)
+[17:51:32] [Server thread/INFO]: There are 1 of a max of 16 players online: CapacityBot0
+[17:51:35] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[17:51:36] [Server thread/INFO]: There are 2 of a max of 16 players online: CapacityBot0, CapacityBot1
+[17:51:36] [Server thread/INFO]: The game time is 745 tick(s)
+[17:51:40] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 3.7ms (Target: 50.0ms)
+[17:51:46] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 2.9ms (Target: 50.0ms)
+[17:51:52] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 2.6ms (Target: 50.0ms)
+[17:51:52] [Server thread/INFO]: The game time is 1066 tick(s)
+[17:51:52] [Server thread/INFO]: There are 2 of a max of 16 players online: CapacityBot0, CapacityBot1
+[17:51:55] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[17:51:56] [Server thread/INFO]: There are 4 of a max of 16 players online: CapacityBot0, CapacityBot1, CapacityBot2, CapacityBot3
+[17:51:56] [Server thread/INFO]: The game time is 1114 tick(s)
+[17:52:01] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 4.7ms (Target: 50.0ms)
+[17:52:07] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 3.8ms (Target: 50.0ms)
+[17:52:13] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 4.1ms (Target: 50.0ms)
+[17:52:13] [Server thread/INFO]: The game time is 1435 tick(s)
+[17:52:13] [Server thread/INFO]: There are 4 of a max of 16 players online: CapacityBot0, CapacityBot1, CapacityBot2, CapacityBot3
+[17:52:17] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[17:52:20] [Server thread/INFO]: There are 8 of a max of 16 players online: CapacityBot0, CapacityBot1, CapacityBot2, CapacityBot3, CapacityBot4, CapacityBot5, CapacityBot6, CapacityBot7
+[17:52:20] [Server thread/INFO]: The game time is 1515 tick(s)
+[17:52:24] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 5.7ms (Target: 50.0ms)
+[17:52:30] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 4.8ms (Target: 50.0ms)
+[17:52:36] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 4.9ms (Target: 50.0ms)
+[17:52:36] [Server thread/INFO]: The game time is 1836 tick(s)
+[17:52:36] [Server thread/INFO]: There are 8 of a max of 16 players online: CapacityBot0, CapacityBot1, CapacityBot2, CapacityBot3, CapacityBot4, CapacityBot5, CapacityBot6, CapacityBot7
+[17:52:39] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[17:52:39] [Server thread/INFO]: Stopping the server
+[17:52:39] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved

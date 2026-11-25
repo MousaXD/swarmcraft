@@ -1,0 +1,10 @@
+capacity world_mib=1 replicas=1 capture_ms=40.104 cumulative_verified_ms=31.805 cumulative_payload_bytes=787614 cumulative_disk_bytes=787711 last_restore_ms=12.537
+capacity world_mib=1 replicas=2 capture_ms=40.104 cumulative_verified_ms=62.233 cumulative_payload_bytes=1575228 cumulative_disk_bytes=1575422 last_restore_ms=11.904
+capacity world_mib=1 replicas=3 capture_ms=40.104 cumulative_verified_ms=94.481 cumulative_payload_bytes=2362842 cumulative_disk_bytes=2363133 last_restore_ms=11.440
+capacity world_mib=8 replicas=1 capture_ms=151.732 cumulative_verified_ms=135.447 cumulative_payload_bytes=6301037 cumulative_disk_bytes=6301134 last_restore_ms=66.209
+capacity world_mib=8 replicas=2 capture_ms=151.732 cumulative_verified_ms=262.311 cumulative_payload_bytes=12602074 cumulative_disk_bytes=12602268 last_restore_ms=59.457
+capacity world_mib=8 replicas=3 capture_ms=151.732 cumulative_verified_ms=386.215 cumulative_payload_bytes=18903111 cumulative_disk_bytes=18903402 last_restore_ms=59.043
+capacity world_mib=32 replicas=1 capture_ms=550.649 cumulative_verified_ms=431.921 cumulative_payload_bytes=25202281 cumulative_disk_bytes=25202378 last_restore_ms=312.685
+capacity world_mib=32 replicas=2 capture_ms=550.649 cumulative_verified_ms=1412.236 cumulative_payload_bytes=50404562 cumulative_disk_bytes=50404756 last_restore_ms=782.629
+capacity world_mib=32 replicas=3 capture_ms=550.649 cumulative_verified_ms=2440.626 cumulative_payload_bytes=75606843 cumulative_disk_bytes=75607134 last_restore_ms=765.733
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.33s

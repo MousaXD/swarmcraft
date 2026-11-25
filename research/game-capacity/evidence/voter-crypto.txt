@@ -1,0 +1,5 @@
+capacity membership_voters=3 majority=2 encoded_votes_bytes=799 median_sign_ms=0.433 median_verify_ms=59.489
+capacity membership_voters=5 majority=3 encoded_votes_bytes=1198 median_sign_ms=0.647 median_verify_ms=68.915
+capacity membership_voters=9 majority=5 encoded_votes_bytes=1996 median_sign_ms=1.072 median_verify_ms=87.039
+capacity membership_voters=17 majority=9 encoded_votes_bytes=3592 median_sign_ms=1.915 median_verify_ms=120.483
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 4.92s

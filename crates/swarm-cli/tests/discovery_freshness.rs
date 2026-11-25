@@ -137,6 +137,71 @@ fn votes<'a>(
     result
 }
 
+/// Measure cryptographic proof work independently of hosting RAM admission.
+/// This does not simulate daemon connectivity, durable recovery, or gameplay.
+#[test]
+#[ignore = "manual voter capacity measurement, separate from live host recovery"]
+fn capacity_signed_freshness_proofs_by_voter_count() {
+    use std::time::Instant;
+
+    for count in [3, 5, 9, 17] {
+        let (ids, announcement, proof, challenge) = fixture(count);
+        let required = count / 2 + 1;
+        let mut sign_ms = Vec::new();
+        let mut verify_ms = Vec::new();
+        let mut proof_bytes = 0;
+        for _ in 0..5 {
+            let start = Instant::now();
+            let valid_votes = votes(ids[..required].iter(), &challenge);
+            sign_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+            proof_bytes = postcard::to_allocvec(&valid_votes).unwrap().len();
+            let mut guard = DiscoveryFreshnessReplayGuard::default();
+            let start = Instant::now();
+            validate_fresh_discovery_candidate(
+                &announcement,
+                &proof,
+                &challenge,
+                &valid_votes,
+                challenge.verifier_peer_id,
+                challenge.nonce,
+                3_000,
+                &mut guard,
+            )
+            .unwrap();
+            verify_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+            assert!(validate_fresh_discovery_candidate(
+                &announcement,
+                &proof,
+                &challenge,
+                &valid_votes,
+                challenge.verifier_peer_id,
+                challenge.nonce,
+                3_000,
+                &mut guard,
+            )
+            .is_err());
+            let mut guard = DiscoveryFreshnessReplayGuard::default();
+            assert!(validate_fresh_discovery_candidate(
+                &announcement,
+                &proof,
+                &challenge,
+                &votes(ids[..required - 1].iter(), &challenge),
+                challenge.verifier_peer_id,
+                challenge.nonce,
+                3_000,
+                &mut guard,
+            )
+            .is_err());
+        }
+        sign_ms.sort_by(f64::total_cmp);
+        verify_ms.sort_by(f64::total_cmp);
+        eprintln!(
+            "capacity membership_voters={count} majority={required} encoded_votes_bytes={proof_bytes} median_sign_ms={:.3} median_verify_ms={:.3}",
+            sign_ms[2], verify_ms[2]
+        );
+    }
+}
+
 #[test]
 fn current_quorum_accepts_and_replay_wrong_head_epoch_membership_world_and_verifier_fail() {
     let (ids, announcement, proof, challenge) = fixture(3);

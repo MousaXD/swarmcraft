@@ -7,7 +7,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use libp2p::StreamProtocol;
 use rand_core::OsRng;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use swarm_network::{
     game_route::GAME_STREAM_PROTOCOL, generate_transport_key, NetworkEvent, SwarmNode, WireRequest, WireResponse,
 };
@@ -118,32 +118,42 @@ async fn authenticated_game_substream_echoes_bytes_without_snapshot_protocol(
             node_b.next_event().await.unwrap();
         }
     });
-    timeout(Duration::from_secs(12), async {
+    let start = Instant::now();
+    timeout(Duration::from_secs(25), async {
         let send = async {
             let mut stream = control_b
                 .open_stream(transport_a, StreamProtocol::new(GAME_STREAM_PROTOCOL))
                 .await
                 .expect("dedicated Minecraft game stream must negotiate");
-            stream.write_all(b"minecraft-data").await.unwrap();
-            stream.flush().await.unwrap();
-            let mut echo = [0; 14];
-            stream.read_exact(&mut echo).await.unwrap();
-            assert_eq!(&echo, b"minecraft-data");
+            for sequence in 0..256 {
+                let bytes = [sequence as u8; 4096];
+                stream.write_all(&bytes).await.unwrap();
+                stream.flush().await.unwrap();
+                let mut echo = [0; 4096];
+                stream.read_exact(&mut echo).await.unwrap();
+                assert_eq!(echo, bytes);
+            }
         };
         let receive = async {
             let (sender, mut stream) = incoming.next().await.expect("must receive game stream");
             assert_eq!(sender, transport_b);
             assert_eq!(registry_a.read().unwrap().get(&sender), Some(&application_b));
-            let mut bytes = [0; 14];
-            stream.read_exact(&mut bytes).await.unwrap();
-            assert_eq!(&bytes, b"minecraft-data");
-            stream.write_all(&bytes).await.unwrap();
-            stream.flush().await.unwrap();
+            for sequence in 0..256 {
+                let mut bytes = [0; 4096];
+                stream.read_exact(&mut bytes).await.unwrap();
+                assert_eq!(bytes, [sequence as u8; 4096]);
+                stream.write_all(&bytes).await.unwrap();
+                stream.flush().await.unwrap();
+            }
         };
         tokio::join!(send, receive);
     })
     .await
     .unwrap_or_else(|_| panic!("{transport_name} game substream must make progress"));
+    eprintln!(
+        "capacity transport={transport_name} acknowledged_bytes=1048576 elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
     driver_a.abort();
     driver_b.abort();
 }

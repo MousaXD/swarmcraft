@@ -1,0 +1,34 @@
+[17:54:17] [Server thread/INFO]: Starting minecraft server version 26.1.2
+[17:54:20] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[17:54:25] [Server thread/INFO]: There are 12 of a max of 16 players online: CapacityBot0, CapacityBot5, CapacityBot4, CapacityBot1, CapacityBot2, CapacityBot3, CapacityBot6, CapacityBot7, CapacityBot8, CapacityBot10, CapacityBot9, CapacityBot11
+[17:54:25] [Server thread/INFO]: The game time is 101 tick(s)
+[17:54:29] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 10.7ms (Target: 50.0ms)
+[17:54:35] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 6.5ms (Target: 50.0ms)
+[17:54:41] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 5.6ms (Target: 50.0ms)
+[17:54:47] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 6.3ms (Target: 50.0ms)
+[17:54:53] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 5.8ms (Target: 50.0ms)
+[17:54:55] [Server thread/INFO]: The game time is 702 tick(s)
+[17:54:55] [Server thread/INFO]: There are 12 of a max of 16 players online: CapacityBot0, CapacityBot5, CapacityBot4, CapacityBot1, CapacityBot2, CapacityBot3, CapacityBot6, CapacityBot7, CapacityBot8, CapacityBot10, CapacityBot9, CapacityBot11
+[17:55:04] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[17:55:10] [Server thread/INFO]: There are 16 of a max of 16 players online: CapacityBot0, CapacityBot1, CapacityBot2, CapacityBot3, CapacityBot4, CapacityBot5, CapacityBot6, CapacityBot7, CapacityBot8, CapacityBot9, CapacityBot10, CapacityBot11, CapacityBot12, CapacityBot13, CapacityBot14, CapacityBot15
+[17:55:11] [Server thread/INFO]: The game time is 846 tick(s)
+[17:55:15] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 7.9ms (Target: 50.0ms)
+[17:55:21] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 7.2ms (Target: 50.0ms)
+[17:55:27] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 7.1ms (Target: 50.0ms)
+[17:55:33] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 7.9ms (Target: 50.0ms)
+[17:55:39] [Server thread/INFO]: Target tick rate: 20.0 per second.
+Average time per tick: 9.0ms (Target: 50.0ms)
+[17:55:41] [Server thread/INFO]: The game time is 1447 tick(s)
+[17:55:41] [Server thread/INFO]: There are 16 of a max of 16 players online: CapacityBot0, CapacityBot1, CapacityBot2, CapacityBot3, CapacityBot4, CapacityBot5, CapacityBot6, CapacityBot7, CapacityBot8, CapacityBot9, CapacityBot10, CapacityBot11, CapacityBot12, CapacityBot13, CapacityBot14, CapacityBot15
+[17:55:46] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[17:55:46] [Server thread/INFO]: Stopping the server
+[17:55:46] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved

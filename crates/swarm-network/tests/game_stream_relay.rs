@@ -10,7 +10,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use libp2p::{multiaddr::Protocol, Multiaddr, StreamProtocol};
 use rand_core::OsRng;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use swarm_network::{
     game_route::GAME_STREAM_PROTOCOL,
     generate_transport_key,
@@ -177,6 +177,7 @@ async fn encrypted_game_substream_survives_a_real_local_libp2p_relay_circuit() {
         assert!(!rogue.connectivity_diagnostics().relay_connectivity);
         drop(rogue);
 
+        let start = Instant::now();
         timeout(Duration::from_secs(25), async {
             let send = async {
                 let mut stream = player_control
@@ -208,6 +209,7 @@ async fn encrypted_game_substream_survives_a_real_local_libp2p_relay_circuit() {
         })
         .await
         .expect("Minecraft substream must cross real libp2p relay");
+        eprintln!("capacity transport=relay-tcp-noise acknowledged_bytes=1048576 elapsed_ms={:.3}", start.elapsed().as_secs_f64() * 1000.0);
         // A known infrastructure relay must remain connected beyond the
         // application PeerHello 10-second deadline. Only real SwarmCraft
         // application peers get that challenge; the relay itself has no
@@ -450,6 +452,9 @@ async fn private_relay_caps_bulk_circuit_without_disconnect_of_independent_pair(
                 }
             };
             let (acknowledged, ()) = tokio::join!(bulk_send, bulk_echo);
+            eprintln!(
+                "capacity relay_circuits=2 configured_circuit_bytes={BUDGET} bulk_acknowledged_bytes={acknowledged}"
+            );
             assert!(acknowledged > 0, "bulk circuit never transferred bytes");
             assert!(acknowledged <= BUDGET, "circuit byte limit was not enforced");
             timeout(Duration::from_secs(8), async {

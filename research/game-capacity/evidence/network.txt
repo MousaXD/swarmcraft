@@ -1,0 +1,8 @@
+test encrypted_game_substream_survives_a_real_local_libp2p_relay_circuit ... capacity transport=relay-tcp-noise acknowledged_bytes=1048576 elapsed_ms=317.817
+test private_relay_caps_bulk_circuit_without_disconnect_of_independent_pair ... capacity relay_circuits=2 configured_circuit_bytes=262144 bulk_acknowledged_bytes=126976
+bulk acknowledged bytes before circuit cap: 126976; independent circuit remained live
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.41s
+test authenticated_game_substream_echoes_bytes_over_ipv6_quic ... capacity transport=IPv6 QUIC acknowledged_bytes=1048576 elapsed_ms=162.067
+test authenticated_game_substream_echoes_bytes_over_quic_without_snapshot_protocol ... capacity transport=QUIC acknowledged_bytes=1048576 elapsed_ms=157.617
+test authenticated_game_substream_echoes_bytes_over_tcp_noise_without_snapshot_protocol ... capacity transport=TCP/Noise acknowledged_bytes=1048576 elapsed_ms=125.558
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.07s

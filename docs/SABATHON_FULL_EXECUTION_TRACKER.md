@@ -355,12 +355,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #35 — P2 · Unverified
 - Work: Publish capacity with separate player, voter, replica, world-size, and relay tests
 - Acceptance: Real game-server measurements report player counts, TPS, and resource ceilings. Replica count is never presented as extra simulation capacity
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: research/game-capacity/README.md, REPORT.md, evidence/; measure.py, bots.cjs and pinned npm lock; crates/swarm-storage/tests/replica_capacity_lab.rs; crates/swarm-network/tests/game_stream_transport.rs and game_stream_relay.rs; crates/swarm-cli/tests/discovery_freshness.rs and consensus_partition_safety.rs.
+- Evidence: Actual isolated Minecraft 26.1.2, Java 25, 1,536 MiB heap, 0/1/2/4/8 moving protocol clients for 16 seconds and separate fresh-world 12/16-client stages for 30 seconds. At the configured 16-slot ceiling: 601 game ticks / 30.065 s = 19.990 TPS, 7.9 ms median sampled MSPT, 1,397.6 MiB peak sampled Java RSS, 443.6 MiB client RSS, 1,965.7 MiB minimum host headroom and 2,214,270 B/s sampled aggregate client RX peak; every client moved and both labs stopped cleanly. Five direct/relay regressions passed (one-MiB request/echo IPv4 QUIC 157.617 ms, direct TCP/Noise 125.558 ms, relayed 317.817 ms; independent circuit survives cap exhaustion). Nine synthetic 1/8/32 MiB x 1/2/3 destination V1 measurements verified reopened stores and exact restores; 32 MiB x three destinations 75,606,843 payload bytes, 2,440.626 ms cumulative verified copy. Separate 3/5/9/17-voter signed freshness benchmark passed, 59.489–120.483 ms median verification, insufficient and replayed proofs refused, seven discovery regressions passed. No replica or voter count added to game simulation capacity.
+- Remaining / next action: #36 user-controlled background replica quotas, scheduling and placement. #35 measures a bounded local vanilla baseline, not a production capacity ceiling or installed authenticated Fabric/gateway gameplay. Positive live 3/5-daemon recovery tests explicitly skipped because available host RAM 3,466 MiB was below the real 4,543 MiB admission requirement; no gate weakened. Repeat on adequate hosts; longer diverse/modded workloads, concurrent replication, independent machines and WAN/public relay remain unverified.
+- External dependency: Adequate host memory for positive live quorum/recovery, installed real-device/real-network capacity matrix, and necessary final CI under local-first policy.
+- Commit: See 25 November local game-server capacity research commit.
 
 ### #36 — P2 · Proposal
 - Work: Add background replica scheduling, quotas, bandwidth windows, and replica placement controls

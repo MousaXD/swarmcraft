@@ -1,0 +1,219 @@
+{
+  "server_sha256": "cd47e7c38328f64768fd17af8fcd8b22496b40b63d4ffee81e71ae059fedcb42",
+  "java": "openjdk version \"25.0.4.1\" 2026-08-18 LTS",
+  "cpu": "AMD Ryzen 5 5600H with Radeon Graphics",
+  "logical_cpus": 12,
+  "heap_mib": 1536,
+  "active_processors": 4,
+  "view_distance": 6,
+  "simulation_distance": 4,
+  "seed": 42035,
+  "initial_available_mib": 3569.375,
+  "stages": [
+    {
+      "players": 0,
+      "game_ticks": 322,
+      "seconds": 16.051,
+      "observed_tps": 20.061,
+      "server_cpu_percent": 9.2,
+      "server_peak_sampled_rss_mib": 763.9,
+      "host_min_available_mib": 2892.3,
+      "world_bytes_after_save": 2241181,
+      "tick_query_lines": [
+        "[17:51:00] [Server thread/INFO]: Target tick rate: 20.0 per second.",
+        "[17:51:06] [Server thread/INFO]: Target tick rate: 20.0 per second.",
+        "[17:51:12] [Server thread/INFO]: Target tick rate: 20.0 per second."
+      ],
+      "bots": []
+    },
+    {
+      "players": 1,
+      "game_ticks": 323,
+      "seconds": 16.039,
+      "observed_tps": 20.138,
+      "server_cpu_percent": 173.4,
+      "server_peak_sampled_rss_mib": 841.0,
+      "host_min_available_mib": 2695.3,
+      "world_bytes_after_save": 8309285,
+      "tick_query_lines": [
+        "[17:51:19] [Server thread/INFO]: Target tick rate: 20.0 per second.",
+        "[17:51:26] [Server thread/INFO]: Target tick rate: 20.0 per second.",
+        "[17:51:31] [Server thread/INFO]: Target tick rate: 20.0 per second."
+      ],
+      "bots": [
+        {
+          "name": "CapacityBot0",
+          "spawned": true,
+          "displacement": 50.98034918148874,
+          "received": 1172708,
+          "sent": 9643,
+          "ping": 0
+        }
+      ]
+    },
+    {
+      "players": 2,
+      "game_ticks": 321,
+      "seconds": 16.049,
+      "observed_tps": 20.001,
+      "server_cpu_percent": 79.1,
+      "server_peak_sampled_rss_mib": 925.0,
+      "host_min_available_mib": 2554.0,
+      "world_bytes_after_save": 9826158,
+      "tick_query_lines": [
+        "[17:51:40] [Server thread/INFO]: Target tick rate: 20.0 per second.",
+        "[17:51:46] [Server thread/INFO]: Target tick rate: 20.0 per second.",
+        "[17:51:52] [Server thread/INFO]: Target tick rate: 20.0 per second."
+      ],
+      "bots": [
+        {
+          "name": "CapacityBot0",
+          "spawned": true,
+          "displacement": 37.73935139520882,
+          "received": 1172688,
+          "sent": 9685,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot1",
+          "spawned": true,
+          "displacement": 21.313845265460653,
+          "received": 1064691,
+          "sent": 9509,
+          "ping": 0
+        }
+      ]
+    },
+    {
+      "players": 4,
+      "game_ticks": 321,
+      "seconds": 16.049,
+      "observed_tps": 20.001,
+      "server_cpu_percent": 107.5,
+      "server_peak_sampled_rss_mib": 979.3,
+      "host_min_available_mib": 2514.3,
+      "world_bytes_after_save": 12610821,
+      "tick_query_lines": [
+        "[17:52:01] [Server thread/INFO]: Target tick rate: 20.0 per second.",
+        "[17:52:07] [Server thread/INFO]: Target tick rate: 20.0 per second.",
+        "[17:52:13] [Server thread/INFO]: Target tick rate: 20.0 per second."
+      ],
+      "bots": [
+        {
+          "name": "CapacityBot0",
+          "spawned": true,
+          "displacement": 39.254977368333016,
+          "received": 1219300,
+          "sent": 10049,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot1",
+          "spawned": true,
+          "displacement": 28.257388414359884,
+          "received": 1199581,
+          "sent": 9804,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot2",
+          "spawned": true,
+          "displacement": 56.548379230398865,
+          "received": 1296216,
+          "sent": 9754,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot3",
+          "spawned": true,
+          "displacement": 58.128923761914,
+          "received": 1301495,
+          "sent": 9531,
+          "ping": 0
+        }
+      ]
+    },
+    {
+      "players": 8,
+      "game_ticks": 321,
+      "seconds": 16.051,
+      "observed_tps": 19.999,
+      "server_cpu_percent": 66.9,
+      "server_peak_sampled_rss_mib": 1025.4,
+      "host_min_available_mib": 2381.5,
+      "world_bytes_after_save": 13541398,
+      "tick_query_lines": [
+        "[17:52:24] [Server thread/INFO]: Target tick rate: 20.0 per second.",
+        "[17:52:30] [Server thread/INFO]: Target tick rate: 20.0 per second.",
+        "[17:52:36] [Server thread/INFO]: Target tick rate: 20.0 per second."
+      ],
+      "bots": [
+        {
+          "name": "CapacityBot0",
+          "spawned": true,
+          "displacement": 42.994313915420925,
+          "received": 1135390,
+          "sent": 10910,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot1",
+          "spawned": true,
+          "displacement": 43.5788940569869,
+          "received": 1315726,
+          "sent": 10784,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot2",
+          "spawned": true,
+          "displacement": 46.54950903470606,
+          "received": 1185191,
+          "sent": 10602,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot3",
+          "spawned": true,
+          "displacement": 55.45509000728126,
+          "received": 1402870,
+          "sent": 10413,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot4",
+          "spawned": true,
+          "displacement": 62.99008904264974,
+          "received": 1342074,
+          "sent": 10153,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot5",
+          "spawned": true,
+          "displacement": 58.33886811639413,
+          "received": 1428380,
+          "sent": 9944,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot6",
+          "spawned": true,
+          "displacement": 19.517264585298324,
+          "received": 1157784,
+          "sent": 9664,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot7",
+          "spawned": true,
+          "displacement": 51.232287371017804,
+          "received": 1396916,
+          "sent": 9510,
+          "ping": 0
+        }
+      ]
+    }
+  ],
+  "complete": true
+}

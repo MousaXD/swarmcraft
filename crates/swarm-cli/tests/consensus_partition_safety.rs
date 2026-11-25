@@ -676,6 +676,7 @@ fn assert_unclean_quorum_loss_does_not_enter_solo(member_count: usize) {
     }
 
     let first_addr = address(refs[0]);
+    let initial_start = Instant::now();
     let mut daemons = Vec::new();
     daemons.push(spawn_daemon(refs[0], &[]));
     thread::sleep(Duration::from_millis(400));
@@ -686,14 +687,17 @@ fn assert_unclean_quorum_loss_does_not_enter_solo(member_count: usize) {
     wait_until("initial authority permit", Duration::from_secs(25), || {
         permit(refs[0], metadata.world_id).is_some_and(|(ep, fence, heartbeat)| ep == 1 && fence == 1 && heartbeat >= 1)
     });
+    eprintln!("capacity voters={member_count} initial_permit_ms={}", initial_start.elapsed().as_millis());
 
     let majority_start = if member_count == 3 { 1 } else { 2 };
+    let loss_start = Instant::now();
     for daemon in daemons.iter_mut().skip(majority_start) {
         daemon.stop();
     }
     wait_until("old authority permit removal", Duration::from_secs(12), || {
         permit(refs[0], metadata.world_id).is_none()
     });
+    eprintln!("capacity voters={member_count} quorum_loss_fencing_ms={}", loss_start.elapsed().as_millis());
     let old_epoch = refs[0].storage.load_epoch_record(metadata.world_id).unwrap();
     assert_eq!(old_epoch.epoch_number, 1);
     assert_eq!(old_epoch.mode, EpochMode::Quorum);
@@ -702,6 +706,7 @@ fn assert_unclean_quorum_loss_does_not_enter_solo(member_count: usize) {
         daemon.stop();
     }
     let majority = &refs[majority_start..];
+    let recovery_start = Instant::now();
     let majority_addrs = majority.iter().map(|peer| address(peer)).collect::<Vec<_>>();
     let mut survivors = Vec::new();
     for (index, peer) in majority.iter().enumerate() {
@@ -712,6 +717,11 @@ fn assert_unclean_quorum_loss_does_not_enter_solo(member_count: usize) {
     wait_until("majority recovery permit", Duration::from_secs(35), || {
         majority.iter().any(|peer| permit(peer, metadata.world_id).is_some_and(|(ep, fence, _)| ep == 2 && fence == 2))
     });
+    eprintln!(
+        "capacity voters={member_count} surviving_voters={} recovery_permit_ms={}",
+        majority.len(),
+        recovery_start.elapsed().as_millis()
+    );
     assert!(survivors.iter_mut().all(ManagedChild::alive));
 }
 

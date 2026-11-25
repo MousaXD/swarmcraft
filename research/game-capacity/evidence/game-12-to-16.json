@@ -1,0 +1,313 @@
+{
+  "server_sha256": "cd47e7c38328f64768fd17af8fcd8b22496b40b63d4ffee81e71ae059fedcb42",
+  "minecraft_version": "26.1.2",
+  "java": "openjdk version \"25.0.4.1\" 2026-08-18 LTS",
+  "cpu": "AMD Ryzen 5 5600H with Radeon Graphics",
+  "logical_cpus": 12,
+  "heap_mib": 1536,
+  "active_processors": 4,
+  "view_distance": 6,
+  "simulation_distance": 4,
+  "seed": 42035,
+  "initial_available_mib": 3499.375,
+  "requested_players": [
+    12,
+    16
+  ],
+  "requested_stage_seconds": 30,
+  "stages": [
+    {
+      "players": 12,
+      "game_ticks": 601,
+      "seconds": 30.046,
+      "observed_tps": 20.003,
+      "server_cpu_percent": 201.8,
+      "server_peak_sampled_rss_mib": 914.6,
+      "client_peak_sampled_rss_mib": 393.8,
+      "host_min_available_mib": 2194.9,
+      "world_bytes_after_save": 13539638,
+      "tick_query_lines": [
+        "Average time per tick: 10.7ms (Target: 50.0ms)",
+        "Average time per tick: 6.5ms (Target: 50.0ms)",
+        "Average time per tick: 5.6ms (Target: 50.0ms)",
+        "Average time per tick: 6.3ms (Target: 50.0ms)",
+        "Average time per tick: 5.8ms (Target: 50.0ms)"
+      ],
+      "mspt_samples": [
+        10.7,
+        6.5,
+        5.6,
+        6.3,
+        5.8
+      ],
+      "client_traffic": {
+        "seconds": 30.195313173,
+        "received_after_all_spawned": 16767258,
+        "sent_after_all_spawned": 216033,
+        "peak_sampled_rx_bytes_per_second": 2595252,
+        "peak_sampled_tx_bytes_per_second": 7672
+      },
+      "bots": [
+        {
+          "name": "CapacityBot0",
+          "spawned": true,
+          "displacement": 87.70146297203229,
+          "received": 1676975,
+          "sent": 18467,
+          "ping": 1
+        },
+        {
+          "name": "CapacityBot1",
+          "spawned": true,
+          "displacement": 87.19723096962473,
+          "received": 1701503,
+          "sent": 18418,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot2",
+          "spawned": true,
+          "displacement": 88.71313870995935,
+          "received": 1752368,
+          "sent": 18397,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot3",
+          "spawned": true,
+          "displacement": 24.615710738033307,
+          "received": 1475792,
+          "sent": 18313,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot4",
+          "spawned": true,
+          "displacement": 94.95171763626682,
+          "received": 1804874,
+          "sent": 18523,
+          "ping": 1
+        },
+        {
+          "name": "CapacityBot5",
+          "spawned": true,
+          "displacement": 101.55106657203702,
+          "received": 1708185,
+          "sent": 18460,
+          "ping": 1
+        },
+        {
+          "name": "CapacityBot6",
+          "spawned": true,
+          "displacement": 93.66341058996679,
+          "received": 1704017,
+          "sent": 18396,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot7",
+          "spawned": true,
+          "displacement": 104.09994139244593,
+          "received": 1716195,
+          "sent": 18460,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot8",
+          "spawned": true,
+          "displacement": 82.29583045228317,
+          "received": 1708446,
+          "sent": 26020,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot9",
+          "spawned": true,
+          "displacement": 87.04289044390303,
+          "received": 1663517,
+          "sent": 17746,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot10",
+          "spawned": true,
+          "displacement": 82.02962553642085,
+          "received": 1762883,
+          "sent": 17712,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot11",
+          "spawned": true,
+          "displacement": 78.97635315257561,
+          "received": 1644424,
+          "sent": 17516,
+          "ping": 1
+        }
+      ]
+    },
+    {
+      "players": 16,
+      "game_ticks": 601,
+      "seconds": 30.065,
+      "observed_tps": 19.99,
+      "server_cpu_percent": 110.3,
+      "server_peak_sampled_rss_mib": 1397.6,
+      "client_peak_sampled_rss_mib": 443.6,
+      "host_min_available_mib": 1965.7,
+      "world_bytes_after_save": 19126326,
+      "tick_query_lines": [
+        "Average time per tick: 7.9ms (Target: 50.0ms)",
+        "Average time per tick: 7.2ms (Target: 50.0ms)",
+        "Average time per tick: 7.1ms (Target: 50.0ms)",
+        "Average time per tick: 7.9ms (Target: 50.0ms)",
+        "Average time per tick: 9.0ms (Target: 50.0ms)"
+      ],
+      "mspt_samples": [
+        7.9,
+        7.2,
+        7.1,
+        7.9,
+        9.0
+      ],
+      "client_traffic": {
+        "seconds": 30.192549054,
+        "received_after_all_spawned": 12299396,
+        "sent_after_all_spawned": 272856,
+        "peak_sampled_rx_bytes_per_second": 2214270,
+        "peak_sampled_tx_bytes_per_second": 9170
+      },
+      "bots": [
+        {
+          "name": "CapacityBot0",
+          "spawned": true,
+          "displacement": 83.12752598683612,
+          "received": 1449480,
+          "sent": 20616,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot1",
+          "spawned": true,
+          "displacement": 129.75606240301965,
+          "received": 1786806,
+          "sent": 20616,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot2",
+          "spawned": true,
+          "displacement": 82.1401389261707,
+          "received": 1661091,
+          "sent": 20322,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot3",
+          "spawned": true,
+          "displacement": 81.60486992917849,
+          "received": 1816090,
+          "sent": 20084,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot4",
+          "spawned": true,
+          "displacement": 80.42323135374362,
+          "received": 1601044,
+          "sent": 19867,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot5",
+          "spawned": true,
+          "displacement": 79.29076775367727,
+          "received": 1611408,
+          "sent": 19671,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot6",
+          "spawned": true,
+          "displacement": 78.3987070148421,
+          "received": 1490206,
+          "sent": 19398,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot7",
+          "spawned": true,
+          "displacement": 77.52725695134528,
+          "received": 1400731,
+          "sent": 19160,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot8",
+          "spawned": true,
+          "displacement": 112.8049778145809,
+          "received": 1619243,
+          "sent": 18964,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot9",
+          "spawned": true,
+          "displacement": 80.40435340758758,
+          "received": 1646851,
+          "sent": 18747,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot10",
+          "spawned": true,
+          "displacement": 74.76572186424528,
+          "received": 1567707,
+          "sent": 18482,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot11",
+          "spawned": true,
+          "displacement": 73.75811740887052,
+          "received": 1490779,
+          "sent": 18258,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot12",
+          "spawned": true,
+          "displacement": 30.264548570616917,
+          "received": 1425986,
+          "sent": 18027,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot13",
+          "spawned": true,
+          "displacement": 83.52282544966945,
+          "received": 1736740,
+          "sent": 17831,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot14",
+          "spawned": true,
+          "displacement": 81.76416333772528,
+          "received": 1681597,
+          "sent": 17572,
+          "ping": 0
+        },
+        {
+          "name": "CapacityBot15",
+          "spawned": true,
+          "displacement": 88.10205055888588,
+          "received": 1713239,
+          "sent": 17376,
+          "ping": 0
+        }
+      ]
+    }
+  ],
+  "complete": true
+}
