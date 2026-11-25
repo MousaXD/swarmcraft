@@ -685,12 +685,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #68 — Expansion · Unverified
 - Work: Certify ownerless and horizontally scaled operation together
 - Acceptance: In one real game session, the founder exits permanently, other peers keep the same world available with no player OP, opt-in worker resources change, and players continue across reassigned regions when the required quorum and capacity survive
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **IN PROGRESS — combined local reference qualification passed; real game/independent-host acceptance open**
+- Source: [Combined qualification report](../research/distributed-simulation/COMBINED_OWNERLESS_REPORT.md); `combined_ownerless_lab.py`, independent evidence verifier, and retained signed history in the research evidence directory.
+- Evidence: Two isolated combined runs using actual Rust signed governance journals, separate TCP clients and policy-pinned Linux cgroup-capped regional worker processes. Retained final run: 13 certified decisions, three replayed checkpoints/ticks, four workers (1→2→1), four client receipts and nine role-proof observations. Founder journal untouched after departure; surviving majority recovers, player crosses different workers, revoked worker cannot volunteer, reduced CPU/memory enforced, retired authenticated receipts refused by session, minority recovery publication denied and exact recovery copy preserved. Client acknowledgements follow matching checkpoint certification. All creation/history/checkpoint commitments independently verified with actual CLI; deterministic replay and observation mutation tests. All 90 distributed-reference tests, release-version and workflow-policy checks passed.
+- Remaining / next action: Independent live quorum transport and canonical publication, resource consent/admission integration, real authenticated account mapping and region-aware Minecraft runtime. Repeat actual combined gameplay across independently controlled machines and verify sustained service at the required target; #63 did not qualify.
+- External dependency: Real independent hosts and accounts, supported distributed Minecraft runtime and live authority, #63 service target. One trusted local controller and reference simulation; no production activation or real game acceptance.
+- Commit: Combined ownerless reference qualification and retained verification; see git history.
 
 ## Next checkpoint
 
@@ -754,4 +754,4 @@ Initial full-item implementation/acceptance totals: not yet established by item-
 - Private replication uses the current signed membership with a matching descriptor and rechecks the exact authenticated recipient before normal payload, manifest acknowledgement and every blob chunk. A half-installed signed roster denies data instead of trusting an obsolete descriptor. Removed local recipients also refuse normal snapshot bytes. Ordinary unauthorized world requests receive a generic refusal.
 - Evidence: strict CLI/storage Clippy, 51 daemon/CLI binary tests, 67 storage tests (1 optional soak ignored), and actual authenticated invite/leave/replication test passed (19.73s). A reusable grant admitted a third peer; revocation left committed membership intact; joint leave committed; a real network probe authenticated as the removed member received status/history refusal and no newer manifest/blob payload while the remaining member verified a new checkpoint. The old device retained its old verified save. Prior commit 8653c2d required CI completed successfully (run 45585530110). Broader local CLI validation underway; UI and field acceptance remain.
 
-Latest actionable continuation after #67 local role separation and proof consumption: #68 combined qualification, with independent-host gameplay and scale gates still open. Ownerless gameplay stays disabled until the canonical authority, admission and field gates are met. The #63 full durable service target, independent quorum, physical, compatibility and actual Minecraft gameplay gates remain open.
+Latest actionable continuation after #68 combined local reference qualification: resolve live authority/runtime integration, #63 sustained service target and independent-host actual Minecraft field acceptance. No remaining local reference qualification is asserted to substitute for these gates. Ownerless gameplay stays disabled until the canonical authority, admission and field gates are met. The #63 full durable service target, independent quorum, physical, compatibility and actual Minecraft gameplay gates remain open.

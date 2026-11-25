@@ -92,6 +92,18 @@ public evidence cover real local Fabric permission tests and a distinct
 policy-pinned reference ledger with authenticated worker receipts. This
 is not canonical quorum authority or distributed Minecraft gameplay.
 
+## Combined ownerless reference qualification (#68, 2026-11-26)
+
+[Combined qualification report](COMBINED_OWNERLESS_REPORT.md): actual
+Rust quorum-signed history, explicit reference role proofs, capped
+regional workers and TCP client transactions in one isolated reference
+session. Two runs demonstrate founder-independent recovery, 1→2→1
+workers, cross-worker movement, revoked eligibility, retired-session
+refusal and minority recovery-copy-only behavior. The retained second
+run has three certified reference ticks and 13 decisions. This does
+not satisfy actual independent-machine Minecraft gameplay or the #63
+sustained-service target; production activation remains gated.
+
 ## Original R0 evidence (2026-11-08)
 
 
