@@ -9,7 +9,6 @@ use std::{
 };
 use swarm_protocol::{
     BlobDescriptor, BlobEncoding, Hash32, PeerId, SnapshotManifestV1, WorldGenesisV1, WorldId, BLOB_HASH_DOMAIN,
-    STORAGE_SCHEMA_VERSION,
 };
 use thiserror::Error;
 use walkdir::WalkDir;
@@ -26,6 +25,10 @@ pub enum StorageError {
     },
     #[error("storage payload paused: {detail}")]
     StoragePressure { detail: String },
+    #[error("incompatible SwarmCraft profile: {detail}; do not downgrade live data; preserve the profile and consult docs/PROFILE_UPGRADE.md")]
+    IncompatibleProfile { detail: String },
+    #[error("unsupported storage schema {found}; this build supports {supported}; preserve this profile and use a compatible build or verified data-only export")]
+    UnsupportedStorageSchema { found: u16, supported: u16 },
     #[error("invalid local replica policy: {0}")]
     InvalidReplicaPolicy(&'static str),
     #[error("snapshot source is not a directory: {0}")]
@@ -147,6 +150,7 @@ pub struct Storage {
 impl Storage {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, StorageError> {
         let this = Self { root: root.into() };
+        crate::profile::activate(&this.root)?;
         // The data root can later contain authority permits and local
         // identities. Do not create it group-writable under umask 0002.
         let mut builder = fs::DirBuilder::new();
@@ -186,9 +190,8 @@ impl Storage {
     }
 
     pub fn create_world(&self, metadata: &WorldMetadataV1) -> Result<(), StorageError> {
-        if metadata.storage_schema_version != STORAGE_SCHEMA_VERSION
-            || metadata.genesis.world_id()? != metadata.world_id
-        {
+        crate::profile::validate_world_schema(metadata.storage_schema_version, metadata.genesis.protocol_version)?;
+        if metadata.genesis.world_id()? != metadata.world_id {
             return Err(StorageError::WorldMetadataMismatch);
         }
         for dir in [
@@ -208,11 +211,12 @@ impl Storage {
 
     pub fn load_world(&self, world: WorldId) -> Result<WorldMetadataV1, StorageError> {
         let path = self.metadata_dir(world).join("world.json");
-        if !path.exists() {
+        if !crate::transaction::canonical_file_exists(&path)? {
             return Err(StorageError::WorldNotFound(world));
         }
-        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let bytes = crate::transaction::read_canonical_file(&path)?;
         let metadata: WorldMetadataV1 = serde_json::from_slice(&bytes)?;
+        crate::profile::validate_world_schema(metadata.storage_schema_version, metadata.genesis.protocol_version)?;
         if metadata.world_id != world || metadata.genesis.world_id()? != world {
             return Err(StorageError::WorldMetadataMismatch);
         }
@@ -232,8 +236,13 @@ impl Storage {
             let Ok(world) = entry.file_name().to_string_lossy().parse::<WorldId>() else {
                 continue;
             };
-            if let Ok(metadata) = self.load_world(world) {
-                worlds.push(metadata);
+            match self.load_world(world) {
+                Ok(metadata) => worlds.push(metadata),
+                Err(error @ (StorageError::UnsupportedStorageSchema { .. } | StorageError::UnsupportedProtocol(_))) => {
+                    return Err(error)
+                }
+                // Unpublished/incomplete world directories are not selectable.
+                Err(_) => {}
             }
         }
         worlds

@@ -525,12 +525,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #52 — P1 · Partial
 - Work: Establish upgrade, downgrade, schema, and interrupted migration acceptance from the supported older preview
 - Acceptance: One real saved world and consent history survive upgrade and restart. Unsupported downgrade stops clearly, with verified export/rollback guidance
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (real Java save, actual published Linux package chain and native candidate Desktop restart; historical downgrade preflight is operator-enforced)
+- Source: `crates/swarm-storage/src/profile.rs`, storage open/schema guards, CLI profile check and import/Desktop entrypoints; `scripts/acceptance/profile_upgrade.py`, `native_profile_upgrade.py`; [operator procedure](PROFILE_UPGRADE.md).
+- Evidence: [Profile upgrade report and exact evidence](../research/profile-upgrade/REPORT.md). Real Java 26.1.2 world (31 files, 2,215,315 bytes, five region files) imported with published 0.5.0, opened with published 0.5.1, explicit opt-in and withdrawal, then upgraded to actual locally packaged candidate. Killed process waiting for activation lock, partial staging refusal and restart; same identity, signed checkpoint, world bytes and latest consent revision. Both historical-target preflights refused initialized data. Verified legacy data-only recovery, denied unsupported certified history, fresh identity and encrypted backup round-trip. Native Linux Desktop boot/restart and future-profile startup/retry refusal passed. Seven profile unit and two CLI tests, import/runtime/backup/storage regressions, strict Clippy, native Desktop build. No CI dispatch.
+- Remaining / next action: #53 resource/crash/retention/network campaigns. The historical executables predate the floor and direct invocation is not retroactively intercepted. Native Windows/macOS installation replacement and future incompatible schema migration remain unverified. No legacy authority conversion or actual live downgrade.
+- External dependency: Authorized native Windows/macOS release qualification and explicit installation/rollback testing.
+- Commit: Guard profile activation and verify real saved-world upgrade; see git history.
 
 ### #53 — P1 · Partial
 - Work: Extend crash, disk-full, retention, platform resource, and network campaigns beyond current automated gates

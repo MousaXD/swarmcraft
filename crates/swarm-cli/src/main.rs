@@ -2,7 +2,7 @@ mod daemon;
 mod invite;
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::{path::PathBuf, str::FromStr};
 use swarm_cli::game_route_api::{call_live_daemon, GameRouteApiOperation, GameRouteApiReply, GameRouteStatusV1};
 use swarm_cli::live_runtime_registry::LiveFabricRuntimeRegistry;
@@ -34,6 +34,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Check the local profile before a supported upgrade or rollback.
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
     /// Initialize local storage and peer identity.
     Init,
     /// Display this device's persistent cryptographic peer identity.
@@ -74,6 +79,24 @@ enum Command {
     },
     /// Display the authorized peers for a world.
     Peers { world: String },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ProfileTarget {
+    Current,
+    #[value(name = "published-0.5.0")]
+    Published050,
+    #[value(name = "published-0.5.1")]
+    Published051,
+}
+
+#[derive(Debug, Subcommand)]
+enum ProfileCommand {
+    /// Read-only compatibility preflight; no recovery or identity creation.
+    Check {
+        #[arg(long, value_enum, default_value = "current")]
+        target: ProfileTarget,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -459,6 +482,17 @@ fn main() -> Result<()> {
     // recipient's existing canonical store (opening can resume transactions).
     let command = match cli.command {
         Command::Backup { command } => return handle_backup(command, &paths),
+        Command::Profile { command: ProfileCommand::Check { target } } => {
+            let report = match target {
+                ProfileTarget::Current => swarm_storage::profile::inspect(&paths.root)?,
+                ProfileTarget::Published050 | ProfileTarget::Published051 => {
+                    swarm_storage::profile::check_historical_target(&paths.root)?
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+
         other => other,
     };
     let storage = Storage::open(paths.root.clone())?;
@@ -510,6 +544,7 @@ fn main() -> Result<()> {
             })?;
         }
         Command::World { command } => handle_world(command, &paths, &storage)?,
+        Command::Profile { .. } => unreachable!("profile checks are handled before storage opens"),
         Command::Backup { .. } => unreachable!("backup commands are handled before canonical storage opens"),
         Command::Invite { command } => handle_invite(command, &paths, &storage)?,
         Command::Contact { command } => match command {

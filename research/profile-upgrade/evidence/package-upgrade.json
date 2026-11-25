@@ -1,0 +1,48 @@
+{
+  "scope": "actual published Debian sidecars and locally built candidate; genuine quiescent Java world; no network or Java during profile operations",
+  "packages": {
+    "legacy": {
+      "tag": "main-latest",
+      "package_sha256": "35c65a3581dbeeee4d9a8e04c83316590999a344cd0c0244edf16368a8d5f5cd",
+      "cli_sha256": "97a87f88bc08931e0b15b52a5066d2b0a44f8bf178525e40e21dce5999a8e6e2",
+      "import_sha256": "e547b7e925aa2e44ed9fa8ac59567735c3a1e974db7f69199b1da8882cd8f7a1"
+    },
+    "pinned": {
+      "tag": "main-snapshot-aaffac22e32547983f1fd558af6eb32c0da4917b",
+      "package_sha256": "7a9c52e2e75f0a5d4966e7e2393fa1522973bff1d0154ac8e3594262bb6e980e",
+      "cli_sha256": "9b6004eb8b3dff3ddae90a9f8c16527f896785862d1ae4e996061dfcc359d61c",
+      "import_sha256": "5ed827f6e950f1afe38d9f33008aeea53278905a33c2b50780b4363400cddbd1"
+    }
+  },
+  "candidate_cli_sha256": "8ee7b1f17d8636749d4b5c676f5e4e32cf14ef955045e83379507d3d76d8a3b9",
+  "candidate_import_sha256": "d60ff2efa158687d8e310f935c8db55ca41279ed1996ca6a37c230c09fe1a886",
+  "saved_files": 31,
+  "saved_bytes": 2215315,
+  "region_files": 5,
+  "checks": {
+    "actual_legacy_import_verified": true,
+    "actual_pinned_preview_preserves_identity_and_explicit_consent_transitions": true,
+    "read_only_preflight": true,
+    "real_killed_candidate_waiting_for_activation": true,
+    "restart_activates_complete_floor": true,
+    "same_profile_upgrade_and_restart_preserve_exact_bytes": true,
+    "both_historical_rollback_targets_refused": true,
+    "verified_legacy_data_only_export_exact": true,
+    "legacy_certified_history_export_refuses_unsupported_genesis": true,
+    "new_identity_data_only_recovery_and_encrypted_roundtrip": true
+  },
+  "original_checkpoint": "4a8dd9a4e11e843b34a63a39d025f74888fe822219a49ea3ef2611447579b3ef",
+  "original_state_root": "0ef6aaa01caf889ab03f15c9e97d3a906c8877305f2743a4b79a4ffd15e7d3c3",
+  "compatibility_floor": {
+    "format_schema": 1,
+    "minimum_reader_generation": 1,
+    "storage_schema_version": 1,
+    "protocol_version": 1
+  },
+  "consent_transitions": [
+    "absent",
+    "explicit_512",
+    "explicit_withdrawal"
+  ],
+  "latest_revision_preserved": true
+}

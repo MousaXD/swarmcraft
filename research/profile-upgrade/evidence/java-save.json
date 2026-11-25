@@ -1,0 +1,11 @@
+{
+  "scope": "genuine Minecraft Java Edition 26.1.2 save, isolated loopback, no client login; prior explicit EULA reused, no user world files accessed",
+  "java_version": "openjdk version \"25.0.5.1\" 2026-11-17 LTS",
+  "server_sha256": "cd47e7c38328f64768fd17af8fcd8b22496b40b63d4ffee81e71ae059fedcb42",
+  "heap_mib": 1536,
+  "available_mib_before": 4676,
+  "saved_files": 31,
+  "saved_bytes": 2215315,
+  "region_files": 5,
+  "clean_stop": true
+}

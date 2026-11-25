@@ -393,6 +393,9 @@ fn import_world_inner(
     if expected_compatibility.is_some_and(|expected| expected != compatibility_fingerprint.to_string()) {
         bail!("import compatibility changed after review; check the import again");
     }
+    // The final destination must pass the same profile gate as the CLI and
+    // Desktop, before identity or staging mutations. Preview stays read-only.
+    let _storage = Storage::open(paths.root.clone())?;
     let identity = PeerIdentity::load_or_create(paths)?;
     let (world, genesis) = create_world_genesis_with_fingerprint(
         &identity,

@@ -1,0 +1,10 @@
+{
+  "complete": true,
+  "scope": "actual current extracted Debian package, isolated loopback-only network namespace, upgraded real Java save",
+  "stages": {
+    "boot": true,
+    "future_profile": true,
+    "restart": true
+  },
+  "candidate_package_sha256": "9d6b8525527618be36e9c2ed7ca5ddbe056cb661dacf4b37471ac4222419d594"
+}

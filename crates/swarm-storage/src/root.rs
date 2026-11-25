@@ -4,6 +4,7 @@ pub use base::*;
 
 pub mod control;
 pub mod membership;
+pub mod profile;
 pub mod recovery_v2;
 pub mod replica;
 pub mod replica_policy;

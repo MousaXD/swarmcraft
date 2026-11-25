@@ -67,7 +67,6 @@ pub fn create_canonical_world(
         let canonical = canonicalize_modpack(request.modpack)?;
 
         let paths = DataPaths::discover().map_err(|error| failure("storage_unavailable", error.to_string()))?;
-        paths.ensure().map_err(|error| failure("storage_unavailable", error.to_string()))?;
         let storage =
             Storage::open(paths.root.clone()).map_err(|error| failure("storage_unavailable", error.to_string()))?;
         let identity =
