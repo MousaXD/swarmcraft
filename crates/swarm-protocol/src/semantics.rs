@@ -92,6 +92,13 @@ impl WorldDescriptorV1 {
 }
 
 impl MembershipRecordV1 {
+    /// Banned identities remain in the roster; no V1 unban operation exists.
+    pub fn preserves_banned_members(&self, previous: &Self) -> bool {
+        previous.members.iter().filter(|member| member.banned).all(|old| {
+            self.members.iter().any(|new| new.peer_id == old.peer_id && new.public_key == old.public_key && new.banned)
+        })
+    }
+
     pub fn validate_semantics(&self) -> Result<(), ProtocolError> {
         require_protocol_version("membership record", self.protocol_version)?;
         require_strict_peer_order("membership record", &self.members)

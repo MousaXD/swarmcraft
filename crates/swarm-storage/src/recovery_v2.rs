@@ -48,6 +48,7 @@ impl Storage {
                 return Err(StorageError::WorldMetadataMismatch);
             }
         }
+        self.ensure_no_device_retirement_locked(world)?;
         if let Some(previous) = latest_certificate(&certificates) {
             let prior_generation = certificate_generation(previous);
             if proposed_generation < prior_generation {

@@ -2199,24 +2199,6 @@ fn maintain_authority_leases(
                 continue;
             }
         };
-        let wake_requested = sleep_record.is_some() && world_wake_requested(paths, world);
-        if sleep_record.is_some() && !wake_requested {
-            clear_permit(paths, world)?;
-            clear_sleeping_world(runtime, world);
-            if let Ok(descriptor) = storage.load_world_descriptor(world) {
-                if let Some(record) =
-                    sleep_record.as_ref().filter(|record| record.authority_peer_id == identity.peer_id())
-                {
-                    if let Err(error) = replicate_sleep_boundary(storage, node, outbound, runtime, &descriptor, record)
-                    {
-                        warn!(%world, %error, "signed sleep replication deferred");
-                    }
-                }
-                request_world_statuses(storage, node, outbound, runtime, &descriptor, identity.peer_id())?;
-                request_host_capabilities(node, outbound, runtime, &descriptor, identity.peer_id())?;
-            }
-            continue;
-        }
         let membership_promise = match load_optional_membership_promise(storage, world) {
             Ok(promise) => promise,
             Err(error) => {
@@ -2235,6 +2217,24 @@ fn maintain_authority_leases(
             continue;
         }
 
+        let wake_requested = sleep_record.is_some() && world_wake_requested(paths, world);
+        if sleep_record.is_some() && !wake_requested {
+            clear_permit(paths, world)?;
+            clear_sleeping_world(runtime, world);
+            if let Ok(descriptor) = storage.load_world_descriptor(world) {
+                if let Some(record) =
+                    sleep_record.as_ref().filter(|record| record.authority_peer_id == identity.peer_id())
+                {
+                    if let Err(error) = replicate_sleep_boundary(storage, node, outbound, runtime, &descriptor, record)
+                    {
+                        warn!(%world, %error, "signed sleep replication deferred");
+                    }
+                }
+                request_world_statuses(storage, node, outbound, runtime, &descriptor, identity.peer_id())?;
+                request_host_capabilities(node, outbound, runtime, &descriptor, identity.peer_id())?;
+            }
+            continue;
+        }
         let Ok(descriptor) = storage.load_world_descriptor(world) else {
             clear_permit(paths, world)?;
             continue;
@@ -4472,6 +4472,23 @@ fn handle_request(
                 return Err(anyhow!("join invite was not issued by the current authority"));
             }
             let descriptor = storage.load_world_descriptor(world)?;
+            if descriptor.members != current.members
+                || epoch.epoch_number != current.epoch
+                || epoch.authority_peer_id != current.authority_peer_id
+                || epoch.authority_public_key != current.authority_public_key
+            {
+                bail!("join requires synchronized signed membership and epoch");
+            }
+            if current.members.iter().any(|m| m.peer_id == application_peer && m.banned) {
+                node.respond(
+                    channel,
+                    WireResponse::Error {
+                        code: "WORLD_ACCESS_DENIED".into(),
+                        message: "World access unavailable".into(),
+                    },
+                )?;
+                return Ok(());
+            }
             let inviter = descriptor
                 .member(request.invite.inviter_peer_id)
                 .context("invite signer is not a current world member")?;

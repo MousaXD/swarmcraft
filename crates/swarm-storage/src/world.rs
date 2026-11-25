@@ -74,6 +74,23 @@ impl Storage {
             if self.first_contact_replay_pinned_locked(record.world_id)? {
                 return Err(StorageError::WorldMetadataMismatch);
             }
+            if !record.preserves_banned_members(&current)
+                || self
+                    .pending_device_retirement_locked(record.world_id)?
+                    .is_some_and(|promise| promise.proposal.previous != current || promise.proposal.proposed != *record)
+            {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+            let transition =
+                swarm_protocol::MembershipProposalV1 { previous: current.clone(), proposed: record.clone() };
+            // Do not install the retirement staged by an operator without
+            // the exact durable certificate. The daemon verifies all
+            // certificate signatures and both quorums before persisting it.
+            if transition.retired_device().is_some()
+                && self.load_membership_certificate(record.world_id)?.proposal != transition
+            {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
             let expected_sequence =
                 current.sequence.checked_add(1).ok_or(StorageError::CounterExhausted("membership sequence"))?;
             if record.sequence != expected_sequence

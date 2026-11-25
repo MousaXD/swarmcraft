@@ -31,12 +31,63 @@ lease and recovery state does not constitute safe identity restoration.
 A lost authority can be replaced only through the existing supported
 quorum recovery flow. See [authority recovery](AUTHORITY_RECOVERY.md).
 
-V1 currently has no supported authority-initiated retirement command for
-an unavailable member. An offline device cannot sign a voluntary leave.
-Revoking a known invite blocks that grant, not the lost member's already
-committed identity. Do not claim the member is removed or that its access
-is revoked until a signed membership transition commits. Do not shrink
-quorum by editing a local descriptor.
+### Retire a lost non-authority device
+
+V1 supports a deliberate authority-initiated retirement through the existing
+signed joint-membership protocol. It is not an automatic ban, contact delete
+or a quorum-shrinking shortcut.
+
+1. Retain the surviving replicas and their control history. If the lost
+   device was the current authority, first establish a certified successor
+   via ordinary recovery. The current authority cannot retire itself.
+2. Safely stop the world at a verified signed sleep checkpoint. Finish any
+   existing membership, transfer or recovery transition; do not delete
+   pending votes or unconfirmed-runtime markers.
+3. Read `world status <world-id>` for the signed membership hash, signed
+   authority epoch/fence and checkpoint manifest. Use `peers <world-id>`
+   to identify the exact old cryptographic peer ID, not the display name.
+4. From the current authority, explicitly run:
+
+```bash
+swarmcraft world retire-device <world-id> <lost-peer-id> \
+  --expected-membership <signed-membership-hash> \
+  --expected-epoch <epoch> --expected-fence <fence> \
+  --expected-checkpoint <manifest-hash> --confirm
+```
+
+The command verifies complete local signed history and the selected
+checkpoint, rejects solo or conflicting authority state and unaccounted
+local JVMs, and records a local vote under the world transaction lock.
+The signed proposed record retains the old identity with `banned=true`
+and `authority_eligible=false`. It does not remove data or change the
+accepted epoch, fence or snapshot. "Retirement staged; NOT committed"
+means the daemon still needs a majority of distinct active voters in
+**both** the old and new configurations. The authority cannot count the
+absent device as a vote, nor stage a retirement when the surviving roster
+could not possibly satisfy the old quorum. In a two-member world, a single
+surviving member cannot retire the other.
+
+Keep the replication daemons of the surviving voters running even while
+Minecraft remains asleep. Reopening the daemon retains and resumes the
+same durable promise; competing generation, transfer or recovery writes
+are blocked. Check the committed signed roster after convergence. Do not
+assume a staged retirement has revoked access. There is no timeout cancel
+or V1 unban command. A conflicting durable promise can require explicit
+review rather than unsafe automatic recovery.
+
+After commitment, the banned identity cannot use its old reusable invite
+to rejoin, even if the token remains valid for other identities. Subsequent
+V1 membership changes must preserve banned identities. This applies to
+upgraded peers with the signed current roster; a disconnected device can
+still possess previously replicated bytes and stale local metadata.
+Retirement cannot remotely erase those copies or globally stop an
+independent legacy partition. Revoke known shared tokens separately,
+especially if a lost device held bearer tokens usable by other identities.
+
+Initialize a replacement with a new identity and issue a fresh invitation.
+Do not inherit hosting preference, EULA consent or previous private keys.
+No Desktop retirement button is exposed yet; the CLI requires explicit
+operator confirmation.
 
 If quorum cannot be recovered, an authorized surviving replica can create
 a separate new private world from an independently verified checkpoint via
@@ -44,19 +95,34 @@ a separate new private world from an independently verified checkpoint via
 original world identity or canonical authority. If no surviving verified
 copy exists, there is no guaranteed data recovery.
 
+## Local contact removal
+
+Use the exact peer ID and public key supplied by a contact's `identity`
+command. Labels are only local descriptions, not cryptographic identities.
+
+```bash
+swarmcraft contact add <peer-id> --public-key <hex-public-key> --label "Old PC"
+swarmcraft contact list
+swarmcraft contact remove <peer-id>
+```
+
+Removing a contact is idempotent and never changes signed world membership,
+authority, invitation validity, or replicated bytes. Updated discovery
+providers refuse fresh presence signatures for the forgotten identity even
+if stale DHT provider hints persist, and local presence queries discard
+observations if the contact changes before the query finishes. Already
+issued short-lived signed observations cannot be remotely erased; they
+expire normally. Use committed device retirement for world-access removal.
+
 ## Remaining implementation
 
-- Provide an explicitly confirmed current-authority retirement operation
-  for a non-authority device. Retain a signed banned roster entry so
-  obsolete reusable V1 invitations cannot readmit that exact identity.
-  Require the exact current membership hash, epoch and fence, reject
-  unresolved competing transitions, and collect durable old/new quorum
-  votes. Never count an absent device as a vote or bypass quorum.
-- Confirm stale presence, previous authenticated connections, obsolete
-  invites and replayed membership cannot reinstate a committed retirement.
-  Distinguish staged retirement from committed retirement in the CLI/UI.
-- Treat contact-list removal as a local preference, never a signed
-  membership transition. No contact registry is activated by this design.
+- Add a reviewed Desktop operator flow for exact-hash confirmation and
+  pending/committed retirement status, without treating a local UI action
+  as a grant. Installed cross-platform acceptance and mixed-version
+  security review remain separate.
+- Expose contact management and presence refresh through a reviewed Desktop
+  flow. The CLI uses the existing local contact store; no contact action
+  grants world membership or authority.
 - Do not export private recovery material automatically. Same-identity
   restoration requires a reviewed complete durable-state backup/restore
   protocol, exclusive identity possession, anti-rollback checks, and

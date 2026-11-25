@@ -112,6 +112,7 @@ impl Storage {
                 }
                 return Err(StorageError::WorldMetadataMismatch);
             }
+            self.ensure_no_device_retirement_locked(record.world_id)?;
             // Preserve only the previously accepted record, never a proposed
             // successor whose canonical publication might still fail. A crash
             // after this archive but before publication cannot advance authority.
@@ -193,6 +194,7 @@ impl Storage {
                     && existing.authority_public_key == reservation.authority_public_key);
             }
         }
+        self.ensure_no_device_retirement_locked(reservation.world_id)?;
         let bytes = postcard::to_allocvec(reservation)?;
         durable_atomic_write(&path, &bytes)?;
         Ok(true)
@@ -232,6 +234,7 @@ impl Storage {
                 &postcard::to_allocvec(&existing)?,
             )?;
         }
+        self.ensure_no_device_retirement_locked(transfer.world_id)?;
         let bytes = postcard::to_allocvec(transfer)?;
         durable_atomic_write(&path, &bytes)
     }
@@ -296,6 +299,7 @@ impl Storage {
 
     pub fn clear_sleep_record(&self, world: WorldId) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(world)?;
+        self.ensure_no_device_retirement_locked(world)?;
         let path = self.control_path(world, "sleep.postcard");
         if canonical_file_exists(&path)? {
             self.archive_sleep_locked(&self.load_sleep_record(world)?)?;
@@ -320,6 +324,7 @@ impl Storage {
         {
             return Ok(false);
         }
+        self.ensure_no_device_retirement_locked(world)?;
         self.archive_sleep_locked(expected)?;
         durable_remove(&path)?;
         Ok(true)
@@ -469,6 +474,7 @@ impl Storage {
     ) -> Result<(), StorageError> {
         let world = anchor.epoch.world_id;
         let _guard = self.lock_world_transaction_for_stale_download(world)?;
+        self.ensure_no_device_retirement_locked(world)?;
         if !crash_retirement_history_matches(anchor, proof)
             || proof.genesis != self.load_world(world)?.genesis
             || postcard::to_allocvec(proof)?.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES

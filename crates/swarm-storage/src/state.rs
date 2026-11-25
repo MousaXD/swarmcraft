@@ -28,6 +28,7 @@ impl Storage {
         vote: &RecoveryVoteV1,
     ) -> Result<RecoveryPromiseResult, StorageError> {
         let _guard = self.lock_world_transaction(ballot.world_id)?;
+        self.ensure_no_device_retirement_locked(ballot.world_id)?;
         ballot.validate_semantics()?;
         vote.validate_semantics()?;
         if !vote.matches_ballot(ballot)?

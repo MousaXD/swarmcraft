@@ -62,8 +62,29 @@ enum Command {
         #[command(subcommand)]
         command: InviteCommand,
     },
+    /// Manage local contacts without granting or revoking world membership.
+    Contact {
+        #[command(subcommand)]
+        command: ContactCommand,
+    },
     /// Display the authorized peers for a world.
     Peers { world: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum ContactCommand {
+    /// Add a verified peer ID/public-key pair to the local contact list.
+    Add {
+        peer: String,
+        #[arg(long)]
+        public_key: String,
+        #[arg(long)]
+        label: String,
+    },
+    /// List local contacts and locally known shared worlds, not live access.
+    List,
+    /// Forget a local contact by peer ID. Does not alter signed membership.
+    Remove { peer: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -146,6 +167,21 @@ enum WorldCommand {
     },
     /// Stage a signed authority-mediated leave request without deleting replicated data.
     Leave { world: String },
+    /// Stage a joint-quorum retirement of a lost non-authority device.
+    RetireDevice {
+        world: String,
+        peer: String,
+        #[arg(long)]
+        expected_membership: String,
+        #[arg(long)]
+        expected_epoch: u64,
+        #[arg(long)]
+        expected_fence: u64,
+        #[arg(long)]
+        expected_checkpoint: String,
+        #[arg(long)]
+        confirm: bool,
+    },
     /// List locally known worlds.
     List,
     /// Show local world and snapshot status.
@@ -330,6 +366,19 @@ fn main() -> Result<()> {
         }
         Command::World { command } => handle_world(command, &paths, &storage)?,
         Command::Invite { command } => handle_invite(command, &paths, &storage)?,
+        Command::Contact { command } => match command {
+            ContactCommand::Add { peer, public_key, label } => {
+                let contact = swarm_cli::discovery::add_friend(&paths, &peer, &public_key, &label)?;
+                println!("{}", serde_json::to_string_pretty(&contact)?);
+            }
+            ContactCommand::List => {
+                println!("{}", serde_json::to_string_pretty(&swarm_cli::discovery::list_friends(&paths)?)?);
+            }
+            ContactCommand::Remove { peer } => {
+                let removed = swarm_cli::discovery::remove_friend(&paths, &peer)?;
+                println!("{}", serde_json::json!({"removed": removed, "world_membership_changed": false}));
+            }
+        },
         Command::Peers { world } => show_peers(parse_world(&world)?, &storage)?,
     }
     Ok(())
@@ -577,6 +626,39 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 println!("{}  {}  snapshots={}", world.world_id, world.display_name, snapshots);
             }
         }
+        WorldCommand::RetireDevice {
+            world,
+            peer,
+            expected_membership,
+            expected_epoch,
+            expected_fence,
+            expected_checkpoint,
+            confirm,
+        } => {
+            if !confirm {
+                bail!("retirement requires --confirm; the retired identity cannot rejoin through a V1 invitation");
+            }
+            let world = parse_world(&world)?;
+            let identity = PeerIdentity::load_existing(paths)?;
+            let result = swarm_cli::device_retirement::stage_device_retirement(
+                storage,
+                &identity,
+                swarm_cli::device_retirement::RetirementRequest {
+                    world,
+                    peer: peer.parse().context("invalid device peer ID")?,
+                    membership_hash: expected_membership.parse().context("invalid membership hash")?,
+                    epoch: expected_epoch,
+                    fencing_token: expected_fence,
+                    checkpoint_hash: expected_checkpoint.parse().context("invalid checkpoint hash")?,
+                },
+            )?;
+            println!("Retirement staged; NOT committed");
+            println!("Proposal: {}", result.proposal_hash()?);
+            println!("Device: {}", result.retired_device().context("invalid retirement shape")?);
+            println!(
+                "The daemon must obtain both old and new signed voter majorities. No authority or save was changed."
+            );
+        }
         WorldCommand::Status { world } => {
             let world = parse_world(&world)?;
             let metadata = storage.load_world(world)?;
@@ -639,6 +721,39 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             };
             println!("Safety: {:?}", safety);
             print_local_member_roles(storage, paths, world);
+            if let Ok(membership) = storage.load_membership_record(world) {
+                if verify_membership_signature(&membership).is_ok() {
+                    println!("Signed membership hash: {}", membership.record_hash()?);
+                    println!("Retired/banned identities: {}", membership.members.iter().filter(|m| m.banned).count());
+                } else {
+                    println!("Signed membership hash: Not verified");
+                }
+            }
+            if let Ok(epoch) = storage.load_epoch_record(world) {
+                if swarm_core::verify_signature(
+                    epoch.authority_peer_id,
+                    epoch.authority_public_key,
+                    &epoch.signing_bytes()?,
+                    &epoch.signature,
+                )
+                .is_ok()
+                {
+                    println!("Signed authority epoch: {}", epoch.epoch_number);
+                    println!("Signed authority fence: {}", epoch.fencing_token);
+                } else {
+                    println!("Signed authority epoch: Not verified");
+                    println!("Signed authority fence: Not verified");
+                }
+            }
+            match storage.load_membership_promise(world) {
+                Ok(promise) => {
+                    if let Some(peer) = promise.proposal.retired_device() {
+                        println!("Device retirement: Pending joint quorum for {peer}");
+                    }
+                }
+                Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => println!("Device retirement: Not verified (unreadable membership prepare)"),
+            }
 
             println!("Background seeding: {}", storage.background_seeding_enabled(world)?);
             if let Ok(status) = migration::load_migration_status(paths, world) {

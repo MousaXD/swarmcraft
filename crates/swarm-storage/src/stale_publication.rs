@@ -314,6 +314,7 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
         if !self.stale_publication_pending(world)? {
+            self.ensure_no_device_retirement_locked(world)?;
             if self.crash_retirement_pending(world)? != crash_retirement {
                 return Err(StorageError::WorldMetadataMismatch);
             }

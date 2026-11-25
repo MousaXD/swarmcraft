@@ -186,7 +186,35 @@ impl MembershipProposalV1 {
             && self.proposed.previous_membership_hash == Some(self.previous.record_hash()?)
             && self.previous.authority_peer_id == self.proposed.authority_peer_id
             && self.previous.authority_public_key == self.proposed.authority_public_key
-            && !self.proposed.members.is_empty())
+            && !self.proposed.members.is_empty()
+            && self.proposed.preserves_banned_members(&self.previous))
+    }
+
+    /// A retirement changes exactly one active non-authority member into
+    /// a banned, ineligible entry while preserving its cryptographic identity.
+    /// This recognizes a signed record shape, not a permission or certificate.
+    pub fn retired_device(&self) -> Option<PeerId> {
+        if !self.validate_shape().ok()? || self.previous.members.len() != self.proposed.members.len() {
+            return None;
+        }
+        let mut retired = None;
+        for (old, new) in self.previous.members.iter().zip(&self.proposed.members) {
+            if old == new {
+                continue;
+            }
+            if retired.is_some()
+                || old.peer_id == self.previous.authority_peer_id
+                || old.peer_id != new.peer_id
+                || old.public_key != new.public_key
+                || old.banned
+                || !new.banned
+                || new.authority_eligible
+            {
+                return None;
+            }
+            retired = Some(old.peer_id);
+        }
+        retired
     }
 
     pub fn proposal_hash(&self) -> Result<Hash32, ProtocolError> {

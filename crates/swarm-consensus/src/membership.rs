@@ -137,6 +137,7 @@ pub fn validate_discovery_membership_proof_shape(
     }
     let mut voters = active_voters(&proof.initial_membership.members)?;
     let mut last_sequence = proof.initial_membership.sequence;
+    let mut last_membership = &proof.initial_membership;
     for certificate in &proof.membership_certificates {
         validate_membership_certificate_shape(certificate)?;
         if certificate.proposal.previous.world_id != proof.world_id
@@ -147,12 +148,15 @@ pub fn validate_discovery_membership_proof_shape(
         }
         last_sequence = certificate.proposal.proposed.sequence;
         let previous = active_voters(&certificate.proposal.previous.members)?;
-        if previous != voters {
+        if previous != voters || !certificate.proposal.previous.preserves_banned_members(last_membership) {
             return Err(MembershipConsensusError::MalformedHistory);
         }
         voters = active_voters(&certificate.proposal.proposed.members)?;
+        last_membership = &certificate.proposal.proposed;
     }
-    if proof.current_membership.sequence < last_sequence || active_voters(&proof.current_membership.members)? != voters
+    if proof.current_membership.sequence < last_sequence
+        || !proof.current_membership.preserves_banned_members(last_membership)
+        || active_voters(&proof.current_membership.members)? != voters
     {
         return Err(MembershipConsensusError::MalformedHistory);
     }

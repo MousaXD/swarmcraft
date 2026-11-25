@@ -500,6 +500,10 @@ fn handle_discovery_request(
             if application_peer != requester_peer_id {
                 bail!("presence requester does not match authenticated peer identity");
             }
+            // Serialize a fresh presence response with contact removal.
+            // A completed removal must not authorize new signatures, even
+            // if the DHT still advertises a stale provider record.
+            let _contacts = lock_friend_store(paths)?;
             if !accepted_friend_peers(paths)?.contains(&requester_peer_id) {
                 node.respond(channel, WireResponse::FriendPresence(None))?;
                 return Ok(());
@@ -898,6 +902,7 @@ pub fn add_friend(paths: &DataPaths, peer: &str, public_key_hex: &str, label: &s
     if label.len() > MAX_FRIEND_LABEL_BYTES {
         bail!("friend label is too long");
     }
+    let _contacts = lock_friend_store(paths)?;
     let mut store = load_friend_store(paths)?;
     if let Some(existing) = store.friends.iter_mut().find(|friend| friend.peer_id == peer_id.to_string()) {
         if existing.public_key_hex != hex::encode(public_key) {
@@ -922,6 +927,7 @@ pub fn add_friend(paths: &DataPaths, peer: &str, public_key_hex: &str, label: &s
 
 pub fn remove_friend(paths: &DataPaths, peer: &str) -> Result<bool> {
     let peer_id = PeerId::from_str(peer).context("invalid friend peer ID")?;
+    let _contacts = lock_friend_store(paths)?;
     let mut store = load_friend_store(paths)?;
     let before = store.friends.len();
     store.friends.retain(|friend| friend.peer_id != peer_id.to_string());
@@ -1511,6 +1517,12 @@ pub async fn friend_presence(
         value?;
     }
 
+    // A query may complete after the user removed the contact. Do not
+    // project the old observation into the now-changed local contact list.
+    let _contacts = lock_friend_store(paths)?;
+    if !load_friend_store(paths)?.friends.iter().any(|current| current == contact) {
+        bail!("friend contact changed while checking presence");
+    }
     Ok(report.unwrap_or_else(|| FriendPresenceReportV1 {
         peer_id: peer.to_string(),
         state: if providers.is_empty() && detail.is_some() { "network_unavailable".into() } else { "offline".into() },
@@ -1698,10 +1710,11 @@ fn add_explicit_bootstraps(node: &mut DiscoveryNode, values: &[String]) -> Resul
 
 fn load_friend_store(paths: &DataPaths) -> Result<FriendStoreV1> {
     let path = friends_path(paths);
-    if !path.exists() {
-        return Ok(FriendStoreV1::default());
-    }
-    let bytes = fs::read(&path).with_context(|| format!("could not read {}", path.display()))?;
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(FriendStoreV1::default()),
+        Err(error) => return Err(error).with_context(|| format!("could not read {}", path.display())),
+    };
     let mut store: FriendStoreV1 = serde_json::from_slice(&bytes).context("friend store is malformed")?;
     if store.version != FRIENDS_FILE_VERSION {
         bail!("unsupported friend store version {}", store.version);
@@ -1716,6 +1729,23 @@ fn load_friend_store(paths: &DataPaths) -> Result<FriendStoreV1> {
         }
     }
     Ok(store)
+}
+
+// All writers hold the same advisory lock across their read-modify-write.
+// A concurrent label update cannot restore a removed contact from a stale
+// copy. The discovery provider also holds it for a fresh presence response.
+fn lock_friend_store(paths: &DataPaths) -> Result<fs::File> {
+    paths.ensure()?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(paths.root.join("friends.lock"))?;
+    fs2::FileExt::lock_exclusive(&file).context("cannot serialize contact store access")?;
+    Ok(file)
 }
 
 fn save_friend_store(paths: &DataPaths, store: &FriendStoreV1) -> Result<()> {
@@ -1882,6 +1912,46 @@ mod tests {
         assert!(err.to_string().contains("does not match"));
     }
 
+    #[tokio::test]
+    async fn removed_contact_cannot_be_probed_and_does_not_remove_same_label_contact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(tmp.path());
+        let a = PeerIdentity::from_secret_bytes([1; 32]);
+        let b = PeerIdentity::from_secret_bytes([2; 32]);
+        for peer in [&a, &b] {
+            add_friend(&paths, &peer.peer_id().to_string(), &hex::encode(peer.public_key()), "Alex").unwrap();
+        }
+        assert!(remove_friend(&paths, &a.peer_id().to_string()).unwrap());
+        assert!(!remove_friend(&paths, &a.peer_id().to_string()).unwrap());
+        let reopened = DataPaths::from_root(tmp.path());
+        assert_eq!(accepted_friend_peers(&reopened).unwrap(), HashSet::from([b.peer_id()]));
+        let error = friend_presence(&reopened, a.peer_id(), &[]).await.unwrap_err();
+        assert!(error.to_string().contains("not an accepted local friend"));
+        assert_eq!(list_friends(&reopened).unwrap()[0].peer_id, b.peer_id().to_string());
+    }
+
+    #[test]
+    fn concurrent_contact_mutations_preserve_other_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(tmp.path());
+        let old = PeerIdentity::from_secret_bytes([50; 32]);
+        add_friend(&paths, &old.peer_id().to_string(), &hex::encode(old.public_key()), "Old").unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| assert!(remove_friend(&paths, &old.peer_id().to_string()).unwrap()));
+            for seed in 1..=16 {
+                let paths = &paths;
+                scope.spawn(move || {
+                    let peer = PeerIdentity::from_secret_bytes([seed; 32]);
+                    add_friend(paths, &peer.peer_id().to_string(), &hex::encode(peer.public_key()), "Same label")
+                        .unwrap();
+                });
+            }
+        });
+        let contacts = accepted_friend_peers(&paths).unwrap();
+        assert_eq!(contacts.len(), 16);
+        assert!(!contacts.contains(&old.peer_id()));
+    }
+
     #[test]
     fn private_and_unlisted_worlds_never_match_public_browse() {
         let identity = PeerIdentity::from_secret_bytes([3; 32]);
@@ -1967,7 +2037,7 @@ mod tests {
         removed.members.retain(|member| member.peer_id != friend.peer_id());
         removed.signature.clear();
         local.sign_membership(&mut removed).unwrap();
-        storage.save_membership_record(&removed).unwrap();
+        assert!(storage.save_membership_record(&removed).is_err(), "a committed ban cannot be erased in V1");
         assert!(shared_worlds(&storage, local.peer_id(), friend.peer_id(), friend.public_key()).unwrap().is_empty());
     }
 

@@ -110,8 +110,8 @@ fn signed_membership_certificates_require_unique_voters_and_bounded_history() {
 
     // This is signed by a real member and still has sufficient honest votes.
     // Adding a voter-key mismatch in historical records is not acceptable.
-    // The forged *banned* key is absent from the final membership, so only an
-    // intermediate-history check can detect it.
+    // A banned entry is still bound to its real identity key. Structural
+    // quorum validation alone cannot detect the forged key.
     let mut intermediate = initial_membership(&[identity(31), identity(32), identity(33)]);
     let mut with_ghost = intermediate.current_membership.clone();
     with_ghost.sequence = 1;
@@ -129,6 +129,14 @@ fn signed_membership_certificates_require_unique_voters_and_bounded_history() {
     let mut first_votes =
         [&alice, &bob].iter().map(|signer| signed_membership_vote(signer, &first_proposal)).collect::<Vec<_>>();
     first_votes.sort_by_key(|vote| vote.voter_peer_id);
+    intermediate.membership_certificates =
+        vec![MembershipCertificateV1 { proposal: first_proposal, votes: first_votes }];
+    intermediate.current_membership = with_ghost.clone();
+    validate_discovery_membership_proof_shape(&intermediate).unwrap();
+    assert!(verify_genesis_anchored_membership(&intermediate).is_err());
+
+    // Independently reject erasing a permanent retirement, even with
+    // enough genuine voter signatures and a correct predecessor hash.
     let mut without_ghost = with_ghost.clone();
     without_ghost.sequence = 2;
     without_ghost.previous_membership_hash = Some(with_ghost.record_hash().unwrap());
@@ -138,12 +146,11 @@ fn signed_membership_certificates_require_unique_voters_and_bounded_history() {
     let mut second_votes =
         [&alice, &bob].iter().map(|signer| signed_membership_vote(signer, &second_proposal)).collect::<Vec<_>>();
     second_votes.sort_by_key(|vote| vote.voter_peer_id);
-    intermediate.membership_certificates = vec![
-        MembershipCertificateV1 { proposal: first_proposal, votes: first_votes },
-        MembershipCertificateV1 { proposal: second_proposal, votes: second_votes },
-    ];
+    intermediate
+        .membership_certificates
+        .push(MembershipCertificateV1 { proposal: second_proposal, votes: second_votes });
     intermediate.current_membership = without_ghost;
-    validate_discovery_membership_proof_shape(&intermediate).unwrap();
+    assert!(validate_discovery_membership_proof_shape(&intermediate).is_err());
     assert!(verify_genesis_anchored_membership(&intermediate).is_err());
 }
 

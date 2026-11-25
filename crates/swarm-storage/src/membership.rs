@@ -11,8 +11,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use swarm_protocol::{
-    DiscoveryMembershipProofV1, InviteV1, JoinRequestV1, MembershipCertificateV1, MembershipProposalV1,
-    MembershipVoteV1, WorldId, MAX_INVITE_LIFETIME_MS,
+    DiscoveryMembershipProofV1, EpochMode, EpochRecordV1, InviteV1, JoinRequestV1, MembershipCertificateV1,
+    MembershipProposalV1, MembershipVoteV1, SleepRecordV1, TransferPhase, WorldId, MAX_INVITE_LIFETIME_MS,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +36,112 @@ impl Storage {
     ) -> Result<MembershipPromiseResult, StorageError> {
         let _guard = self.lock_world_transaction(proposal.proposed.world_id)?;
         self.promise_membership_proposal_locked(proposal, vote)
+    }
+
+    /// Exact-generation CAS for the operator's verified sleep boundary.
+    /// The caller verifies signatures and history. This persists a vote,
+    /// not a committed ban, and never bypasses joint consensus.
+    pub fn promise_device_retirement(
+        &self,
+        expected_epoch: &EpochRecordV1,
+        expected_sleep: &SleepRecordV1,
+        proposal: &MembershipProposalV1,
+        vote: &MembershipVoteV1,
+    ) -> Result<MembershipPromiseResult, StorageError> {
+        let world = proposal.proposed.world_id;
+        let _guard = self.lock_world_transaction(world)?;
+        if proposal.retired_device().is_none()
+            || expected_epoch.world_id != world
+            || expected_sleep.world_id != world
+            || self.load_epoch_record(world)? != *expected_epoch
+            || self.load_sleep_record(world)? != *expected_sleep
+            || expected_sleep.epoch != expected_epoch.epoch_number
+            || expected_sleep.fencing_token != expected_epoch.fencing_token
+            || expected_sleep.authority_peer_id != expected_epoch.authority_peer_id
+            || expected_sleep.authority_public_key != expected_epoch.authority_public_key
+            || vote.voter_peer_id != expected_epoch.authority_peer_id
+            || vote.voter_public_key != expected_epoch.authority_public_key
+            || self
+                .load_or_initialize_canonical_head_locked(world)?
+                .head
+                .is_none_or(|head| head.manifest_hash != expected_sleep.latest_snapshot_hash)
+        {
+            return Ok(MembershipPromiseResult::Rejected);
+        }
+        self.check_retirement_base_locked(proposal)?;
+        self.promise_membership_proposal_locked(proposal, vote)
+    }
+
+    fn check_retirement_base_locked(&self, proposal: &MembershipProposalV1) -> Result<(), StorageError> {
+        let world = proposal.proposed.world_id;
+        let epoch = self.load_epoch_record(world)?;
+        let current = self.load_membership_record(world)?;
+        if current != proposal.previous
+            || self.load_world_descriptor(world)?.members != current.members
+            || epoch.mode == EpochMode::Solo
+            || epoch.epoch_number != current.epoch
+            || epoch.authority_peer_id != current.authority_peer_id
+            || epoch.authority_public_key != current.authority_public_key
+            || !current.members.iter().any(|m| {
+                !m.banned
+                    && m.authority_eligible
+                    && m.peer_id == epoch.authority_peer_id
+                    && m.public_key == epoch.authority_public_key
+            })
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        let generation = (epoch.epoch_number, epoch.fencing_token);
+        match self.load_recovery_promise(world) {
+            Ok(_) => return Err(StorageError::WorldMetadataMismatch),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        match self.load_recovery_reservation(world) {
+            Ok(_) => return Err(StorageError::WorldMetadataMismatch),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        if self
+            .load_recovery_certificates(world)?
+            .iter()
+            .flatten()
+            .any(|certificate| (certificate.ballot.target_epoch, certificate.ballot.target_fencing_token) > generation)
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        match self.load_transfer_record(world) {
+            Ok(transfer) => {
+                let target = (transfer.next_epoch, transfer.next_fencing_token);
+                if transfer.phase != TransferPhase::Committed
+                    || target > generation
+                    || (target == generation && transfer.to_peer_id != epoch.authority_peer_id)
+                {
+                    return Err(StorageError::WorldMetadataMismatch);
+                }
+            }
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+
+    pub(crate) fn pending_device_retirement_locked(
+        &self,
+        world: WorldId,
+    ) -> Result<Option<DurableMembershipPromiseV1>, StorageError> {
+        match self.load_membership_promise(world) {
+            Ok(promise) => Ok(promise.proposal.retired_device().is_some().then_some(promise)),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn ensure_no_device_retirement_locked(&self, world: WorldId) -> Result<(), StorageError> {
+        if self.pending_device_retirement_locked(world)?.is_some() {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(())
     }
 
     /// The caller verifies the invite, join request, membership, epoch and vote
@@ -162,6 +268,9 @@ impl Storage {
             }
             return Ok(MembershipPromiseResult::Rejected);
         }
+        if proposal.retired_device().is_some() {
+            self.check_retirement_base_locked(proposal)?;
+        }
         let promise = DurableMembershipPromiseV1 { proposal: proposal.clone(), vote: vote.clone() };
         durable_atomic_write(
             &self.world_dir(proposal.proposed.world_id).join("metadata/membership-promise.postcard"),
@@ -186,11 +295,20 @@ impl Storage {
         committed_hash: swarm_protocol::Hash32,
     ) -> Result<bool, StorageError> {
         let _guard = self.lock_world_transaction(world)?;
-        let Ok(promise) = self.load_membership_promise(world) else {
-            return Ok(false);
+        let promise = match self.load_membership_promise(world) {
+            Ok(promise) => promise,
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
         };
         if promise.proposal.proposed.record_hash()? != committed_hash {
             return Ok(false);
+        }
+        if promise.proposal.retired_device().is_some()
+            && (self.load_membership_record(world)? != promise.proposal.proposed
+                || self.load_world_descriptor(world)?.members != promise.proposal.proposed.members
+                || self.load_membership_certificate(world)?.proposal != promise.proposal)
+        {
+            return Err(StorageError::WorldMetadataMismatch);
         }
         durable_remove(&self.world_dir(world).join("metadata/membership-promise.postcard"))?;
         Ok(true)
@@ -205,6 +323,15 @@ impl Storage {
             } else {
                 Err(StorageError::WorldMetadataMismatch)
             };
+        }
+        if self.pending_device_retirement_locked(world)?.is_some_and(|promise| promise.proposal != certificate.proposal)
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        if certificate.proposal.retired_device().is_some()
+            && self.load_membership_record(world)? != certificate.proposal.proposed
+        {
+            self.check_retirement_base_locked(&certificate.proposal)?;
         }
         let encoded = postcard::to_allocvec(certificate)?;
         self.archive_membership_certificate_locked(certificate, &encoded)?;

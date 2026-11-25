@@ -255,12 +255,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #25 — P1 · Proposal
 - Work: Add supported invite/device lifecycle, including contact removal, replacement devices, and recovery of a lost identity
 - Acceptance: Losing a PC has a documented repair path. A removed device cannot regain access through stale presence or an obsolete invite. Private recovery material is only exported with explicit user action
-- State: **IN PROGRESS** (repair guidance and source review; retirement implementation pending)
-- Source: `docs/DEVICE_RECOVERY.md`, `docs/INVITE_LIFECYCLE.md`, `docs/RECOVERED_COPY.md`, daemon joint membership and signed invite paths.
-- Evidence: Existing process regression covers revoked invite, signed leave, and removed-peer private replication denial. Source review confirms V1 reusable grants and absence of an authority-initiated lost-device retirement command. No new identity export or unsafe key-only restoration was enabled.
-- Remaining / next action: Implement confirmed joint-quorum retirement retaining a signed banned entry; test obsolete invite replay, committed retirement and replacement; separate contact removal and reviewed recovery export.
-- External dependency: Genuine surviving quorum; no original-identity recovery without safe durable-state restoration.
-- Commit: See device recovery review checkpoint in git history.
+- State: **LOCALLY VERIFIED** (explicit V1 lost-device retirement and local contact CLI; full identity backup/restore and Desktop flows remain pending)
+- Source: `crates/swarm-cli/src/device_retirement.rs`, `world retire-device`, `contact add/list/remove`, signed membership promise/certificate storage, [device recovery](DEVICE_RECOVERY.md), [invite lifecycle](INVITE_LIFECYCLE.md), [recovered copy](RECOVERED_COPY.md).
+- Evidence: Actual local daemon regression proves staged retirement requires surviving old/new quorum, persists across restart, rejects uncertified membership publication and conflicting epoch/sleep consumption, preserves checkpoint/epoch, denies an authenticated old identity's obsolete signed invite and private status request, and admits a new device without erasing the banned identity. Public CLI contact removal leaves signed membership unchanged; concurrent contact mutations preserve other entries, removed contacts cannot be probed, providers check live contact store before signing presence. Protocol/consensus/storage suites, strict Clippy, CLI library 158 passed/2 ignored, CLI binary 51/51, all four existing invite/join integration tests and the updated retirement/contact scenario pass locally.
+- Remaining / next action: Desktop operator/contact flow; independently reviewed identity backup/restore preserving durable anti-rollback state; installed mixed-version acceptance. A signed contact or invitation does not grant authority; no unsafe private-key export was added. Existing previously issued presence observations expire normally.
+- External dependency: Genuine surviving quorum; no original-identity recovery without safe durable-state restoration. Retired legacy/offline devices may still retain previous bytes; no remote erase guarantee.
+- Commit: See locally verified lost-device retirement and contact milestone in git history.
 
 ### #26 — Sabathon P0 (baseline) / P1 (full identity mapping) · Missing
 - Work: Manage deterministic `server.properties` at Fabric launch (`server-ip=127.0.0.1`, per-world loopback port, explicit `online-mode`, `enable-rcon=false`, baseline allowlist); in P1 connect private SwarmCraft membership to full Minecraft login/session allowlist policy

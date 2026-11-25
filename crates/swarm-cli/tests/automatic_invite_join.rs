@@ -1094,3 +1094,252 @@ fn late_join_after_signed_wake_retargets_during_download_and_publishes_only_fina
     assert!(swarm_cli::live_authority::verify_playable_epoch(&b.storage, &next).is_err());
     swarm_cli::live_authority::verify_playable_epoch(&b.storage, &successor).unwrap();
 }
+
+#[test]
+fn lost_device_retirement_requires_surviving_joint_quorum_and_denies_old_bearer_invite() {
+    use swarm_network::{NetworkEvent, SwarmNode, WireRequest, WireResponse};
+    use swarm_protocol::{SleepRecordV1, PROTOCOL_VERSION};
+
+    let issuer = peer_fixture();
+    let survivor = peer_fixture();
+    let lost = peer_fixture();
+    let ip = local_non_loopback_ipv4();
+    let address = automatic_transport_address(&issuer, ip);
+    let created = run_cli(
+        &issuer,
+        &["world", "create", "--name", "lost-device", "--minecraft", "26.1.2", "--fabric-loader", "0.19.3"],
+    );
+    let world: WorldId = created.lines().find_map(|s| s.strip_prefix("World ID: ")).unwrap().parse().unwrap();
+    let world_arg = world.to_string();
+    let epoch = issuer.storage.load_epoch_record(world).unwrap();
+    let head = issuer.storage.latest_snapshot(world).unwrap().unwrap();
+    let token = run_cli(&issuer, &["invite", "create", &world_arg, "--bootstrap", &address]);
+    let a = spawn_daemon(&issuer, ip);
+    let b = spawn_daemon(&survivor, ip);
+    assert!(run_cli(&survivor, &["world", "join", &token]).contains("Join request staged"));
+    wait_until("first survivor committed", Duration::from_secs(45), || {
+        let Ok(m) = issuer.storage.load_membership_record(world) else {
+            return false;
+        };
+        m.sequence == 1
+            && survivor.storage.load_membership_record(world).ok().as_ref() == Some(&m)
+            && survivor.storage.load_epoch_record(world).ok().as_ref() == Some(&epoch)
+            && survivor.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&head)
+    });
+    let c = spawn_daemon(&lost, ip);
+    assert!(run_cli(&lost, &["world", "join", &token, "--host-candidate"]).contains("Join request staged"));
+    // Keep the old signed bearer admission request even after it commits.
+    let old_request = lost.storage.load_pending_join(world).unwrap();
+    wait_until("all three devices committed", Duration::from_secs(60), || {
+        let Ok(m) = issuer.storage.load_membership_record(world) else {
+            return false;
+        };
+        m.sequence == 2
+            && [&survivor, &lost].iter().all(|p| {
+                p.storage.load_membership_record(world).ok().as_ref() == Some(&m)
+                    && p.storage.load_epoch_record(world).ok().as_ref() == Some(&epoch)
+                    && p.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&head)
+            })
+            && issuer.storage.load_membership_promise(world).is_err()
+    });
+    drop((a, b, c));
+    let before = issuer.storage.load_membership_record(world).unwrap();
+    // Forgetting a contact is deliberately not a world membership operation.
+    let peer = lost.identity.peer_id().to_string();
+    let key = hex::encode(lost.identity.public_key());
+    let _: serde_json::Value =
+        serde_json::from_str(&run_cli(&issuer, &["contact", "add", &peer, "--public-key", &key, "--label", "Old PC"]))
+            .unwrap();
+    let listed: serde_json::Value = serde_json::from_str(&run_cli(&issuer, &["contact", "list"])).unwrap();
+    assert_eq!(listed[0]["peer_id"], peer);
+    let removed: serde_json::Value = serde_json::from_str(&run_cli(&issuer, &["contact", "remove", &peer])).unwrap();
+    assert_eq!(removed["removed"], true);
+    assert_eq!(removed["world_membership_changed"], false);
+    assert_eq!(run_cli(&issuer, &["contact", "list"]), "[]");
+    assert_eq!(issuer.storage.load_membership_record(world).unwrap(), before);
+    assert!(issuer.storage.load_membership_promise(world).is_err());
+
+    // A signed test sleep boundary, not an installed JVM acceptance.
+    let mut sleep = SleepRecordV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        latest_snapshot_hash: head.manifest_hash().unwrap(),
+        epoch: epoch.epoch_number,
+        fencing_token: epoch.fencing_token,
+        authority_peer_id: issuer.identity.peer_id(),
+        authority_public_key: issuer.identity.public_key(),
+        signature: vec![],
+    };
+    issuer.identity.sign_sleep_record(&mut sleep).unwrap();
+    for p in [&issuer, &survivor, &lost] {
+        p.storage.save_sleep_record(&sleep).unwrap();
+    }
+    let target = lost.identity.peer_id().to_string();
+    let membership = before.record_hash().unwrap().to_string();
+    let checkpoint = head.manifest_hash().unwrap().to_string();
+    let epoch_arg = epoch.epoch_number.to_string();
+    let fence = epoch.fencing_token.to_string();
+    let args = [
+        "world",
+        "retire-device",
+        &world_arg,
+        &target,
+        "--expected-membership",
+        &membership,
+        "--expected-epoch",
+        &epoch_arg,
+        "--expected-fence",
+        &fence,
+        "--expected-checkpoint",
+        &checkpoint,
+        "--confirm",
+    ];
+    let denied = |p: &PeerFixture, args: &[&str]| {
+        let result = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+            .arg("--data-dir")
+            .arg(&p.paths.root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!result.status.success(), "unexpected success: {}", String::from_utf8_lossy(&result.stdout));
+    };
+    denied(&issuer, &args[..args.len() - 1]);
+    denied(&survivor, &args);
+    let own = issuer.identity.peer_id().to_string();
+    let mut self_retire = args;
+    self_retire[3] = &own;
+    denied(&issuer, &self_retire);
+    let wrong = "ab".repeat(32);
+    let mut wrong_head = args;
+    wrong_head[11] = &wrong;
+    denied(&issuer, &wrong_head);
+    let mut wrong_roster = args;
+    wrong_roster[5] = &wrong;
+    denied(&issuer, &wrong_roster);
+    let mut stale = args;
+    stale[9] = "999";
+    denied(&issuer, &stale);
+    assert!(issuer.storage.load_membership_promise(world).is_err());
+    assert!(run_cli(&issuer, &args).contains("Retirement staged; NOT committed"));
+    let promise = issuer.storage.load_membership_promise(world).unwrap();
+    assert_eq!(promise.proposal.retired_device(), Some(lost.identity.peer_id()));
+    assert_eq!(issuer.storage.load_membership_record(world).unwrap(), before);
+    assert!(issuer.storage.save_membership_record(&promise.proposal.proposed).is_err());
+    assert!(issuer
+        .storage
+        .clear_membership_promise_after_commit(world, promise.proposal.proposed.record_hash().unwrap())
+        .is_err());
+    assert!(issuer.storage.clear_sleep_record(world).is_err());
+    let mut newer = epoch.clone();
+    newer.epoch_number += 1;
+    newer.fencing_token += 1;
+    newer.previous_epoch_hash = Some(epoch.record_hash().unwrap());
+    newer.signature = issuer.identity.sign(&newer.signing_bytes().unwrap());
+    assert!(issuer.storage.save_epoch_record(&newer).is_err());
+
+    // Restart the authority without either other voter. It must retain
+    // the exact pending promise; neither its own vote nor timeout suffices.
+    let _a = spawn_daemon(&issuer, ip);
+    thread::sleep(Duration::from_secs(3));
+    assert_eq!(issuer.storage.load_membership_record(world).unwrap(), before);
+    assert_eq!(issuer.storage.load_membership_promise(world).unwrap(), promise);
+    assert!(run_cli(&issuer, &["world", "status", &world_arg]).contains("Device retirement: Pending joint quorum"));
+    let _b = spawn_daemon_with_peers(&survivor, ip, std::slice::from_ref(&address));
+    wait_until("joint retirement by actual surviving daemons", Duration::from_secs(45), || {
+        issuer.storage.load_membership_record(world).ok().as_ref() == Some(&promise.proposal.proposed)
+            && survivor.storage.load_membership_record(world).ok().as_ref() == Some(&promise.proposal.proposed)
+            && issuer.storage.load_membership_promise(world).is_err()
+            && survivor.storage.load_membership_promise(world).is_err()
+    });
+    let committed = issuer.storage.load_membership_record(world).unwrap();
+    assert_eq!(issuer.storage.load_epoch_record(world).unwrap(), epoch);
+    assert_eq!(issuer.storage.load_sleep_record(world).unwrap(), sleep);
+    assert_eq!(issuer.storage.latest_snapshot(world).unwrap().unwrap(), head);
+    assert_eq!(committed.members.iter().filter(|m| m.banned).count(), 1);
+    let cert = issuer.storage.load_membership_certificate(world).unwrap();
+    swarm_consensus::validate_membership_certificate_shape(&cert).unwrap();
+    assert_eq!(cert.votes.len(), 2);
+    assert!(!cert.votes.iter().any(|v| v.voter_peer_id == lost.identity.peer_id()));
+    let reopened = Storage::open(issuer.paths.root.clone()).unwrap();
+    assert_eq!(reopened.load_membership_record(world).unwrap(), committed);
+    assert!(reopened.save_membership_record(&before).is_err());
+    let mut erased = committed.clone();
+    erased.sequence += 1;
+    erased.previous_membership_hash = Some(committed.record_hash().unwrap());
+    erased.members.retain(|m| m.peer_id != lost.identity.peer_id());
+    issuer.identity.sign_membership(&mut erased).unwrap();
+    assert!(reopened.save_membership_record(&erased).is_err());
+
+    // The still-valid old token is not revoked globally. A real authenticated
+    // connection with its old identity is nevertheless denied both admission
+    // and private world data. Reusing the original request is deliberate.
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let key = load_or_create_transport_key(&lost.paths.transport_key()).unwrap();
+        let hello = lost.identity.signed_peer_hello(vec!["snapshot-replication-v1".into()]).unwrap();
+        let mut probe = SwarmNode::new(key, hello, lost.identity.network_signing_key()).unwrap();
+        probe.listen(format!("/ip4/{ip}/udp/{}/quic-v1", lost.port).parse().unwrap()).unwrap();
+        probe.dial(address.parse().unwrap()).unwrap();
+        let mut requests = Vec::new();
+        let mut denied = 0;
+        tokio::time::timeout(Duration::from_secs(35), async {
+            loop {
+                match probe.next_event().await.unwrap() {
+                    NetworkEvent::Authenticated { transport_peer, application_peer }
+                        if application_peer == issuer.identity.peer_id() && requests.is_empty() =>
+                    {
+                        requests.push(
+                            probe
+                                .send_request(&transport_peer, WireRequest::JoinRequest(Box::new(old_request.clone())))
+                                .unwrap(),
+                        );
+                        requests.push(
+                            probe.send_request(&transport_peer, WireRequest::WorldStatus { world_id: world }).unwrap(),
+                        );
+                    }
+                    NetworkEvent::Response { transport_peer, request_id, response }
+                        if probe.application_peer(&transport_peer) == Some(issuer.identity.peer_id())
+                            && requests.contains(&request_id) =>
+                    {
+                        assert!(matches!(response,WireResponse::Error {code,..} if code=="WORLD_ACCESS_DENIED"));
+                        denied += 1;
+                        if denied == 2 {
+                            break;
+                        }
+                    }
+                    NetworkEvent::InboundRequest { request, channel, .. } => {
+                        assert!(!matches!(
+                            &request,
+                            WireRequest::SnapshotManifest(_)
+                                | WireRequest::BlobChunk { .. }
+                                | WireRequest::HistoricalReplayOffer { .. }
+                        ));
+                        let _ = probe.respond(
+                            channel,
+                            WireResponse::Error { code: "TEST_PROBE".into(), message: "retired device".into() },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("authenticated old invite and world status must be denied");
+    });
+    assert_eq!(issuer.storage.load_membership_record(world).unwrap(), committed);
+    // Replacement identity uses normal admission; the old tombstone
+    // survives a later signed membership transition.
+    let replacement = peer_fixture();
+    let _d = spawn_daemon(&replacement, ip);
+    let fresh = run_cli(&issuer, &["invite", "create", &world_arg, "--bootstrap", &address]);
+    assert!(run_cli(&replacement, &["world", "join", &fresh]).contains("Join request staged"));
+    wait_until("replacement joins without reinstating old identity", Duration::from_secs(60), || {
+        let Ok(m) = issuer.storage.load_membership_record(world) else {
+            return false;
+        };
+        m.sequence == committed.sequence + 1
+            && m.members.iter().any(|v| v.peer_id == lost.identity.peer_id() && v.banned && !v.authority_eligible)
+            && m.members.iter().any(|v| v.peer_id == replacement.identity.peer_id() && !v.banned)
+            && replacement.storage.load_membership_record(world).ok().as_ref() == Some(&m)
+            && replacement.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&head)
+    });
+}
