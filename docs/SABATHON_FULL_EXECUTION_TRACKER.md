@@ -345,12 +345,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #34 — P2 · Research
 - Work: Evaluate operation journaling and erasure coding independently
 - Acceptance: Proven improvement against an existing snapshot baseline; fault tolerance, restore complexity, and storage cost are measured before new live formats
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: crates/swarm-storage/tests/operation_journal_lab.rs, erasure_coding_lab.rs, support/research_v1_fixture.rs; research/journal-erasure/REPORT.md.
+- Evidence: Independently compare actual V1 full-file capture/replication/restore against bounded ordered byte-operation journal and 4+2 GF(256) archive. Journal: three sparse rounds, 6.30 MB full delta vs 12.7–12.8 KB actual journal record; retained base+records 6,338,215 vs 25,199,566 bytes, ordered replay increases restore cost (111–124 ms vs 55–58 ms). Exact base, predecessor, preimage and whole-tree checks; missing middle record blocks suffix while base/prefix restore; reordered/truncated/corrupted/unsafe operations denied; reopened final replay cross-checks full V1 restore. Erasure: actual V1 encoded blobs, six separate simulated domains, replicated pinned metadata, 9,460,962 bytes vs 18,900,003 for three full copies. All 154 bounded recoverable erasure patterns and 140 triple-loss refusals, corrupt metadata fallback, missing/corrupt domain recovery and 12 repaired shards plus exact metadata, third-domain denial without canonical publication, original V1 hash rejection despite self-consistent corrupted parity. Actual reconstruction/repair read/write bytes and timing recorded; all three research tests and strict all-target/all-feature storage Clippy passed.
+- Remaining / next action: #35 real game-server capacity evidence. Byte-operation journal is not semantic Minecraft operation capture/write-ahead or a live recovery protocol. Erasure failure domains are directories on one host, not independent machines. Both are isolated research-only, with no production activation; independently prove real semantic replay, audited codec, durable signed metadata, retention, streaming/resource limits, independent placement and WAN fault recovery before considering live formats.
+- External dependency: Actual game/semantic write-ahead and installed real-device independent-failure-domain tests; necessary final CI under local-first policy.
+- Commit: See 25 November independent journal and erasure research commit.
 
 ### #35 — P2 · Unverified
 - Work: Publish capacity with separate player, voter, replica, world-size, and relay tests
