@@ -126,3 +126,10 @@ WebDriver/WebKitGTK/Xvfb must already be available. The script does not
 install dependencies, run hosted jobs, or modify the shipping configuration.
 It removes a sidecar only from its own disposable copy for the negative
 control. An unavailable native runtime is a blocked field check, not a pass.
+
+The cross-platform installed GUI release gate is also local-first:
+[Native Desktop QA](NATIVE_DESKTOP_QA.md) contains an explicit
+Windows WebView2 driver and an external macOS Accessibility adapter.
+The installed shipping, candidate and separate negative build must be
+verified on real Windows, Intel Mac and Apple Silicon Mac machines. Do
+not dispatch hosted CI to compensate for unavailable local hardware.

@@ -1,0 +1,7 @@
+{
+  "productName": "SwarmCraft QA Broken",
+  "identifier": "dev.swarmcraft.desktop.qa-broken",
+  "build": {
+    "frontendDist": "../frontend/broken-dist"
+  }
+}

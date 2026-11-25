@@ -164,12 +164,13 @@ xvfb-run -a python3 scripts/acceptance/packaged-desktop-webdriver.py \
   --artifacts /tmp/swarmcraft-desktop-e2e
 ```
 
-This is a **Linux native-WebKitGTK GUI** gate. Windows and macOS packages
-remain built but are not yet exercised through a real packaged GUI in this
-gate; neither platform should be described as E2E-certified. In particular,
-macOS's native WKWebView lacks a direct `tauri-driver` counterpart. These
-tests also do not certify WAN connectivity, full Minecraft hosting or
-multi-device horizontal scaling.
+This is a **Linux native-WebKitGTK GUI** gate. The separate local
+[installed Windows/macOS native QA runner](../../docs/NATIVE_DESKTOP_QA.md)
+uses WebView2/msedgedriver on Windows and external native Accessibility
+on both Mac architectures, without adding hooks to shipping artifacts.
+Actual installed Windows/macOS runs remain required; neither platform
+should be described as E2E-certified. These tests also do not certify WAN
+connectivity, full Minecraft hosting or multi-device horizontal scaling.
 
 ## Official catalogs vs. shipped Fabric compatibility
 

@@ -1,0 +1,7 @@
+{
+  "productName": "SwarmCraft QA Candidate",
+  "identifier": "dev.swarmcraft.desktop.qa-candidate",
+  "build": {
+    "frontendDist": "../frontend/dist"
+  }
+}

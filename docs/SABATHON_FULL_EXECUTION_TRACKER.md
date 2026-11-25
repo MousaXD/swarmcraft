@@ -375,12 +375,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #37 — Release-Gate P0 · Unverified
 - Work: Implement installed Windows/macOS native GUI QA for #141 using platform-valid automation
 - Acceptance: Exercise actual WebView2 (`msedgedriver`) on Windows and native WKWebView automation (Accessibility/XCUITest or isolated QA bridge, not `tauri-driver`) on Apple Silicon & Intel macOS with real sidecars, real IPC, restart, host consent, and an intentional failure in a separate QA build
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **EXTERNALLY BLOCKED** (local harness implemented; installed acceptance not established)
+- Source: [Native Desktop QA](NATIVE_DESKTOP_QA.md); scripts/acceptance/{native_desktop_qa.py,native_desktop_ax.swift,test_native_desktop_qa.py}; apps/desktop/frontend/tauri.native-qa.{candidate,broken}.conf.json.
+- Evidence: 14 new runner contract tests and six existing acceptance/startup tests passed; five-workflow local-first policy check passed. Built and extracted the real Linux shipping Debian package with all four current sidecars, launched the actual WebKitGTK GUI in an isolated authenticated Xvfb display, created a private world, verified its signed checkpoint with the bundled CLI and observed unchanged persisted identity/world after process restart. Full Linux journey did not pass: the legacy sidebar hides Diagnostics even with Tools open; corrected the harness to use selected-world advanced controls and World details. A later native interaction still failed before signed-invite/join completion. No platform acceptance credited.
+- Remaining / next action: Finish the native interaction regression with categorized driver evidence, run the complete shipping/candidate/broken-module/missing-sidecar matrix, compile and exercise the AX client on actual Mac hardware, and retain exact-commit signed-join and hosting-consent evidence. Candidate remains opt-in; no shipping cutover. Proceed with #38 parity/rollback preparation without treating #37 as passed.
+- External dependency: Interactive native Windows x86_64 with matching WebView2 driver, native Apple Silicon and Intel macOS devices with Accessibility and screen-recording permissions, pinned installers and isolated test LAN. Swift helper is not compiled or runtime-verified on Linux.
+- Commit: Native installed QA checkpoint following 26c8c8b; see git history.
 
 ### #38 — P1 · Partial
 - Work: Decide Svelte cutover after shipping parity review (post-sabathon)
