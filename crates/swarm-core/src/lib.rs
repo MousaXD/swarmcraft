@@ -130,14 +130,19 @@ impl PeerIdentity {
         Self { signing_key: SigningKey::from_bytes(&secret) }
     }
 
+    /// Inspect an existing identity without creating or repairing local keys.
+    pub fn load_existing(paths: &DataPaths) -> Result<Self, CoreError> {
+        let key_path = paths.identity_key();
+        let bytes = fs::read(&key_path).map_err(|e| io_error(&key_path, e))?;
+        let secret: [u8; 32] = bytes.as_slice().try_into().map_err(|_| CoreError::InvalidIdentityKey(bytes.len()))?;
+        Ok(Self::from_secret_bytes(secret))
+    }
+
     pub fn load_or_create(paths: &DataPaths) -> Result<Self, CoreError> {
         paths.ensure()?;
         let key_path = paths.identity_key();
         if key_path.exists() {
-            let bytes = fs::read(&key_path).map_err(|e| io_error(&key_path, e))?;
-            let secret: [u8; 32] =
-                bytes.as_slice().try_into().map_err(|_| CoreError::InvalidIdentityKey(bytes.len()))?;
-            return Ok(Self::from_secret_bytes(secret));
+            return Self::load_existing(paths);
         }
 
         let identity = Self::generate();

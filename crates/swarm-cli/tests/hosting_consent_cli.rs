@@ -55,6 +55,12 @@ fn new_world_is_player_only_until_explicit_public_cli_action() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");
     let world = fresh_world(&data);
+    let role_status = invoke(&data, &["world", "status", &world]);
+    assert_success(&role_status);
+    let text = String::from_utf8(role_status.stdout).unwrap();
+    assert!(text.contains("Local voter role: Member role"), "{text}");
+    assert!(text.contains("Local host candidate: Eligible by signed membership"), "{text}");
+    assert!(text.contains("Local hosting consent: Player only (0 MiB)"), "{text}");
     let status = status_json(&data, &world);
     assert_eq!(status["selected_heap_mib"], 0);
     assert_eq!(status["consented"], false);

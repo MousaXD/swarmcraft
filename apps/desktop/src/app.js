@@ -814,6 +814,9 @@ function selectWorld(world, { focusDetail = false } = {}) {
     $('selectedMinecraft').textContent = world.status.Minecraft || 'Unknown';
     $('selectedCheckpoint').textContent = world.status['Latest snapshot'] || (world.snapshots ? `${world.snapshots} stored` : 'None');
     $('selectedCompatibility').textContent = world.compatibility['Authority eligibility'] || 'Not synchronized';
+    for (const field of document.querySelectorAll('[data-local-role-field]')) {
+      field.textContent = world.status[field.dataset.localRoleField] || 'Not verified';
+    }
 
     const safety = world.status.Safety || 'Unknown';
     const kind = safetyKind(safety);

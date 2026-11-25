@@ -1211,6 +1211,106 @@ mod tests {
     }
 
     #[test]
+    fn v1_role_projection_keeps_nonhosting_voters_and_durable_joint_promises() {
+        use crate::member_roles::{inspect_v1_roles, LocalMembershipRole};
+        use swarm_consensus::{membership_vote_for, validate_membership_certificate_shape};
+        use swarm_storage::MembershipPromiseResult;
+
+        let (temp, storage, alice, epoch) = fixture();
+        let world = epoch.world_id;
+        let bob = PeerIdentity::from_secret_bytes([22; 32]);
+        let outsider = PeerIdentity::from_secret_bytes([23; 32]);
+        let genesis = storage.load_world(world).unwrap().genesis;
+        let initial = signed_membership(&epoch, &alice, vec![member(&alice)], None);
+        storage.save_membership_record(&initial).unwrap();
+        initial_config(&storage, &alice, world);
+        let mut replica = member(&bob);
+        replica.authority_eligible = false;
+        let accepted = signed_membership(&epoch, &alice, vec![member(&alice), replica], Some(&initial));
+        let proposal = MembershipProposalV1 { previous: initial, proposed: accepted.clone() };
+        let sign_vote = |proposal: &MembershipProposalV1, voter: &PeerIdentity| {
+            let mut vote = membership_vote_for(proposal, voter.peer_id(), voter.public_key()).unwrap();
+            vote.signature = voter.sign(&vote.signing_bytes().unwrap());
+            vote
+        };
+        let cert =
+            MembershipCertificateV1 { votes: vec![sign_vote(&proposal, &alice), sign_vote(&proposal, &bob)], proposal };
+        validate_membership_certificate_shape(&cert).unwrap();
+        storage.save_membership_certificate(&cert).unwrap();
+        storage.save_membership_record(&accepted).unwrap();
+        let descriptor = swarm_protocol::WorldDescriptorV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            compatibility_fingerprint: genesis.compatibility_fingerprint,
+            members: accepted.members.clone(),
+            preferred_replication_factor: 3,
+        };
+        storage.save_world_descriptor(&descriptor).unwrap();
+
+        let role = inspect_v1_roles(&storage, &bob, world).unwrap();
+        assert_eq!(role.membership, LocalMembershipRole::Active);
+        assert!(role.player_member && role.replica_member && role.voter_member);
+        assert!(!role.host_candidate && !role.locally_accepted_authority);
+        let creator = inspect_v1_roles(&storage, &alice, world).unwrap();
+        assert!(creator.host_candidate && creator.locally_accepted_authority);
+        let viewer = inspect_v1_roles(&storage, &outsider, world).unwrap();
+        assert_eq!(viewer.membership, LocalMembershipRole::NotMember);
+        assert!(!viewer.player_member && !viewer.replica_member && !viewer.voter_member);
+        assert!(!viewer.host_candidate && !viewer.locally_accepted_authority);
+
+        // Local consent is not signed membership, even with a nonzero heap.
+        let paths = swarm_core::DataPaths::from_root(temp.path().join("data"));
+        paths.ensure().unwrap();
+        std::fs::write(paths.identity_key(), [22; 32]).unwrap();
+        let consent_dir = paths.root.join("control").join(world.to_hex());
+        std::fs::create_dir_all(&consent_dir).unwrap();
+        let consent = crate::hosting_budget::HostingConsentV1 {
+            schema_version: 1,
+            world_id: world,
+            peer_id: bob.peer_id(),
+            enabled: true,
+            heap_mib: 1024,
+            revision: 1,
+        };
+        std::fs::write(consent_dir.join("hosting-consent.json"), serde_json::to_vec(&consent).unwrap()).unwrap();
+        assert!(crate::hosting_budget::load_consent(&paths, world).unwrap().unwrap().enabled);
+        assert_eq!(inspect_v1_roles(&storage, &bob, world).unwrap(), role);
+
+        // An unsigned descriptor cannot promote a non-hosting member.
+        let mut forged = descriptor.clone();
+        forged.members.iter_mut().find(|m| m.peer_id == bob.peer_id()).unwrap().authority_eligible = true;
+        storage.save_world_descriptor(&forged).unwrap();
+        assert!(inspect_v1_roles(&storage, &bob, world).is_err());
+        storage.save_world_descriptor(&descriptor).unwrap();
+
+        let mut members = accepted.members.clone();
+        members.push(member(&outsider));
+        let pending = MembershipProposalV1 {
+            previous: accepted.clone(),
+            proposed: signed_membership(&epoch, &alice, members, Some(&accepted)),
+        };
+        let vote = sign_vote(&pending, &bob);
+        assert_eq!(storage.promise_membership_proposal(&pending, &vote).unwrap(), MembershipPromiseResult::Accepted);
+        let reopened = Storage::open(temp.path().join("data")).unwrap();
+        let durable = reopened.load_membership_promise(world).unwrap();
+        assert_eq!(durable.vote, vote);
+        let during = inspect_v1_roles(&reopened, &bob, world).unwrap();
+        assert!(during.voter_member && during.membership_transition_pending);
+        assert!(!during.host_candidate);
+        assert!(!inspect_v1_roles(&reopened, &outsider, world).unwrap().voter_member);
+
+        let alternative = MembershipProposalV1 {
+            previous: accepted.clone(),
+            proposed: signed_membership(&epoch, &alice, vec![member(&alice)], Some(&accepted)),
+        };
+        assert_eq!(
+            reopened.promise_membership_proposal(&alternative, &sign_vote(&alternative, &bob)).unwrap(),
+            MembershipPromiseResult::Rejected
+        );
+        assert_eq!(reopened.load_membership_promise(world).unwrap(), durable);
+    }
+
+    #[test]
     fn v2_migration_review_uses_real_canonical_storage_and_never_activates() {
         use crate::v2_migration_review::review_stable_v2_migration;
         use swarm_protocol::{

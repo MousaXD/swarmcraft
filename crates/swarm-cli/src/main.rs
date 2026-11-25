@@ -638,6 +638,8 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 WorldSafetyLevelV1::Canonical
             };
             println!("Safety: {:?}", safety);
+            print_local_member_roles(storage, paths, world);
+
             println!("Background seeding: {}", storage.background_seeding_enabled(world)?);
             if let Ok(status) = migration::load_migration_status(paths, world) {
                 println!("Migration: {:?}", status.phase);
@@ -1202,6 +1204,69 @@ fn handle_invite(command: InviteCommand, paths: &DataPaths, storage: &Storage) -
     Ok(())
 }
 
+/// User-facing role facts are read-only and separate from hosting memory,
+/// live route proofs, and actual authority mutations.
+fn print_local_member_roles(storage: &Storage, paths: &DataPaths, world: WorldId) {
+    use swarm_cli::member_roles::{inspect_v1_roles, LocalMembershipRole};
+    let roles = PeerIdentity::load_existing(paths)
+        .map_err(anyhow::Error::from)
+        .and_then(|identity| inspect_v1_roles(storage, &identity, world));
+    match roles {
+        Ok(role) => {
+            let membership = match role.membership {
+                LocalMembershipRole::Active => "Accepted signed member",
+                LocalMembershipRole::NotMember => "Not an accepted member",
+                LocalMembershipRole::Banned => "Banned member",
+                LocalMembershipRole::Synchronizing => "Synchronizing membership",
+            };
+            let label = |allowed| if allowed { "Member role" } else { "Not granted" };
+            println!("Local member role: {membership}");
+            println!("Local player role: {}", label(role.player_member));
+            println!("Local replica role: {}", label(role.replica_member));
+            println!("Local voter role: {}", label(role.voter_member));
+            println!(
+                "Local host candidate: {}",
+                if role.host_candidate { "Eligible by signed membership" } else { "Not granted" }
+            );
+            println!(
+                "Local administration: {}",
+                if role.locally_accepted_authority {
+                    "Locally accepted authority; live proof still required"
+                } else {
+                    "No independent V1 administrator grant"
+                }
+            );
+            println!(
+                "Local membership transition: {}",
+                if role.membership_transition_pending {
+                    "Pending; joint checks apply"
+                } else {
+                    "No local pending transition observed"
+                }
+            );
+        }
+        Err(_) => {
+            for field in [
+                "Local member role",
+                "Local player role",
+                "Local replica role",
+                "Local voter role",
+                "Local host candidate",
+                "Local administration",
+                "Local membership transition",
+            ] {
+                println!("{field}: Not verified");
+            }
+        }
+    }
+    match swarm_cli::hosting_budget::load_consent(paths, world) {
+        Ok(Some(consent)) if consent.enabled => {
+            println!("Local hosting consent: {} MiB opted in (not authority)", consent.heap_mib)
+        }
+        Ok(_) => println!("Local hosting consent: Player only (0 MiB)"),
+        Err(_) => println!("Local hosting consent: Not verified"),
+    }
+}
 fn show_peers(world: WorldId, storage: &Storage) -> Result<()> {
     let descriptor = storage.load_world_descriptor(world)?;
     if descriptor.members.is_empty() {

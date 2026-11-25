@@ -211,7 +211,7 @@ pub fn load_consent(paths: &DataPaths, world: WorldId) -> Result<Option<HostingC
         .with_context(|| format!("invalid local hosting consent {}; refusing hosting", path.display()))?;
     // Replacing or repairing a local identity must never silently reenable
     // consent granted to a different cryptographic peer.
-    let peer = PeerIdentity::load_or_create(paths)?.peer_id();
+    let peer = PeerIdentity::load_existing(paths)?.peer_id();
     verify_record(world, peer, &consent)?;
     Ok(Some(consent))
 }

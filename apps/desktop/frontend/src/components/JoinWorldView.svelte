@@ -117,8 +117,8 @@
                 <textarea id="joinInvite" bind:this={inviteInput} rows="7" placeholder="scinvite:…" required spellcheck="false"></textarea>
               </div>
               <label class="field field-wide" for="joinHostCandidate">
-                <span><input id="joinHostCandidate" type="checkbox" bind:checked={hostCandidate} disabled={busy} /> Allow this device to be a hosting candidate</span>
-                <span class="muted">This requests eligibility only. Hosting stays disabled until you explicitly contribute memory and meet the signed authority and quorum requirements.</span>
+                <span><input id="joinHostCandidate" type="checkbox" bind:checked={hostCandidate} disabled={busy} /> Request eligibility to host this world in the future</span>
+                <span class="muted">Accepted members can replicate and vote even if this is unchecked. Hosting additionally requires explicit local memory consent, EULA acceptance and verified authority.</span>
               </label>
               <div id="joinError" class="form-error field-wide" role="alert" hidden={!error}>{error}</div>
               <div class="form-actions field-wide">

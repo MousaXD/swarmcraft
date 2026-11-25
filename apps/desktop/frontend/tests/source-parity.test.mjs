@@ -720,3 +720,18 @@ test('Svelte host-readiness is native Rust-only, bounded, and cannot invent a sa
   assert.ok(native.includes("'readinessNativeConfirmed'"));
   assert.ok(native.includes("'readinessNoFalseGreen'"));
 });
+
+test('both frontends display the same Rust role facts without creating a role grant', async () => {
+  const [legacy, candidate, controller, cli] = await Promise.all([
+    source('../../src/index.html'), source('../src/components/WorldsView.svelte'),
+    source('../../src/app.js'), source('../../../../crates/swarm-cli/src/main.rs'),
+  ]);
+  const fields = text => [...text.matchAll(/data-local-role-field="([^"]+)"/g)].map(match => match[1]);
+  assert.deepEqual(fields(candidate), fields(legacy));
+  assert.equal(fields(legacy).length, 9);
+  for (const field of fields(legacy)) {
+    assert.ok(candidate.includes("selectedEntry?.status['" + field + "'] || 'Not verified'"));
+    assert.ok(cli.includes(field));
+  }
+  assert.ok(controller.includes("field.textContent = world.status[field.dataset.localRoleField] || 'Not verified'"));
+});

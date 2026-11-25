@@ -158,6 +158,52 @@
                   </div>
                 </section>
 
+                <section class="player-section" aria-labelledby="localRolesTitle">
+                  <div class="section-heading"><div>
+                    <h3 id="localRolesTitle">Roles on this device</h3>
+                    <p>Locally accepted V1 membership, not live authorization. Accepted members can play, replicate and vote without volunteering to host. Independent viewer and administrator grants are not supported in V1.</p>
+                  </div></div>
+                  <div class="world-state-grid">
+                    <div class="state-cell">
+                      <span class="section-label">Membership</span>
+                      <strong data-local-role-field="Local member role">Not verified</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Player</span>
+                      <strong data-local-role-field="Local player role">Not verified</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Replica</span>
+                      <strong data-local-role-field="Local replica role">Not verified</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Voter</span>
+                      <strong data-local-role-field="Local voter role">Not verified</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Host candidate</span>
+                      <strong data-local-role-field="Local host candidate">Not verified</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Administration</span>
+                      <strong data-local-role-field="Local administration">Not verified</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Membership transition</span>
+                      <strong data-local-role-field="Local membership transition">Not verified</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Hosting preference</span>
+                      <strong data-local-role-field="Local hosting consent">Not verified</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Background seeding</span>
+                      <strong data-local-role-field="Background seeding">Not verified</strong>
+                    </div>
+                  </div>
+                  <p class="field-help">Host eligibility, local memory consent and actual live authority are separate checks. Replica membership does not mean this device has a complete, verified checkpoint. Refresh Worlds for updated local records.</p>
+                </section>
+
                 <section class="player-section" aria-labelledby="availabilityTitle">
                   <div class="section-heading">
                     <div>
@@ -403,7 +449,7 @@
               </div>
               <label class="check-row field-wide" for="joinHostCandidate">
                 <input id="joinHostCandidate" type="checkbox" />
-                <span>Request eligibility to host this world in the future. Hosting stays disabled until I separately choose a local memory budget and accept the Minecraft EULA.</span>
+                <span>Request eligibility to host this world in the future. Accepted members can replicate and vote even if this is unchecked. Hosting additionally requires explicit local memory consent, EULA acceptance and verified authority.</span>
               </label>
               <div id="joinError" class="form-error field-wide" role="alert" hidden></div>
               <div class="form-actions field-wide">

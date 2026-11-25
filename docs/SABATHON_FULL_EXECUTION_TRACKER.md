@@ -245,12 +245,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #24 — P1 · Partial
 - Work: Split member, player, replica, voter, administrator, and host-candidate permissions in UI and policy
 - Acceptance: A non-hosting replica can safely vote. A player or viewer can’t become host from UI preference alone. Membership changes preserve durable quorum rules
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (V1 read-only role projection; independent policy roles remain pending)
+- Source: `crates/swarm-cli/src/member_roles.rs`, `world status`, existing signed membership/consent checks; both desktop frontends; [V1 role boundaries](V1_ROLE_PERMISSIONS.md).
+- Evidence: Signed real-storage test verifies non-hosting member can sign and persist a joint vote, conflicting durable promise rejected after reopen, local positive consent does not promote role, unsigned descriptor mismatch rejected, and proposed/nonmember cannot inherit membership. Public CLI 5/5; core library 14/14; Svelte 82/82, source parity 30/30, type check and strict Clippy pass.
+- Remaining / next action: Exact-SHA CI; installed GUI acceptance. Independent viewer/player/administrator roles need reviewed canonical policy semantics and safe activation, not a V1 UI grant.
+- External dependency: Durable V2 migration and canonical policy review before independent grants are enabled.
+- Commit: See V1 role projection checkpoint in git history.
 
 ### #25 — P1 · Proposal
 - Work: Add supported invite/device lifecycle, including contact removal, replacement devices, and recovery of a lost identity

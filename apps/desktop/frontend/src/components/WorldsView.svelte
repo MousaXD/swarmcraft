@@ -211,6 +211,52 @@
                   {/key}
                 {/if}
 
+                <section class="player-section" aria-labelledby="localRolesTitle">
+                  <div class="section-heading"><div>
+                    <h3 id="localRolesTitle">Roles on this device</h3>
+                    <p>Locally accepted V1 membership, not live authorization. Accepted members can play, replicate and vote without volunteering to host. Independent viewer and administrator grants are not supported in V1.</p>
+                  </div></div>
+                  <div class="world-state-grid">
+                    <div class="state-cell">
+                      <span class="section-label">Membership</span>
+                      <strong data-local-role-field="Local member role">{selectedEntry?.status['Local member role'] || 'Not verified'}</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Player</span>
+                      <strong data-local-role-field="Local player role">{selectedEntry?.status['Local player role'] || 'Not verified'}</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Replica</span>
+                      <strong data-local-role-field="Local replica role">{selectedEntry?.status['Local replica role'] || 'Not verified'}</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Voter</span>
+                      <strong data-local-role-field="Local voter role">{selectedEntry?.status['Local voter role'] || 'Not verified'}</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Host candidate</span>
+                      <strong data-local-role-field="Local host candidate">{selectedEntry?.status['Local host candidate'] || 'Not verified'}</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Administration</span>
+                      <strong data-local-role-field="Local administration">{selectedEntry?.status['Local administration'] || 'Not verified'}</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Membership transition</span>
+                      <strong data-local-role-field="Local membership transition">{selectedEntry?.status['Local membership transition'] || 'Not verified'}</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Hosting preference</span>
+                      <strong data-local-role-field="Local hosting consent">{selectedEntry?.status['Local hosting consent'] || 'Not verified'}</strong>
+                    </div>
+                    <div class="state-cell">
+                      <span class="section-label">Background seeding</span>
+                      <strong data-local-role-field="Background seeding">{selectedEntry?.status['Background seeding'] || 'Not verified'}</strong>
+                    </div>
+                  </div>
+                  <p class="field-help">Host eligibility, local memory consent and actual live authority are separate checks. Replica membership does not mean this device has a complete, verified checkpoint. Refresh Worlds for updated local records.</p>
+                </section>
+
                 <section class="player-section" aria-labelledby="availabilityTitle">
                   <div class="section-heading">
                     <div>
