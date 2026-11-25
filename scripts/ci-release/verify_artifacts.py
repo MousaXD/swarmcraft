@@ -84,10 +84,48 @@ def verify_checksum(package: Path, checksum: Path) -> str:
 def expected_status_file(platform: str) -> str | None:
     return {
         "linux": "SIGNING_STATUS_LINUX.txt",
-        "windows": "SIGNING_STATUS_WINDOWS.txt",
-        "macos-arm64": "SIGNING_STATUS_MACOS_arm64.txt",
-        "macos-x86_64": "SIGNING_STATUS_MACOS_x86_64.txt",
+        "windows": "SIGNING_EVIDENCE_WINDOWS.json",
+        "macos-arm64": "SIGNING_EVIDENCE_MACOS_arm64.json",
+        "macos-x86_64": "SIGNING_EVIDENCE_MACOS_x86_64.json",
     }.get(platform)
+
+
+NATIVE_CHECKS = {
+    "windows": ["authenticode_trust", "all_signatures", "trusted_timestamp", "expected_signer"],
+    "macos-arm64": ["dmg_staple", "mounted_app_codesign", "developer_id_team", "app_staple", "gatekeeper", "binary_architecture"],
+    "macos-x86_64": ["dmg_staple", "mounted_app_codesign", "developer_id_team", "app_staple", "gatekeeper", "binary_architecture"],
+}
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            reject(f"duplicate signing evidence field: {key}")
+        result[key] = value
+    return result
+
+
+def verify_native_signing_receipt(path: Path, platform: str, commit: str, package: Path, digest: str) -> dict:
+    # The platform job must perform the native checks. The publisher checks
+    # their byte-bound receipts, not the OS trust chain on a Linux runner.
+    if path.stat().st_size > 16384:
+        reject("oversized native signing evidence")
+    receipt = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+    fields = {"schema", "commit", "platform", "file", "bytes", "sha256", "checks", "identity"}
+    if not isinstance(receipt, dict) or receipt.keys() != fields:
+        reject("malformed native signing evidence")
+    if (receipt["schema"] != "swarmcraft-native-signing-v1"
+        or receipt["commit"] != commit or receipt["platform"] != platform
+        or receipt["file"] != package.name or receipt["sha256"] != digest
+        or type(receipt["bytes"]) is not int or receipt["bytes"] != package.stat().st_size
+        or receipt["checks"] != NATIVE_CHECKS[platform]):
+        reject(f"native signing evidence does not match package: {package.name}")
+    pattern = r"[A-F0-9]{40}" if platform == "windows" else r"[A-Z0-9]{10}"
+    if not isinstance(receipt["identity"], str) or not re.fullmatch(pattern, receipt["identity"]):
+        reject(f"invalid native signing identity: {platform}")
+    return {"file": path.name, "sha256": sha256_file(path)}
+
 
 
 def verify(source: Path, output: Path, channel: str, commit: str, version: str) -> list[dict]:
@@ -148,13 +186,17 @@ def verify(source: Path, output: Path, channel: str, commit: str, version: str) 
 
         for package in packages:
             digest = verify_checksum(package, directory / f"{package.name}.sha256")
-            evidence.append({
+            record = {
                 "platform": platform,
                 "source_artifact": folder,
                 "file": package.name,
                 "sha256": digest,
                 "bytes": package.stat().st_size,
-            })
+            }
+            if channel == "production" and platform in NATIVE_CHECKS:
+                record["native_signing_evidence"] = verify_native_signing_receipt(
+                    directory / expected_status_file(platform), platform, commit, package, digest)
+            evidence.append(record)
         for item in files:
             if item.name in staged_names:
                 reject(f"colliding asset names between platform groups: {item.name}")
@@ -171,7 +213,8 @@ def verify(source: Path, output: Path, channel: str, commit: str, version: str) 
             "commit": commit,
             "version": version,
             "channel": channel,
-            "scope": "current-workflow artifact checksums, not a signing attestation",
+            "scope": ("current-workflow artifact checksums, not a signing attestation" if channel == "preview"
+                      else "current-workflow artifact checksums and hash-bound native verification receipts; not independent publisher trust verification"),
             "assets": evidence,
         }, indent=2) + "\n", encoding="utf-8"
     )

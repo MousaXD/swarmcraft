@@ -40,7 +40,7 @@ All builder jobs depend on validation. The read-only package verification job ru
 
 Each preview is published under `main-snapshot-<full commit SHA>`. The publisher checks the byte count and SHA-256 digest of every uploaded asset while the release is still a draft, then binds the tag to that commit and publishes the prerelease. An interrupted upload leaves the previous releases available on the GitHub Releases page. A rerun can resume a draft whose existing assets match the verified files. A conflicting draft or tag requires operator review.
 
-The existing `main-latest` release is retained for legacy clients. To roll back, install the previous complete snapshot from the GitHub Releases page. Preview Windows installers are unsigned and macOS disk images are ad-hoc signed development builds.
+The existing `main-latest` release is retained for legacy clients. To roll back the application, obtain the previous complete snapshot from GitHub Releases, verify the checksums, stop the application and preserve the current profile. Reopen only a separately preserved compatible profile; do not downgrade live data without the #52 schema/rollback acceptance. The historical 0.5.0 release lacks a commit-bound provenance manifest. Preview Windows installers are unsigned and macOS disk images are ad-hoc signed development builds.
 
 ### Versioned `vX.Y.Z`
 
@@ -54,6 +54,22 @@ Before any package job starts it requires both:
 `scripts/check_release_version.py --tag "$GITHUB_REF_NAME"` semantics are exercised through the reusable release-identity gate. The tag must equal `v<workspace.package.version>` exactly, and shipped Rust/Tauri/Fabric metadata plus both committed Rust lock graphs must agree with that application version.
 
 Production tags fail closed when any required Windows Authenticode or Apple Developer ID/notarization credential is missing. There is no unsigned/ad-hoc production fallback.
+
+The final staged Windows installer must pass native Authenticode verification,
+timestamp and expected certificate checks. The staged macOS disk image must
+pass stapled-ticket validation and its read-only mounted app must pass strict
+signature, expected Developer ID team, app ticket, Gatekeeper and architecture
+checks. Native jobs issue a JSON receipt bound to the exact source SHA,
+platform, file, size and SHA-256; the publisher rejects missing or mismatched
+receipts and records their SHA-256 in the provenance manifest. Receipts report
+the native job's checks, not a publisher-side independent OS trust attestation.
+No mobile or unsupported target is certified. The preview inventory contains
+only Debian amd64, Windows x64, macOS arm64/x86_64 and Fabric JAR; production
+additionally requires Linux AppImage.
+
+See the [published preview audit and rollback rehearsal](../research/release-verification/REPORT.md).
+Actual signed production execution requires authorized native runners and
+credentials; the Linux-only rehearsal and offline gate tests do not replace it.
 
 ## Excluded Rust crates are first-class gates
 

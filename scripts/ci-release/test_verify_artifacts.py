@@ -53,7 +53,18 @@ class PublicationBoundaryTest(unittest.TestCase):
             if channel == "production":
                 status = verify_artifacts.expected_status_file(platform)
                 if status:
-                    (dest / status).write_text("Test-only status declaration\n")
+                    if platform in verify_artifacts.NATIVE_CHECKS:
+                        package = dest / packages[0]
+                        receipt = {
+                            "schema": "swarmcraft-native-signing-v1", "commit": SHA,
+                            "platform": platform, "file": package.name,
+                            "bytes": package.stat().st_size, "sha256": verify_artifacts.sha256_file(package),
+                            "checks": verify_artifacts.NATIVE_CHECKS[platform],
+                            "identity": "A" * (40 if platform == "windows" else 10),
+                        }
+                        (dest / status).write_text(json.dumps(receipt))
+                    else:
+                        (dest / status).write_text("Checksum-protected Linux release package.\n")
 
     def verify(self, channel="preview"):
         return verify_artifacts.verify(self.source, self.out, channel, SHA, VERSION)
@@ -141,8 +152,39 @@ class PublicationBoundaryTest(unittest.TestCase):
     def test_missing_production_signing_status_is_fatal(self):
         self.make_artifacts("production")
         folder = self.source / verify_artifacts.expected_groups("production", SHA)["windows"]
-        (folder / "SIGNING_STATUS_WINDOWS.txt").unlink()
+        (folder / verify_artifacts.expected_status_file("windows")).unlink()
         with self.assertRaisesRegex(ValueError, "missing/unknown"):
+            self.verify("production")
+
+    def test_production_receipt_must_match_exact_bytes_commit_platform_and_checks(self):
+        for field, value in (
+            ("sha256", "b" * 64), ("commit", "b" * 40), ("file", "other.exe"),
+            ("bytes", 123), ("platform", "macos-arm64"), ("checks", []), ("identity", ""),
+        ):
+            with self.subTest(field=field):
+                self.make_artifacts("production")
+                folder = self.source / verify_artifacts.expected_groups("production", SHA)["windows"]
+                path = folder / verify_artifacts.expected_status_file("windows")
+                record = json.loads(path.read_text())
+                record[field] = value
+                path.write_text(json.dumps(record))
+                with self.assertRaises(ValueError):
+                    self.verify("production")
+                self.assertFalse(self.out.exists())
+
+    def test_plaintext_signing_status_cannot_substitute_for_native_receipt(self):
+        self.make_artifacts("production")
+        folder = self.source / verify_artifacts.expected_groups("production", SHA)["macos-arm64"]
+        (folder / verify_artifacts.expected_status_file("macos-arm64")).write_text("Signed and notarized")
+        with self.assertRaises(ValueError):
+            self.verify("production")
+
+    def test_duplicate_receipt_fields_fail_closed(self):
+        self.make_artifacts("production")
+        folder = self.source / verify_artifacts.expected_groups("production", SHA)["macos-arm64"]
+        path = folder / verify_artifacts.expected_status_file("macos-arm64")
+        path.write_text(path.read_text()[:-1] + ', "commit": "' + SHA + '"}')
+        with self.assertRaisesRegex(ValueError, "duplicate"):
             self.verify("production")
 
     def test_symlink_package_is_rejected(self):

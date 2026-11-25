@@ -505,12 +505,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #50 — Release-Gate P0 · Partial
 - Work: Verify an immutable main snapshot and rollback, then establish production release evidence
 - Acceptance: Preview retains previous assets and validates source/version/hash. Tagged release independently verifies Windows signing and Mac notarization; mobile and unsupported packages are clearly scoped out
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (published preview bytes and isolated native package rollback; production-native signing remains externally blocked)
+- Source: `scripts/ci-release/verify_published_preview.py`, `scripts/acceptance/native_published_preview_rollback.py`, `scripts/ci-release/verify_artifacts.py`, Windows/macOS native verification scripts, production release workflow and release gates.
+- Evidence: [Audit report and exact downloaded-asset/native evidence](../research/release-verification/REPORT.md). Verified all 21 published assets, both versions' five package checksums and Fabric version, 0.5.1 exact-main source manifest, and actual four-stage Linux package rollback with separate preserved profiles and unchanged signed snapshots/records. New byte-bound signing receipts required by publisher; offline release and workflow policy tests pass. No hosted CI, release or main mutation.
+- Remaining / next action: Approved native Windows Authenticode and macOS notarization run on exact production candidate; do not infer live-data downgrade (#52) from package rollback. Continue #51.
+- External dependency: Authorized native runners, signing/notarization credentials and release approval; previous release lacks a commit-bound manifest.
+- Commit: Verify published previews and bind production signing evidence; see git history.
 
 ### #51 — P1 · Partial
 - Work: Extend release resilience for download outages, executable provenance, shared runtime cache publication, and dependency health

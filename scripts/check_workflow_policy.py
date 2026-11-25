@@ -259,6 +259,24 @@ def require_validation_dependency(path: Path, builder_jobs: tuple[str, ...]) -> 
         fail(f"{path.name}: publisher must use only verified staged assets")
 
 
+def check_native_signing_receipts(release: str) -> None:
+    blocks = job_blocks(release)
+    for name, command in (
+        ("windows", "./scripts/ci-release/verify_windows_signing.ps1 -Directory dist -Commit $env:GITHUB_SHA -ExpectedThumbprint $env:EXPECTED_SIGNER_THUMBPRINT"),
+        ("macos", 'bash scripts/ci-release/verify_macos_signing.sh dist "$GITHUB_SHA" "$RELEASE_ARCH" "$APPLE_TEAM_ID"'),
+    ):
+        block = blocks.get(name, "")
+        upload = block.find("uses: actions/upload-artifact@")
+        check = block.find(command)
+        if check < 0 or upload < 0 or check >= upload:
+            fail(f"release.yml: {name} must verify exact staged package before artifact upload")
+    if "EXPECTED_SIGNER_THUMBPRINT: ${{ steps.windows-signer.outputs.thumbprint }}" not in blocks["windows"]:
+        fail("release.yml: Windows receipt must bind expected production certificate")
+    if "RELEASE_ARCH: ${{ matrix.arch }}" not in blocks["macos"]:
+        fail("release.yml: macOS receipt must bind the matrix architecture")
+
+
+
 def main() -> None:
     paths = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
     if {path.name for path in paths} != set(ALLOWED_EVENTS):
@@ -277,6 +295,7 @@ def main() -> None:
     )
 
     release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    check_native_signing_receipts(release)
     if "release_tag: ${{ github.ref_name }}" not in release:
         fail("release.yml must bind the exact tag name into release identity validation")
     if "python3 scripts/check_release_credentials.py" not in release:

@@ -153,11 +153,18 @@ jobs:
           Copy-Item target/release/swarmcraft-runtime.exe "apps/desktop/src-tauri/binaries/swarmcraft-runtime-$target.exe"
           Copy-Item target/release/swarmcraft-import.exe "apps/desktop/src-tauri/binaries/swarmcraft-import-$target.exe"
       - name: Import Authenticode certificate and sign bundled executables
+        id: windows-signer
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $pfx = Join-Path $env:RUNNER_TEMP 'swarmcraft-release.pfx'
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificates = @((Get-PfxData -FilePath $pfx -Password $password).EndEntityCertificates)
+          if ($certificates.Count -ne 1) { throw 'Expected exactly one end-entity signing certificate' }
+          $thumbprint = $certificates[0].Thumbprint
+          if ($thumbprint -cnotmatch '^[A-F0-9]{40}$') { throw 'Invalid signing certificate thumbprint' }
+          "thumbprint=$thumbprint" >> $env:GITHUB_OUTPUT
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
             Sort-Object FullName -Descending |
             Select-Object -First 1
@@ -193,12 +200,23 @@ jobs:
             & $signtool.FullName verify /pa /all $_.FullName
             if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed for $($_.FullName)" }
           }
-          'Authenticode signed with the required production release certificate.' | Set-Content dist/SIGNING_STATUS_WINDOWS.txt
           Remove-Item $pfx -Force
           Get-ChildItem dist -File -Filter *.exe | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $($_.Name)" | Set-Content -NoNewline "$($_.FullName).sha256"
           }
+      - name: Verify final staged Windows installer and bind native signing evidence
+        shell: pwsh
+        env:
+          EXPECTED_SIGNER_THUMBPRINT: ${{ steps.windows-signer.outputs.thumbprint }}
+        run: |
+          ./scripts/ci-release/verify_windows_signing.ps1 -Directory dist -Commit $env:GITHUB_SHA -ExpectedThumbprint $env:EXPECTED_SIGNER_THUMBPRINT
+      - name: Clean up imported release certificate
+        if: always()
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'swarmcraft-release.pfx'
+          if (Test-Path -LiteralPath $pfx) { Remove-Item -LiteralPath $pfx -Force }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-release-${{ github.sha }}
@@ -262,15 +280,19 @@ jobs:
           dmg=(apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg)
           test "${#dmg[@]}" -eq 1
           xcrun stapler validate "${dmg[0]}"
-      - name: Stage macOS package and signing status
+      - name: Stage macOS package
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
           find apps/desktop/src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -exec cp {} dist/ \;
           test -n "$(find dist -maxdepth 1 -type f -name '*.dmg' -print -quit)"
-          printf '%s\n' 'Developer ID signing and notarization credentials were required and configured for this production build.' > "dist/SIGNING_STATUS_MACOS_${{ matrix.arch }}.txt"
           for file in dist/*.dmg; do shasum -a 256 "$file" > "$file.sha256"; done
+      - name: Verify final staged disk image and bind native signing evidence
+        shell: bash
+        env:
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: bash scripts/ci-release/verify_macos_signing.sh dist "$GITHUB_SHA" "$RELEASE_ARCH" "$APPLE_TEAM_ID"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-${{ matrix.arch }}-release-${{ github.sha }}

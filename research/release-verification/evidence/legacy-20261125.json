@@ -1,0 +1,84 @@
+{
+  "tag": "main-latest",
+  "tag_target": "682c78f522aff53a59720de6c864e4e536eea778",
+  "version": "0.5.0",
+  "source_manifest_verified": false,
+  "legacy_provenance_limitation": "No commit-bound manifest; tag and published bytes only",
+  "asset_count": 10,
+  "asset_bytes": 102481494,
+  "assets": {
+    "swarmcraft-fabric-0.5.0.jar": {
+      "bytes": 2535775,
+      "sha256": "87ad0f42fadf0687df28ea20953187e414579cb61287d55d78f23a712649ce55"
+    },
+    "swarmcraft-fabric-0.5.0.jar.sha256": {
+      "bytes": 94,
+      "sha256": "83658f39e6bc51c5fa26bfb43403ca2b41efef90b26b78dfc1e4cd061afca1e7"
+    },
+    "SwarmCraft_0.5.0_amd64.deb": {
+      "bytes": 28941374,
+      "sha256": "35c65a3581dbeeee4d9a8e04c83316590999a344cd0c0244edf16368a8d5f5cd"
+    },
+    "SwarmCraft_0.5.0_amd64.deb.sha256": {
+      "bytes": 98,
+      "sha256": "cbd7e28311d90608a75b1574110e318b2a3e6335a453992fa6cfbf1e714c4884"
+    },
+    "SwarmCraft_0.5.0_arm64.dmg": {
+      "bytes": 26646649,
+      "sha256": "060352fb6d70a04428baf805787d8ee1b74e29a22a235bb989b56b48b77842c0"
+    },
+    "SwarmCraft_0.5.0_arm64.dmg.sha256": {
+      "bytes": 98,
+      "sha256": "f7681dc116b59e8c40782b318f986b4150dce023a23ed83083c70456c4aee468"
+    },
+    "SwarmCraft_0.5.0_x64-setup.exe": {
+      "bytes": 14653496,
+      "sha256": "c7d1a65b1f3b2c17d316767e6e28fe3a9de8c8eb0917bc08e2b2bda39b5b77e8"
+    },
+    "SwarmCraft_0.5.0_x64-setup.exe.sha256": {
+      "bytes": 96,
+      "sha256": "108383051556d3936d4e8936811723c727e20d86fbd8e36cc2a108da0a4d8264"
+    },
+    "SwarmCraft_0.5.0_x86_64.dmg": {
+      "bytes": 29703715,
+      "sha256": "190e6bb1ec9b4a545ac840915d4b4f93c1e6776effbdb0d7aa7c518051fc744a"
+    },
+    "SwarmCraft_0.5.0_x86_64.dmg.sha256": {
+      "bytes": 99,
+      "sha256": "88a4cdf06d9609b8129992d4c4956bf3eedfa9d94e74c48d3880effef8240d4e"
+    }
+  },
+  "packages": [
+    {
+      "platform": "linux",
+      "file": "SwarmCraft_0.5.0_amd64.deb",
+      "bytes": 28941374,
+      "sha256": "35c65a3581dbeeee4d9a8e04c83316590999a344cd0c0244edf16368a8d5f5cd"
+    },
+    {
+      "platform": "windows",
+      "file": "SwarmCraft_0.5.0_x64-setup.exe",
+      "bytes": 14653496,
+      "sha256": "c7d1a65b1f3b2c17d316767e6e28fe3a9de8c8eb0917bc08e2b2bda39b5b77e8"
+    },
+    {
+      "platform": "macos-arm64",
+      "file": "SwarmCraft_0.5.0_arm64.dmg",
+      "bytes": 26646649,
+      "sha256": "060352fb6d70a04428baf805787d8ee1b74e29a22a235bb989b56b48b77842c0"
+    },
+    {
+      "platform": "macos-x86_64",
+      "file": "SwarmCraft_0.5.0_x86_64.dmg",
+      "bytes": 29703715,
+      "sha256": "190e6bb1ec9b4a545ac840915d4b4f93c1e6776effbdb0d7aa7c518051fc744a"
+    },
+    {
+      "platform": "fabric",
+      "file": "swarmcraft-fabric-0.5.0.jar",
+      "bytes": 2535775,
+      "sha256": "87ad0f42fadf0687df28ea20953187e414579cb61287d55d78f23a712649ce55"
+    }
+  ],
+  "scope": "Downloaded published bytes, GitHub metadata, checksums and Fabric version; not platform signing, installation or downgrade certification"
+}

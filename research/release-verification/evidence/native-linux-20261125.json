@@ -1,0 +1,40 @@
+{
+  "complete": true,
+  "packages": {
+    "legacy": {
+      "files": {
+        "desktop": "a5787cc04c9c56c4b4528a479278b9d188632535364a4b9b154167d71e7e4b23",
+        "swarmcraft": "97a87f88bc08931e0b15b52a5066d2b0a44f8bf178525e40e21dce5999a8e6e2",
+        "swarmcraft-host": "1c00983be638ad0646d01ef00715f49c57ae5bbde5ca7bb0dc803dff876b70ee",
+        "swarmcraft-import": "e547b7e925aa2e44ed9fa8ac59567735c3a1e974db7f69199b1da8882cd8f7a1",
+        "swarmcraft-runtime": "e734caac080c345a84559afdad1e1d07be0eb054f9a2e0b480737d7db92ef009"
+      },
+      "metadata": "Package: swarm-craft\nVersion: 0.5.0\nArchitecture: amd64\n",
+      "package_sha256": "35c65a3581dbeeee4d9a8e04c83316590999a344cd0c0244edf16368a8d5f5cd",
+      "source_manifest_verified": false,
+      "tag": "main-latest",
+      "tag_target": "682c78f522aff53a59720de6c864e4e536eea778"
+    },
+    "pinned": {
+      "files": {
+        "desktop": "e3612e98deff0bd283a5f11f206e705911dc8685acba77da36619b23af32867d",
+        "swarmcraft": "9b6004eb8b3dff3ddae90a9f8c16527f896785862d1ae4e996061dfcc359d61c",
+        "swarmcraft-host": "49473b34fcac7d22d8bd5786f8deb99534b65dcdb46568a07891fb0a3f7a75a9",
+        "swarmcraft-import": "5ed827f6e950f1afe38d9f33008aeea53278905a33c2b50780b4363400cddbd1",
+        "swarmcraft-runtime": "298adabe10a01502aca777f5b0ca19596bb18837ab317ec2f3a076241d47a92b"
+      },
+      "metadata": "Package: swarm-craft\nVersion: 0.5.1\nArchitecture: amd64\n",
+      "package_sha256": "7a9c52e2e75f0a5d4966e7e2393fa1522973bff1d0154ac8e3594262bb6e980e",
+      "source_manifest_verified": true,
+      "tag": "main-snapshot-aaffac22e32547983f1fd558af6eb32c0da4917b",
+      "tag_target": "aaffac22e32547983f1fd558af6eb32c0da4917b"
+    }
+  },
+  "scope": "actual downloaded Debian packages, real WebKitGTK, separate quiescent data profiles; not live-data downgrade",
+  "stages": {
+    "legacy_baseline": true,
+    "pinned_current": true,
+    "return_current": true,
+    "rollback_previous": true
+  }
+}

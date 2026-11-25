@@ -6,7 +6,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
-from check_workflow_policy import check_local_first
+from check_workflow_policy import check_local_first, check_native_signing_receipts
 
 
 class LocalFirstPolicyTests(unittest.TestCase):
@@ -21,6 +21,15 @@ class LocalFirstPolicyTests(unittest.TestCase):
         for path in (ROOT / ".github/workflows").glob("*.yml"):
             with self.subTest(path=path.name):
                 check_local_first(path, path.read_text())
+
+    def test_production_native_receipts_cannot_be_removed(self):
+        release = (ROOT / ".github/workflows/release.yml").read_text()
+        check_native_signing_receipts(release)
+        for script in ("verify_windows_signing.ps1", "verify_macos_signing.sh"):
+            with self.subTest(script=script), self.assertRaises(SystemExit):
+                check_native_signing_receipts(release.replace(script, "not-verified"))
+        with self.assertRaises(SystemExit):
+            check_native_signing_receipts(release.replace("steps.windows-signer.outputs.thumbprint", "inputs.fake"))
 
     def test_agent_workflow_rejected(self):
         with self.assertRaises(SystemExit):
