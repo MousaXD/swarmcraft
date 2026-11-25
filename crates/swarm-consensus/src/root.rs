@@ -19,3 +19,5 @@ pub use recovery::*;
 pub use solo::*;
 
 pub mod ownerless;
+
+pub mod ownerless_authority;

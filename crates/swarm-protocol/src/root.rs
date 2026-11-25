@@ -131,3 +131,6 @@ impl SleepRecordV1 {
 
 mod ownerless;
 pub use ownerless::*;
+
+mod ownerless_authority;
+pub use ownerless_authority::*;

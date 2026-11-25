@@ -139,9 +139,9 @@ prove compliant game ticks.
 
 The [#65 permission lab](ownerless-permissions.md) verifies isolated real
 Minecraft permissions and policy-bound reference workers; canonical runtime
-admission and actual successor-host gameplay remain gated. #66 must establish
-durable shared authority and founder-independent recovery, including
-the inability of an isolated key to publish or change membership.
+admission and actual successor-host gameplay remain gated. The [#66 reference authority](ownerless-authority.md) verifies durable local
+quorum history, founder-independent recovery and joint enrollment; live
+canonical Minecraft authority remains gated.
 #67 must separate admission, gameplay roles, validator enrollment and
 worker consent, with public access treated as a distinct policy.
 #68 must verify all of these together in actual independent-host

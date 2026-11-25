@@ -58,7 +58,7 @@ Region scheduling work such as [Folia](https://docs.papermc.io/folia/reference/o
 
 ## Ownerless, no-OP world option
 
-The isolated, non-activatable #64 creation contract is documented in [Ownerless creation](rfcs/ownerless-creation.md). The [#65 permission lab](rfcs/ownerless-permissions.md) tests actual Minecraft/Fabric permissions and policy-pinned reference workers. Canonical authority, live admission, and independent-host gameplay gates remain open.
+The isolated, non-activatable #64 creation contract is documented in [Ownerless creation](rfcs/ownerless-creation.md). The [#65 permission lab](rfcs/ownerless-permissions.md) tests actual Minecraft/Fabric permissions and policy-pinned reference workers. The [#66 CFT reference authority](rfcs/ownerless-authority.md) adds signed quorum history, durable local vote locks, joint roster changes and verified recovery copies. Canonical Minecraft authority, live admission, and independent-host gameplay gates remain open.
 
 Keep **Ownerless / no OP** as a creation-time option. “2b2t-inspired” describes a persistent world and its gameplay philosophy. This SwarmCraft mode adds the explicit requirement that no player, including the founder and current host, has operator powers. Joining rules are a separate choice, so the world can be public or invite-only. Publish the exact limits of any gameplay, spam, or infrastructure policies at creation.
 

@@ -2,7 +2,8 @@
 //! Verification is not canonical acceptance and cannot authorize execution.
 use ed25519_dalek::{Signature, VerifyingKey};
 use swarm_protocol::{
-    Hash32, OwnerlessCreationApprovalV1, OwnerlessCreationV1, OwnerlessError, OwnerlessGenesisV1, OwnerlessWorldIdV1,
+    Hash32, OwnerlessCreationApprovalV1, OwnerlessCreationV1, OwnerlessError, OwnerlessGenesisV1, OwnerlessValidatorV1,
+    OwnerlessWorldIdV1, MAX_OWNERLESS_VALIDATORS, MIN_OWNERLESS_VALIDATORS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +29,17 @@ impl VerifiedOwnerlessCreationV1 {
 
 pub fn validate_ownerless_genesis(genesis: &OwnerlessGenesisV1) -> Result<(), OwnerlessError> {
     genesis.validate()?;
-    for validator in &genesis.validators {
+    validate_ownerless_roster(&genesis.validators)
+}
+
+pub fn validate_ownerless_roster(roster: &[OwnerlessValidatorV1]) -> Result<(), OwnerlessError> {
+    if !(MIN_OWNERLESS_VALIDATORS..=MAX_OWNERLESS_VALIDATORS).contains(&roster.len())
+        || roster.windows(2).any(|w| w[0].peer_id >= w[1].peer_id)
+        || roster.iter().any(|v| *v != OwnerlessValidatorV1::from_key(v.public_key))
+    {
+        return Err(OwnerlessError::Invalid("invalid ownerless validator roster"));
+    }
+    for validator in roster {
         let key = VerifyingKey::from_bytes(&validator.public_key)
             .map_err(|_| OwnerlessError::Invalid("invalid validator public key"))?;
         // Reject noncanonical encodings and mixed-torsion aliases, not
@@ -42,7 +53,7 @@ pub fn validate_ownerless_genesis(genesis: &OwnerlessGenesisV1) -> Result<(), Ow
     Ok(())
 }
 
-fn verify_signature(key: &[u8; 32], bytes: &[u8], signature: &[u8]) -> bool {
+pub(crate) fn verify_signature(key: &[u8; 32], bytes: &[u8], signature: &[u8]) -> bool {
     let Ok(key) = VerifyingKey::from_bytes(key) else { return false };
     let Ok(signature) = Signature::from_slice(signature) else { return false };
     key.verify_strict(bytes, &signature).is_ok()

@@ -1,5 +1,6 @@
 mod daemon;
 mod invite;
+mod ownerless_authority;
 mod ownerless_creation;
 
 use anyhow::{bail, Context, Result};

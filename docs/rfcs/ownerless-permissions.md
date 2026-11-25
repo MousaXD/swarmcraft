@@ -114,8 +114,9 @@ profiles on one workstation, not independent hosting machines. The second
 JVM restart is not a quorum-authorized hosting transfer. The reference
 workers are not Minecraft region servers.
 
-#66 must provide durable, independent shared authority, roster changes,
-recovery and fencing; #67 must provide separate authenticated admission
+The [#66 reference authority](ownerless-authority.md) verifies durable
+local quorum history, roster changes, recovery and reference fencing. Live
+canonical authority remains gated; #67 must separate authenticated admission
 and worker/validator eligibility. A real founder departure, successor
 hosting, playable identity, actual independent-machine distributed Minecraft
 and the #63 sustained-throughput qualification remain open. Do not enable

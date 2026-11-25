@@ -17,6 +17,11 @@ use swarm_protocol::{
 
 #[derive(Debug, Subcommand)]
 pub enum OwnerlessCommand {
+    /// Isolated quorum-certified reference history; never a playable world.
+    Authority {
+        #[command(subcommand)]
+        command: crate::ownerless_authority::AuthorityCommand,
+    },
     /// Draft an isolated no-OP creation proposal, not a playable world.
     Draft {
         #[arg(long)]
@@ -90,6 +95,7 @@ fn print_document(value: &impl Serialize) -> Result<()> {
 
 pub fn run(paths: &DataPaths, command: OwnerlessCommand) -> Result<()> {
     match command {
+        OwnerlessCommand::Authority { command } => crate::ownerless_authority::run(paths, command),
         OwnerlessCommand::Draft { name, compatibility_fingerprint, initial_state_commitment, validator_keys } => {
             ensure!(validator_keys.len() <= MAX_OWNERLESS_VALIDATORS, "too many validator keys");
             let mut validators = Vec::new();
