@@ -10,8 +10,9 @@ use swarm_cli::{
     authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
     game_route_api::{GameRouteApiOperation, GameRouteApiReply, GameRouteApiServer, GameRouteStatusV1},
     historical_authority::{
-        collect_replay_proof, load_staged_replay, publish_stale_replay, verify_and_stage_first_contact_replay,
-        verify_and_stage_stale_replay, verify_replay_proof,
+        collect_replay_proof, load_staged_replay, local_committed_retirement, publish_stale_replay,
+        stale_replay_recipient_allowed, verify_and_stage_first_contact_replay, verify_and_stage_stale_replay,
+        verify_replay_proof,
     },
     host_readiness::{self, PeerReadinessObservation},
     hosting_budget, launch_guard,
@@ -3486,7 +3487,12 @@ fn request_stale_replay_proofs(
     for metadata in storage.list_worlds()? {
         let world = metadata.world_id;
         let Ok(epoch) = storage.load_epoch_record(world) else { continue };
-        if epoch.epoch_number == 0 || epoch.mode == EpochMode::Solo || epoch.authority_peer_id == identity.peer_id() {
+        if epoch.epoch_number == 0 || epoch.mode == EpochMode::Solo {
+            continue;
+        }
+        if epoch.authority_peer_id == identity.peer_id()
+            && !local_committed_retirement(storage, identity, &epoch).is_ok_and(|record| record.is_some())
+        {
             continue;
         }
         let Ok(descriptor) = storage.load_world_descriptor(world) else { continue };
@@ -3675,7 +3681,8 @@ fn drive_stale_replay_downloads(
         }
         let Some(progress) = storage.stale_replay_progress(world)? else { continue };
         let membership = progress.proof.membership.last().context("stale replay has no target membership")?;
-        if progress.anchor.epoch.authority_peer_id == identity.peer_id()
+        if !stale_replay_recipient_allowed(storage, identity, &progress.anchor, &progress.proof).unwrap_or(false)
+            || membership.authority_peer_id == identity.peer_id()
             || !membership.members.iter().any(|member| {
                 !member.banned && member.peer_id == identity.peer_id() && member.public_key == identity.public_key()
             })
@@ -3742,7 +3749,8 @@ fn authorize_stale_manifest(
     let world = manifest.world_id;
     let (anchor, proof) = storage.load_staged_stale_replay_proof(world)?.context("no pinned stale replay history")?;
     let membership = proof.membership.last().context("missing stale replay membership")?.clone();
-    if anchor.epoch.authority_peer_id == identity.peer_id()
+    if !stale_replay_recipient_allowed(storage, identity, &anchor, &proof)?
+        || membership.authority_peer_id == identity.peer_id()
         || membership.record_hash()? != membership_hash
         || membership.authority_peer_id != source
         || !membership.members.iter().any(|member| {

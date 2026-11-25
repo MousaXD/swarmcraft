@@ -48,7 +48,7 @@ Implementation completion: count only items whose full implementation criteria a
 - State: **IN PROGRESS**
 - Source: crates/swarm-cli/src/daemon.rs; crates/swarm-storage/src/stale_publication.rs
 - Evidence: Live integration status; scoped automated evidence, exact-SHA CI pending.
-- Remaining / next action: Exact transfer phases and included recovery/membership votes are now consumed only after certified replay publication; continue with guarded retired-authority replay, recovery reservations, sleep and unresolved decisions.
+- Remaining / next action: Exact transfer phases and included recovery/membership votes are consumed only after certified replay publication. Planned-retirement re-entry now holds the existing runtime exclusion and exact committed-transfer guard. Continue crash-recovered retired-authority re-entry, recovery reservations, sleep and unresolved decisions.
 - External dependency: Not yet established; assess during execution.
 - Commit: 2d45f97 baseline; see live status for individual commits
 
@@ -694,7 +694,7 @@ Implementation completion: count only items whose full implementation criteria a
 
 ## Next checkpoint
 
-Continue #4: exact certified transfer and voting fences reconciled; retired-authority runtime exclusion, other durable records and previously unknown successor discovery remain. Keep publication and runtime fail-closed. #9 precedes #8; #23 precedes activation of V2-dependent permissions; #56 precedes distributed-runtime adoption; #64–68 require signed governance and independent acceptance.
+Continue #4: planned-transfer retired-authority re-entry and exact certified voting fences implemented. Next: crash-recovered authority retirement requires its own durable generation fence before data-only replay, with old-host write/permit/route denial, orphan handling and exact prefix preservation; then other durable records and previously unknown successor discovery. Keep publication and runtime fail-closed. #9 precedes #8; #23 precedes activation of V2-dependent permissions; #56 precedes distributed-runtime adoption; #64–68 require signed governance and independent acceptance.
 
 Initial full-item implementation/acceptance totals: not yet established by item-specific audit; zero items asserted fully accepted by this ledger.
 
@@ -703,3 +703,10 @@ Initial full-item implementation/acceptance totals: not yet established by item-
 - #4: `stale_publication.rs` now accepts only byte-exact transfer phases and recovery/membership promises represented in the verified history; consumption occurs after all canonical records are written and verified, while the intent still fences ordinary access. Other fences remain blocking.
 - Evidence: expanded signed replay regression passed, storage library 67 passed/1 optional soak ignored, strict storage/CLI all-target/all-feature Clippy passed, formatting and diff checks passed. No complete backlog item is newly claimed.
 - Next: prove retired-authority re-entry using the runtime ownership guard, fail-closed permit/lease and route behavior, and orphan handling; do not merely remove the authority exclusion.
+
+### 25 November: planned-retirement re-entry
+
+- Previous fence reconciliation committed as `0ef8d21`. New daemon flow allows a retired local authority to stage/download exact successor history only when it retains its signed committed outbound transfer, and only if the full anchored proof contains that exact immediate transition.
+- Before publication, the caller acquires the same world runtime lock as hosting, rejects ambiguous or live persistent JVM records, clears the old permit and invalidates runtime verification. Storage repeats the exact retirement check under its transaction lock. The intent remains the visibility fence and no local authority or consent is created.
+- A retired authority without the matching committed transfer remains blocked; crash-recovery retirement requires a separate durable denial fence rather than simply allowing old authorities to replay. No divergent or pruned history is overwritten.
+- Strict storage/CLI Clippy and all 135 CLI library tests passed. The real process-level invite/replay regression passed both extended runs, including strengthened direct orphan-record and held-lock denial assertions (final run: 46.32 seconds).

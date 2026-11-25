@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use swarm_consensus::{membership::validate_membership_certificate_shape, validate_recovery_certificate_shape};
 use swarm_core::{
     protocol_v2::{verify_recovery_ballot_signature, verify_recovery_vote_signature, verify_world_config_signature},
-    verify_membership_signature, verify_signature, verify_snapshot_signature, verify_transfer_signature, PeerIdentity,
+    verify_membership_signature, verify_signature, verify_snapshot_signature, verify_transfer_signature, DataPaths,
+    PeerIdentity,
 };
 use swarm_protocol::{
     peer_id_from_public_key, AuthorityTransferV1, EpochMode, EpochRecordV1, HistoricalCheckpointV1,
@@ -204,6 +205,62 @@ pub fn verify_and_stage_first_contact_replay(
     Ok(())
 }
 
+/// A locally committed outbound transfer already denies old-generation
+/// leases and hosting. Only this exact, signed local fence allows retired
+/// authority replay for now; crash recovery needs a separate durable fence.
+pub fn local_committed_retirement(
+    storage: &Storage,
+    local: &PeerIdentity,
+    epoch: &EpochRecordV1,
+) -> Result<Option<AuthorityTransferV1>> {
+    if epoch.authority_peer_id != local.peer_id() || epoch.authority_public_key != local.public_key() {
+        return Ok(None);
+    }
+    let transfer = match storage.load_transfer_record(epoch.world_id) {
+        Ok(record) => record,
+        Err(swarm_storage::StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    verify_transfer_signature(&transfer)?;
+    if transfer.phase != TransferPhase::Committed
+        || transfer.from_peer_id != local.peer_id()
+        || transfer.signer_peer_id != local.peer_id()
+        || transfer.signer_public_key != local.public_key()
+        || epoch.epoch_number.checked_add(1) != Some(transfer.next_epoch)
+        || epoch.fencing_token.checked_add(1) != Some(transfer.next_fencing_token)
+    {
+        return Ok(None);
+    }
+    Ok(Some(transfer))
+}
+
+fn replay_retirement<'a>(
+    anchor: &StaleReplayAnchorV1,
+    proof: &'a HistoricalReplayProofV1,
+) -> Result<&'a AuthorityTransferV1> {
+    let index = usize::try_from(anchor.epoch.epoch_number.checked_sub(1).context("invalid retired epoch")?)?;
+    let Some(HistoricalTransitionV1::Transfer { committed, .. }) = proof.transitions.get(index) else {
+        bail!("retired authority requires its exact committed outbound transfer");
+    };
+    Ok(committed.as_ref())
+}
+
+/// Data-only admission; the verified proof must include the local signed
+/// retirement decision before a former authority can download its suffix.
+pub fn stale_replay_recipient_allowed(
+    storage: &Storage,
+    local: &PeerIdentity,
+    anchor: &StaleReplayAnchorV1,
+    proof: &HistoricalReplayProofV1,
+) -> Result<bool> {
+    if anchor.epoch.authority_peer_id != local.peer_id() {
+        return Ok(true);
+    }
+    Ok(local_committed_retirement(storage, local, &anchor.epoch)?.as_ref() == Some(replay_retirement(anchor, proof)?))
+}
+
 /// Verify an authenticated newer authority's complete history against the
 /// exact already accepted local generation. A valid genesis signature by
 /// itself is insufficient: a signed alternate branch is never a catch-up.
@@ -217,7 +274,6 @@ pub fn verify_and_stage_stale_replay(
 ) -> Result<()> {
     let world = anchor.epoch.world_id;
     if storage.stale_replay_anchor(world)? != *anchor
-        || anchor.epoch.authority_peer_id == local.peer_id()
         || source == local.peer_id()
         || !anchor.membership.members.iter().any(|member| {
             !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key()
@@ -229,7 +285,7 @@ pub fn verify_and_stage_stale_replay(
             .any(|member| !member.banned && member.authority_eligible && member.peer_id == source)
         || !anchor.is_extended_by(&proof)
     {
-        bail!("stale replay is not an exact successor of an accepted non-authority replica");
+        bail!("stale replay is not an exact successor of an accepted replica");
     }
     let target = proof.membership.last().context("stale replay lacks final membership")?.clone();
     if target.authority_peer_id != source
@@ -240,6 +296,9 @@ pub fn verify_and_stage_stale_replay(
         bail!("stale replay source or recipient is not bound to final signed membership");
     }
     let verified = verify_replay_proof(proof, &storage.load_world(world)?.genesis, &target)?;
+    if !stale_replay_recipient_allowed(storage, local, anchor, verified.proof())? {
+        bail!("retired authority has no matching locally committed transfer fence");
+    }
     // Preserve every locally retained canonical manifest, not just the
     // endpoint. Each signature and the underlying bytes must verify.
     let manifests = storage.list_snapshots(world)?;
@@ -282,7 +341,6 @@ pub fn publish_stale_replay(
     let anchor = &candidate.anchor;
     let target = proof.membership.last().context("stale replay lacks target membership")?;
     if !anchor.is_extended_by(proof)
-        || anchor.epoch.authority_peer_id == local.peer_id()
         || target.authority_peer_id == local.peer_id()
         || !anchor.membership.members.iter().any(|member| {
             !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key()
@@ -296,13 +354,29 @@ pub fn publish_stale_replay(
             !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key()
         })
     {
-        bail!("stale publication does not bind an accepted non-authority replica to a known successor");
+        bail!("stale publication does not bind an accepted replica to a known successor");
     }
     let verified = verify_replay_proof(proof.clone(), &storage.load_world(world)?.genesis, target)?;
     for manifest in &candidate.manifests {
         verified.verify_manifest(manifest)?;
     }
-    storage.begin_verified_stale_publication(&candidate)?;
+    let retired = anchor.epoch.authority_peer_id == local.peer_id();
+    let _runtime_exclusion = if retired {
+        Some(crate::migration::acquire_retired_replay_guard(&DataPaths::from_root(storage.root()), world)?)
+    } else {
+        None
+    };
+    if retired {
+        let retirement = replay_retirement(anchor, verified.proof())?;
+        if !storage.stale_publication_pending(world)?
+            && !stale_replay_recipient_allowed(storage, local, anchor, verified.proof())?
+        {
+            bail!("retired authority has no matching locally committed transfer fence");
+        }
+        storage.begin_verified_retired_stale_publication(&candidate, retirement)?;
+    } else {
+        storage.begin_verified_stale_publication(&candidate)?;
+    }
     storage.finish_verified_stale_publication(&candidate)?;
     Ok(verified.proof)
 }

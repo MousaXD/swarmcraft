@@ -328,6 +328,9 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
         transfer.signer_public_key = signer.public_key();
         transfer.signature = signer.sign(&transfer.signing_bytes().unwrap());
         b.storage.save_transfer_record(&transfer).unwrap();
+        // The retired source durably signed its own committed decision,
+        // but its local save history is behind the successor's boundary.
+        a.storage.save_transfer_record(&transfer).unwrap();
     }
     b.storage.save_epoch_record(&next).unwrap();
     swarm_cli::migration::ensure_authority_artifacts(&b.storage, &b.identity, &next).unwrap();
@@ -372,6 +375,73 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
     assert_eq!(reopened.load_epoch_record(world).unwrap(), next);
     assert_eq!(reopened.list_snapshots(world).unwrap(), history);
     assert!(reopened.load_staged_stale_replay_proof(world).unwrap().is_none());
+
+    // The original source has the exact local committed transfer, but not
+    // the successor's checkpoint suffix. A surviving JVM ownership record
+    // must block canonical publication even after all data is verified.
+    let retired_anchor = a.storage.stale_replay_anchor(world).unwrap();
+    let process_dir = a.paths.root.join("control").join(world.to_hex());
+    fs::create_dir_all(&process_dir).unwrap();
+    let process_record = process_dir.join("runtime-process.json");
+    fs::write(
+        &process_record,
+        serde_json::to_vec(&serde_json::json!({"version": 1, "controller_pid": 1, "java_pid": std::process::id()}))
+            .unwrap(),
+    )
+    .unwrap();
+    let retired = spawn_daemon_with_peers(&a, local_ip, &[automatic_transport_address(&b, local_ip)]);
+    wait_until(
+        "retired source downloads exact isolated suffix while runtime remains occupied",
+        Duration::from_secs(90),
+        || {
+            a.storage.stale_replay_progress(world).ok().flatten().is_some_and(|progress| {
+                progress.anchor == retired_anchor
+                    && progress.proof == expected
+                    && progress.completed == expected.checkpoints.len()
+            })
+        },
+    );
+    assert_eq!(a.storage.load_epoch_record(world).unwrap(), epoch);
+    assert_eq!(a.storage.load_transfer_record(world).unwrap(), transfer);
+    assert!(!a.storage.stale_publication_pending(world).unwrap());
+    assert_eq!(a.storage.latest_snapshot(world).unwrap().unwrap(), head);
+    // Exercise the publisher directly as well, so the test proves a denial
+    // rather than merely observing the interval before the next daemon tick.
+    let error = swarm_cli::historical_authority::publish_stale_replay(&a.storage, &a.identity, world).unwrap_err();
+    assert!(error.to_string().contains("unaccounted Minecraft process"), "{error:#}");
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(process_dir.join("authority-runtime.lock"))
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&lock).unwrap();
+    // The test PID stands in for an unaccounted surviving process. An
+    // independently held runtime lock must deny publication as well.
+    fs::remove_file(&process_record).unwrap();
+    let error = swarm_cli::historical_authority::publish_stale_replay(&a.storage, &a.identity, world).unwrap_err();
+    assert!(error.to_string().contains("active authority runtime"), "{error:#}");
+    assert_eq!(a.storage.load_epoch_record(world).unwrap(), epoch);
+    assert!(!a.storage.stale_publication_pending(world).unwrap());
+    fs2::FileExt::unlock(&lock).unwrap();
+    drop(lock);
+    wait_until("retired source re-enters as a replica", Duration::from_secs(90), || {
+        a.storage.load_epoch_record(world).ok().as_ref() == Some(&next)
+            && a.storage.latest_snapshot(world).ok().flatten().as_ref()
+                == b.storage.latest_snapshot(world).ok().flatten().as_ref()
+            && a.storage.stale_publication_pending(world).ok() == Some(false)
+            && a.storage.load_transfer_record(world).is_err()
+    });
+    assert_eq!(a.storage.list_snapshots(world).unwrap(), history);
+    assert_eq!(a.storage.load_membership_record(world).unwrap(), *expected.membership.last().unwrap());
+    assert_eq!(a.storage.load_transfer_phase(&transfer, swarm_protocol::TransferPhase::Committed).unwrap(), transfer);
+    assert!(swarm_cli::hosting_budget::load_consent(&a.paths, world).unwrap().is_none());
+    swarm_cli::live_authority::verify_playable_epoch(&a.storage, &next).unwrap();
+    drop(retired);
+    let reopened = Storage::open(a.paths.root.clone()).unwrap();
+    assert_eq!(reopened.load_epoch_record(world).unwrap(), next);
+    assert_eq!(reopened.list_snapshots(world).unwrap(), history);
 }
 
 #[test]

@@ -750,7 +750,7 @@ fn infer_trigger(storage: &Storage, epoch: &EpochRecordV1, local_peer: PeerId) -
 /// players as confusing "No such file or directory" setup failures. This
 /// advisory whole-file lock makes later attempts fail fast (explicit launches)
 /// or stay silent and retry later (supervisor ticks) instead of racing.
-struct AuthorityRuntimeGuard {
+pub(crate) struct AuthorityRuntimeGuard {
     file: fs::File,
 }
 
@@ -795,6 +795,18 @@ impl AuthorityRuntimeGuard {
             .with_context(|| format!("cannot record owner in authority runtime lock {}", path.display()))?;
         Ok(Some(Self { file }))
     }
+}
+
+/// Keep the retired generation's runtime slot exclusively owned throughout
+/// replay publication. The persistent Java record covers hard-killed Rust
+/// controllers whose advisory locks have already been released.
+pub(crate) fn acquire_retired_replay_guard(paths: &DataPaths, world: WorldId) -> Result<AuthorityRuntimeGuard> {
+    crate::runtime_process_guard::refuse_unaccounted_world_runtime(paths, world)?;
+    let slot = AuthorityRuntimeGuard::acquire(paths, world)?;
+    crate::runtime_process_guard::refuse_unaccounted_world_runtime(paths, world)?;
+    crate::authority_permit::clear_permit(paths, world)?;
+    host_readiness::invalidate_runtime_verification(paths, world)?;
+    Ok(slot)
 }
 
 impl Drop for AuthorityRuntimeGuard {

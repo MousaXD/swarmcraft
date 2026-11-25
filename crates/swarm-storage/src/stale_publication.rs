@@ -243,6 +243,42 @@ impl Storage {
     /// return the exact durable intent has fenced all ordinary live reads
     /// and writes. It is safe to exit the process at this boundary.
     pub fn begin_verified_stale_publication(&self, candidate: &StalePublicationCandidate) -> Result<(), StorageError> {
+        self.begin_verified_stale_publication_inner(candidate, None)
+    }
+
+    /// A formerly authoritative replica must still hold its exact local
+    /// committed transfer at the instant the publication intent is installed.
+    /// The caller independently verifies the transcript and holds runtime
+    /// exclusion across both publication phases. On resume the intent already
+    /// fences live access and the consumed record may have been removed.
+    pub fn begin_verified_retired_stale_publication(
+        &self,
+        candidate: &StalePublicationCandidate,
+        retirement: &AuthorityTransferV1,
+    ) -> Result<(), StorageError> {
+        let anchor_epoch = &candidate.anchor.epoch;
+        let index =
+            usize::try_from(anchor_epoch.epoch_number.checked_sub(1).ok_or(StorageError::WorldMetadataMismatch)?)
+                .map_err(|_| StorageError::WorldMetadataMismatch)?;
+        if !matches!(candidate.proof.transitions.get(index),
+            Some(HistoricalTransitionV1::Transfer { committed, .. }) if committed.as_ref() == retirement)
+            || retirement.from_peer_id != anchor_epoch.authority_peer_id
+            || candidate
+                .proof
+                .epochs
+                .last()
+                .is_none_or(|target| target.authority_peer_id == anchor_epoch.authority_peer_id)
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        self.begin_verified_stale_publication_inner(candidate, Some(retirement))
+    }
+
+    fn begin_verified_stale_publication_inner(
+        &self,
+        candidate: &StalePublicationCandidate,
+        retirement: Option<&AuthorityTransferV1>,
+    ) -> Result<(), StorageError> {
         let world = candidate.proof.world_id;
         let _gc = self.lock_blob_gc_for_snapshot_commit(world)?;
         let _guard = self.lock_world_transaction_for_replay(world)?;
@@ -251,6 +287,12 @@ impl Storage {
         }
         let intent = make_intent(&candidate.anchor, &candidate.proof)?;
         if !self.stale_publication_pending(world)? {
+            if let Some(expected) = retirement {
+                let path = self.world_dir(world).join("metadata/transfer.postcard");
+                if read_canonical_file(&path)? != postcard::to_allocvec(expected)? {
+                    return Err(StorageError::WorldMetadataMismatch);
+                }
+            }
             durable_atomic_write(&self.stale_publication_path(world), &postcard::to_allocvec(&intent)?)?;
         }
         Ok(())

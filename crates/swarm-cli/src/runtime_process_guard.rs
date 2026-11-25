@@ -86,46 +86,64 @@ pub fn refuse_unaccounted_runtimes(paths: &DataPaths) -> Result<()> {
         if !kind.is_dir() {
             continue;
         }
-        let record_path = entry.path().join("runtime-process.json");
-        // A dangling symlink would otherwise look like an absent record and
-        // bypass the safety check while an orphan JVM might still exist.
-        match fs::symlink_metadata(&record_path) {
-            Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
-                bail!("untrusted hosting process record {}; JVM admission denied", record_path.display());
+        check_quiescent_record(&entry.path().join("runtime-process.json"))?;
+    }
+    Ok(())
+}
+
+/// Scoped check for replay publication while holding the world's exclusive
+/// authority runtime lock. Other worlds' legitimate hosts need not stop.
+pub(crate) fn refuse_unaccounted_world_runtime(paths: &DataPaths, world: WorldId) -> Result<()> {
+    let control = paths.root.join("control");
+    let world_control = control.join(world.to_hex());
+    for directory in [&control, &world_control] {
+        match fs::symlink_metadata(directory) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                bail!("untrusted runtime control directory {}; replay denied", directory.display());
             }
             Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error).with_context(|| format!("cannot inspect {}", record_path.display()));
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error).with_context(|| format!("cannot inspect {}", directory.display())),
         }
-        // Once a record was observed, deletion or replacement between
-        // metadata inspection and read must not become "no record".
-        let bytes = fs::read(&record_path)
-            .with_context(|| format!("cannot read observed hosting process record {}", record_path.display()))?;
-        let record: RuntimeProcessRecord = serde_json::from_slice(&bytes).with_context(|| {
-            format!("unreadable hosting process record at {}; new JVM denied", record_path.display())
-        })?;
-        if record.version != RUNTIME_PROCESS_RECORD_VERSION {
-            bail!("unsupported hosting process record at {}; new JVM denied", record_path.display());
+    }
+    check_quiescent_record(&world_control.join("runtime-process.json"))
+}
+
+fn check_quiescent_record(record_path: &std::path::Path) -> Result<()> {
+    // A dangling symlink would otherwise look like an absent record and
+    // bypass the safety check while an orphan JVM might still exist.
+    match fs::symlink_metadata(record_path) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+            bail!("untrusted hosting process record {}; JVM admission denied", record_path.display());
         }
-        match record.java_pid {
-            Some(pid) => {
-                if process_alive(pid)
-                    .with_context(|| format!("cannot verify residual Java PID {pid} in {}", record_path.display()))?
-                {
-                    bail!(
-                        "unaccounted Minecraft process PID {pid} remains alive in {}; refusing additional JVM admission",
-                        record_path.display()
-                    );
-                }
-            }
-            None => {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot inspect {}", record_path.display()));
+        }
+    }
+    // Once a record was observed, deletion or replacement between
+    // metadata inspection and read must not become "no record".
+    let bytes = fs::read(record_path)
+        .with_context(|| format!("cannot read observed hosting process record {}", record_path.display()))?;
+    let record: RuntimeProcessRecord = serde_json::from_slice(&bytes)
+        .with_context(|| format!("unreadable hosting process record at {}; new JVM denied", record_path.display()))?;
+    if record.version != RUNTIME_PROCESS_RECORD_VERSION {
+        bail!("unsupported hosting process record at {}; new JVM denied", record_path.display());
+    }
+    match record.java_pid {
+        Some(pid) => {
+            if process_alive(pid)
+                .with_context(|| format!("cannot verify residual Java PID {pid} in {}", record_path.display()))?
+            {
                 bail!(
-                    "ambiguous prior Minecraft launch at {}; refusing additional JVM admission",
+                    "unaccounted Minecraft process PID {pid} remains alive in {}; refusing additional JVM admission",
                     record_path.display()
                 );
             }
+        }
+        None => {
+            bail!("ambiguous prior Minecraft launch at {}; refusing additional JVM admission", record_path.display());
         }
     }
     Ok(())
