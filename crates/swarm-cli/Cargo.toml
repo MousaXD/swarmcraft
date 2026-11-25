@@ -22,6 +22,10 @@ path = "src/runtime_main.rs"
 name = "swarmcraft-import"
 path = "src/import_main.rs"
 
+[[bin]]
+name = "swarmcraft-infra"
+path = "src/infra_main.rs"
+
 [dependencies]
 blake3.workspace = true
 anyhow.workspace = true

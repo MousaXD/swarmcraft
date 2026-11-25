@@ -14,7 +14,12 @@ Use one copy of this template per real-machine network scenario. Do not mark a s
 
 - Matrix scenario: same LAN / home NAT to public peer / two home NATs / symmetric or strict NAT / CGNAT / mobile hotspot / IPv6 / blocked UDP / relay fallback / relay loss
 - Expected connection path:
-- Actual connection path:
+- Actual authenticated control path (direct QUIC / TCP / hole-punch / relay / unavailable):
+- Actual game stream path (direct QUIC / TCP / hole-punch / relay / unavailable):
+- Current verified host route and successful Minecraft login:
+- Shared marker visible in Minecraft (not merely socket/stream echo):
+- Network path failure reason and recovery action:
+- Packet loss, latency, bandwidth and measurement method (if impaired):
 - Bootstrap service used, if any:
 - Relay service used, if any:
 - Environment class known independently of AutoNAT, if known:

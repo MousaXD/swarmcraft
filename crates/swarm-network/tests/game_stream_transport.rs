@@ -8,7 +8,9 @@ use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use libp2p::StreamProtocol;
 use rand_core::OsRng;
 use std::time::Duration;
-use swarm_network::{game_route::GAME_STREAM_PROTOCOL, generate_transport_key, NetworkEvent, SwarmNode};
+use swarm_network::{
+    game_route::GAME_STREAM_PROTOCOL, generate_transport_key, NetworkEvent, SwarmNode, WireRequest, WireResponse,
+};
 use swarm_protocol::{peer_id_from_public_key, PeerHelloV1, PROTOCOL_VERSION};
 use tokio::time::timeout;
 
@@ -71,6 +73,33 @@ async fn authenticated_game_substream_echoes_bytes_without_snapshot_protocol(
     .await
     .expect("both application identities must be authenticated");
 
+    assert!(node_a.connectivity_diagnostics().direct_connectivity);
+    assert!(node_b.connectivity_diagnostics().direct_connectivity);
+    assert!(!node_a.connectivity_diagnostics().relay_connectivity);
+    assert!(!node_b.connectivity_diagnostics().relay_connectivity);
+
+    // Independently exercise the ordinary authenticated control RPC before
+    // opening the game stream; both must work on the selected direct path.
+    let request = node_b.send_request(&transport_a, WireRequest::Ping { nonce: 29 }).unwrap();
+    timeout(Duration::from_secs(8), async {
+        loop {
+            tokio::select! {
+                event = node_a.next_event() => {
+                    if let NetworkEvent::InboundRequest { transport_peer, request: WireRequest::Ping { nonce }, channel } = event.unwrap() {
+                        assert_eq!(transport_peer, transport_b);
+                        node_a.respond(channel, WireResponse::Pong { nonce }).unwrap();
+                    }
+                }
+                event = node_b.next_event() => {
+                    if let NetworkEvent::Response { transport_peer, request_id, response: WireResponse::Pong { nonce: 29 } } = event.unwrap() {
+                        assert_eq!(transport_peer, transport_a);
+                        assert_eq!(request_id, request);
+                        break;
+                    }
+                }
+            }
+        }
+    }).await.expect("authenticated control RPC must make progress");
     let registry_a = node_a.game_authenticated_peers();
     let registry_b = node_b.game_authenticated_peers();
     assert_eq!(registry_a.read().unwrap().get(&transport_b), Some(&application_b));
@@ -127,4 +156,21 @@ async fn authenticated_game_substream_echoes_bytes_over_quic_without_snapshot_pr
 #[tokio::test]
 async fn authenticated_game_substream_echoes_bytes_over_tcp_noise_without_snapshot_protocol() {
     authenticated_game_substream_echoes_bytes_without_snapshot_protocol("/ip4/127.0.0.1/tcp/0", "TCP/Noise").await;
+}
+
+#[tokio::test]
+async fn authenticated_game_substream_echoes_bytes_over_ipv6_quic() {
+    // Explicitly report unavailable IPv6 instead of falling back to IPv4.
+    // Linux CI is required to exercise this path; other OS runners may have
+    // IPv6 disabled by policy.
+    if let Err(error) = std::net::UdpSocket::bind("[::1]:0") {
+        #[cfg(target_os = "linux")]
+        panic!("IPv6 loopback is required on Linux: {error}");
+        #[cfg(not(target_os = "linux"))]
+        {
+            eprintln!("IPv6 loopback not available on this runner: {error}");
+            return;
+        }
+    }
+    authenticated_game_substream_echoes_bytes_without_snapshot_protocol("/ip6/::1/udp/0/quic-v1", "IPv6 QUIC").await;
 }

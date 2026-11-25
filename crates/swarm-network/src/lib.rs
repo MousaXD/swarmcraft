@@ -14,6 +14,7 @@ pub mod game_route_host_service;
 pub mod game_route_resolver;
 pub mod game_stream_replay;
 pub mod game_transport;
+pub mod infrastructure;
 mod invite_connectivity;
 mod node;
 mod transport;
@@ -35,7 +36,7 @@ pub use invite_connectivity::{
 pub use libp2p::request_response::ResponseChannel;
 pub use libp2p::PeerId as TransportPeerId;
 pub use node::{NetworkEvent, SwarmNode, BOOTSTRAP_ENV, RELAY_ENV, WIRE_PROTOCOL};
-pub use transport::{generate_transport_key, load_or_create_transport_key};
+pub use transport::{generate_transport_key, load_or_create_transport_key, read_transport_peer_id};
 pub use wire::{
     BlobResumeV1, HostCapabilityV1, HostRuntimeReadinessV1, PeerHelloProofV1, ReplicaAckV1, ServerModsReadinessV1,
     WireLimitError, WireRequest, WireResponse, MAX_BLOB_CHUNK, MAX_DISCOVERY_ANNOUNCEMENT_BYTES,

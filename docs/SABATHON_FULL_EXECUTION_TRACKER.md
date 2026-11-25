@@ -147,40 +147,40 @@ Implementation completion: count only items whose full implementation criteria a
 - Acceptance: Per-path results are fresh and actionable. Failure has retry/copy options and no endless loading or false Ready
 - State: **LOCALLY VERIFIED**
 - Source: [Connection diagnosis](CONNECTION_DIAGNOSIS.md); crates/swarm-cli/src/{game_route_api,daemon,daemon_game_gateway}.rs; crates/swarm-network/src/game_transport.rs; apps/desktop/src/{game-route-status,discovery-diagnostics}.js; both Desktop views.
-- Evidence: strict core Clippy; 115 network, 140 CLI library and 51 daemon tests; real game-stream and resolver integration; local negative gateway smoke (unconsented mock, not installed Minecraft); 144 Desktop tests including ChromeDriver at three viewport sizes; 82 Svelte tests, 29 source parity tests, typecheck/build. Native Desktop decoder test execution and exact-SHA CI tracked separately.
-- Remaining / next action: Confirm native decoder test and exact-SHA CI; installed multi-network directory/peer/host/game error journey, including real Minecraft login. Typed host-proof failure does not speculate about which required proof failed.
+- Evidence: strict core Clippy; 115 network, 140 CLI library and 51 daemon tests; real game-stream and resolver integration; local negative gateway smoke (unconsented mock, not installed Minecraft); 144 Desktop tests including ChromeDriver at three viewport sizes; 82 Svelte tests, 29 source parity tests, typecheck/build. Four native Desktop route-decoder tests passed. Exact-SHA CI tracked separately.
+- Remaining / next action: Confirm exact-SHA CI; installed multi-network directory/peer/host/game error journey, including real Minecraft login. Typed host-proof failure does not speculate about which required proof failed.
 - External dependency: Installed devices and representative networks for field acceptance.
 - Commit: Connection-diagnosis checkpoint following ad99fd8; see git history.
 
 ### #15 — P1 · Unverified
 - Work: Certify representative LAN, WAN, home NAT, CGNAT, IPv6, mobile, blocked UDP, and packet-loss scenarios
 - Acceptance: Matrix reports network class, selected control and game routes, success/failure, and reason. Any unsupported path is named accurately
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **IN PROGRESS**
+- Source: [Network validation](NETWORK_VALIDATION.md); [field template](network-validation/FIELD_RECORD_TEMPLATE.md); crates/swarm-network/tests/{game_stream_transport,game_stream_relay}.rs
+- Evidence: Local authenticated control and dedicated game-stream echo pass on IPv4 QUIC, TCP/Noise, IPv6 QUIC, and production TCP relay. Explicit relay loss and replacement pass. Existing CI netem tests measure snapshot resume, not Minecraft latency.
+- Remaining / next action: Record actual control/game paths, successful Minecraft login, and failure reasons on all representative physical networks. No field row promoted from loopback.
+- External dependency: Independent LAN/WAN, NAT/CGNAT, mobile, routed IPv6, UDP-blocked and measured-loss environments.
+- Commit: See private infrastructure checkpoint in git history.
 
 ### #16 — P1 · Partial
 - Work: Publish deployable discovery bootstrap, private rendezvous, and game relay configurations with documented boundaries
 - Acceptance: A new group can bring up its own compatible node, swap relays, and recover from relay outage. Relay and directory services never grant world authority
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: crates/swarm-network/src/infrastructure.rs; crates/swarm-cli/src/{infra_main,runtime_main,discovery}.rs; deploy/infrastructure/; deploy/systemd/swarmcraft-{locator,relay}.service; [deployment runbook](PRIVATE_INFRASTRUCTURE.md)
+- Evidence: Production allowlisted relay transfers authenticated control/game bytes, refuses unknown transport, drops the old path on outage and reconnects via replacement without changing peer identities. Independent local locator and signed publisher subprocesses resolve and browse only through DHT with mDNS disabled; private world absent, duplicate ownership denied, relay identity stable on restart. DHT-discovered already-authenticated providers now participate in freshness proof; private visibility change invalidates cached announcement and voting. Strict Clippy, 3 infrastructure unit tests, 5 discovery network regressions and process smoke passed.
+- Remaining / next action: Run exact-SHA CI; deploy to an independent group VPN/firewall; validate actual daemon restart/replacement with installed Minecraft. Standalone discovery publishers require a reachable direct/VPN address; no cryptographic DHT isolation or automatic Desktop relay swap claimed.
+- External dependency: Independent operators/networks and real gameplay field test.
+- Commit: See private infrastructure checkpoint in git history.
 
 ### #17 — P1 · Proposal
 - Work: Define relay connection, bandwidth, duration, auth, and resource policies before shared hosting
 - Acceptance: Fair-use and disconnect behavior are measured with multiple worlds. Invites and private route details are absent from public logs
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **IN PROGRESS**
+- Source: crates/swarm-network/src/infrastructure.rs; crates/swarm-network/tests/game_stream_relay.rs; [resource policy](PRIVATE_INFRASTRUCTURE.md)
+- Evidence: Explicit transport allowlist, connection/reservation/circuit/byte/duration limits and retained libp2p rate limiters. Deployment examples bound memory/tasks/fds. Local four-peer test enforces 256 KiB encrypted circuit cap; 124 KiB acknowledged payload with echo before disconnect and auth revocation; independent circuit remains live. Operator services do not log remote peer events, invite or route payloads.
+- Remaining / next action: Measure duration exhaustion, sustained throughput and fairness with real concurrent worlds and limited uplinks; validate operator resource policies on target service host. Current caps are not per-world bandwidth guarantees.
+- External dependency: Multiple actual Minecraft worlds and representative shared-relay deployment.
+- Commit: See private infrastructure checkpoint in git history.
 
 ### #18 — P2 · Proposal
 - Work: Add adaptive replication throttling so background saves do not ruin game latency

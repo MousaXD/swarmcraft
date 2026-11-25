@@ -6,6 +6,14 @@ pub fn generate_transport_key() -> Keypair {
     Keypair::generate_ed25519()
 }
 
+/// Read the existing transport identity for a private relay allowlist.
+/// Never create, rotate, or print the key from this diagnostic command.
+pub fn read_transport_peer_id(path: &Path) -> Result<libp2p::PeerId> {
+    let bytes = fs::read(path).context("transport identity missing; initialize the daemon once")?;
+    let key = Keypair::from_protobuf_encoding(&bytes).context("invalid persisted libp2p transport key")?;
+    Ok(key.public().to_peer_id())
+}
+
 pub fn load_or_create_transport_key(path: &Path) -> Result<Keypair> {
     if path.exists() {
         let bytes = fs::read(path).with_context(|| format!("cannot read transport key {}", path.display()))?;

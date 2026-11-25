@@ -1,0 +1,27 @@
+[Unit]
+Description=SwarmCraft private infrastructure relay
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=swarmcraft-infra
+Group=swarmcraft-infra
+StateDirectory=swarmcraft-relay
+StateDirectoryMode=0700
+UMask=0077
+ExecStart=/usr/local/bin/swarmcraft-infra --state-dir /var/lib/swarmcraft-relay relay --config /etc/swarmcraft-infra/relay.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitNOFILE=1024
+TasksMax=128
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

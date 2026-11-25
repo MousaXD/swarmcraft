@@ -1,0 +1,8 @@
+{
+  "listen": "/ip4/127.0.0.1/tcp/41002",
+  "advertise": null,
+  "allowed_transport_peers": [],
+  "max_circuit_bytes": 67108864,
+  "max_circuit_seconds": 900,
+  "max_circuits": 8
+}

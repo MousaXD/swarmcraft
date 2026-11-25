@@ -38,6 +38,8 @@ enum Command {
     Init,
     /// Display this device's persistent cryptographic peer identity.
     Identity,
+    /// Read the existing transport peer ID (for private relay allowlists).
+    TransportId,
     /// Run the authenticated replication coordinator and migration supervisor.
     Daemon {
         #[arg(long, default_value = "/ip4/0.0.0.0/udp/0/quic-v1")]
@@ -286,6 +288,9 @@ fn main() -> Result<()> {
             let identity = PeerIdentity::load_or_create(&paths)?;
             println!("Peer ID: {}", identity.peer_id());
             println!("Public key: {}", hex_string(&identity.public_key()));
+        }
+        Command::TransportId => {
+            println!("{}", swarm_network::read_transport_peer_id(&paths.transport_key())?);
         }
         Command::Daemon { listen, peer_addrs, replica_only } => {
             // The profile lives for the entire daemon, across all worlds in

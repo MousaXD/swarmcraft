@@ -85,6 +85,10 @@ Bootstrap and relay addresses that are used as configured infrastructure must co
 
 Kademlia bootstrap peers and relay peers are tracked separately so an outbound infrastructure failure can be reported as `BootstrapUnavailable` or `RelayUnavailable` instead of a generic connection string.
 
+Group-operated locator and bounded TCP relay deployment, identity allowlists,
+private rendezvous requirements and explicit relay replacement are described
+in [Private infrastructure](PRIVATE_INFRASTRUCTURE.md).
+
 ## Field connectivity probe
 
 The repository includes a small networking-only probe that runs the real `SwarmNode`, opens IPv4 QUIC, attempts IPv6 QUIC when the host supports it, consumes the normal bootstrap/relay environment configuration, and prints diagnostic snapshots as network events arrive.
@@ -175,6 +179,21 @@ The following distinction is intentional.
 - relay fallback through the intended production/community relay deployment;
 - replacing a failed relay with another viable relay/path in the field.
 
+## Local evidence matrix (not field certification)
+
+Record the physical network independently from AutoNAT. An authenticated
+control request and a dedicated game stream are separate checks; an echo
+test is never evidence of a successful Minecraft login.
+
+| Test environment | Control path | Game stream | Local evidence / limitation |
+| --- | --- | --- | --- |
+| IPv4 loopback | QUIC / signed Ping-Pong | QUIC substream | Direct authenticated byte exchange |
+| IPv4 loopback | TCP/Noise / signed Ping-Pong | TCP/Noise substream | TCP core transport only; no arbitrary direct TCP daemon peer hint |
+| IPv6 loopback | IPv6 QUIC / signed Ping-Pong | IPv6 QUIC substream | No IPv4 fallback; Linux gate requires IPv6; no ISP routing evidence |
+| Local group relay | TCP/Noise circuit / signed Ping-Pong | TCP/Noise circuit | Production allowlisted relay, unlisted reservation refused |
+| Local relay outage/replacement | Old authentication removed; explicit replacement reauthenticates | Old stream fails; new stream echoes | No direct fallback in this test; no actual Minecraft login |
+| Hosted CI loopback impairment | QUIC snapshot resume under netem | Not measured | Existing impairment job; no game-latency or field evidence |
+
 ## Manual real-world validation matrix
 
 Do not change a row to **Verified** unless it has been exercised between real machines/networks and the evidence is recorded with the tested SwarmCraft commit/version.
@@ -187,10 +206,11 @@ Do not change a row to **Verified** unless it has been exercised between real ma
 | Symmetric/strict NAT | relay likely; hole punch only if the NATs permit it | Field certification required |
 | CGNAT | relay likely; hole punch where carrier permits | Field certification required |
 | Mobile hotspot | direct/hole punch/relay depends on carrier | Field certification required |
-| IPv6 peers | direct IPv6 where routable | Field certification required across representative ISPs |
-| UDP blocked | TCP/relay path if configured and reachable | Field certification required |
-| Direct path fails but relay is reachable | one bounded relay fallback for an explicit dial plan | Real relay deployment test required |
-| Relay disappears after world was replicated | another direct/relay path may reconnect; canonical world history remains independent of relay | Multi-path/multi-relay field validation required |
+| IPv6 peers | direct IPv6 where routable | Local IPv6 transport gate; field certification required across representative ISPs |
+| UDP blocked | TCP relay path if configured and reachable | Local TCP relay exercised without UDP; real firewall certification required |
+| Direct path fails but relay is reachable | one bounded relay fallback for an explicit dial plan | Local relay and fallback coverage; real relay deployment test required |
+| Relay disappears after world was replicated | another direct/relay path may reconnect; canonical world history remains independent of relay | Local explicit replacement transport test; multi-path/multi-relay field validation required |
+| Measured WAN packet loss | direct or relay while authenticated; reconnect and resume when interrupted | CI loopback snapshot impairment only; actual game responsiveness and physical WAN record required |
 
 ## Manual authority transfer under adverse networks
 

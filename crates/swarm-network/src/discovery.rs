@@ -4,10 +4,13 @@ use futures::StreamExt;
 use libp2p::{
     connection_limits, identify,
     identity::Keypair,
-    kad::{self, store::MemoryStore},
+    kad::{
+        self,
+        store::{MemoryStore, MemoryStoreConfig, RecordStore},
+    },
     mdns, noise, ping,
     request_response::{self, cbor, ProtocolSupport},
-    swarm::{dial_opts::DialOpts, ConnectionId, NetworkBehaviour, SwarmEvent},
+    swarm::{behaviour::toggle::Toggle, dial_opts::DialOpts, ConnectionId, NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId as TransportPeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
 use rand_core::{OsRng, RngCore};
@@ -68,7 +71,7 @@ mod generated_behaviour {
         // otherwise a rejected duplicate leaves phantom connection state.
         pub(super) limits: connection_limits::Behaviour,
         pub(super) request_response: cbor::Behaviour<WireRequest, WireResponse>,
-        pub(super) mdns: mdns::tokio::Behaviour,
+        pub(super) mdns: Toggle<mdns::tokio::Behaviour>,
         pub(super) identify: identify::Behaviour,
         pub(super) ping: ping::Behaviour,
         pub(super) kad: kad::Behaviour<MemoryStore>,
@@ -137,10 +140,28 @@ pub struct DiscoveryNode {
     connection_counts: HashMap<TransportPeerId, usize>,
     pending_dials: HashSet<TransportPeerId>,
     admission: AdmissionController,
+    locator_only: bool,
 }
 
 impl DiscoveryNode {
     pub fn new(transport_key: Keypair, local_hello: PeerHelloV1, application_signing_key: SigningKey) -> Result<Self> {
+        Self::with_mode(transport_key, local_hello, application_signing_key, false)
+    }
+
+    pub(crate) fn new_locator(
+        transport_key: Keypair,
+        local_hello: PeerHelloV1,
+        application_signing_key: SigningKey,
+    ) -> Result<Self> {
+        Self::with_mode(transport_key, local_hello, application_signing_key, true)
+    }
+
+    fn with_mode(
+        transport_key: Keypair,
+        local_hello: PeerHelloV1,
+        application_signing_key: SigningKey,
+        locator_only: bool,
+    ) -> Result<Self> {
         verify_peer_hello(&local_hello).context("local discovery PeerHello must be valid")?;
         let local_peer = transport_key.public().to_peer_id();
         let self_test =
@@ -153,13 +174,47 @@ impl DiscoveryNode {
                 .with_request_timeout(Duration::from_secs(15))
                 .with_max_concurrent_streams(64),
         );
-        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer)
-            .context("failed to initialize discovery mDNS")?;
+        let mdns_enabled = if locator_only {
+            false
+        } else {
+            match env::var("SWARMCRAFT_DISCOVERY_MDNS").as_deref() {
+                Ok("0") => false,
+                Ok("1") | Err(env::VarError::NotPresent) => true,
+                _ => return Err(anyhow!("SWARMCRAFT_DISCOVERY_MDNS must be 0 or 1")),
+            }
+        };
+        let mdns = if !mdns_enabled {
+            None
+        } else {
+            Some(
+                mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer)
+                    .context("failed to initialize discovery mDNS")?,
+            )
+        };
         let identify =
             identify::Behaviour::new(identify::Config::new(DISCOVERY_WIRE_PROTOCOL.to_owned(), transport_key.public()));
         let mut kad_config = kad::Config::default();
         kad_config.set_query_timeout(Duration::from_secs(15));
-        let mut kad = kad::Behaviour::with_config(local_peer, MemoryStore::new(local_peer), kad_config);
+        // Locator entries expire after ten minutes. Republish bounded
+        // provider hints periodically even when the local signed world
+        // configuration has not changed (including after locator restart).
+        kad_config.set_provider_publication_interval(Some(Duration::from_secs(60)));
+        let store = if locator_only {
+            kad_config.set_record_filtering(kad::StoreInserts::FilterBoth);
+            kad_config.set_provider_record_ttl(Some(Duration::from_secs(10 * 60)));
+            MemoryStore::with_config(
+                local_peer,
+                MemoryStoreConfig {
+                    max_records: 0,
+                    max_value_bytes: 0,
+                    max_providers_per_key: 20,
+                    max_provided_keys: 1024,
+                },
+            )
+        } else {
+            MemoryStore::new(local_peer)
+        };
+        let mut kad = kad::Behaviour::with_config(local_peer, store, kad_config);
         kad.set_mode(Some(kad::Mode::Server));
 
         let swarm = SwarmBuilder::with_existing_identity(transport_key)
@@ -169,7 +224,7 @@ impl DiscoveryNode {
             .with_dns()?
             .with_behaviour(move |_| DiscoveryBehaviour {
                 request_response,
-                mdns,
+                mdns: Toggle::from(mdns),
                 identify,
                 ping: ping::Behaviour::default(),
                 kad,
@@ -189,9 +244,32 @@ impl DiscoveryNode {
             connection_counts: HashMap::new(),
             pending_dials: HashSet::new(),
             admission: AdmissionController::new(),
+            locator_only,
         };
-        node.configure_from_environment()?;
+        if !locator_only {
+            node.configure_from_environment()?;
+        }
         Ok(node)
+    }
+
+    pub(crate) fn add_locator_external_address(&mut self, address: Multiaddr) -> Result<()> {
+        if !self.locator_only {
+            return Err(anyhow!("explicit locator advertisement requires locator-only service"));
+        }
+        self.swarm.add_external_address(address);
+        Ok(())
+    }
+
+    /// Publish the address of an actual bound listener for explicit
+    /// discovery providers. Only locators, never game routes or authority.
+    pub fn advertise_local_listener(&mut self, address: Multiaddr) -> Result<Multiaddr> {
+        crate::infrastructure::validate_endpoint(&address, false, false)?;
+        if !self.swarm.listeners().any(|listener| listener == &address) {
+            return Err(anyhow!("discovery address is not an active local listener"));
+        }
+        let address = address.with(libp2p::multiaddr::Protocol::P2p(self.local_transport_peer_id()));
+        self.swarm.add_external_address(address.clone());
+        Ok(address)
     }
 
     pub fn local_transport_peer_id(&self) -> TransportPeerId {
@@ -365,6 +443,9 @@ impl DiscoveryNode {
             self.drive_auth_challenges();
             match event {
                 SwarmEvent::NewListenAddr { address, .. } => return Ok(DiscoveryNetworkEvent::Listening { address }),
+                SwarmEvent::ListenerError { .. } | SwarmEvent::ListenerClosed { .. } if self.locator_only => {
+                    return Err(anyhow!("locator listener stopped"));
+                }
                 SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, num_established, .. } => {
                     self.pending_dials.remove(&peer_id);
                     let connection_is_dialer = endpoint.is_dialer();
@@ -791,6 +872,18 @@ impl DiscoveryNode {
                     }
                     _ => {}
                 },
+                SwarmEvent::Behaviour(DiscoveryBehaviourEvent::Kad(kad::Event::InboundRequest {
+                    request: kad::InboundRequest::AddProvider { record: Some(record) },
+                })) if self.locator_only => {
+                    // DHT provider claims are untrusted locator hints only.
+                    // Actual signed announcement and quorum are checked by clients.
+                    if locator_provider_key(record.key.as_ref())
+                        && record.addresses.len() <= 8
+                        && record.addresses.iter().all(|address| address.to_vec().len() <= 512)
+                    {
+                        let _ = self.swarm.behaviour_mut().kad.store_mut().add_provider(record);
+                    }
+                }
                 SwarmEvent::Behaviour(DiscoveryBehaviourEvent::Ping(_))
                 | SwarmEvent::Behaviour(DiscoveryBehaviourEvent::Identify(_))
                 | SwarmEvent::Behaviour(DiscoveryBehaviourEvent::Kad(_)) => {}
@@ -874,6 +967,12 @@ impl DiscoveryNode {
                 .send_request(peer, WireRequest::HelloChallenge { challenge: challenge.nonce });
         }
     }
+}
+
+fn locator_provider_key(key: &[u8]) -> bool {
+    key == PUBLIC_DIRECTORY_KEY
+        || (key.starts_with(WORLD_KEY_PREFIX) && key.len() == WORLD_KEY_PREFIX.len() + 32)
+        || (key.starts_with(FRIEND_KEY_PREFIX) && key.len() == FRIEND_KEY_PREFIX.len() + 64)
 }
 
 pub fn public_directory_key() -> kad::RecordKey {

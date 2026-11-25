@@ -1,4 +1,3 @@
-#![allow(unreachable_code)] // libp2p's generated relay-event conversion is unreachable under newer Rust.
 //! Locally hosted three-process-style relay acceptance.
 //!
 //! Player and host have NO direct application connection or manually
@@ -9,24 +8,53 @@
 
 use ed25519_dalek::{Signer, SigningKey};
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
-use libp2p::{
-    identify, identity,
-    multiaddr::Protocol,
-    noise, ping, relay,
-    swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, StreamProtocol, SwarmBuilder,
-};
+use libp2p::{multiaddr::Protocol, Multiaddr, StreamProtocol};
 use rand_core::OsRng;
 use std::time::Duration;
-use swarm_network::{game_route::GAME_STREAM_PROTOCOL, generate_transport_key, NetworkEvent, SwarmNode};
+use swarm_network::{
+    game_route::GAME_STREAM_PROTOCOL,
+    generate_transport_key,
+    infrastructure::{PrivateRelay, PrivateRelayConfig},
+    NetworkEvent, SwarmNode, TransportPeerId, WireRequest, WireResponse,
+};
 use swarm_protocol::{peer_id_from_public_key, PeerHelloV1, PROTOCOL_VERSION};
-use tokio::time::timeout;
+use tokio::{sync::oneshot, task::JoinHandle, time::timeout};
 
-#[derive(NetworkBehaviour)]
-struct LocalRelayBehaviour {
-    relay: relay::Behaviour,
-    ping: ping::Behaviour,
-    identify: identify::Behaviour,
+async fn start_relay(allowed: &[TransportPeerId]) -> (TransportPeerId, Multiaddr, JoinHandle<()>) {
+    start_relay_with_budget(allowed, 8 * 1024 * 1024).await
+}
+
+async fn start_relay_with_budget(
+    allowed: &[TransportPeerId],
+    max_circuit_bytes: u64,
+) -> (TransportPeerId, Multiaddr, JoinHandle<()>) {
+    let key = generate_transport_key();
+    let peer = key.public().to_peer_id();
+    let relay = PrivateRelay::bind(
+        key,
+        &PrivateRelayConfig {
+            listen: "/ip4/127.0.0.1/tcp/0".into(),
+            advertise: None,
+            allowed_transport_peers: allowed.iter().map(ToString::to_string).collect(),
+            max_circuit_bytes,
+            max_circuit_seconds: 300,
+            max_circuits: 4,
+        },
+    )
+    .await
+    .unwrap();
+    let address = relay.advertised_address().clone();
+    let task = tokio::spawn(async move { relay.run().await.unwrap() });
+    (peer, address, task)
+}
+
+async fn pump(mut node: SwarmNode, mut stop: oneshot::Receiver<()>) -> SwarmNode {
+    loop {
+        tokio::select! {
+            _ = &mut stop => return node,
+            event = node.next_event() => { event.unwrap(); }
+        }
+    }
 }
 
 fn hello(key: &SigningKey, nonce: u8) -> PeerHelloV1 {
@@ -45,52 +73,7 @@ fn hello(key: &SigningKey, nonce: u8) -> PeerHelloV1 {
 
 #[tokio::test]
 async fn encrypted_game_substream_survives_a_real_local_libp2p_relay_circuit() {
-    timeout(Duration::from_secs(45), async {
-        let relay_key = identity::Keypair::generate_ed25519();
-        let relay_peer = relay_key.public().to_peer_id();
-        let mut relay_server = SwarmBuilder::with_existing_identity(relay_key)
-            .with_tokio()
-            .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)
-            .unwrap()
-            .with_behaviour(move |key| LocalRelayBehaviour {
-                // The library default limits a circuit to only 128 KiB and
-                // 120 seconds, unsuitable for a real Minecraft session.
-                // Real deployments need an explicitly provisioned relay
-                // budget; this is still bounded to 8 MiB/5 min for the test.
-                relay: relay::Behaviour::new(
-                    key.public().to_peer_id(),
-                    relay::Config {
-                        max_circuit_bytes: 8 * 1024 * 1024,
-                        max_circuit_duration: Duration::from_secs(5 * 60),
-                        ..Default::default()
-                    },
-                ),
-                ping: ping::Behaviour::default(),
-                identify: identify::Behaviour::new(identify::Config::new(
-                    "/swarmcraft/test-relay/1".to_owned(),
-                    key.public(),
-                )),
-            })
-            .unwrap()
-            .build();
-        relay_server.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
-        let relay_address = loop {
-            if let SwarmEvent::NewListenAddr { address, .. } = relay_server.select_next_some().await {
-                break address.with(Protocol::P2p(relay_peer));
-            }
-        };
-        // A real relay advertises a reachable multiaddr in reservation
-        // responses; without an external address the reservation reply may
-        // be rejected as unusable even though the TCP connection exists.
-        relay_server.add_external_address(relay_address.clone());
-        // Keep the relay's swarm polled; it is a separate infrastructure
-        // participant with no SwarmCraft application authority or world keys.
-        let relay_task = tokio::spawn(async move {
-            loop {
-                relay_server.select_next_some().await;
-            }
-        });
-
+    timeout(Duration::from_secs(80), async {
         let host_key = SigningKey::generate(&mut OsRng);
         let player_key = SigningKey::generate(&mut OsRng);
         let host_app = peer_id_from_public_key(&host_key.verifying_key().to_bytes());
@@ -99,6 +82,8 @@ async fn encrypted_game_substream_survives_a_real_local_libp2p_relay_circuit() {
         let mut player = SwarmNode::new(generate_transport_key(), hello(&player_key, 2), player_key).unwrap();
         let host_transport = host.local_transport_peer_id();
         let player_transport = player.local_transport_peer_id();
+        let (relay_peer, relay_address, relay_task) = start_relay(&[host_transport, player_transport]).await;
+
         // Host does not listen publicly for game traffic; only to its
         // authenticated relay circuit. No raw-IP dial or fallback is used.
         host.configure_relay(relay_peer, relay_address.clone()).unwrap();
@@ -116,7 +101,7 @@ async fn encrypted_game_substream_survives_a_real_local_libp2p_relay_circuit() {
         assert!(reserved_address.iter().any(|protocol| matches!(protocol, Protocol::P2pCircuit)));
         assert_eq!(host.application_peer(&relay_peer), None, "relay server is not an authenticated world member");
 
-        player.dial_via_relay(relay_peer, relay_address, host_transport).unwrap();
+        player.dial_via_relay(relay_peer, relay_address.clone(), host_transport).unwrap();
         let mut host_authenticated = false;
         let mut player_authenticated = false;
         timeout(Duration::from_secs(18), async {
@@ -144,8 +129,53 @@ async fn encrypted_game_substream_survives_a_real_local_libp2p_relay_circuit() {
         let mut host_control = host.game_stream_control();
         let mut player_control = player.game_stream_control();
         let mut incoming = host_control.accept(StreamProtocol::new(GAME_STREAM_PROTOCOL)).unwrap();
-        let host_task = tokio::spawn(async move { while host.next_event().await.is_ok() {} });
-        let player_task = tokio::spawn(async move { while player.next_event().await.is_ok() {} });
+        // A real control RPC and game substream use the same authenticated
+        // relayed application connection, not a direct IP fallback.
+        assert!(host.connectivity_diagnostics().relay_connectivity);
+        assert!(!host.connectivity_diagnostics().direct_connectivity);
+        assert!(player.connectivity_diagnostics().relay_connectivity);
+        assert!(!player.connectivity_diagnostics().direct_connectivity);
+        let request = player.send_request(&host_transport, WireRequest::Ping { nonce: 17 }).unwrap();
+        timeout(Duration::from_secs(8), async {
+            loop {
+                tokio::select! {
+                    event = host.next_event() => {
+                        if let NetworkEvent::InboundRequest { transport_peer, request: WireRequest::Ping { nonce }, channel } = event.unwrap() {
+                            assert_eq!(transport_peer, player_transport);
+                            host.respond(channel, WireResponse::Pong { nonce }).unwrap();
+                        }
+                    }
+                    event = player.next_event() => {
+                        if let NetworkEvent::Response { transport_peer, request_id, response: WireResponse::Pong { nonce: 17 } } = event.unwrap() {
+                            assert_eq!(transport_peer, host_transport);
+                            assert_eq!(request_id, request);
+                            break;
+                        }
+                    }
+                }
+            }
+        }).await.unwrap();
+
+        let (host_stop, host_rx) = oneshot::channel();
+        let (player_stop, player_rx) = oneshot::channel();
+        let host_task = tokio::spawn(pump(host, host_rx));
+        let player_task = tokio::spawn(pump(player, player_rx));
+
+        // An unknown transport identity cannot reserve or authenticate
+        // through the actual production relay, even with a valid PeerHello.
+        let rogue_key = SigningKey::generate(&mut OsRng);
+        let mut rogue = SwarmNode::new(generate_transport_key(), hello(&rogue_key, 3), rogue_key).unwrap();
+        rogue.configure_relay(relay_peer, relay_address.clone()).unwrap();
+        let admitted = timeout(Duration::from_secs(3), async {
+            loop {
+                if let NetworkEvent::Listening { address } = rogue.next_event().await.unwrap() {
+                    if address.iter().any(|part| matches!(part, Protocol::P2pCircuit)) { break; }
+                }
+            }
+        }).await;
+        assert!(admitted.is_err(), "unlisted transport obtained a relay reservation");
+        assert!(!rogue.connectivity_diagnostics().relay_connectivity);
+        drop(rogue);
 
         timeout(Duration::from_secs(25), async {
             let send = async {
@@ -226,9 +256,226 @@ async fn encrypted_game_substream_survives_a_real_local_libp2p_relay_circuit() {
         )
         .await;
         assert!(!matches!(reopened, Ok(Ok(_))), "game stream unexpectedly opened after the only relay went down");
+        let _ = host_stop.send(());
+        let _ = player_stop.send(());
+        let mut host = host_task.await.unwrap();
+        let mut player = player_task.await.unwrap();
+        assert_eq!(host.local_transport_peer_id(), host_transport);
+        assert_eq!(player.local_transport_peer_id(), player_transport);
+        assert!(host.application_peer(&player_transport).is_none());
+
+        // Explicit operator relay replacement: retain the exact application
+        // and transport identities; never reinterpret the relay as authority.
+        let (replacement, replacement_address, replacement_task) = start_relay(&[host_transport, player_transport]).await;
+        host.configure_relay(replacement, replacement_address.clone()).unwrap();
+        timeout(Duration::from_secs(12), async {
+            loop {
+                if let NetworkEvent::Listening { address } = host.next_event().await.unwrap() {
+                    if address.iter().any(|part| matches!(part, Protocol::P2p(peer) if peer == replacement))
+                        && address.iter().any(|part| matches!(part, Protocol::P2pCircuit)) { break; }
+                }
+            }
+        }).await.expect("replacement relay reservation");
+        player.dial_via_relay(replacement, replacement_address, host_transport).unwrap();
+        timeout(Duration::from_secs(15), async {
+            loop {
+                if host.application_peer(&player_transport) == Some(player_app)
+                    && player.application_peer(&host_transport) == Some(host_app) { break; }
+                tokio::select! {
+                    event = host.next_event() => { event.unwrap(); }
+                    event = player.next_event() => { event.unwrap(); }
+                }
+            }
+        }).await.expect("replacement circuit must freshly authenticate both original peers");
+        assert_eq!(host.application_peer(&replacement), None);
+        assert_eq!(player.application_peer(&replacement), None);
+        assert!(host.connectivity_diagnostics().relay_connectivity);
+        assert!(!host.connectivity_diagnostics().direct_connectivity);
+
+        let host_task = tokio::spawn(async move { while host.next_event().await.is_ok() {} });
+        let player_task = tokio::spawn(async move { while player.next_event().await.is_ok() {} });
+        timeout(Duration::from_secs(8), async {
+            let send = async {
+                let mut stream = player_control.open_stream(host_transport, StreamProtocol::new(GAME_STREAM_PROTOCOL)).await.unwrap();
+                stream.write_all(b"replacement").await.unwrap();
+                stream.flush().await.unwrap();
+                let mut response = [0; 11];
+                stream.read_exact(&mut response).await.unwrap();
+                assert_eq!(&response, b"replacement");
+            };
+            let receive = async {
+                let (peer, mut stream) = incoming.next().await.unwrap();
+                assert_eq!(peer, player_transport);
+                assert_eq!(authenticated_host.read().unwrap().get(&peer), Some(&player_app));
+                let mut data = [0; 11];
+                stream.read_exact(&mut data).await.unwrap();
+                stream.write_all(&data).await.unwrap();
+                stream.flush().await.unwrap();
+            };
+            tokio::join!(send, receive);
+        }).await.expect("fresh game stream over replacement relay");
         host_task.abort();
         player_task.abort();
+        replacement_task.abort();
     })
     .await
     .expect("bounded local relay acceptance must finish");
+}
+
+async fn connect_isolated_relay_pair(
+    host: &mut SwarmNode,
+    player: &mut SwarmNode,
+    relay: TransportPeerId,
+    address: Multiaddr,
+) {
+    let host_id = host.local_transport_peer_id();
+    let player_id = player.local_transport_peer_id();
+    host.configure_relay(relay, address.clone()).unwrap();
+    timeout(Duration::from_secs(12), async {
+        loop {
+            if let NetworkEvent::Listening { address } = host.next_event().await.unwrap() {
+                if address.iter().any(|part| matches!(part, Protocol::P2pCircuit)) {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("independent host relay reservation");
+    player.dial_via_relay(relay, address, host_id).unwrap();
+    timeout(Duration::from_secs(15), async {
+        while host.application_peer(&player_id).is_none() || player.application_peer(&host_id).is_none() {
+            tokio::select! {
+                event = host.next_event() => { event.unwrap(); }
+                event = player.next_event() => { event.unwrap(); }
+            }
+        }
+    })
+    .await
+    .expect("independent pair authentication");
+    for node in [host, player] {
+        assert!(node.connectivity_diagnostics().relay_connectivity);
+        assert!(!node.connectivity_diagnostics().direct_connectivity);
+        assert_eq!(node.application_peer(&relay), None);
+    }
+}
+
+#[tokio::test]
+async fn private_relay_caps_bulk_circuit_without_disconnect_of_independent_pair() {
+    timeout(Duration::from_secs(60), async {
+        let make_node = |nonce| {
+            let key = SigningKey::generate(&mut OsRng);
+            SwarmNode::new(generate_transport_key(), hello(&key, nonce), key).unwrap()
+        };
+        let mut bulk_host = make_node(1);
+        let mut bulk_client = make_node(2);
+        let mut small_host = make_node(3);
+        let mut small_client = make_node(4);
+        let bulk_host_id = bulk_host.local_transport_peer_id();
+        let bulk_client_id = bulk_client.local_transport_peer_id();
+        let small_host_id = small_host.local_transport_peer_id();
+        let small_client_id = small_client.local_transport_peer_id();
+        const BUDGET: u64 = 256 * 1024;
+        let (relay, address, relay_task) =
+            start_relay_with_budget(&[bulk_host_id, bulk_client_id, small_host_id, small_client_id], BUDGET).await;
+        connect_isolated_relay_pair(&mut bulk_host, &mut bulk_client, relay, address.clone()).await;
+        let bulk_authenticated = bulk_host.game_authenticated_peers();
+        let mut bulk_host_control = bulk_host.game_stream_control();
+        let mut bulk_client_control = bulk_client.game_stream_control();
+        let mut bulk_incoming = bulk_host_control.accept(StreamProtocol::new(GAME_STREAM_PROTOCOL)).unwrap();
+        let bulk_host_task = tokio::spawn(async move { while bulk_host.next_event().await.is_ok() {} });
+        let bulk_client_task = tokio::spawn(async move { while bulk_client.next_event().await.is_ok() {} });
+
+        connect_isolated_relay_pair(&mut small_host, &mut small_client, relay, address).await;
+        let small_authenticated = small_host.game_authenticated_peers();
+        let mut small_host_control = small_host.game_stream_control();
+        let mut small_client_control = small_client.game_stream_control();
+        let mut small_incoming = small_host_control.accept(StreamProtocol::new(GAME_STREAM_PROTOCOL)).unwrap();
+        let small_host_task = tokio::spawn(async move { while small_host.next_event().await.is_ok() {} });
+        let small_client_task = tokio::spawn(async move { while small_client.next_event().await.is_ok() {} });
+
+        // A small circuit has its own budget and must remain useful while
+        // an unrelated transport pair attempts to consume the relay.
+        let small_echo = async {
+            let (peer, mut stream) = small_incoming.next().await.unwrap();
+            assert_eq!(peer, small_client_id);
+            let mut data = [0; 16];
+            for _ in 0..2 {
+                stream.read_exact(&mut data).await.unwrap();
+                stream.write_all(&data).await.unwrap();
+                stream.flush().await.unwrap();
+            }
+        };
+        let small_check = async {
+            let mut stream = small_client_control
+                .open_stream(small_host_id, StreamProtocol::new(GAME_STREAM_PROTOCOL))
+                .await
+                .unwrap();
+            stream.write_all(&[42; 16]).await.unwrap();
+            stream.flush().await.unwrap();
+            let mut echo = [0; 16];
+            stream.read_exact(&mut echo).await.unwrap();
+            assert_eq!(echo, [42; 16]);
+
+            // Count acknowledged bytes, not writes buffered by the client.
+            // Exceed the *encrypted circuit* budget with bounded chunks.
+            let bulk_send = async {
+                let mut stream = bulk_client_control
+                    .open_stream(bulk_host_id, StreamProtocol::new(GAME_STREAM_PROTOCOL))
+                    .await
+                    .unwrap();
+                let data = [9; 4096];
+                let mut acknowledged = 0u64;
+                let mut echoed = [0; 4096];
+                loop {
+                    if stream.write_all(&data).await.is_err()
+                        || stream.flush().await.is_err()
+                        || stream.read_exact(&mut echoed).await.is_err()
+                    {
+                        break acknowledged;
+                    }
+                    assert_eq!(echoed, data);
+                    acknowledged += data.len() as u64;
+                    assert!(acknowledged < 2 * BUDGET, "bulk circuit exceeded configured cap");
+                }
+            };
+            let bulk_echo = async {
+                let (peer, mut stream) = bulk_incoming.next().await.unwrap();
+                assert_eq!(peer, bulk_client_id);
+                let mut data = [0; 4096];
+                while stream.read_exact(&mut data).await.is_ok() {
+                    if stream.write_all(&data).await.is_err() || stream.flush().await.is_err() {
+                        break;
+                    }
+                }
+            };
+            let (acknowledged, ()) = tokio::join!(bulk_send, bulk_echo);
+            assert!(acknowledged > 0, "bulk circuit never transferred bytes");
+            assert!(acknowledged <= BUDGET, "circuit byte limit was not enforced");
+            timeout(Duration::from_secs(8), async {
+                while bulk_authenticated.read().unwrap().contains_key(&bulk_client_id) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("budget exhaustion must remove old application authentication");
+
+            stream.write_all(&[43; 16]).await.unwrap();
+            stream.flush().await.unwrap();
+            stream.read_exact(&mut echo).await.unwrap();
+            assert_eq!(echo, [43; 16]);
+            assert!(small_authenticated.read().unwrap().contains_key(&small_client_id));
+            println!("bulk acknowledged bytes before circuit cap: {acknowledged}; independent circuit remained live");
+        };
+        timeout(Duration::from_secs(20), async {
+            tokio::join!(small_echo, small_check);
+        })
+        .await
+        .expect("bounded bulk disconnect and independent small stream progress");
+        for task in [bulk_host_task, bulk_client_task, small_host_task, small_client_task, relay_task] {
+            task.abort();
+        }
+    })
+    .await
+    .expect("bounded relay resource acceptance");
 }

@@ -1,0 +1,28 @@
+[Unit]
+Description=SwarmCraft private infrastructure locator
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=swarmcraft-infra
+Group=swarmcraft-infra
+StateDirectory=swarmcraft-locator
+StateDirectoryMode=0700
+UMask=0077
+EnvironmentFile=/etc/swarmcraft-infra/locator.env
+ExecStart=/usr/local/bin/swarmcraft-infra --state-dir /var/lib/swarmcraft-locator locator --listen ${LOCATOR_LISTEN} --advertise ${LOCATOR_ADVERTISE}
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitNOFILE=1024
+TasksMax=128
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

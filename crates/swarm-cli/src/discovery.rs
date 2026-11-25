@@ -195,10 +195,33 @@ pub async fn serve(paths: DataPaths, listen: String) -> Result<()> {
     let storage = Storage::open(paths.root.clone())?;
     let identity = PeerIdentity::load_or_create(&paths)?;
     let hello = identity.signed_peer_hello(vec![DISCOVERY_CAPABILITY.into()])?;
+    let lock_path = paths.identity_dir().join("discovery-provider.lock");
+    let mut lock_options = fs::OpenOptions::new();
+    lock_options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        lock_options.mode(0o600);
+    }
+    let provider_lock = lock_options.open(lock_path)?;
+    fs2::FileExt::try_lock_exclusive(&provider_lock).context("another discovery publisher owns this data directory")?;
     let transport_path = paths.identity_dir().join("discovery-transport.key");
     let transport_key = load_or_create_transport_key(&transport_path)?;
     let mut node = DiscoveryNode::new(transport_key, hello, identity.network_signing_key())?;
     node.listen(listen.parse().context("invalid discovery listen multiaddress")?)?;
+
+    // Provider records need a real bound address before DHT publication.
+    let first_address = timeout(Duration::from_secs(10), async {
+        loop {
+            if let DiscoveryNetworkEvent::Listening { address } = node.next_event().await? {
+                return Ok::<_, anyhow::Error>(address);
+            }
+        }
+    })
+    .await
+    .context("discovery publisher listener did not start")??;
+    let first_address = node.advertise_local_listener(first_address)?;
+    println!("Discovery provider address: {first_address}");
 
     let mut published = PublishedDiscoveryState::default();
     let mut refresh = tokio::time::interval(DISCOVERY_REFRESH_INTERVAL);
@@ -220,7 +243,9 @@ pub async fn serve(paths: DataPaths, listen: String) -> Result<()> {
             event = node.next_event() => {
                 match event? {
                     DiscoveryNetworkEvent::Listening { address } => {
-                        info!(%address, "discovery listening");
+                        if let Ok(address) = node.advertise_local_listener(address) {
+                            println!("Discovery provider address: {address}");
+                        }
                     }
                     DiscoveryNetworkEvent::InboundRequest { application_peer, request, channel, .. } => {
                         if let Err(error) = handle_discovery_request(
@@ -363,6 +388,18 @@ fn refresh_publications(
     Ok(())
 }
 
+// Cached announcements must not outlive a signed visibility/configuration
+// change, even during the interval before DHT records expire or refresh.
+fn published_announcement_is_current(storage: &Storage, value: &WorldAnnouncementV1) -> bool {
+    storage.load_world_config(value.world_id).is_ok_and(|config| {
+        verify_world_config_signature(&config).is_ok()
+            && config.visibility != WorldVisibilityV1::Private
+            && config.visibility == value.visibility
+            && config.sequence == value.config_sequence
+            && config.config_hash().is_ok_and(|hash| hash == value.config_hash)
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_discovery_request(
     paths: &DataPaths,
@@ -384,6 +421,7 @@ fn handle_discovery_request(
                 .filter(|value| matches!(value.visibility, WorldVisibilityV1::Public))
                 .filter(|value| value.expires_unix_ms >= now)
                 .filter(|value| announcement_matches(value, &filter))
+                .filter(|value| published_announcement_is_current(storage, value))
                 .take(limit)
                 .cloned()
                 .collect();
@@ -396,6 +434,7 @@ fn handle_discovery_request(
                 .get(&world_id)
                 .filter(|value| value.expires_unix_ms >= now)
                 .filter(|value| !matches!(value.visibility, WorldVisibilityV1::Private))
+                .filter(|value| published_announcement_is_current(storage, value))
                 .cloned()
                 .map(Box::new);
             node.respond(channel, WireResponse::DiscoveryResolved(value))?;
@@ -421,7 +460,9 @@ fn handle_discovery_request(
                 node.respond(channel, WireResponse::DiscoveryFreshnessContext(None))?;
                 return Ok(());
             };
-            if announcement.announcement_hash()? != announcement_hash
+            if announcement.expires_unix_ms < now
+                || !published_announcement_is_current(storage, announcement)
+                || announcement.announcement_hash()? != announcement_hash
                 || announcement.announcer_peer_id != identity.peer_id()
             {
                 node.respond(channel, WireResponse::DiscoveryFreshnessContext(None))?;
@@ -568,7 +609,8 @@ fn local_state_matches_freshness_challenge(
         Err(_) => return Ok(false),
     };
     verify_world_config_signature(&config)?;
-    if config.authority_peer_id != challenge.authority_peer_id
+    if config.visibility == WorldVisibilityV1::Private
+        || config.authority_peer_id != challenge.authority_peer_id
         || config.sequence != challenge.config_sequence
         || config.config_hash()? != challenge.config_hash
     {
@@ -639,7 +681,13 @@ async fn prove_candidate_freshness(
     let expires_unix_ms =
         checked_discovery_expiry(issued_unix_ms, DISCOVERY_FRESHNESS_MAX_LIFETIME_MS, "freshness challenge")?;
     let announcement_hash = announcement.announcement_hash()?;
-    let mut providers = locator_peers.clone();
+    // Include previously discovered providers: their authentication event may
+    // already have been consumed by the browse/resolve collection phase.
+    // Prefer the announcer, then bound the number of untrusted locators.
+    let mut known: Vec<_> = locator_peers.iter().copied().collect();
+    known.sort_by_key(|peer| (node.application_peer(peer) != Some(announcement.announcer_peer_id), *peer));
+    known.truncate(swarm_core::MAX_DISCOVERY_FRESHNESS_VOTES);
+    let mut providers: HashSet<_> = known.into_iter().collect();
     let mut applications = HashMap::new();
     let mut context_requested = HashSet::new();
     let mut vote_requested = HashSet::new();
@@ -683,7 +731,33 @@ async fn prove_candidate_freshness(
                             break;
                         }
                         if providers.insert(peer) {
-                            let _ = node.dial_peer(peer);
+                            if let Some(application_peer) = node.application_peer(&peer) {
+                                applications.insert(peer, application_peer);
+                                if application_peer == announcement.announcer_peer_id && context_requested.insert(peer)
+                                {
+                                    node.send_request(
+                                        &peer,
+                                        WireRequest::DiscoveryFreshnessContext {
+                                            world_id: announcement.world_id,
+                                            announcement_hash,
+                                            verifier_peer_id: verifier.peer_id(),
+                                            nonce,
+                                            issued_unix_ms,
+                                            expires_unix_ms,
+                                        },
+                                    )?;
+                                }
+                                if let Some(active) = &challenge {
+                                    if vote_requested.insert(peer) {
+                                        node.send_request(
+                                            &peer,
+                                            WireRequest::DiscoveryFreshnessVote(Box::new(active.clone())),
+                                        )?;
+                                    }
+                                }
+                            } else {
+                                let _ = node.dial_peer(peer);
+                            }
                         }
                     }
                 }
@@ -1112,7 +1186,7 @@ pub async fn search_public_worlds(
     }
 
     for candidate in candidates {
-        match prove_candidate_freshness(&mut node, &identity, &candidate, &bootstrap_peers).await {
+        match prove_candidate_freshness(&mut node, &identity, &candidate, &providers).await {
             Ok(true) => match replay.accept(&candidate) {
                 Ok(()) => {
                     results.insert(candidate.world_id, candidate);
@@ -1319,7 +1393,7 @@ pub async fn resolve_world(
         }
     }
     for candidate in candidates {
-        match prove_candidate_freshness(&mut node, &identity, &candidate, &bootstrap_peers).await {
+        match prove_candidate_freshness(&mut node, &identity, &candidate, &providers).await {
             Ok(true) => {
                 result = Some(candidate);
                 break;
@@ -2073,6 +2147,24 @@ mod tests {
         assert!(local_state_matches_freshness_challenge(&stores[2], &c, &current).unwrap());
         assert!(!local_state_matches_freshness_challenge(&stores[0], &a, &current).unwrap());
         assert!(!local_state_matches_freshness_challenge(&stores[1], &b, &stale).unwrap());
+
+        let mut cached_public = sample_announcement(&b, WorldVisibilityV1::Public);
+        cached_public.world_id = world;
+        cached_public.config_sequence = config2.sequence;
+        cached_public.config_hash = config2.config_hash().unwrap();
+        assert!(published_announcement_is_current(&stores[1], &cached_public));
+
+        let mut private = config2.clone();
+        private.sequence += 1;
+        private.previous_config_hash = Some(config2.config_hash().unwrap());
+        private.visibility = WorldVisibilityV1::Private;
+        sign_world_config(&b, &mut private).unwrap();
+        stores[1].save_world_config(&private).unwrap();
+        assert!(!published_announcement_is_current(&stores[1], &cached_public));
+        let mut private_challenge = current;
+        private_challenge.config_sequence = private.sequence;
+        private_challenge.config_hash = private.config_hash().unwrap();
+        assert!(!local_state_matches_freshness_challenge(&stores[1], &b, &private_challenge).unwrap());
     }
 
     #[test]

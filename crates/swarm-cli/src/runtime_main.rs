@@ -54,6 +54,12 @@ enum RuntimeCommand {
     Verify { world: String },
     /// Inspect one exact Fabric mod JAR using the shared Rust authority parser.
     InspectMod { path: PathBuf },
+    /// Publish signed public/unlisted discovery hints from this member's local world store.
+    /// Bind to a reachable local/VPN address; private worlds are never published.
+    DiscoveryServe {
+        #[arg(long, default_value = "/ip4/127.0.0.1/tcp/0")]
+        listen: String,
+    },
     /// Search authenticated public world announcements. Discovery never grants membership.
     DiscoverySearch {
         #[arg(long)]
@@ -151,6 +157,9 @@ fn main() -> Result<()> {
         }
         RuntimeCommand::InspectMod { path } => {
             print_json(&server_mods::inspect_fabric_mod(&path)?)?;
+        }
+        RuntimeCommand::DiscoveryServe { listen } => {
+            tokio::runtime::Runtime::new()?.block_on(discovery::serve(paths.clone(), listen))?;
         }
         RuntimeCommand::DiscoverySearch { query, bootstrap } => {
             let report = tokio::runtime::Runtime::new()?.block_on(discovery::search_public_worlds(
