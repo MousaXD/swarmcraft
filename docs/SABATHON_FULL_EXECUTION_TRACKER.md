@@ -635,12 +635,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #63 — Expansion · Unverified
 - Work: Run real distributed gameplay and publish the scale envelope
 - Acceptance: Compare the same world, load, and network with one worker and multiple independent workers. Show increased sustainable active regions or player capacity at the published service target. Publish clustered-load and degraded-network limits
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **IN PROGRESS** (local full durable reference scale envelope measured; correctness verified, service target failed; actual Minecraft and independent-host acceptance open)
+- Source: [Scale envelope report](../research/distributed-simulation/SCALE_ENVELOPE_REPORT.md); `scale_lab.py`, `verify_scale_evidence.py`, `test_scale_evidence.py`; disposable scope allowance in `placement_lab.py`.
+- Evidence: 24 real capped private-network runs, six workload/delay combinations, two repetitions each for one and two workers, eight-second 20 Hz windows (192 seconds total). 36 worker and 48 persistent TCP client process instances, 1,538 accepted durable ticks and 3,076 client commands independently replayed, all scopes released. 1,514 completions within 3,840 scheduled slots; zero runs and zero original slots meet the strict service target. At 8,192 spread agents, two workers improve mean throughput from 3.375 to 3.875 ticks/s (+14.8%) but remain below target; clustered and degraded-link results do not establish capacity gains. 86 research tests passed (six new), malformed/incomplete/altered evidence refused.
+- Remaining / next action: Profile and optimize full durable publication without weakening safety; qualify sustained service on independent enrolled hosts with actual compatible game clients and increased active regions/player load. Continue #64 ownerless/no-OP creation-policy research independently. Production regional NO-GO retained.
+- External dependency: Actual compatible Minecraft runtime and clients, independently enrolled physical worker/control hosts, durable quorum-backed regional authority/recovery, long-duration comparative gameplay at the published service target.
+- Commit: Measure full durable reference scale envelope and retain negative qualification evidence; see git history.
 
 ### #64 — Expansion · Missing
 - Work: Add a creation-time **Ownerless / no OP** world option with a signed governance policy
@@ -754,4 +754,4 @@ Initial full-item implementation/acceptance totals: not yet established by item-
 - Private replication uses the current signed membership with a matching descriptor and rechecks the exact authenticated recipient before normal payload, manifest acknowledgement and every blob chunk. A half-installed signed roster denies data instead of trusting an obsolete descriptor. Removed local recipients also refuse normal snapshot bytes. Ordinary unauthorized world requests receive a generic refusal.
 - Evidence: strict CLI/storage Clippy, 51 daemon/CLI binary tests, 67 storage tests (1 optional soak ignored), and actual authenticated invite/leave/replication test passed (19.73s). A reusable grant admitted a third peer; revocation left committed membership intact; joint leave committed; a real network probe authenticated as the removed member received status/history refusal and no newer manifest/blob payload while the remaining member verified a new checkpoint. The old device retained its old verified save. Prior commit 8653c2d required CI completed successfully (run 45585530110). Broader local CLI validation underway; UI and field acceptance remain.
 
-Latest actionable continuation after #62: #63 sustained comparative reference-runtime scale envelope and clustered/degraded limits, without production regional activation. The independent quorum, physical, compatibility and actual Minecraft gameplay gates remain open.
+Latest actionable continuation after #63 local negative scale qualification: #64 ownerless/no-OP signed creation-policy research. The #63 full durable service target, independent quorum, physical, compatibility and actual Minecraft gameplay gates remain open; production regional activation is not authorized.

@@ -75,6 +75,16 @@ accepted cut. No-capacity conditions pause rather than overcommit.
 This is stop-all reference-generation recovery under one trusted
 local ledger, not live Minecraft migration or quorum certification.
 
+## Durable scale envelope (#63, 2026-11-26)
+
+[Scale envelope report](SCALE_ENVELOPE_REPORT.md): 24 repeated paced
+comparisons using real capped worker and persistent reference-client
+processes, complete durable command/receipt service, spread and
+clustered loads, and real kernel-impaired worker links. All 1,538
+accepted ticks replay correctly; zero runs satisfy the strict 20 Hz
+target. Production scaling remains unqualified; no Minecraft or
+independent physical-machine capacity is claimed.
+
 ## Original R0 evidence (2026-11-08)
 
 
