@@ -21,3 +21,5 @@ pub use solo::*;
 pub mod ownerless;
 
 pub mod ownerless_authority;
+
+pub mod ownerless_participation;

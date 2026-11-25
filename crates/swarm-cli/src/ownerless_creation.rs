@@ -12,7 +12,7 @@ use swarm_core::{random_nonce, DataPaths, PeerIdentity};
 use swarm_protocol::{
     Hash32, OwnerlessCreationApprovalV1, OwnerlessCreationV1, OwnerlessGenesisV1, OwnerlessValidatorV1,
     OwnerlessWorldIdV1, MAX_OWNERLESS_DOCUMENT_BYTES, MAX_OWNERLESS_VALIDATORS, OWNERLESS_FORMAT_V1,
-    OWNERLESS_NO_OP_V1,
+    OWNERLESS_NO_OP_PUBLIC_V2, OWNERLESS_NO_OP_V1, OWNERLESS_PUBLIC_FORMAT_V2,
 };
 
 #[derive(Debug, Subcommand)]
@@ -30,6 +30,9 @@ pub enum OwnerlessCommand {
         compatibility_fingerprint: Hash32,
         #[arg(long)]
         initial_state_commitment: Hash32,
+        /// New signed public-authenticated reference identity; default remains invite-only.
+        #[arg(long)]
+        public_play: bool,
         /// Explicit validator public key (64 hex characters); repeat for every validator.
         #[arg(long = "validator-key", required = true)]
         validator_keys: Vec<String>,
@@ -96,7 +99,13 @@ fn print_document(value: &impl Serialize) -> Result<()> {
 pub fn run(paths: &DataPaths, command: OwnerlessCommand) -> Result<()> {
     match command {
         OwnerlessCommand::Authority { command } => crate::ownerless_authority::run(paths, command),
-        OwnerlessCommand::Draft { name, compatibility_fingerprint, initial_state_commitment, validator_keys } => {
+        OwnerlessCommand::Draft {
+            name,
+            compatibility_fingerprint,
+            initial_state_commitment,
+            public_play,
+            validator_keys,
+        } => {
             ensure!(validator_keys.len() <= MAX_OWNERLESS_VALIDATORS, "too many validator keys");
             let mut validators = Vec::new();
             for key in validator_keys {
@@ -106,12 +115,12 @@ pub fn run(paths: &DataPaths, command: OwnerlessCommand) -> Result<()> {
             }
             validators.sort_by_key(|v| v.peer_id);
             let genesis = OwnerlessGenesisV1 {
-                format_version: OWNERLESS_FORMAT_V1,
+                format_version: if public_play { OWNERLESS_PUBLIC_FORMAT_V2 } else { OWNERLESS_FORMAT_V1 },
                 name,
                 creation_nonce: random_nonce(),
                 compatibility_fingerprint,
                 initial_state_commitment,
-                policy: OWNERLESS_NO_OP_V1,
+                policy: if public_play { OWNERLESS_NO_OP_PUBLIC_V2 } else { OWNERLESS_NO_OP_V1 },
                 validators,
             };
             validate_ownerless_genesis(&genesis)?;
@@ -164,6 +173,10 @@ pub fn run(paths: &DataPaths, command: OwnerlessCommand) -> Result<()> {
         OwnerlessCommand::PermissionProfile { certificate, expected_world, expected_compatibility } => {
             let certificate: OwnerlessCreationV1 = read_document(&certificate)?;
             let verified = verify_ownerless_creation(expected_world, &certificate)?;
+            ensure!(
+                certificate.genesis.format_version == OWNERLESS_FORMAT_V1,
+                "public reference identities cannot use the private #65 Fabric permission lab"
+            );
             ensure!(
                 certificate.genesis.compatibility_fingerprint == expected_compatibility,
                 "certificate differs from independently expected compatibility"

@@ -4,10 +4,13 @@
 use swarm_protocol::{
     ownerless_genesis_head, Hash32, OwnerlessAuthorityActionV1, OwnerlessAuthorityCertificateV1,
     OwnerlessAuthorityHistoryV1, OwnerlessAuthorityProposalV1, OwnerlessAuthorityVoteV1, OwnerlessError,
-    OwnerlessValidatorV1, OwnerlessWorldIdV1, PeerId, MAX_OWNERLESS_HISTORY_RECORDS, MAX_OWNERLESS_VALIDATORS,
+    OwnerlessParticipantV1, OwnerlessParticipationMode, OwnerlessValidatorV1, OwnerlessWorkerEligibilityV1,
+    OwnerlessWorldIdV1, PeerId, MAX_OWNERLESS_HISTORY_RECORDS, MAX_OWNERLESS_PLAYERS, MAX_OWNERLESS_VALIDATORS,
+    MAX_OWNERLESS_WORKERS,
 };
 
 use crate::ownerless::{validate_ownerless_roster, verify_ownerless_creation, verify_signature};
+use crate::ownerless_participation::validate_participant;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedOwnerlessHead {
@@ -19,6 +22,9 @@ pub struct VerifiedOwnerlessHead {
     fence: u64,
     checkpoint: Hash32,
     validators: Vec<OwnerlessValidatorV1>,
+    participation_mode: OwnerlessParticipationMode,
+    invited_players: Vec<OwnerlessParticipantV1>,
+    eligible_workers: Vec<OwnerlessWorkerEligibilityV1>,
 }
 
 impl VerifiedOwnerlessHead {
@@ -45,6 +51,15 @@ impl VerifiedOwnerlessHead {
     }
     pub fn validators(&self) -> &[OwnerlessValidatorV1] {
         &self.validators
+    }
+    pub fn participation_mode(&self) -> OwnerlessParticipationMode {
+        self.participation_mode
+    }
+    pub fn invited_players(&self) -> &[OwnerlessParticipantV1] {
+        &self.invited_players
+    }
+    pub fn eligible_workers(&self) -> &[OwnerlessWorkerEligibilityV1] {
+        &self.eligible_workers
     }
     pub fn threshold(&self) -> usize {
         majority(&self.validators)
@@ -98,6 +113,32 @@ impl VerifiedOwnerlessHead {
                             return Err(OwnerlessError::Invalid("validator identity key changed"));
                         }
                     }
+                }
+                self.fence.checked_add(1).ok_or(OwnerlessError::Invalid("fence exhausted"))?;
+            }
+            OwnerlessAuthorityActionV1::SetPlayer { player, allowed } => {
+                validate_participant(player)?;
+                if self.participation_mode != OwnerlessParticipationMode::InviteOnly {
+                    return Err(OwnerlessError::Invalid("public participation does not use private invitations"));
+                }
+                match self.invited_players.binary_search_by_key(&player.peer_id, |p| p.peer_id) {
+                    Ok(i) if !*allowed && self.invited_players[i] == *player => {}
+                    Err(_) if *allowed && self.invited_players.len() < MAX_OWNERLESS_PLAYERS => {}
+                    _ => return Err(OwnerlessError::Invalid("unchanged or invalid player eligibility")),
+                }
+                self.fence.checked_add(1).ok_or(OwnerlessError::Invalid("fence exhausted"))?;
+            }
+            OwnerlessAuthorityActionV1::SetWorker { worker, maximum } => {
+                validate_participant(worker)?;
+                if let Some(budget) = maximum {
+                    budget.validate()?;
+                }
+                match self.eligible_workers.binary_search_by_key(&worker.peer_id, |w| w.worker.peer_id) {
+                    Ok(i)
+                        if self.eligible_workers[i].worker == *worker
+                            && maximum.as_ref() != Some(&self.eligible_workers[i].maximum) => {}
+                    Err(_) if maximum.is_some() && self.eligible_workers.len() < MAX_OWNERLESS_WORKERS => {}
+                    _ => return Err(OwnerlessError::Invalid("unchanged or invalid worker eligibility")),
                 }
                 self.fence.checked_add(1).ok_or(OwnerlessError::Invalid("fence exhausted"))?;
             }
@@ -188,6 +229,31 @@ pub fn apply_ownerless_certificate(
             next.validators = validators.clone();
             next.fence += 1;
         }
+        OwnerlessAuthorityActionV1::SetPlayer { player, allowed } => {
+            let position = next.invited_players.binary_search_by_key(&player.peer_id, |p| p.peer_id);
+            match (position, allowed) {
+                (Err(i), true) => next.invited_players.insert(i, *player),
+                (Ok(i), false) => {
+                    next.invited_players.remove(i);
+                }
+                _ => return Err(OwnerlessError::Invalid("invalid player transition")),
+            }
+            next.fence += 1;
+        }
+        OwnerlessAuthorityActionV1::SetWorker { worker, maximum } => {
+            let position = next.eligible_workers.binary_search_by_key(&worker.peer_id, |w| w.worker.peer_id);
+            match (position, maximum) {
+                (Ok(i), Some(maximum)) => next.eligible_workers[i].maximum = *maximum,
+                (Err(i), Some(maximum)) => {
+                    next.eligible_workers.insert(i, OwnerlessWorkerEligibilityV1 { worker: *worker, maximum: *maximum })
+                }
+                (Ok(i), None) => {
+                    next.eligible_workers.remove(i);
+                }
+                _ => return Err(OwnerlessError::Invalid("invalid worker transition")),
+            }
+            next.fence += 1;
+        }
     }
     Ok(next)
 }
@@ -210,6 +276,13 @@ pub fn verify_ownerless_history(
         fence: 1,
         checkpoint: genesis.initial_state_commitment,
         validators: genesis.validators.clone(),
+        participation_mode: if genesis.policy.authenticated_invite_only {
+            OwnerlessParticipationMode::InviteOnly
+        } else {
+            OwnerlessParticipationMode::PublicAuthenticated
+        },
+        invited_players: Vec::new(),
+        eligible_workers: Vec::new(),
     };
     for certificate in &history.records {
         head = apply_ownerless_certificate(&head, certificate)?;

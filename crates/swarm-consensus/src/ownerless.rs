@@ -40,15 +40,18 @@ pub fn validate_ownerless_roster(roster: &[OwnerlessValidatorV1]) -> Result<(), 
         return Err(OwnerlessError::Invalid("invalid ownerless validator roster"));
     }
     for validator in roster {
-        let key = VerifyingKey::from_bytes(&validator.public_key)
-            .map_err(|_| OwnerlessError::Invalid("invalid validator public key"))?;
-        // Reject noncanonical encodings and mixed-torsion aliases, not
-        // just weak (small-order) keys. Roster uniqueness must count
-        // canonical prime-order keys rather than alternate encodings.
-        let point = key.to_edwards();
-        if key.is_weak() || !point.is_torsion_free() || point.compress().to_bytes() != validator.public_key {
-            return Err(OwnerlessError::Invalid("weak or noncanonical validator public key"));
-        }
+        validate_ownerless_public_key(&validator.public_key)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_ownerless_public_key(public_key: &[u8; 32]) -> Result<(), OwnerlessError> {
+    let key =
+        VerifyingKey::from_bytes(public_key).map_err(|_| OwnerlessError::Invalid("invalid validator public key"))?;
+    // Reject alternate encodings, weak and mixed-torsion keys for every role.
+    let point = key.to_edwards();
+    if key.is_weak() || !point.is_torsion_free() || &point.compress().to_bytes() != public_key {
+        return Err(OwnerlessError::Invalid("weak or noncanonical validator public key"));
     }
     Ok(())
 }

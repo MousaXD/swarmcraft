@@ -138,6 +138,10 @@ The deliberately bounded reference format permits at most 128 decisions,
 4 MiB history JSON and 1 MiB nonempty checkpoint bytes. No history compaction,
 large real save transfer or production checkpoint format is implied.
 
+The [#67 participation contract](ownerless-participation.md) appends separate
+majority-certified private invitations and worker caps to this history.
+Existing checkpoint/recovery/reconfiguration encodings are unchanged.
+
 ## CFT and remaining gates
 
 This is not Byzantine consensus. Valid signatures alone cannot detect

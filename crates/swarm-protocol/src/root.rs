@@ -134,3 +134,6 @@ pub use ownerless::*;
 
 mod ownerless_authority;
 pub use ownerless_authority::*;
+
+mod ownerless_participation;
+pub use ownerless_participation::*;

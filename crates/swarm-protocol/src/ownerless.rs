@@ -7,12 +7,18 @@ use thiserror::Error;
 use super::{peer_id_from_public_key, Hash32, PeerId, ProtocolError};
 
 pub const OWNERLESS_FORMAT_V1: u16 = 1;
+/// Public authenticated participation is a new, explicitly signed identity.
+/// Never reinterpret a legacy invite-only certificate as public.
+pub const OWNERLESS_PUBLIC_FORMAT_V2: u16 = 2;
 pub const MIN_OWNERLESS_VALIDATORS: usize = 3;
 pub const MAX_OWNERLESS_VALIDATORS: usize = 15;
 pub const MAX_OWNERLESS_DOCUMENT_BYTES: usize = 64 * 1024;
 const GENESIS_DOMAIN: &[u8] = b"swarmcraft/ownerless-genesis/v1\0";
 const POLICY_DOMAIN: &[u8] = b"swarmcraft/ownerless-policy/v1\0";
 const APPROVAL_DOMAIN: &[u8] = b"swarmcraft/ownerless-creation-approval/v1\0";
+const PUBLIC_GENESIS_DOMAIN: &[u8] = b"swarmcraft/ownerless-public-genesis/v2\0";
+const PUBLIC_POLICY_DOMAIN: &[u8] = b"swarmcraft/ownerless-public-policy/v2\0";
+const PUBLIC_APPROVAL_DOMAIN: &[u8] = b"swarmcraft/ownerless-public-creation-approval/v2\0";
 
 #[derive(Debug, Error)]
 pub enum OwnerlessError {
@@ -75,6 +81,9 @@ pub const OWNERLESS_NO_OP_V1: OwnerlessPolicyV1 = OwnerlessPolicyV1 {
     immutable_rules: true,
 };
 
+pub const OWNERLESS_NO_OP_PUBLIC_V2: OwnerlessPolicyV1 =
+    OwnerlessPolicyV1 { authenticated_invite_only: false, ..OWNERLESS_NO_OP_V1 };
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnerlessValidatorV1 {
@@ -104,9 +113,11 @@ pub struct OwnerlessGenesisV1 {
 
 impl OwnerlessGenesisV1 {
     pub fn validate(&self) -> Result<(), OwnerlessError> {
-        if self.format_version != OWNERLESS_FORMAT_V1 {
-            return Err(OwnerlessError::Invalid("unsupported format"));
-        }
+        let required_policy = match self.format_version {
+            OWNERLESS_FORMAT_V1 => OWNERLESS_NO_OP_V1,
+            OWNERLESS_PUBLIC_FORMAT_V2 => OWNERLESS_NO_OP_PUBLIC_V2,
+            _ => return Err(OwnerlessError::Invalid("unsupported format")),
+        };
         if self.name.is_empty()
             || self.name.len() > 96
             || self.name.trim() != self.name
@@ -120,7 +131,7 @@ impl OwnerlessGenesisV1 {
         {
             return Err(OwnerlessError::Invalid("missing genesis commitment"));
         }
-        if self.policy != OWNERLESS_NO_OP_V1 {
+        if self.policy != required_policy {
             return Err(OwnerlessError::Invalid("protected no-OP policy differs"));
         }
         if !(MIN_OWNERLESS_VALIDATORS..=MAX_OWNERLESS_VALIDATORS).contains(&self.validators.len())
@@ -135,13 +146,15 @@ impl OwnerlessGenesisV1 {
     pub fn world_id(&self) -> Result<OwnerlessWorldIdV1, OwnerlessError> {
         self.validate()?;
         let encoded = postcard::to_allocvec(self).map_err(ProtocolError::from)?;
-        Ok(OwnerlessWorldIdV1(Hash32::from_domain_bytes(GENESIS_DOMAIN, &encoded)))
+        let domain = if self.format_version == OWNERLESS_FORMAT_V1 { GENESIS_DOMAIN } else { PUBLIC_GENESIS_DOMAIN };
+        Ok(OwnerlessWorldIdV1(Hash32::from_domain_bytes(domain, &encoded)))
     }
 
     pub fn policy_hash(&self) -> Result<Hash32, OwnerlessError> {
         self.validate()?;
         let encoded = postcard::to_allocvec(&self.policy).map_err(ProtocolError::from)?;
-        Ok(Hash32::from_domain_bytes(POLICY_DOMAIN, &encoded))
+        let domain = if self.format_version == OWNERLESS_FORMAT_V1 { POLICY_DOMAIN } else { PUBLIC_POLICY_DOMAIN };
+        Ok(Hash32::from_domain_bytes(domain, &encoded))
     }
 
     /// Proposed stable-roster maintenance threshold only; NOT a certificate.
@@ -162,7 +175,8 @@ impl OwnerlessGenesisV1 {
         }
         let encoded = postcard::to_allocvec(&(self.format_version, world, self.policy_hash()?, voter))
             .map_err(ProtocolError::from)?;
-        let mut bytes = APPROVAL_DOMAIN.to_vec();
+        let domain = if self.format_version == OWNERLESS_FORMAT_V1 { APPROVAL_DOMAIN } else { PUBLIC_APPROVAL_DOMAIN };
+        let mut bytes = domain.to_vec();
         bytes.extend(encoded);
         Ok(bytes)
     }

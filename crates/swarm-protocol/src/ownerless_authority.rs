@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Hash32, OwnerlessCreationV1, OwnerlessError, OwnerlessValidatorV1, OwnerlessWorldIdV1, PeerId, ProtocolError,
+    Hash32, OwnerlessCreationV1, OwnerlessError, OwnerlessParticipantV1, OwnerlessValidatorV1, OwnerlessWorkerBudgetV1,
+    OwnerlessWorldIdV1, PeerId, ProtocolError,
 };
 
 pub const MAX_OWNERLESS_HISTORY_RECORDS: usize = 128;
@@ -38,6 +39,11 @@ pub enum OwnerlessAuthorityActionV1 {
     Recover,
     /// Joint old/new roster approval; retains EXACT state and advances fence.
     Reconfigure { validators: Vec<OwnerlessValidatorV1> },
+    // Append-only enum variants: preserve the existing three postcard tags.
+    /// Invite-only player eligibility, independently of validator status.
+    SetPlayer { player: OwnerlessParticipantV1, allowed: bool },
+    /// Separate worker eligibility and cap. None revokes it.
+    SetWorker { worker: OwnerlessParticipantV1, maximum: Option<OwnerlessWorkerBudgetV1> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

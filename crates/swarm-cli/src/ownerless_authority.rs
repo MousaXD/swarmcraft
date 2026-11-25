@@ -23,12 +23,20 @@ use swarm_protocol::{
     MAX_OWNERLESS_HISTORY_BYTES, MAX_OWNERLESS_VALIDATORS,
 };
 
+#[path = "ownerless_participation.rs"]
+mod participation;
+
 const JOURNAL_LIMIT: usize = MAX_OWNERLESS_HISTORY_BYTES + MAX_OWNERLESS_DOCUMENT_BYTES * 2;
 const JOURNAL_DOMAIN: &[u8] = b"swarmcraft/ownerless-authority/local-journal/v1\0";
 const STORE: &str = "ownerless-authority-lab-v1";
 
 #[derive(Debug, Subcommand)]
 pub enum AuthorityCommand {
+    /// Separate reference player/worker eligibility and single-use identity proofs.
+    Participation {
+        #[command(subcommand)]
+        command: participation::ParticipationCommand,
+    },
     /// Compute the bounded reference checkpoint commitment for a genesis or proposal.
     StateHash {
         #[arg(long)]
@@ -250,6 +258,9 @@ fn report(head: &VerifiedOwnerlessHead, local: Option<&Journal>) -> serde_json::
             "peer_id": v.peer_id.to_string(), "public_key": hex::encode(v.public_key)
         })).collect::<Vec<_>>(),
         "majority_threshold": head.threshold(),
+        "participation_mode": head.participation_mode(),
+        "invited_player_count": head.invited_players().len(),
+        "eligible_worker_count": head.eligible_workers().len(),
         "local_identity": local.map(|j| j.identity.to_string()),
         "local_validator": local.is_some_and(|j| head.validators().iter().any(|v| v.peer_id == j.identity)),
         "pending_proposal": local.and_then(|j| j.pending.as_ref()).map(|p| p.vote.proposal_hash.to_string()),
@@ -506,6 +517,7 @@ impl Store {
 pub fn run(paths: &DataPaths, command: AuthorityCommand) -> Result<()> {
     use AuthorityCommand::*;
     match command {
+        Participation { command } => participation::run(paths, command),
         StateHash { checkpoint: file } => {
             let bytes = bounded_file(open_regular(&file)?, MAX_OWNERLESS_CHECKPOINT_BYTES)?;
             print(

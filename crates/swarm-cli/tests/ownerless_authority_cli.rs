@@ -48,6 +48,9 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_mode(false)
+    }
+    fn with_mode(public: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let profiles: Vec<_> = (0..5).map(|i| temp.path().join(format!("peer-{i}"))).collect();
         let identities: Vec<_> =
@@ -57,32 +60,122 @@ impl Fixture {
         validators.sort_by_key(|v| v.peer_id);
         let initial = temp.path().join("initial.bin");
         fs::write(&initial, b"accepted genesis bytes").unwrap();
-        let genesis = OwnerlessGenesisV1 {
-            format_version: OWNERLESS_FORMAT_V1,
-            name: "Authority test".into(),
-            creation_nonce: [99; 32],
-            compatibility_fingerprint: Hash32([73; 32]),
-            initial_state_commitment: ownerless_checkpoint_commitment(&fs::read(&initial).unwrap()).unwrap(),
-            policy: OWNERLESS_NO_OP_V1,
-            validators,
+        let organizer = temp.path().join("organizer");
+        let certificate = temp.path().join("creation.json");
+        let genesis = if public {
+            let keys: Vec<_> = identities[..3].iter().map(|id| hex::encode(id.public_key())).collect();
+            let compatibility = Hash32([73; 32]).to_string();
+            let commitment = ownerless_checkpoint_commitment(&fs::read(&initial).unwrap()).unwrap().to_string();
+            let result = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+                .arg("--data-dir")
+                .arg(&organizer)
+                .args([
+                    "ownerless",
+                    "draft",
+                    "--name",
+                    "Public reference",
+                    "--public-play",
+                    "--compatibility-fingerprint",
+                    &compatibility,
+                    "--initial-state-commitment",
+                    &commitment,
+                    "--validator-key",
+                    &keys[0],
+                    "--validator-key",
+                    &keys[1],
+                    "--validator-key",
+                    &keys[2],
+                ])
+                .output()
+                .unwrap();
+            let draft = success(result);
+            let genesis: OwnerlessGenesisV1 = serde_json::from_slice(&draft).unwrap();
+            assert_eq!(genesis.format_version, swarm_protocol::OWNERLESS_PUBLIC_FORMAT_V2);
+            assert_eq!(genesis.policy, swarm_protocol::OWNERLESS_NO_OP_PUBLIC_V2);
+            let draft_path = temp.path().join("draft.json");
+            fs::write(&draft_path, draft).unwrap();
+            let world = genesis.world_id().unwrap().to_string();
+            let mut approvals = Vec::new();
+            for (i, profile) in profiles[..3].iter().enumerate() {
+                let approval = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+                    .arg("--data-dir")
+                    .arg(profile)
+                    .args(["ownerless", "approve", "--draft", s(&draft_path), "--expected-world", &world, "--confirm"])
+                    .output()
+                    .unwrap();
+                let path = temp.path().join(format!("approval-{i}.json"));
+                fs::write(&path, success(approval)).unwrap();
+                approvals.push(path);
+            }
+            let assembled = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+                .arg("--data-dir")
+                .arg(&organizer)
+                .args([
+                    "ownerless",
+                    "assemble",
+                    "--draft",
+                    s(&draft_path),
+                    "--expected-world",
+                    &world,
+                    "--approval",
+                    s(&approvals[0]),
+                    "--approval",
+                    s(&approvals[1]),
+                    "--approval",
+                    s(&approvals[2]),
+                ])
+                .output()
+                .unwrap();
+            fs::write(&certificate, success(assembled)).unwrap();
+            let permission = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+                .arg("--data-dir")
+                .arg(&organizer)
+                .args([
+                    "ownerless",
+                    "permission-profile",
+                    "--certificate",
+                    s(&certificate),
+                    "--expected-world",
+                    &world,
+                    "--expected-compatibility",
+                    &compatibility,
+                ])
+                .output()
+                .unwrap();
+            rejected(permission, "public reference identities cannot use the private #65");
+            genesis
+        } else {
+            let genesis = OwnerlessGenesisV1 {
+                format_version: OWNERLESS_FORMAT_V1,
+                name: "Authority test".into(),
+                creation_nonce: [99; 32],
+                compatibility_fingerprint: Hash32([73; 32]),
+                initial_state_commitment: ownerless_checkpoint_commitment(&fs::read(&initial).unwrap()).unwrap(),
+                policy: OWNERLESS_NO_OP_V1,
+                validators,
+            };
+            let world_id = genesis.world_id().unwrap();
+            let mut approvals: Vec<_> = identities[..3]
+                .iter()
+                .map(|k| {
+                    let validator = k.peer_id();
+                    OwnerlessCreationApprovalV1 {
+                        world_id,
+                        validator,
+                        signature: k.sign(&genesis.approval_bytes(validator).unwrap()),
+                    }
+                })
+                .collect();
+            approvals.sort_by_key(|a| a.validator);
+            fs::write(
+                &certificate,
+                serde_json::to_vec(&OwnerlessCreationV1 { genesis: genesis.clone(), approvals }).unwrap(),
+            )
+            .unwrap();
+            genesis
         };
         let world_id = genesis.world_id().unwrap();
-        let mut approvals: Vec<_> = identities[..3]
-            .iter()
-            .map(|k| {
-                let validator = k.peer_id();
-                OwnerlessCreationApprovalV1 {
-                    world_id,
-                    validator,
-                    signature: k.sign(&genesis.approval_bytes(validator).unwrap()),
-                }
-            })
-            .collect();
-        approvals.sort_by_key(|a| a.validator);
-        let certificate = temp.path().join("creation.json");
-        fs::write(&certificate, serde_json::to_vec(&OwnerlessCreationV1 { genesis, approvals }).unwrap()).unwrap();
         let world = world_id.to_string();
-        let organizer = temp.path().join("organizer");
         let h = temp.path().join("history0.json");
         fs::write(
             &h,
@@ -94,6 +187,7 @@ impl Fixture {
         .unwrap();
         let report = json(invoke(&organizer, &["inspect", "--history", s(&h), "--expected-world", &world]));
         assert_eq!(report["sequence"], 0);
+        assert_eq!(report["participation_mode"], if public { "public_authenticated" } else { "invite_only" });
         let initial_head = report["head"].as_str().unwrap().to_owned();
         let fixture = Self { temp, profiles, identities, world, genesis: h, initial, initial_head };
         for i in 0..5 {
@@ -434,5 +528,312 @@ fn same_head_witness_changes_do_not_unlock_but_certified_extension_resolves_pend
     f.sync(&[0, 1, 2], &h2, &other.1, &f.initial, 2, 3);
     rejected(f.vote_cmd(0, &p.1, &candidate, &state).output().unwrap(), "differs from expected pin");
     rejected(f.accept(0, &h1, &p.1, &f.initial), "rollback or conflicting");
+    f.assert_no_live_storage();
+}
+
+impl Fixture {
+    fn role_propose(&self, history: &Path, head: &str, name: &str, action: &[&str]) -> (PathBuf, String) {
+        let mut args = vec![
+            "participation",
+            action[0],
+            "--history",
+            s(history),
+            "--expected-world",
+            &self.world,
+            "--expected-head",
+            head,
+        ];
+        args.extend(&action[1..]);
+        let bytes = success(invoke(&self.organizer(), &args));
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let hash = v["proposal_hash"].as_str().unwrap().to_owned();
+        let p = self.path(name);
+        fs::write(&p, bytes).unwrap();
+        (p, hash)
+    }
+    fn commit_role(
+        &self,
+        history: &Path,
+        head: &str,
+        proposal: &(PathBuf, String),
+        name: &str,
+        seq: u64,
+        fence: u64,
+    ) -> PathBuf {
+        let v1 = self.vote(1, head, proposal, &self.initial, &format!("{name}-v1.json"));
+        rejected(self.assemble(history, head, proposal, &[&v1]), "missing current validator majority");
+        let v2 = self.vote(2, head, proposal, &self.initial, &format!("{name}-v2.json"));
+        let h = self.certified(history, head, proposal, &[&v1, &v2], name);
+        self.sync(&[1, 2, 3, 4], &h, &proposal.1, &self.initial, seq, fence);
+        h
+    }
+    fn challenge(&self, verifier: usize, subject: usize, head: &str, name: &str, intent: &[&str]) -> (PathBuf, String) {
+        let key = hex::encode(self.identities[subject].public_key());
+        let mut args = vec![
+            "participation",
+            "challenge",
+            "--expected-world",
+            &self.world,
+            "--expected-head",
+            head,
+            "--subject-key",
+            &key,
+        ];
+        args.extend(intent);
+        let bytes = success(invoke(&self.profiles[verifier], &args));
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let hash = v["challenge_hash"].as_str().unwrap().to_owned();
+        let p = self.path(name);
+        fs::write(&p, bytes).unwrap();
+        (p, hash)
+    }
+    fn respond(
+        &self,
+        subject: usize,
+        history: &Path,
+        head: &str,
+        challenge: &(PathBuf, String),
+        consent: bool,
+    ) -> Output {
+        let mut args = vec![
+            "participation",
+            "respond",
+            "--history",
+            s(history),
+            "--expected-world",
+            &self.world,
+            "--expected-head",
+            head,
+            "--request",
+            s(&challenge.0),
+            "--expected-challenge",
+            &challenge.1,
+            "--confirm",
+        ];
+        if consent {
+            args.push("--confirm-volunteer");
+        }
+        invoke(&self.profiles[subject], &args)
+    }
+    fn response(
+        &self,
+        subject: usize,
+        history: &Path,
+        head: &str,
+        challenge: &(PathBuf, String),
+        consent: bool,
+        name: &str,
+    ) -> PathBuf {
+        let p = self.path(name);
+        fs::write(&p, success(self.respond(subject, history, head, challenge, consent))).unwrap();
+        p
+    }
+    fn verify_role_cmd(&self, verifier: usize, head: &str, challenge: &(PathBuf, String), response: &Path) -> Command {
+        cmd(
+            &self.profiles[verifier],
+            &[
+                "participation",
+                "verify",
+                "--expected-world",
+                &self.world,
+                "--expected-head",
+                head,
+                "--expected-challenge",
+                &challenge.1,
+                "--response",
+                s(response),
+            ],
+        )
+    }
+    fn verify_role(&self, verifier: usize, head: &str, challenge: &(PathBuf, String), response: &Path) -> Output {
+        self.verify_role_cmd(verifier, head, challenge, response).output().unwrap()
+    }
+}
+
+fn assert_role(report: Value, role: &str, already_validator: bool) {
+    assert_eq!(report["role"], role);
+    assert_eq!(report["validator_already_enrolled"], already_validator);
+    for flag in [
+        "validator_granted",
+        "write_authority",
+        "live_quorum_verified",
+        "resource_enforcement_verified",
+        "runtime_activation",
+        "worker_admission",
+        "player_admission",
+    ] {
+        assert_eq!(report[flag], false, "unexpected role grant: {flag}");
+    }
+}
+
+#[test]
+fn public_authenticated_play_never_enrolls_workers_or_validators() {
+    let f = Fixture::with_mode(true);
+    let head = &f.initial_head;
+    let player_key = hex::encode(f.identities[3].public_key());
+    let before = fs::read(f.journal(1)).unwrap();
+    let play = f.challenge(1, 3, head, "play.json", &["--play"]);
+    rejected(f.respond(4, &f.genesis, head, &play, false), "not the reviewed participation subject");
+    rejected(f.respond(3, &f.genesis, head, &play, true), "play must not include it");
+    let reply = f.response(3, &f.genesis, head, &play, false, "play-response.json");
+    let report = json(f.verify_role(1, head, &play, &reply));
+    assert_role(report, "reference_player", false);
+    rejected(f.verify_role(1, head, &play, &reply), "already consumed or canceled");
+    assert_eq!(fs::read(f.journal(1)).unwrap(), before, "play mutated authority journal");
+
+    // A player can request volunteering but cannot manufacture eligibility.
+    let offer_args = ["--memory-mib", "4096", "--cpu-millicores", "1000"];
+    let offer = f.challenge(1, 3, head, "unapproved.json", &offer_args);
+    rejected(f.respond(3, &f.genesis, head, &offer, false), "separate --confirm-volunteer");
+    let reply = f.response(3, &f.genesis, head, &offer, true, "offer-response.json");
+    rejected(f.verify_role(1, head, &offer, &reply), "no accepted eligibility");
+    rejected(
+        invoke(
+            &f.organizer(),
+            &[
+                "participation",
+                "propose-player",
+                "--history",
+                s(&f.genesis),
+                "--expected-world",
+                &f.world,
+                "--expected-head",
+                head,
+                "--player-key",
+                &player_key,
+                "--allow",
+            ],
+        ),
+        "public participation does not use private invitations",
+    );
+
+    let grant = f.role_propose(
+        &f.genesis,
+        head,
+        "worker.json",
+        &["propose-worker", "--worker-key", &player_key, "--memory-mib", "4096", "--cpu-millicores", "2000"],
+    );
+    rejected(f.vote_cmd(3, head, &grant, &f.initial).output().unwrap(), "not an eligible ownerless validator");
+    let h1 = f.commit_role(&f.genesis, head, &grant, "h1.json", 1, 2);
+    let head = &grant.1;
+    assert_eq!(json(f.status(3))["local_validator"], false);
+    // Old challenge was issued against the preceding head.
+    rejected(f.verify_role(1, head, &offer, &reply), "differs from accepted head");
+    let large = f.challenge(1, 3, head, "oversize.json", &["--memory-mib", "8192", "--cpu-millicores", "1000"]);
+    let large_reply = f.response(3, &h1, head, &large, true, "large-response.json");
+    rejected(f.verify_role(1, head, &large, &large_reply), "exceeds accepted worker cap");
+    let offer = f.challenge(1, 3, head, "approved.json", &offer_args);
+    let reply = f.response(3, &h1, head, &offer, true, "approved-response.json");
+    let report = json(f.verify_role(1, head, &offer, &reply));
+    assert_eq!(report["offered_budget"]["memory_mib"], 4096);
+    assert_eq!(report["offered_budget"]["cpu_millicores"], 1000);
+    assert_role(report, "reference_volunteer", false);
+    let recovery = f.propose(&h1, head, "recovery.json", &["--recover"]);
+    rejected(f.vote_cmd(3, head, &recovery, &f.initial).output().unwrap(), "not an eligible ownerless validator");
+
+    let stale = f.challenge(1, 3, head, "pending-offer.json", &offer_args);
+    let stale_reply = f.response(3, &h1, head, &stale, true, "pending-response.json");
+    let revoke = f.role_propose(&h1, head, "revoke.json", &["propose-worker", "--worker-key", &player_key, "--revoke"]);
+    let h2 = f.commit_role(&h1, head, &revoke, "h2.json", 2, 3);
+    let head = &revoke.1;
+    rejected(f.verify_role(1, head, &stale, &stale_reply), "differs from accepted head");
+    let offer = f.challenge(1, 3, head, "removed.json", &offer_args);
+    let reply = f.response(3, &h2, head, &offer, true, "removed-response.json");
+    rejected(f.verify_role(1, head, &offer, &reply), "no accepted eligibility");
+    let play = f.challenge(1, 3, head, "still-public.json", &["--play"]);
+    let reply = f.response(3, &h2, head, &play, false, "still-public-response.json");
+    assert_role(json(f.verify_role(1, head, &play, &reply)), "reference_player", false);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn invite_only_player_and_worker_roles_are_independent_and_revocable() {
+    let f = Fixture::new();
+    let head = &f.initial_head;
+    let player_key = hex::encode(f.identities[3].public_key());
+    let worker_key = hex::encode(f.identities[4].public_key());
+    // Even a founding validator is not automatically invited.
+    let denied = f.challenge(1, 0, head, "founder-play.json", &["--play"]);
+    let reply = f.response(0, &f.genesis, head, &denied, false, "founder-reply.json");
+    rejected(f.verify_role(1, head, &denied, &reply), "no accepted private invitation");
+    let invite =
+        f.role_propose(&f.genesis, head, "invite.json", &["propose-player", "--player-key", &player_key, "--allow"]);
+    let h1 = f.commit_role(&f.genesis, head, &invite, "h1.json", 1, 2);
+    let head = &invite.1;
+    let play = f.challenge(1, 3, head, "invited.json", &["--play"]);
+    let reply = f.response(3, &h1, head, &play, false, "invited-response.json");
+    assert_role(json(f.verify_role(1, head, &play, &reply)), "reference_player", false);
+    let worker = f.role_propose(
+        &h1,
+        head,
+        "worker.json",
+        &["propose-worker", "--worker-key", &worker_key, "--memory-mib", "4096", "--cpu-millicores", "1000"],
+    );
+    let h2 = f.commit_role(&h1, head, &worker, "h2.json", 2, 3);
+    let head = &worker.1;
+    let play = f.challenge(1, 4, head, "worker-play.json", &["--play"]);
+    let reply = f.response(4, &h2, head, &play, false, "worker-play-response.json");
+    rejected(f.verify_role(1, head, &play, &reply), "no accepted private invitation");
+    let offer = f.challenge(1, 4, head, "worker-offer.json", &["--memory-mib", "512", "--cpu-millicores", "250"]);
+    let reply = f.response(4, &h2, head, &offer, true, "worker-offer-response.json");
+    assert_role(json(f.verify_role(1, head, &offer, &reply)), "reference_volunteer", false);
+    let revoke =
+        f.role_propose(&h2, head, "uninvite.json", &["propose-player", "--player-key", &player_key, "--revoke"]);
+    let h3 = f.commit_role(&h2, head, &revoke, "h3.json", 3, 4);
+    let head = &revoke.1;
+    let status = json(f.status(1));
+    assert_eq!(status["invited_player_count"], 0);
+    assert_eq!(status["eligible_worker_count"], 1);
+    let play = f.challenge(1, 3, head, "revoked.json", &["--play"]);
+    let reply = f.response(3, &h3, head, &play, false, "revoked-response.json");
+    rejected(f.verify_role(1, head, &play, &reply), "no accepted private invitation");
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn participation_challenge_is_single_use_across_processes_and_output_failure() {
+    let f = Fixture::with_mode(true);
+    let head = &f.initial_head;
+    let play = f.challenge(1, 3, head, "first.json", &["--play"]);
+    let response = f.response(3, &f.genesis, head, &play, false, "first-response.json");
+    let a = f.verify_role_cmd(1, head, &play, &response).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let b = f.verify_role_cmd(1, head, &play, &response).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let a = a.wait_with_output().unwrap();
+    let b = b.wait_with_output().unwrap();
+    assert_ne!(a.status.success(), b.status.success());
+    let (winner, loser) = if a.status.success() { (a, b) } else { (b, a) };
+    assert_role(json(winner), "reference_player", false);
+    rejected(loser, "already consumed or canceled");
+    let next = f.challenge(1, 3, head, "next.json", &["--play"]);
+    let reply = f.response(3, &f.genesis, head, &next, false, "next-response.json");
+    rejected(f.verify_role(1, head, &play, &response), "differs from expected pin");
+    let full = OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let out =
+        f.verify_role_cmd(1, head, &next, &reply).stdout(Stdio::from(full)).stderr(Stdio::piped()).output().unwrap();
+    assert!(!out.status.success());
+    rejected(f.verify_role(1, head, &next, &reply), "already consumed or canceled");
+    let canceled = f.challenge(1, 3, head, "cancel.json", &["--play"]);
+    let reply = f.response(3, &f.genesis, head, &canceled, false, "cancel-response.json");
+    success(invoke(
+        &f.profiles[1],
+        &[
+            "participation",
+            "cancel",
+            "--expected-world",
+            &f.world,
+            "--expected-head",
+            head,
+            "--expected-challenge",
+            &canceled.1,
+        ],
+    ));
+    rejected(f.verify_role(1, head, &canceled, &reply), "already consumed or canceled");
+    let tampered = f.challenge(1, 3, head, "tamper.json", &["--play"]);
+    let reply = f.response(3, &f.genesis, head, &tampered, false, "tamper-response.json");
+    let path = f.journal(1).parent().unwrap().join("participation-challenge.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    state["state"]["consumed"] = true.into();
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    rejected(f.verify_role(1, head, &tampered, &reply), "local participation challenge signature invalid");
     f.assert_no_live_storage();
 }

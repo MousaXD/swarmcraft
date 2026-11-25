@@ -675,12 +675,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #67 — Expansion · Missing
 - Work: Separate world governance, public/private participation, and volunteer worker trust
 - Acceptance: Ownerless can be invite-only or public. Joining a public world grants neither a vote nor write authority. Anonymous game access and eligibility to run or certify workers are separate policies
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (signed public/private reference policy and independent reference role eligibility; actual Minecraft authentication, admission and runtime activation remain gated)
+- Source: [Ownerless participation RFC](rfcs/ownerless-participation.md); `crates/swarm-protocol/src/ownerless_participation.rs`, `crates/swarm-consensus/src/ownerless_participation.rs`, `crates/swarm-cli/src/ownerless_participation.rs`, #66 signed history/journals.
+- Evidence: Explicit public format 2 distinct signing domains/identity; original private policy hash unchanged and existing #65 evidence reverified. Current majority independently certifies/revokes private invitations and capped worker eligibility; no implicit player, worker or validator role. Signed verifier challenge binds exact current head, subject, verifier, role, nonce and budget; explicit separate volunteer consent. Durable one-shot local consumption under world lock, concurrent/replayed/canceled/replaced/tampered/stale proofs and lost stdout tested. 131 protocol/consensus tests (four new); seven authority CLI and two creation CLI integration tests (three new); all role reports deny live quorum, runtime, actual admission and write authority.
+- Remaining / next action: #68 combined qualification; live Minecraft authenticated account mapping, actual public/private routing, live quorum transport and current consent/resource/runtime integration remain gated. Public reference eligibility requires application key proof, not anonymous offline Minecraft login. One-shot offer is not an ongoing worker grant; no actual capacity or enforcement inferred. Public format explicitly refused by existing private Fabric lab.
+- External dependency: Real independently owned machines, authenticated accounts, supported distributed Minecraft runtime, live authority/worker integration and #63 sustained service target.
+- Commit: Separate public/private ownerless reference roles and durable challenge consumption; see git history.
 
 ### #68 — Expansion · Unverified
 - Work: Certify ownerless and horizontally scaled operation together
@@ -754,4 +754,4 @@ Initial full-item implementation/acceptance totals: not yet established by item-
 - Private replication uses the current signed membership with a matching descriptor and rechecks the exact authenticated recipient before normal payload, manifest acknowledgement and every blob chunk. A half-installed signed roster denies data instead of trusting an obsolete descriptor. Removed local recipients also refuse normal snapshot bytes. Ordinary unauthorized world requests receive a generic refusal.
 - Evidence: strict CLI/storage Clippy, 51 daemon/CLI binary tests, 67 storage tests (1 optional soak ignored), and actual authenticated invite/leave/replication test passed (19.73s). A reusable grant admitted a third peer; revocation left committed membership intact; joint leave committed; a real network probe authenticated as the removed member received status/history refusal and no newer manifest/blob payload while the remaining member verified a new checkpoint. The old device retained its old verified save. Prior commit 8653c2d required CI completed successfully (run 45585530110). Broader local CLI validation underway; UI and field acceptance remain.
 
-Latest actionable continuation after #66 local CFT reference-authority and founder-independent recovery verification: #67 separate public/private participation, governance and volunteer worker eligibility. Ownerless gameplay stays disabled until the canonical authority, admission and field gates are met. The #63 full durable service target, independent quorum, physical, compatibility and actual Minecraft gameplay gates remain open.
+Latest actionable continuation after #67 local role separation and proof consumption: #68 combined qualification, with independent-host gameplay and scale gates still open. Ownerless gameplay stays disabled until the canonical authority, admission and field gates are met. The #63 full durable service target, independent quorum, physical, compatibility and actual Minecraft gameplay gates remain open.

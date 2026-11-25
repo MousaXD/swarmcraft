@@ -176,3 +176,7 @@ flock /tmp/swarmcraft-sabathon-cargo.lock -c \
 flock /tmp/swarmcraft-sabathon-cargo.lock -c \
   'cargo clippy --locked --offline -p swarm-protocol -p swarm-consensus --all-targets -- -D warnings'
 ```
+
+The [#67 participation contract](ownerless-participation.md) preserves the
+private format and adds a distinct signed public-authenticated reference
+format. Neither can activate a playable world.
