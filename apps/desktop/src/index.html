@@ -311,10 +311,12 @@
                     <p class="field-help">This supplies a locally missing canonical artifact. It does not change the world's signed modpack.</p>
                   </div>
                   <div class="compact-actions">
+                    <button id="acquireRequiredMods" class="button button-secondary world-required" type="button">Acquire required server mods</button>
                     <button id="supplyRequiredMod" class="button button-secondary world-required" type="button">Supply required JAR</button>
                     <button id="refreshMods" class="button button-subtle world-required" type="button">Refresh / Verify</button>
                     <button id="openModsFolder" class="button button-subtle world-required" type="button">Open mods folder</button>
                   </div>
+                  <p id="modAcquisitionReport" class="client-profile-text" role="status" aria-live="polite" hidden></p>
                 </section>
 
                 <details class="details-panel">

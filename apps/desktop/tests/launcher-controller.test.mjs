@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { canonicalPackageFromDownloaded, errorText } from '../src/launcher-controller.js';
+import { canonicalPackageFromDownloaded, errorText, manualArtifactSelection } from '../src/launcher-controller.js';
 
 test('downloaded provider artifact maps runtime identity and exact provider provenance', () => {
   const selected = new Map([['dep', 'dep-version']]);
@@ -58,4 +58,28 @@ test('MD5-only provider provenance is canonicalized as manual-required', () => {
     selectedByProject: new Map(),
   });
   assert.equal(result.retrieval, 'manual_required');
+});
+
+test('restricted file selection preserves exact provider identity and strong hashes without enabling automatic download', () => {
+  const version = { project_id: '123', file_id: '456', dependencies: [] };
+  const file = { project_id: '123', version_id: '456', file_name: 'exact.jar', file_size: 42,
+    hashes: [{ algorithm: 'sha1', digest: 'ab'.repeat(20) }] };
+  const selected = manualArtifactSelection('curseforge', version, file, '/fixture/exact.jar');
+  const result = canonicalPackageFromDownloaded({
+    provider: 'curseforge', version, file, manual: true,
+    downloaded: { path: selected.path, filename: selected.filename, size: selected.size, hashes: selected.hashes },
+    inspection: { mod_id: 'restricted', version: '1.0', environment: 'server' }, selectedByProject: new Map(),
+  });
+  assert.equal(result.retrieval, 'manual_required');
+  assert.equal(result.projectId, '123');
+  assert.equal(result.versionId, '456');
+  assert.equal(result.fileSize, 42);
+  assert.deepEqual(result.providerHashes, selected.hashes);
+  assert.notEqual(selected.key, manualArtifactSelection('curseforge', version, { ...file, file_size: 43 }, '').key);
+  for (const invalid of [
+    { ...file, version_id: '999' }, { ...file, file_name: '../unsafe.jar' },
+    { ...file, hashes: [] }, { ...file, file_size: 0 },
+  ]) assert.throws(() => manualArtifactSelection('curseforge', version, invalid, '/fixture/exact.jar'));
+  assert.throws(() => manualArtifactSelection('curseforge', version, file, 'relative.jar'));
+  assert.throws(() => manualArtifactSelection('modrinth', version, { ...file, file_type: 'sources' }, '/fixture/exact.jar'));
 });

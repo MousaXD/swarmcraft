@@ -73,6 +73,7 @@ export interface NativeCommandTable {
   hosting_contribution_get: { args: { world: string }; result: HostingContributionReadiness };
   hosting_contribution_set: { args: { world: string; heapMib: number }; result: HostingContributionReadiness };
   world_mods_status: { args: { world: string }; result: string };
+  world_mods_acquire: { args: { world: string }; result: string };
   world_mods_add: { args: { world: string; jarPath: string }; result: string };
   world_mods_remove: { args: { world: string; modId: string }; result: string };
   open_world_mods_folder: { args: { world: string }; result: string };

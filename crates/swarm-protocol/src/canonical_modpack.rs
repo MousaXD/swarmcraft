@@ -254,6 +254,42 @@ impl CanonicalModpackV1 {
         Ok(())
     }
 
+    /// Deployment validation is stricter than the historical wire-format
+    /// validator: each side needs one exact artifact per runtime ID, and a
+    /// required dependency must be available on every side of its dependent.
+    pub fn validate_deployment_sides(&self) -> Result<(), CanonicalModpackError> {
+        self.validate()?;
+        for side in [ArtifactSideV1::Server, ArtifactSideV1::Client] {
+            let mut ids = BTreeSet::new();
+            let mut selected = BTreeSet::new();
+            let packages = self.packages.iter().filter(|p| p.side == side || p.side == ArtifactSideV1::Both);
+            for package in packages.clone() {
+                if !ids.insert(&package.artifact_id) {
+                    return Err(CanonicalModpackError::DuplicatePackage(package.artifact_id.clone()));
+                }
+                if let CanonicalArtifactSourceV1::Provider { artifact } = &package.source {
+                    selected.insert(&artifact.identity);
+                }
+            }
+            for package in packages {
+                if let CanonicalArtifactSourceV1::Provider { artifact } = &package.source {
+                    for dependency in &artifact.dependencies {
+                        if dependency.kind == CanonicalDependencyKindV1::Required
+                            && !selected.contains(&dependency.target)
+                        {
+                            return Err(CanonicalModpackError::MissingRequiredDependency(format!(
+                                "{:?}: {}",
+                                side,
+                                dependency.target.display_key()
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn to_runtime_compatibility(
         &self,
         fabric_adapter_version: impl Into<String>,
@@ -600,6 +636,28 @@ mod tests {
         let root = provider_package("root", CanonicalProviderV1::Modrinth, "root", "1", 1, vec![incompatible]);
         let other = provider_package("other", CanonicalProviderV1::Modrinth, "other", "1", 2, Vec::new());
         assert!(matches!(pack(vec![root, other]).validate(), Err(CanonicalModpackError::IncompatibleDependency(_))));
+    }
+
+    #[test]
+    fn deployment_rejects_side_incomplete_dependencies_and_overlapping_ids() {
+        let dependency = identity(CanonicalProviderV1::CurseForge, "10", "20");
+        let root = provider_package(
+            "root",
+            CanonicalProviderV1::Modrinth,
+            "root",
+            "1",
+            1,
+            vec![CanonicalDependencyV1 { kind: CanonicalDependencyKindV1::Required, target: dependency }],
+        );
+        let mut child = provider_package("child", CanonicalProviderV1::CurseForge, "10", "20", 2, Vec::new());
+        child.side = ArtifactSideV1::Client;
+        let mismatched = pack(vec![root.clone(), child.clone()]);
+        assert!(mismatched.validate().is_ok());
+        assert!(mismatched.validate_deployment_sides().is_err());
+        child.side = ArtifactSideV1::Both;
+        assert!(pack(vec![root.clone(), child.clone()]).validate_deployment_sides().is_ok());
+        let duplicate = provider_package("root", CanonicalProviderV1::CurseForge, "30", "40", 3, Vec::new());
+        assert!(pack(vec![root, child, duplicate]).validate_deployment_sides().is_err());
     }
 
     #[test]

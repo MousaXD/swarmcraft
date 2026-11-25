@@ -424,17 +424,36 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
     case 'host_readiness': return { eligible: false, reason: 'No selected world in browser smoke fixture' };
     case 'connectivity_status': return { state: 'nat_status_unknown' };
     case 'modrinth_search': return { items: [{ project_id: 'lithium', title: 'Lithium' }] };
+    case 'curseforge_search': return { status: 'ok', data: { projects: [{ project_id: '123', name: 'Restricted mod' }] } };
+    case 'curseforge_resolve_project': return { status: 'ok', data: { packages: [{
+      project_id: '123', file_id: '456', version_id: '456', file_name: 'restricted.jar', dependencies: [],
+    }] } };
+    case 'curseforge_download': return { status: 'manual_artifact_required', data: {
+      project_id: '123', version_id: '456', file_name: 'restricted.jar', file_size: 42,
+      hashes: [{ algorithm: 'sha1', digest: 'b'.repeat(40) }],
+    } };
     case 'modrinth_resolve_project': return { versions: [{
       project_id: 'lithium', version_id: 'lithium-1', display_name: 'Lithium', dependencies: [],
       files: [{ primary: true, filename: 'lithium.jar', locator: { url: 'https://cdn.modrinth.com/lithium.jar' }, retrieval: { state: 'provider_download' }, hashes: { sha512: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } }],
     }] };
     case 'provider_staging_dir': return '/tmp/swarmcraft-provider-smoke';
     case 'modrinth_download': return { path: '/tmp/swarmcraft-provider-smoke/lithium.jar', filename: 'lithium.jar', size: 123, hashes: { sha512: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } };
-    case 'inspect_mod_artifact': return { mod_id: 'lithium', version: '1.0.0', environment: 'server' };
+    case 'inspect_mod_artifact': return args.path === '/fixture/restricted.jar'
+      ? { mod_id: 'restricted', version: '1.0', environment: 'server' }
+      : { mod_id: 'lithium', version: '1.0.0', environment: 'server' };
     case 'create_canonical_world': return { worldId: 'scworld:browser-smoke', canonical: { compatibilityFingerprint: 'browser-fingerprint' } };
     case 'world_mods_add':
       if (window.__swarmcraftWorldModFailures > 0) { window.__swarmcraftWorldModFailures -= 1; throw new Error('simulated local mod installation failure'); }
       return { status: 'ok' };
+    case 'world_mods_acquire': return JSON.stringify({
+      world_id: args.world, ready: false, inventory_issues: ['missing_required'],
+      artifacts: [
+        { mod_id: 'downloaded', version: '1', artifact_hash: 'a'.repeat(64), provider: 'modrinth',
+          project_id: 'modrinth-id', version_id: 'exact-version', file_name: 'downloaded.jar', state: 'acquired' },
+        { mod_id: 'restricted', version: '2', artifact_hash: 'b'.repeat(64), provider: 'curse_forge',
+          project_id: '123', version_id: '456', file_name: 'restricted.jar', state: 'manual_required' },
+      ],
+    });
     case 'discovery_search': return { results: [] };
     case 'discovery_resolve': return { state: 'found', world: { world_id: args.world, name: 'Browser Public World', visibility: 'public', expires_unix_ms: Date.now() + 60_000 } };
     default: return null;
@@ -531,11 +550,24 @@ const scenario = String.raw`(async () => {
   document.getElementById('modSearchButton').click();
   await waitFor(() => document.querySelector('#modSearchResults button'), 'provider search result');
   document.querySelector('#modSearchResults button').click();
+  document.getElementById('modProvider').value = 'curseforge';
+  document.getElementById('modSearch').value = 'Restricted mod';
+  document.getElementById('modSearchButton').click();
+  await waitFor(() => document.getElementById('modSearchResults').textContent.includes('Restricted mod'), 'restricted provider search result');
+  document.querySelector('#modSearchResults button').click();
   document.getElementById('createName').value = 'Browser smoke world';
+  document.getElementById('createForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await waitFor(() => document.getElementById('manualProviderArtifact0') && document.getElementById('createError').textContent.includes('Manual artifact required'), 'exact manual file selection');
+  require(!window.__swarmcraftCalls.some(call => call.command === 'create_canonical_world'), 'World created before restricted artifact was supplied');
+  document.getElementById('manualProviderArtifact0').value = '/fixture/restricted.jar';
   document.getElementById('createForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   await waitFor(() => document.getElementById('createError')?.dataset.createdWorldId === 'scworld:browser-smoke', 'post-create repair state');
 
   require(window.__swarmcraftCalls.filter((call) => call.command === 'create_canonical_world').length === 1, 'Canonical Create was not invoked exactly once');
+  const createdPack = window.__swarmcraftCalls.find(call => call.command === 'create_canonical_world').args.request.modpack.packages;
+  require(createdPack.length === 2, 'Both provider artifacts were not retained');
+  require(createdPack.some(pkg => pkg.provider === 'curseforge' && pkg.retrieval === 'manual_required' && pkg.artifactPath === '/fixture/restricted.jar'), 'Manual restriction was lost during canonicalization');
+  require(createdPack.some(pkg => pkg.provider === 'modrinth' && pkg.retrieval === 'provider_download'), 'Permitted provider artifact was not retained');
   require(window.__swarmcraftCalls.filter((call) => call.command === 'create_world').length === 0, 'Legacy create_world handler still owned intended Create path');
   require(document.getElementById('createWorld').disabled, 'Create submit was re-enabled after canonical world already existed');
   require(document.getElementById('createRepairRetry'), 'Local mod repair action was not offered');
@@ -854,6 +886,13 @@ const clientProfileScenario = String.raw`(async () => {
   require([...document.querySelectorAll('[data-reconnect-world]')].every(button => button.disabled), 'Client match enabled unverified reconnect');
   edit('/fixture/changed/mods');
   require($('clientInventoryStatus').dataset.state !== 'checked', 'Path edit retained success');
+  const acquired = window.__swarmcraftCalls.length;
+  $('acquireRequiredMods').click();
+  await waitFor(() => $('modAcquisitionReport').textContent.includes('Supply the exact authorized JAR manually'), 'provider acquisition report');
+  require($('modAcquisitionReport').textContent.includes('Downloaded and verified'), 'Verified acquisition absent');
+  require($('modAcquisitionReport').textContent.includes('CurseForge 123/456'), 'Exact manual fallback absent');
+  require(window.__swarmcraftCalls.slice(acquired).filter(call => call.command === 'world_mods_acquire').length === 1, 'Unexpected acquisition count');
+  require(!window.__swarmcraftCalls.slice(acquired).some(call => ['runtime_install', 'runtime_repair', 'hosting_contribution_set'].includes(call.command)), 'Acquisition changed runtime or consent');
   require(window.__swarmcraftBrowserErrors.length === 0, 'Client preparation browser errors: ' + window.__swarmcraftBrowserErrors.join(' | '));
   return { status: 'pass' };
 })()`;

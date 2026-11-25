@@ -137,6 +137,9 @@ pub fn canonicalize_modpack(
     manifest
         .validate()
         .map_err(|error| CanonicalizationFailure::new("canonical_validation_failed", error.to_string()))?;
+    manifest
+        .validate_deployment_sides()
+        .map_err(|error| CanonicalizationFailure::new("canonical_deployment_failed", error.to_string()))?;
     let compatibility = manifest
         .to_runtime_compatibility(env!("CARGO_PKG_VERSION"))
         .map_err(|error| CanonicalizationFailure::new("canonical_validation_failed", error.to_string()))?;

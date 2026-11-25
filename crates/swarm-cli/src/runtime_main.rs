@@ -55,6 +55,8 @@ enum RuntimeCommand {
     Verify { world: String },
     /// Inspect one exact Fabric mod JAR using the shared Rust authority parser.
     InspectMod { path: PathBuf },
+    /// Acquire permitted exact server mods without accepting EULA or starting a server.
+    AcquireMods { world: String },
     /// Describe the signed client profile and optionally inspect one selected mods folder.
     ClientProfile {
         world: String,
@@ -165,6 +167,9 @@ fn main() -> Result<()> {
         RuntimeCommand::InspectMod { path } => {
             print_json(&server_mods::inspect_fabric_mod(&path)?)?;
         }
+        RuntimeCommand::AcquireMods { world } => {
+            print_json(&provider_runtime::acquire_missing_server_mods(&paths, &storage, parse_world(&world)?)?)?;
+        }
         RuntimeCommand::ClientProfile { world, mods_dir } => {
             print_json(&client_profile::prepare_client_profile(&storage, parse_world(&world)?, mods_dir.as_deref())?)?;
         }
@@ -209,8 +214,17 @@ fn main() -> Result<()> {
 }
 
 fn prepare_provider_mods(paths: &DataPaths, storage: &Storage, world: WorldId) -> Result<()> {
-    let world_config = storage.load_world_config(world)?;
-    provider_runtime::acquire_missing_server_mods(paths, world, &world_config.compatibility)?;
+    let report = provider_runtime::acquire_missing_server_mods(paths, storage, world)?;
+    if !report.ready {
+        let summary = report
+            .artifacts
+            .iter()
+            .filter(|a| !matches!(a.state, "acquired" | "already_verified"))
+            .map(|a| format!("{} {}: {}", a.mod_id, a.version, a.state))
+            .collect::<Vec<_>>()
+            .join("; ");
+        anyhow::bail!("Server mod preparation incomplete. Use Acquire required server mods or Supply required JAR in the world Mods panel. {summary}");
+    }
     Ok(())
 }
 

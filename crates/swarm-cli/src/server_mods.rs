@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
+    fs,
     io::Write,
     path::{Path, PathBuf},
 };
@@ -540,25 +540,21 @@ fn canonical_file_name(mod_id: &str, version: &str, hash: Hash32) -> String {
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("mod destination has no parent directory")?;
-    fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
-    if path.exists() {
-        let existing = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
-        if existing == bytes {
-            return Ok(());
+    swarm_core::create_private_dir_all(parent)?;
+    // Concurrent UI/CLI preparations may target the same immutable JAR.
+    // Never share a temporary filename or overwrite an existing destination.
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    match temporary.persist_noclobber(path) {
+        Ok(_) => (),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !fs::symlink_metadata(path)?.is_file() || fs::read(path)? != bytes {
+                bail!("refusing to replace a different artifact at {}", path.display());
+            }
         }
-        bail!("refusing to replace a different artifact at {}", path.display());
+        Err(error) => return Err(error.error).context("cannot publish verified mod artifact"),
     }
-    let tmp = path.with_extension("jar.tmp");
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&tmp)
-        .with_context(|| format!("cannot create {}", tmp.display()))?;
-    file.write_all(bytes).with_context(|| format!("cannot write {}", tmp.display()))?;
-    file.sync_all().with_context(|| format!("cannot sync {}", tmp.display()))?;
-    drop(file);
-    fs::rename(&tmp, path).with_context(|| format!("cannot publish {}", path.display()))?;
     sync_parent(parent)
 }
 
@@ -988,7 +984,7 @@ fn decode_distance(reader: &mut BitReader<'_>, symbol: usize) -> Result<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use swarm_protocol::PROTOCOL_VERSION;
 
@@ -1057,6 +1053,21 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_publication_is_idempotent_and_never_replaces_other_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("verified.jar");
+        std::thread::scope(|scope| {
+            let a = scope.spawn(|| atomic_write(&path, b"exact bytes"));
+            let b = scope.spawn(|| atomic_write(&path, b"exact bytes"));
+            a.join().unwrap().unwrap();
+            b.join().unwrap().unwrap();
+        });
+        assert!(atomic_write(&path, b"different bytes").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"exact bytes");
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn duplicate_mod_id_and_conflicting_versions_are_reported() {
         let profile = manifest(vec![requirement("lithium", "1", 1)]);
         let values = vec![installed("lithium", "1", 1), installed("lithium", "2", 2)];
@@ -1117,7 +1128,7 @@ mod tests {
         assert!(compare_runtime_profile(&profile, &[]).is_empty());
     }
 
-    fn stored_jar(name: &str, contents: &[u8]) -> Vec<u8> {
+    pub(crate) fn stored_jar(name: &str, contents: &[u8]) -> Vec<u8> {
         let name = name.as_bytes();
         let crc = crc32(contents);
         let mut out = Vec::new();

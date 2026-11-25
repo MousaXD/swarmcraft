@@ -587,6 +587,9 @@ export function createBackendAdapter(invoke) {
         await call('world_mods_status', { world }),
         'Server mod status',
       ),
+      acquire: async (world) => parseJsonContract(
+        await call('world_mods_acquire', { world }), 'Server mod acquisition',
+      ),
       supplyRequiredJar: (world, jarPath) => call('world_mods_add', { world, jarPath }),
       removeLocal: (world, modId) => call('world_mods_remove', { world, modId }),
       openFolder: (world) => call('open_world_mods_folder', { world }),

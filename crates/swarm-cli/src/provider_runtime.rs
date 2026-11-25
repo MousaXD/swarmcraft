@@ -3,12 +3,13 @@ use reqwest::{blocking::Client, redirect::Policy, Url};
 use serde_json::{json, Value};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     env,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 use swarm_core::DataPaths;
 use swarm_protocol::{
@@ -35,83 +36,214 @@ const MAX_PROVIDER_METADATA_OBJECT_ENTRIES: usize = 512;
 const MAX_PROVIDER_METADATA_STRING_BYTES: usize = 64 * 1024;
 const MAX_PROVIDER_METADATA_NODES: usize = 50_000;
 
-/// Acquire only the exact missing server-side artifacts encoded into the signed
-/// compatibility manifest. Provider metadata is a retrieval locator; the final
-/// publication gate remains the signed Fabric mod id/version/runtime hash.
+/// Local, advisory acquisition report. It grants neither hosting consent
+/// nor runtime readiness, and contains no machine-local credentials or URLs.
+#[derive(Debug, serde::Serialize)]
+pub struct AcquisitionReport {
+    pub world_id: String,
+    pub ready: bool,
+    pub artifacts: Vec<ArtifactOutcome>,
+    pub inventory_issues: Vec<crate::server_mods::ModIssueKind>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ArtifactOutcome {
+    pub mod_id: String,
+    pub version: String,
+    pub artifact_hash: String,
+    pub provider: Option<CanonicalProviderV1>,
+    pub project_id: Option<String>,
+    pub version_id: Option<String>,
+    pub file_name: Option<String>,
+    pub state: &'static str,
+}
+
+impl ArtifactOutcome {
+    fn new(package: &CanonicalPackageV1, state: &'static str) -> Self {
+        let source = match &package.source {
+            CanonicalArtifactSourceV1::Provider { artifact } => Some(artifact),
+            _ => None,
+        };
+        Self {
+            mod_id: package.artifact_id.clone(),
+            version: package.version.clone(),
+            artifact_hash: package.artifact_hash.to_hex(),
+            provider: source.map(|a| a.identity.provider),
+            project_id: source.map(|a| a.identity.project_id.clone()),
+            version_id: source.map(|a| a.identity.version_id.clone()),
+            file_name: source.map(|a| a.file_name.clone()),
+            state,
+        }
+    }
+}
+
+/// Use the creator-signed immutable compatibility, not an unsigned or
+/// renderer-supplied manifest, for any provider network request.
+pub fn verified_compatibility(
+    storage: &swarm_storage::Storage,
+    world: WorldId,
+) -> Result<RuntimeCompatibilityManifestV1> {
+    let history = crate::historical_authority::collect_signed_config_history(storage, world)?;
+    let config = history.first().context("missing creator-signed compatibility profile")?;
+    let metadata = storage.load_world(world)?;
+    let manifest = &config.compatibility;
+    if manifest.fingerprint()? != metadata.genesis.compatibility_fingerprint
+        || manifest.minecraft_version != metadata.genesis.minecraft_version
+        || manifest.loader_version != metadata.genesis.fabric_loader_version
+        || manifest.loader_id != "fabric"
+    {
+        bail!("canonical compatibility does not match world genesis");
+    }
+    swarm_protocol::validate_runtime_selection(&manifest.minecraft_version, &manifest.loader_version, None)?;
+    Ok(manifest.clone())
+}
+
+/// Acquire each allowed missing server artifact independently. Restricted
+/// artifacts are never fetched; successful exact files remain reusable
+/// across a retry. No launcher, peer transfer or server start is involved.
 pub fn acquire_missing_server_mods(
+    paths: &DataPaths,
+    storage: &swarm_storage::Storage,
+    world: WorldId,
+) -> Result<AcquisitionReport> {
+    let manifest = verified_compatibility(storage, world)?;
+    acquire_with(
+        paths,
+        world,
+        &manifest,
+        |artifact, staging| match artifact.identity.provider {
+            CanonicalProviderV1::Modrinth => acquire_modrinth(artifact, staging),
+            CanonicalProviderV1::CurseForge => acquire_curseforge(artifact, staging),
+        },
+        || {
+            if verified_compatibility(storage, world)? != manifest {
+                bail!("canonical compatibility changed during acquisition");
+            }
+            Ok(())
+        },
+    )
+}
+
+fn acquire_with(
     paths: &DataPaths,
     world: WorldId,
     manifest: &RuntimeCompatibilityManifestV1,
-) -> Result<Vec<InstalledServerMod>> {
+    mut fetch: impl FnMut(&CanonicalProviderArtifactV1, &Path) -> Result<PathBuf>,
+    mut recheck: impl FnMut() -> Result<()>,
+) -> Result<AcquisitionReport> {
     let canonical = CanonicalModpackV1::from_runtime_compatibility(manifest)
         .context("cannot reconstruct exact canonical provider provenance from the signed runtime manifest")?;
-    let readiness = server_mods::evaluate_world_mods(paths, world, manifest)?;
-    let staging = StagingDir::new(paths, world)?;
-    let mut added = Vec::new();
-
-    for package in canonical
-        .packages
-        .iter()
-        .filter(|package| matches!(package.side, ArtifactSideV1::Server | ArtifactSideV1::Both))
+    canonical.validate_deployment_sides()?;
+    // Do not silently reinterpret inconsistent side declarations from older
+    // or malicious signed profiles.
+    if manifest.required_server_mods.iter().any(|r| r.side == ArtifactSideV1::Client)
+        || manifest.required_client_mods.iter().any(|r| r.side == ArtifactSideV1::Server)
     {
-        if readiness.installed.iter().any(|candidate| installed_matches(candidate, package)) {
-            continue;
-        }
-        if let Some(conflict) = readiness.installed.iter().find(|candidate| candidate.mod_id == package.artifact_id) {
-            bail!(
-                "installed mod {} is version {} but this world requires exact version {} with artifact hash {}; remove the incompatible local JAR before retrying runtime preparation",
-                package.artifact_id,
-                conflict.version,
-                package.version,
-                package.artifact_hash
-            );
-        }
-
-        let CanonicalArtifactSourceV1::Provider { artifact } = &package.source else {
-            bail!(
-                "required mod {} {} is an exact local/imported artifact and is not installed; supply the original canonical JAR through the world Mods flow before runtime preparation",
-                package.artifact_id,
-                package.version
-            );
-        };
-        if artifact.retrieval == CanonicalRetrievalV1::ManualRequired {
-            bail!(
-                "automatic download is not permitted for exact {:?} artifact {}/{} ({}); obtain that exact provider file and add it through the world Mods flow",
-                artifact.identity.provider,
-                artifact.identity.project_id,
-                artifact.identity.version_id,
-                artifact.file_name
-            );
-        }
-
-        let downloaded = match artifact.identity.provider {
-            CanonicalProviderV1::Modrinth => acquire_modrinth(artifact, staging.path())?,
-            CanonicalProviderV1::CurseForge => acquire_curseforge(artifact, staging.path())?,
-        };
-        verify_canonical_hashes(&downloaded, &artifact.hashes)?;
-        if let Some(expected) = artifact.file_size {
-            let actual = fs::metadata(&downloaded)
-                .with_context(|| format!("cannot inspect downloaded provider artifact {}", downloaded.display()))?
-                .len();
-            if actual != expected {
-                bail!(
-                    "provider artifact size mismatch for {}: canonical source requires {expected} bytes, downloaded {actual}",
-                    artifact.file_name
-                );
+        bail!("signed profile contains inconsistent mod sides");
+    }
+    let readiness = server_mods::evaluate_world_mods(paths, world, manifest)?;
+    let mut outcomes = Vec::new();
+    for package in canonical.packages.iter().filter(|p| {
+        matches!(p.side, ArtifactSideV1::Server | ArtifactSideV1::Both)
+            && !matches!(p.artifact_id.as_str(), "swarmcraft.legacy-compatibility" | "swarmcraft" | "fabric-api")
+    }) {
+        let candidates =
+            readiness.installed.iter().filter(|candidate| candidate.mod_id == package.artifact_id).collect::<Vec<_>>();
+        let state = if candidates.len() == 1 && installed_matches(candidates[0], package) {
+            "already_verified"
+        } else if !candidates.is_empty() {
+            "incompatible"
+        } else {
+            match &package.source {
+                CanonicalArtifactSourceV1::Local { .. } => "manual_required",
+                CanonicalArtifactSourceV1::Provider { artifact }
+                    if artifact.retrieval == CanonicalRetrievalV1::ManualRequired =>
+                {
+                    "manual_required"
+                }
+                CanonicalArtifactSourceV1::Provider { artifact } => {
+                    if safe_filename(&artifact.file_name).is_err()
+                        || artifact.file_size.is_some_and(|n| n > MAX_PROVIDER_ARTIFACT_BYTES)
+                    {
+                        "incompatible"
+                    } else {
+                        let staging = StagingDir::new(paths, world)?;
+                        match fetch(artifact, staging.path()) {
+                            Err(error) if error.downcast_ref::<ManualArtifactRequired>().is_some() => "manual_required",
+                            Err(error)
+                                if error.downcast_ref::<crate::package_provider::ProviderFailure>().is_some_and(
+                                    |failure| {
+                                        matches!(
+                                            failure.kind,
+                                            crate::package_provider::ProviderFailureKind::HashMismatch
+                                                | crate::package_provider::ProviderFailureKind::Incompatible
+                                        )
+                                    },
+                                ) =>
+                            {
+                                "incompatible"
+                            }
+                            Err(_) => "unavailable",
+                            Ok(downloaded) => {
+                                // The provider cannot substitute a different
+                                // required package or a path outside staging.
+                                let verified = downloaded.parent() == Some(staging.path())
+                                    && downloaded.file_name().and_then(|v| v.to_str())
+                                        == Some(artifact.file_name.as_str())
+                                    && verify_downloaded(&downloaded, artifact, package).is_ok();
+                                if !verified {
+                                    "incompatible"
+                                } else {
+                                    recheck()?;
+                                    match server_mods::add_local_mod(paths, world, manifest, &downloaded) {
+                                        Ok(_) => "acquired",
+                                        Err(_) => "incompatible",
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
-        }
-        added.push(server_mods::add_local_mod(paths, world, manifest, &downloaded).with_context(|| {
-            format!("downloaded provider artifact {} failed the signed world requirement", artifact.file_name)
-        })?);
+        };
+        outcomes.push(ArtifactOutcome::new(package, state));
     }
-
+    recheck()?;
     let final_readiness = server_mods::evaluate_world_mods(paths, world, manifest)?;
-    if !final_readiness.ready {
-        let details = final_readiness.issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>().join("; ");
-        bail!("server mod preparation is still incomplete after exact provider acquisition: {details}");
-    }
-    Ok(added)
+    Ok(AcquisitionReport {
+        world_id: world.to_string(),
+        ready: final_readiness.ready
+            && outcomes.iter().all(|outcome| matches!(outcome.state, "acquired" | "already_verified")),
+        artifacts: outcomes,
+        inventory_issues: final_readiness.issues.into_iter().map(|issue| issue.kind).collect(),
+    })
 }
+
+fn verify_downloaded(path: &Path, artifact: &CanonicalProviderArtifactV1, package: &CanonicalPackageV1) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file()
+        || metadata.len() > MAX_PROVIDER_ARTIFACT_BYTES
+        || artifact.file_size.is_some_and(|expected| expected != metadata.len())
+    {
+        bail!("provider artifact is not an exact bounded regular file");
+    }
+    verify_canonical_hashes(path, &artifact.hashes)?;
+    let inspected = server_mods::inspect_fabric_mod(path)?;
+    if !installed_matches(&inspected, package) {
+        bail!("provider artifact does not match its signed mod identity/version/hash");
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ManualArtifactRequired;
+
+impl std::fmt::Display for ManualArtifactRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Provider requires manual acquisition of the exact artifact")
+    }
+}
+impl std::error::Error for ManualArtifactRequired {}
 
 fn installed_matches(candidate: &InstalledServerMod, package: &CanonicalPackageV1) -> bool {
     candidate.mod_id == package.artifact_id
@@ -142,7 +274,13 @@ fn acquire_modrinth(artifact: &CanonicalProviderArtifactV1, staging: &Path) -> R
             destination_dir: staging.to_path_buf(),
             max_bytes: Some(MAX_PROVIDER_ARTIFACT_BYTES),
         })
-        .context("Modrinth could not provide the exact canonical artifact")?;
+        .map_err(|error| {
+            if matches!(error.kind, crate::package_provider::ProviderFailureKind::RetrievalRestricted) {
+                ManualArtifactRequired.into()
+            } else {
+                anyhow::Error::new(error)
+            }
+        })?;
     if downloaded.filename != artifact.file_name {
         bail!(
             "Modrinth exact artifact filename changed for {}/{}: canonical source requires {}, provider returned {}",
@@ -186,6 +324,17 @@ fn acquire_curseforge(artifact: &CanonicalProviderArtifactV1, staging: &Path) ->
         .ok_or_else(|| anyhow!("CurseForge exact file {file_id} is unavailable or removed"))?;
     validate_curseforge_file(file, project_id, file_id, artifact)?;
 
+    let (project_status, project) =
+        curseforge_json("GET", &format!("{CURSEFORGE_API_BASE}/v1/mods/{project_id}"), &api_key, None)?;
+    ensure_curseforge_status(project_status, "exact project metadata")?;
+    let project = project.get("data").context("CurseForge project metadata unavailable")?;
+    if project.get("id").and_then(Value::as_u64) != Some(project_id) {
+        bail!("CurseForge returned a different project identity");
+    }
+    if project.get("allowModDistribution").and_then(Value::as_bool) == Some(false) {
+        return Err(ManualArtifactRequired.into());
+    }
+
     let download_url = if let Some(url) =
         file.get("downloadUrl").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty())
     {
@@ -194,10 +343,7 @@ fn acquire_curseforge(artifact: &CanonicalProviderArtifactV1, staging: &Path) ->
         curseforge_download_url(project_id, file_id, &api_key)?
     };
     let Some(download_url) = download_url else {
-        bail!(
-            "CurseForge does not permit automatic download of exact file {project_id}/{file_id}; obtain {} manually and add that exact artifact through the world Mods flow",
-            artifact.file_name
-        );
+        return Err(ManualArtifactRequired.into());
     };
     validate_curseforge_artifact_url(&download_url)?;
 
@@ -205,10 +351,7 @@ fn acquire_curseforge(artifact: &CanonicalProviderArtifactV1, staging: &Path) ->
     let status = download_curseforge_artifact(&download_url, &destination)?;
     if matches!(status, 403 | 404) {
         let _ = fs::remove_file(&destination);
-        bail!(
-            "CurseForge does not permit automatic download of exact file {project_id}/{file_id}; obtain {} manually and add that exact artifact through the world Mods flow",
-            artifact.file_name
-        );
+        return Err(ManualArtifactRequired.into());
     }
     if !(200..300).contains(&status) {
         let _ = fs::remove_file(&destination);
@@ -610,30 +753,27 @@ fn temporary_path(prefix: &str) -> PathBuf {
 }
 
 struct StagingDir {
-    path: PathBuf,
+    directory: tempfile::TempDir,
 }
 
 impl StagingDir {
     fn new(paths: &DataPaths, world: WorldId) -> Result<Self> {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let path = paths.root.join("provider-staging").join(format!(
-            "runtime-{}-{}-{nonce}",
-            world.to_hex(),
-            std::process::id()
-        ));
-        fs::create_dir_all(&path)
-            .with_context(|| format!("cannot create provider staging directory {}", path.display()))?;
-        Ok(Self { path })
+        let root = paths.root.join("provider-staging");
+        swarm_core::create_private_dir_all(&root)?;
+        if !fs::symlink_metadata(&root)?.is_dir() {
+            bail!("provider staging root is not a regular directory");
+        }
+        let directory = tempfile::Builder::new().prefix(&format!("runtime-{}-", world.to_hex())).tempdir_in(root)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(Self { directory })
     }
 
     fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for StagingDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+        self.directory.path()
     }
 }
 
@@ -664,6 +804,184 @@ mod tests {
             retrieval: CanonicalRetrievalV1::ProviderDownload,
             dependencies: Vec::new(),
         }
+    }
+
+    fn fixture_package(
+        id: &str,
+        provider: CanonicalProviderV1,
+        retrieval: CanonicalRetrievalV1,
+        side: ArtifactSideV1,
+    ) -> (CanonicalPackageV1, Vec<u8>) {
+        let metadata =
+            serde_json::to_vec(&json!({"schemaVersion":1,"id":id,"version":"1.0","environment":"*"})).unwrap();
+        let bytes = crate::server_mods::tests::stored_jar("fabric.mod.json", &metadata);
+        let package = CanonicalPackageV1 {
+            artifact_id: id.into(),
+            version: "1.0".into(),
+            artifact_hash: swarm_protocol::runtime_artifact_hash(&bytes),
+            side,
+            source: CanonicalArtifactSourceV1::Provider {
+                artifact: CanonicalProviderArtifactV1 {
+                    identity: CanonicalPackageIdentityV1 { provider, project_id: id.into(), version_id: "1".into() },
+                    // Every provider deliberately returns the same filename.
+                    file_name: "same.jar".into(),
+                    file_size: Some(bytes.len() as u64),
+                    hashes: vec![CanonicalProviderHashV1 {
+                        algorithm: CanonicalHashAlgorithmV1::Sha1,
+                        digest_hex: hex::encode(Sha1::digest(&bytes)),
+                    }],
+                    retrieval,
+                    dependencies: Vec::new(),
+                },
+            },
+        };
+        (package, bytes)
+    }
+
+    fn fixture_manifest(packages: Vec<CanonicalPackageV1>) -> RuntimeCompatibilityManifestV1 {
+        CanonicalModpackV1 {
+            schema_version: swarm_protocol::CANONICAL_MODPACK_SCHEMA_VERSION,
+            minecraft_version: "26.1.2".into(),
+            loader: swarm_protocol::CanonicalLoaderV1 { id: "fabric".into(), version: "0.19.3".into() },
+            packages,
+            datapacks: Vec::new(),
+        }
+        .to_runtime_compatibility("0.5.1")
+        .unwrap()
+    }
+
+    #[test]
+    fn pristine_target_acquires_both_providers_retains_partial_progress_and_requires_manual_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(tmp.path().join("data"));
+        let world = WorldId([7; 32]);
+        let (a, a_bytes) = fixture_package(
+            "alpha",
+            CanonicalProviderV1::Modrinth,
+            CanonicalRetrievalV1::ProviderDownload,
+            ArtifactSideV1::Both,
+        );
+        let (b, b_bytes) = fixture_package(
+            "beta",
+            CanonicalProviderV1::CurseForge,
+            CanonicalRetrievalV1::ProviderDownload,
+            ArtifactSideV1::Server,
+        );
+        let (c, c_bytes) = fixture_package(
+            "manual",
+            CanonicalProviderV1::CurseForge,
+            CanonicalRetrievalV1::ManualRequired,
+            ArtifactSideV1::Server,
+        );
+        let (d, _) = fixture_package(
+            "client",
+            CanonicalProviderV1::Modrinth,
+            CanonicalRetrievalV1::ProviderDownload,
+            ArtifactSideV1::Client,
+        );
+        let manifest = fixture_manifest(vec![a, b, c, d]);
+        let mut calls = Vec::new();
+        let first = acquire_with(
+            &paths,
+            world,
+            &manifest,
+            |artifact, staging| {
+                calls.push(artifact.identity.project_id.clone());
+                if artifact.identity.provider == CanonicalProviderV1::CurseForge {
+                    bail!("simulated unavailable provider");
+                }
+                let path = staging.join(&artifact.file_name);
+                fs::write(&path, &a_bytes)?;
+                Ok(path)
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(calls, ["alpha", "beta"]);
+        assert_eq!(
+            first.artifacts.iter().map(|a| a.state).collect::<Vec<_>>(),
+            ["acquired", "unavailable", "manual_required"]
+        );
+        assert!(!first.ready);
+        let manual = tmp.path().join("manual.jar");
+        fs::write(&manual, b"wrong bytes").unwrap();
+        assert!(server_mods::add_local_mod(&paths, world, &manifest, &manual).is_err());
+        fs::write(&manual, &c_bytes).unwrap();
+        server_mods::add_local_mod(&paths, world, &manifest, &manual).unwrap();
+        calls.clear();
+        let second = acquire_with(
+            &paths,
+            world,
+            &manifest,
+            |artifact, staging| {
+                calls.push(artifact.identity.project_id.clone());
+                let path = staging.join(&artifact.file_name);
+                fs::write(&path, &b_bytes)?;
+                Ok(path)
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(calls, ["beta"]);
+        assert!(second.ready);
+        assert_eq!(
+            second.artifacts.iter().map(|a| a.state).collect::<Vec<_>>(),
+            ["already_verified", "acquired", "already_verified"]
+        );
+        assert!(fs::read_dir(paths.root.join("provider-staging")).unwrap().next().is_none());
+        assert!(!paths.root.join("runtime").exists());
+    }
+
+    #[test]
+    fn restricted_corrupt_substituted_or_stale_artifacts_never_publish() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(tmp.path().join("data"));
+        let world = WorldId([8; 32]);
+        let (a, a_bytes) = fixture_package(
+            "alpha",
+            CanonicalProviderV1::Modrinth,
+            CanonicalRetrievalV1::ProviderDownload,
+            ArtifactSideV1::Server,
+        );
+        let (b, b_bytes) = fixture_package(
+            "beta",
+            CanonicalProviderV1::CurseForge,
+            CanonicalRetrievalV1::ProviderDownload,
+            ArtifactSideV1::Server,
+        );
+        let manifest = fixture_manifest(vec![a, b]);
+        let report = acquire_with(
+            &paths,
+            world,
+            &manifest,
+            |artifact, staging| {
+                if artifact.identity.provider == CanonicalProviderV1::CurseForge {
+                    return Err(ManualArtifactRequired.into());
+                }
+                let path = staging.join(&artifact.file_name);
+                fs::write(&path, &b_bytes)?;
+                Ok(path)
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert!(!report.ready);
+        assert_eq!(report.artifacts.iter().map(|a| a.state).collect::<Vec<_>>(), ["incompatible", "manual_required"]);
+        assert!(server_mods::evaluate_world_mods(&paths, world, &manifest).unwrap().installed.is_empty());
+        let failed = acquire_with(
+            &paths,
+            world,
+            &manifest,
+            |artifact, staging| {
+                let path = staging.join(&artifact.file_name);
+                fs::write(&path, &a_bytes)?;
+                Ok(path)
+            },
+            || bail!("signed profile changed"),
+        );
+        assert!(failed.is_err());
+        assert!(server_mods::evaluate_world_mods(&paths, world, &manifest).unwrap().installed.is_empty());
+        assert!(fs::read_dir(paths.root.join("provider-staging")).unwrap().next().is_none());
     }
 
     #[test]

@@ -117,6 +117,20 @@ swarmcraft-runtime client-profile <WORLD_ID> --mods-dir /absolute/path/to/instan
 
 Launch Minecraft yourself through your chosen launcher. Use Multiplayer and the current verified reconnect instructions in SwarmCraft; the compatibility report does not grant a route or enable hosting.
 
+## Exact provider artifacts and manual fallback
+
+When creating a world, the provider picker resolves required dependencies and selects exact versions. If the provider returns a restricted installable JAR with exact identity, size and hash metadata, Create asks for the absolute path to a manually obtained authorized copy before publishing the world. The native canonicalizer checks the declared bytes; the signed profile retains the manual-only restriction even when strong provider hashes exist. Do not use unofficial redistribution sources.
+
+For an existing world, expand **Advanced world controls** and select **Acquire required server mods**. SwarmCraft checks the creator-signed compatibility, validates dependency sides, acquires permitted missing server artifacts directly from Modrinth or CurseForge, and compares their provider and canonical hashes, mod IDs and versions. CurseForge requires the machine-local `SWARMCRAFT_CURSEFORGE_API_KEY` environment variable; an unavailable key or provider is reported as an unavailable acquisition, never a substitute download. Explicit distribution refusal and local/imported files require manual supply.
+
+The report identifies exact provider project/file IDs, filename and expected SwarmCraft artifact hash. Use **Supply required JAR** for an authorized exact local file. Successful partial acquisitions remain available on retry. No existing different artifact is overwritten. This operation checks server JARs only; it neither accepts EULA nor installs or starts the runtime, grants hosting consent, changes launcher accounts, or redistributes mod files through peers. Client setup continues to use the separate launcher workflow above.
+
+```sh
+swarmcraft-runtime acquire-mods <WORLD_ID>
+```
+
+The JSON response can report incomplete inventory even with a successful command exit. Check its `ready` field and per-artifact states; it is not a game-ready or live hosting authorization.
+
 ## Host Readiness and migration safety
 
 The player-facing shutdown question renders the backend `HostReadinessReport`; JavaScript does not recompute whether another device can safely take over.

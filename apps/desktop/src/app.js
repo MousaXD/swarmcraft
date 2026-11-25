@@ -2,6 +2,7 @@ import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normali
 import { createImportRequest, parseImportResult } from './import-flow.js';
 import { installImportReview } from './import-review.js';
 import { installClientPreparation } from './client-preparation.js';
+import { describeModAcquisition } from './mod-acquisition.js';
 import { normalizeRecoveryReview, recoveryCopyReceipt, recoveryExportReceipt } from './recovery-copy.js';
 import { validateInviteToken, inspectInviteReceipt, revocationRequest, revokeInviteReceipt, pendingMembershipMessage } from './invite-lifecycle.js';
 import { clientContinuityFromMigration, ensureClientContinuityPanel } from './client-continuity.js';
@@ -25,6 +26,7 @@ let latestMigrationState = null;
 let localCheckpointVerification = null;
 let latestHostReadiness = null;
 let modsRequestGeneration = 0;
+let modAcquisitionGeneration = 0;
 let connectivityRefreshInFlight = false;
 let connectivityGeneration = 0;
 let networkStoppedBySvelte = false;
@@ -325,6 +327,8 @@ function clearSelection() {
   showInline('membershipNotice', '');
   if ($('refreshMembership')) $('refreshMembership').hidden = true;
   selectedWorldId = '';
+  modAcquisitionGeneration += 1;
+  showInline('modAcquisitionReport', '');
   clientPreparation.select('');
   migrationRequestGeneration += 1;
   hostReadinessRequestGeneration += 1;
@@ -760,6 +764,26 @@ async function refreshWorldMods(world) {
   renderWorldMods(runtimeStatus, modsStatus);
 }
 
+async function acquireRequiredMods() {
+  const world = worldId();
+  const generation = ++modAcquisitionGeneration;
+  showInline('modAcquisitionReport', 'Acquiring permitted exact server artifacts from their authorized providers…');
+  try {
+    const report = await run('Acquiring required server mods…', () => backend.mods.acquire(world), { logResult: false });
+    if (selectedWorldId !== world || modAcquisitionGeneration !== generation) return;
+    showInline('modAcquisitionReport', describeModAcquisition(report, world), report.ready ? 'neutral' : 'warning');
+  } catch {
+    if (selectedWorldId === world && modAcquisitionGeneration === generation) {
+      showInline('modAcquisitionReport', 'Acquisition could not be verified. Refresh the world, then retry or supply exact required JARs.', 'warning');
+    }
+  } finally {
+    if (selectedWorldId === world && modAcquisitionGeneration === generation) {
+      await refreshWorldMods(selectedWorld());
+      await refreshHostReadiness(selectedWorld());
+    }
+  }
+}
+
 async function supplyRequiredMod() {
   const jarPath = $('modJarPath').value.trim();
   if (!jarPath) {
@@ -804,6 +828,10 @@ function selectWorld(world, { focusDetail = false } = {}) {
   gameRouteRequestGeneration += 1;
   gameRouteState = UNVERIFIED_GAME_ROUTE;
   if (selectedWorldId !== world.id) localCheckpointVerification = null;
+  if (selectedWorldId !== world.id) {
+    modAcquisitionGeneration += 1;
+    showInline('modAcquisitionReport', '');
+  }
   selectedWorldId = world.id;
   clientPreparation.select(world.id);
   queueGameGatewaySelection(world);
@@ -1956,6 +1984,7 @@ bindAction('seedOn', () => setSeeding(true));
 bindAction('seedOff', () => setSeeding(false));
 bindAction('diagnosticSeedOn', () => setSeeding(true));
 bindAction('diagnosticSeedOff', () => setSeeding(false));
+bindAction('acquireRequiredMods', acquireRequiredMods);
 bindAction('supplyRequiredMod', supplyRequiredMod);
 bindAction('refreshMods', () => refreshWorldMods(selectedWorld()));
 bindAction('openModsFolder', openModsFolder);

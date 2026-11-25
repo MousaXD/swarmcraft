@@ -1072,6 +1072,9 @@ async fn download_artifact(
     }
     let expected_size = file.get("fileLength").and_then(Value::as_u64).unwrap_or_default();
     validate_declared_artifact_size(expected_size)?;
+    if project.get("allowModDistribution").and_then(Value::as_bool) == Some(false) {
+        return manual_artifact_required(file, project);
+    }
     let Some(url) = client.download_url(file).await? else {
         return manual_artifact_required(file, project);
     };

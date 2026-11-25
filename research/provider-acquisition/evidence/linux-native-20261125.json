@@ -1,0 +1,25 @@
+{
+  "scope": "extracted-linux-package-native-local-artifact-fallback",
+  "complete": true,
+  "stages": {
+    "manual_required": true,
+    "manual_supply_and_retry": true,
+    "checkpoint_and_player_only_preserved": true,
+    "owned_process_cleanup": true
+  },
+  "package_sha256": "2581e2f10f89b52e0b52fc3e0acf03ce851100538421e1eed5b0b962dd3a2f15",
+  "files": {
+    "desktop": "d62f9cc1aa4d3bdc251c88c09a7e78e14523fb55679fa9430396ba45a6de68ac",
+    "swarmcraft": "c93f559dee90d90ec7b09ad9ac4ae0414fee77a4dfae0a4176f1f6960acd75ce",
+    "swarmcraft-host": "bee23f685cc2b636f80f045895970bf4a470721e12392bdc8652bbf439761e0b",
+    "swarmcraft-runtime": "cbcbf60ab0c8a8200a2a3d3b758e62a7b7e6312023e2998e8e64d5f5506b4bdb",
+    "swarmcraft-import": "5f87da62043a320f2e53406a432025f3446586fc6d8c0f866fe2bf051d496d5c"
+  },
+  "date": "2026-11-25",
+  "build_source": "Provider acquisition working tree based on cb0f4a0; packaged before documentation/evidence checkpoint.",
+  "limitations": [
+    "Synthetic local JAR fixture; provider network requests were not used in native test.",
+    "Provider acquisition orchestration and HTTP contracts exercised with local fixtures, not live production downloads.",
+    "No real Minecraft gameplay or native Windows/macOS acceptance."
+  ]
+}

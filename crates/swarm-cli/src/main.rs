@@ -1230,9 +1230,8 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
         }
         WorldCommand::ModsAdd { world, jar } => {
             let world = parse_world(&world)?;
-            let config =
-                storage.load_world_config(world).context("canonical runtime profile is not yet synchronized")?;
-            let installed = server_mods::add_local_mod(paths, world, &config.compatibility, &jar)?;
+            let compatibility = swarm_cli::provider_runtime::verified_compatibility(storage, world)?;
+            let installed = server_mods::add_local_mod(paths, world, &compatibility, &jar)?;
             println!(
                 "Installed {} {} with artifact hash {}",
                 installed.mod_id, installed.version, installed.artifact_hash

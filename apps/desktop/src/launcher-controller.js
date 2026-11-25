@@ -69,7 +69,7 @@ function dependencyTargets(dependencies, selectedByProject) {
   return result;
 }
 
-export function canonicalPackageFromDownloaded({ provider, version, file, downloaded, inspection, selectedByProject }) {
+export function canonicalPackageFromDownloaded({ provider, version, file, downloaded, inspection, selectedByProject, manual = false }) {
   const projectId = clean(version.project_id ?? version.projectId ?? file.project_id ?? file.projectId);
   const versionId = clean(
     version.version_id ?? version.versionId ?? file.version_id ?? file.versionId ?? file.file_id ?? file.fileId,
@@ -96,9 +96,40 @@ export function canonicalPackageFromDownloaded({ provider, version, file, downlo
     fileName: clean(downloaded.filename ?? file.filename ?? file.file_name ?? file.fileName),
     fileSize: Number(downloaded.size ?? downloaded.bytes ?? file.file_size ?? file.fileSize) || undefined,
     providerHashes: hashes,
-    retrieval: hasStrongProviderHash ? 'provider_download' : 'manual_required',
+    retrieval: !manual && hasStrongProviderHash ? 'provider_download' : 'manual_required',
     dependencies: dependencyTargets(version.dependencies ?? file.dependencies, selectedByProject),
   };
+}
+
+// A restricted provider file can only be supplied by the user against
+// its exact metadata. Never turn a manual receipt into a download locator.
+export function manualArtifactSelection(provider, version, file, localPath) {
+  const projectId = clean(version.project_id ?? version.projectId);
+  const versionId = clean(version.version_id ?? version.versionId ?? version.file_id ?? version.fileId);
+  const fileProject = clean(file.project_id ?? file.projectId ?? file.locator?.project_id ?? projectId);
+  const fileVersion = clean(file.version_id ?? file.versionId ?? file.file_id ?? file.fileId ?? file.locator?.version_id ?? versionId);
+  const filename = clean(file.filename ?? file.file_name ?? file.fileName);
+  const size = Number(file.size ?? file.file_size ?? file.fileSize);
+  const hashes = providerHashes(file.hashes);
+  const path = clean(localPath);
+  if (!projectId || !versionId || fileProject !== projectId || fileVersion !== versionId
+      || !/^[^/\\:\x00-\x1f]+\.jar$/i.test(filename)
+      || !Number.isSafeInteger(size) || size <= 0
+      || !hashes.length || !hashes.every(h => {
+        const length = {sha512:128, sha256:64, sha1:40, md5:32}[h.algorithm.toLowerCase()];
+        return h.digest.length === length && /^[a-f0-9]+$/i.test(h.digest);
+      })
+      || (provider === 'modrinth' && file.file_type && file.file_type !== 'unknown')) {
+    throw new Error('The provider did not supply an exact installable JAR identity and verification metadata. Manual selection is unavailable.');
+  }
+  // Include all immutable metadata in the input key. A changed provider
+  // response cannot accidentally reuse a previously selected local path.
+  const key = JSON.stringify([provider, projectId, versionId, filename, size,
+    hashes.map(h => h.algorithm.toLowerCase() + ':' + h.digest.toLowerCase()).sort()]);
+  if (path && !/^(?:\/|[a-z]:[\\/]|\\\\)/i.test(path)) {
+    throw new Error('Enter an absolute path to the exact manually obtained JAR.');
+  }
+  return { key, projectId, versionId, filename, size, hashes, path };
 }
 
 function setNotice(target, message, kind = 'info') {
@@ -166,7 +197,8 @@ function installModsUi() {
     <p id="modSearchStatus" class="field-help" role="status" aria-live="polite"></p>
     <div id="modSearchResults" class="details-grid launcher-results"></div>
     <div class="section-heading launcher-subheading"><div><h3>Selected mods</h3></div></div>
-    <div id="selectedMods" class="details-grid launcher-results"><p class="field-help">No third-party mods selected.</p></div>`;
+    <div id="selectedMods" class="details-grid launcher-results"><p class="field-help">No third-party mods selected.</p></div>
+    <div id="manualProviderArtifacts" class="details-grid launcher-results" aria-live="polite"></div>`;
   actions.before(section);
 }
 
@@ -395,6 +427,34 @@ export function install() {
   });
 
   const roots = [];
+  const manualInputs = new Map();
+  function requestManualArtifact(provider, version, file) {
+    const requirement = manualArtifactSelection(provider, version, file, '');
+    let input = manualInputs.get(requirement.key);
+    if (!input) {
+      const field = document.createElement('div');
+      field.className = 'field field-wide';
+      const label = document.createElement('label');
+      input = document.createElement('input');
+      input.id = 'manualProviderArtifact' + manualInputs.size;
+      input.autocomplete = 'off';
+      input.placeholder = '/absolute/path/to/' + requirement.filename;
+      label.htmlFor = input.id;
+      label.textContent = 'Supply exact ' + provider + ' file ' + requirement.projectId + '/' + requirement.versionId + ' · ' + requirement.filename;
+      const hint = document.createElement('p');
+      hint.className = 'field-help';
+      hint.textContent = 'Obtain this file yourself from its authorized provider. SwarmCraft will verify the selected bytes before creating the signed world. No automatic redistribution.';
+      field.append(label, input, hint);
+      byId('manualProviderArtifacts').append(field);
+      manualInputs.set(requirement.key, input);
+    }
+    if (!clean(input.value)) {
+      input.focus();
+      throw new Error('Manual artifact required: ' + requirement.filename + ' (' + provider + ' ' + requirement.projectId + '/' + requirement.versionId + '). Supply its local path, then retry Create.');
+    }
+    const selected = manualArtifactSelection(provider, version, file, input.value);
+    return { path: selected.path, destination: selected.path, filename: selected.filename, size: selected.size, hashes: selected.hashes };
+  }
   const renderSelected = () => {
     const target = byId('selectedMods');
     if (!target) return;
@@ -498,19 +558,28 @@ export function install() {
     const selectedByProject = new Map(versions.map((version) => [clean(version.project_id), clean(version.version_id)]));
     const packages = [];
     for (const version of versions) {
-      const file =
+      let file =
         (version.files || []).find((candidate) => candidate.primary && candidate.retrieval?.state === 'provider_download') ||
         (version.files || []).find((candidate) => candidate.retrieval?.state === 'provider_download');
+      let downloaded;
+      let manual = false;
       if (!file) {
-        throw new Error(`${version.display_name || version.project_id} cannot be downloaded automatically from Modrinth.`);
+        const candidates = (version.files || []).filter(candidate =>
+          candidate.retrieval?.state === 'manual_required' && /\.jar$/i.test(candidate.filename)
+          && (!candidate.file_type || candidate.file_type === 'unknown'));
+        file = candidates.find(candidate => candidate.primary) || (candidates.length === 1 ? candidates[0] : null);
+        if (!file) throw new Error(`${version.display_name || version.project_id} has no unambiguous installable Modrinth JAR.`);
+        downloaded = requestManualArtifact('modrinth', version, file);
+        manual = true;
+      } else {
+        downloaded = await call('modrinth_download', {
+          locator: file.locator,
+          stagingSession,
+          maxBytes: null,
+        });
       }
-      const downloaded = await call('modrinth_download', {
-        locator: file.locator,
-        stagingSession,
-        maxBytes: null,
-      });
       const inspection = await inspectPackage(downloaded.path);
-      packages.push(canonicalPackageFromDownloaded({ provider: 'modrinth', version, file, downloaded, inspection, selectedByProject }));
+      packages.push(canonicalPackageFromDownloaded({ provider: 'modrinth', version, file, downloaded, inspection, selectedByProject, manual }));
     }
     return packages;
   }
@@ -533,10 +602,14 @@ export function install() {
         fileId: Number(version.file_id),
         stagingSession,
       });
-      const downloaded = requireOkEnvelope(downloadedEnvelope, 'CurseForge');
+      const manual = downloadedEnvelope?.status === 'manual_artifact_required';
+      const file = manual ? downloadedEnvelope.data : version;
+      const downloaded = manual
+        ? requestManualArtifact('curseforge', version, file)
+        : requireOkEnvelope(downloadedEnvelope, 'CurseForge');
       const inspection = await inspectPackage(downloaded.destination);
       packages.push(
-        canonicalPackageFromDownloaded({ provider: 'curseforge', version, file: version, downloaded, inspection, selectedByProject }),
+        canonicalPackageFromDownloaded({ provider: 'curseforge', version, file, downloaded, inspection, selectedByProject, manual }),
       );
     }
     return packages;

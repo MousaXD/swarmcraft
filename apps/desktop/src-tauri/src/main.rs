@@ -395,6 +395,14 @@ async fn world_mods_status(app: AppHandle, world: String) -> Result<String, Stri
     run_cli(&app, vec!["world".into(), "mods-status".into(), world, "--json".into()]).await
 }
 
+#[tauri::command]
+async fn world_mods_acquire(app: AppHandle, world: String) -> Result<String, String> {
+    let world = hosting_contribution_commands::validate_world_id(&world)?;
+    run_runtime_cli(&app, vec!["acquire-mods".into(), world.to_string()])
+        .await
+        .map_err(|_| "Cannot acquire mods for this signed world profile. Verify the world and retry.".into())
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn world_mods_add(app: AppHandle, world: String, jar_path: String) -> Result<String, String> {
     let world = require_value(world, "World ID")?;
@@ -811,6 +819,7 @@ fn main() {
             hosting_contribution_get,
             hosting_contribution_set,
             world_mods_status,
+            world_mods_acquire,
             world_mods_add,
             world_mods_remove,
             open_world_mods_folder,
