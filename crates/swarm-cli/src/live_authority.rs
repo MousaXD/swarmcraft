@@ -438,6 +438,7 @@ impl SignedLiveAuthoritySource {
             bail!("host Fabric attestation is not bound to current signed quorum");
         }
         if proof.epoch.authority_peer_id == self.local_application_peer {
+            let _profile = hosting_budget::hosting_profile_guard(&self.paths)?;
             // A local authority must independently re-read its own consent.
             let consent =
                 hosting_budget::load_consent(&self.paths, world)?.context("local hosting consent is absent")?;
@@ -474,6 +475,7 @@ impl SignedLiveAuthoritySource {
             bail!("host authentication was withdrawn during proof verification");
         }
         if proof.epoch.authority_peer_id == self.local_application_peer {
+            let _profile = hosting_budget::hosting_profile_guard(&self.paths)?;
             let consent =
                 hosting_budget::load_consent(&self.paths, world)?.context("local hosting consent is absent")?;
             if !consent.enabled

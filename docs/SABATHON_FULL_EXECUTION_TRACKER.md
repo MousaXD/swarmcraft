@@ -95,12 +95,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #9 — P1 · Proposal (recommended first)
 - Work: Provide a supported headless zero-Java third-replica profile (`swarmcraft daemon`) for small private worlds
 - Acceptance: A small third device (Raspberry Pi, NAS, or low-cost VPS) runs and restarts without Java, acknowledges current saves, and votes under the existing quorum rules — solving both crash failover and async offline handoff with zero new consensus machinery
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: crates/swarm-cli/src/{main,hosting_budget,daemon,live_authority}.rs; docs/HEADLESS_REPLICA.md; deploy/systemd/swarmcraft-replica.service
+- Evidence: 138 CLI library tests, 4 public CLI hosting tests, and real three-daemon recovery/wake with a replica-only voter passed. The local process test checks exact signed recovery votes, restart, no runtime, and no permit. Dedicated profile and deployment example implemented.
+- Remaining / next action: Field-run a low-memory VPS/Pi/NAS with independent transport, verify snapshot/ack across restart, measure storage/RSS, and validate real Minecraft offline handoff. Systemd example not installed on a live device.
+- External dependency: Dedicated third device/network and real gameplay for field acceptance.
+- Commit: See 25 November headless replica checkpoint.
 
 ### #10 — P1 · Partial
 - Work: Make invite expiry, reuse, membership approval, pending state, and revocation legible. Review a recipient-bound or one-use invite option
@@ -694,7 +694,7 @@ Implementation completion: count only items whose full implementation criteria a
 
 ## Next checkpoint
 
-Continue #4: planned and crash-recovered authority re-entry, exact certified voting fences, and durable crash-retirement replay implemented. Targeted successor proof offers and certified retargeting after membership changes are implemented. Pending join/leave and solo conflicts remain conservatively blocked; independent private WAN reachability remains unverified. Continue #9 and the remaining P0 acceptance. Keep publication and runtime fail-closed. #9 precedes #8; #23 precedes activation of V2-dependent permissions; #56 precedes distributed-runtime adoption; #64–68 require signed governance and independent acceptance.
+Continue #4: planned and crash-recovered authority re-entry, exact certified voting fences, and durable crash-retirement replay implemented. Targeted successor proof offers and certified retargeting after membership changes are implemented. Pending join/leave and solo conflicts remain conservatively blocked; independent private WAN reachability remains unverified. Item #9 explicit headless profile is locally verified; field certification remains open. Continue #8 design prerequisite, remaining P0 acceptance and other actionable roadmap items. Keep publication and runtime fail-closed. #9 precedes #8; #23 precedes activation of V2-dependent permissions; #56 precedes distributed-runtime adoption; #64–68 require signed governance and independent acceptance.
 
 Initial full-item implementation/acceptance totals: not yet established by item-specific audit; zero items asserted fully accepted by this ledger.
 
@@ -729,3 +729,9 @@ Initial full-item implementation/acceptance totals: not yet established by item-
 - #4: the accepted authority offers a complete, bounded signed history only to an authenticated current authorized member. A receiver must already possess an exact canonical anchor or committed admission; the offer itself grants neither membership nor live authority. Full history, joint admission certificates, transfer/recovery proof, exact sender, and local membership are independently verified. Only negotiated historical manifests/chunks may bypass the obsolete local roster; all ordinary RPCs remain fenced. The receipt reveals no local world existence or verification outcome. Retargeting requires certified membership advancement, not merely another checkpoint. Existing pull compatibility remains.
 - Evidence: strict all-target/all-feature Clippy, 136 CLI/114 network/67 storage library tests (1 optional soak ignored), both real multi-daemon invite/replay process tests (154.93s), formatting and diff checks. The offline first-contact player resumed a partial download from a newly admitted successor absent from its original membership, and published only the final epoch. The crash-retired unit regression separately verifies a subsequently admitted successor, missing joint certificate, wrong sender, and checkpoint-only target denial. The process fixtures use signed synthetic transitions, not real Minecraft gameplay.
 - Remaining: private reachability across independent networks, stale-replica unknown-successor transport field validation, pending membership/solo conflict resolution, and the installed gameplay acceptance. No full backlog item newly claimed.
+
+### 25 November: headless third voting replica
+
+- #9: implemented explicit `swarmcraft daemon --replica-only`. The profile holds exclusive local memory/profile locks and refuses active or ambiguous prior runtime ownership. No migration supervisor is launched, stale permits/readiness are invalidated, and host candidacy/transfer activation/local permit renewal and positive opt-in are denied while the profile is active. Existing consent revisions are preserved; explicit revocation remains available. Ordinary signed replication and voting are unchanged.
+- Evidence: 138 CLI library tests (including positive prior consent, shared/exclusive profile lock and ambiguous runtime negatives), 4 real public CLI consent tests (including two replica-only process starts, stale permit removal and opt-in denial without a JVM), strict CLI all-target/all-feature Clippy, and the real three-daemon recovery/wake process test (31.52s), including signed recovery votes by the replica-only peer, no local runtime/permit, and restart. The host side uses a mock JVM, not field Minecraft.
+- Added dedicated deployment guide and example systemd service; these were not installed on the user's machine. Dedicated low-memory/independent-network operation and real offline handoff remain field acceptance. Next: #8 reviewed exclusive-turn design (no weakening default quorum), and additional locally testable release/UX/replication work.

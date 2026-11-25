@@ -46,6 +46,9 @@ enum Command {
         /// Every dial still requires connection-bound PeerHello, canonical membership and live quorum.
         #[arg(long = "peer")]
         peer_addrs: Vec<String>,
+        /// Run only authenticated replication and voting; never supervise or launch Minecraft.
+        #[arg(long)]
+        replica_only: bool,
     },
     /// Manage replicated worlds.
     World {
@@ -254,14 +257,31 @@ fn main() -> Result<()> {
             println!("Peer ID: {}", identity.peer_id());
             println!("Public key: {}", hex_string(&identity.public_key()));
         }
-        Command::Daemon { listen, peer_addrs } => {
+        Command::Daemon { listen, peer_addrs, replica_only } => {
+            // The profile lives for the entire daemon, across all worlds in
+            // this data root. It does not synthesize consent or change roles.
+            let _replica_profile = if replica_only {
+                let profile = hosting_budget::begin_replica_only(&paths)?;
+                for metadata in storage.list_worlds()? {
+                    swarm_cli::authority_permit::clear_permit(&paths, metadata.world_id)?;
+                    host_readiness::invalidate_runtime_verification(&paths, metadata.world_id)?;
+                    host_readiness::invalidate_cached_readiness(&paths, metadata.world_id)?;
+                }
+                info!("replica-only profile: authenticated storage/voting enabled; Minecraft hosting disabled");
+                Some(profile)
+            } else {
+                None
+            };
             invite::configure_connectivity_snapshot(&paths);
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
                 let live_runtime_registry = LiveFabricRuntimeRegistry::default();
-                let supervisor = tokio::spawn(migration::supervise(paths.clone(), live_runtime_registry.clone()));
+                let supervisor = (!replica_only)
+                    .then(|| tokio::spawn(migration::supervise(paths.clone(), live_runtime_registry.clone())));
                 let result = daemon::run(&paths, &storage, &listen, &peer_addrs, live_runtime_registry).await;
-                supervisor.abort();
+                if let Some(supervisor) = supervisor {
+                    supervisor.abort();
+                }
                 result
             })?;
         }

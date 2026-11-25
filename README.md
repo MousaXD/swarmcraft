@@ -72,6 +72,11 @@ Important remaining work includes:
 
 For exactly two voting members, crash failover intentionally remains fail-closed: if Alice disappears, Bob alone cannot form majority quorum. Use an explicit authority transfer while both peers are present, or a three-voter topology for automatic crash recovery. Multi-member wake likewise remains fail-closed rather than using first-click-wins semantics.
 
+For a third storage voter without Minecraft or Java, use
+`swarmcraft daemon --replica-only`. See the
+[headless replica deployment guide](docs/HEADLESS_REPLICA.md) for admission,
+service configuration, and the remaining field-verification boundaries.
+
 Distributed region simulation is research for later and is not part of the current preview.
 
 For the detailed implementation matrix, see [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md).

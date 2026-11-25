@@ -1258,6 +1258,7 @@ fn local_host_generation_eligible(
     generation: HostRouteGeneration,
 ) -> bool {
     let HostRouteGeneration { world, epoch_number, fencing_token, consent_revision } = generation;
+    let Ok(_profile) = hosting_budget::hosting_profile_guard(paths) else { return false };
     let Ok(epoch) = storage.load_epoch_record(world) else { return false };
     if swarm_cli::live_authority::verify_playable_epoch(storage, &epoch).is_err()
         || epoch.authority_peer_id != identity.peer_id()
@@ -2246,6 +2247,14 @@ fn maintain_authority_leases(
             && epoch.authority_peer_id == identity.peer_id()
             && epoch.authority_public_key == identity.public_key()
         {
+            // A replica-only daemon never renews a local hosting permit or
+            // promotes authority artifacts, even for a stale self-owned epoch.
+            // Retain shared profile ownership across all writes in this tick.
+            let Ok(_profile) = hosting_budget::hosting_profile_guard(paths) else {
+                clear_permit(paths, world)?;
+                runtime.permit_heartbeats.remove(&world);
+                continue;
+            };
             if epoch.mode == EpochMode::Recovery || (epoch.mode == EpochMode::Quorum && epoch.epoch_number > 0) {
                 if let Err(error) = migration::ensure_authority_artifacts(storage, identity, &epoch) {
                     // The supervisor may be finishing the exact same

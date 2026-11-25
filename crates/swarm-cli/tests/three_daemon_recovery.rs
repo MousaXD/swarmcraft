@@ -102,6 +102,10 @@ fn transport_address(peer: &PeerFixture) -> String {
 }
 
 fn spawn_daemon(peer: &PeerFixture, application_peers: &[String]) -> ManagedChild {
+    spawn_daemon_profile(peer, application_peers, false)
+}
+
+fn spawn_daemon_profile(peer: &PeerFixture, application_peers: &[String], replica_only: bool) -> ManagedChild {
     let mut command = Command::new(env!("CARGO_BIN_EXE_swarmcraft"));
     command
         .arg("--data-dir")
@@ -112,6 +116,9 @@ fn spawn_daemon(peer: &PeerFixture, application_peers: &[String]) -> ManagedChil
         .env("RUST_LOG", "warn")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    if replica_only {
+        command.arg("--replica-only");
+    }
     // These are world voters, NOT bootstrap infrastructure. Bootstrap peers
     // intentionally do not receive authenticated application PeerHello.
     for address in application_peers {
@@ -409,7 +416,7 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
 
     let mut daemon_a = spawn_daemon(&a, &[]);
     thread::sleep(Duration::from_secs(1));
-    let _daemon_b = spawn_daemon(&b, std::slice::from_ref(&a_addr));
+    let _daemon_b = spawn_daemon_profile(&b, std::slice::from_ref(&a_addr), true);
     thread::sleep(Duration::from_secs(1));
     let _daemon_c = spawn_daemon(&c, &[a_addr.clone(), b_addr.clone()]);
 
@@ -448,6 +455,15 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
             .is_some_and(|(epoch, fencing, heartbeat)| epoch == 2 && fencing == 2 && heartbeat >= 2)
     });
     assert!(permit_generation(loser, world).is_none());
+    assert!(swarm_cli::hosting_budget::hosting_profile_guard(&b.paths).is_err());
+    assert!(!b.paths.root.join("runtime").join(world.to_hex()).exists());
+    assert!(b
+        .storage
+        .load_recovery_certificate(world)
+        .unwrap()
+        .votes
+        .iter()
+        .any(|vote| vote.voter_peer_id == b.identity.peer_id()));
     wait_until("recovered authority runtime ready", Duration::from_secs(30), || {
         runtime_ready(winner, world, winner_endpoint, MigrationTrigger::AutomaticRecovery)
     });
@@ -511,7 +527,7 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
     }
     request_world_wake(&c.paths, &c.storage, world).unwrap();
 
-    let _wake_voter = spawn_daemon(&b, &[]);
+    let _wake_voter = spawn_daemon_profile(&b, &[], true);
     thread::sleep(Duration::from_secs(1));
     let _wake_authority = spawn_daemon(&c, std::slice::from_ref(&b_addr));
 
@@ -531,6 +547,15 @@ fn hard_kill_recovers_one_authority_and_stale_peer_resyncs() {
             .is_some_and(|(epoch, fencing, heartbeat)| epoch == 3 && fencing == 3 && heartbeat >= 2)
     });
     assert!(permit_generation(&b, world).is_none());
+    assert!(swarm_cli::hosting_budget::hosting_profile_guard(&b.paths).is_err());
+    assert!(!b.paths.root.join("runtime").join(world.to_hex()).exists());
+    assert!(b
+        .storage
+        .load_recovery_certificate(world)
+        .unwrap()
+        .votes
+        .iter()
+        .any(|vote| vote.voter_peer_id == b.identity.peer_id()));
     wait_until("woken authority runtime ready", Duration::from_secs(30), || {
         runtime_ready(&c, world, "carol.test:25565", MigrationTrigger::WorldWake)
     });

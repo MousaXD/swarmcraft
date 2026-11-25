@@ -71,6 +71,41 @@ pub struct HostingAdmission {
     consent: HostingConsentV1,
 }
 
+/// Explicit headless profile for a dedicated data root. Holding the same
+/// memory reservation as a JVM prevents another supported launch path from
+/// racing the replica daemon. The separate profile lock denies candidacy and
+/// transfer activation even when an old positive consent record remains.
+pub struct ReplicaOnlyProfile {
+    _profile_lock: File,
+    _exclusive_memory_lock: File,
+}
+
+pub fn begin_replica_only(paths: &DataPaths) -> Result<ReplicaOnlyProfile> {
+    // Serialize with consent changes and authority transitions. Neither the
+    // profile nor its restart modifies an existing local consent revision.
+    let consent_lock = open_lock(&control_path(paths).join("hosting-consent-write.lock"))?;
+    consent_lock.lock_exclusive().context("cannot serialize replica-only profile with hosting operations")?;
+    let memory_lock = open_lock(&control_path(paths).join("hosting-active-memory.lock"))?;
+    memory_lock
+        .try_lock_exclusive()
+        .context("cannot start replica-only while Minecraft hosting admission is active")?;
+    runtime_process_guard::refuse_unaccounted_runtimes(paths)?;
+    let profile_lock = open_lock(&control_path(paths).join("hosting-replica-only.lock"))?;
+    profile_lock
+        .try_lock_exclusive()
+        .context("cannot exclusively establish replica-only profile; another hosting operation is active")?;
+    Ok(ReplicaOnlyProfile { _profile_lock: profile_lock, _exclusive_memory_lock: memory_lock })
+}
+
+/// A shared lock is retained during short authority-changing operations.
+/// I/O errors and a live exclusive replica-only profile both fail closed.
+pub fn hosting_profile_guard(paths: &DataPaths) -> Result<File> {
+    let lock = open_lock(&control_path(paths).join("hosting-replica-only.lock"))?;
+    FileExt::try_lock_shared(&lock)
+        .context("replica-only profile active or hosting profile could not be verified; hosting denied")?;
+    Ok(lock)
+}
+
 impl HostingAdmission {
     pub fn heap_mib(&self) -> u64 {
         self.consent.heap_mib
@@ -140,6 +175,7 @@ pub fn load_consent(paths: &DataPaths, world: WorldId) -> Result<Option<HostingC
 /// Choosing zero explicitly revokes permission and invalidates in-flight admissions.
 pub fn set_contribution(paths: &DataPaths, world: WorldId, heap_mib: u64) -> Result<HostingConsentV1> {
     if heap_mib != 0 {
+        let _profile = hosting_profile_guard(paths)?;
         // The user's durable preference may be configured while other apps
         // are consuming RAM. Check the hard physical limit now; every actual
         // launch still checks CURRENT available headroom under admission lock.
@@ -155,6 +191,7 @@ pub fn set_contribution(paths: &DataPaths, world: WorldId, heap_mib: u64) -> Res
 fn persist_contribution(paths: &DataPaths, world: WorldId, heap_mib: u64) -> Result<HostingConsentV1> {
     let lock = open_lock(&control_path(paths).join("hosting-consent-write.lock"))?;
     lock.lock_exclusive().context("cannot serialize hosting consent updates")?;
+    let _profile = if heap_mib != 0 { Some(hosting_profile_guard(paths)?) } else { None };
     let previous = load_consent(paths, world)?;
     let now_nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let next_revision = previous
@@ -247,6 +284,7 @@ pub fn check_budget(heap_mib: u64, memory: AvailableMemory) -> Result<()> {
 }
 
 pub fn require_contribution(paths: &DataPaths, world: WorldId) -> Result<HostingConsentV1> {
+    let _profile = hosting_profile_guard(paths)?;
     let record =
         load_consent(paths, world)?.context("hosting consent is absent; this device is player-only (0 MiB)")?;
     if !record.enabled {
@@ -279,6 +317,7 @@ pub fn revalidate_admission(paths: &DataPaths, world: WorldId, admission: &Hosti
 }
 
 fn revalidate_contribution(paths: &DataPaths, world: WorldId, expected: &HostingConsentV1) -> Result<()> {
+    let _profile = hosting_profile_guard(paths)?;
     let current = load_consent(paths, world)?.context("hosting consent disappeared before the operation")?;
     if !current.enabled || current != *expected {
         bail!("hosting consent or heap changed; hosting operation denied");
@@ -357,7 +396,9 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
         Ok(mem) => (Some(mem.physical_mib), Some(mem.available_mib)),
         Err(_) => (None, None),
     };
-    let (may_host_now, reason) = if heap == 0 {
+    let (may_host_now, reason) = if let Err(error) = hosting_profile_guard(paths) {
+        (false, error.to_string())
+    } else if heap == 0 {
         (false, "Player-only; no Minecraft hosting consent".to_string())
     } else {
         match memory {
@@ -909,6 +950,59 @@ mod tests {
         });
         assert!(result.unwrap_err().to_string().contains("hosting consent or heap changed"));
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn replica_only_profile_denies_hosting_without_changing_old_consent() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let world = WorldId([71; 32]);
+        let consent = persist_contribution(&paths, world, 512).unwrap();
+        let profile = begin_replica_only(&paths).unwrap();
+        assert_eq!(load_consent(&paths, world).unwrap(), Some(consent.clone()));
+        assert!(hosting_profile_guard(&paths).is_err());
+        assert!(require_contribution(&paths, world).unwrap_err().to_string().contains("replica-only"));
+        assert!(admit(&paths, world).is_err());
+        assert!(persist_contribution(&paths, world, 1024).is_err());
+        let ran = std::cell::Cell::new(false);
+        assert!(with_consent_guarded_operation(&paths, world, &consent, || {
+            ran.set(true);
+            Ok(())
+        })
+        .is_err());
+        assert!(!ran.get());
+        let status = contribution_readiness(&paths, world).unwrap();
+        assert!(!status.may_host_now);
+        assert!(status.reason.contains("replica-only"));
+        assert!(begin_replica_only(&paths).is_err());
+        assert_eq!(load_consent(&paths, world).unwrap(), Some(consent));
+        let revoked = set_contribution(&paths, world, 0).unwrap();
+        assert!(!revoked.enabled);
+        drop(profile);
+        assert!(hosting_profile_guard(&paths).is_ok());
+        assert_eq!(load_consent(&paths, world).unwrap(), Some(revoked));
+        assert!(begin_replica_only(&paths).is_ok());
+    }
+
+    #[test]
+    fn replica_only_profile_rejects_active_or_ambiguous_runtime_ownership() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let memory_lock = open_lock(&control_path(&paths).join("hosting-active-memory.lock")).unwrap();
+        memory_lock.try_lock_exclusive().unwrap();
+        assert!(begin_replica_only(&paths).is_err());
+        drop(memory_lock);
+        let shared = hosting_profile_guard(&paths).unwrap();
+        assert!(begin_replica_only(&paths).is_err());
+        drop(shared);
+        let world = WorldId([72; 32]);
+        let record = control_path(&paths).join(world.to_hex()).join("runtime-process.json");
+        fs::create_dir_all(record.parent().unwrap()).unwrap();
+        fs::write(&record, b"ambiguous runtime record").unwrap();
+        assert!(begin_replica_only(&paths).is_err());
+        assert!(record.exists());
+        fs::remove_file(record).unwrap();
+        assert!(begin_replica_only(&paths).is_ok());
     }
 
     #[test]
