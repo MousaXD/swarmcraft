@@ -2,6 +2,31 @@
 
 **Decision:** [RFC 0001](RFC.md) — **NO-GO** for general-purpose Minecraft Java/Fabric active multi-machine simulation using current SwarmCraft. Research-only; existing single-authority replication and failover remain the supported architecture.
 
+## Reopened feasibility (#56, 2026-11-25)
+
+[Experimental runtime selection](REGION_LAB_DESIGN.md) and
+[networked region lab report](REGION_LAB_REPORT.md): actual distinct
+worker processes, private veth/TCP links with kernel netem, and
+deterministic cross-region movement/resource/signal execution checked
+against a monolithic reference. The lab stays isolated under this
+research directory. The production Fabric NO-GO remains; physical
+multi-machine Minecraft gameplay and durable quorum-backed regional
+commits are unverified. The earlier 2026-11-08 synthetic proxy below
+is retained unchanged as a separate historical experiment.
+
+```sh
+unshare --user --map-root-user --net python3 network_lab.py \
+  --output /tmp/new-region-lab.json
+python3 verify_lab_evidence.py /tmp/new-region-lab.json
+```
+
+See the report for Linux namespace requirements and exact workload
+matrix. Never interpret lab agents as Minecraft players or turn a
+successful lab receipt into authority.
+
+## Original R0 evidence (2026-11-08)
+
+
 There are **no modifications** to production Rust crates, Minecraft/Fabric bridge, desktop, workflows or release configuration. The included Python standard-library tools have limited meanings:
 
 - [model.py](model.py) / [test_model.py](test_model.py) — in-memory *central* oracle (not a distributed quorum protocol), fenced grants, entity transfers and 10 deterministic invariant tests.

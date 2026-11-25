@@ -2,6 +2,12 @@
 
 **Issue:** [#86](https://github.com/MousaXD/swarmcraft/issues/86) · **Date:** 2026-11-08 · **Agent:** 06 · **State:** research-only final recommendation
 
+**2026-11-25 follow-up:** [#56 networked reference runtime](REGION_LAB_REPORT.md)
+reopens the decision for the expanded roadmap and adds actual region
+execution over isolated virtual network nodes. It does not qualify
+physical multi-host Minecraft or supersede this Fabric NO-GO. The
+dated R0 findings below remain unchanged.
+
 ## Executive decision
 
 **NO-GO** for implementing general-purpose, active multi-machine Minecraft Java/Fabric simulation within SwarmCraft's current architecture and ordinary Fabric mod-compatibility constraints. This is **not** a proof that distributed Minecraft simulation is impossible. It is a decision that the demonstrated safety, compatibility and performance prerequisites for this product **do not exist yet**. The proposed future custom-runtime experiment remains **CONDITIONAL**, requiring a new scope and explicit approval.
