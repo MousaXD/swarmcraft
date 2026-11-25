@@ -227,6 +227,20 @@ enum WorldCommand {
     Recover { world: String, snapshot: u64, destination: PathBuf },
     /// Export the newest valid snapshot as a normal Minecraft world folder.
     Export { world: String, destination: PathBuf },
+    /// Create a separate private world from the exact locally verified checkpoint, without recovering original authority.
+    RecoverCopy {
+        world: String,
+        /// Exact checkpoint manifest hash displayed by world status.
+        #[arg(long)]
+        checkpoint: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// Confirm that this creates a new world ID and cannot restore the original world.
+        #[arg(long)]
+        confirm_new_identity: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -939,6 +953,29 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             ensure_empty_or_missing(&destination)?;
             storage.restore_snapshot(&manifest, &destination)?;
             println!("Exported snapshot #{} to {}", manifest.snapshot_number, destination.display());
+        }
+        WorldCommand::RecoverCopy { world, checkpoint, name, confirm_new_identity, json } => {
+            let result = swarm_cli::world_import::recover_copy(
+                paths,
+                &swarm_cli::world_import::RecoverCopyRequest {
+                    source_world: parse_world(&world)?,
+                    expected_checkpoint: checkpoint.parse().context("invalid exact recovery checkpoint hash")?,
+                    name,
+                    confirm_new_identity,
+                },
+            )?;
+            if json {
+                println!("{}", serde_json::to_string(&result)?);
+            } else {
+                println!("Original world: {}", result.source_world_id);
+                println!(
+                    "Verified source checkpoint #{}: {}",
+                    result.source_snapshot_number, result.source_snapshot_hash
+                );
+                println!("Recovered world: {}", result.display_name);
+                println!("New world ID: {}", result.world_id);
+                println!("This private copy does not recover original authority or inherit hosting consent.");
+            }
         }
     }
     Ok(())

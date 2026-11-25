@@ -99,24 +99,7 @@ impl VerifiedReplayProof {
     }
 
     pub fn verify_manifest(&self, manifest: &SnapshotManifestV1) -> Result<()> {
-        let index = usize::try_from(manifest.snapshot_number.checked_sub(1).context("zero snapshot number")?)?;
-        let expected = self.proof.checkpoints.get(index).context("checkpoint outside certified replay proof")?;
-        let epoch = self
-            .proof
-            .epochs
-            .get(usize::try_from(expected.epoch - 1)?)
-            .context("checkpoint references unknown epoch")?;
-        let parent = index.checked_sub(1).map(|prior| self.proof.checkpoints[prior].manifest_hash);
-        verify_snapshot_signature(manifest)?;
-        if manifest.world_id != self.proof.world_id
-            || HistoricalCheckpointV1::from_manifest(manifest)? != *expected
-            || manifest.previous_snapshot_hash != parent
-            || manifest.authority_peer_id != epoch.authority_peer_id
-            || manifest.authority_public_key != epoch.authority_public_key
-        {
-            bail!("signed manifest does not match the certified replay position");
-        }
-        Ok(())
+        verify_manifest_against_history(&self.proof, manifest)
     }
 
     /// This is the only replay publication path. No epoch, lease, or
@@ -133,6 +116,26 @@ impl VerifiedReplayProof {
         storage.publish_verified_historical_replay(&self.proof)?;
         Ok(())
     }
+}
+
+/// Individual manifest verification is also used for an offline *copy*.
+/// Only the envelope verifier below can construct VerifiedReplayProof.
+fn verify_manifest_against_history(proof: &HistoricalReplayProofV1, manifest: &SnapshotManifestV1) -> Result<()> {
+    let index = usize::try_from(manifest.snapshot_number.checked_sub(1).context("zero snapshot number")?)?;
+    let expected = proof.checkpoints.get(index).context("checkpoint outside certified replay proof")?;
+    let epoch =
+        proof.epochs.get(usize::try_from(expected.epoch - 1)?).context("checkpoint references unknown epoch")?;
+    let parent = index.checked_sub(1).map(|prior| proof.checkpoints[prior].manifest_hash);
+    verify_snapshot_signature(manifest)?;
+    if manifest.world_id != proof.world_id
+        || HistoricalCheckpointV1::from_manifest(manifest)? != *expected
+        || manifest.previous_snapshot_hash != parent
+        || manifest.authority_peer_id != epoch.authority_peer_id
+        || manifest.authority_public_key != epoch.authority_public_key
+    {
+        bail!("signed manifest does not match the certified replay position");
+    }
+    Ok(())
 }
 
 pub fn load_staged_replay(storage: &Storage, world: WorldId) -> Result<Option<VerifiedReplayProof>> {
@@ -431,6 +434,23 @@ pub fn verify_replay_proof(
     genesis: &WorldGenesisV1,
     expected_membership: &MembershipRecordV1,
 ) -> Result<VerifiedReplayProof> {
+    validate_replay_shape(&proof, genesis, expected_membership)?;
+    let final_epoch = proof.epochs.last().context("missing final epoch")?;
+    verify_signature(
+        final_epoch.authority_peer_id,
+        final_epoch.authority_public_key,
+        &proof.signing_bytes()?,
+        &proof.signature,
+    )?;
+    verify_replay_history(&proof, genesis, expected_membership)?;
+    Ok(VerifiedReplayProof { proof })
+}
+
+fn validate_replay_shape(
+    proof: &HistoricalReplayProofV1,
+    genesis: &WorldGenesisV1,
+    expected_membership: &MembershipRecordV1,
+) -> Result<()> {
     if proof.protocol_version != PROTOCOL_VERSION
         || proof.genesis != *genesis
         || genesis.world_id()? != proof.world_id
@@ -455,6 +475,17 @@ pub fn verify_replay_proof(
     if postcard::to_allocvec(&proof)?.len() > MAX_REPLAY_PROOF_BYTES {
         bail!("historical replay proof exceeds encoded byte limit");
     }
+    Ok(())
+}
+
+/// Common signed record/transition checks. This function returns no replay
+/// capability. Network publication additionally requires the final authority's
+/// signed envelope; offline copy verifies every original manifest instead.
+fn verify_replay_history(
+    proof: &HistoricalReplayProofV1,
+    genesis: &WorldGenesisV1,
+    expected_membership: &MembershipRecordV1,
+) -> Result<()> {
     let creator = peer_id_from_public_key(&genesis.creator_public_key);
     let first = &proof.epochs[0];
     if first.authority_peer_id != creator
@@ -465,12 +496,6 @@ pub fn verify_replay_proof(
         bail!("historical replay does not start at supported signed genesis");
     }
     let final_epoch = proof.epochs.last().context("missing final epoch")?;
-    verify_signature(
-        final_epoch.authority_peer_id,
-        final_epoch.authority_public_key,
-        &proof.signing_bytes()?,
-        &proof.signature,
-    )?;
     for (index, epoch) in proof.epochs.iter().enumerate() {
         let generation = index as u64 + 1;
         let previous_hash = index.checked_sub(1).map(|prior| proof.epochs[prior].record_hash()).transpose()?;
@@ -633,7 +658,7 @@ pub fn verify_replay_proof(
     if current_epoch != final_epoch.epoch_number {
         bail!("historical checkpoint head has not reached the final authority generation");
     }
-    Ok(VerifiedReplayProof { proof })
+    Ok(())
 }
 
 fn verify_transition(
@@ -754,12 +779,37 @@ pub fn collect_replay_proof(
     identity: &PeerIdentity,
     world: WorldId,
 ) -> Result<HistoricalReplayProofV1> {
-    let genesis = storage.load_world(world)?.genesis;
-    let epochs = collect_signed_epoch_history(storage, world)?;
-    let accepted = epochs.last().context("missing current authority")?;
+    let accepted = storage.load_epoch_record(world)?;
     if accepted.authority_peer_id != identity.peer_id() || accepted.authority_public_key != identity.public_key() {
         bail!("only the local accepted authority can sign a historical replay proof");
     }
+    let (mut proof, manifests) = collect_local_history(storage, world)?;
+    let final_epoch = proof.epochs.last().context("missing current authority")?;
+    if final_epoch.authority_peer_id != identity.peer_id() || final_epoch.authority_public_key != identity.public_key()
+    {
+        bail!("accepted authority changed during historical replay collection");
+    }
+    proof.signature = identity.sign(&proof.signing_bytes()?);
+    let membership = proof.membership.last().context("missing current membership")?.clone();
+    let genesis = proof.genesis.clone();
+    let verified = verify_replay_proof(proof, &genesis, &membership)?;
+    for manifest in &manifests {
+        verified.verify_manifest(manifest)?;
+    }
+    let proof = verified.proof;
+    ensure_collected_history_current(storage, &proof, &manifests)?;
+    Ok(proof)
+}
+
+/// Assemble exact retained signed records without claiming a final-authority
+/// envelope. This private helper is shared by the authority-only signer and
+/// the offline, new-identity recovery-copy verifier.
+fn collect_local_history(
+    storage: &Storage,
+    world: WorldId,
+) -> Result<(HistoricalReplayProofV1, Vec<SnapshotManifestV1>)> {
+    let genesis = storage.load_world(world)?.genesis;
+    let epochs = collect_signed_epoch_history(storage, world)?;
     let current_membership = storage.load_membership_record(world)?;
     let mut membership = Vec::new();
     let mut record = current_membership.clone();
@@ -817,7 +867,7 @@ pub fn collect_replay_proof(
         };
         transitions.push(evidence);
     }
-    let mut proof = HistoricalReplayProofV1 {
+    let proof = HistoricalReplayProofV1 {
         protocol_version: PROTOCOL_VERSION,
         world_id: world,
         genesis: genesis.clone(),
@@ -833,20 +883,93 @@ pub fn collect_replay_proof(
         transitions,
         signature: Vec::new(),
     };
-    proof.signature = identity.sign(&proof.signing_bytes()?);
-    let verified = verify_replay_proof(proof, &genesis, &current_membership)?;
-    for manifest in &manifests {
-        verified.verify_manifest(manifest)?;
-    }
-    let proof = verified.proof;
+    ensure_collected_history_current(storage, &proof, &manifests)?;
+    Ok((proof, manifests))
+}
+
+fn ensure_collected_history_current(
+    storage: &Storage,
+    proof: &HistoricalReplayProofV1,
+    manifests: &[SnapshotManifestV1],
+) -> Result<()> {
+    let world = proof.world_id;
     if storage.load_epoch_record(world)? != *proof.epochs.last().context("missing epoch")?
-        || storage.load_membership_record(world)? != current_membership
+        || storage.load_membership_record(world)? != *proof.membership.last().context("missing membership")?
         || storage.load_world_config(world)? != *proof.configs.last().context("missing config")?
         || storage.latest_snapshot(world)?.as_ref() != manifests.last()
     {
-        bail!("canonical history advanced during proof collection; retry");
+        bail!("canonical history advanced during collection; retry");
     }
-    Ok(proof)
+    Ok(())
+}
+
+/// Verified local data for creating a DIFFERENT world. No replay envelope or
+/// publication method is exposed, and the old world is never advanced.
+pub(crate) struct LocalRecoverySource {
+    pub manifest: SnapshotManifestV1,
+    pub config: WorldConfigV1,
+    epoch: EpochRecordV1,
+    membership: MembershipRecordV1,
+}
+
+impl LocalRecoverySource {
+    pub fn ensure_unchanged(&self, storage: &Storage) -> Result<()> {
+        let world = self.manifest.world_id;
+        let descriptor = storage.load_world_descriptor(world)?;
+        if storage.load_epoch_record(world)? != self.epoch
+            || storage.load_membership_record(world)? != self.membership
+            || storage.load_world_config(world)? != self.config
+            || storage.latest_snapshot(world)?.as_ref() != Some(&self.manifest)
+            || descriptor.members != self.membership.members
+            || descriptor.compatibility_fingerprint != self.config.compatibility_fingerprint()?
+            || storage.first_contact_publication_started(world)?
+            || !storage.list_solo_conflicts(world)?.is_empty()
+        {
+            bail!("source world changed during recovery copy; inspect the checkpoint and retry");
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn verify_local_recovery_source(
+    storage: &Storage,
+    local: &PeerIdentity,
+    world: WorldId,
+    expected_checkpoint: swarm_protocol::Hash32,
+) -> Result<LocalRecoverySource> {
+    if !storage.list_solo_conflicts(world)?.is_empty() {
+        bail!("conflicting solo branches require explicit conflict inspection before recovery");
+    }
+    let (proof, manifests) = collect_local_history(storage, world)?;
+    let membership = proof.membership.last().context("missing accepted membership")?;
+    if !membership
+        .members
+        .iter()
+        .any(|member| !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key())
+    {
+        bail!("local identity is not an authorized retained-world member");
+    }
+    validate_replay_shape(&proof, &proof.genesis, membership)?;
+    verify_replay_history(&proof, &proof.genesis, membership)?;
+    // The final signer need not be online to recover a separate world, but
+    // every original retained manifest must carry its own verified signature
+    // and match the complete certified epoch/transition history.
+    for manifest in &manifests {
+        verify_manifest_against_history(&proof, manifest)?;
+    }
+    let manifest = manifests.last().context("missing retained canonical checkpoint")?.clone();
+    if manifest.manifest_hash()? != expected_checkpoint {
+        bail!("retained canonical checkpoint differs from the explicitly selected recovery hash");
+    }
+    storage.verify_snapshot(&manifest)?;
+    let source = LocalRecoverySource {
+        manifest,
+        config: proof.configs.last().context("missing accepted config")?.clone(),
+        epoch: proof.epochs.last().context("missing accepted epoch")?.clone(),
+        membership: membership.clone(),
+    };
+    source.ensure_unchanged(storage)?;
+    Ok(source)
 }
 
 /// Collect the signed config hash chain independently. Full replay must

@@ -551,6 +551,43 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
     assert!(swarm_cli::hosting_budget::load_consent(&b.paths, world).unwrap().is_none());
     swarm_cli::live_authority::verify_playable_epoch(&b.storage, &recovered).unwrap();
     drop((resumed, recovered_host));
+
+    // With every authority process stopped, the former host's exact verified
+    // replica can produce an explicitly NEW private world. It cannot sign an
+    // old-world replay envelope or acquire old-world authority.
+    let original_epoch = b.storage.load_epoch_record(world).unwrap();
+    let original_membership = b.storage.load_membership_record(world).unwrap();
+    let original_checkpoint = b.storage.latest_snapshot(world).unwrap().unwrap();
+    let original_hash = original_checkpoint.manifest_hash().unwrap().to_string();
+    assert_ne!(original_epoch.authority_peer_id, b.identity.peer_id());
+    assert!(swarm_cli::historical_authority::collect_replay_proof(&b.storage, &b.identity, world).is_err());
+    let recovered_output = run_cli(
+        &b,
+        &[
+            "world",
+            "recover-copy",
+            &world.to_string(),
+            "--checkpoint",
+            &original_hash,
+            "--confirm-new-identity",
+            "--json",
+        ],
+    );
+    let copied: swarm_cli::world_import::RecoverCopyResult = serde_json::from_str(&recovered_output).unwrap();
+    let new_world: WorldId = copied.world_id.parse().unwrap();
+    assert_ne!(new_world, world);
+    assert_eq!(copied.source_world_id, world.to_string());
+    assert_eq!(copied.source_snapshot_hash, original_hash);
+    let copied_manifest = b.storage.latest_snapshot(new_world).unwrap().unwrap();
+    assert_eq!(copied_manifest.entries, original_checkpoint.entries);
+    assert_eq!(copied_manifest.state_root, original_checkpoint.state_root);
+    b.storage.verify_snapshot(&copied_manifest).unwrap();
+    assert_eq!(b.storage.load_membership_record(new_world).unwrap().members.len(), 1);
+    assert_eq!(b.storage.load_epoch_record(new_world).unwrap().authority_peer_id, b.identity.peer_id());
+    assert!(swarm_cli::hosting_budget::load_consent(&b.paths, new_world).unwrap().is_none());
+    assert_eq!(b.storage.load_epoch_record(world).unwrap(), original_epoch);
+    assert_eq!(b.storage.load_membership_record(world).unwrap(), original_membership);
+    assert_eq!(b.storage.latest_snapshot(world).unwrap().unwrap(), original_checkpoint);
 }
 
 #[test]

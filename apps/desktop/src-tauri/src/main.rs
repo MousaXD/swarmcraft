@@ -367,6 +367,36 @@ async fn recover_world(app: AppHandle, world: String, snapshot: u64, destination
     run_cli(&app, vec!["world".into(), "recover".into(), world, snapshot.to_string(), destination]).await
 }
 
+/// A recovered copy is a new private identity, never a membership or
+/// authority change to the original world. Pin the exact selected checkpoint.
+#[tauri::command(rename_all = "camelCase")]
+async fn recover_copy(
+    app: AppHandle,
+    world: String,
+    checkpoint: String,
+    confirm_new_identity: bool,
+) -> Result<String, String> {
+    if !confirm_new_identity {
+        return Err("Confirm that recovery creates a separate world identity.".into());
+    }
+    let world = hosting_contribution_commands::validate_world_id(&world)?;
+    let checkpoint: swarm_protocol::Hash32 =
+        checkpoint.parse().map_err(|_| "A valid checkpoint manifest hash is required".to_string())?;
+    run_cli(
+        &app,
+        vec![
+            "world".into(),
+            "recover-copy".into(),
+            world.to_string(),
+            "--checkpoint".into(),
+            checkpoint.to_string(),
+            "--confirm-new-identity".into(),
+            "--json".into(),
+        ],
+    )
+    .await
+}
+
 #[tauri::command]
 async fn migration_capabilities(app: AppHandle) -> String {
     let mut supported = Vec::new();
@@ -617,6 +647,7 @@ fn main() {
             verify_world,
             export_world,
             recover_world,
+            recover_copy,
             migration_capabilities,
             migration_status,
             manual_transfer_step,

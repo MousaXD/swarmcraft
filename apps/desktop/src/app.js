@@ -1,5 +1,6 @@
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
 import { createImportRequest, parseImportResult } from './import-flow.js';
+import { recoveryCopySelection, recoveryCopyReceipt } from './recovery-copy.js';
 import { clientContinuityFromMigration, ensureClientContinuityPanel } from './client-continuity.js';
 import { UNVERIFIED_GAME_ROUTE, ensureGameReconnectActions, gameReadinessCheckpoints, isUsableGameRoute, updateGameReadinessChecklist, updateGameRouteControls } from './game-route-status.js';
 
@@ -28,6 +29,8 @@ let structuredConnectivity = connectivityFromStatus({ state: 'nat_status_unknown
 let serviceWarning = '';
 let startupInProgress = false;
 let lastWorldError = null;
+let recoveryCopyTarget = null;
+let recoveryCopyPending = false;
 const MIGRATION_REFRESH_MS = 5000;
 const CONNECTIVITY_REFRESH_MS = 10000;
 
@@ -1421,6 +1424,62 @@ async function recoverWorld() {
   await run('Recovering verified snapshot…', () => backend.recoverWorld(worldId(), Number($('snapshotNumber').value || 1), destination));
 }
 
+async function openRecoveryCopy() {
+  const requestedWorld = worldId();
+  showInline('recoveryCopyNotice', '');
+  try {
+    const status = await backend.worldStatus(requestedWorld);
+    if (selectedWorldId !== requestedWorld || currentView !== 'diagnostics'
+        || recoveryCopyPending || $('recoveryCopyDialog').open) return;
+    recoveryCopyTarget = recoveryCopySelection(requestedWorld, status);
+    $('recoveryCopySource').textContent = 'Original: ' + requestedWorld
+      + '\nSnapshot: ' + recoveryCopyTarget.snapshot + '\nManifest: ' + recoveryCopyTarget.checkpoint;
+    $('recoveryCopyTitle').textContent = 'Create a separate recovered world?';
+    $('confirmRecoveryCopy').hidden = false;
+    $('confirmRecoveryCopy').disabled = false;
+    $('cancelRecoveryCopy').textContent = 'Cancel';
+    showInline('recoveryCopyResult', '');
+    $('recoveryCopyDialog').showModal();
+  } catch (error) {
+    if (selectedWorldId === requestedWorld) showInline('recoveryCopyNotice', String(error), 'warning');
+  }
+}
+
+async function confirmRecoveryCopy() {
+  if (!recoveryCopyTarget || recoveryCopyPending || !$('recoveryCopyDialog').open) return;
+  const target = recoveryCopyTarget;
+  if (selectedWorldId !== target.world) {
+    recoveryCopyTarget = null;
+    $('confirmRecoveryCopy').disabled = true;
+    showInline('recoveryCopyResult', 'The selected world changed. Close and confirm the intended world again.', 'warning');
+    return;
+  }
+  recoveryCopyPending = true;
+  $('confirmRecoveryCopy').disabled = true;
+  $('cancelRecoveryCopy').disabled = true;
+  showInline('recoveryCopyResult', 'Verifying history and copying checkpoint…');
+  try {
+    const raw = await backend.recoverCopy(target.world, target.checkpoint, true);
+    const receipt = recoveryCopyReceipt(target, raw);
+    const message = receipt.name + ' created.\nOriginal: ' + receipt.source + '\nNew world: ' + receipt.world
+      + '\nSelect the new world in Worlds; hosting setup is separate.';
+    $('recoveryCopyTitle').textContent = 'Recovered world created';
+    showInline('recoveryCopyResult', message, 'safe');
+    showInline('recoveryCopyNotice', message, 'safe');
+    setOutput(message, 'Recovered copy');
+    await refreshWorlds();
+  } catch (error) {
+    $('recoveryCopyTitle').textContent = 'Recovery outcome not confirmed';
+    showInline('recoveryCopyResult', 'Could not confirm the recovered copy. Refresh Worlds before trying again. ' + String(error), 'danger');
+  } finally {
+    recoveryCopyTarget = null;
+    recoveryCopyPending = false;
+    $('confirmRecoveryCopy').hidden = true;
+    $('cancelRecoveryCopy').disabled = false;
+    $('cancelRecoveryCopy').textContent = 'Done';
+  }
+}
+
 async function transferHost() {
   invalidateGameRoute();
   invalidateHostReadiness();
@@ -1611,6 +1670,19 @@ bindAction('startDaemon', startDaemon);
 bindAction('stopDaemon', stopDaemon);
 bindAction('exportWorld', exportWorld);
 bindAction('recoverWorld', recoverWorld);
+bindAction('openRecoveryCopy', openRecoveryCopy);
+$('confirmRecoveryCopy')?.addEventListener('click', confirmRecoveryCopy);
+$('recoveryCopyDialog')?.addEventListener('cancel', (event) => {
+  if (recoveryCopyPending) event.preventDefault();
+});
+$('recoveryCopyDialog')?.querySelector('form')?.addEventListener('submit', (event) => {
+  if (recoveryCopyPending) event.preventDefault();
+});
+$('recoveryCopyDialog')?.addEventListener('close', () => {
+  // Native close events are queued; an immediately reopened dialog already
+  // owns a different selection, which the previous close must not clear.
+  if (!$('recoveryCopyDialog').open) recoveryCopyTarget = null;
+});
 bindAction('transferHost', transferHost);
 bindAction('wakeWorld', wakeWorld);
 document.addEventListener('click', (event) => {

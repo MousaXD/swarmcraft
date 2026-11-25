@@ -532,6 +532,10 @@ export function createBackendAdapter(invoke) {
     verifyWorld: (world) => call('verify_world', { world }),
     exportWorld: (world, destination) => call('export_world', { world, destination }),
     recoverWorld: (world, snapshot, destination) => call('recover_world', { world, snapshot, destination }),
+    recoverCopy: (world, checkpoint, confirmNewIdentity) => {
+      if (confirmNewIdentity !== true) return Promise.reject(new Error('Confirm creation of a separate world identity.'));
+      return call('recover_copy', { world, checkpoint, confirmNewIdentity });
+    },
     ensureDaemonRunning: (listen) => call('ensure_daemon_running', { listen }),
     startDaemon: (listen) => call('start_daemon', { listen }),
     stopDaemon: () => call('stop_daemon'),

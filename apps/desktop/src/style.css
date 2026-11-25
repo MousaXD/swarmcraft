@@ -271,6 +271,7 @@ input::placeholder, textarea::placeholder { color: #667069; }
 .dialog-card p { margin-top: 5px; color: var(--muted); font-size: 11px; }
 .dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s4); }
 .dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--s2); padding-top: var(--s2); }
+#recoveryCopyResult, #recoveryCopyNotice { white-space: pre-line; }
 .invite-result { display: grid; gap: var(--s2); }
 .invite-result textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 

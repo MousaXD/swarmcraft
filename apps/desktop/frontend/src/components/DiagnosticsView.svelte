@@ -239,6 +239,11 @@
                   <button id="exportWorld" class="button button-secondary world-required" type="button">Export latest</button>
                   <button id="recoverWorld" class="button button-warning world-required" type="button">Recover snapshot</button>
                 </div>
+                <p class="helper">If the original world cannot safely resume, create a separate private world from this device's verified checkpoint. The original stays unchanged.</p>
+                <div class="compact-actions">
+                  <button id="openRecoveryCopy" class="button button-secondary world-required" type="button">Create recovered copy</button>
+                </div>
+                <div id="recoveryCopyNotice" class="inline-notice" role="status" aria-live="polite" hidden></div>
               </section>
             </div>
           </div>

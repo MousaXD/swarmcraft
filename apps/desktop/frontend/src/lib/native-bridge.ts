@@ -48,7 +48,7 @@ export interface NativeCommandTable {
   validate_fabric_selection: { args: { minecraftVersion: string; fabricLoaderVersion: string }; result: void };
   create_world: { args: { name: string; minecraft: string; fabricLoader: string; compatibility: string; visibility: string }; result: string };
   import_world: { args: { source: string; name: string; minecraft: string; fabricLoader: string; visibility: string; serverMods: string[]; noServerMods: boolean }; result: string };
-  join_world: { args: { invite: string }; result: string };
+  join_world: { args: { invite: string; hostCandidate: boolean }; result: string };
   leave_world: { args: { world: string }; result: string };
   create_invite: { args: { world: string; expiresMinutes: number; bootstrapAddrs: string[] }; result: string };
   world_status: { args: { world: string }; result: string };
@@ -70,6 +70,7 @@ export interface NativeCommandTable {
   verify_world: { args: { world: string }; result: string };
   export_world: { args: { world: string; destination: string }; result: string };
   recover_world: { args: { world: string; snapshot: number; destination: string }; result: string };
+  recover_copy: { args: { world: string; checkpoint: string; confirmNewIdentity: boolean }; result: string };
   migration_capabilities: { args: Record<string, never>; result: string };
   migration_status: { args: { world: string }; result: string };
   manual_transfer_step: { args: { world: string; action: string; value: string | null }; result: string };

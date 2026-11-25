@@ -203,6 +203,7 @@ const tauriFixture = String.raw`
 window.__swarmcraftBrowserErrors = [];
 window.__swarmcraftCalls = [];
 window.__swarmcraftWorldModFailures = 1;
+window.__swarmcraftRecoveryWorld = null;
 addEventListener('error', (event) => {
   window.__swarmcraftBrowserErrors.push(String(event.error?.stack || event.message || event.error || 'window error'));
 });
@@ -222,7 +223,23 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
     case 'fabric_loader_versions':
       if (!args.minecraftVersion || typeof args.refresh !== 'boolean') throw new Error('fabric_loader_versions requires minecraftVersion and refresh');
       return { origin: 'network', versions: [{ version: '0.19.3', stable: true, minecraft_version: args.minecraftVersion, adapter_supported: args.minecraftVersion === '26.1.2' }] };
-    case 'list_worlds': return [];
+    case 'list_worlds': return window.__swarmcraftRecoveryWorld
+      ? window.__swarmcraftRecoveryWorld + '  Recovery source  snapshots=4'
+      : [];
+    case 'world_status':
+      if (args.world === window.__swarmcraftRecoveryWorld) {
+        return ['World: Recovery source', 'World ID: ' + args.world, 'Safety: Canonical',
+          'Latest snapshot: 4', 'Checkpoint manifest: ' + 'c'.repeat(64)].join('\n');
+      }
+      return '';
+    case 'recover_copy':
+      if (args.world !== window.__swarmcraftRecoveryWorld || args.checkpoint !== 'c'.repeat(64)
+          || args.confirmNewIdentity !== true) throw new Error('Unexpected recovery selection');
+      return JSON.stringify({
+        source_world_id: args.world, source_snapshot_hash: args.checkpoint, source_snapshot_number: 4,
+        world_id: 'scworld:' + 'b'.repeat(64), snapshot_hash: 'd'.repeat(64),
+        display_name: 'Recovered: Recovery source',
+      });
     case 'identity':
     case 'node_identity': return { peerId: '12D3KooWBrowserSmoke' };
     case 'migration_capabilities': return { transfer: false, wake: false, reason: 'Browser smoke fixture' };
@@ -354,6 +371,50 @@ const scenario = String.raw`(async () => {
   return { status: 'pass', width: innerWidth, height: innerHeight, calls: window.__swarmcraftCalls.length };
 })()`;
 
+const recoveryScenario = String.raw`(async () => {
+  const waitFor = async (predicate, label) => {
+    for (let i = 0; i < 160; i += 1) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    throw new Error('Timed out waiting for ' + label);
+  };
+  const require = (condition, message) => { if (!condition) throw new Error(message); };
+  const source = 'scworld:' + 'a'.repeat(64);
+  window.__swarmcraftRecoveryWorld = source;
+  document.querySelector('[data-view="worlds"]').click();
+  document.getElementById('refresh').click();
+  await waitFor(() => document.getElementById('world').value === source, 'source selection');
+  document.querySelector('[data-view="diagnostics"]').click();
+  const button = document.getElementById('openRecoveryCopy');
+  button.click();
+  const dialog = document.getElementById('recoveryCopyDialog');
+  await waitFor(() => dialog.open, 'confirmation dialog');
+  require(document.getElementById('recoveryCopySource').textContent.includes(source), 'Original identity missing');
+  require(document.getElementById('recoveryCopySource').textContent.includes('c'.repeat(64)), 'Exact checkpoint missing');
+  require(!window.__swarmcraftCalls.some(call => call.command === 'recover_copy'), 'Copy dispatched without confirmation');
+  document.getElementById('cancelRecoveryCopy').click();
+  await waitFor(() => !dialog.open, 'cancel dialog');
+  require(!window.__swarmcraftCalls.some(call => call.command === 'recover_copy'), 'Canceled recovery dispatched');
+  button.click();
+  await waitFor(() => dialog.open, 'reopen confirmation');
+  const confirm = document.getElementById('confirmRecoveryCopy');
+  confirm.click();
+  confirm.click();
+  await waitFor(() => document.getElementById('cancelRecoveryCopy').textContent === 'Done',
+    'copy receipt (state: ' + document.getElementById('recoveryCopyResult').textContent
+      + ', dispatched: ' + window.__swarmcraftCalls.filter(call => call.command === 'recover_copy').length + ')');
+  require(window.__swarmcraftCalls.filter(call => call.command === 'recover_copy').length === 1, 'Recovery was not dispatched exactly once');
+  const result = document.getElementById('recoveryCopyResult');
+  require(result.textContent.includes(source) && result.textContent.includes('scworld:' + 'b'.repeat(64)), 'Receipt lacks both world IDs');
+  require(result.dataset.tone === 'safe', 'Confirmed receipt did not show success');
+  const bounds = dialog.getBoundingClientRect();
+  require(bounds.left >= 0 && bounds.top >= 0 && bounds.right <= innerWidth && bounds.bottom <= innerHeight, 'Recovery dialog exceeds viewport');
+  require(dialog.scrollWidth <= dialog.clientWidth + 2, 'Recovery dialog has horizontal overflow');
+  require(window.__swarmcraftBrowserErrors.length === 0, 'Recovery browser errors: ' + window.__swarmcraftBrowserErrors.join(' | '));
+  return { status: 'pass' };
+})()`;
+
 const scenarioRunner = String.raw`
 const done = arguments[arguments.length - 1];
 Promise.resolve().then(() => eval(arguments[0])).then(
@@ -388,6 +449,11 @@ async function runViewport(port, sessionId, documentHtml, graph, width, height, 
   const screenshotBase64 = await webdriverRequest(port, `/session/${sessionId}/screenshot`);
   assert.ok(screenshotBase64, 'ChromeDriver returned empty screenshot');
   await writeFile(screenshotPath, Buffer.from(screenshotBase64, 'base64'));
+  const recovery = await executeAsync(port, sessionId, scenarioRunner, [recoveryScenario]);
+  assert.equal(recovery?.ok, true, `Recovery browser scenario failed at ${width}x${height}: ${recovery?.error || JSON.stringify(recovery)}`);
+  assert.equal(recovery.value?.status, 'pass');
+  const recoveryScreenshot = await webdriverRequest(port, `/session/${sessionId}/screenshot`);
+  await writeFile(screenshotPath.replace(/\.png$/, '-recovery.png'), Buffer.from(recoveryScreenshot, 'base64'));
 }
 
 test('current Desktop module graph initializes, owns canonical Create, and renders supported window sizes', async () => {

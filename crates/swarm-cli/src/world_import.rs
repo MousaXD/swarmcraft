@@ -9,9 +9,9 @@ use std::{
 };
 use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
 use swarm_protocol::{
-    validate_runtime_selection, AuthorityPolicyV1, MembershipPolicyV1, MembershipRecordV1,
-    RuntimeCompatibilityManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1, WorldPresentationV1,
-    WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    validate_runtime_selection, AuthorityPolicyV1, Hash32, MembershipPolicyV1, MembershipRecordV1,
+    RuntimeCompatibilityManifestV1, SnapshotManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1,
+    WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 
@@ -40,6 +40,29 @@ pub struct ImportWorldResult {
     pub compatibility_fingerprint: String,
 }
 
+/// An explicitly selected local checkpoint becomes a separate private world.
+/// This action never attempts to acquire or repair the original authority.
+#[derive(Debug, Clone)]
+pub struct RecoverCopyRequest {
+    pub source_world: WorldId,
+    pub expected_checkpoint: Hash32,
+    pub name: Option<String>,
+    pub confirm_new_identity: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoverCopyResult {
+    pub source_world_id: String,
+    pub source_snapshot_number: u64,
+    pub source_snapshot_hash: String,
+    pub world_id: String,
+    pub display_name: String,
+    pub snapshot_hash: String,
+    pub state_root: String,
+    pub compatibility_fingerprint: String,
+    pub files: usize,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct ImportFaults {
     after_snapshot_commit: bool,
@@ -64,6 +87,177 @@ impl Drop for MinecraftSourceQuiescence {
 /// rename after every signed metadata object and canonical snapshot is durable.
 pub fn import_world(paths: &DataPaths, request: &ImportWorldRequest) -> Result<ImportWorldResult> {
     import_world_inner(paths, request, ImportFaults::default())
+}
+
+pub fn recover_copy(paths: &DataPaths, request: &RecoverCopyRequest) -> Result<RecoverCopyResult> {
+    recover_copy_inner(paths, request, ImportFaults::default())
+}
+
+fn recover_copy_inner(
+    paths: &DataPaths,
+    request: &RecoverCopyRequest,
+    faults: ImportFaults,
+) -> Result<RecoverCopyResult> {
+    if !request.confirm_new_identity {
+        bail!("recovery copy requires explicit confirmation that a NEW world identity will be created");
+    }
+    let storage = Storage::open(paths.root.clone())?;
+    let identity = PeerIdentity::load_or_create(paths)?;
+    let source = crate::historical_authority::verify_local_recovery_source(
+        &storage,
+        &identity,
+        request.source_world,
+        request.expected_checkpoint,
+    )?;
+    let name = request.name.as_deref().unwrap_or(&source.config.presentation.name).trim();
+    if name.is_empty() {
+        bail!("recovered world name is required");
+    }
+    let display_name = format!("Recovered: {name}");
+    // Preserve the exact signed compatibility contract. Do not infer mods
+    // from world bytes or silently copy EULA, Java paths or hosting consent.
+    let compatibility = source.config.compatibility.clone();
+    let fingerprint = compatibility.fingerprint()?;
+    let (world, genesis) = create_world_genesis_with_fingerprint(
+        &identity,
+        compatibility.minecraft_version.clone(),
+        compatibility.loader_version.clone(),
+        fingerprint,
+    )?;
+    if world == request.source_world {
+        bail!("recovered world identity must differ from the original");
+    }
+    let staging_root = paths.root.join(".recovery-staging").join(world.to_hex());
+    let final_world_dir = paths.worlds_dir().join(world.to_hex());
+    if staging_root.exists() || final_world_dir.exists() {
+        bail!("generated recovery destination already exists; refusing to overwrite");
+    }
+    swarm_core::create_private_dir_all(&staging_root)?;
+    let outcome = (|| -> Result<RecoverCopyResult> {
+        let staged = Storage::open(staging_root.clone())?;
+        staged.create_world(&WorldMetadataV1 {
+            storage_schema_version: STORAGE_SCHEMA_VERSION,
+            display_name: display_name.clone(),
+            world_id: world,
+            genesis: genesis.clone(),
+        })?;
+        let descriptor = WorldDescriptorV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            compatibility_fingerprint: fingerprint,
+            members: vec![local_member(&identity)],
+            preferred_replication_factor: 2,
+        };
+        staged.save_world_descriptor(&descriptor)?;
+
+        // Copy immutable encoded blobs into the invisible new world. The
+        // bounded receiver independently verifies every descriptor, so a
+        // concurrent source GC/corruption is a failure, never a partial copy.
+        const COPY_CHUNK: usize = 256 * 1024;
+        for entry in &source.manifest.entries {
+            let blob = &entry.blob;
+            if staged.has_complete_blob(world, blob) {
+                continue;
+            }
+            let mut offset = 0;
+            loop {
+                let (bytes, finished) =
+                    storage.read_encoded_blob_chunk(request.source_world, blob, offset, COPY_CHUNK)?;
+                if bytes.is_empty() && !finished {
+                    bail!("recovery blob copy made no progress");
+                }
+                offset = staged.receive_blob_chunk(world, blob, offset, &bytes, finished)?;
+                if finished {
+                    break;
+                }
+            }
+        }
+        let mut snapshot = SnapshotManifestV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            snapshot_number: 1,
+            epoch: world_genesis::GENESIS_EPOCH,
+            sequence: 1,
+            previous_snapshot_hash: None,
+            entries: source.manifest.entries.clone(),
+            state_root: source.manifest.state_root,
+            authority_peer_id: identity.peer_id(),
+            authority_public_key: identity.public_key(),
+            signature: Vec::new(),
+        };
+        identity.sign_snapshot(&mut snapshot)?;
+        staged.commit_snapshot(&snapshot)?;
+        staged.verify_snapshot(&snapshot)?;
+        swarm_core::verify_snapshot_signature(&snapshot)?;
+        world_genesis::establish_initial_epoch(&staged, &identity, &snapshot)?;
+        let mut membership = MembershipRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            epoch: world_genesis::GENESIS_EPOCH,
+            sequence: 0,
+            previous_membership_hash: None,
+            members: descriptor.members.clone(),
+            authority_peer_id: identity.peer_id(),
+            authority_public_key: identity.public_key(),
+            signature: Vec::new(),
+        };
+        identity.sign_membership(&mut membership)?;
+        staged.save_membership_record(&membership)?;
+        let mut config = WorldConfigV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            sequence: 1,
+            previous_config_hash: None,
+            compatibility,
+            visibility: WorldVisibilityV1::Private,
+            authority_policy: AuthorityPolicyV1 {
+                allow_solo_advancement: false,
+                preferred_replication_factor: 2,
+            },
+            membership_policy: MembershipPolicyV1::InviteOnly,
+            presentation: WorldPresentationV1 {
+                name: display_name.clone(),
+                description: format!(
+                    "Independent recovered copy of {} at checkpoint #{} ({}). Not a continuation of the original authority history.",
+                    request.source_world, source.manifest.snapshot_number, request.expected_checkpoint
+                ),
+                tags: Vec::new(),
+                icon_hash: None,
+                approximate_region: None,
+            },
+            authority_peer_id: identity.peer_id(),
+            authority_public_key: identity.public_key(),
+            signature: Vec::new(),
+        };
+        sign_world_config(&identity, &mut config)?;
+        staged.save_world_config(&config)?;
+        if faults.after_snapshot_commit {
+            bail!("injected recovered-copy interruption after snapshot commit");
+        }
+        // Recheck the user's exact selection before publishing. No lease,
+        // membership, runtime, invite or recovery state was changed in source.
+        source.ensure_unchanged(&storage)?;
+        if faults.before_publication {
+            bail!("injected recovered-copy interruption before publication");
+        }
+        let result = RecoverCopyResult {
+            source_world_id: request.source_world.to_string(),
+            source_snapshot_number: source.manifest.snapshot_number,
+            source_snapshot_hash: request.expected_checkpoint.to_string(),
+            world_id: world.to_string(),
+            display_name,
+            snapshot_hash: snapshot.manifest_hash()?.to_string(),
+            state_root: snapshot.state_root.to_string(),
+            compatibility_fingerprint: fingerprint.to_string(),
+            files: snapshot.entries.len(),
+        };
+        publish_staged_world(paths, &staged.world_dir(world), &final_world_dir)?;
+        Ok(result)
+    })();
+    if staging_root.exists() {
+        let _ = fs::remove_dir_all(&staging_root);
+    }
+    outcome
 }
 
 fn import_world_inner(
@@ -254,12 +448,17 @@ fn stage_and_publish(
     // handle, while Windows correctly rejects it with AccessDenied.
     drop(snapshot);
 
+    publish_staged_world(paths, &staged_world_dir, final_world_dir)?;
+    Ok(result)
+}
+
+fn publish_staged_world(paths: &DataPaths, staged_world_dir: &Path, final_world_dir: &Path) -> Result<()> {
     fs::create_dir_all(paths.worlds_dir())
         .with_context(|| format!("cannot create SwarmCraft worlds directory {}", paths.worlds_dir().display()))?;
     if final_world_dir.exists() {
         bail!("import destination unexpectedly appeared: {}", final_world_dir.display());
     }
-    fs::rename(&staged_world_dir, final_world_dir).with_context(|| {
+    fs::rename(staged_world_dir, final_world_dir).with_context(|| {
         format!(
             "cannot atomically publish imported world {} -> {}",
             staged_world_dir.display(),
@@ -269,11 +468,11 @@ fn stage_and_publish(
     if let Err(error) = sync_directory(&paths.worlds_dir()) {
         // Publication durability was not proven. Roll the directory back out of
         // the visible namespace when possible and fail closed.
-        let _ = fs::rename(final_world_dir, &staged_world_dir);
+        let _ = fs::rename(final_world_dir, staged_world_dir);
         return Err(error).context("import publication directory could not be durably synchronized");
     }
 
-    Ok(result)
+    Ok(())
 }
 
 fn validate_request(request: &ImportWorldRequest) -> Result<()> {
@@ -556,6 +755,99 @@ mod tests {
         let runtime = RuntimeInstaller::new(&paths, &reopened).inspect(world).unwrap();
         assert!(!runtime.eula_accepted);
         assert!(!runtime.launch_configured);
+    }
+
+    #[test]
+    fn recovery_copy_preserves_exact_bytes_and_starts_a_separate_private_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let original = import_world(&paths, &request(source_world(temp.path()))).unwrap();
+        let world: WorldId = original.world_id.parse().unwrap();
+        let storage = Storage::open(paths.root.clone()).unwrap();
+        let original_snapshot = storage.latest_snapshot(world).unwrap().unwrap();
+        let original_epoch = storage.load_epoch_record(world).unwrap();
+        let original_membership = storage.load_membership_record(world).unwrap();
+        let original_config = storage.load_world_config(world).unwrap();
+        let mut recovery = RecoverCopyRequest {
+            source_world: world,
+            expected_checkpoint: original_snapshot.manifest_hash().unwrap(),
+            name: Some("Survival backup".into()),
+            confirm_new_identity: false,
+        };
+        assert!(recover_copy(&paths, &recovery).is_err());
+        recovery.confirm_new_identity = true;
+        let expected = recovery.expected_checkpoint;
+        recovery.expected_checkpoint = Hash32([0x55; 32]);
+        assert!(recover_copy(&paths, &recovery).is_err());
+        recovery.expected_checkpoint = expected;
+        for faults in [
+            ImportFaults { after_snapshot_commit: true, before_publication: false },
+            ImportFaults { after_snapshot_commit: false, before_publication: true },
+        ] {
+            assert!(recover_copy_inner(&paths, &recovery, faults).is_err());
+            assert_eq!(storage.list_worlds().unwrap().len(), 1);
+        }
+        let result = recover_copy(&paths, &recovery).unwrap();
+        let copy: WorldId = result.world_id.parse().unwrap();
+        assert_ne!(copy, world);
+        assert_eq!(result.source_world_id, original.world_id);
+        assert_eq!(result.source_snapshot_hash, original.snapshot_hash);
+        assert_eq!(result.display_name, "Recovered: Survival backup");
+        let new_snapshot = storage.latest_snapshot(copy).unwrap().unwrap();
+        assert_eq!(new_snapshot.entries, original_snapshot.entries);
+        assert_eq!(new_snapshot.state_root, original_snapshot.state_root);
+        assert_ne!(new_snapshot.manifest_hash().unwrap(), original_snapshot.manifest_hash().unwrap());
+        assert_eq!(new_snapshot.epoch, world_genesis::GENESIS_EPOCH);
+        assert!(new_snapshot.previous_snapshot_hash.is_none());
+        storage.verify_snapshot(&new_snapshot).unwrap();
+        swarm_core::verify_snapshot_signature(&new_snapshot).unwrap();
+        let config = storage.load_world_config(copy).unwrap();
+        assert_eq!(config.visibility, WorldVisibilityV1::Private);
+        assert_eq!(config.compatibility, original_config.compatibility);
+        assert!(!config.authority_policy.allow_solo_advancement);
+        assert!(config.presentation.description.contains(&original.world_id));
+        assert!(config.presentation.description.contains(&original.snapshot_hash));
+        assert!(crate::hosting_budget::load_consent(&paths, copy).unwrap().is_none());
+        assert!(migration::load_runtime_config(&paths, copy).is_err());
+        assert!(!paths.root.join("runtime").join(copy.to_hex()).exists());
+        assert_eq!(storage.load_epoch_record(world).unwrap(), original_epoch);
+        assert_eq!(storage.load_membership_record(world).unwrap(), original_membership);
+        assert_eq!(storage.load_world_config(world).unwrap(), original_config);
+        assert_eq!(storage.latest_snapshot(world).unwrap().unwrap(), original_snapshot);
+        assert_eq!(storage.list_worlds().unwrap().len(), 2);
+        let restored = temp.path().join("recovered-bytes");
+        storage.restore_snapshot(&new_snapshot, &restored).unwrap();
+        assert_eq!(fs::read(restored.join("level.dat")).unwrap(), b"existing-level-data\n");
+        assert_eq!(fs::read(restored.join("region/r.0.0.mca")).unwrap(), b"existing-region-data\n");
+    }
+
+    #[test]
+    fn recovery_copy_refuses_corrupt_source_without_publishing_a_world() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let original = import_world(&paths, &request(source_world(temp.path()))).unwrap();
+        let world: WorldId = original.world_id.parse().unwrap();
+        let storage = Storage::open(paths.root.clone()).unwrap();
+        let snapshot = storage.latest_snapshot(world).unwrap().unwrap();
+        let blob = &snapshot.entries[0].blob;
+        let extension = match blob.encoding {
+            swarm_protocol::BlobEncoding::Raw => "raw",
+            swarm_protocol::BlobEncoding::Zstd => "zst",
+        };
+        let path = storage.world_dir(world).join("blobs").join(format!("{}.{extension}", blob.hash.to_hex()));
+        fs::write(path, b"corrupt").unwrap();
+        assert!(recover_copy(
+            &paths,
+            &RecoverCopyRequest {
+                source_world: world,
+                expected_checkpoint: snapshot.manifest_hash().unwrap(),
+                name: None,
+                confirm_new_identity: true,
+            }
+        )
+        .is_err());
+        assert_eq!(storage.list_worlds().unwrap().len(), 1);
+        assert_eq!(storage.latest_snapshot(world).unwrap().unwrap(), snapshot);
     }
 
     #[test]

@@ -146,6 +146,21 @@
     </form>
   </dialog>
 
+<dialog id="recoveryCopyDialog" class="dialog" aria-labelledby="recoveryCopyTitle">
+    <form class="dialog-card" method="dialog">
+      <div>
+        <h2 id="recoveryCopyTitle">Create a separate recovered world?</h2>
+        <p>This copies the exact local checkpoint after verifying its signed history and files. It does not restore authority over the original, and may not include its newest remote changes. Hosting permission and runtime setup are not inherited.</p>
+      </div>
+      <pre id="recoveryCopySource" class="diagnostic-output"></pre>
+      <div id="recoveryCopyResult" class="inline-notice" role="status" aria-live="polite" hidden></div>
+      <div class="dialog-actions">
+        <button id="cancelRecoveryCopy" class="button button-secondary" value="cancel" type="submit">Cancel</button>
+        <button id="confirmRecoveryCopy" class="button button-warning" type="button">Create new private world</button>
+      </div>
+    </form>
+  </dialog>
+
 <dialog id="sleepDialog" class="dialog">
     <form class="dialog-card" method="dialog">
       <div>

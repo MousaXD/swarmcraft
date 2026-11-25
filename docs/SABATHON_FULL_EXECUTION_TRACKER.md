@@ -4,7 +4,7 @@ Baseline: `2d45f97b5e31118a7074361e141a90b9296eccbd` (2026-11-25).
 
 All 68 original backlog IDs retained. Acceptance text is copied from the two roadmap documents. Historical partial work is not counted as complete. NOT STARTED means not yet started in this execution ledger, not necessarily absent from source. IN PROGRESS includes existing partial work. LOCALLY VERIFIED here is scoped to implemented automated components, not full acceptance. CI VERIFIED requires the current source and complete item-specific evidence; FIELD VERIFIED requires field evidence. No item is marked fully accepted at initialization.
 
-Current CI: [45519415707](https://github.com/MousaXD/swarmcraft/actions/runs/45519415707) completed successfully: 20 selected jobs passed, optional soak skipped, exact source commit `2d45f97`. Previous `a7f2326` run 45515921964 passed 20 selected jobs on retry. See [live integration status](SABATHON_P0_LIVE_INTEGRATION_STATUS.md) for scope and residuals.
+Current CI: [45524776685](https://github.com/MousaXD/swarmcraft/actions/runs/45524776685) completed successfully on `e1f7bce` (certified successor offers). Earlier `bfca9f5` run 45523386525 was cancelled; `d6bf294` run 45521764635 completed successfully with 20 selected jobs passed. Newer checkpoints below have local evidence and still require exact-SHA CI. See [live integration status](SABATHON_P0_LIVE_INTEGRATION_STATUS.md) for scope and residuals.
 
 ## Status accounting
 
@@ -115,12 +115,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #11 — P1 · Partial
 - Work: Expose a clear recovery path when a sole valid copy survives but quorum is gone. Reuse export/import and add a labeled recovered-world workflow
 - Acceptance: The original bytes are preserved. A new recovered world uses a new identity unless a valid original authority transition exists. UI clearly identifies the old and new worlds
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: crates/swarm-cli/src/{world_import,historical_authority,main}.rs; apps/desktop/src/{app,recovery-copy,backend-adapter}.js; native Tauri recover_copy and Svelte parity; docs/RECOVERED_COPY.md
+- Evidence: Exact selected hash and complete retained signed history verified offline; independent private genesis, identical file state root, atomic staging, no inherited consent, and unchanged original signed records. Corruption, wrong selection, interrupted publication, and missing confirmation regressions pass; real multi-daemon offline former-replica recovery via CLI passes. 140 CLI library tests, 2 invite/recovery integration tests, strict CLI Clippy, native Tauri check, 137 Desktop tests including ChromeDriver confirmation/cancel/reopen/duplicate-click checks at three sizes, 29 Svelte source tests, and 82 Svelte unit tests pass.
+- Remaining / next action: Exact-SHA CI; installed native recovery journey on representative retained world. Unsupported incomplete/pruned/conflicting history stays denied; manual verified export is separate.
+- External dependency: Installed native UI field acceptance, including a real Minecraft save.
+- Commit: See 25 November recovered-copy checkpoint.
 
 ### #12 — Sabathon P0 · Missing
 - Work: Build authenticated game-traffic transport as a dedicated libp2p stream protocol (reusing existing QUIC/TCP/Noise/DCUtR/relay) wired directly into the P0 loopback gateway (#3), isolated from `request-response` snapshot sync
@@ -741,3 +741,9 @@ Initial full-item implementation/acceptance totals: not yet established by item-
 - #8: chose explicit online-overlap handoff for a separate, fixed two-member policy, no automatic crash recovery, immutable release after old runtime is quiesced, exact recipient receipt/checkpoint and strictly advancing generation. The design explicitly distinguishes world-data rollback from undetectable complete control-journal rollback and retains new-world recovery for lost grants. Async dropbox is a future transport-only option.
 - Five isolated model regressions passed; bounded exploration checked 3,165 unique independent-journal states with partition, restart, checkpoint loss, canceled attempts, reverse transfer and delayed/duplicate records. All 51 consensus unit/integration tests and strict all-target/all-feature Clippy passed.
 - No live policy, production signing/journal, UI, permit or route changes activated. Independent review and actual two-device field tests remain open. Continue #11 and other locally actionable work without loosening the existing quorum rules.
+
+### 25 November: recovered private world copy
+
+- #11: explicit CLI and Desktop recovery copy pins the selected manifest hash, verifies the complete retained signed history and blob bytes without manufacturing an original-authority replay envelope, and publishes a newly signed private world only after staging and verification. Its independent genesis preserves the exact file state root and compatibility contract. Original data/control records remain unchanged; source memberships, runtime, consent, invitations and recovery authority are not inherited. Incomplete, pruned, conflicting and unsupported legacy histories remain fail-closed.
+- Local evidence: strict CLI Clippy; 140 CLI library tests; both actual multi-daemon invite/recovery tests, including an offline replica whose original authority is different (147.69s); native Tauri cargo check; 137 Desktop tests with real headless Chrome at 980x760, 720x560, 1280x900, using a temporary version-matched ChromeDriver and mocked IPC for UI actions; 29 Svelte source parity tests; Svelte type check and 82 unit tests. The browser caught and verified the fix for a delayed close event clearing a reopened dialog's selection. Corrected the previously stale typed join_world hostCandidate argument while checking Svelte.
+- The recovered-copy browser receipt identifies both world IDs, with explicit confirmation and no original authority change. Actual installed native Minecraft recovery and exact-SHA CI remain separate acceptance. See docs/RECOVERED_COPY.md. Continue #10 invite lifecycle and further locally testable items.
