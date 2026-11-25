@@ -1,0 +1,42 @@
+{
+  "complete": true,
+  "packages": {
+    "candidate": {
+      "files": {
+        "desktop": "261af5271386947b3330b0c58bfeac65d494f24e46fc224207e2a22d0ae927e6",
+        "swarmcraft": "afa6f0f15640aa289e34e5e18f1af3457793981265ec0101d34d5d1a917cbee8",
+        "swarmcraft-host": "7ba365e175ed785fe27b343f016414c7508b57177483411763c5afe5140772b8",
+        "swarmcraft-import": "c1619302bfb1ca1c2bfc0cf41816ecc5cf3dd1a42c8e81666e10ac4cc8f79493",
+        "swarmcraft-runtime": "21569069e8b16d70fa0335590165cafa8c40c7806b115005381b1ed5a0ff32c2"
+      },
+      "metadata": "Package: swarm-craft\nVersion: 0.5.1\nArchitecture: amd64\n",
+      "package_sha256": "34dfaf14f2841b3a32a79b2340ee56764cfeb275e4cb69df1466bd4259c3aeba"
+    },
+    "shipping": {
+      "files": {
+        "desktop": "342a615a47c3a2a3374c32bcb9bbec566a5612e246f44d6c5b413cdfeeedff65",
+        "swarmcraft": "afa6f0f15640aa289e34e5e18f1af3457793981265ec0101d34d5d1a917cbee8",
+        "swarmcraft-host": "7ba365e175ed785fe27b343f016414c7508b57177483411763c5afe5140772b8",
+        "swarmcraft-import": "c1619302bfb1ca1c2bfc0cf41816ecc5cf3dd1a42c8e81666e10ac4cc8f79493",
+        "swarmcraft-runtime": "21569069e8b16d70fa0335590165cafa8c40c7806b115005381b1ed5a0ff32c2"
+      },
+      "metadata": "Package: swarm-craft\nVersion: 0.5.1\nArchitecture: amd64\n",
+      "package_sha256": "3a7bc76bf7262ab5af142a7420fceea7bc2da1932f8e87a8ff7a8365d937270b"
+    }
+  },
+  "release_certified": false,
+  "schema": 1,
+  "scope": "extracted-deb-frontend-replacement-shared-profile",
+  "source": {
+    "build_inputs_unchanged": true,
+    "operator_build_commit": "c1e3ade9987f65c82487a9ffb278f41e8bfca848",
+    "runner_commit": "c1e3ade9987f65c82487a9ffb278f41e8bfca848"
+  },
+  "stages": {
+    "candidate-opt-in": true,
+    "candidate-withdraw": true,
+    "shipping-created": true,
+    "shipping-final-rollback": true,
+    "shipping-rollback": true
+  }
+}

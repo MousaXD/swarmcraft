@@ -351,7 +351,21 @@ zero Svelte type warnings/errors, legacy browser regression at all
 three viewports, 23 acceptance-contract tests, three frontend script
 tests, six hosting-consent CLI tests (including the real invalid-record
 warning/JSON separation regression), strict targeted Clippy, formatting,
-and five-workflow policy check passed. The real package rebuild after
-the sidecar fix and the final native rollback remain to be exercised.
-Windows/macOS native installed QA and the complete multi-device
-journeys remain prerequisites for any production cutover.
+and five-workflow policy check passed.
+
+The corrected real Linux packages were built from
+`c1e3ade9987f65c82487a9ffb278f41e8bfca848`. All five native rollback
+stages passed on one isolated WebKitGTK/Xvfb session sequence: private
+world creation, explicit candidate opt-in to 512 MiB, legacy rollback,
+candidate withdrawal, and final legacy rollback. Each stage verified
+the same identity, world, signed checkpoint and persisted consent;
+the application and its packaged sidecars exited between stages.
+The four sidecar hashes were identical across packages. The screenshots
+were reviewed locally: opt-in reported insufficient current memory
+for hosting, and withdrawal visibly returned the device to player-only.
+No Java server was started and no eligibility or safe live-host
+shutdown was inferred. See the sanitized
+[exact-commit evidence](../../research/desktop-rollback/evidence/linux-native-20261125.json).
+This is a completed local idle rollback, not OS updater rollback or
+full release certification. Windows/macOS installed QA, the complete
+multi-device journeys and final production cutover remain outstanding.
