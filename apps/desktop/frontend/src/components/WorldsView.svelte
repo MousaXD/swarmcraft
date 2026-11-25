@@ -76,7 +76,7 @@
               <div class="pane-head">
                 <div>
                   <h2>Your worlds</h2>
-                  <p id="worldCount" class="meta-text">{#if $worldState.busy}Loading…{:else if $worldState.phase === 'unavailable'}Could not read local worlds{:else if !$worldState.worlds.length}No local worlds{:else}{$worldState.worlds.length} {$worldState.worlds.length === 1 ? 'world' : 'worlds'}{/if}</p>
+                  <p id="worldCount" class="meta-text" role="status" aria-atomic="true">{#if $worldState.busy}Loading…{:else if $worldState.phase === 'unavailable'}Could not read local worlds{:else if !$worldState.worlds.length}No local worlds{:else}{$worldState.worlds.length} {$worldState.worlds.length === 1 ? 'world' : 'worlds'}{/if}</p>
                 </div>
                 <button id="refresh" class="icon-button" type="button" aria-label="Refresh worlds" title="Refresh worlds" onclick={refreshWorlds} disabled={$worldState.busy} aria-busy={$worldState.busy}>↻</button>
               </div>
@@ -99,10 +99,10 @@
                 {:else}
                   {#each $worldState.worlds as world (world.id)}
                     <button type="button" class="world-row" class:is-selected={selectedId === world.id}
-                      data-world-id={world.id} aria-pressed={selectedId === world.id}
+                      data-world-id={world.id} aria-pressed={selectedId === world.id} aria-controls="selectionContent"
                       disabled={$worldState.busy} onclick={() => selectWorld(world.id)}>
                       <span class="world-row-title">
-                        <strong>{world.name}</strong>
+                        <strong title={world.name}>{world.name}</strong>
                         <span class="world-row-id">{world.id}</span>
                       </span>
                       <span class={`status-badge ${worldSafetyTone(world.status.Safety)}`}>{world.status.Safety || 'Unknown'}</span>
@@ -137,13 +137,13 @@
                       <h2 id="selectedName">{selectedEntry?.name || 'World'}</h2>
                       <span id="selectedSafety" class={`status-badge ${worldSafetyTone(selectedEntry?.status.Safety)}`}>{selectedEntry?.status.Safety || 'Unknown'}</span>
                     </div>
-                    <button id="copyWorldId" class="machine-button" type="button" title="Copy World ID">
+                    <button id="copyWorldId" class="machine-button" type="button" title="Copy World ID" aria-label="Copy full World ID" aria-describedby="selectedWorldId">
                       <span id="selectedWorldId" class="machine-line">{selectedEntry?.id || ''}</span>
                       <span aria-hidden="true">⧉</span>
                     </button>
                   </div>
                   <div class="hero-actions">
-                    <button id="playWorld" class="button button-primary play-button" type="button" disabled>Play</button>
+                    <button id="playWorld" class="button button-primary play-button" type="button" aria-describedby="playAvailability" disabled>Play</button>
                     <button id="inviteWorld" class="button button-secondary" type="button">Invite</button>
                     <button id="transferHost" class="button button-secondary authority-transfer" type="button" disabled>Transfer host</button>
                   </div>
@@ -275,7 +275,7 @@
                   <div class="section-heading migration-heading">
                     <div>
                       <h3 id="migrationTitle">Host handoff</h3>
-                      <p id="migrationSummary">No host migration is active.</p>
+                      <p id="migrationSummary" role="status" aria-atomic="true">No host migration is active.</p>
                     </div>
                     <span id="migrationBadge" class="status-badge neutral">Not active</span>
                   </div>

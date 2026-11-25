@@ -641,6 +641,8 @@ export function install() {
     async (event) => {
       event.preventDefault();
       event.stopImmediatePropagation();
+      const form = event.currentTarget;
+      if (form.dataset.busy === 'true' || form.dataset.canonicalCreated === 'true') return;
       const name = clean(byId('createName').value);
       const minecraftVersion = clean(byId('createMinecraft').value);
       const loaderVersion = clean(byId('createLoader').value);
@@ -649,7 +651,9 @@ export function install() {
         setCreateMessage('Choose a name, Minecraft version, Fabric Loader, and visibility.', 'error');
         return;
       }
-      const submit = event.currentTarget.querySelector('button[type="submit"]');
+      const submit = form.querySelector('button[type="submit"]');
+      form.dataset.busy = 'true';
+      form.setAttribute('aria-busy', 'true');
       if (submit) submit.disabled = true;
       setCreateMessage('Resolving exact mods and dependencies…');
       try {
@@ -673,25 +677,37 @@ export function install() {
             },
           },
         });
+        form.dataset.canonicalCreated = 'true';
         const pendingPackages = [...unique.values()];
         try {
           await finishLocalModSetup(created, pendingPackages, submit);
         } catch (setupError) {
           const retry = async (retryEvent) => {
             const button = retryEvent.currentTarget;
+            if (form.dataset.busy === 'true') return;
+            form.dataset.busy = 'true';
+            form.setAttribute('aria-busy', 'true');
             button.disabled = true;
             button.textContent = 'Retrying local setup…';
             try {
               await finishLocalModSetup(created, pendingPackages, submit);
             } catch (retryError) {
               renderCreateRepairState({ created, pendingPackages, error: retryError, retry });
+            } finally {
+              form.dataset.busy = 'false';
+              form.removeAttribute('aria-busy');
             }
           };
           renderCreateRepairState({ created, pendingPackages, error: setupError, retry });
         }
       } catch (error) {
         setCreateMessage(errorText(error), 'error');
-        if (submit) submit.disabled = false;
+      } finally {
+        form.dataset.busy = 'false';
+        form.removeAttribute('aria-busy');
+        if (submit && form.dataset.canonicalCreated !== 'true') {
+          submit.disabled = !byId('createMinecraft')?.value || !byId('createLoader')?.value;
+        }
       }
     },
     true,

@@ -8,6 +8,7 @@
   <script src="./bootstrap.js" defer></script>
 </head>
 <body>
+  <button id="skipToCurrentView" class="skip-to-view" type="button">Skip to current view</button>
   <div class="app-shell">
     <aside class="sidebar" aria-label="Primary navigation">
       <div class="brand">
@@ -54,10 +55,10 @@
     <main class="workspace">
       <header class="topbar">
         <div class="topbar-title">
-          <h1 id="viewTitle">Worlds</h1>
+          <h1 id="viewTitle" tabindex="-1">Worlds</h1>
           <span id="viewContext">Choose a world and play</span>
         </div>
-        <div class="topbar-status" role="status" aria-live="polite">
+        <div class="topbar-status" role="status" aria-live="polite" aria-atomic="true">
           <span id="statusDot" class="status-dot" aria-hidden="true"></span>
           <span id="status">Starting…</span>
         </div>
@@ -71,7 +72,7 @@
               <div class="pane-head">
                 <div>
                   <h2>Your worlds</h2>
-                  <p id="worldCount" class="meta-text">Loading…</p>
+                  <p id="worldCount" class="meta-text" role="status" aria-atomic="true">Loading…</p>
                 </div>
                 <button id="refresh" class="icon-button" type="button" aria-label="Refresh worlds" title="Refresh worlds">↻</button>
               </div>
@@ -102,13 +103,13 @@
                       <h2 id="selectedName">World</h2>
                       <span id="selectedSafety" class="status-badge neutral">Unknown</span>
                     </div>
-                    <button id="copyWorldId" class="machine-button" type="button" title="Copy World ID">
+                    <button id="copyWorldId" class="machine-button" type="button" title="Copy World ID" aria-label="Copy full World ID" aria-describedby="selectedWorldId">
                       <span id="selectedWorldId" class="machine-line"></span>
                       <span aria-hidden="true">⧉</span>
                     </button>
                   </div>
                   <div class="hero-actions">
-                    <button id="playWorld" class="button button-primary play-button" type="button" disabled>Play</button>
+                    <button id="playWorld" class="button button-primary play-button" type="button" aria-describedby="playAvailability" disabled>Play</button>
                     <button id="inviteWorld" class="button button-secondary" type="button">Invite</button>
                     <button id="transferHost" class="button button-secondary authority-transfer" type="button" disabled>Transfer host</button>
                   </div>
@@ -154,7 +155,7 @@
                   <div>
                     <span id="hostReadinessQuestion" class="section-label">Can I turn off this PC?</span>
                     <h3 id="hostReadinessTitle">Checking shutdown safety…</h3>
-                    <p id="hostReadinessDetail">SwarmCraft is checking whether another device can safely keep this world available.</p>
+                    <p id="hostReadinessDetail" aria-live="polite">SwarmCraft is checking whether another device can safely keep this world available.</p>
                   </div>
                 </section>
 
@@ -222,7 +223,7 @@
                   <div class="section-heading migration-heading">
                     <div>
                       <h3 id="migrationTitle">Host handoff</h3>
-                      <p id="migrationSummary">No host migration is active.</p>
+                      <p id="migrationSummary" role="status" aria-atomic="true">No host migration is active.</p>
                     </div>
                     <span id="migrationBadge" class="status-badge neutral">Not active</span>
                   </div>
@@ -637,12 +638,12 @@
     </main>
   </div>
 
-  <dialog id="inviteDialog" class="dialog">
+  <dialog id="inviteDialog" class="dialog" aria-labelledby="inviteDialogTitle" aria-describedby="inviteDialogDescription">
     <form id="inviteForm" class="dialog-card" method="dialog">
       <div class="dialog-heading">
         <div>
-          <h2>Invite to <span id="inviteWorldName">world</span></h2>
-          <p>A signed invite is reusable until it expires or is revoked. Anyone with the token can request admission; signed membership approval is still required.</p>
+          <h2 id="inviteDialogTitle">Invite to <span id="inviteWorldName">world</span></h2>
+          <p id="inviteDialogDescription">A signed invite is reusable until it expires or is revoked. Anyone with the token can request admission; signed membership approval is still required.</p>
         </div>
         <button id="closeInvite" class="icon-button" value="cancel" type="submit" aria-label="Close invite dialog">×</button>
       </div>
@@ -663,6 +664,7 @@
         </div>
       </details>
       <div id="inviteError" class="form-error" role="alert" hidden></div>
+      <p id="invitePendingNotice" data-dialog-progress class="inline-notice" role="status" aria-atomic="true" hidden></p>
       <div id="inviteResultWrap" class="invite-result" hidden>
         <label for="inviteResult">Signed invite</label>
         <textarea id="inviteResult" rows="5" readonly spellcheck="false"></textarea>
@@ -734,25 +736,27 @@
     </form>
   </dialog>
 
-  <dialog id="sleepDialog" class="dialog">
+  <dialog id="sleepDialog" class="dialog" aria-labelledby="sleepDialogTitle" aria-describedby="sleepDialogDescription">
     <form class="dialog-card" method="dialog">
       <div>
-        <h2>Stop this world?</h2>
-        <p>SwarmCraft will stop the local Minecraft runtime. This does not itself create a durable sleeping migration state. Background replica storage can continue separately.</p>
+        <h2 id="sleepDialogTitle">Stop this world?</h2>
+        <p id="sleepDialogDescription">SwarmCraft will stop the local Minecraft runtime. This does not itself create a durable sleeping migration state. Background replica storage can continue separately.</p>
       </div>
+      <p id="sleepDialogNotice" data-dialog-progress class="inline-notice" role="status" aria-atomic="true" hidden></p>
       <div class="dialog-actions">
-        <button class="button button-secondary" value="cancel" type="submit">Cancel</button>
+        <button id="cancelSleep" class="button button-secondary" value="cancel" type="submit">Cancel</button>
         <button id="confirmSleep" class="button button-warning" value="default" type="button">Stop world</button>
       </div>
     </form>
   </dialog>
 
-  <dialog id="leaveDialog" class="dialog">
+  <dialog id="leaveDialog" class="dialog" aria-labelledby="leaveDialogTitle" aria-describedby="leaveDialogText">
     <form method="dialog" class="dialog-card">
       <div>
-        <h2>Leave this world?</h2>
+        <h2 id="leaveDialogTitle">Leave this world?</h2>
         <p id="leaveDialogText">This stages a signed leave request for the selected world.</p>
       </div>
+      <p id="leavePendingNotice" data-dialog-progress class="inline-notice" role="status" aria-atomic="true" hidden></p>
       <div class="dialog-actions">
         <button id="cancelLeave" class="button button-secondary" value="cancel" type="submit">Cancel</button>
         <button id="confirmLeave" class="button button-danger" value="default" type="button">Leave world</button>

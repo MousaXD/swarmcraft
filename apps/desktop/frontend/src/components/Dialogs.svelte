@@ -108,12 +108,12 @@
   }
 </script>
 
-<dialog id="inviteDialog" class="dialog" oncancel={preventCloseWhilePending}>
+<dialog id="inviteDialog" class="dialog" aria-labelledby="inviteDialogTitle" aria-describedby="inviteDialogDescription" oncancel={preventCloseWhilePending}>
     <form id="inviteForm" class="dialog-card" method="dialog" onsubmit={preventInviteSubmitWhilePending}>
       <div class="dialog-heading">
         <div>
-          <h2>Invite to <span id="inviteWorldName">world</span></h2>
-          <p>A signed invite is reusable until it expires or is revoked. Anyone with the token can request admission; signed membership approval is still required.</p>
+          <h2 id="inviteDialogTitle">Invite to <span id="inviteWorldName">world</span></h2>
+          <p id="inviteDialogDescription">A signed invite is reusable until it expires or is revoked. Anyone with the token can request admission; signed membership approval is still required.</p>
         </div>
         <button id="closeInvite" class="icon-button" value="cancel" type="submit" disabled={busy} aria-label="Close invite dialog">×</button>
       </div>
@@ -134,6 +134,7 @@
         </div>
       </details>
       <div id="inviteError" class="form-error" role="alert" hidden={!error}>{error}</div>
+      <p id="invitePendingNotice" data-dialog-progress class="inline-notice" role="status" aria-atomic="true" hidden={!busy}>Creating the signed invitation. Wait for the native result before closing.</p>
       <div id="inviteResultWrap" class="invite-result" hidden={!showSigned}>
         <label for="inviteResult">Signed invite</label>
         <textarea id="inviteResult" bind:this={output} value={signed} rows="5" readonly spellcheck="false"></textarea>
@@ -206,25 +207,27 @@
     </form>
   </dialog>
 
-<dialog id="sleepDialog" class="dialog">
+<dialog id="sleepDialog" class="dialog" aria-labelledby="sleepDialogTitle" aria-describedby="sleepDialogDescription">
     <form class="dialog-card" method="dialog">
       <div>
-        <h2>Stop this world?</h2>
-        <p>SwarmCraft will stop the local Minecraft runtime. This does not itself create a durable sleeping migration state. Background replica storage can continue separately.</p>
+        <h2 id="sleepDialogTitle">Stop this world?</h2>
+        <p id="sleepDialogDescription">SwarmCraft will stop the local Minecraft runtime. This does not itself create a durable sleeping migration state. Background replica storage can continue separately.</p>
       </div>
+      <p id="sleepDialogNotice" data-dialog-progress class="inline-notice" role="status" aria-atomic="true" hidden></p>
       <div class="dialog-actions">
-        <button class="button button-secondary" value="cancel" type="submit">Cancel</button>
+        <button id="cancelSleep" class="button button-secondary" value="cancel" type="submit">Cancel</button>
         <button id="confirmSleep" class="button button-warning" value="default" type="button">Stop world</button>
       </div>
     </form>
   </dialog>
 
-<dialog id="leaveDialog" class="dialog" oncancel={preventCloseWhilePending}>
-    <form method="dialog" class="dialog-card">
+<dialog id="leaveDialog" class="dialog" aria-labelledby="leaveDialogTitle" aria-describedby="leaveDialogText" oncancel={preventCloseWhilePending}>
+    <form method="dialog" class="dialog-card" onsubmit={(event) => { if (leaving) event.preventDefault(); }}>
       <div>
-        <h2>Leave this world?</h2>
+        <h2 id="leaveDialogTitle">Leave this world?</h2>
         <p id="leaveDialogText">This stages a signed leave request for the selected world.</p>
       </div>
+      <p id="leavePendingNotice" data-dialog-progress class="inline-notice" role="status" aria-atomic="true" hidden={!leaving}>Requesting membership leave. Wait for the native result before closing.</p>
       <p class="form-error" role="alert" hidden={!leaveError}>{leaveError}</p>
       <div class="dialog-actions">
         <button id="cancelLeave" class="button button-secondary" value="cancel" type="submit" disabled={leaving}>Cancel</button>

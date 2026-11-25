@@ -1,0 +1,83 @@
+{
+  "date": "2026-11-25",
+  "scope": "Linux x86_64 extracted Debian packages; actual WebKitGTK and four bundled Rust sidecars",
+  "build_base": "9151b4b766a54a1e16abb7c160d35997be62b801",
+  "variants": {
+    "shipping": {
+      "stages": {
+        "boot": true,
+        "980x760": {
+          "keyboard_only": true,
+          "long_name_and_id": true,
+          "dialog_semantics": true,
+          "layout": true,
+          "escape_and_focus": true,
+          "safe_stop_cancel": true
+        },
+        "720x560": {
+          "keyboard_only": true,
+          "long_name_and_id": true,
+          "dialog_semantics": true,
+          "layout": true,
+          "escape_and_focus": true,
+          "safe_stop_cancel": true
+        },
+        "native_dialog_accessibility": true,
+        "checkpoint_and_consent_unchanged": true
+      },
+      "package_sha256": "13106fff681783e0709bd9fae3b4e9e3682cdafa8f5bde6fcf97060b084dca31",
+      "files": {
+        "desktop": "36e0a8ab83ee30d2dfe43bad5324058b01cbc0571a27602ea97fdc801dcc50db",
+        "swarmcraft": "90457c8d7cdae03c2db68152e2221cfc7631915bc260ece68878249f41ada45c",
+        "swarmcraft-host": "271eaec6e697f46ec02a9f39a76f5b892803018feb84f3cc8c796ae3c8b34720",
+        "swarmcraft-runtime": "dae85c6c3cc26ccd5c90671ce3e8958c64d6ef69a4c02f7256ba58dc1b9c57ce",
+        "swarmcraft-import": "d22321087482560c218fca94c28b35cac69c6c5687c30d20d0491536922e6d72"
+      },
+      "engine": {
+        "engine": "WebKitGTK",
+        "native_driver": "WebKitWebDriver"
+      }
+    },
+    "candidate": {
+      "stages": {
+        "boot": true,
+        "980x760": {
+          "keyboard_only": true,
+          "long_name_and_id": true,
+          "dialog_semantics": true,
+          "layout": true,
+          "escape_and_focus": true,
+          "safe_stop_cancel": true
+        },
+        "720x560": {
+          "keyboard_only": true,
+          "long_name_and_id": true,
+          "dialog_semantics": true,
+          "layout": true,
+          "escape_and_focus": true,
+          "safe_stop_cancel": true
+        },
+        "native_dialog_accessibility": true,
+        "checkpoint_and_consent_unchanged": true
+      },
+      "package_sha256": "3c15c3b3b1a79b47200be27552ce8752472c8f2d7acead82ce5d954f7b34e06c",
+      "files": {
+        "desktop": "db6d2e8ed7cc527cada18f456f5b75afcfa80349acdbcedc87de6c23d39a09ac",
+        "swarmcraft": "90457c8d7cdae03c2db68152e2221cfc7631915bc260ece68878249f41ada45c",
+        "swarmcraft-host": "271eaec6e697f46ec02a9f39a76f5b892803018feb84f3cc8c796ae3c8b34720",
+        "swarmcraft-runtime": "dae85c6c3cc26ccd5c90671ce3e8958c64d6ef69a4c02f7256ba58dc1b9c57ce",
+        "swarmcraft-import": "d22321087482560c218fca94c28b35cac69c6c5687c30d20d0491536922e6d72"
+      },
+      "engine": {
+        "engine": "WebKitGTK",
+        "native_driver": "WebKitWebDriver"
+      }
+    }
+  },
+  "limitations": [
+    "Native packages extracted, not system-installed; actual WebKitGTK and bundled Rust sidecars. Accessible names/descriptions/live-region attributes inspected in the native DOM; no OS screen-reader speech or accessibility API certification.",
+    "Effective scaled CSS viewport and interrupted IPC response tests use the browser fixture, not native OS scaling or a real interrupted runtime install.",
+    "Windows/macOS and complete live gameplay not tested."
+  ],
+  "build_source": "Working tree based on 9151b4b; final implementation built before evidence/docs checkpoint; both variants repeated successfully with the retained native runner."
+}

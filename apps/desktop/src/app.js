@@ -3,6 +3,7 @@ import { createImportRequest, parseImportResult } from './import-flow.js';
 import { installImportReview } from './import-review.js';
 import { installClientPreparation } from './client-preparation.js';
 import { describeModAcquisition } from './mod-acquisition.js';
+import { actionPending, focusAvailable, focusCurrentView, guardDialogDismissal, openTaskDialog } from './accessibility.js';
 import { normalizeRecoveryReview, recoveryCopyReceipt, recoveryExportReceipt } from './recovery-copy.js';
 import { validateInviteToken, inspectInviteReceipt, revocationRequest, revokeInviteReceipt, pendingMembershipMessage } from './invite-lifecycle.js';
 import { clientContinuityFromMigration, ensureClientContinuityPanel } from './client-continuity.js';
@@ -74,7 +75,7 @@ function setStatus(message, tone = 'neutral') {
     message = 'Networking needs attention';
     tone = 'warning';
   }
-  $('status').textContent = message;
+  if ($('status').textContent !== message) $('status').textContent = message;
   $('statusDot').className = `status-dot ${tone}`;
 }
 
@@ -95,7 +96,7 @@ function setOutput(output, label = '') {
 function showInline(id, message, tone = 'neutral') {
   const element = $(id);
   if (!element) return;
-  element.textContent = message;
+  if (element.textContent !== message) element.textContent = message;
   element.hidden = !message;
   element.dataset.tone = tone;
 }
@@ -147,6 +148,7 @@ async function run(label, work, { quiet = false, successMessage = null, logResul
 
 function showView(name, { focus = true } = {}) {
   if (!viewMeta[name]) return;
+  const changed = currentView !== name;
   currentView = name;
   for (const panel of document.querySelectorAll('[data-view-panel]')) {
     const active = panel.dataset.viewPanel === name;
@@ -162,6 +164,7 @@ function showView(name, { focus = true } = {}) {
   const [title, context] = viewMeta[name];
   $('viewTitle').textContent = title;
   $('viewContext').textContent = context;
+  if (changed) document.dispatchEvent(new Event('swarmcraftcontextchanged'));
   if (name === 'diagnostics') {
     updateDiagnosticsContext();
     // Svelte candidate owns the Diagnostics network display. Shipping legacy
@@ -172,10 +175,7 @@ function showView(name, { focus = true } = {}) {
       refreshConnectivityDiagnostics({ logFailure: false }).catch(() => {});
     }
   }
-  if (focus) {
-    const panel = document.querySelector(`[data-view-panel="${name}"]`);
-    panel?.querySelector('input:not([type="hidden"]):not(:disabled), textarea:not(:disabled), button:not(:disabled), summary, [tabindex]')?.focus({ preventScroll: true });
-  }
+  if (focus) focusCurrentView();
 }
 
 function parseLines(text) {
@@ -291,7 +291,7 @@ async function refreshConnectivityDiagnostics({ logFailure = false } = {}) {
 
 function updatePlayState(world) {
   const eligibility = hostingEligibility(world);
-  $('playWorld').disabled = !eligibility.enabled;
+  $('playWorld').disabled = actionPending($('playWorld')) || !eligibility.enabled;
   $('playAvailability').textContent = eligibility.reason;
   $('playAvailability').dataset.tone = eligibility.enabled ? 'safe' : 'warning';
   $('runtimeEligibilityHint').textContent = eligibility.reason;
@@ -302,13 +302,13 @@ function updateWorldSpecificControls() {
   const world = selectedWorld();
   const hasWorld = Boolean(world);
   const eligibility = hostingEligibility(world);
-  for (const control of document.querySelectorAll('.world-required')) control.disabled = !hasWorld;
-  for (const control of document.querySelectorAll('.authority-required')) control.disabled = !hasWorld || !eligibility.enabled;
-  $('playWorld').disabled = !hasWorld || !eligibility.enabled;
+  for (const control of document.querySelectorAll('.world-required')) control.disabled = actionPending(control) || !hasWorld;
+  for (const control of document.querySelectorAll('.authority-required')) control.disabled = actionPending(control) || !hasWorld || !eligibility.enabled;
+  $('playWorld').disabled = actionPending($('playWorld')) || !hasWorld || !eligibility.enabled;
 
   const migration = backend.migration.capabilities;
-  $('transferHost').disabled = !hasWorld || !migration.transfer || !eligibility.enabled;
-  $('wakeWorld').disabled = !hasWorld || !migration.wake;
+  $('transferHost').disabled = actionPending($('transferHost')) || !hasWorld || !migration.transfer || !eligibility.enabled;
+  $('wakeWorld').disabled = actionPending($('wakeWorld')) || !hasWorld || !migration.wake;
   $('transferAvailability').hidden = migration.transfer;
   $('transferAvailability').textContent = migration.transfer ? '' : 'Manual host transfer is not available in this build.';
   if (migration.transfer && migration.wake) {
@@ -326,6 +326,7 @@ function clearSelection() {
   membershipRequestGeneration += 1;
   showInline('membershipNotice', '');
   if ($('refreshMembership')) $('refreshMembership').hidden = true;
+  const changed = Boolean(selectedWorldId);
   selectedWorldId = '';
   modAcquisitionGeneration += 1;
   showInline('modAcquisitionReport', '');
@@ -337,6 +338,7 @@ function clearSelection() {
   localCheckpointVerification = null;
   modsRequestGeneration += 1;
   $('world').value = '';
+  if (changed) document.dispatchEvent(new Event('swarmcraftcontextchanged'));
   $('selectionContent').hidden = true;
   $('noSelection').hidden = false;
   if (window.__swarmcraftSvelteWorldsOwned === true) {
@@ -412,7 +414,8 @@ function renderMigration(state) {
   // The persisted Ready phase can survive a hard crash. It is not a live
   // Minecraft process check or a signed client route, so never paint it green.
   $('migrationBadge').className = `status-badge ${migration.failed || continuity.tone === 'danger' ? 'danger' : migration.available ? 'warning' : 'neutral'}`;
-  $('migrationSummary').textContent = migration.detail || (migration.available ? migration.label : 'No host migration is active.');
+  const summary = migration.detail || (migration.available ? migration.label : 'No host migration is active.');
+  if ($('migrationSummary').textContent !== summary) $('migrationSummary').textContent = summary;
   $('migrationProgress').hidden = !migration.available || migration.failed || migration.blocked || migration.phase === 'ready';
   $('migrationProgressBar').style.width = `${migration.progress}%`;
   runtimeSetupActionButton().hidden = migration.action !== 'runtime-setup';
@@ -426,7 +429,10 @@ function renderMigration(state) {
     const index = MIGRATION_PHASES.indexOf(phase);
     item.textContent = migrationLabels[phase];
     if (migration.phase === 'failed' && index <= activeIndex) item.classList.add('is-failed');
-    else if (phase === migration.phase) item.classList.add(migration.failed ? 'is-failed' : 'is-current');
+    else if (phase === migration.phase) {
+      item.classList.add(migration.failed ? 'is-failed' : 'is-current');
+      item.setAttribute('aria-current', 'step');
+    }
     else if (index < activeIndex && migration.phase !== 'failed') item.classList.add('is-complete');
     steps.append(item);
   });
@@ -823,6 +829,7 @@ function queueGameGatewaySelection(world) {
 }
 
 function selectWorld(world, { focusDetail = false } = {}) {
+  const changed = selectedWorldId !== world.id;
   hostReadinessRequestGeneration += 1;
   if (window.__swarmcraftSvelteReadinessOwned !== true) renderHostReadiness(null);
   gameRouteRequestGeneration += 1;
@@ -836,6 +843,7 @@ function selectWorld(world, { focusDetail = false } = {}) {
   clientPreparation.select(world.id);
   queueGameGatewaySelection(world);
   $('world').value = world.id;
+  if (changed) document.dispatchEvent(new Event('swarmcraftcontextchanged'));
   // The candidate now renders read-only selected-world metadata directly
   // from Svelte's current native Rust world-list response. Preserve legacy
   // updates in the shipping frontend and keep all action gates in Rust.
@@ -891,6 +899,7 @@ function renderWorld(world) {
   row.type = 'button';
   row.className = 'world-row';
   row.dataset.worldId = world.id;
+  row.setAttribute('aria-controls', 'selectionContent');
   row.setAttribute('aria-pressed', world.id === selectedWorldId ? 'true' : 'false');
   row.addEventListener('click', () => selectWorld(world));
 
@@ -898,6 +907,7 @@ function renderWorld(world) {
   title.className = 'world-row-title';
   const name = document.createElement('strong');
   name.textContent = world.name;
+  name.title = world.name;
   const id = document.createElement('span');
   id.className = 'world-row-id';
   id.textContent = world.id;
@@ -1342,7 +1352,7 @@ function openInviteManagement() {
   clearInviteInspection();
   showInline('inviteManagementNotice', '');
   setInviteManagementBusy(false);
-  $('inviteManagementDialog').showModal();
+  openTaskDialog($('inviteManagementDialog'), $('manageInvites'), $('manageInviteToken'));
 }
 
 async function inspectManagedInvite() {
@@ -1417,8 +1427,8 @@ function openInviteDialog() {
   $('inviteResult').value = '';
   $('inviteResultWrap').hidden = true;
   showInline('inviteError', '');
-  $('inviteDialog').showModal();
-  $('inviteMinutes').focus();
+  if (!window.__swarmcraftSvelteInviteOwned) showInline('invitePendingNotice', '');
+  openTaskDialog($('inviteDialog'), $('inviteWorld'), $('inviteMinutes'));
 }
 
 async function createInvite() {
@@ -1442,6 +1452,7 @@ async function createInvite() {
 
 async function copyText(text, label) {
   if (!text) return;
+  const previous = document.activeElement;
   try {
     await navigator.clipboard.writeText(text);
   } catch (_) {
@@ -1450,10 +1461,18 @@ async function copyText(text, label) {
     temp.setAttribute('readonly', '');
     temp.style.position = 'fixed';
     temp.style.opacity = '0';
-    document.body.append(temp);
-    temp.select();
-    document.execCommand('copy');
-    temp.remove();
+    const parent = document.querySelector('dialog[open]') || document.body;
+    parent.append(temp);
+    try {
+      temp.select();
+      if (!document.execCommand('copy')) throw new Error('Clipboard denied');
+    } catch {
+      setStatus(`Could not copy ${label}. Select and copy the text manually.`, 'warning');
+      return;
+    } finally {
+      temp.remove();
+      focusAvailable(previous);
+    }
   }
   setStatus(`${label} copied`, 'safe');
 }
@@ -1491,7 +1510,7 @@ async function verifyWorld() {
     if (manifestHash) localCheckpointVerification = { worldId: requestedWorldId, manifestHash };
   }
   renderGameRoute();
-  showInline('worldNotice', 'Replica verification completed. Detailed output is available in Activity.', 'safe');
+  if (requestedWorldId === selectedWorldId) showInline('worldNotice', 'Replica verification completed. Detailed output is available in Activity.', 'safe');
 }
 
 async function setSeeding(enabled) {
@@ -1503,7 +1522,8 @@ async function setSeeding(enabled) {
 
 function openSleepDialog() {
   if (!selectedWorld()) throw new Error('Choose a world first.');
-  $('sleepDialog').showModal();
+  showInline('sleepDialogNotice', '');
+  openTaskDialog($('sleepDialog'), $('sleepWorld'), $('cancelSleep'));
 }
 
 async function sleepWorld() {
@@ -1521,7 +1541,8 @@ function openLeaveDialog() {
   if (!world) throw new Error('Choose a world first.');
   $('leaveDialogText').textContent = `This stages a signed leave request for ${world.name}. Local membership changes after the request is accepted.`;
   if (window.__swarmcraftSvelteLeaveOwned) window.__swarmcraftResetSvelteLeave?.();
-  $('leaveDialog').showModal();
+  if (!window.__swarmcraftSvelteLeaveOwned) showInline('leavePendingNotice', '');
+  openTaskDialog($('leaveDialog'), $('leaveWorld'), $('cancelLeave'));
 }
 
 async function performLeaveWorld() {
@@ -1706,7 +1727,7 @@ async function openRecoveryCopy() {
     showInline('recoveryChoiceNotice', notice, count || recoveryReview.checkpointError ? 'warning' : 'neutral');
     showInline('recoveryCopyNotice', '');
     selectRecoveryChoice();
-    $('recoveryCopyDialog').showModal();
+    openTaskDialog($('recoveryCopyDialog'), $('openRecoveryCopy'), $('recoveryChoice'));
   } catch (error) {
     if (selectedWorldId === requestedWorld) showInline('recoveryCopyNotice', String(error), 'warning');
   }
@@ -1895,21 +1916,42 @@ function bindAction(id, handler, { submit = false } = {}) {
     if (id === 'identityButton' && window.__swarmcraftSvelteIdentityOwned === true) return;
     if ((id === 'startDaemon' || id === 'stopDaemon')
         && window.__swarmcraftSvelteNetworkingOwned === true) return;
-    if (element.dataset.busy === 'true') return;
-    const busyControl = submit && event.submitter ? event.submitter : element;
+    if (actionPending(element)) return;
+    const busyControl = submit ? event.submitter || element.querySelector('button[type="submit"]') || element : element;
+    const hadFocus = document.activeElement === busyControl;
+    const dialog = element.closest('dialog');
+    const dismiss = dialog ? [...dialog.querySelectorAll('button[type="submit"]')] : [];
+    const enabledDismiss = dismiss.filter(control => !control.disabled);
+    const progress = dialog?.querySelector('[data-dialog-progress]');
+    let outcomeUnconfirmed = false;
     element.dataset.busy = 'true';
     busyControl.disabled = true;
     busyControl.setAttribute('aria-busy', 'true');
+    for (const control of enabledDismiss) control.disabled = true;
+    if (progress) {
+      progress.textContent = 'Working with the native backend. This action cannot be dismissed until its outcome is known.';
+      progress.hidden = false;
+    }
     try {
       await handler(event);
     } catch (error) {
+      outcomeUnconfirmed = true;
       if (!error?.swarmcraftActivityLogged) setOutput(String(error), 'Action failed');
+      if (progress) {
+        progress.textContent = 'The outcome could not be confirmed. Review the world or Activity before retrying.';
+        progress.hidden = false;
+      }
     } finally {
       element.dataset.busy = 'false';
       busyControl.disabled = false;
       busyControl.removeAttribute('aria-busy');
+      for (const control of enabledDismiss) control.disabled = false;
+      if (progress && !outcomeUnconfirmed) progress.hidden = true;
       updateWorldSpecificControls();
       if (id === 'importForm') importReview.sync();
+      if (hadFocus && (document.activeElement === document.body || document.activeElement === dialog)) {
+        focusAvailable(busyControl);
+      }
     }
   });
 }
@@ -1925,6 +1967,8 @@ window.__swarmcraftTakeImportReview = request => importReview.take(request);
 window.__swarmcraftRefreshImportReview = () => importReview.sync();
 
 for (const nav of document.querySelectorAll('.nav-item[data-view]')) nav.addEventListener('click', () => showView(nav.dataset.view));
+$('skipToCurrentView')?.addEventListener('click', focusCurrentView);
+document.addEventListener('swarmcraftplaysettled', updateWorldSpecificControls);
 for (const back of document.querySelectorAll('[data-back-worlds]')) back.addEventListener('click', () => showView('worlds'));
 $('quickCreate').addEventListener('click', () => showView('create'));
 $('quickImport').addEventListener('click', () => showView('import'));
@@ -1949,6 +1993,16 @@ bindAction('importForm', importWorld, { submit: true });
 bindAction('joinForm', joinWorld, { submit: true });
 bindAction('joinWorldIdButton', joinWorldId);
 bindAction('createInvite', createInvite);
+for (const [dialogId, actionId] of [['inviteDialog', 'createInvite'], ['sleepDialog', 'confirmSleep'], ['leaveDialog', 'confirmLeave']]) {
+  const dialog = $(dialogId);
+  guardDialogDismissal(dialog, () => actionPending($(actionId)), () => {
+    const notice = dialog.querySelector('[data-dialog-progress]');
+    if (notice) {
+      notice.textContent = 'This native action is still pending. Wait for its outcome before closing.';
+      notice.hidden = false;
+    }
+  });
+}
 $('manageInvites')?.addEventListener('click', openInviteManagement);
 $('refreshMembership')?.addEventListener('click', refreshMembershipStatus);
 $('inspectInvite')?.addEventListener('click', inspectManagedInvite);

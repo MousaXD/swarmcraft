@@ -435,12 +435,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #43 — P2 · Proposal
 - Work: Improve accessibility and everyday polish across main actions
 - Acceptance: Both supported window sizes, keyboard-only flow, screen-reader names/live state, scaling, long names and IDs, and interrupted progress pass on installed builds
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (scoped UI and packaged Linux checks; full accessibility/platform acceptance pending)
+- Source: apps/desktop/src/{accessibility,app,runtime-wizard,launcher-controller,catalog-selectors}.js; apps/desktop/src/{index.html,style.css,player-experience.css}; Svelte App/Dialogs/Topbar/WorldsView; apps/desktop/tests/desktop-browser-webdriver.test.mjs; scripts/acceptance/native_desktop_accessibility.py.
+- Evidence: [Accessibility report](../research/desktop-accessibility/REPORT.md) and [real packaged Linux evidence](../research/desktop-accessibility/evidence/linux-native-20261125.json). Shared focus and dialog behavior, accessible names/live-state markup, long-name/ID handling, duplicate/pending-action guards and stale runtime response refusal implemented. 156 frontend Node tests, Svelte unit/source-parity checks, Svelte check/build and five-workflow policy passed. Both real Chromium variants passed shared journeys and interrupted-runtime/invitation tests at three viewports, keyboard-only flows at 980x760 and 720x560, and effective scaled viewports at 576x448 and 360x280. Both extracted current Debian packages with identical four real Rust sidecars passed native WebKitGTK keyboard-only Invite/Stop cancellation and focus restoration at both supported sizes, native dialog semantics/layout, exact long names/IDs and unchanged verified checkpoint/player-only consent. Repeated with retained native runner. Initial browser multi-viewport fixture state leak corrected; screenshot review corrected a shrinking close control before the final build.
+- Remaining / next action: OS accessibility API/screen-reader and actual OS scale testing, system-installed Windows/macOS/Linux coverage, broader native main-action and real interrupted-runtime coverage. Keep qualified field acceptance distinct from browser fixtures. Do not mark full acceptance complete.
+- External dependency: Native assistive technology and platform field environments, plus qualified real Fabric runtime for live operation interruption.
+- Commit: Accessibility and everyday usability checkpoint; see git history.
 
 ### #44 — P2 · Research
 - Work: Evaluate additional loaders, Bedrock clients, and cross-play separately
@@ -448,8 +448,8 @@ Implementation completion: count only items whose full implementation criteria a
 - State: **NOT STARTED**
 - Source: Pending item-specific source mapping; see original roadmap links.
 - Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
+- Remaining / next action: Deferred by explicit roadmap prerequisite: #42 pinned Fabric tuple is not field-qualified. Do not widen loader/protocol support or advertise cross-play before proving the Fabric baseline. Continue independent backlog items such as #45.
+- External dependency: #42 actual Fabric bridge/server/client lifecycle qualification with authorized licensed client and native platform evidence.
 - Commit: Pending item-specific attribution
 
 ### #45 — P2 · Partial

@@ -181,6 +181,15 @@ async function startLocalCdp() {
     };
     return {
       close: cleanup,
+      async key(name) {
+        const [code, key, vk, text] = {
+          Tab: ['Tab', 'Tab', 9], Enter: ['Enter', 'Enter', 13, '\r'],
+          Escape: ['Escape', 'Escape', 27], Space: ['Space', ' ', 32, ' '],
+        }[name];
+        const event = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk };
+        await send('Input.dispatchKeyEvent', { ...event, type: text ? 'keyDown' : 'rawKeyDown', ...(text ? { text } : {}) });
+        await send('Input.dispatchKeyEvent', { ...event, type: 'keyUp' });
+      },
       async request(pathname, body) {
         if (pathname.endsWith('/url')) {
           const result = await send('Page.navigate', { url: body.url });
@@ -307,6 +316,11 @@ window.__swarmcraftImportBlocked = false;
 window.__swarmcraftImportDelay = false;
 window.__swarmcraftImportedWorld = null;
 window.__swarmcraftClientDelay = false;
+window.__swarmcraftAccessibilityFixture = false;
+window.__swarmcraftHoldRuntimeStatus = false;
+window.__swarmcraftReleaseRuntimeStatus = null;
+window.__swarmcraftReleaseInstall = null;
+window.__swarmcraftReleaseInvite = null;
 addEventListener('error', (event) => {
   window.__swarmcraftBrowserErrors.push(String(event.error?.stack || event.message || event.error || 'window error'));
 });
@@ -356,13 +370,16 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
         { version: '0.19.3', stable: true, minecraft_version: args.minecraftVersion, adapter_supported: args.minecraftVersion === '26.1.2', selection_state: args.minecraftVersion === '26.1.2' ? 'pinned_baseline' : 'unsupported_adapter' },
         { version: '0.19.2', stable: true, minecraft_version: args.minecraftVersion, adapter_supported: false, selection_state: 'unsupported_adapter' },
       ] };
-    case 'list_worlds': return window.__swarmcraftImportedWorld
+    case 'list_worlds': return window.__swarmcraftAccessibilityFixture
+      ? 'scworld:' + 'a'.repeat(64) + '  ' + 'LongWorldName'.repeat(14) + '  snapshots=1\nscworld:' + 'b'.repeat(64) + '  Second world  snapshots=1'
+      : window.__swarmcraftImportedWorld
       ? window.__swarmcraftImportedWorld + '  Reviewed import  snapshots=1'
       : window.__swarmcraftRecoveryWorld
       ? window.__swarmcraftRecoveryWorld + '  Recovery source  snapshots=4'
       : 'No local worlds.';
     case 'game_route_status': return { world_id: args.world, state: 'unavailable', route_verified: false, diagnostic: 'peer_link_unavailable', recent_session: { state: 'stream_admission_failed', age_ms: 100 } };
     case 'world_status':
+      if (window.__swarmcraftAccessibilityFixture) return 'Safety: Canonical\nMinecraft: 26.1.2\nLatest snapshot: 1';
       if (args.world === window.__swarmcraftImportedWorld) {
         return ['World: Reviewed import', 'World ID: ' + args.world, 'Safety: Canonical', 'Latest snapshot: 1'].join('\n');
       }
@@ -372,6 +389,27 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
           ...(window.__swarmcraftPendingMembership ? ['Membership: ' + window.__swarmcraftPendingMembership] : [])].join('\n');
       }
       return '';
+    case 'world_compatibility': return window.__swarmcraftAccessibilityFixture ? 'Authority eligibility: Compatible' : '';
+    case 'runtime_status':
+      if (!window.__swarmcraftAccessibilityFixture) return null;
+      if (window.__swarmcraftHoldRuntimeStatus) {
+        window.__swarmcraftHoldRuntimeStatus = false;
+        return await new Promise(resolve => { window.__swarmcraftReleaseRuntimeStatus = resolve; });
+      }
+      return JSON.stringify({ ready: false, eula_required: true, eula_accepted: false, retry_safe: false });
+    case 'runtime_install':
+      if (window.__swarmcraftAccessibilityFixture) {
+        await new Promise(resolve => { window.__swarmcraftReleaseInstall = resolve; });
+        throw new Error('Fixture installation interrupted');
+      }
+      return null;
+    case 'runtime_launch': return null;
+    case 'create_invite':
+      if (window.__swarmcraftAccessibilityFixture) {
+        await new Promise(resolve => { window.__swarmcraftReleaseInvite = resolve; });
+        throw new Error('Fixture invitation response unavailable');
+      }
+      return null;
     case 'recovery_review':
       return JSON.stringify({
         world_id: args.world, evidence: 'local_signed_history_not_live_authority',
@@ -590,6 +628,9 @@ const scenario = String.raw`(async () => {
   require(document.getElementById('createWorld').disabled, 'Create submit was re-enabled after canonical world already existed');
   require(document.getElementById('createRepairRetry'), 'Local mod repair action was not offered');
   require(document.getElementById('createError').textContent.includes('was created canonically'), 'Partial-success copy did not preserve canonical creation success');
+  document.getElementById('createForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await wait(50);
+  require(window.__swarmcraftCalls.filter((call) => call.command === 'create_canonical_world').length === 1, 'Repeated submit duplicated the canonical world');
   require(document.querySelector('#sleepDialog .dialog-card > div:first-child p').textContent.includes('durable sleeping state'), 'Stop dialog did not expose durable sleeping semantics');
 
   for (const id of [
@@ -923,6 +964,151 @@ Promise.resolve().then(() => eval(arguments[0])).then(
 );
 `;
 
+const accessibilityScenario = String.raw`(async () => {
+  const $ = id => document.getElementById(id);
+  const require = (condition, message) => { if (!condition) throw new Error(message); };
+  const waitFor = async (predicate, label) => {
+    for (let i = 0; i < 240; i++) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    throw new Error('Timed out waiting for ' + label);
+  };
+  window.__swarmcraftAccessibilityFixture = true;
+  $('navWorlds').click();
+  $('refresh').click();
+  await waitFor(() => $('selectedName').textContent === 'LongWorldName'.repeat(14) && !$('playWorld').disabled, 'compatible long-name world');
+  // Readiness checks may make their own status calls during refresh. Wait
+  // for those before holding the explicit Play inspection.
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const before = window.__swarmcraftCalls.length;
+  window.__swarmcraftHoldRuntimeStatus = true;
+  $('playWorld').click();
+  await waitFor(() => typeof window.__swarmcraftReleaseRuntimeStatus === 'function', 'held runtime inspection');
+  $('openJoin').click();
+  $('navWorlds').click();
+  window.__swarmcraftReleaseRuntimeStatus(JSON.stringify({ ready: true, eula_accepted: true }));
+  await waitFor(() => $('playWorld').dataset.runtimeWizardBusy === 'false', 'stale inspection retired');
+  require(!$('runtimeSetupDialog').open, 'Late status reopened a dismissed journey');
+  require(!window.__swarmcraftCalls.slice(before).some(c => c.command === 'runtime_launch'), 'Late status launched after navigation');
+
+  $('playWorld').click();
+  await waitFor(() => $('runtimeSetupDialog').open && !$('runtimeEulaStep').hidden, 'runtime setup');
+  require(document.activeElement === $('runtimeEulaAccept'), 'EULA consent is not the initial keyboard focus');
+  require(!$('runtimeEulaAccept').checked && $('runtimeSetupContinue').disabled, 'EULA was implicitly accepted');
+  $('runtimeEulaAccept').click();
+  $('runtimeSetupContinue').click();
+  await waitFor(() => typeof window.__swarmcraftReleaseInstall === 'function', 'held runtime installation');
+  const runtime = $('runtimeSetupDialog');
+  require($('runtimeSetupClose').disabled && $('runtimeAdvancedSetup').disabled, 'In-progress setup could be dismissed');
+  const cancellation = new Event('cancel', { cancelable: true });
+  runtime.dispatchEvent(cancellation);
+  require(cancellation.defaultPrevented && runtime.open, 'Escape bypassed pending native operation');
+  $('runtimeSetupContinue').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  require(window.__swarmcraftCalls.slice(before).filter(c => c.command === 'runtime_install').length === 1, 'Duplicate runtime installation');
+  window.__swarmcraftReleaseInstall();
+  await waitFor(() => !$('runtimeFailureStep').hidden && !$('runtimeSetupClose').disabled, 'interrupted setup feedback');
+  require(runtime.open && $('runtimeWizardCapability').textContent.includes('not started'), 'Setup interruption was represented as success');
+  require(!window.__swarmcraftCalls.slice(before).some(c => c.command === 'runtime_launch'), 'Interrupted setup launched Minecraft');
+  $('runtimeSetupClose').click();
+  await waitFor(() => !runtime.open, 'runtime close');
+
+  $('inviteWorld').click();
+  await waitFor(() => $('inviteDialog').open, 'invite dialog');
+  $('createInvite').click();
+  await waitFor(() => typeof window.__swarmcraftReleaseInvite === 'function', 'held invitation');
+  const invite = $('inviteDialog');
+  require($('createInvite').disabled && $('cancelInvite').disabled, 'Invitation controls did not stay disabled while pending');
+  const escape = new Event('cancel', { cancelable: true });
+  invite.dispatchEvent(escape);
+  require(escape.defaultPrevented && invite.open, 'Pending invite could be dismissed');
+  $('createInvite').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  require(window.__swarmcraftCalls.slice(before).filter(c => c.command === 'create_invite').length === 1, 'Duplicate signed invitation');
+  window.__swarmcraftReleaseInvite();
+  await waitFor(() => !$('createInvite').disabled && !$('inviteError').hidden, 'invitation failure recovery');
+  $('cancelInvite').click();
+  await waitFor(() => !invite.open, 'invite close');
+  require(window.__swarmcraftBrowserErrors.length === 0, 'Accessibility scenario errors: ' + window.__swarmcraftBrowserErrors.join(' | '));
+  return { status: 'pass' };
+})()`;
+
+async function keyInput(port, sessionId, name) {
+  if (typeof port === 'object') return port.key(name);
+  const value = { Tab: '\uE004', Enter: '\uE007', Escape: '\uE00C', Space: '\uE00D' }[name];
+  await webdriverRequest(port, `/session/${sessionId}/actions`, {
+    method: 'POST', body: { actions: [{ type: 'key', id: 'a11y-keyboard', actions: [
+      { type: 'keyDown', value }, { type: 'keyUp', value },
+    ] }] },
+  });
+}
+
+async function tabTo(port, sessionId, selector) {
+  for (let attempt = 0; attempt < 140; attempt++) {
+    if (await execute(port, sessionId, 'return document.activeElement?.matches(arguments[0]);', [selector])) return;
+    await keyInput(port, sessionId, 'Tab');
+  }
+  assert.fail('Keyboard Tab traversal did not reach ' + selector);
+}
+
+async function keyboardGate(port, sessionId, screenshotPath) {
+  const read = (script, args = []) => execute(port, sessionId, script, args);
+  const key = name => keyInput(port, sessionId, name);
+  await tabTo(port, sessionId, '#skipToCurrentView');
+  assert.equal(await read('return document.activeElement.getBoundingClientRect().top >= 0'), true);
+  await key('Enter');
+  assert.equal(await read('return document.activeElement.textContent.trim()'), 'Your worlds');
+  await tabTo(port, sessionId, '.world-row[data-world-id="scworld:' + 'a'.repeat(64) + '"]');
+  await key('Enter');
+  assert.equal(await read('return document.activeElement.getAttribute("aria-pressed")'), 'true');
+  await tabTo(port, sessionId, '#inviteWorld');
+  assert.equal(await read('return getComputedStyle(document.activeElement).outlineStyle !== "none"'), true);
+  await key('Enter');
+  assert.equal(await read('return document.getElementById("inviteDialog").open'), true);
+  assert.equal(await read('return document.activeElement.id'), 'inviteMinutes');
+  const dialog = await read(`
+    const d = document.getElementById('inviteDialog');
+    const label = document.getElementById(d.getAttribute('aria-labelledby'));
+    const r = d.getBoundingClientRect();
+    return { named: label?.textContent.includes('LongWorldName'), bounds: r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight, overflow: d.scrollWidth > d.clientWidth + 2 };
+  `);
+  assert.deepEqual(dialog, { named: true, bounds: true, overflow: false });
+  if (screenshotPath) await writeFile(screenshotPath, Buffer.from(await webdriverRequest(port, `/session/${sessionId}/screenshot`), 'base64'));
+  await key('Escape');
+  // Native close events are queued after the keyboard event.
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(await read('return document.getElementById("inviteDialog").open'), false);
+  assert.equal(await read('return document.activeElement.id'), 'inviteWorld');
+  assert.equal(await read('return document.body.scrollWidth <= innerWidth && document.documentElement.scrollWidth <= innerWidth'), true);
+  // Verify the main dangerous action is reachable without a pointer and
+  // begins on Cancel. Escape must leave the native backend untouched.
+  await tabTo(port, sessionId, '#advancedWorldTools > summary');
+  if (!(await read('return document.getElementById("advancedWorldTools").open'))) await key('Enter');
+  await tabTo(port, sessionId, '#sleepWorld');
+  const before = await read('return window.__swarmcraftCalls.filter(c => c.command === "stop_host").length');
+  await key('Enter');
+  assert.equal(await read('return document.activeElement.id'), 'cancelSleep');
+  await key('Escape');
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(await read('return document.activeElement.id'), 'sleepWorld');
+  assert.equal(await read('return window.__swarmcraftCalls.filter(c => c.command === "stop_host").length'), before);
+}
+
+async function runAccessibilityGate(port, sessionId, width, height, screenshotPath) {
+  const result = await executeAsync(port, sessionId, scenarioRunner, [accessibilityScenario]);
+  assert.equal(result?.ok, true, `Accessibility/interruption scenario failed at ${width}x${height}: ${result?.error}`);
+  if (width > 1000) return;
+  await keyboardGate(port, sessionId, screenshotPath.replace(/\.png$/, '-keyboard.png'));
+  if (width === 720 && typeof port === 'object') {
+    // These are the effective CSS viewport sizes at 125% and 200% of the
+    // configured minimum window. No claim of native OS text-scale here.
+    for (const [w, h] of [[576, 448], [360, 280]]) {
+      await setViewport(port, sessionId, w, h);
+      await keyboardGate(port, sessionId, screenshotPath.replace(/\.png$/, `-scaled-${w}x${h}.png`));
+    }
+    await setViewport(port, sessionId, width, height);
+  }
+}
+
 function pngDimensions(buffer) {
   assert.equal(buffer.toString('ascii', 1, 4), 'PNG', 'Expected PNG screenshot');
   return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
@@ -974,6 +1160,7 @@ async function runViewport(port, sessionId, documentHtml, graph, width, height, 
   const clientProfile = await executeAsync(port, sessionId, scenarioRunner, [clientProfileScenario]);
   assert.equal(clientProfile?.ok, true, `Client preparation browser scenario failed at ${width}x${height}: ${clientProfile?.error || JSON.stringify(clientProfile)}`);
   assert.equal(clientProfile.value?.status, 'pass');
+  await runAccessibilityGate(port, sessionId, width, height, screenshotPath);
 }
 
 // Exercise the actual compiled Svelte module graph, including its shared
@@ -1051,6 +1238,7 @@ async function runCandidateViewport(port, sessionId, url, width, height, screens
     assert.deepEqual(pngDimensions(screenshot), { width, height });
     await writeFile(screenshotPath.replace(/\.png$/, `-${name}.png`), screenshot);
   }
+  await runAccessibilityGate(port, sessionId, width, height, screenshotPath);
 }
 
 test('current Desktop module graph initializes, owns canonical Create, and renders supported window sizes', async () => {

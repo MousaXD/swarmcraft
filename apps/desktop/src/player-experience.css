@@ -31,7 +31,6 @@
 
 .selection-content[data-player-experience="true"] .machine-button {
   margin-top: 9px;
-  opacity: .58;
 }
 
 .selection-content[data-player-experience="true"] .machine-button:hover,

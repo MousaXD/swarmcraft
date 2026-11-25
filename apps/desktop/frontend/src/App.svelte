@@ -57,6 +57,7 @@
   });
 </script>
 
+<button id="skipToCurrentView" class="skip-to-view" type="button">Skip to current view</button>
 <div class="app-shell">
   <Sidebar />
   <Workspace />

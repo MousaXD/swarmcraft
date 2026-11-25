@@ -44,6 +44,12 @@ The launcher centers normal use around:
 
 Conflict, solo/degraded, canonical, authority-eligibility, membership and relay semantics remain distinct. A storage replica never implies authority eligibility, and discovery never implies membership.
 
+## Keyboard and accessibility
+
+Press Tab to reach **Skip to current view**, then Enter to focus the view heading. Use Tab and Enter to select worlds and open actions; Escape dismisses idle dialogs and restores focus to the originating control. Destructive Stop/Leave confirmations initially focus Cancel. An in-flight native action cannot be dismissed or submitted twice while its result is pending. This is a UI guard, not a promise to cancel the Rust operation. If the outcome cannot be confirmed, review the current world state before retrying.
+
+Both frontends expose named controls and live status, wrap long world names, preserve the full copyable world ID, and retain reachable dialogs at reduced effective viewport widths. See the [local accessibility evidence](../../research/desktop-accessibility/REPORT.md) for the exact tested scope and remaining native screen-reader/platform work.
+
 ## Backend integration
 
 `src/backend-adapter.js` is the frontend boundary for Tauri command contracts. Authority, recovery, quorum, fencing, runtime verification and mod-readiness decisions stay in Rust.

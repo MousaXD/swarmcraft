@@ -1,3 +1,5 @@
+import { focusAvailable, guardDialogDismissal, openTaskDialog } from './accessibility.js';
+
 const WIZARD_MARK = 'swarmcraftRuntimeWizardRegistered';
 
 const PHASE_COPY = Object.freeze({
@@ -261,7 +263,7 @@ async function pollRuntimeStatus(backend, world, shouldStop, onStatus) {
     if (shouldStop()) return;
     try {
       const status = await backend.runtime.status(world);
-      onStatus(status);
+      if (!shouldStop()) onStatus(status);
     } catch (_) {
       // Installation owns the actionable error. Polling is best-effort progress only.
     }
@@ -294,6 +296,7 @@ function setDialogContext(world) {
   byId('runtimeSetupTitle').textContent = `Set up ${world.name}`;
   byId('runtimeSetupIntro').textContent = `SwarmCraft will prepare the server runtime for Minecraft ${world.minecraft}.`;
   byId('runtimeEulaAccept').checked = false;
+  byId('runtimeComponentList').replaceChildren();
   byId('runtimeFailureStep').hidden = true;
   byId('runtimeEulaStep').hidden = true;
   byId('runtimeRetrySetup').hidden = true;
@@ -310,14 +313,15 @@ async function launchPreparedWorld(backend, world, status, dialog = null) {
   try {
     const pid = await backend.runtime.launch(world.id);
     dialog?.close();
+    const stillSelected = currentWorldContext().id === world.id;
     if (pid == null) {
       // The daemon owns multiplayer hosting. A verified gateway is enough
       // to show manual reconnect instructions, NOT to claim that a local JVM
       // started or that any Minecraft player actually logged in.
-      setWorldNotice('Authenticated Minecraft route verified. Use the current localhost address under Join current host; connect in Minecraft Java Multiplayer.', 'safe');
+      if (stillSelected) setWorldNotice('Authenticated Minecraft route verified. Use the current localhost address under Join current host; connect in Minecraft Java Multiplayer.', 'safe');
       setActivity('A fresh signed multiplayer route is available. No direct Minecraft server was launched by Desktop.', 'Play');
     } else {
-      setWorldNotice(`Minecraft server started · PID ${pid}.`, 'safe');
+      if (stillSelected) setWorldNotice(`Minecraft server started · PID ${pid}.`, 'safe');
       setActivity(`Minecraft server runtime started with PID ${pid}.`, 'Play');
     }
     setTopStatus('Ready', 'safe');
@@ -336,70 +340,108 @@ export function registerRuntimeWizard(backend) {
 
   ensureStyles();
   const dialog = ensureDialog();
-  let previousFocus = null;
   let world = null;
   let latestStatus = null;
   let acceptedEula = false;
   let installGeneration = 0;
+  let inspectionGeneration = 0;
+  let installationPending = false;
+  document.addEventListener('swarmcraftcontextchanged', () => {
+    inspectionGeneration += 1;
+    if (installationPending) installGeneration += 1;
+  });
+  const selected = target => target?.id && currentWorldContext().id === target.id
+    && byId('worldsView')?.hidden === false;
+  const announcePending = () => {
+    const message = 'Minecraft setup is still running. Wait for the native result before closing.';
+    byId('runtimeWizardCapability').textContent = message;
+    byId('runtimeWizardCapability').dataset.tone = 'working';
+  };
+  const setInstallationPending = value => {
+    installationPending = value;
+    byId('runtimeSetupClose').disabled = value;
+    byId('runtimeAdvancedSetup').disabled = value;
+    byId('runtimeRetrySetup').disabled = value;
+  };
+  const beginContext = target => {
+    world = target;
+    latestStatus = null;
+    acceptedEula = false;
+    setDialogContext(target);
+  };
 
   const closeDialog = () => {
+    if (installationPending) { announcePending(); return; }
+    inspectionGeneration += 1;
     if (dialog.open) dialog.close();
     resetBusy();
-    previousFocus?.focus?.({ preventScroll: true });
   };
 
   byId('runtimeSetupClose').addEventListener('click', closeDialog);
+  guardDialogDismissal(dialog, () => installationPending, announcePending);
   dialog.addEventListener('cancel', (event) => {
     event.preventDefault();
     closeDialog();
   });
-  dialog.addEventListener('close', () => previousFocus?.focus?.({ preventScroll: true }));
-  byId('runtimeAdvancedSetup').addEventListener('click', () => openAdvancedSetup(dialog));
+  dialog.addEventListener('close', () => {
+    if (!dialog.open) inspectionGeneration += 1;
+  });
+  byId('runtimeAdvancedSetup').addEventListener('click', () => {
+    if (!installationPending) openAdvancedSetup(dialog);
+  });
   byId('runtimeEulaAccept').addEventListener('change', (event) => {
     acceptedEula = event.currentTarget.checked;
     byId('runtimeSetupContinue').disabled = !acceptedEula;
   });
 
   const inspectForPlay = async (playButton) => {
-    world = currentWorldContext();
-    if (!world.id) return;
-    previousFocus = playButton;
+    const requested = currentWorldContext();
+    if (!requested.id || installationPending || dialog.open) return;
+    const generation = ++inspectionGeneration;
+    const current = () => generation === inspectionGeneration && selected(requested);
+    beginContext(requested);
+    const hadFocus = document.activeElement === playButton;
     markPlayBusy(playButton, true);
     setTopStatus('Checking Minecraft setup…');
     try {
       const status = await backend.runtime.status(world.id);
+      if (!current()) return;
       latestStatus = status;
       if (status.ready) {
         await launchPreparedWorld(backend, world, status);
         return;
       }
-      setDialogContext(world);
-      dialog.showModal();
+      openTaskDialog(dialog, playButton, byId('runtimeSetupClose'));
       renderComponents(status);
       if (status.eulaRequired && !status.eulaAccepted) showEula(status);
       else showPreparation(status);
-      byId('runtimeSetupContinue').focus({ preventScroll: true });
+      if (!(status.eulaRequired && !status.eulaAccepted)) focusAvailable(byId('runtimeSetupContinue'));
     } catch (error) {
-      setDialogContext(world);
-      dialog.showModal();
+      if (!current()) return;
+      if (!dialog.open) openTaskDialog(dialog, playButton, byId('runtimeSetupClose'));
       if (error?.code === 'SWARMCRAFT_CAPABILITY_UNAVAILABLE') renderUnavailable(error);
       else renderFailure(error, latestStatus);
       setTopStatus('Runtime setup needs attention', 'warning');
     } finally {
       markPlayBusy(playButton, false);
+      document.dispatchEvent(new Event('swarmcraftplaysettled'));
+      if (hadFocus && !dialog.open && selected(requested) && document.activeElement === document.body) focusAvailable(playButton);
     }
   };
 
   const install = async () => {
-    if (!world?.id) return;
+    if (!world?.id || installationPending || !dialog.open || !selected(world)) return;
+    const requested = world;
     const generation = ++installGeneration;
+    const active = () => generation === installGeneration && dialog.open && selected(requested);
+    setInstallationPending(true);
     showInstalling(latestStatus);
     setTopStatus('Preparing Minecraft server…');
     let stopped = false;
     const polling = pollRuntimeStatus(
       backend,
       world.id,
-      () => stopped || generation !== installGeneration,
+      () => stopped || !active(),
       (status) => {
         latestStatus = status;
         showInstalling(status);
@@ -409,8 +451,11 @@ export function registerRuntimeWizard(backend) {
       latestStatus = await backend.runtime.install(world.id, { acceptEula: acceptedEula });
       stopped = true;
       await polling;
+      if (!active()) return;
       latestStatus = await backend.runtime.verify(world.id);
+      if (!active()) return;
       if (latestStatus.eulaRequired && !latestStatus.eulaAccepted) {
+        acceptedEula = false;
         showEula(latestStatus);
         resetBusy();
         return;
@@ -427,9 +472,17 @@ export function registerRuntimeWizard(backend) {
       stopped = true;
       await polling;
       resetBusy();
+      if (!active()) return;
       if (error?.code === 'SWARMCRAFT_CAPABILITY_UNAVAILABLE') renderUnavailable(error);
       else renderFailure(error, latestStatus);
       setTopStatus('Runtime setup needs attention', 'warning');
+    } finally {
+      stopped = true;
+      setInstallationPending(false);
+      resetBusy();
+      if (dialog.open && document.activeElement === document.body) {
+        focusAvailable(byId('runtimeRetrySetup')) || focusAvailable(byId('runtimeSetupContinue')) || focusAvailable(byId('runtimeSetupClose'));
+      }
     }
   };
 
@@ -447,25 +500,28 @@ export function registerRuntimeWizard(backend) {
     const play = event.target.closest?.('#playWorld');
     const migrationSetup = event.target.closest?.('#migrationRuntimeSetup');
     if (!play && !migrationSetup) return;
-    if (play?.disabled) return;
     event.preventDefault();
     event.stopImmediatePropagation();
+    if (play?.disabled || installationPending || dialog.open || byId('playWorld')?.dataset.runtimeWizardBusy === 'true') return;
     if (migrationSetup) {
-      world = currentWorldContext();
-      previousFocus = migrationSetup;
-      setDialogContext(world);
-      dialog.showModal();
-      backend.runtime.status(world.id).then((status) => {
+      const requested = currentWorldContext();
+      if (!selected(requested)) return;
+      const generation = ++inspectionGeneration;
+      const active = () => generation === inspectionGeneration && dialog.open && selected(requested);
+      beginContext(requested);
+      openTaskDialog(dialog, migrationSetup, byId('runtimeSetupClose'));
+      backend.runtime.status(requested.id).then((status) => {
+        if (!active()) return;
         latestStatus = status;
         if (status.eulaRequired && !status.eulaAccepted) showEula(status);
         else showPreparation(status);
       }).catch((error) => {
+        if (!active()) return;
         if (error?.code === 'SWARMCRAFT_CAPABILITY_UNAVAILABLE') renderUnavailable(error);
         else renderFailure(error, latestStatus);
       });
       return;
     }
-    if (play.dataset.runtimeWizardBusy === 'true') return;
     inspectForPlay(play);
   }, true);
 }

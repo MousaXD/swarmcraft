@@ -316,7 +316,7 @@ export function registerCatalogSelectors({ invoke, documentRef } = {}) {
   };
 
   const syncCreateButton = () => {
-    createButton.disabled = !state.ready;
+    createButton.disabled = !state.ready || form.dataset.busy === 'true' || form.dataset.canonicalCreated === 'true';
   };
 
   const clearSelect = (select, label) => {

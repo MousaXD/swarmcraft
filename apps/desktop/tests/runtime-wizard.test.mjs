@@ -92,7 +92,7 @@ test('Play flow is wizard-first only when setup is missing, but ready runtimes l
   const wizard = await source('runtime-wizard.js');
   assert.match(wizard, /const status = await backend\.runtime\.status\(world\.id\)/);
   assert.match(wizard, /if \(status\.ready\) \{\s*await launchPreparedWorld/);
-  assert.match(wizard, /dialog\.showModal\(\)/);
+  assert.match(wizard, /openTaskDialog\(dialog, playButton/);
   assert.match(wizard, /backend\.runtime\.install\(world\.id, \{ acceptEula: acceptedEula \}\)/);
   assert.match(wizard, /backend\.runtime\.verify\(world\.id\)/);
   assert.match(wizard, /backend\.runtime\.launch\(world\.id\)/);
@@ -122,7 +122,8 @@ test('wizard exposes explicit EULA, retry safety, advanced fallback, progress, a
   }
   assert.match(wizard, /status\?\.retrySafe !== true/);
   assert.match(wizard, /latestStatus\?\.retrySafe !== true/);
-  assert.match(wizard, /previousFocus\?\.focus/);
+  const accessibility = await source('accessibility.js');
+  assert.match(accessibility, /focusAvailable\(trigger\)/);
   assert.match(wizard, /dialog\.addEventListener\('cancel'/);
   assert.match(wizard, /pollRuntimeStatus/);
   assert.match(wizard, /Automatic Minecraft setup is not available in this build/);
