@@ -3,6 +3,7 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use swarm_network::{ReplicaPullTargetV1, REPLICA_PULL_CAPABILITY};
+use swarm_storage::replica_policy::ReplicaPolicy;
 
 const MAX_PULLS: usize = 4;
 const MAX_WORLDS: usize = 4;
@@ -146,7 +147,7 @@ impl PullRuntime {
 
 /// Only already accepted, ordinary quorum/recovery worlds. A pull capability
 /// is a transport hint, never authorization to discover or advance a world.
-fn scope(storage: &Storage, world: WorldId, local: PeerId) -> Result<(MembershipRecordV1, EpochRecordV1)> {
+pub(super) fn scope(storage: &Storage, world: WorldId, local: PeerId) -> Result<(MembershipRecordV1, EpochRecordV1)> {
     if storage.stale_publication_pending(world)?
         || storage.crash_retirement_pending(world)?
         || storage.first_contact_replay_pinned(world)?
@@ -241,13 +242,14 @@ fn descriptors_consistent(manifest: &SnapshotManifestV1) -> Result<()> {
 
 /// Admission never modifies canonical metadata. Negotiate only when the
 /// manifest sender advertised support and two distinct signed members are
-/// connected. One remaining source is enough to finish an existing pull.
+/// connected (one is enough when a local receive limit requires a pull).
 pub(super) fn negotiate(
     context: &HandlerContext<'_>,
     node: &SwarmNode,
     source: (TransportPeerId, PeerId),
     manifest: &SnapshotManifestV1,
     missing: &[BlobResumeV1],
+    policy: ReplicaPolicy,
     state: &mut RequestState<'_>,
 ) -> Result<Option<ReplicaPullTargetV1>> {
     let (transport, sender) = source;
@@ -274,7 +276,7 @@ pub(super) fn negotiate(
     if missing.is_empty()
         || missing.len() > MAX_BLOBS
         || state.leases.pulls.downloads.len() >= MAX_WORLDS
-        || state.leases.pulls.fallback_until.contains_key(&world)
+        || (!policy.requires_controlled_pull() && state.leases.pulls.fallback_until.contains_key(&world))
         || !node.application_supports(&transport, REPLICA_PULL_CAPABILITY)
     {
         return Ok(None);
@@ -282,7 +284,8 @@ pub(super) fn negotiate(
     let Ok((membership, epoch)) = scope(storage, world, identity.peer_id()) else { return Ok(None) };
     if !matches_epoch(manifest, &epoch)
         || epoch.authority_peer_id == identity.peer_id()
-        || current_candidates(node, state.leases, &membership).len() < 2
+        || current_candidates(node, state.leases, &membership).len()
+            < if policy.requires_controlled_pull() { 1 } else { 2 }
     {
         return Ok(None);
     }
@@ -366,6 +369,13 @@ pub(super) fn serve(
         if offset >= descriptor.encoded_size || max_bytes == 0 || max_bytes as usize > MAX_BLOB_CHUNK {
             bail!("invalid replica pull chunk");
         }
+        let policy = replica_cache::current_policy(storage, target.world_id)?;
+        if !replica_cache::send_allowed(policy)? {
+            return Ok(WireResponse::Error {
+                code: "REPLICA_PACED".into(),
+                message: "Replica is pacing background payloads".into(),
+            });
+        }
         let (limit, paced) =
             match state.leases.replication_pacer.plan(state.now, node.game_traffic_active(), max_bytes as usize) {
                 ChunkPlan::Ready { max_bytes, paced } => (max_bytes, paced),
@@ -376,6 +386,13 @@ pub(super) fn serve(
                     })
                 }
             };
+        let limit = state.leases.replica_budget.allowance(target.world_id, policy, state.now, limit);
+        if limit == 0 {
+            return Ok(WireResponse::Error {
+                code: "REPLICA_PACED".into(),
+                message: "Replica is pacing background payloads".into(),
+            });
+        }
         let (data, finished) = storage.read_encoded_blob_chunk(target.world_id, descriptor, offset, limit)?;
         if data.is_empty() || data.len() > limit {
             bail!("replica returned an invalid local chunk");
@@ -390,7 +407,14 @@ pub(super) fn serve(
         {
             bail!("replica source eligibility changed");
         }
+        if replica_cache::current_policy(storage, target.world_id)? != policy || !replica_cache::send_allowed(policy)? {
+            return Ok(WireResponse::Error {
+                code: "REPLICA_PACED".into(),
+                message: "Replica is pacing background payloads".into(),
+            });
+        }
         state.leases.replication_pacer.sent(state.now, data.len(), paced);
+        state.leases.replica_budget.charge(target.world_id, policy, Instant::now(), data.len());
         Ok(WireResponse::ReplicaBlobData { target, hash, offset, data, finished })
     })()
     .unwrap_or_else(|error| {
@@ -437,8 +461,15 @@ pub(super) fn drive(
     runtime: &mut LeaseRuntime,
     now: Instant,
 ) -> Result<()> {
-    let mut worlds =
-        runtime.pulls.downloads.iter().map(|(world, download)| (download.last_scheduled, *world)).collect::<Vec<_>>();
+    let mut worlds = runtime
+        .pulls
+        .downloads
+        .iter()
+        .map(|(world, download)| {
+            let hot = replica_cache::current_policy(context.storage, *world).is_ok_and(|policy| policy.hot);
+            (replica_cache::scheduling_key(download.last_scheduled, hot), *world)
+        })
+        .collect::<Vec<_>>();
     worlds.sort_unstable();
     runtime.pulls.fallback_until.retain(|_, until| *until > now);
     let active_game = node.game_traffic_active();
@@ -458,6 +489,19 @@ pub(super) fn drive(
             runtime.pulls.cancel(outbound, world);
             continue;
         };
+        let policy = match replica_cache::current_policy(context.storage, world)
+            .and_then(|policy| Ok((policy, replica_cache::receive_allowed(policy)?)))
+        {
+            Ok((policy, true)) => policy,
+            _ => {
+                // Drop only the negotiation. Already verified blobs and
+                // durable partials remain; no fallback can bypass a pause.
+                runtime.pulls.cancel(outbound, world);
+                pending.remove(&world);
+                info!(%world, "receiver-driven replica pull paused by local cache policy");
+                continue;
+            }
+        };
         let download = &runtime.pulls.downloads[&world];
         let Ok(membership) = eligible_current(context.storage, context.identity, manifest, download) else {
             runtime.pulls.cancel(outbound, world);
@@ -467,9 +511,11 @@ pub(super) fn drive(
         // A stalled pull never permanently disables ordinary push. Keep all
         // complete blobs and partial offsets; a later manifest renegotiates.
         if now.saturating_duration_since(download.last_progress) >= STALL_TIMEOUT && !download.blobs.is_empty() {
-            warn!(%world, "replica pull stalled; preserving payloads and allowing legacy fallback");
+            warn!(%world, controlled = policy.requires_controlled_pull(), "replica pull stalled; preserving payloads and renegotiating");
             runtime.pulls.cancel(outbound, world);
-            runtime.pulls.mark_fallback(world, now);
+            if !policy.requires_controlled_pull() {
+                runtime.pulls.mark_fallback(world, now);
+            }
             continue;
         }
         if download.blobs.is_empty() {
@@ -504,7 +550,9 @@ pub(super) fn drive(
                 } else {
                     warn!(%world, %error, "replica pull publication deferred to ordinary negotiation");
                     runtime.pulls.cancel(outbound, world);
-                    runtime.pulls.mark_fallback(world, now);
+                    if !policy.requires_controlled_pull() {
+                        runtime.pulls.mark_fallback(world, now);
+                    }
                 }
                 continue;
             }
@@ -536,12 +584,17 @@ pub(super) fn drive(
         if active >= capacity || download.pause_until.is_some_and(|until| until > now) {
             continue;
         }
+        if policy.requires_controlled_pull() && busy.iter().any(|(busy_world, _)| *busy_world == world) {
+            continue;
+        }
         // Ambiguous local I/O can leave a full partial after the last write.
         // Renegotiate through the durable resume/promotion path instead of
         // requesting zero bytes or subtracting an invalid offset.
         if download.blobs.values().any(|blob| blob.offset >= blob.descriptor.encoded_size) {
             runtime.pulls.cancel(outbound, world);
-            runtime.pulls.mark_fallback(world, now);
+            if !policy.requires_controlled_pull() {
+                runtime.pulls.mark_fallback(world, now);
+            }
             continue;
         }
         let mut candidates = current_candidates(node, runtime, &membership);
@@ -566,14 +619,26 @@ pub(super) fn drive(
                 ChunkPlan::Ready { max_bytes, paced } => (max_bytes, paced),
                 ChunkPlan::Deferred(_) => break,
             };
+            let max_bytes = runtime.replica_budget.allowance(world, policy, now, max_bytes);
+            if max_bytes == 0 {
+                break;
+            }
             let download = runtime.pulls.downloads.get_mut(&world).expect("active pull exists");
             let blob = download.blobs.get_mut(&hash).expect("selected pull blob exists");
+            let limit = max_bytes.min((blob.descriptor.encoded_size - blob.offset).min(usize::MAX as u64) as usize);
+            if policy.requires_controlled_pull() {
+                if let Err(error) = context.storage.try_require_payload_space(world, limit as u64) {
+                    tracing::debug!(%world, %error, "controlled replica pull deferred by local storage admission");
+                    download.pause_until = Some(now + REPLICATION_RATE_LIMIT_BACKOFF);
+                    download.last_progress = now;
+                    break;
+                }
+            }
             if blob.offset > 0 && blob.preferred != Some(peer) && !blob.counted_resume {
                 download.resumed += 1;
                 blob.counted_resume = true;
             }
             blob.start(peer);
-            let limit = max_bytes.min((blob.descriptor.encoded_size - blob.offset).min(usize::MAX as u64) as usize);
             let request = PullRequest {
                 target: download.target,
                 transport,
@@ -602,11 +667,15 @@ pub(super) fn drive(
             };
             outbound.insert(request_key(&id), OutboundContext::PullChunk(request));
             runtime.pulls.pacer.sent(now, limit, paced);
+            runtime.replica_budget.charge(world, policy, Instant::now(), limit);
             download.last_scheduled = Some(now);
             busy.insert((world, hash));
             peers.insert(peer);
             active += 1;
             download.max_parallel = download.max_parallel.max(busy.iter().filter(|(w, _)| *w == world).count());
+            if policy.requires_controlled_pull() {
+                break;
+            }
         }
     }
     Ok(())
@@ -641,6 +710,10 @@ pub(super) fn response(
 ) {
     let (transport, request, response) = reply;
     let world = request.target.world_id;
+    if !replica_cache::current_policy(context.storage, world).and_then(replica_cache::receive_allowed).unwrap_or(false)
+    {
+        return;
+    }
     let Some(download) = runtime.pulls.downloads.get_mut(&world) else { return };
     let Some(manifest) = pending.get(&world) else { return };
     if download.target != request.target {

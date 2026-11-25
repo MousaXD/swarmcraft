@@ -216,6 +216,12 @@ impl Storage {
         self.begin_blob_write(world)?.require(additional)
     }
 
+    /// Nonblocking preflight for network schedulers. Actual writes must still
+    /// acquire admission again; this is not a disk reservation.
+    pub fn try_require_payload_space(&self, world: WorldId, additional: u64) -> Result<(), StorageError> {
+        self.try_begin_blob_write(world)?.require(additional)
+    }
+
     /// Restore may target a different filesystem. Check the actual existing
     /// ancestor, before touching the destination or retiring a runtime.
     pub fn require_restore_space(

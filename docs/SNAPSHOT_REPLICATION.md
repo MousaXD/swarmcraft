@@ -2,6 +2,9 @@
 
 SwarmCraft snapshots remain content-addressed and manifest-driven. This document describes the storage-side replication scheduler and the conservative retention/GC rules layered on top of the existing resumable blob protocol.
 
+For device-local cache selection, hot-world scheduling, ordinary payload
+limits, UTC windows and replica coverage, see [Replica cache policy](REPLICA_CACHE_POLICY.md).
+
 ## Replication invariants
 
 The scheduler does not weaken existing verification.

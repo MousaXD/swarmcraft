@@ -20,6 +20,7 @@ use swarm_cli::{
     live_authority::{SignedHostFabricAttestation, SignedLiveAuthoritySource},
     live_runtime_registry::LiveFabricRuntimeRegistry,
     migration::{self, clear_world_wake_request, world_wake_requested},
+    replica_cache::{self, PayloadBudget},
     replication_pacing::{ChunkPlan, ReplicationPacer},
 };
 use swarm_consensus::{
@@ -154,6 +155,8 @@ const MAX_REMEMBERED_TRANSFER_ACKS: usize = 1024;
 // Snapshot RPC has a 30-second transport deadline; don't start overlapping
 // manifest negotiations for the same peer while one can still be in flight.
 const TRANSFER_MANIFEST_RETRY: Duration = Duration::from_secs(35);
+const CACHE_MANIFEST_RETRY: Duration = Duration::from_secs(5);
+const BACKGROUND_STATUS_WORLD_BATCH: usize = 4;
 const GAME_QUORUM_CONTEXT_DOMAIN: &[u8] = b"swarmcraft/game-live-quorum-context/v1\0";
 const LIVE_QUORUM_VOTE_LIFETIME_MS: u64 = 3_000;
 const LIVE_QUORUM_MAX_CLOCK_SKEW_MS: u64 = 500;
@@ -261,13 +264,16 @@ struct LeaseRuntime {
     canonical_payload_sent: HashMap<(WorldId, PeerId), (AuthorityGeneration, Instant)>,
     replications: HashMap<(TransportPeerId, WorldId), ReplicationState>,
     replication_pacer: ReplicationPacer,
+    replica_budget: PayloadBudget,
     pulls: parallel_replication::PullRuntime,
     transfer_acks: Vec<TransferDeliveryAck>,
     transfer_replica_acks: HashMap<(WorldId, PeerId), Hash32>,
     sleep_acks: HashMap<(WorldId, PeerId), SleepRecordV1>,
     // Historical diagnostics only; never used by transfer or quorum gates.
     last_checkpoint_ack: HashMap<WorldId, (PeerId, ReplicaAckV1, Instant)>,
+    // Exact offered hash and next permitted offer deadline.
     transfer_manifest_requests: HashMap<(WorldId, PeerId), (Hash32, Instant)>,
+    background_status_cursor: usize,
     live_quorum_vote_nonces: HashMap<(WorldId, PeerId, [u8; 32]), u64>,
     historical_inbound: HashMap<WorldId, HistoricalInboundReplica>,
     // GC roots must outlive the entire inbound manifest negotiation, not
@@ -629,6 +635,9 @@ pub async fn run(
                         }
                     }
                 }
+                if let Err(error) = request_background_replica_statuses(storage, &identity, &mut node, &mut outbound, &mut leases) {
+                    warn!(%error, "background replica status polling deferred");
+                }
                 match drive_historical_replay_downloads(storage, &identity, &mut node, &mut outbound, &leases) {
                     Ok(ready) => {
                         for world in ready {
@@ -692,7 +701,8 @@ pub async fn run(
                 }
             }
             _ = replication_tick.tick(), if !leases.replications.is_empty() => {
-                retry_due_replication(storage, &mut node, &mut outbound, &mut leases, Instant::now())?;
+                let context = HandlerContext { paths, identity: &identity, storage };
+                retry_due_replication(&context, &mut node, &mut outbound, &mut leases, Instant::now())?;
             }
             _ = lease_tick.tick() => {
                 // Status hints expire after three seconds. The slower
@@ -1946,9 +1956,10 @@ fn replicate_exact_checkpoint(
         }
         if runtime.replications.contains_key(&(*transport, world))
             || manifest_request_pending(outbound, world, transport)
-            || runtime.transfer_manifest_requests.get(&(world, peer)).is_some_and(|(hash, when)| {
-                *hash == expected_hash && now.saturating_duration_since(*when) < TRANSFER_MANIFEST_RETRY
-            })
+            || runtime
+                .transfer_manifest_requests
+                .get(&(world, peer))
+                .is_some_and(|(hash, when)| *hash == expected_hash && now < *when)
         {
             continue;
         }
@@ -1963,7 +1974,9 @@ fn replicate_exact_checkpoint(
                         historical_membership: None,
                     },
                 );
-                runtime.transfer_manifest_requests.insert((world, peer), (expected_hash, now));
+                runtime
+                    .transfer_manifest_requests
+                    .insert((world, peer), (expected_hash, now + TRANSFER_MANIFEST_RETRY));
             }
             Err(error) => warn!(%world, %peer, %error, "final transfer checkpoint replication deferred"),
         }
@@ -2904,6 +2917,43 @@ fn signed_lease(
     Ok(lease)
 }
 
+// This is independent of authority renewal and hosting consent. Only a
+// committed source may offer data, and status remains an untrusted routing hint.
+fn request_background_replica_statuses(
+    storage: &Storage,
+    identity: &PeerIdentity,
+    node: &mut SwarmNode,
+    outbound: &mut HashMap<String, OutboundContext>,
+    runtime: &mut LeaseRuntime,
+) -> Result<()> {
+    if runtime.authenticated_peers.is_empty() {
+        return Ok(());
+    }
+    let mut worlds = storage.list_worlds()?.into_iter().map(|metadata| metadata.world_id).collect::<Vec<_>>();
+    worlds.sort_by_key(|world| world.to_string());
+    if worlds.is_empty() {
+        runtime.background_status_cursor = 0;
+        return Ok(());
+    }
+    let start = runtime.background_status_cursor % worlds.len();
+    let count = worlds.len().min(BACKGROUND_STATUS_WORLD_BATCH);
+    runtime.background_status_cursor = (start + count) % worlds.len();
+    for index in 0..count {
+        let world = worlds[(start + index) % worlds.len()];
+        let local = identity.peer_id();
+        if !ordinary_replica_upload_allowed(storage, world, local)
+            || parallel_replication::scope(storage, world, local).is_err()
+        {
+            continue;
+        }
+        let Ok(descriptor) = storage.load_world_descriptor(world) else { continue };
+        if let Err(error) = request_world_statuses(storage, node, outbound, runtime, &descriptor, local) {
+            warn!(%world, %error, "background replica status request deferred");
+        }
+    }
+    Ok(())
+}
+
 fn request_world_statuses(
     storage: &Storage,
     node: &mut SwarmNode,
@@ -2914,7 +2964,10 @@ fn request_world_statuses(
 ) -> Result<()> {
     storage.load_world(descriptor.world_id)?;
     for (transport_peer, application_peer) in &runtime.authenticated_peers {
-        if *application_peer == local_peer || descriptor.member(*application_peer).is_none() {
+        if *application_peer == local_peer
+            || !descriptor.member(*application_peer).is_some_and(|member| !member.banned)
+            || node.application_peer(transport_peer) != Some(*application_peer)
+        {
             continue;
         }
         if status_request_pending(outbound, descriptor.world_id, *application_peer) {
@@ -3085,6 +3138,47 @@ fn publish_host_readiness_snapshot(
             manifest_hash: ack.manifest_hash.to_string(),
             age_ms: now.saturating_duration_since(*observed_at).as_millis().try_into().unwrap_or(u64::MAX),
         });
+    }
+    if let Some(checkpoint) = &mut report.checkpoint {
+        if let (Ok(descriptor), Ok(membership), Ok(epoch)) = (
+            storage.load_world_descriptor(world),
+            storage.load_membership_record(world),
+            storage.load_epoch_record(world),
+        ) {
+            if descriptor.members == membership.members && verify_membership_signature(&membership).is_ok() {
+                let mut matching = Vec::new();
+                let mut receipts = Vec::new();
+                for member in
+                    membership.members.iter().filter(|member| !member.banned && member.peer_id != identity.peer_id())
+                {
+                    let name = member.peer_id.to_string();
+                    if !report.peers.iter().any(|peer| peer.peer_id == name && peer.reachable && peer.current_state) {
+                        continue;
+                    }
+                    matching.push(name.clone());
+                    // Never count a status hint alone as a verified receipt.
+                    // These are observations, not a new recovery gate.
+                    if runtime
+                        .transfer_replica_acks
+                        .get(&(world, member.peer_id))
+                        .is_some_and(|hash| hash.to_string() == checkpoint.manifest_hash)
+                    {
+                        receipts.push(name);
+                    }
+                }
+                matching.sort_unstable();
+                matching.dedup();
+                receipts.sort_unstable();
+                receipts.dedup();
+                checkpoint.replica_coverage = Some(host_readiness::ReplicaCoverage {
+                    membership_hash: membership.record_hash()?.to_string(),
+                    epoch_hash: epoch.record_hash()?.to_string(),
+                    preferred_total_copies: descriptor.preferred_replication_factor,
+                    connected_matching_status_peers: matching,
+                    connected_exact_receipt_peers: receipts,
+                });
+            }
+        }
     }
     host_readiness::publish_report(paths, world, &report)
 }
@@ -4269,7 +4363,7 @@ fn drive_genesis_catchup(
     let world = status.world_id;
     let storage = context.storage;
     if status.epoch > crate::world_genesis::GENESIS_EPOCH {
-        return Ok(());
+        return drive_ordinary_catchup(context, node, transport_peer, peer, status, outbound, runtime);
     }
     let descriptor = storage.load_world_descriptor(world)?;
     authorize_committed_member(storage, world, peer)?;
@@ -4358,9 +4452,11 @@ fn drive_genesis_catchup(
     };
     verify_snapshot_signature(&manifest)?;
     let hash = manifest.manifest_hash()?;
-    if runtime.transfer_manifest_requests.get(&(world, peer)).is_some_and(|(previous, sent)| {
-        *previous == hash && now.saturating_duration_since(*sent) < TRANSFER_MANIFEST_RETRY
-    }) {
+    if runtime
+        .transfer_manifest_requests
+        .get(&(world, peer))
+        .is_some_and(|(previous, sent)| *previous == hash && now < *sent)
+    {
         return Ok(());
     }
     let id = node.send_request(transport_peer, WireRequest::SnapshotManifest(manifest.clone()))?;
@@ -4373,7 +4469,83 @@ fn drive_genesis_catchup(
             historical_membership: None,
         },
     );
-    runtime.transfer_manifest_requests.insert((world, peer), (hash, now));
+    runtime.transfer_manifest_requests.insert((world, peer), (hash, now + TRANSFER_MANIFEST_RETRY));
+    Ok(())
+}
+
+// Later-generation catch-up never invents a missing base or epoch. Offer
+// only a direct signed successor of the exact reported canonical parent.
+fn drive_ordinary_catchup(
+    context: &HandlerContext<'_>,
+    node: &mut SwarmNode,
+    transport: &TransportPeerId,
+    peer: PeerId,
+    status: &WorldStatusV1,
+    outbound: &mut HashMap<String, OutboundContext>,
+    runtime: &mut LeaseRuntime,
+) -> Result<()> {
+    let world = status.world_id;
+    let storage = context.storage;
+    let local = context.identity.peer_id();
+    if !ordinary_replica_upload_allowed(storage, world, local)
+        || runtime.replications.contains_key(&(*transport, world))
+        || manifest_request_pending(outbound, world, transport)
+    {
+        return Ok(());
+    }
+    let (_, epoch) = parallel_replication::scope(storage, world, local)?;
+    authorize_committed_member(storage, world, peer)?;
+    let descriptor = storage.load_world_descriptor(world)?;
+    if status.epoch != epoch.epoch_number || status.compatibility_fingerprint != descriptor.compatibility_fingerprint {
+        return Ok(());
+    }
+    let Some(parent_hash) = status.latest_snapshot else { return Ok(()) };
+    if storage.canonical_snapshot_head(world)?.head.is_some_and(|head| head.manifest_hash == parent_hash) {
+        return Ok(());
+    }
+    let history = storage.list_snapshots(world)?;
+    let Some(parent) = history.iter().find(|candidate| {
+        candidate.sequence == status.sequence
+            && status.state_hash == Some(candidate.state_root)
+            && candidate.manifest_hash().ok() == Some(parent_hash)
+            && candidate.epoch == epoch.epoch_number
+            && candidate.authority_peer_id == epoch.authority_peer_id
+            && candidate.authority_public_key == epoch.authority_public_key
+    }) else {
+        return Ok(());
+    };
+    verify_snapshot_signature(parent)?;
+    let Some(next) = history.iter().find(|candidate| {
+        Some(candidate.snapshot_number) == parent.snapshot_number.checked_add(1)
+            && Some(candidate.sequence) == parent.sequence.checked_add(1)
+            && candidate.previous_snapshot_hash == Some(parent_hash)
+            && candidate.epoch == epoch.epoch_number
+            && candidate.authority_peer_id == epoch.authority_peer_id
+            && candidate.authority_public_key == epoch.authority_public_key
+    }) else {
+        return Ok(());
+    };
+    verify_snapshot_signature(next)?;
+    let hash = next.manifest_hash()?;
+    let now = Instant::now();
+    if runtime
+        .transfer_manifest_requests
+        .get(&(world, peer))
+        .is_some_and(|(previous, deadline)| *previous == hash && now < *deadline)
+    {
+        return Ok(());
+    }
+    let id = node.send_request(transport, WireRequest::SnapshotManifest(next.clone()))?;
+    outbound.insert(
+        request_key(&id),
+        OutboundContext::Manifest {
+            world,
+            transport: *transport,
+            snapshot_number: next.snapshot_number,
+            historical_membership: None,
+        },
+    );
+    runtime.transfer_manifest_requests.insert((world, peer), (hash, now + TRANSFER_MANIFEST_RETRY));
     Ok(())
 }
 
@@ -4396,6 +4568,13 @@ fn storage_paused_response() -> WireResponse {
     WireResponse::Error {
         code: "STORAGE_PAUSED".into(),
         message: "Receiving device paused payload writes; free space or adjust its local storage quota".into(),
+    }
+}
+
+fn cache_paused_response() -> WireResponse {
+    WireResponse::Error {
+        code: "CACHE_PAUSED".into(),
+        message: "Ordinary replica payload deferred by local cache policy or controlled pull availability".into(),
     }
 }
 
@@ -4866,6 +5045,11 @@ fn handle_request(
                 bail!("ordinary manifest cannot replace an active historical negotiation");
             }
             authorize_manifest(storage, application_peer, &manifest)?;
+            let policy = replica_cache::current_policy(storage, manifest.world_id)?;
+            if !replica_cache::receive_allowed(policy)? {
+                node.respond(channel, cache_paused_response())?;
+                return Ok(());
+            }
             if state.leases.pulls.active(manifest.world_id) {
                 let target = parallel_replication::negotiate(
                     context,
@@ -4873,6 +5057,7 @@ fn handle_request(
                     (transport_peer, application_peer),
                     &manifest,
                     &[],
+                    policy,
                     state,
                 )?
                 .context("active pull negotiation disappeared")?;
@@ -4902,8 +5087,15 @@ fn handle_request(
                 (transport_peer, application_peer),
                 &manifest,
                 &missing,
+                policy,
                 state,
             )?;
+            if policy.requires_controlled_pull() && !missing.is_empty() && pull.is_none() {
+                // A remote push cannot enforce a local receive budget before
+                // bytes arrive. Never silently fall back under a user limit.
+                node.respond(channel, cache_paused_response())?;
+                return Ok(());
+            }
             if let Some(pins) = pins {
                 state.leases.inbound_replication_pins.insert(manifest.world_id, pins);
             }
@@ -4980,6 +5172,14 @@ fn handle_request(
                 authorize_committed_member(storage, world_id, application_peer)?;
                 authorize_committed_member(storage, world_id, identity.peer_id())?;
                 authorize_manifest(storage, application_peer, manifest)?;
+                let policy = replica_cache::current_policy(storage, world_id)?;
+                if !replica_cache::receive_allowed(policy)? || policy.requires_controlled_pull() {
+                    // Includes withdrawal or a new rate/window on an old
+                    // negotiated push. Retain existing durable partial data.
+                    node.respond(channel, cache_paused_response())?;
+                    state.pending_manifests.remove(&world_id);
+                    return Ok(());
+                }
             }
             let descriptor =
                 find_descriptor(manifest, hash).context("blob hash is not referenced by negotiated manifest")?;
@@ -5588,6 +5788,24 @@ fn handle_response(
             }
         }
         (
+            Some(OutboundContext::Manifest { world, transport, snapshot_number, historical_membership: None }),
+            WireResponse::Error { code, message },
+        ) if code == "CACHE_PAUSED" => {
+            if transport == *transport_peer && private_replication_recipient(storage, node, transport_peer, world) {
+                if let Some(peer) = node.application_peer(transport_peer) {
+                    let hash = storage.load_snapshot(world, snapshot_number)?.manifest_hash()?;
+                    let entry = runtime
+                        .transfer_manifest_requests
+                        .entry((world, peer))
+                        .or_insert((hash, now + CACHE_MANIFEST_RETRY));
+                    if entry.0 == hash {
+                        entry.1 = now + CACHE_MANIFEST_RETRY;
+                    }
+                }
+                warn!(%world, %code, %message, "receiver cache paused; retrying signed manifest after backoff");
+            }
+        }
+        (
             Some(OutboundContext::Manifest { world, transport, snapshot_number, historical_membership }),
             WireResponse::ManifestPullAccepted { target },
         ) => {
@@ -5651,7 +5869,7 @@ fn handle_response(
                 if node.game_traffic_active() {
                     runtime.replications.get_mut(&key).expect("replication state exists").retry_at = Some(now);
                 } else {
-                    send_next_replication_chunk(storage, node, transport_peer, world, outbound, runtime, now)?;
+                    send_next_replication_chunk(handler, node, transport_peer, world, outbound, runtime, now)?;
                 }
             }
         }
@@ -5696,7 +5914,7 @@ fn handle_response(
             if node.game_traffic_active() {
                 runtime.replications.get_mut(&key).expect("replication state exists").retry_at = Some(now);
             } else {
-                send_next_replication_chunk(storage, node, transport_peer, world, outbound, runtime, now)?;
+                send_next_replication_chunk(handler, node, transport_peer, world, outbound, runtime, now)?;
             }
         }
         (Some(OutboundContext::BlobChunk { world, snapshot_number, .. }), WireResponse::Error { code, message })
@@ -5787,8 +6005,7 @@ fn handle_response(
                                     verify_snapshot_signature(&manifest)?;
                                     if !runtime.transfer_manifest_requests.get(&(world, peer)).is_some_and(
                                         |(hash, sent)| {
-                                            manifest.manifest_hash().is_ok_and(|value| *hash == value)
-                                                && now.saturating_duration_since(*sent) < TRANSFER_MANIFEST_RETRY
+                                            manifest.manifest_hash().is_ok_and(|value| *hash == value) && now < *sent
                                         },
                                     ) {
                                         let hash = manifest.manifest_hash()?;
@@ -5805,7 +6022,9 @@ fn handle_response(
                                                 historical_membership: None,
                                             },
                                         );
-                                        runtime.transfer_manifest_requests.insert((world, peer), (hash, now));
+                                        runtime
+                                            .transfer_manifest_requests
+                                            .insert((world, peer), (hash, now + TRANSFER_MANIFEST_RETRY));
                                     }
                                 }
                             }
@@ -6813,7 +7032,7 @@ fn historical_send_is_authorized(
 }
 
 fn send_next_replication_chunk(
-    storage: &Storage,
+    context: &HandlerContext<'_>,
     node: &mut SwarmNode,
     transport_peer: &TransportPeerId,
     world: WorldId,
@@ -6821,6 +7040,7 @@ fn send_next_replication_chunk(
     runtime: &mut LeaseRuntime,
     now: Instant,
 ) -> Result<()> {
+    let storage = context.storage;
     let key = (*transport_peer, world);
     if storage.stale_publication_pending(world)?
         || storage.crash_retirement_pending(world)?
@@ -6841,7 +7061,11 @@ fn send_next_replication_chunk(
                 runtime.replications.remove(&key);
                 return Ok(());
             }
+        } else if !ordinary_replica_upload_allowed(storage, world, context.identity.peer_id()) {
+            runtime.replications.remove(&key);
+            return Ok(());
         }
+        let historical = replication.historical_membership.is_some();
         let snapshot_number = replication.snapshot_number;
         let Some(resume) = replication.pending.front().cloned() else {
             runtime.replications.remove(&key);
@@ -6855,6 +7079,34 @@ fn send_next_replication_chunk(
                 return Ok(());
             }
         };
+        // Certified historical replay is a separate protocol. Ordinary
+        // local upload windows apply even to the legacy push path.
+        let policy = if !historical {
+            match replica_cache::current_policy(storage, world)
+                .and_then(|policy| Ok((policy, replica_cache::send_allowed(policy)?)))
+            {
+                Ok((policy, true)) => policy,
+                Ok((_, false)) => {
+                    runtime.replications.get_mut(&key).expect("replication state exists").retry_at =
+                        Some(now + Duration::from_secs(1));
+                    return Ok(());
+                }
+                Err(error) => {
+                    warn!(%world, %error, "ordinary upload blocked by unreadable replica policy");
+                    runtime.replications.get_mut(&key).expect("replication state exists").retry_at =
+                        Some(now + REPLICATION_RATE_LIMIT_BACKOFF);
+                    return Ok(());
+                }
+            }
+        } else {
+            swarm_storage::replica_policy::ReplicaPolicy::default()
+        };
+        let max_bytes = runtime.replica_budget.allowance(world, policy, now, max_bytes);
+        if max_bytes == 0 {
+            runtime.replications.get_mut(&key).expect("replication state exists").retry_at =
+                Some(now + Duration::from_millis(50));
+            return Ok(());
+        }
         let manifest = storage.load_snapshot(world, snapshot_number)?;
         let descriptor = find_descriptor(&manifest, resume.hash)
             .context("pending replication blob is not referenced by its snapshot manifest")?;
@@ -6868,6 +7120,19 @@ fn send_next_replication_chunk(
         }
 
         let (data, finished) = storage.read_encoded_blob_chunk(world, descriptor, resume.offset, max_bytes)?;
+        if !historical {
+            if !ordinary_replica_upload_allowed(storage, world, context.identity.peer_id()) {
+                runtime.replications.remove(&key);
+                return Ok(());
+            }
+            if !replica_cache::current_policy(storage, world)
+                .is_ok_and(|current| current == policy && replica_cache::send_allowed(current).unwrap_or(false))
+            {
+                runtime.replications.get_mut(&key).expect("replication state exists").retry_at =
+                    Some(now + Duration::from_millis(100));
+                return Ok(());
+            }
+        }
         let next_offset = resume.offset.checked_add(data.len() as u64).context("blob replication offset overflow")?;
         let encoded_bytes = data.len();
         let request_id = node.send_request(
@@ -6891,12 +7156,18 @@ fn send_next_replication_chunk(
         replication.last_sent_at = Some(now);
         replication.paced = paced;
         runtime.replication_pacer.sent(now, encoded_bytes, paced);
+        runtime.replica_budget.charge(world, policy, Instant::now(), encoded_bytes);
         return Ok(());
     }
 }
 
+fn ordinary_replica_upload_allowed(storage: &Storage, world: WorldId, local_peer: PeerId) -> bool {
+    storage.load_epoch_record(world).is_ok_and(|epoch| epoch.authority_peer_id == local_peer)
+        || storage.background_seeding_enabled(world).unwrap_or(false)
+}
+
 fn retry_due_replication(
-    storage: &Storage,
+    context: &HandlerContext<'_>,
     node: &mut SwarmNode,
     outbound: &mut HashMap<String, OutboundContext>,
     runtime: &mut LeaseRuntime,
@@ -6915,7 +7186,7 @@ fn retry_due_replication(
 
     for (_, peer, world) in due {
         if runtime.authenticated_peers.contains_key(&peer) {
-            send_next_replication_chunk(storage, node, &peer, world, outbound, runtime, now)?;
+            send_next_replication_chunk(context, node, &peer, world, outbound, runtime, now)?;
         } else {
             runtime.replications.remove(&(peer, world));
         }

@@ -81,6 +81,18 @@ pub struct CheckpointProgress {
     /// Last exact canonical-head acknowledgement observed by this daemon.
     /// It is historical evidence, not proof that the peer is still reachable.
     pub last_replica_ack: Option<ReplicaAcknowledgment>,
+    /// Bounded, presentation-only observations for replica placement.
+    #[serde(default)]
+    pub replica_coverage: Option<ReplicaCoverage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicaCoverage {
+    pub membership_hash: String,
+    pub epoch_hash: String,
+    pub preferred_total_copies: u16,
+    pub connected_matching_status_peers: Vec<String>,
+    pub connected_exact_receipt_peers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,6 +113,7 @@ impl CheckpointProgress {
                 .iter()
                 .try_fold(0u64, |total, entry| total.checked_add(entry.blob.uncompressed_size)),
             last_replica_ack: None,
+            replica_coverage: None,
         })
     }
 }

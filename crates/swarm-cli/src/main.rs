@@ -315,6 +315,23 @@ enum WorldCommand {
     ModsPath { world: String },
     /// Enable or disable background replica seeding while Minecraft is off.
     Seed { world: String, enabled: bool },
+    /// Replace this device's ordinary replica follow/window/rate policy.
+    /// Defaults preserve existing automatic replication; UTC window is optional.
+    ReplicaPolicy {
+        world: String,
+        #[arg(long, action = clap::ArgAction::Set, required = true)]
+        follow: bool,
+        /// Give this world's pulls a bounded preference over other worlds.
+        #[arg(long)]
+        hot: bool,
+        /// Daily UTC window, HH:MM-HH:MM (start inclusive, end exclusive).
+        #[arg(long)]
+        utc_window: Option<String>,
+        #[arg(long)]
+        max_kib_per_second: Option<u32>,
+    },
+    /// Inspect local replica policy, quota and checkpoint (not remote durability).
+    ReplicaStatus { world: String },
     /// List preserved conflicting solo-history branches requiring manual resolution.
     Conflicts { world: String },
     /// Create and commit a signed snapshot from a quiescent directory.
@@ -1237,6 +1254,82 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             let world = parse_world(&world)?;
             storage.set_background_seeding(world, enabled)?;
             println!("Background seeding: {}", if enabled { "enabled" } else { "disabled" });
+        }
+        WorldCommand::ReplicaPolicy { world, follow, hot, utc_window, max_kib_per_second } => {
+            use swarm_storage::replica_policy::{ReplicaPolicy, UtcWindow};
+            let world = parse_world(&world)?;
+            let utc_window = utc_window
+                .map(|value| -> Result<UtcWindow> {
+                    let (start, end) = value.split_once('-').context("expected UTC HH:MM-HH:MM")?;
+                    Ok(UtcWindow {
+                        start_minute: swarm_cli::replica_cache::parse_utc_minute(start)?,
+                        end_minute: swarm_cli::replica_cache::parse_utc_minute(end)?,
+                    })
+                })
+                .transpose()?;
+            let policy = ReplicaPolicy { follow, hot, utc_window, max_kib_per_second };
+            storage.set_world_replica_policy(world, policy)?;
+            println!("{}", serde_json::to_string_pretty(&policy)?);
+        }
+        WorldCommand::ReplicaStatus { world } => {
+            let world = parse_world(&world)?;
+            let policy = storage.world_replica_policy(world)?;
+            let metadata = storage.load_world(world)?;
+            let descriptor = storage.load_world_descriptor(world).ok();
+            let head = storage.canonical_snapshot_head(world)?;
+            let local_verified = head.head.is_some_and(|reference| {
+                storage.load_snapshot(world, reference.snapshot_number).is_ok_and(|manifest| {
+                    manifest.manifest_hash().ok() == Some(reference.manifest_hash)
+                        && verify_snapshot_signature(&manifest).is_ok()
+                        && storage.verify_snapshot(&manifest).is_ok()
+                })
+            });
+            let coverage = (|| -> Option<host_readiness::ReplicaCoverage> {
+                let report = host_readiness::load_host_readiness_report(paths, world).ok()?;
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+                if u128::from(report.generated_unix_ms) > now {
+                    return None;
+                }
+                let checkpoint = report.checkpoint?;
+                let reference = head.head?;
+                if checkpoint.snapshot_number != reference.snapshot_number
+                    || checkpoint.manifest_hash != reference.manifest_hash.to_string()
+                {
+                    return None;
+                }
+                let coverage = checkpoint.replica_coverage?;
+                if storage.load_membership_record(world).ok()?.record_hash().ok()?.to_string()
+                    != coverage.membership_hash
+                    || storage.load_epoch_record(world).ok()?.record_hash().ok()?.to_string() != coverage.epoch_hash
+                {
+                    return None;
+                }
+                Some(coverage)
+            })();
+            let observed_copies =
+                coverage.as_ref().map(|value| usize::from(local_verified) + value.connected_exact_receipt_peers.len());
+            let observed_copy_deficit = coverage
+                .as_ref()
+                .zip(observed_copies)
+                .map(|(value, copies)| usize::from(value.preferred_total_copies).saturating_sub(copies));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "world_id": metadata.world_id.to_string(),
+                    "policy": policy,
+                    "ordinary_receive_allowed_now": swarm_cli::replica_cache::receive_allowed(policy)?,
+                    "ordinary_send_window_open_now": swarm_cli::replica_cache::send_allowed(policy)?,
+                    "background_seeding_enabled": storage.background_seeding_enabled(world)?,
+                    "storage": storage.world_storage_status(world)?,
+                    "local_canonical_head": head.head,
+                    "local_head_payload_and_signature_verified": local_verified,
+                    "preferred_replication_factor": descriptor.map(|value| value.preferred_replication_factor),
+                    "observed_replica_coverage": coverage,
+                    "observed_copy_count": observed_copies,
+                    "observed_copy_deficit": observed_copy_deficit,
+                    "remote_recoverability": "receipt/status observations only; not proof of future availability or hosting permission"
+                }))?
+            );
         }
         WorldCommand::Conflicts { world } => {
             let world = parse_world(&world)?;

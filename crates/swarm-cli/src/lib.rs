@@ -17,6 +17,7 @@ pub mod migration;
 pub mod package_provider;
 pub mod provider_runtime;
 pub mod recovery_review;
+pub mod replica_cache;
 pub mod replication_pacing;
 pub mod runtime_installer;
 pub mod runtime_layout;

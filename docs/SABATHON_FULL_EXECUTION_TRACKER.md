@@ -365,12 +365,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #36 — P2 · Proposal
 - Work: Add background replica scheduling, quotas, bandwidth windows, and replica placement controls
 - Acceptance: A user can choose what to cache. Hot worlds retain the configured recoverability target under normal churn without overrunning disk or bandwidth
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: docs/REPLICA_CACHE_POLICY.md; crates/swarm-storage/src/replica_policy.rs, space.rs; crates/swarm-cli/src/replica_cache.rs, daemon.rs, daemon_parallel_replication.rs, host_readiness.rs, main.rs; crates/swarm-storage/tests/storage_space.rs; crates/swarm-cli/tests/parallel_replication.rs.
+- Evidence: Durable device/world follow and hot preference, daily UTC window and aggregate per-world ordinary encoded-payload dispatch budget; fail-closed policy parsing, quota preflight, controlled single-source pull with no unlimited legacy fallback, bounded hot priority and rotating background polling independent of hosting, exact-manifest retry after cache pause. CLI policy/status smoke passed including closed window, invalid UTC refusal, pause/resume and verified unchanged local head. Two live daemon regressions passed: paused receiver and closed window refused offers; zero quota prevented payload, quota increase allowed partial, pause retained exact bytes and old head, receiver restarted and authority disappeared, surviving opted-in seeder completed 983,073 remaining blob bytes in 6.276 s at configured 256 KiB/s with one active pull, exact restore and two surviving verified copies; repeat measured 6.273 s. Existing two-source, one-source fallback and corrupt/disconnected-source restoration passed. 132 storage tests, 168 CLI library and 51 CLI binary tests passed; 4 separately gated/soak tests ignored. Strict all-target/all-feature Clippy and formatting passed.
+- Remaining / next action: #37 installed native Windows/macOS GUI QA. Local placement is voluntary on already admitted members; no remote placement solver or new desktop UI. Target/deficit reporting distinguishes exact connected receipts from hints and is observational, not authority or availability proof. WAN and installed multi-device target retention, later-generation background catch-up under real churn, large multi-world workloads, OS-wide shaping and global multi-world disk quotas not established. Certified historical replay retains separate verified admission and is outside ordinary bandwidth windows. No forced eviction or bypass when insufficient opted-in capacity exists.
+- External dependency: Independent installed devices/networks and longer multi-world capacity/churn validation; necessary final CI under local-first policy.
+- Commit: See 25 November replica cache policy commit.
 
 ### #37 — Release-Gate P0 · Unverified
 - Work: Implement installed Windows/macOS native GUI QA for #141 using platform-valid automation

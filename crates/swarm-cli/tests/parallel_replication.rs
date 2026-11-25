@@ -18,6 +18,8 @@ use swarm_protocol::{
     BlobDescriptor, BlobEncoding, DiscoveryMembershipProofV1, EpochRecordV1, MembershipCertificateV1,
     MembershipProposalV1, MembershipRecordV1, SnapshotManifestV1, WorldId, WorldMemberV1, PROTOCOL_VERSION,
 };
+use swarm_storage::replica_policy::{ReplicaPolicy, UtcWindow};
+use swarm_storage::WorldStoragePolicy;
 use swarm_storage::{SnapshotContext, Storage};
 
 struct Device {
@@ -324,6 +326,101 @@ fn blob_path(storage: &Storage, world: WorldId, descriptor: &BlobDescriptor) -> 
         BlobEncoding::Zstd => "zst",
     };
     storage.world_dir(world).join("blobs").join(format!("{}.{suffix}", descriptor.hash))
+}
+
+#[test]
+fn controlled_replica_policy_pauses_resumes_and_survives_source_churn() {
+    let fixture = Fixture::new();
+    let world = fixture.world;
+    let paused = ReplicaPolicy { follow: false, ..Default::default() };
+    fixture.receiver.storage.set_world_replica_policy(world, paused).unwrap();
+    let mut authority = fixture.authority.start(&[], "policy-authority.log");
+    wait("authority listener", Duration::from_secs(15), || authority.text().contains("daemon listening"));
+    let mut receiver = fixture.receiver.start(&[fixture.authority.address()], "policy-receiver.log");
+    wait("policy receiver authentication", Duration::from_secs(20), || receiver.text().contains("peer authenticated"));
+    let (source, next) = fixture.prepare(&fixture.first, 1, 1024 * 1024);
+    fixture.authority.storage.commit_snapshot(&next).unwrap();
+    let blob = next.entries.iter().find(|entry| entry.blob.encoded_size > 512 * 1024).unwrap().blob.clone();
+    let offset = || fixture.receiver.storage.partial_blob_offset(world, &blob).unwrap();
+    let old_head = || {
+        assert_eq!(fixture.receiver.storage.latest_snapshot(world).unwrap().as_ref(), Some(&fixture.first));
+        fixture.receiver.storage.verify_snapshot(&fixture.first).unwrap();
+    };
+    wait("explicit receiver pause", Duration::from_secs(30), || authority.text().contains("CACHE_PAUSED"));
+    old_head();
+    assert_eq!(offset(), 0);
+    let minute = swarm_cli::replica_cache::utc_minute().unwrap();
+    let closed = ReplicaPolicy {
+        follow: true,
+        hot: true,
+        utc_window: Some(UtcWindow { start_minute: (minute + 60) % 1440, end_minute: (minute + 61) % 1440 }),
+        max_kib_per_second: Some(256),
+    };
+    let prior_denials = authority.text().matches("CACHE_PAUSED").count();
+    fixture.receiver.storage.set_world_replica_policy(world, closed).unwrap();
+    wait("closed UTC window refusal", Duration::from_secs(30), || {
+        authority.text().matches("CACHE_PAUSED").count() > prior_denials
+    });
+    old_head();
+    assert_eq!(offset(), 0);
+
+    let controlled = ReplicaPolicy { utc_window: None, ..closed };
+    fixture
+        .receiver
+        .storage
+        .set_world_storage_policy(world, WorldStoragePolicy { max_world_bytes: Some(0), ..Default::default() })
+        .unwrap();
+    fixture.receiver.storage.set_world_replica_policy(world, controlled).unwrap();
+    wait("single-source controlled pull", Duration::from_secs(30), || {
+        receiver.text().contains("receiver-driven replica pull negotiated")
+    });
+    thread::sleep(Duration::from_secs(1));
+    old_head();
+    assert_eq!(offset(), 0, "quota must prevent scheduling payload reads");
+    fixture.receiver.storage.set_world_storage_policy(world, WorldStoragePolicy::default()).unwrap();
+    wait("durable partial", Duration::from_secs(30), || {
+        let n = offset();
+        n > 0 && n < blob.encoded_size
+    });
+    fixture.receiver.storage.set_world_replica_policy(world, paused).unwrap();
+    wait("in-flight policy withdrawal", Duration::from_secs(10), || {
+        receiver.text().contains("receiver-driven replica pull paused by local cache policy")
+    });
+    let partial = offset();
+    assert!(partial > 0 && partial < blob.encoded_size);
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(offset(), partial);
+    old_head();
+    receiver.stop();
+    authority.stop();
+    // One surviving opted-in seeder already has the exact signed checkpoint.
+    // Restart the receiving daemon: policy and partial must survive.
+    let reopened = Storage::open(&fixture.receiver.paths.root).unwrap();
+    assert_eq!(reopened.world_replica_policy(world).unwrap(), paused);
+    assert_eq!(reopened.partial_blob_offset(world, &blob).unwrap(), partial);
+    reopened.set_world_replica_policy(world, controlled).unwrap();
+    let mut seeder = fixture.seeder.start(&[], "policy-seeder.log");
+    wait("seeder listener", Duration::from_secs(15), || seeder.text().contains("daemon listening"));
+    let start = Instant::now();
+    let mut receiver = fixture.receiver.start(&[fixture.seeder.address()], "policy-restarted.log");
+    fixture.wait_head(&mut receiver, next.manifest(), "controlled resume from surviving seeder");
+    fixture.restore(next.manifest(), source.path(), "policy-restored");
+    fixture.seeder.storage.verify_snapshot(next.manifest()).unwrap();
+    let remaining = blob.encoded_size - partial;
+    let elapsed = start.elapsed();
+    // With a quarter-second initial burst, the total cannot arrive sooner
+    // than the requested payload budget permits (wall time includes startup).
+    assert!(elapsed.as_secs_f64() + 0.3 >= remaining as f64 / (256.0 * 1024.0));
+    wait("verified pull completion diagnostic", Duration::from_secs(5), || {
+        complete_line(&receiver.text(), next.snapshot_number).is_some()
+    });
+    let log = receiver.text();
+    let line = complete_line(&log, next.snapshot_number).expect("verified pull completion");
+    assert_eq!(metric(line, "sources"), 1);
+    assert_eq!(metric(line, "max_parallel"), 1);
+    assert!(metric(line, "resumed") > 0);
+    assert!(receiver.alive() && seeder.alive());
+    eprintln!("controlled replica resumed {remaining} bytes in {elapsed:?}; two surviving verified copies; {line}");
 }
 
 #[test]

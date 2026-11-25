@@ -26,6 +26,8 @@ pub enum StorageError {
     },
     #[error("storage payload paused: {detail}")]
     StoragePressure { detail: String },
+    #[error("invalid local replica policy: {0}")]
+    InvalidReplicaPolicy(&'static str),
     #[error("snapshot source is not a directory: {0}")]
     SourceNotDirectory(PathBuf),
     #[error("symlinks are not allowed in snapshots: {0}")]

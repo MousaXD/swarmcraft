@@ -61,6 +61,38 @@ fn policy(max_world_bytes: Option<u64>) -> WorldStoragePolicy {
 }
 
 #[test]
+fn local_replica_policy_is_durable_and_invalid_records_fail_closed() {
+    use swarm_storage::replica_policy::{ReplicaPolicy, UtcWindow};
+    let (_temp, storage, world) = fixture();
+    assert_eq!(storage.world_replica_policy(world).unwrap(), ReplicaPolicy::default());
+    let restricted = ReplicaPolicy {
+        follow: false,
+        hot: true,
+        utc_window: Some(UtcWindow { start_minute: 1320, end_minute: 120 }),
+        max_kib_per_second: Some(64),
+    };
+    storage.set_world_replica_policy(world, restricted).unwrap();
+    let reopened = Storage::open(storage.root()).unwrap();
+    assert_eq!(reopened.world_replica_policy(world).unwrap(), restricted);
+    assert!(reopened
+        .set_world_replica_policy(world, ReplicaPolicy { max_kib_per_second: Some(0), ..restricted })
+        .is_err());
+    assert_eq!(reopened.world_replica_policy(world).unwrap(), restricted);
+    let path = reopened.world_dir(world).join("metadata/local-replica-policy.json");
+    fs::write(&path, b"{\"follow\":true,\"unknown\":1}").unwrap();
+    assert!(reopened.world_replica_policy(world).is_err());
+    fs::write(&path, vec![0u8; 4097]).unwrap();
+    assert!(reopened.world_replica_policy(world).is_err());
+    #[cfg(unix)]
+    {
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(path.with_extension("missing"), &path).unwrap();
+        assert!(reopened.world_replica_policy(world).is_err());
+        assert!(reopened.set_world_replica_policy(world, restricted).is_err());
+    }
+}
+
+#[test]
 fn quota_pauses_local_checkpoint_without_changing_head_or_leaking_owned_temp() {
     let (temp, storage, world) = fixture();
     let source = temp.path().join("source");
