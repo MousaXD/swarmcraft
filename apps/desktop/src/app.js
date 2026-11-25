@@ -1,6 +1,7 @@
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
 import { createImportRequest, parseImportResult } from './import-flow.js';
 import { installImportReview } from './import-review.js';
+import { installClientPreparation } from './client-preparation.js';
 import { normalizeRecoveryReview, recoveryCopyReceipt, recoveryExportReceipt } from './recovery-copy.js';
 import { validateInviteToken, inspectInviteReceipt, revocationRequest, revokeInviteReceipt, pendingMembershipMessage } from './invite-lifecycle.js';
 import { clientContinuityFromMigration, ensureClientContinuityPanel } from './client-continuity.js';
@@ -324,6 +325,7 @@ function clearSelection() {
   showInline('membershipNotice', '');
   if ($('refreshMembership')) $('refreshMembership').hidden = true;
   selectedWorldId = '';
+  clientPreparation.select('');
   migrationRequestGeneration += 1;
   hostReadinessRequestGeneration += 1;
   gameRouteRequestGeneration += 1;
@@ -803,6 +805,7 @@ function selectWorld(world, { focusDetail = false } = {}) {
   gameRouteState = UNVERIFIED_GAME_ROUTE;
   if (selectedWorldId !== world.id) localCheckpointVerification = null;
   selectedWorldId = world.id;
+  clientPreparation.select(world.id);
   queueGameGatewaySelection(world);
   $('world').value = world.id;
   // The candidate now renders read-only selected-world metadata directly
@@ -1889,6 +1892,7 @@ const importReview = installImportReview($('importForm'), backend, importRequest
       $('importForm').dispatchEvent(new Event('importreviewstart'));
     } else showInline('importError', '');
   });
+const clientPreparation = installClientPreparation($('clientProfilePanel'), backend);
 window.__swarmcraftTakeImportReview = request => importReview.take(request);
 window.__swarmcraftRefreshImportReview = () => importReview.sync();
 

@@ -1,0 +1,25 @@
+{
+  "scope": "extracted-linux-package-native-client-setup",
+  "complete": true,
+  "stages": {
+    "signed_requirements": true,
+    "missing_mod": true,
+    "exact_inventory": true,
+    "launcher_files_and_hosting_preserved": true
+  },
+  "package_sha256": "b16cfd61da2784104752df6432513119db11a3667abc3b4f9c3e7a5482dd632f",
+  "files": {
+    "desktop": "01292d8d2688240c6bc87518a0f2107c82d99717117384e976610b5de3cd0228",
+    "swarmcraft": "e02822d1b66d623a4a621049e516446456d72e933c562ca12a95bdb7f423e758",
+    "swarmcraft-host": "330e92dca268f725ec706726f5a6368a3b369952ff354fa60fcfbd169cb56c47",
+    "swarmcraft-runtime": "28ca78f03a02925f572a8c98c6470e31a4b1c1286b9fca3423dcd3ec33cf499e",
+    "swarmcraft-import": "938158089d3b30d2e29555b63f6bd69d55d113942e9ead110188f54f50847683"
+  },
+  "date": "2026-11-25",
+  "build_source": "Client-preparation working tree based on 21e88a7; packaged before documentation/evidence checkpoint.",
+  "limitations": [
+    "Synthetic save and mod JAR fixture, not an actual running Minecraft instance.",
+    "No real launcher authentication, entitlement, Java selection, mod dependency resolution or gameplay was exercised.",
+    "No native Windows/macOS execution."
+  ]
+}

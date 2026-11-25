@@ -331,6 +331,21 @@ async fn game_route_status(app: AppHandle, world: String) -> Result<game_route_c
     game_route_commands::decode_current_game_route_status(&output, world)
 }
 
+/// Advisory client checklist, not a route grant or launcher process invocation.
+#[tauri::command(rename_all = "camelCase")]
+async fn client_profile(app: AppHandle, world: String, mods_dir: Option<String>) -> Result<String, String> {
+    let world = hosting_contribution_commands::validate_world_id(&world)?;
+    let mut args = vec!["client-profile".into(), world.to_string()];
+    if let Some(dir) = mods_dir.filter(|value| !value.is_empty()) {
+        if !std::path::Path::new(&dir).is_absolute() {
+            return Err("Select an absolute path to your client mods folder".into());
+        }
+        args.push("--mods-dir".into());
+        args.push(dir);
+    }
+    run_runtime_cli(&app, args).await.map_err(|_| "Signed client profile could not be checked".into())
+}
+
 #[tauri::command]
 async fn hosting_contribution_get(
     app: AppHandle,
@@ -792,6 +807,7 @@ fn main() {
             host_readiness,
             game_route_select,
             game_route_status,
+            client_profile,
             hosting_contribution_get,
             hosting_contribution_set,
             world_mods_status,

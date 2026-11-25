@@ -100,6 +100,23 @@ Select **Import world** only after checking the review. Changing any form value 
 
 EULA acceptance, Java/runtime binaries and `RuntimeLaunchConfig` are intentionally not imported. After import, the world enters the same Runtime Wizard + Play path as any other world.
 
+## Minecraft client setup
+
+Select your world, then expand **Minecraft client setup**. The requirements come from the locally retained creator-signed world configuration and its immutable genesis compatibility fingerprint. They are not a live authorization to connect or host.
+
+Choose Minecraft Launcher, Prism Launcher or another Java Edition launcher. Follow the instructions to create a separate installation/instance and game directory, select the exact Minecraft and Fabric versions and the game-appropriate Java runtime, and obtain the listed client/both-side JARs from authorized sources. Keep your existing launcher account and other instances unchanged. The server-only SwarmCraft Fabric bridge is not a client mod.
+
+Optionally enter the full path to that instance's existing `mods` folder and select **Check client profile**. SwarmCraft inspects only its top-level regular JARs, compares the signed IDs, versions and domain-separated artifact hashes, and reports missing, duplicate, unexpected, invalid or mismatched files. The check is a point-in-time inventory observation, not proof that dependencies resolve, that the launcher actually uses the selected folder, or that Java, the game, login or the network connection works. No launcher configuration, account files or game binaries are read or written, and no mods or launchers are installed or started. Use a separate instance rather than deleting or overwriting your usual mods.
+
+Equivalent read-only client inventory request via the runtime sidecar:
+
+```sh
+swarmcraft-runtime client-profile <WORLD_ID>
+swarmcraft-runtime client-profile <WORLD_ID> --mods-dir /absolute/path/to/instance/mods
+```
+
+Launch Minecraft yourself through your chosen launcher. Use Multiplayer and the current verified reconnect instructions in SwarmCraft; the compatibility report does not grant a route or enable hosting.
+
 ## Host Readiness and migration safety
 
 The player-facing shutdown question renders the backend `HostReadinessReport`; JavaScript does not recompute whether another device can safely take over.

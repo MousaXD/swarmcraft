@@ -306,6 +306,7 @@ window.__swarmcraftImportPicker = '/tmp/QA Minecraft Save';
 window.__swarmcraftImportBlocked = false;
 window.__swarmcraftImportDelay = false;
 window.__swarmcraftImportedWorld = null;
+window.__swarmcraftClientDelay = false;
 addEventListener('error', (event) => {
   window.__swarmcraftBrowserErrors.push(String(event.error?.stack || event.message || event.error || 'window error'));
 });
@@ -316,6 +317,16 @@ const record = (command, args) => window.__swarmcraftCalls.push({ command, args:
 window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
   record(command, args);
   switch (command) {
+    case 'client_profile': {
+      if (window.__swarmcraftClientDelay) await new Promise(resolve => setTimeout(resolve, 180));
+      return JSON.stringify({
+        world_id: args.world, compatibility_fingerprint: 'b'.repeat(64),
+        minecraft_version: '26.1.2', fabric_loader_version: '0.19.3', minimum_java_major: 25,
+        required_mods: [{ mod_id: 'sharedmod', version: '1.0', artifact_hash: 'c'.repeat(64) }],
+        inventory: !args.modsDir ? 'not_checked' : args.modsDir === '/fixture/matching/mods' ? 'exact_match' : 'needs_review',
+        issues: args.modsDir && args.modsDir !== '/fixture/matching/mods' ? [{ code: 'missing_required', mod_id: 'sharedmod' }] : [],
+      });
+    }
     case 'pick_import_folder': return window.__swarmcraftImportPicker;
     case 'preview_import_world': {
       if (window.__swarmcraftImportDelay) await new Promise(resolve => setTimeout(resolve, 180));
@@ -796,6 +807,57 @@ const importScenario = String.raw`(async () => {
   return { status: 'pass' };
 })()`;
 
+const clientProfileScenario = String.raw`(async () => {
+  const $ = id => document.getElementById(id);
+  const require = (condition, message) => { if (!condition) throw new Error(message); };
+  const waitFor = async (predicate, label) => {
+    for (let i = 0; i < 200; i += 1) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    throw new Error('Timed out waiting for ' + label);
+  };
+  const edit = value => {
+    $('clientModsFolder').value = value;
+    $('clientModsFolder').dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const before = window.__swarmcraftCalls.length;
+  await waitFor(() => !$('selectionContent').hidden && !$('checkClientProfile').disabled, 'selected imported world');
+  $('clientProfilePanel').querySelector('summary').click();
+  await waitFor(() => !$('clientProfileRequirements').hidden, 'signed requirements');
+  require($('clientProfileRequirements').textContent.includes('26.1.2'), 'Minecraft requirement missing');
+  require($('clientProfileRequirements').textContent.includes('0.19.3'), 'Fabric requirement missing');
+  require($('clientProfileRequirements').textContent.includes('sharedmod'), 'Client mod missing');
+  require($('clientInventoryStatus').textContent.includes('not checked'), 'Unchecked folder represented as verified');
+  $('clientLauncher').value = 'prism';
+  $('clientLauncher').dispatchEvent(new Event('change', { bubbles: true }));
+  require($('clientLauncherInstructions').textContent.includes('Prism Launcher'), 'Launcher instructions did not change');
+  edit('/fixture/missing/mods');
+  $('checkClientProfile').click();
+  await waitFor(() => $('clientInventoryStatus').dataset.state === 'warning', 'missing mod diagnosis');
+  require($('clientInventoryStatus').textContent.includes('Required client mod is missing'), 'Missing mod not reported');
+  edit('/fixture/matching/mods');
+  window.__swarmcraftClientDelay = true;
+  $('checkClientProfile').click();
+  edit('/fixture/changed/mods');
+  await new Promise(resolve => setTimeout(resolve, 260));
+  require($('clientInventoryStatus').dataset.state !== 'checked', 'Stale folder reply enabled success');
+  window.__swarmcraftClientDelay = false;
+  edit('/fixture/matching/mods');
+  $('checkClientProfile').click();
+  await waitFor(() => $('clientInventoryStatus').dataset.state === 'checked', 'matching client JAR inventory');
+  require($('clientInventoryStatus').textContent.includes('login have not been verified'), 'Client inventory confused with runtime or login');
+  const calls = window.__swarmcraftCalls.slice(before).filter(call => call.command === 'client_profile');
+  require(calls.length >= 4, 'Expected native profile reads');
+  require(calls.every(call => call.args.world === window.__swarmcraftImportedWorld), 'Profile read for wrong world');
+  require(!window.__swarmcraftCalls.slice(before).some(call => ['runtime_install', 'runtime_repair', 'hosting_contribution_set', 'launch_client'].includes(call.command)), 'Client inspection mutated runtime or account');
+  require([...document.querySelectorAll('[data-reconnect-world]')].every(button => button.disabled), 'Client match enabled unverified reconnect');
+  edit('/fixture/changed/mods');
+  require($('clientInventoryStatus').dataset.state !== 'checked', 'Path edit retained success');
+  require(window.__swarmcraftBrowserErrors.length === 0, 'Client preparation browser errors: ' + window.__swarmcraftBrowserErrors.join(' | '));
+  return { status: 'pass' };
+})()`;
+
 const scenarioRunner = String.raw`
 const done = arguments[arguments.length - 1];
 Promise.resolve().then(() => eval(arguments[0])).then(
@@ -852,6 +914,9 @@ async function runViewport(port, sessionId, documentHtml, graph, width, height, 
   const imported = await executeAsync(port, sessionId, scenarioRunner, [importScenario]);
   assert.equal(imported?.ok, true, `Import browser scenario failed at ${width}x${height}: ${imported?.error || JSON.stringify(imported)}`);
   assert.equal(imported.value?.status, 'pass');
+  const clientProfile = await executeAsync(port, sessionId, scenarioRunner, [clientProfileScenario]);
+  assert.equal(clientProfile?.ok, true, `Client preparation browser scenario failed at ${width}x${height}: ${clientProfile?.error || JSON.stringify(clientProfile)}`);
+  assert.equal(clientProfile.value?.status, 'pass');
 }
 
 // Exercise the actual compiled Svelte module graph, including its shared
@@ -920,6 +985,7 @@ async function runCandidateViewport(port, sessionId, url, width, height, screens
   for (const [name, script] of [
     ['create-provider', scenario], ['recovery', recoveryScenario],
     ['selection', selectionScenario], ['branch', branchScenario], ['invitation', inviteScenario], ['import', importScenario],
+    ['client-preparation', clientProfileScenario],
   ]) {
     const result = await executeAsync(port, sessionId, scenarioRunner, [script]);
     assert.equal(result?.ok, true, `Compiled candidate ${name} failed at ${width}x${height}: ${result?.error || JSON.stringify(result)}`);

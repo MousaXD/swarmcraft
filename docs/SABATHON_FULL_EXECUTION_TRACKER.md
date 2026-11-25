@@ -405,12 +405,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #40 — P1 · Partial
 - Work: Deliver compatible game-client preparation and handoff to the chosen launcher. Preserve the user's account and settings
 - Acceptance: Matching Java/Fabric/mod set launches or is clearly directed. Existing Mojang/Microsoft sign-in and entitlement remain intact. No credentials travel through invites
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (manual launcher handoff, signed requirements and exact local client-JAR inspection; live launch/entitlement acceptance pending)
+- Source: [Desktop client setup](../apps/desktop/README.md#minecraft-client-setup); crates/swarm-cli/src/client_profile.rs; crates/swarm-cli/tests/client_profile_cli.rs; apps/desktop/src/client-preparation.js; apps/desktop/tests/client-preparation.test.mjs; [native Linux evidence](../research/client-preparation/evidence/linux-native-20261125.json).
+- Evidence: Real runtime sidecar exposes an advisory creator-signed, genesis-bound compatibility profile; includes client-only and Both requirements, including universal mods stored only in the server array, rejects contradictory declarations and excludes server-only bridge/datapacks. Explicitly selected top-level mod inventory is bounded and checked for exact ID/version/domain-separated artifact hash, missing, duplicate, invalid, unexpected and server-only JARs. Both frontends provide isolated instance instructions for Minecraft Launcher, Prism Launcher and other Java Edition launchers; no credential/config reads, writes, process launches, downloads, invite changes or route grants. Three Rust unit tests, one real sidecar integration (including changed-byte/version, duplicates, symlink denial, incompatible signed configuration denial, preserved account/settings fixtures and canonical checkpoint), three frontend contract tests, 30 source parity tests, Svelte check/build, and strict targeted Clippy passed. Both browser variants passed seven shared scenarios at three viewports, including stale inventory reply denial and independent verified-reconnect gating. Built and extracted current Linux shipping Debian with real sidecars; native WebKitGTK in isolated Xvfb displayed signed Minecraft/Fabric/Java and mod requirements, detected a missing required mod, confirmed exact inventory, preserved synthetic account/settings/JAR files and player-only hosting state, and verified the canonical checkpoint. No actual game launch or Microsoft/Mojang authentication tested.
+- Remaining / next action: Exercise real compatible Minecraft/Fabric/Java client profiles in official and Prism launchers on clean native platforms, verify existing login/entitlement and settings, and connect through fresh authenticated gateway during Session 0/1. Manual setup is deliberate; automatic launcher integration, artifact acquisition and full dependency resolution are not credited. Proceed to #41.
+- External dependency: Real licensed Minecraft clients, actual launcher instances/accounts, native Windows and macOS, and real multi-peer gameplay environment.
+- Commit: Client preparation and local evidence checkpoint; see git history.
 
 ### #41 — P1 · Partial
 - Work: Finish modpack dependency acquisition for each supported provider and manual-artifact fallback

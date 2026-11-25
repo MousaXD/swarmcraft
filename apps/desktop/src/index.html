@@ -252,6 +252,28 @@
                   <p id="migrationAvailability" class="section-note">Transfer and wake are unavailable in this build. Existing Play and graceful stop remain available.</p>
                 </section>
 
+                <details id="clientProfilePanel" class="player-section client-profile-panel">
+                  <summary>Minecraft client setup</summary>
+                  <p class="field-help">Prepare a separate client instance in your preferred launcher. SwarmCraft never reads your launcher account files, changes existing profiles, or starts the launcher.</p>
+                  <div class="field">
+                    <label for="clientLauncher">Your Minecraft Java launcher</label>
+                    <select id="clientLauncher">
+                      <option value="official">Minecraft Launcher</option>
+                      <option value="prism">Prism Launcher</option>
+                      <option value="other">Other Java Edition launcher</option>
+                    </select>
+                  </div>
+                  <div id="clientProfileRequirements" class="client-profile-text" hidden></div>
+                  <div id="clientLauncherInstructions" class="client-profile-text" hidden></div>
+                  <div class="field">
+                    <label for="clientModsFolder">Client instance mods folder (optional)</label>
+                    <input id="clientModsFolder" class="machine-input" autocomplete="off" placeholder="/path/to/instance/mods" />
+                    <p class="field-help">Only this folder's top-level mod JARs are inspected. Leave blank to view requirements without inspecting files.</p>
+                  </div>
+                  <button id="checkClientProfile" class="button button-secondary" type="button" disabled>Check client profile</button>
+                  <p id="clientInventoryStatus" class="client-profile-text" role="status" aria-live="polite">Open to check the signed client requirements.</p>
+                </details>
+
                 <section id="modsPanel" class="player-section" aria-labelledby="modsTitle">
                   <div class="section-heading">
                     <div>

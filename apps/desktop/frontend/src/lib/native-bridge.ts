@@ -69,6 +69,7 @@ export interface NativeCommandTable {
   game_route_select: { args: { world: string }; result: string };
   /** Fresh signed-quorum, consent and Fabric proof from the live daemon. */
   game_route_status: { args: { world: string }; result: NativeGameRouteStatus };
+  client_profile: { args: { world: string; modsDir: string | null }; result: string };
   hosting_contribution_get: { args: { world: string }; result: HostingContributionReadiness };
   hosting_contribution_set: { args: { world: string; heapMib: number }; result: HostingContributionReadiness };
   world_mods_status: { args: { world: string }; result: string };

@@ -238,6 +238,10 @@ input::placeholder, textarea::placeholder { color: #667069; }
 .import-review { padding: var(--s3); border: 1px solid var(--border-strong); border-radius: var(--r-md); background: var(--surface-2); color: var(--text-2); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .import-review[data-state="blocked"] { border-color: var(--danger-border); color: #e8b0b0; }
 .import-review[data-state="ready"] { border-color: var(--safe-border); }
+.client-profile-panel > summary { cursor: pointer; font-weight: 650; }
+.client-profile-panel[open] > :not(summary) { margin-top: var(--s3); }
+.client-profile-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
+.client-profile-text[data-state="warning"] { color: #e8b0b0; }
 .form-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--s2); padding-top: var(--s1); }
 .form-details { margin-top: 0; }
 .details-fields { margin-top: var(--s3); }

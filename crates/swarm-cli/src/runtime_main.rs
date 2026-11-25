@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, str::FromStr};
 use swarm_cli::{
+    client_profile,
     discovery::{self, DiscoverySearchInputV1},
     host_readiness, launch_guard, migration, provider_runtime,
     runtime_installer::{
@@ -54,6 +55,12 @@ enum RuntimeCommand {
     Verify { world: String },
     /// Inspect one exact Fabric mod JAR using the shared Rust authority parser.
     InspectMod { path: PathBuf },
+    /// Describe the signed client profile and optionally inspect one selected mods folder.
+    ClientProfile {
+        world: String,
+        #[arg(long)]
+        mods_dir: Option<PathBuf>,
+    },
     /// Publish signed public/unlisted discovery hints from this member's local world store.
     /// Bind to a reachable local/VPN address; private worlds are never published.
     DiscoveryServe {
@@ -157,6 +164,9 @@ fn main() -> Result<()> {
         }
         RuntimeCommand::InspectMod { path } => {
             print_json(&server_mods::inspect_fabric_mod(&path)?)?;
+        }
+        RuntimeCommand::ClientProfile { world, mods_dir } => {
+            print_json(&client_profile::prepare_client_profile(&storage, parse_world(&world)?, mods_dir.as_deref())?)?;
         }
         RuntimeCommand::DiscoveryServe { listen } => {
             tokio::runtime::Runtime::new()?.block_on(discovery::serve(paths.clone(), listen))?;

@@ -537,6 +537,7 @@ export function createBackendAdapter(invoke) {
     // Selected-world hint only. This can reserve a loopback listener but it
     // cannot grant game traffic; gameRouteStatus must independently verify it.
     gameRouteSelect: (world) => call('game_route_select', { world }),
+    clientProfile: (world, modsDir = null) => call('client_profile', { world, modsDir }),
     worldCompatibility: (world) => call('world_compatibility', { world }),
     worldConflicts: (world) => call('world_conflicts', { world }),
     setBackgroundSeeding: (world, enabled) => call('set_background_seeding', { world, enabled }),
