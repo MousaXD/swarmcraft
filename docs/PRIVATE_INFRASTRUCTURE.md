@@ -76,6 +76,14 @@ target/release/swarmcraft-runtime --data-dir ./other-player discovery-resolve \
   '<world-id>' --bootstrap '<complete locator multiaddress>'
 ```
 
+Desktop uses the explicit `SWARMCRAFT_DISCOVERY_BOOTSTRAP` environment variable
+for directory provider addresses. The runtime CLI also accepts `--query` and
+`--limit` (1–64, default 32). Results are a bounded, point-in-time snapshot;
+`providers_seen`, `providers_responded`, `truncated`, and the report state
+describe coverage. `verified_unix_ms` records successful freshness verification,
+not current online status or authorization. Desktop pages that snapshot locally;
+there is no network-wide pagination cursor in discovery V1.
+
 The locator is not a proxy for an unreachable discovery publisher: a client
 must still reach the publisher and enough current world members for freshness.
 The standalone discovery transport does not implement relay-client routing.

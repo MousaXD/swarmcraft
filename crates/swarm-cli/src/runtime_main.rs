@@ -75,6 +75,9 @@ enum RuntimeCommand {
     DiscoverySearch {
         #[arg(long)]
         query: Option<String>,
+        /// Maximum verified listings in this bounded snapshot (1 through 64).
+        #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u16).range(1..=64))]
+        limit: u16,
         #[arg(long = "bootstrap")]
         bootstrap: Vec<String>,
     },
@@ -182,10 +185,10 @@ fn main() -> Result<()> {
         RuntimeCommand::DiscoveryServe { listen } => {
             tokio::runtime::Runtime::new()?.block_on(discovery::serve(paths.clone(), listen))?;
         }
-        RuntimeCommand::DiscoverySearch { query, bootstrap } => {
+        RuntimeCommand::DiscoverySearch { query, limit, bootstrap } => {
             let report = tokio::runtime::Runtime::new()?.block_on(discovery::search_public_worlds(
                 &paths,
-                DiscoverySearchInputV1 { query, ..Default::default() },
+                DiscoverySearchInputV1 { query, limit, ..Default::default() },
                 &bootstrap,
             ))?;
             print_json(&report)?;

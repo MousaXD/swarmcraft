@@ -321,6 +321,22 @@ window.__swarmcraftHoldRuntimeStatus = false;
 window.__swarmcraftReleaseRuntimeStatus = null;
 window.__swarmcraftReleaseInstall = null;
 window.__swarmcraftReleaseInvite = null;
+window.__swarmcraftDiscoveryReport = null;
+window.__swarmcraftDiscoveryHold = false;
+window.__swarmcraftReleaseDiscovery = null;
+window.__swarmcraftResolveHold = false;
+window.__swarmcraftReleaseResolve = null;
+window.__swarmcraftResolveVisibility = 'public';
+window.__swarmcraftDiscoveryCard = (world, name, overrides = {}) => {
+  const now = Date.now();
+  return { world_id: world, name, visibility:'public', membership_policy:'invite_only', join_action:'invite_required',
+    minecraft_version:'26.1.2', loader_id:'fabric', loader_version:'0.19.3', issued_unix_ms:now-1000,
+    verified_unix_ms:now, expires_unix_ms:now+60_000, ...overrides };
+};
+window.__swarmcraftDirectoryReport = (results, overrides = {}) => ({
+  state: results.length ? 'ok' : 'empty', results, providers_seen:2, providers_responded:2,
+  truncated:false, rejected_invalid:0, rejected_stale:0, ...overrides
+});
 addEventListener('error', (event) => {
   window.__swarmcraftBrowserErrors.push(String(event.error?.stack || event.message || event.error || 'window error'));
 });
@@ -497,8 +513,18 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
           project_id: '123', version_id: '456', file_name: 'restricted.jar', state: 'manual_required' },
       ],
     });
-    case 'discovery_search': return { results: [] };
-    case 'discovery_resolve': return { state: 'found', world: { world_id: args.world, name: 'Browser Public World', visibility: 'public', expires_unix_ms: Date.now() + 60_000 } };
+    case 'discovery_search':
+      if (window.__swarmcraftDiscoveryHold) {
+        window.__swarmcraftDiscoveryHold = false;
+        return await new Promise(resolve => { window.__swarmcraftReleaseDiscovery = resolve; });
+      }
+      return window.__swarmcraftDiscoveryReport || window.__swarmcraftDirectoryReport([]);
+    case 'discovery_resolve':
+      if (window.__swarmcraftResolveHold) {
+        window.__swarmcraftResolveHold = false;
+        return await new Promise(resolve => { window.__swarmcraftReleaseResolve = resolve; });
+      }
+      return { state: 'found', world: window.__swarmcraftDiscoveryCard(args.world, 'Browser Public World', {visibility:window.__swarmcraftResolveVisibility}) };
     default: return null;
   }
 } } };
@@ -591,12 +617,14 @@ const scenario = String.raw`(async () => {
   require(document.getElementById('importCatalogStatus').textContent.includes('authenticated client acceptance remain pending'), 'Import overclaims field qualification');
 
 
-  document.getElementById('joinWorldId').value = 'scworld:browser-public';
+  document.getElementById('openDiscover').click();
+  document.querySelector('#discoverPanel details summary').click();
+  document.getElementById('joinWorldId').value = 'scworld:' + 'd'.repeat(64);
   document.getElementById('joinWorldIdButton').click();
   await waitFor(() => document.getElementById('joinWorldIdNotice').textContent.includes('Browser Public World'), 'local World ID feedback');
   require(!document.getElementById('joinWorldIdNotice').hidden, 'Local World ID feedback stayed hidden');
   require(!document.getElementById('copyDiscoveryDiagnosis').disabled, 'Safe directory diagnosis unavailable');
-  document.getElementById('joinWorldId').value = 'scworld:changed-public';
+  document.getElementById('joinWorldId').value = 'scworld:' + 'e'.repeat(64);
   document.getElementById('joinWorldId').dispatchEvent(new Event('input', { bubbles: true }));
   await waitFor(() => document.getElementById('copyDiscoveryDiagnosis').disabled, 'Changed lookup invalidates stale diagnosis');
   require(!document.getElementById('publicWorldStatus').textContent.includes('Browser Public World'), 'Exact World ID feedback leaked into Public Worlds status');
@@ -956,6 +984,138 @@ const clientProfileScenario = String.raw`(async () => {
   return { status: 'pass' };
 })()`;
 
+const discoveryScenario = String.raw`(async () => {
+  const $ = id => document.getElementById(id);
+  const require = (condition, message) => { if (!condition) throw new Error(message); };
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const waitFor = async (predicate, label) => {
+    for (let i = 0; i < 240; i++) {
+      if (predicate()) return;
+      await wait(25);
+    }
+    throw new Error('Timed out waiting for ' + label);
+  };
+  const ids = i => 'scworld:' + i.toString(16).padStart(64,'0');
+  const listing = (i, overrides = {}) => window.__swarmcraftDiscoveryCard(ids(i), i === 1 ? 'LongWorldName'.repeat(17) : 'Public village '+i, {
+    description: '<b>Literal signed text</b>', tags:['survival','cooperative'], approximate_region:'Local test',
+    ...overrides,
+  });
+  const report = window.__swarmcraftDirectoryReport;
+  const calls = name => window.__swarmcraftCalls.filter(c=>c.command===name);
+  const count = () => $('publicWorldResults').children.length;
+  const edit = value => {
+    $('publicWorldQuery').value = value;
+    $('publicWorldQuery').dispatchEvent(new Event('input',{bubbles:true}));
+  };
+  const search = async raw => {
+    window.__swarmcraftDiscoveryReport = raw;
+    $('publicWorldSearch').click();
+    await waitFor(() => !$('publicWorldSearch').disabled, 'search settled');
+  };
+  const prior = calls('join_world').length;
+  $('openDiscover').click();
+  require(!$('discoverPanel').hidden && $('joinPanel').hidden, 'Discover is not separate from private invite admission');
+  await search(report([]));
+  require($('publicWorldStatus').textContent.includes('No matching public listings'), 'Missing honest empty state');
+  await search(report([], {state:'partial', providers_responded:0, detail:'sensitive bootstraps'}));
+  require($('publicWorldStatus').textContent.includes('Discovery incomplete') && !$('publicWorldStatus').textContent.includes('sensitive'), 'Incomplete or private details misrepresented');
+  await search(report([], {state:'provider_unavailable',providers_seen:0,providers_responded:0}));
+  require($('publicWorldStatus').textContent.includes('No discovery provider'), 'Unavailable state missing');
+  await search(report([], {state:'network_unavailable',providers_responded:0}));
+  require($('publicWorldStatus').textContent.includes('network unavailable'), 'Network unavailable state missing');
+
+  // A changed search invalidates the held result without launching another
+  // native search while the original is still in flight.
+  edit('first');
+  window.__swarmcraftDiscoveryHold = true;
+  const initialCalls = calls('discovery_search').length;
+  $('publicWorldSearch').click();
+  await waitFor(() => typeof window.__swarmcraftReleaseDiscovery === 'function', 'held search');
+  edit('second');
+  $('publicWorldForm').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
+  require(calls('discovery_search').length === initialCalls+1, 'Repeated search escaped the busy gate');
+  window.__swarmcraftReleaseDiscovery(report([listing(99)]));
+  await waitFor(() => !$('publicWorldSearch').disabled, 'obsolete search retired');
+  require(count()===0 && $('publicWorldStatus').textContent.includes('Search changed'), 'Late search repopulated stale results');
+
+  const data = Array.from({length:14},(_,i)=>listing(i+1));
+  data.push(listing(50,{visibility:'unlisted'}),listing(51,{visibility:'private'}),listing(52),listing(52),listing(53,{expires_unix_ms:Date.now()-1}));
+  await search(report(data,{state:'partial',truncated:true,providers_responded:1}));
+  require(count()===6, 'Page exceeds bound or missing verified rows');
+  require($('publicWorldStatus').textContent.includes('14 verified public listings') && $('publicWorldStatus').textContent.includes('Search limit reached'), 'Verified snapshot count/limit not visible');
+  require($('publicWorldPage').textContent.includes('Page 1 of 3'), 'Page 1 missing');
+  require($('publicWorldResults').textContent.includes('Verified at') && $('publicWorldResults').textContent.includes('Expires') && $('publicWorldResults').textContent.includes('Signed invite required'), 'Listing freshness and membership semantics absent');
+  require($('publicWorldResults').textContent.includes('<b>Literal signed text</b>') && !$('publicWorldResults').querySelector('b'), 'Untrusted listing rendered as HTML');
+  require($('publicWorldPrev').disabled && !$('publicWorldNext').disabled, 'Page start bounds');
+  $('publicWorldNext').click();
+  require(count()===6 && $('publicWorldPage').textContent.includes('Page 2 of 3'), 'Next page incorrect');
+  $('publicWorldNext').click();
+  require(count()===2 && $('publicWorldNext').disabled && $('publicWorldPage').textContent.includes('Page 3 of 3'), 'Last page incorrect');
+  require([...$('publicWorldResults').children].every(row=>row.dataset.worldId !== ids(50)), 'Unlisted leaked into browse');
+  $('publicWorldPrev').click(); $('publicWorldPrev').click();
+  require(count()===6 && $('publicWorldPrev').disabled, 'Previous page incorrect');
+  const row = $('publicWorldResults').querySelector('li');
+  row.querySelector('button').click();
+  await waitFor(() => $('joinWorldIdNotice').textContent.includes('Verified signed announcement'), 'exact listing action');
+  require($('joinWorldId').value===ids(1) && calls('discovery_resolve').at(-1).args.world===ids(1), 'Row action did not resolve exact ID');
+  require($('joinWorldId').closest('details').open, 'Exact listing disclosure not opened');
+  require(!$('copyDiscoveryDiagnosis').disabled, 'No safe diagnosis');
+  $('joinWorldId').value=ids(88);
+  $('joinWorldId').dispatchEvent(new Event('input',{bubbles:true}));
+  window.__swarmcraftResolveVisibility='unlisted';
+  $('joinWorldIdButton').click();
+  await waitFor(() => $('joinWorldIdNotice').textContent.includes('unlisted'), 'unlisted exact lookup');
+  require($('joinWorldIdNotice').textContent.includes('does not grant membership'), 'Exact unlisted lookup implied admission');
+
+  window.__swarmcraftResolveHold = true;
+  $('joinWorldIdButton').click();
+  await waitFor(() => typeof window.__swarmcraftReleaseResolve === 'function', 'held resolve');
+  $('joinWorldId').value=ids(89);
+  $('joinWorldId').dispatchEvent(new Event('input',{bubbles:true}));
+  require($('joinWorldIdButton').disabled && $('copyDiscoveryDiagnosis').disabled, 'Editing exact ID allowed overlapping lookup or stale copy');
+  window.__swarmcraftReleaseResolve({state:'found',world:listing(88,{visibility:'unlisted'})});
+  await waitFor(() => !$('joinWorldIdButton').disabled, 'stale exact lookup retired');
+  require($('joinWorldIdNotice').hidden && $('copyDiscoveryDiagnosis').disabled, 'Changed ID accepted late result');
+  $('joinWorldId').value='scworld:invalid';
+  $('joinWorldId').dispatchEvent(new Event('input',{bubbles:true}));
+  const resolveCount=calls('discovery_resolve').length;
+  $('joinWorldIdButton').click();
+  await waitFor(() => $('joinWorldIdNotice').textContent.includes('full World ID'), 'invalid ID local validation');
+  require(calls('discovery_resolve').length===resolveCount, 'Invalid ID reached native sidecar');
+  window.__swarmcraftResolveVisibility='public';
+
+  // Expiration retires results even with no new user action.
+  await search(report([listing(42,{expires_unix_ms:Date.now()+250})]));
+  await waitFor(() => count()===1, 'short-lived listing');
+  await waitFor(() => count()===0 && $('publicWorldStatus').textContent.includes('expired'), 'expired listing retired');
+  require($('publicWorldPages').hidden, 'Expired pages still visible');
+  $('discoverToJoin').click();
+  require(!$('joinPanel').hidden && $('discoverPanel').hidden && !$('joinInvite').value, 'Private Join not separate');
+  require(calls('join_world').length===prior, 'Directory search attempted membership');
+
+  // Leave a populated real-rendered layout for visual evidence at this size.
+  $('joinToDiscover').click();
+  $('joinWorldId').closest('details').open=false;
+  edit('');
+  await search(report(Array.from({length:14},(_,i)=>listing(i+1))));
+  $('discoverPanel').scrollTop=0;
+  require(!$('discoverPanel').hidden && document.body.scrollWidth<=innerWidth
+    && $('discoverPanel').scrollWidth<=$('discoverPanel').clientWidth+2, 'Lobby horizontal overflow');
+  require(window.__swarmcraftBrowserErrors.length===0, 'Lobby browser errors: '+window.__swarmcraftBrowserErrors.join(' | '));
+  return {status:'pass'};
+})()`;
+
+async function runDiscoveryGate(port, sessionId, width, height, screenshotPath) {
+  const result = await executeAsync(port, sessionId, scenarioRunner, [discoveryScenario]);
+  assert.equal(result?.ok, true, `Discovery lobby scenario failed at ${width}x${height}: ${result?.error}`);
+  assert.equal(result.value?.status,'pass');
+  const png=Buffer.from(await webdriverRequest(port,`/session/${sessionId}/screenshot`),'base64');
+  await writeFile(screenshotPath.replace(/\.png$/,'-discovery.png'),png);
+  await tabTo(port,sessionId,'#publicWorldNext');
+  await keyInput(port,sessionId,'Enter');
+  assert.equal(await execute(port,sessionId,'return document.getElementById("publicWorldPage").textContent.includes("Page 2 of 3")'),true);
+}
+
 const scenarioRunner = String.raw`
 const done = arguments[arguments.length - 1];
 Promise.resolve().then(() => eval(arguments[0])).then(
@@ -1161,6 +1321,7 @@ async function runViewport(port, sessionId, documentHtml, graph, width, height, 
   assert.equal(clientProfile?.ok, true, `Client preparation browser scenario failed at ${width}x${height}: ${clientProfile?.error || JSON.stringify(clientProfile)}`);
   assert.equal(clientProfile.value?.status, 'pass');
   await runAccessibilityGate(port, sessionId, width, height, screenshotPath);
+  await runDiscoveryGate(port, sessionId, width, height, screenshotPath);
 }
 
 // Exercise the actual compiled Svelte module graph, including its shared
@@ -1239,6 +1400,7 @@ async function runCandidateViewport(port, sessionId, url, width, height, screens
     await writeFile(screenshotPath.replace(/\.png$/, `-${name}.png`), screenshot);
   }
   await runAccessibilityGate(port, sessionId, width, height, screenshotPath);
+  await runDiscoveryGate(port, sessionId, width, height, screenshotPath);
 }
 
 test('current Desktop module graph initializes, owns canonical Create, and renders supported window sizes', async () => {

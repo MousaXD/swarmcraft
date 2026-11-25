@@ -27,7 +27,7 @@ use swarm_protocol::{
     WorldVisibilityV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{Storage, StorageError};
-use tokio::time::{timeout, Instant, MissedTickBehavior};
+use tokio::time::{timeout, timeout_at, Instant, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 pub const DISCOVERY_CAPABILITY: &str = "discovery-v1";
@@ -40,6 +40,12 @@ const DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const ANNOUNCEMENT_RENEW_BEFORE_MS: u64 = 60_000;
 const DISCOVERY_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 const DISCOVERY_FRESHNESS_TIMEOUT: Duration = Duration::from_secs(5);
+// Bound the whole verification pass, not just each candidate. Warmup and
+// collection are separately bounded at eight seconds apiece. An exhausted
+// budget produces a partial directory report, never an unverified listing.
+const DISCOVERY_VERIFICATION_BUDGET: Duration = Duration::from_secs(12);
+const MAX_DIRECTORY_PROVIDERS: usize = 64;
+const MAX_DIRECTORY_CANDIDATES: usize = MAX_DISCOVERY_RESULTS;
 // A transient QUIC stream loss must not permanently hide a signed canonical
 // provider. Limit retries to the caller's explicit locators and the existing
 // overall discovery deadline; retries never bypass authentication or quorum.
@@ -118,6 +124,9 @@ pub struct WorldDiscoveryCardV1 {
     pub announcer_peer_id: String,
     pub issued_unix_ms: u64,
     pub expires_unix_ms: u64,
+    /// Local time at successful nonce/quorum verification. This is a
+    /// point-in-time directory observation, never a live hosting lease.
+    pub verified_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,6 +135,10 @@ pub struct PublicWorldSearchReportV1 {
     pub state: String,
     pub results: Vec<WorldDiscoveryCardV1>,
     pub providers_seen: usize,
+    pub providers_responded: usize,
+    /// True if any provider, candidate, result or verification budget may
+    /// have limited this snapshot. V1 has no remote continuation cursor.
+    pub truncated: bool,
     pub rejected_invalid: usize,
     pub rejected_stale: usize,
     pub detail: Option<String>,
@@ -534,12 +547,18 @@ fn handle_discovery_request(
         WireRequest::DiscoveryPublic { filter } => {
             let now = unix_millis()?;
             let limit = usize::from(filter.limit.clamp(1, MAX_DISCOVERY_RESULTS as u16));
-            let values = state
+            let mut matching: Vec<_> = state
                 .announcements
                 .values()
                 .filter(|value| matches!(value.visibility, WorldVisibilityV1::Public))
-                .filter(|value| value.expires_unix_ms >= now)
+                .filter(|value| value.expires_unix_ms > now)
                 .filter(|value| announcement_matches(value, &filter))
+                .collect();
+            // A capped response must not select an arbitrary HashMap subset
+            // on each identical request.
+            matching.sort_by(|a, b| announcement_order(a, b));
+            let values = matching
+                .into_iter()
                 .filter(|value| published_announcement_is_current(storage, value))
                 .take(limit)
                 .cloned()
@@ -1163,6 +1182,11 @@ pub async fn search_public_worlds(
     bootstrap_addrs: &[String],
 ) -> Result<PublicWorldSearchReportV1> {
     let filter: DiscoveryFilterV1 = input.into();
+    let request = WireRequest::DiscoveryPublic { filter: filter.clone() };
+    request.validate_limits()?;
+    if bootstrap_addrs.len() > MAX_DIRECTORY_PROVIDERS {
+        bail!("too many configured discovery locators");
+    }
     let identity = PeerIdentity::load_or_create(paths)?;
     let hello = identity.signed_peer_hello(vec![DISCOVERY_CAPABILITY.into()])?;
     let mut node = DiscoveryNode::new(generate_transport_key(), hello, identity.network_signing_key())?;
@@ -1183,7 +1207,6 @@ pub async fn search_public_worlds(
     let mut retry_attempts = HashMap::<TransportPeerId, u8>::new();
     let mut handshake_retry_attempts = HashMap::<TransportPeerId, u8>::new();
     let mut queued_retries = HashMap::new();
-    let request = WireRequest::DiscoveryPublic { filter: filter.clone() };
     for transport_peer in bootstrap_order.iter().copied() {
         if node.application_peer(&transport_peer).is_some() && requested.insert(transport_peer) {
             let request_id =
@@ -1198,7 +1221,10 @@ pub async fn search_public_worlds(
     }
     let query = node.find_public_providers();
     let mut candidates = Vec::<WorldAnnouncementV1>::new();
-    let mut results = HashMap::<WorldId, WorldAnnouncementV1>::new();
+    let mut results = HashMap::<WorldId, (WorldAnnouncementV1, u64)>::new();
+    let mut candidate_hashes = HashSet::new();
+    let mut responded = HashSet::new();
+    let mut truncated = false;
     let mut replay = AnnouncementReplayGuard::default();
     let mut rejected_invalid = 0usize;
     let mut rejected_stale = 0usize;
@@ -1219,6 +1245,13 @@ pub async fn search_public_worlds(
             match event {
                 DiscoveryNetworkEvent::ProvidersFound { query_id, providers: found } if query_id == query => {
                     for peer in found {
+                        if providers.contains(&peer) {
+                            continue;
+                        }
+                        if providers.len() >= MAX_DIRECTORY_PROVIDERS {
+                            truncated = true;
+                            break;
+                        }
                         if providers.insert(peer) {
                             if let Err(error) = node.dial_peer(peer) {
                                 debug!(transport_peer = %peer, %error, "could not dial public discovery provider");
@@ -1272,7 +1305,15 @@ pub async fn search_public_worlds(
                     }
                     pending.remove(&key);
                     if let WireResponse::DiscoveryWorlds(values) = response {
+                        responded.insert(transport_peer);
+                        if values.len() >= usize::from(filter.limit) {
+                            truncated = true;
+                        }
                         for value in values {
+                            if candidates.len() >= MAX_DIRECTORY_CANDIDATES {
+                                truncated = true;
+                                break;
+                            }
                             if !matches!(value.visibility, WorldVisibilityV1::Public)
                                 || value.membership_policy != MembershipPolicyV1::InviteOnly
                                 || !announcement_matches(&value, &filter)
@@ -1283,8 +1324,7 @@ pub async fn search_public_worlds(
                             match verify_world_announcement(&value, unix_millis()?) {
                                 Ok(()) => {
                                     let hash = value.announcement_hash()?;
-                                    if candidates.iter().all(|existing| existing.announcement_hash().ok() != Some(hash))
-                                    {
+                                    if candidate_hashes.insert(hash) {
                                         candidates.push(value);
                                     }
                                 }
@@ -1292,6 +1332,8 @@ pub async fn search_public_worlds(
                                 Err(_) => rejected_invalid += 1,
                             }
                         }
+                    } else if !matches!(response, WireResponse::Error { .. }) {
+                        rejected_invalid += 1;
                     }
                 }
                 DiscoveryNetworkEvent::OutboundFailure { transport_peer, request_id, error } => {
@@ -1334,30 +1376,55 @@ pub async fn search_public_worlds(
         }
     }
 
+    let deadline = Instant::now() + DISCOVERY_VERIFICATION_BUDGET;
     for candidate in candidates {
-        match prove_candidate_freshness(&mut node, &identity, &candidate, &providers).await {
-            Ok(true) => match replay.accept(&candidate) {
+        if Instant::now() >= deadline {
+            truncated = true;
+            break;
+        }
+        match timeout_at(deadline, prove_candidate_freshness(&mut node, &identity, &candidate, &providers)).await {
+            Ok(Ok(true)) => match replay.accept(&candidate) {
                 Ok(()) => {
-                    results.insert(candidate.world_id, candidate);
+                    results.insert(candidate.world_id, (candidate, unix_millis()?));
                 }
                 Err(DiscoveryRecordError::Replay) => rejected_stale += 1,
                 Err(_) => rejected_invalid += 1,
             },
-            Ok(false) => rejected_stale += 1,
-            Err(_) => rejected_invalid += 1,
+            Ok(Ok(false)) => rejected_stale += 1,
+            Ok(Err(_)) => rejected_invalid += 1,
+            Err(_) => {
+                truncated = true;
+                break;
+            }
         }
     }
 
-    let mut values: Vec<_> = results.into_values().collect();
-    values.sort_by(|a, b| {
-        a.presentation
-            .name
-            .to_lowercase()
-            .cmp(&b.presentation.name.to_lowercase())
-            .then_with(|| a.world_id.cmp(&b.world_id))
-    });
-    values.truncate(usize::from(filter.limit.clamp(1, MAX_DISCOVERY_RESULTS as u16)));
-    let cards = values.into_iter().map(WorldDiscoveryCardV1::from).collect::<Vec<_>>();
+    let now = unix_millis()?;
+    let mut values: Vec<_> = results
+        .into_values()
+        .filter(|(value, _)| {
+            if value.expires_unix_ms <= now {
+                rejected_stale += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    values.sort_by(|(a, _), (b, _)| announcement_order(a, b));
+    if values.len() > usize::from(filter.limit) {
+        truncated = true;
+    }
+    values.truncate(usize::from(filter.limit));
+    let cards = values
+        .into_iter()
+        .map(|(value, verified)| WorldDiscoveryCardV1::from_verified(value, verified))
+        .collect::<Vec<_>>();
+    let incomplete = truncated
+        || responded.len() < providers.len()
+        || rejected_invalid > 0
+        || rejected_stale > 0
+        || network_error.is_some();
     let state = if providers.is_empty() {
         if network_error.is_some() {
             "network_unavailable"
@@ -1367,12 +1434,12 @@ pub async fn search_public_worlds(
     } else if cards.is_empty() {
         // Failed explicit providers are not proof that no public worlds
         // exist. Report incomplete discovery rather than a false empty set.
-        if rejected_invalid > 0 || rejected_stale > 0 || network_error.is_some() {
+        if incomplete {
             "partial"
         } else {
             "empty"
         }
-    } else if rejected_invalid > 0 || rejected_stale > 0 || network_error.is_some() {
+    } else if incomplete {
         "partial"
     } else {
         "ok"
@@ -1381,6 +1448,8 @@ pub async fn search_public_worlds(
         state: state.into(),
         results: cards,
         providers_seen: providers.len(),
+        providers_responded: responded.len(),
+        truncated,
         rejected_invalid,
         rejected_stale,
         detail: network_error,
@@ -1392,6 +1461,9 @@ pub async fn resolve_world(
     world: WorldId,
     bootstrap_addrs: &[String],
 ) -> Result<ResolveWorldReportV1> {
+    if bootstrap_addrs.len() > MAX_DIRECTORY_PROVIDERS {
+        bail!("too many configured discovery locators");
+    }
     let identity = PeerIdentity::load_or_create(paths)?;
     let hello = identity.signed_peer_hello(vec![DISCOVERY_CAPABILITY.into()])?;
     let mut node = DiscoveryNode::new(generate_transport_key(), hello, identity.network_signing_key())?;
@@ -1427,6 +1499,8 @@ pub async fn resolve_world(
     let query = node.find_world_providers(world);
     let mut candidates = Vec::<WorldAnnouncementV1>::new();
     let mut result = None;
+    let mut candidate_hashes = HashSet::new();
+    let mut responded = HashSet::new();
     let mut invalid = false;
     let mut stale = false;
     let mut detail = None;
@@ -1493,7 +1567,14 @@ pub async fn resolve_world(
                         }
                     }
                     pending.remove(&key);
+                    if matches!(&response, WireResponse::DiscoveryResolved(_)) {
+                        responded.insert(transport_peer);
+                    }
                     if let WireResponse::DiscoveryResolved(Some(value)) = response {
+                        if candidates.len() >= MAX_DIRECTORY_CANDIDATES {
+                            detail.get_or_insert_with(|| "exact discovery candidate limit reached".into());
+                            continue;
+                        }
                         if value.world_id != world
                             || matches!(value.visibility, WorldVisibilityV1::Private)
                             || value.membership_policy != MembershipPolicyV1::InviteOnly
@@ -1505,13 +1586,15 @@ pub async fn resolve_world(
                             Ok(()) => {
                                 let value = *value;
                                 let hash = value.announcement_hash()?;
-                                if candidates.iter().all(|existing| existing.announcement_hash().ok() != Some(hash)) {
+                                if candidate_hashes.insert(hash) {
                                     candidates.push(value);
                                 }
                             }
                             Err(DiscoveryRecordError::Expired) => stale = true,
                             Err(_) => invalid = true,
                         }
+                    } else if !matches!(response, WireResponse::DiscoveryResolved(None) | WireResponse::Error { .. }) {
+                        invalid = true;
                     }
                 }
                 DiscoveryNetworkEvent::OutboundFailure { transport_peer, request_id, error } => {
@@ -1545,14 +1628,27 @@ pub async fn resolve_world(
             detail.get_or_insert_with(|| "exact discovery query deadline exceeded".into());
         }
     }
+    let deadline = Instant::now() + DISCOVERY_VERIFICATION_BUDGET;
     for candidate in candidates {
-        match prove_candidate_freshness(&mut node, &identity, &candidate, &providers).await {
-            Ok(true) => {
-                result = Some(candidate);
+        if Instant::now() >= deadline {
+            detail.get_or_insert_with(|| "exact discovery verification budget exhausted".into());
+            break;
+        }
+        match timeout_at(deadline, prove_candidate_freshness(&mut node, &identity, &candidate, &providers)).await {
+            Ok(Ok(true)) => {
+                let verified = unix_millis()?;
+                if candidate.expires_unix_ms > verified {
+                    result = Some(WorldDiscoveryCardV1::from_verified(candidate, verified));
+                    break;
+                }
+                stale = true;
+            }
+            Ok(Ok(false)) => stale = true,
+            Ok(Err(_)) => invalid = true,
+            Err(_) => {
+                detail.get_or_insert_with(|| "exact discovery verification budget exhausted".into());
                 break;
             }
-            Ok(false) => stale = true,
-            Err(_) => invalid = true,
         }
     }
 
@@ -1562,7 +1658,7 @@ pub async fn resolve_world(
         "stale"
     } else if invalid {
         "invalid"
-    } else if detail.is_some() {
+    } else if detail.is_some() || responded.len() < providers.len() {
         // A failed explicit request or provider lookup is not evidence that
         // this world does not exist, even when DHT peers were discovered.
         "network_unavailable"
@@ -1571,7 +1667,7 @@ pub async fn resolve_world(
     } else {
         "not_found"
     };
-    Ok(ResolveWorldReportV1 { state: state.into(), world: result.map(WorldDiscoveryCardV1::from), detail })
+    Ok(ResolveWorldReportV1 { state: state.into(), world: result, detail })
 }
 
 pub async fn friend_presence(
@@ -1763,8 +1859,16 @@ fn announcement_matches(value: &WorldAnnouncementV1, filter: &DiscoveryFilterV1)
     true
 }
 
-impl From<WorldAnnouncementV1> for WorldDiscoveryCardV1 {
-    fn from(value: WorldAnnouncementV1) -> Self {
+fn announcement_order(a: &WorldAnnouncementV1, b: &WorldAnnouncementV1) -> std::cmp::Ordering {
+    a.presentation
+        .name
+        .to_lowercase()
+        .cmp(&b.presentation.name.to_lowercase())
+        .then_with(|| a.world_id.cmp(&b.world_id))
+}
+
+impl WorldDiscoveryCardV1 {
+    fn from_verified(value: WorldAnnouncementV1, verified_unix_ms: u64) -> Self {
         let (membership_policy, join_action) = match value.membership_policy {
             MembershipPolicyV1::Open => ("open", "unsupported"),
             MembershipPolicyV1::ApprovalRequired => ("approval_required", "unsupported"),
@@ -1791,6 +1895,7 @@ impl From<WorldAnnouncementV1> for WorldDiscoveryCardV1 {
             announcer_peer_id: value.announcer_peer_id.to_string(),
             issued_unix_ms: value.issued_unix_ms,
             expires_unix_ms: value.expires_unix_ms,
+            verified_unix_ms,
         }
     }
 }

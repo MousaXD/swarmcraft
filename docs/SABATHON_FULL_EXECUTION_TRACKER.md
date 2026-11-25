@@ -455,12 +455,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #45 — P2 · Partial
 - Work: Build the normal-player world lobby on signed discovery and provider results
 - Acceptance: Public search and exact unlisted resolve have useful empty states, bounded paging, freshness display, and a separate private Join action
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (real signed loopback directory, both packaged Linux frontends, bounded snapshot; WAN and other native platforms pending)
+- Source: crates/swarm-cli/src/{discovery,runtime_main}.rs; crates/swarm-cli/tests/discovery_network_freshness.rs; apps/desktop/src/{discovery-lobby,discovery-diagnostics,launcher-controller,app}.js; apps/desktop/src-tauri/src/launcher_commands.rs; Svelte DiscoveryView/JoinWorldView/Sidebar/Workspace; scripts/e2e/discovery_lobby_smoke.py; scripts/acceptance/native_discovery_lobby.py.
+- Evidence: [Report](../research/discovery-lobby/REPORT.md), [real loopback CLI](../research/discovery-lobby/evidence/loopback-cli-20261125.json), [native Linux recheck](../research/discovery-lobby/evidence/linux-native-20261125.json). Rust caps provider collection and overall freshness verification; no relaxed signed membership/quorum proof. Both frontends expose separate Discover and signed-invite Join, six-card pages over a bounded 32-result snapshot, verification time/expiry, provider coverage, explicit incomplete/empty/network errors, and stale-response/duplicate/expired-record rejection. Nine discovery library tests, six real-network tests, targeted Clippy/format/native check, 160 Node tests, 82 Svelte tests, 30 source-parity tests, Svelte check/build and both Chromium variants at three sizes passed. The actual CLI verified nine public worlds, deterministic cap of three, unlisted exact lookup, private refusal and unchanged membership. Both extracted Debian packages passed the native filtered-search recheck with nine signed public listings, two pages, both supported window sizes, exact unlisted lookup and no membership creation. Initial native nine-listing timeout and intermediate eight-listing partial result are recorded; no limit or verification gate weakened.
+- Remaining / next action: Remote multi-provider/WAN/NAT reliability and system-installed Windows/macOS field qualification. Discovery V1 intentionally has local bounded paging, not a distributed global index/cursor. Proceed to #46.
+- External dependency: Reachable operator-managed providers, actual remote network and platform field environments.
+- Commit: Bounded signed discovery lobby and local evidence checkpoint; see git history.
 
 ### #46 — P2 · Partial
 - Work: Connect friend contact/presence primitives to explicit consent, hide/offline mode, and useful invitations

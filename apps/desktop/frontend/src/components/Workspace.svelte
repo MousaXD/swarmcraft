@@ -3,6 +3,7 @@
   import WorldsView from './WorldsView.svelte';
   import CreateWorldView from './CreateWorldView.svelte';
   import ImportWorldView from './ImportWorldView.svelte';
+  import DiscoveryView from './DiscoveryView.svelte';
   import JoinWorldView from './JoinWorldView.svelte';
   import ActivityView from './ActivityView.svelte';
   import DiagnosticsView from './DiagnosticsView.svelte';
@@ -14,6 +15,7 @@
     <WorldsView />
     <CreateWorldView />
     <ImportWorldView />
+    <DiscoveryView />
     <JoinWorldView />
     <ActivityView />
     <DiagnosticsView />

@@ -496,15 +496,16 @@ def run(binary: Path, artifacts: Path):
             "Empty invite did not fail closed through Svelte: " + repr(observed)
         )
         # Checking a World ID may display discovery guidance but must not
-        # impersonate joining, create membership or request native IPC.
+        # impersonate joining, create membership or request a native join.
         # The World ID lookup is inside a collapsed native <details> panel.
         # Open it as a user would before typing into the field.
         mark_stage('signed-discovery-resolution')
-        app.click("#joinPanel details.task-secondary summary")
-        app.type("#joinWorldId", "scworld:discovery-only")
+        app.click("#openDiscover")
+        app.click("#discoverPanel details.task-secondary summary")
+        app.type("#joinWorldId", "scworld:" + "e" * 64)
         app.click("#joinWorldIdButton")
         discovery = None
-        for _ in range(70):
+        for _ in range(160):
             discovery = app.execute("""
               const note = document.getElementById('joinWorldIdNotice');
               const button = document.getElementById('joinWorldIdButton');

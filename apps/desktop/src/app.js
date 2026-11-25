@@ -49,6 +49,7 @@ const viewMeta = {
   worlds: ['Worlds', 'Choose a world and play'],
   create: ['Create', 'Start a replicated Minecraft world'],
   import: ['Import', 'Bring an existing Minecraft world into SwarmCraft'],
+  discover: ['Discover', 'Find signed public and unlisted world listings'],
   join: ['Join', 'Join with a signed invite'],
   activity: ['Activity', 'Recent actions and detailed errors'],
   diagnostics: ['Diagnostics', 'Advanced connectivity, runtime, and recovery tools'],
@@ -1286,9 +1287,8 @@ function joinWorldId() {
     $('joinWorldId').focus();
     return;
   }
-  const message = `Discovery can look for ${world}, but it does not grant membership. A private world still needs a signed invite.`;
+  const message = `Signed directory lookup is unavailable. Discovery does not grant membership. A private world still needs a signed invite.`;
   showInline('joinWorldIdNotice', message);
-  setOutput(message, 'World discovery');
 }
 
 function renderMembershipNotice(world) {
@@ -1976,6 +1976,8 @@ $('quickJoin').addEventListener('click', () => showView('join'));
 $('cancelCreate').addEventListener('click', () => showView('worlds'));
 $('cancelImport').addEventListener('click', () => showView('worlds'));
 $('cancelJoin').addEventListener('click', () => showView('worlds'));
+$('discoverToJoin').addEventListener('click', () => showView('join'));
+$('joinToDiscover').addEventListener('click', () => showView('discover'));
 $('openWorldDiagnostics').addEventListener('click', () => showView('diagnostics'));
 $('clearActivity').addEventListener('click', () => { $('output').textContent = 'Activity cleared.'; });
 $('inviteWorld').addEventListener('click', () => { try { openInviteDialog(); } catch (error) { setOutput(String(error), 'Invite'); } });

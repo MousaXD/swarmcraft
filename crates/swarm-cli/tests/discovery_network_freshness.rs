@@ -907,3 +907,63 @@ async fn permanently_disconnecting_explicit_provider_is_bounded_and_fails_closed
     exact_task.abort();
     assert!(exact_task.await.is_err_and(|error| error.is_cancelled()));
 }
+
+/// A real authenticated provider may send many correctly signed, unproven
+/// announcements. Per-candidate deadlines alone could stall the lobby for
+/// minutes. The aggregate deadline must return an incomplete result instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn signed_but_unproven_browse_candidates_exhaust_only_bounded_budget() {
+    let (authority, mut provider, address, _) = make_node([106; 32]).await;
+    let mut values = Vec::new();
+    for index in 1..=12 {
+        let world = swarm_protocol::WorldId([index; 32]);
+        let membership = signed_membership(&authority, world, 1, 0, None, &[member(&authority)]);
+        values.push(announcement(AnnouncementFixture {
+            authority: &authority,
+            world,
+            membership: &membership,
+            epoch: 1,
+            fence: 1,
+            config_sequence: 1,
+            config_hash: Hash32([10; 32]),
+            canonical_head: DiscoveryCanonicalHeadV1 {
+                snapshot_number: 1,
+                manifest_hash: Hash32([11; 32]),
+                epoch: 1,
+                sequence: 1,
+            },
+            sequence: 1,
+            name: "Signed but unproven listing",
+        }));
+    }
+    let provider_task = tokio::spawn(async move {
+        loop {
+            if let DiscoveryNetworkEvent::InboundRequest { request, channel, .. } = provider.next_event().await.unwrap()
+            {
+                let response = match request {
+                    WireRequest::DiscoveryPublic { .. } => WireResponse::DiscoveryWorlds(values.clone()),
+                    WireRequest::DiscoveryFreshnessContext { .. } => WireResponse::DiscoveryFreshnessContext(None),
+                    _ => WireResponse::Error { code: "NO_PROOF".into(), message: "no proof".into() },
+                };
+                provider.respond(channel, response).unwrap();
+            }
+        }
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let paths = DataPaths::from_root(temp.path());
+    let start = tokio::time::Instant::now();
+    let report = timeout(
+        Duration::from_secs(30),
+        search_public_worlds(&paths, DiscoverySearchInputV1 { limit: 4, ..Default::default() }, &[address]),
+    )
+    .await
+    .expect("aggregate browse deadline should bound all unproven candidates")
+    .unwrap();
+    assert!(start.elapsed() < Duration::from_secs(30));
+    assert_eq!(report.state, "partial", "{report:?}");
+    assert!(report.truncated, "directory must disclose its bounded scope");
+    assert_eq!(report.providers_responded, 1);
+    assert!(report.results.is_empty(), "signatures alone must not admit listings");
+    provider_task.abort();
+    assert!(provider_task.await.is_err_and(|error| error.is_cancelled()));
+}

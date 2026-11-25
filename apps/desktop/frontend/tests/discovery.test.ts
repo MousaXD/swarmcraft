@@ -12,8 +12,14 @@ describe('Svelte World ID discovery uses Rust signed-announcement verification',
     expect(formatDiscoveryResult(report, 'scworld:abc').message).toContain('does not grant membership');
   });
   it('displays a Rust-verified signed public announcement without inventing membership', () => {
-    const r = formatDiscoveryResult({ state: 'found', world: {world_id:'scworld:abc', name:'Friends', visibility:'public', expires_unix_ms:Date.now()+60000} }, 'scworld:abc');
-    expect(r.tone).toBe('safe');
+    const now = Date.now();
+    const world = 'scworld:' + 'a'.repeat(64);
+    const r = formatDiscoveryResult({ state: 'found', world: {
+      world_id:world, name:'Friends', visibility:'public', membership_policy:'invite_only', join_action:'invite_required',
+      minecraft_version:'26.1.2', loader_id:'fabric', loader_version:'0.19.3',
+      issued_unix_ms:now-1000, verified_unix_ms:now, expires_unix_ms:now+60000,
+    } }, world, now);
+    expect(r.tone).toBe('neutral');
     expect(r.message).toContain('signed announcement');
     expect(r.message).toContain('does not grant membership');
   });

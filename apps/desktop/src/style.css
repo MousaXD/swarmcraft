@@ -364,3 +364,29 @@ input::placeholder, textarea::placeholder { color: #667069; }
   .button { transition: none; }
   .button:active:not(:disabled) { transform: none; }
 }
+
+/* Normal-player discovery lobby: independent from signed invite admission. */
+.discovery-shell { display: grid; gap: var(--s4); }
+.discovery-header { justify-content: space-between; align-items: flex-start; margin-bottom: 0; flex-wrap: wrap; }
+.discovery-header > div { min-width: 0; flex: 1 1 300px; }
+.discovery-section { display: grid; gap: var(--s3); min-width: 0; }
+.discovery-search { display: grid; gap: var(--s1); min-width: 0; }
+.discovery-search > label { color: var(--text-2); font-size: 11px; font-weight: 650; }
+.discovery-search-controls { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: var(--s2); }
+.discovery-results { min-width: 0; margin: 0; padding: 0; list-style: none; display: grid; border-radius: var(--r-md); }
+.discovery-results:empty { display: none; }
+.discovery-result { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: start; gap: var(--s3); padding: var(--s3); border-top: 1px solid var(--border); }
+.discovery-result:last-child { border-bottom: 1px solid var(--border); }
+.discovery-result-copy { display: grid; gap: var(--s1); min-width: 0; overflow-wrap: anywhere; }
+.discovery-result-copy > strong { font-size: 13px; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.discovery-result-copy .field-help, .discovery-result-actions .field-help { font-size: 11px; color: var(--muted); line-height: 1.4; }
+.discovery-freshness { font-size: 11px; color: var(--text-2); }
+.discovery-result-actions { display: grid; gap: var(--s1); justify-items: end; }
+.discovery-pages { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s2); color: var(--text-2); font-size: 11px; }
+.discovery-shell .task-secondary { margin-top: 0; }
+.discovery-shell .task-secondary .inline-notice { margin-block: var(--s2); overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .discovery-result { grid-template-columns: minmax(0,1fr); }
+  .discovery-result-actions { justify-items: start; }
+  .discovery-search-controls { grid-template-columns: minmax(0,1fr); }
+}

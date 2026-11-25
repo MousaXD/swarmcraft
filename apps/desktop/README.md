@@ -28,6 +28,7 @@ The launcher centers normal use around:
 
 - creating a world;
 - importing an existing Minecraft world through the typed Rust importer;
+- discovering public worlds and checking exact public or unlisted World IDs;
 - joining with a signed invite;
 - choosing a world and playing;
 - running the managed Runtime Wizard when Java/Minecraft/Fabric setup is incomplete;
@@ -43,6 +44,12 @@ The launcher centers normal use around:
 - opening advanced diagnostics for technical setup, manual overrides or recovery.
 
 Conflict, solo/degraded, canonical, authority-eligibility, membership and relay semantics remain distinct. A storage replica never implies authority eligibility, and discovery never implies membership.
+
+## Discover worlds
+
+The Discover view searches signed public announcements, with at most 32 results and six per page. A blank search browses the bounded snapshot; a name or tag narrows it. Verification times, signed expiry, provider response counts, and partial-result warnings describe what was actually checked. Expired cards are removed. Exact public or unlisted World IDs can be checked separately. A private world is never listed, and a listing does not grant membership, hosting permission, or a Minecraft route. The separate Join view accepts a signed invitation.
+
+Configure reachable directory providers as described in [Private infrastructure](../../docs/PRIVATE_INFRASTRUCTURE.md). An unavailable or incomplete directory is not proof that a world does not exist.
 
 ## Keyboard and accessibility
 

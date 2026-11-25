@@ -1,12 +1,8 @@
 <script lang="ts">
   import { nativeWorldActions } from '../lib/native-world-actions';
   import { WorldFormError } from '../lib/world-actions';
-  import { resolveSignedDiscovery, formatDiscoveryResult, discoveryUnavailable } from '../lib/discovery';
 
   let inviteInput: HTMLTextAreaElement | undefined;
-  let worldIdInput: HTMLInputElement | undefined;
-  let worldIdNotice = $state('');
-  let worldIdTone = $state('neutral');
   let busy = $state(false);
   let error = $state('');
   let hostCandidate = $state(false);
@@ -51,54 +47,6 @@
     }
   }
 
-  // Resolve the signed announcement through Rust. Discovery never joins.
-  let resolvingWorldId = $state(false);
-  let directoryDiagnosis = $state('');
-  let discoveryRevision = 0;
-  let discoveryExpiry: ReturnType<typeof setTimeout> | undefined;
-  function clearDirectoryDiagnosis() {
-    discoveryRevision += 1;
-    clearTimeout(discoveryExpiry);
-    directoryDiagnosis = '';
-    worldIdNotice = '';
-    resolvingWorldId = false;
-  }
-  async function copyDirectoryDiagnosis() {
-    if (!directoryDiagnosis) return;
-    try { await navigator.clipboard.writeText(directoryDiagnosis); }
-    catch { worldIdNotice = 'Could not copy directory diagnosis. Check clipboard access.'; worldIdTone = 'warning'; }
-  }
-  async function checkWorldId() {
-    if (resolvingWorldId) return;
-    const world = worldIdInput?.value.trim() ?? '';
-    if (!world) {
-      worldIdNotice = 'Enter a World ID first.';
-      worldIdTone = 'danger';
-      worldIdInput?.focus();
-      return;
-    }
-    clearDirectoryDiagnosis();
-    const revision = discoveryRevision;
-    resolvingWorldId = true;
-    worldIdNotice = 'Checking the signed discovery announcement…';
-    worldIdTone = 'neutral';
-    let display;
-    try {
-      display = formatDiscoveryResult(await resolveSignedDiscovery(world), world);
-    } catch {
-      display = discoveryUnavailable();
-    }
-    if (revision !== discoveryRevision) return;
-    if (worldIdInput?.value.trim() !== world) { clearDirectoryDiagnosis(); return; }
-    worldIdNotice = display.message;
-    worldIdTone = display.tone;
-    directoryDiagnosis = display.copy;
-    resolvingWorldId = false;
-    const lifetime = Math.min(30_000, ('validUntil' in display && typeof display.validUntil === 'number' ? display.validUntil : Date.now() + 30_000) - Date.now());
-    discoveryExpiry = setTimeout(() => {
-      if (revision === discoveryRevision) clearDirectoryDiagnosis();
-    }, Math.max(0, lifetime));
-  }
 </script>
 
 <section id="joinPanel" class="view task-view" data-view-panel="join" aria-labelledby="joinTitle" hidden>
@@ -127,16 +75,6 @@
               </div>
             </form>
 
-            <details class="task-secondary">
-              <summary>Have only a World ID?</summary>
-              <p>A World ID can check discovery for public or unlisted worlds, but you still need accepted membership before joining a private world.</p>
-              <div class="inline-field">
-                <label for="joinWorldId">World ID</label>
-                <input id="joinWorldId" bind:this={worldIdInput} oninput={clearDirectoryDiagnosis} class="machine-input" placeholder="scworld:…" />
-                <button id="joinWorldIdButton" class="button button-secondary" type="button" onclick={checkWorldId} disabled={resolvingWorldId} aria-busy={resolvingWorldId}>Check</button>
-              </div>
-              <div id="joinWorldIdNotice" class="inline-notice" role="status" data-tone={worldIdTone} hidden={!worldIdNotice}>{worldIdNotice}</div>
-              <button id="copyDiscoveryDiagnosis" class="button button-subtle" type="button" onclick={copyDirectoryDiagnosis} disabled={!directoryDiagnosis}>Copy safe directory diagnosis</button>
-            </details>
+            <p class="field-help">Have only a World ID? <button id="joinToDiscover" class="button button-subtle button-small" type="button">Check discovery</button></p>
           </div>
         </section>

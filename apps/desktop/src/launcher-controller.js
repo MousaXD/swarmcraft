@@ -1,4 +1,5 @@
-import { discoveryUnavailable, formatDiscoveryResult, withDiscoveryDeadline } from './discovery-diagnostics.js';
+import { installDiscoveryLobby } from './discovery-lobby.js';
+import { discoveryUnavailable, formatDiscoveryResult, normalizeWorldId, withDiscoveryDeadline } from './discovery-diagnostics.js';
 import { providerContractInvoke } from './provider-contract-bridge.js';
 import { baselineNotice, catalogChoiceLabel, catalogSelectionState } from './runtime-catalog-policy.js';
 const invoke = () => providerContractInvoke(window.__TAURI__?.core);
@@ -203,29 +204,6 @@ function installModsUi() {
   actions.before(section);
 }
 
-function installDiscoveryUi() {
-  const form = byId('joinForm');
-  if (!form || byId('publicWorldDiscovery')) return;
-  const section = document.createElement('section');
-  section.id = 'publicWorldDiscovery';
-  section.className = 'player-section launcher-section';
-  section.innerHTML = `
-    <div class="section-heading">
-      <div>
-        <h3>Public worlds</h3>
-        <p>Browse authenticated public announcements. Discovery never grants membership; invite-only worlds still require a signed invite.</p>
-      </div>
-    </div>
-    <div class="field field-wide launcher-fields">
-      <label for="publicWorldQuery">Search public worlds</label>
-      <input id="publicWorldQuery" type="search" placeholder="World name or tag" />
-    </div>
-    <div class="compact-actions"><button id="publicWorldSearch" type="button" class="button button-secondary button-small">Search</button></div>
-    <div id="publicWorldStatus" class="inline-notice" role="status" aria-live="polite" hidden></div>
-    <div id="publicWorldResults" class="details-grid launcher-results"></div>`;
-  form.parentNode.insertBefore(section, form.nextSibling);
-}
-
 function hideInternalInputs() {
   const compatibility = byId('createCompatibility');
   if (compatibility) {
@@ -424,7 +402,7 @@ export function install() {
   if (!call) return null;
   hideInternalInputs();
   installModsUi();
-  installDiscoveryUi();
+  installDiscoveryLobby(call);
   hydrateImportCatalogs(call).catch((error) => {
     const ui = ensureImportCatalogUi();
     if (ui) {
@@ -713,43 +691,6 @@ export function install() {
     true,
   );
 
-  byId('publicWorldSearch')?.addEventListener('click', async () => {
-    const status = byId('publicWorldStatus');
-    const results = byId('publicWorldResults');
-    setLocalStatus(status, 'Searching authenticated public announcements…');
-    results.replaceChildren();
-    try {
-      const report = await call('discovery_search', { query: clean(byId('publicWorldQuery').value) || null });
-      setLocalStatus(
-        status,
-        report.detail ||
-          (report.results?.length
-            ? `${report.results.length} public world${report.results.length === 1 ? '' : 's'} found.`
-            : 'No public worlds found.'),
-      );
-      for (const world of report.results || []) {
-        const action = makeButton(
-          world.join_action === 'invite_required' ? 'Invite required' : 'View',
-          () => {
-            byId('joinWorldId').value = world.world_id;
-            setLocalStatus(
-              status,
-              world.join_action === 'invite_required'
-                ? `${world.name} is public to discover, but its authority still requires a signed invite for membership.`
-                : `${world.name} was discovered. Membership is still decided by the world authority.`,
-            );
-          },
-          true,
-        );
-        results.append(
-          makeResultRow(`${world.name} · Minecraft ${world.minecraft_version} · Fabric ${world.loader_version}`, action),
-        );
-      }
-    } catch (error) {
-      setLocalStatus(status, errorText(error), 'danger');
-    }
-  });
-
   const discoveryInput = byId('joinWorldId');
   const discoveryButton = byId('joinWorldIdButton');
   const discoveryCopy = byId('copyDiscoveryDiagnosis');
@@ -761,12 +702,11 @@ export function install() {
     clearTimeout(discoveryExpiry);
     discoveryDiagnosis = '';
     if (discoveryCopy) discoveryCopy.disabled = true;
-    if (discoveryButton) {
-      discoveryButton.disabled = false;
-      discoveryButton.removeAttribute('aria-busy');
-    }
     setLocalStatus(byId('joinWorldIdNotice'), '');
   }
+  document.addEventListener('swarmcraftcontextchanged', () => {
+    if (window.__swarmcraftSvelteDiscoveryOwned !== true && byId('discoverPanel')?.hidden) clearDiscoveryDiagnosis();
+  });
   discoveryInput?.addEventListener('input', () => {
     if (window.__swarmcraftSvelteDiscoveryOwned === true) return;
     clearDiscoveryDiagnosis();
@@ -786,8 +726,13 @@ export function install() {
     event.preventDefault();
     event.stopImmediatePropagation();
     if (discoveryButton.disabled) return;
-    const world = clean(discoveryInput.value);
-    if (!world) return;
+    const world = normalizeWorldId(discoveryInput.value);
+    if (!world) {
+      clearDiscoveryDiagnosis();
+      setLocalStatus(byId('joinWorldIdNotice'), 'Enter a full World ID (scworld: followed by 64 hexadecimal characters). Discovery does not grant membership.', 'warning');
+      discoveryInput.focus();
+      return;
+    }
     clearDiscoveryDiagnosis();
     const revision = discoveryRevision;
     const status = byId('joinWorldIdNotice');
@@ -801,16 +746,19 @@ export function install() {
     } catch {
       display = discoveryUnavailable();
     }
-    if (revision !== discoveryRevision) return;
-    if (clean(discoveryInput.value) !== world) { clearDiscoveryDiagnosis(); return; }
     discoveryButton.disabled = false;
     discoveryButton.removeAttribute('aria-busy');
+    if (revision !== discoveryRevision) return;
+    if (normalizeWorldId(discoveryInput.value) !== world) { clearDiscoveryDiagnosis(); return; }
     setLocalStatus(status, display.message, display.tone);
     discoveryDiagnosis = display.copy;
     if (discoveryCopy) discoveryCopy.disabled = false;
     const lifetime = Math.min(30_000, (display.validUntil ?? Date.now() + 30_000) - Date.now());
     discoveryExpiry = setTimeout(() => {
-      if (revision === discoveryRevision) clearDiscoveryDiagnosis();
+      if (revision === discoveryRevision) {
+        clearDiscoveryDiagnosis();
+        setLocalStatus(status, 'Lookup observation expired. Check the listing again for current signed evidence.', 'warning');
+      }
     }, Math.max(0, lifetime));
   }, true);
 

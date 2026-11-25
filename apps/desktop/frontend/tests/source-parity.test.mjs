@@ -7,7 +7,7 @@ const source = async (name) => readFile(new URL(name, import.meta.url), 'utf8');
 const ids = (value) => [...value.matchAll(/\bid=["']([^"']+)["']/g)].map((match) => match[1]);
 const componentNames = [
   'Sidebar', 'Topbar', 'WorldsView', 'CreateWorldView', 'ImportWorldView',
-  'JoinWorldView', 'ActivityView', 'DiagnosticsView', 'Dialogs', 'Workspace',
+  'JoinWorldView', 'DiscoveryView', 'ActivityView', 'DiagnosticsView', 'Dialogs', 'Workspace',
   'HostingContributionPanel',
 ];
 
@@ -40,7 +40,7 @@ test('Svelte component split retains every legacy DOM binding and every view', a
     [],
     'Every existing native/UI binding must survive Svelte migration',
   );
-  for (const view of ['worlds', 'create', 'import', 'join', 'activity', 'diagnostics']) {
+  for (const view of ['worlds', 'create', 'import', 'discover', 'join', 'activity', 'diagnostics']) {
     assert.ok(parts.join('\n').includes('data-view-panel="' + view + '"'), 'Missing view ' + view);
   }
   assert.ok(app.includes('onMount(() => {'));
@@ -364,7 +364,7 @@ test('Svelte invite dialog owns signed creation without duplicate legacy calls o
 
 test('Svelte World-ID hint never impersonates signed membership or issues duplicate legacy actions', async () => {
   const [join, app, root] = await Promise.all([
-    source('../src/components/JoinWorldView.svelte'),
+    source('../src/components/DiscoveryView.svelte'),
     source('../../src/app.js'),
     source('../src/App.svelte'),
   ]);
@@ -386,7 +386,7 @@ test('World ID lookup preserves actual Rust signed discovery and capture-phase l
   assert.ok(controller.includes('window.__swarmcraftSvelteDiscoveryOwned === true) return'));
   assert.ok(controller.includes("call('discovery_resolve', { world })"), 'Shipping lookup is retained');
   assert.ok(discovery.includes("nativeBridge().invoke('discovery_resolve', { world })"), 'Svelte performs a real lookup');
-  assert.ok(script.includes('app.click("#joinPanel details.task-secondary summary")'));
+  assert.ok(script.includes('app.click("#discoverPanel details.task-secondary summary")'));
 });
 
 test('Svelte signed Leave World remains a deliberate confirmation and never double-invokes Rust', async () => {

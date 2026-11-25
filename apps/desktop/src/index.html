@@ -29,6 +29,9 @@
         <button id="openImport" class="nav-item" type="button" data-view="import">
           <span class="nav-glyph" aria-hidden="true">⇩</span><span>Import</span>
         </button>
+        <button id="openDiscover" class="nav-item" type="button" data-view="discover">
+          <span class="nav-glyph" aria-hidden="true">⌕</span><span>Discover</span>
+        </button>
         <button id="openJoin" class="nav-item" type="button" data-view="join">
           <span class="nav-glyph" aria-hidden="true">↳</span><span>Join</span>
         </button>
@@ -486,17 +489,47 @@
               </div>
             </form>
 
+            <p class="field-help">Have only a World ID? <button id="joinToDiscover" class="button button-subtle button-small" type="button">Check discovery</button></p>
+          </div>
+        </section>
+
+        <section id="discoverPanel" class="view task-view" data-view-panel="discover" aria-labelledby="discoverTitle" hidden>
+          <div class="task-shell discovery-shell">
+            <div class="task-header discovery-header">
+              <div>
+                <h2 id="discoverTitle">Discover worlds</h2>
+                <p>Browse signed public listings or check an exact public or unlisted World ID. A directory listing is not membership, server availability, or a verified game route.</p>
+              </div>
+              <button id="discoverToJoin" class="button button-secondary" type="button">Join with invite</button>
+            </div>
             <details class="task-secondary">
-              <summary>Have only a World ID?</summary>
-              <p>A World ID can check discovery for public or unlisted worlds, but you still need accepted membership before joining a private world.</p>
+              <summary>Check an exact World ID</summary>
+              <p>Public or unlisted worlds can be checked by exact ID. Private worlds are not listed. Ask the owner for a signed invite to request membership.</p>
               <div class="inline-field">
                 <label for="joinWorldId">World ID</label>
-                <input id="joinWorldId" class="machine-input" placeholder="scworld:…" />
-                <button id="joinWorldIdButton" class="button button-secondary" type="button">Check</button>
+                <input id="joinWorldId" class="machine-input" placeholder="scworld:…" autocomplete="off" spellcheck="false" maxlength="72" />
+                <button id="joinWorldIdButton" class="button button-secondary" type="button">Check listing</button>
               </div>
               <div id="joinWorldIdNotice" class="inline-notice" role="status" hidden></div>
               <button id="copyDiscoveryDiagnosis" class="button button-subtle" type="button" disabled>Copy safe directory diagnosis</button>
             </details>
+            <section id="publicWorldDiscovery" class="discovery-section" aria-labelledby="publicWorldTitle">
+              <h3 id="publicWorldTitle">Public worlds</h3>
+              <form id="publicWorldForm" class="discovery-search">
+                <label for="publicWorldQuery">Search public worlds</label>
+                <div class="discovery-search-controls">
+                  <input id="publicWorldQuery" type="search" placeholder="Name, description or tag" maxlength="128" autocomplete="off" />
+                  <button id="publicWorldSearch" type="submit" class="button button-primary">Search</button>
+                </div>
+              </form>
+              <p id="publicWorldStatus" class="inline-notice" role="status" aria-live="polite" aria-atomic="true">Search by name or tag, or leave the field blank to browse.</p>
+              <div id="publicWorldPages" class="discovery-pages" hidden>
+                <button id="publicWorldPrev" class="button button-secondary button-small" type="button" disabled>Previous</button>
+                <span id="publicWorldPage" role="status" aria-atomic="true"></span>
+                <button id="publicWorldNext" class="button button-secondary button-small" type="button" disabled>Next</button>
+              </div>
+              <ul id="publicWorldResults" class="discovery-results" aria-label="Verified public listings" aria-busy="false"></ul>
+            </section>
           </div>
         </section>
 

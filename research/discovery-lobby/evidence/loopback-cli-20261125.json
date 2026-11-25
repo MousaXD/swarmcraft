@@ -1,0 +1,32 @@
+{
+  "scope": "real loopback publisher and runtime CLI; mDNS disabled",
+  "checks": {
+    "public_snapshot": {
+      "verified_count": 9,
+      "state": "ok",
+      "seconds": 17.008,
+      "private_unlisted_excluded": true,
+      "point_in_time_verified": true
+    },
+    "capped_snapshot": {
+      "verified_count": 3,
+      "truncated": true,
+      "deterministic_order": true,
+      "seconds": 9.994
+    },
+    "no_matching_listing": {
+      "state": "partial",
+      "seconds": 9.391
+    },
+    "unlisted_exact_lookup": {
+      "verified": true,
+      "seconds": 8.528
+    },
+    "private_exact_lookup": {
+      "refused": true,
+      "state": "network_unavailable",
+      "seconds": 9.478
+    },
+    "membership_not_created": true
+  }
+}

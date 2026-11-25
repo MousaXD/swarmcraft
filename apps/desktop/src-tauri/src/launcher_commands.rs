@@ -137,8 +137,10 @@ pub(crate) async fn inspect_mod_artifact(app: AppHandle, path: String) -> Result
 pub(crate) async fn discovery_search(app: AppHandle, query: Option<String>) -> Result<Value, String> {
     let mut arguments = vec!["discovery-search".into()];
     if let Some(query) = query.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
-        arguments.push("--query".into());
-        arguments.push(query);
+        if query.len() > 128 {
+            return Err("Discovery search is too long".into());
+        }
+        arguments.push(format!("--query={query}"));
     }
     add_discovery_bootstraps(&mut arguments);
     let raw = run_runtime_cli(&app, arguments).await?;
