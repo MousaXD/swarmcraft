@@ -335,7 +335,7 @@ fn spawn_heartbeat(paths: DataPaths, world: WorldId, generation: AuthorityGenera
     fs::set_permissions(&control, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&world_control, fs::Permissions::from_mode(0o700)).unwrap();
     tokio::spawn(async move {
-        for sequence in 1..100u64 {
+        for sequence in 1..1000u64 {
             refresh_permit(&paths, world, generation, sequence).unwrap();
             sleep(Duration::from_millis(100)).await;
         }
@@ -467,6 +467,122 @@ async fn withdrawing_active_host_consent_uses_fabric_barrier_and_durable_sleep()
     assert_eq!(fs::read_to_string(restored.join("safe-stop-latest.txt")).unwrap(), "saved-at-shutdown\n");
     assert!(swarm_cli::hosting_budget::require_contribution(&alice.paths, shared.world).is_err());
 
+    supervisor.abort();
+    let _ = supervisor.await;
+    heartbeat.abort();
+    let _ = heartbeat.await;
+}
+
+#[tokio::test]
+async fn hung_withdrawal_barrier_retains_live_runtime_and_blocks_unconfirmed_relaunch() {
+    use swarm_cli::hosting_budget::{contribution_readiness, LocalCheckpointState};
+    let _host_slot = HOST_TEST_LOCK.lock().await;
+    if !hosting_capacity_for_process_test() {
+        assert!(
+            std::env::var_os("SWARMCRAFT_REQUIRE_HUNG_GATE").is_none(),
+            "required live hung barrier gate must not skip"
+        );
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let alice = peer(temp.path().join("alice-hung"));
+    let bob = peer(temp.path().join("bob-hung"));
+    let source = temp.path().join("source-hung");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("level.dat"), b"canonical-before-hung-stop\n").unwrap();
+    let shared = initialize_two_peer_world(&alice, &bob, &source);
+    let before = alice.storage.latest_snapshot(shared.world).unwrap().unwrap();
+    let endpoint = "127.0.0.1:25571";
+    configure_safe_stop_runtime(temp.path(), &alice, shared.world, endpoint);
+    let config = migration::load_runtime_config(&alice.paths, shared.world).unwrap();
+    let script = fs::read_to_string(&config.java).unwrap();
+    let start = script.find("            pathlib.Path(world, \"safe-stop-latest.txt\")").unwrap();
+    let script = format!(
+        "{}{}",
+        &script[..start],
+        r#"
+            import time
+            pathlib.Path(world, "pending-save.txt").write_text("unconfirmed-live-save")
+            # Deliberately never acknowledge the shutdown request.
+            deadline = time.monotonic() + 75
+            while not pathlib.Path(world, "fixture-exit").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            break
+"#
+    );
+    fs::write(&config.java, script).unwrap();
+    let generation =
+        AuthorityGeneration { epoch: shared.epoch.epoch_number, fencing_token: shared.epoch.fencing_token };
+    let heartbeat = spawn_heartbeat(alice.paths.clone(), shared.world, generation);
+    let registry = LiveFabricRuntimeRegistry::default();
+    let supervisor_paths = alice.paths.clone();
+    let supervisor = tokio::spawn(async move { migration::supervise(supervisor_paths, registry).await });
+    wait_until_ready(&alice, shared.world, endpoint).await;
+    let runtime = alice.paths.root.join("runtime").join(shared.world.to_hex()).join("world");
+    swarm_cli::hosting_budget::set_contribution(&alice.paths, shared.world, 0).unwrap();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if runtime.join("pending-save.txt").exists() {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("hung fixture never received save barrier");
+    let stopping = contribution_readiness(&alice.paths, shared.world).unwrap();
+    assert_eq!(stopping.checkpoint_state, LocalCheckpointState::StoppingAtCheckpoint);
+    assert!(!stopping.may_host_now);
+    let status = migration::load_migration_status(&alice.paths, shared.world).unwrap();
+    assert!(!status.runtime_ready);
+    assert!(status.game_endpoint.is_none());
+    // Wait for the real production 30-second IPC deadline, not a shortened
+    // test-only timeout. The child must remain alive after that failure.
+    timeout(Duration::from_secs(40), async {
+        loop {
+            if migration::load_migration_status(&alice.paths, shared.world).unwrap().phase == MigrationPhase::Blocked {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("hung barrier was not reported as blocked");
+    let blocked = contribution_readiness(&alice.paths, shared.world).unwrap();
+    assert_eq!(blocked.checkpoint_state, LocalCheckpointState::CheckpointBlocked);
+    assert!(!blocked.may_host_now);
+    assert!(swarm_cli::runtime_process_guard::refuse_unaccounted_runtimes(&alice.paths).is_err());
+    assert_eq!(
+        alice.storage.latest_snapshot(shared.world).unwrap().unwrap().manifest_hash().unwrap(),
+        before.manifest_hash().unwrap()
+    );
+    assert!(alice.storage.load_sleep_record(shared.world).is_err());
+    assert_eq!(fs::read_to_string(runtime.join("pending-save.txt")).unwrap(), "unconfirmed-live-save");
+    // Release only our own fixture. A clean exit code without the missing
+    // barrier acknowledgement must not publish a canonical checkpoint.
+    fs::write(runtime.join("fixture-exit"), "").unwrap();
+    timeout(Duration::from_secs(8), async {
+        loop {
+            if swarm_cli::runtime_process_guard::refuse_unaccounted_runtimes(&alice.paths).is_ok() {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("fixture did not exit cleanly");
+    swarm_cli::hosting_budget::set_contribution(&alice.paths, shared.world, 512).unwrap();
+    assert!(swarm_cli::hosting_budget::require_contribution(&alice.paths, shared.world).is_err());
+    sleep(Duration::from_millis(750)).await;
+    assert_eq!(
+        alice.storage.latest_snapshot(shared.world).unwrap().unwrap().manifest_hash().unwrap(),
+        before.manifest_hash().unwrap()
+    );
+    assert_eq!(fs::read_to_string(runtime.join("pending-save.txt")).unwrap(), "unconfirmed-live-save");
+    assert_eq!(
+        contribution_readiness(&alice.paths, shared.world).unwrap().checkpoint_state,
+        LocalCheckpointState::CheckpointBlocked
+    );
     supervisor.abort();
     let _ = supervisor.await;
     heartbeat.abort();

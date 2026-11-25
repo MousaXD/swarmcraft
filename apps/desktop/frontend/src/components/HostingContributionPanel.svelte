@@ -12,6 +12,7 @@
   let error = $state('');
   let notice = $state('');
   let generation = 0;
+  let polling = false;
 
   const validHeap = $derived(Number.isSafeInteger(heapMib) && heapMib >= 512 && heapMib <= 65_536);
 
@@ -40,7 +41,28 @@
 
   onMount(() => {
     void refresh();
-    return () => { generation += 1; };
+    const timer = window.setInterval(async () => {
+      if (!readiness || saving || checking || polling ||
+        !['stopping_at_checkpoint', 'checkpoint_blocked'].includes(readiness.checkpoint_state || '')) return;
+      polling = true;
+      const request = ++generation;
+      const world = selectedWorld;
+      try {
+        const response = await readHostingContribution(world);
+        if (request === generation && selectedWorld === world) {
+          readiness = response;
+          if (response.checkpoint_state === 'no_pending_checkpoint') {
+            notice = 'No pending local checkpoint is observed. Review world safety before shutting down this PC.';
+          }
+        }
+      } catch {
+        if (request === generation && selectedWorld === world) {
+          readiness = null;
+          error = 'Checkpoint status cannot be verified. Keep the host running and inspect Diagnostics.';
+        }
+      } finally { polling = false; }
+    }, 1500);
+    return () => { generation += 1; window.clearInterval(timer); };
   });
 
   async function save(event: SubmitEvent) {
@@ -106,6 +128,10 @@
     <p id="hostingContributionStatus" class="section-note" role="status">
       {#if checking}
         Checking saved consent and local memory…
+      {:else if readiness?.checkpoint_state === 'stopping_at_checkpoint'}
+        Stopping at checkpoint
+      {:else if readiness?.checkpoint_state === 'checkpoint_blocked'}
+        Checkpoint not confirmed — recovery required
       {:else if readiness}
         {readiness.consented ? 'Hosting memory contribution selected' : 'Player only — 0 MiB'}
       {:else}
@@ -113,6 +139,9 @@
       {/if}
     </p>
     {#if readiness}
+      {#if readiness.checkpoint_state === 'checkpoint_blocked'}
+        <p class="form-error" role="alert">Keep the controller running if Java is still active. Review Diagnostics, wait for the save barrier if it can finish, or preserve the runtime files for recovery. Do not force-stop or reset the world.</p>
+      {/if}
       <p id="hostingContributionReason" class="section-note">
         {readiness.reason} This is a local capacity check, not permission to take authority.
       </p>

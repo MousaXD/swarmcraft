@@ -24,6 +24,7 @@ export interface HostingContributionReadiness {
     { mode: 'linux_cgroup_configured'; limit_mib: number } |
     { mode: 'linux_cgroup_active'; limit_mib: number; current_bytes: number; peak_bytes: number | null } |
     { mode: 'unavailable'; detail: string };
+  checkpoint_state?: 'no_pending_checkpoint' | 'stopping_at_checkpoint' | 'checkpoint_blocked' | null;
   consent_revision: string | null;
 }
 

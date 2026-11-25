@@ -77,6 +77,14 @@ pub enum ProcessMemoryReport {
     Unavailable { detail: String },
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalCheckpointState {
+    NoPendingCheckpoint,
+    StoppingAtCheckpoint,
+    CheckpointBlocked,
+}
+
 /// Public-only response from the real packaged Rust hosting CLI. Unknown
 /// fields (including peer identity or private paths) fail closed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -96,6 +104,8 @@ pub struct HostingContributionReadinessReply {
     pub hard_process_memory_cap_guaranteed: bool,
     #[serde(default)]
     pub process_memory: Option<ProcessMemoryReport>,
+    #[serde(default)]
+    pub checkpoint_state: Option<LocalCheckpointState>,
     pub consent_revision: Option<String>,
 }
 
@@ -140,6 +150,14 @@ pub fn decode_readiness(output: &str, world: WorldId) -> Result<HostingContribut
                 }
             }
         }
+    }
+    if report.may_host_now
+        && matches!(
+            report.checkpoint_state,
+            Some(LocalCheckpointState::StoppingAtCheckpoint | LocalCheckpointState::CheckpointBlocked)
+        )
+    {
+        return Err("Unconfirmed checkpoint cannot advertise hosting eligibility".into());
     }
     if report.consented && report.consent_revision.is_none() {
         return Err("Persisted hosting consent revision is absent".into());
@@ -329,6 +347,25 @@ mod tests {
         report["process_memory"] = serde_json::json!({"mode":"linux_cgroup_configured", "limit_mib":1536});
         assert!(decode_readiness(&report.to_string(), world).is_err());
         report["process_memory"] = serde_json::json!({"mode":"heap_only", "path":"/private"});
+        assert!(decode_readiness(&report.to_string(), world).is_err());
+    }
+
+    #[test]
+    fn pending_or_blocked_checkpoint_cannot_advertise_hosting_eligibility() {
+        let world = validate_world_id(WORLD).unwrap();
+        let mut report: serde_json::Value = serde_json::from_str(&sample_readiness()).unwrap();
+        for state in ["stopping_at_checkpoint", "checkpoint_blocked"] {
+            report["checkpoint_state"] = serde_json::json!(state);
+            report["consented"] = serde_json::json!(true);
+            report["selected_heap_mib"] = serde_json::json!(512);
+            report["consent_revision"] = serde_json::json!("1");
+            report["may_host_now"] = serde_json::json!(false);
+            assert!(decode_readiness(&report.to_string(), world).is_ok());
+            report["may_host_now"] = serde_json::json!(true);
+            assert!(decode_readiness(&report.to_string(), world).is_err());
+        }
+        report["may_host_now"] = serde_json::json!(false);
+        report["checkpoint_state"] = serde_json::json!("checkpoint_completed_but_unverified");
         assert!(decode_readiness(&report.to_string(), world).is_err());
     }
 

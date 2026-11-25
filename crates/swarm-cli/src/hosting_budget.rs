@@ -47,6 +47,14 @@ pub struct AvailableMemory {
     pub available_mib: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalCheckpointState {
+    NoPendingCheckpoint,
+    StoppingAtCheckpoint,
+    CheckpointBlocked,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContributionReadiness {
     pub world_id: String,
@@ -63,6 +71,7 @@ pub struct ContributionReadiness {
     /// Cgroup charges are not a guaranteed whole-process RSS cap.
     pub hard_process_memory_cap_guaranteed: bool,
     pub process_memory: ProcessMemoryReport,
+    pub checkpoint_state: LocalCheckpointState,
     /// Decimal string, never a lossy JavaScript number. None is an absent
     /// local preference; zero MiB can have a durable revocation revision.
     pub consent_revision: Option<String>,
@@ -311,6 +320,9 @@ pub fn require_contribution(paths: &DataPaths, world: WorldId) -> Result<Hosting
     if !record.enabled {
         bail!("hosting consent was withdrawn; this device is player-only (0 MiB)");
     }
+    if crate::migration::shutdown_checkpoint_pending(paths, world)? {
+        bail!("previous local shutdown checkpoint is unconfirmed; hosting denied");
+    }
     host_memory_cap::validate_configuration()?;
     check_budget(record.heap_mib, memory_snapshot()?)?;
     Ok(record)
@@ -344,6 +356,9 @@ fn revalidate_contribution(paths: &DataPaths, world: WorldId, expected: &Hosting
     let current = load_consent(paths, world)?.context("hosting consent disappeared before the operation")?;
     if !current.enabled || current != *expected {
         bail!("hosting consent or heap changed; hosting operation denied");
+    }
+    if crate::migration::shutdown_checkpoint_pending(paths, world)? {
+        bail!("previous local shutdown checkpoint is unconfirmed; hosting denied");
     }
     host_memory_cap::validate_configuration()?;
     check_budget(current.heap_mib, memory_snapshot()?)
@@ -404,6 +419,43 @@ pub fn runtime_withdrawal(paths: &DataPaths, world: WorldId, admitted: &HostingC
     Ok(None)
 }
 
+/// A denial-only lifecycle observation, not a signed sleep/transfer proof.
+fn local_checkpoint_state(paths: &DataPaths, world: WorldId, consented: bool) -> LocalCheckpointState {
+    use crate::migration::{self, MigrationPhase};
+    use LocalCheckpointState::*;
+    let pending = match migration::shutdown_checkpoint_pending(paths, world) {
+        Ok(pending) => pending,
+        Err(_) => return CheckpointBlocked,
+    };
+    if !pending && consented {
+        return NoPendingCheckpoint;
+    }
+    let live = match runtime_process_guard::runtime_present(paths, world) {
+        Ok(live) => live,
+        Err(_) => return CheckpointBlocked,
+    };
+    if !pending && !live {
+        return NoPendingCheckpoint;
+    }
+    match migration::load_migration_status(paths, world) {
+        Ok(status)
+            if status.world_id == world.to_string()
+                && matches!(
+                    status.phase,
+                    MigrationPhase::Blocked | MigrationPhase::Failed | MigrationPhase::Superseded
+                ) =>
+        {
+            CheckpointBlocked
+        }
+        Ok(status)
+            if status.world_id == world.to_string() && (live || status.phase == MigrationPhase::Checkpointing) =>
+        {
+            StoppingAtCheckpoint
+        }
+        _ => CheckpointBlocked,
+    }
+}
+
 /// A coherent native IPC view. Lock out concurrent contribution updates while
 /// reading the revision, consent, and sampled eligibility. The revision is a
 /// decimal string because nanosecond-based u64 values exceed JS safe integers.
@@ -429,7 +481,12 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
             ProcessMemoryReport::Unavailable { detail: "Cannot verify the configured memory controller or recorded runtime; inspect local diagnostics before retrying".into() }
         }
     };
-    let (may_host_now, reason) = if let ProcessMemoryReport::Unavailable { detail } = &process_memory {
+    let checkpoint_state = local_checkpoint_state(paths, world, heap != 0);
+    let (may_host_now, reason) = if checkpoint_state == LocalCheckpointState::CheckpointBlocked {
+        (false, "Unconfirmed local checkpoint; retain the runtime and review Diagnostics".into())
+    } else if checkpoint_state == LocalCheckpointState::StoppingAtCheckpoint {
+        (false, "Stopping at checkpoint; local hosting is not eligible until completion".into())
+    } else if let ProcessMemoryReport::Unavailable { detail } = &process_memory {
         (false, format!("hosting memory enforcement cannot be verified: {detail}"))
     } else if let Err(error) = hosting_profile_guard(paths) {
         (false, error.to_string())
@@ -461,6 +518,7 @@ pub fn contribution_readiness(paths: &DataPaths, world: WorldId) -> Result<Contr
         reason,
         hard_process_memory_cap_guaranteed: false,
         process_memory,
+        checkpoint_state,
         consent_revision,
     })
 }

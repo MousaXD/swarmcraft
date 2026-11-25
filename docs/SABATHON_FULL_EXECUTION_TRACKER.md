@@ -206,11 +206,11 @@ Implementation completion: count only items whose full implementation criteria a
 - Work: Clarify withdrawal lifecycle and handle a hung JVM without silently losing the current save
 - Acceptance: UI shows **Stopping at checkpoint** until proof of checkpoint/fence/exit, or a truthful error with recovery choices. Stale readiness and active gateway routes are cleared immediately
 - State: **LOCALLY VERIFIED**
-- Source: crates/swarm-cli/src/migration.rs; tests/migration_core.rs; Desktop hosting contribution panel
-- Evidence: Mock Fabric migration suite 10/10 and host-process test pass, including active withdrawal with verified saved marker, signed durable sleep, and invalid transfer intent preserving runtime. Existing failure-state/route-retirement checks retained.
-- Remaining / next action: Add explicit hung-barrier process regression and improve truthful pending-stop UI; actual JVM field withdrawal remains.
-- External dependency: Installed Minecraft/Fabric client and real-world recovery choices.
-- Commit: See hosting process ownership checkpoint in git history.
+- Source: crates/swarm-cli/src/{migration,hosting_budget,runtime_process_guard}.rs; tests/migration_core.rs; native hosting contribution DTO and panel; [recovery contract](UNCONFIRMED_SHUTDOWN_RECOVERY.md)
+- Evidence: Real local mock-Fabric subprocess exercised full 30-second hung barrier (32.66s, passed), stopping/blocked reporting, immediate stale readiness retirement, live process retention, unchanged canonical snapshot, no signed sleep, and no relaunch/reset after subsequent clean exit without acknowledgement and renewed consent. Durable pending-checkpoint marker retained until verified fenced publication. Earlier successful safe-stop, transfer and withdrawal suite passed. Rust library 151/151 regular tests and strict Clippy; frontend check/tests passed. Required CI gate forbids treating insufficient-memory skip as positive evidence.
+- Remaining / next action: Deliberate supported archival/recovery operation for unconfirmed runtime (original local launch remains blocked until safe recovery; separate-world import of a copy is available); installed Minecraft/Fabric withdrawal and exact-SHA CI.
+- External dependency: Adequately provisioned OS runner and installed Minecraft/Fabric.
+- Commit: See unconfirmed shutdown checkpoint in git history.
 
 ### #21 — P1 · Partial
 - Work: Improve process identity and coordinate a safe resource budget across data roots where supported

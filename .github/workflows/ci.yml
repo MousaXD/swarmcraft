@@ -75,6 +75,10 @@ jobs:
           sudo systemd-run --quiet --wait --pipe --collect --unit="swarmcraft-memory-cap-test-host-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" -p "User=$(id -un)" -p Delegate=memory -p RuntimeMaxSec=90 -p "WorkingDirectory=$PWD" /bin/bash "$PWD/scripts/e2e/linux_cgroup_memory_gate.sh" "$host_bin" --exact real_host_process_restores_launches_and_commits_mutated_world --nocapture
       - name: Migration orchestration
         run: cargo test -p swarm-cli --test migration_core --locked
+      - name: Required live hung shutdown barrier
+        env:
+          SWARMCRAFT_REQUIRE_HUNG_GATE: "1"
+        run: cargo test -p swarm-cli --test migration_core --locked hung_withdrawal_barrier_retains_live_runtime_and_blocks_unconfirmed_relaunch -- --exact --nocapture
       - name: Runtime setup failure hardening
         run: cargo test -p swarm-cli --test runtime_setup_hardening --locked
       - name: Three-daemon recovery

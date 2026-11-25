@@ -447,6 +447,16 @@ async fn supervise_world(paths: DataPaths, world: WorldId, runtime_registry: Liv
             sleep(SUPERVISOR_POLL).await;
             continue;
         }
+        if shutdown_checkpoint_pending(&paths, world)? {
+            // Direct hosting may still own the checkpoint and write status.
+            // Do not overwrite its report while that runtime lock is held.
+            if let Some(_guard) = AuthorityRuntimeGuard::try_acquire(&paths, world)? {
+                publish_status(&paths, &storage, world, None, MigrationPhase::Blocked, false, None, None,
+                    Some("Previous checkpoint is unconfirmed; retained runtime requires recovery or archival before relaunch".into()))?;
+            }
+            sleep(SUPERVISOR_POLL).await;
+            continue;
+        }
         let config = match load_runtime_config(&paths, world) {
             Ok(config) => config,
             Err(error) => {
@@ -895,6 +905,9 @@ async fn run_authority_runtime_inner(
     }
     // This admission must happen before authority epoch mutation, runtime reset,
     // snapshot restore, or Java spawn for ALL launch triggers.
+    if shutdown_checkpoint_pending(paths, options.world)? {
+        bail!("previous save-and-stop checkpoint was not confirmed; retained runtime must be recovered or archived before relaunch");
+    }
     let admission = hosting_budget::admit(paths, options.world)?;
     let memory_cap = HostMemoryCap::prepare(admission.heap_mib())?;
     let identity = PeerIdentity::load_or_create(paths)?;
@@ -1296,6 +1309,7 @@ async fn run_authority_runtime_inner(
             info!(world = %options.world, snapshot = final_manifest.snapshot_number, "world committed and sleeping");
         }
     }
+    clear_shutdown_checkpoint(paths, options.world)?;
     Ok(())
 }
 
@@ -1303,6 +1317,61 @@ async fn run_authority_runtime_inner(
 enum RuntimeDisposition {
     Sleep,
     Transfer(PeerId),
+}
+
+/// A requested save is not equivalent to a completed save. Keep the
+/// durable marker until a fenced snapshot and sleep/transfer record exist.
+fn shutdown_checkpoint_path(paths: &DataPaths, world: WorldId) -> PathBuf {
+    control_dir(paths, world).join("shutdown-checkpoint-pending.json")
+}
+
+pub(crate) fn shutdown_checkpoint_pending(paths: &DataPaths, world: WorldId) -> Result<bool> {
+    match fs::symlink_metadata(shutdown_checkpoint_path(paths, world)) {
+        Ok(_) => Ok(true), // even corrupt/ambiguous markers prohibit reset
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).context("cannot determine whether prior checkpoint was confirmed"),
+    }
+}
+
+fn clear_shutdown_checkpoint(paths: &DataPaths, world: WorldId) -> Result<()> {
+    let path = shutdown_checkpoint_path(paths, world);
+    remove_if_present(&path)?;
+    #[cfg(unix)]
+    fs::File::open(path.parent().context("shutdown checkpoint has no parent")?)?.sync_all()?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ShutdownCheckpoint {
+    disposition: RuntimeDisposition,
+    acknowledged: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn checkpoint_stop(
+    paths: &DataPaths,
+    epoch: &EpochRecordV1,
+    child: &mut Child,
+    session: &mut swarm_ipc::FabricSession,
+    request_id: u64,
+    disposition: RuntimeDisposition,
+    checkpoint: &mut Option<ShutdownCheckpoint>,
+) -> Result<RuntimeDisposition> {
+    if !checkpoint.as_ref().is_some_and(|state| state.acknowledged) {
+        *checkpoint = Some(ShutdownCheckpoint { disposition, acknowledged: false });
+        // Write and sync before asking Fabric to save or stop. A crash in
+        // this interval may never erase an unconfirmed save on next launch.
+        atomic_json(&shutdown_checkpoint_path(paths, epoch.world_id), &StopIntentV1::from_epoch(epoch))?;
+        session.prepare_shutdown(request_id, FABRIC_SHUTDOWN_TIMEOUT).await?;
+        checkpoint.as_mut().expect("checkpoint request recorded").acknowledged = true;
+    }
+    let status = timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
+        .await
+        .context("Minecraft did not stop after the shutdown save barrier")??;
+    if !status.success() {
+        bail!("Minecraft exited unsuccessfully after save barrier: {status}; checkpoint not confirmed");
+    }
+    Ok(checkpoint.as_ref().expect("checkpoint request recorded").disposition)
 }
 
 struct RuntimeExitOptions<'a> {
@@ -1346,6 +1415,7 @@ async fn wait_for_runtime_exit(
     options: RuntimeExitOptions<'_>,
 ) -> Result<RuntimeDisposition> {
     let mut withdrawal_reported = false;
+    let mut checkpoint: Option<ShutdownCheckpoint> = None;
     let mut invalid_stop_intent_reported = false;
     let mut permit_watch =
         PermitWatch::new(AuthorityGeneration { epoch: epoch.epoch_number, fencing_token: epoch.fencing_token });
@@ -1356,21 +1426,19 @@ async fn wait_for_runtime_exit(
         // A corrupt/missing permit resets the watch and makes proof deny.
         let _ = permit_watch.observe(paths, epoch.world_id, Instant::now());
         if let Some(status) = child.try_wait()? {
-            if !status.success() {
-                if let Err(error) = retire_live_runtime(
-                    paths,
-                    epoch.world_id,
-                    MigrationPhase::Failed,
-                    Some(&format!("Minecraft server exited unsuccessfully: {status}")),
-                ) {
+            if !status.success() || checkpoint.as_ref().is_some_and(|state| !state.acknowledged) {
+                let detail =
+                    format!("Minecraft exited ({status}) without a confirmed clean checkpoint; runtime files retained");
+
+                if let Err(error) = retire_live_runtime(paths, epoch.world_id, MigrationPhase::Failed, Some(&detail)) {
                     warn!(world = %epoch.world_id, %error, "could not invalidate stale readiness after Java exit");
                 }
-                bail!("Minecraft server exited unsuccessfully: {status}");
+                bail!("{detail}");
             }
             if let Err(error) = retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, None) {
                 warn!(world = %epoch.world_id, %error, "could not invalidate readiness after Java exited");
             }
-            return Ok(RuntimeDisposition::Sleep);
+            return Ok(checkpoint.map_or(RuntimeDisposition::Sleep, |state| state.disposition));
         }
         let authority_current = ensure_runtime_generation(storage, identity, epoch);
         if let Err(error) = authority_current {
@@ -1401,21 +1469,15 @@ async fn wait_for_runtime_exit(
             if let Err(error) = retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, None) {
                 warn!(world = %epoch.world_id, %error, "could not publish safe-stop checkpointing state");
             }
-            let stop_result = async {
-                session.prepare_shutdown(1, FABRIC_SHUTDOWN_TIMEOUT).await?;
-                timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
-                    .await
-                    .map_err(|_| anyhow!("Minecraft did not stop after the shutdown save barrier"))??;
-                Ok::<(), anyhow::Error>(())
-            }
-            .await;
+            let stop_result =
+                checkpoint_stop(paths, epoch, child, session, 1, RuntimeDisposition::Sleep, &mut checkpoint).await;
             if let Err(error) = clear_stop_intent(paths, epoch.world_id) {
                 // An inability to clear telemetry/intent must never kill the
                 // unfenced Java process or discard an already saved checkpoint.
                 warn!(world = %epoch.world_id, %error, "cannot clear safe-stop intent");
             }
             match stop_result {
-                Ok(()) => return Ok(RuntimeDisposition::Sleep),
+                Ok(disposition) => return Ok(disposition),
                 Err(error) => {
                     if let Err(report_error) = retire_live_runtime(
                         paths,
@@ -1440,16 +1502,18 @@ async fn wait_for_runtime_exit(
                     {
                         warn!(world = %epoch.world_id, %error, "could not publish transfer checkpointing state");
                     }
-                    let outcome = async {
-                        session.prepare_shutdown(2, FABRIC_SHUTDOWN_TIMEOUT).await?;
-                        timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
-                            .await
-                            .map_err(|_| anyhow!("Minecraft did not stop after the transfer save barrier"))??;
-                        Ok::<(), anyhow::Error>(())
-                    }
+                    let outcome = checkpoint_stop(
+                        paths,
+                        epoch,
+                        child,
+                        session,
+                        2,
+                        RuntimeDisposition::Transfer(target),
+                        &mut checkpoint,
+                    )
                     .await;
                     match outcome {
-                        Ok(()) => return Ok(RuntimeDisposition::Transfer(target)),
+                        Ok(disposition) => return Ok(disposition),
                         Err(error) => {
                             if let Err(report_error) = retire_live_runtime(
                                 paths,
@@ -1506,22 +1570,16 @@ async fn wait_for_runtime_exit(
                 }
             }
             warn!(world = %epoch.world_id, %reason, "hosting contribution withdrawn or unsafe; requesting durable safe stop");
-            let stopped = async {
-                session.prepare_shutdown(1, FABRIC_SHUTDOWN_TIMEOUT).await?;
-                timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
-                    .await
-                    .map_err(|_| anyhow!("Minecraft did not stop after hosting withdrawal save barrier"))??;
-                Ok::<(), anyhow::Error>(())
-            }
-            .await;
+            let stopped =
+                checkpoint_stop(paths, epoch, child, session, 1, RuntimeDisposition::Sleep, &mut checkpoint).await;
             match stopped {
-                Ok(()) => return Ok(RuntimeDisposition::Sleep),
+                Ok(disposition) => return Ok(disposition),
                 Err(error) => {
                     if let Err(report_error) = retire_live_runtime(
                         paths,
                         epoch.world_id,
                         MigrationPhase::Blocked,
-                        Some("hosting withdrawal save barrier failed; Java remains running while shutdown retries"),
+                        Some("hosting withdrawal checkpoint is unconfirmed; runtime files retained. Keep the controller running and inspect Diagnostics; do not force-stop or reset the world"),
                     ) {
                         warn!(world = %epoch.world_id, %report_error, "could not publish failed hosting-withdrawal state");
                     }
@@ -1537,15 +1595,9 @@ async fn wait_for_runtime_exit(
                     if let Err(error) = retire_live_runtime(paths, epoch.world_id, MigrationPhase::Checkpointing, None) {
                         warn!(world = %epoch.world_id, %error, "could not publish Ctrl+C checkpointing state");
                     }
-                    let stop_result = async {
-                        session.prepare_shutdown(1, FABRIC_SHUTDOWN_TIMEOUT).await?;
-                        timeout(FABRIC_SHUTDOWN_TIMEOUT, wait_for_child(child))
-                            .await
-                            .map_err(|_| anyhow!("Minecraft did not stop after the shutdown barrier"))??;
-                        Ok::<(), anyhow::Error>(())
-                    }.await;
+                    let stop_result = checkpoint_stop(paths, epoch, child, session, 1, RuntimeDisposition::Sleep, &mut checkpoint).await;
                     match stop_result {
-                        Ok(()) => return Ok(RuntimeDisposition::Sleep),
+                        Ok(disposition) => return Ok(disposition),
                         Err(error) => {
                             if let Err(report_error) = retire_live_runtime(
                                 paths,
@@ -1605,7 +1657,10 @@ async fn challenge_live_supervised_runtime(
     if supervised_runtime_withdrawal(paths, epoch.world_id, admission, memory_cap, child.id())?.is_some() {
         bail!("hosting consent or memory admission was withdrawn");
     }
-    if load_stop_intent(paths, epoch)? || load_transfer_intent(paths, epoch)?.is_some() {
+    if shutdown_checkpoint_pending(paths, epoch.world_id)?
+        || load_stop_intent(paths, epoch)?
+        || load_transfer_intent(paths, epoch)?.is_some()
+    {
         bail!("runtime is stopping or transferring; no new game sessions");
     }
     if !permit_watch.observe(paths, epoch.world_id, Instant::now())? {
@@ -1625,6 +1680,7 @@ async fn challenge_live_supervised_runtime(
     }
     ensure_authority_generation(storage, identity, epoch)?;
     if supervised_runtime_withdrawal(paths, epoch.world_id, admission, memory_cap, child.id())?.is_some()
+        || shutdown_checkpoint_pending(paths, epoch.world_id)?
         || load_stop_intent(paths, epoch)?
         || load_transfer_intent(paths, epoch)?.is_some()
         || !permit_watch.observe(paths, epoch.world_id, Instant::now())?
@@ -1637,7 +1693,9 @@ async fn challenge_live_supervised_runtime(
 /// Denial-only last-mile check for responses queued while the signed authority
 /// was stopping or preparing a transfer. Never grants permission by itself.
 pub fn no_local_route_transition_pending(paths: &DataPaths, epoch: &EpochRecordV1) -> Result<bool> {
-    Ok(!load_stop_intent(paths, epoch)? && load_transfer_intent(paths, epoch)?.is_none())
+    Ok(!shutdown_checkpoint_pending(paths, epoch.world_id)?
+        && !load_stop_intent(paths, epoch)?
+        && load_transfer_intent(paths, epoch)?.is_none())
 }
 
 pub fn prepare_manual_transfer(
@@ -2562,7 +2620,7 @@ fn publish_failure(
     storage: &Storage,
     world: WorldId,
     trigger: MigrationTrigger,
-    config: &RuntimeLaunchConfig,
+    _config: &RuntimeLaunchConfig,
     error: &anyhow::Error,
 ) -> Result<()> {
     warn!(%world, %error, "authority runtime transition failed");
@@ -2573,7 +2631,7 @@ fn publish_failure(
         Some(trigger),
         MigrationPhase::Failed,
         false,
-        config.game_endpoint.clone(),
+        None,
         storage.latest_snapshot(world)?.and_then(|snapshot| snapshot.manifest_hash().ok()),
         Some(error.to_string()),
     )

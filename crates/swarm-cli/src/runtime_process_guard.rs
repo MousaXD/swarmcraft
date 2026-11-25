@@ -310,6 +310,11 @@ pub(crate) fn clear_quiescent_record(path: &Path) -> Result<()> {
     }
 }
 
+pub(crate) fn runtime_present(paths: &DataPaths, world: WorldId) -> Result<bool> {
+    let Some(record) = read_record(&record_path(paths, world))? else { return Ok(false) };
+    Ok(record.ownership()? != Ownership::Quiescent)
+}
+
 /// Local observation only; a durable record alone does not certify a live cap.
 pub(crate) fn observed_memory(paths: &DataPaths, world: WorldId) -> Result<Option<ProcessMemoryReport>> {
     let Some(record) = read_record(&record_path(paths, world))? else { return Ok(None) };
