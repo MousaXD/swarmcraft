@@ -1,3 +1,5 @@
+import { baselineNotice, catalogChoiceLabel, catalogSelectionState } from './runtime-catalog-policy.js';
+
 function nonEmptyString(value) {
   return typeof value === 'string' && value.trim() === value && value.length > 0;
 }
@@ -17,15 +19,14 @@ export function normalizeMinecraftCatalog(response) {
     if (typeof version.supported !== 'boolean') {
       throw new Error('Mojang catalog omitted the supported flag.');
     }
-    if (version.adapter_supported !== undefined && typeof version.adapter_supported !== 'boolean') {
-      throw new Error('Minecraft catalog contained an invalid shipped-adapter compatibility flag.');
-    }
+    const selectionState = catalogSelectionState(version);
     return {
       id: version.id,
       type: version.type,
       releaseTime: version.release_time,
       supported: version.supported,
-      adapterSupported: version.adapter_supported ?? version.supported,
+      adapterSupported: version.adapter_supported,
+      selectionState,
     };
   });
 }
@@ -38,20 +39,19 @@ export function normalizeFabricCatalog(response, minecraftVersion) {
     if (loader.minecraft_version !== minecraftVersion) {
       throw new Error('Fabric catalog returned a loader for the wrong Minecraft version.');
     }
-    if (loader.adapter_supported !== undefined && typeof loader.adapter_supported !== 'boolean') {
-      throw new Error('Fabric catalog contained an invalid shipped-adapter compatibility flag.');
-    }
+    const selectionState = catalogSelectionState(loader);
     return {
       version: loader.version,
       stable: loader.stable,
       minecraftVersion: loader.minecraft_version,
-      adapterSupported: loader.adapter_supported ?? true,
+      adapterSupported: loader.adapter_supported,
+      selectionState,
     };
   });
 }
 
 export function chooseMinecraftVersion(versions, preferred = '') {
-  const compatible = (version) => version.supported && version.adapterSupported !== false;
+  const compatible = (version) => version.supported && version.selectionState === 'pinned_baseline' && version.type === 'release';
   if (preferred && versions.some((version) => version.id === preferred && compatible(version))) return preferred;
   return versions.find((version) => compatible(version) && version.type === 'release')?.id
     || versions.find(compatible)?.id
@@ -59,7 +59,7 @@ export function chooseMinecraftVersion(versions, preferred = '') {
 }
 
 export function chooseFabricLoader(versions, preferred = '') {
-  const compatible = (loader) => loader.adapterSupported !== false;
+  const compatible = (loader) => loader.selectionState === 'pinned_baseline' && loader.stable;
   if (preferred && versions.some((loader) => loader.version === preferred && compatible(loader))) return preferred;
   return versions.find((loader) => compatible(loader) && loader.stable)?.version
     || versions.find(compatible)?.version
@@ -155,9 +155,10 @@ export class CatalogSelectionState {
   get ready() {
     return !this.loadingMinecraft && !this.loadingFabric
       && this.minecraftVersions.some((version) =>
-        version.id === this.minecraft && version.supported && version.adapterSupported !== false)
+        version.id === this.minecraft && version.supported && version.type === 'release' && version.selectionState === 'pinned_baseline')
       && this.fabricVersions.some((loader) =>
-        loader.version === this.fabricLoader && loader.adapterSupported !== false);
+        loader.version === this.fabricLoader && loader.minecraftVersion === this.minecraft
+        && loader.stable && loader.selectionState === 'pinned_baseline');
   }
 }
 
@@ -328,31 +329,31 @@ export function registerCatalogSelectors({ invoke, documentRef } = {}) {
   const renderMinecraft = () => {
     minecraftSelect.replaceChildren();
     for (const version of state.minecraftVersions) {
-      const compatible = version.supported && version.adapterSupported !== false;
+      const compatible = version.supported && version.type === 'release' && version.selectionState === 'pinned_baseline';
       const label = version.type === 'snapshot' ? `${version.id} (snapshot)` : version.id;
       const option = appendOption(
         doc, minecraftSelect, version.id,
-        compatible ? label : `${label} (requires newer SwarmCraft adapter)`,
+        catalogChoiceLabel(label, version.selectionState, version.supported && version.type === 'release'),
       );
       option.disabled = !compatible;
     }
     minecraftSelect.value = state.minecraft;
-    minecraftSelect.disabled = !state.minecraftVersions.some((version) => version.supported && version.adapterSupported !== false);
+    minecraftSelect.disabled = !state.minecraftVersions.some((version) => version.supported && version.type === 'release' && version.selectionState === 'pinned_baseline');
   };
 
   const renderFabric = () => {
     fabricSelect.replaceChildren();
     for (const loader of state.fabricVersions) {
-      const compatible = loader.adapterSupported !== false;
+      const compatible = loader.stable && loader.selectionState === 'pinned_baseline';
       const label = loader.stable ? loader.version : `${loader.version} (unstable)`;
       const option = appendOption(
         doc, fabricSelect, loader.version,
-        compatible ? label : `${label} (requires newer SwarmCraft adapter)`,
+        catalogChoiceLabel(label, loader.selectionState, loader.stable),
       );
       option.disabled = !compatible;
     }
     fabricSelect.value = state.fabricLoader;
-    fabricSelect.disabled = !state.fabricVersions.some((loader) => loader.adapterSupported !== false);
+    fabricSelect.disabled = !state.fabricVersions.some((loader) => loader.stable && loader.selectionState === 'pinned_baseline');
   };
 
   const loadFabric = async ({ refresh = false, preferred = '' } = {}) => {
@@ -377,10 +378,10 @@ export function registerCatalogSelectors({ invoke, documentRef } = {}) {
       renderFabric();
       if (!state.fabricLoader) {
         lastFailure = 'fabric';
-        setError(`No Fabric Loader for Minecraft ${minecraftVersion} is compatible with the shipped SwarmCraft adapter. Select another supported version or update SwarmCraft.`);
-        status.textContent = 'No compatible Fabric Loader is available for this SwarmCraft build.';
+        setError(`The pinned Fabric Loader baseline for Minecraft ${minecraftVersion} is unavailable. Other loader releases are not yet qualified for new worlds.`);
+        status.textContent = 'No selectable Fabric Loader is available for this build.';
       } else {
-        status.textContent = responseNotice(response, 'Fabric Loader');
+        status.textContent = responseNotice(response, 'Fabric Loader') + ' ' + baselineNotice;
       }
     } catch (catalogError) {
       if (request !== fabricRequest || minecraftVersion !== state.minecraft) return;
@@ -414,8 +415,8 @@ export function registerCatalogSelectors({ invoke, documentRef } = {}) {
       renderMinecraft();
       if (!state.minecraft) {
         lastFailure = 'mojang';
-        setError('The shipped SwarmCraft Fabric adapter supports none of the currently listed Minecraft releases. Update SwarmCraft to use newer releases.');
-        status.textContent = 'No Minecraft versions are compatible with this SwarmCraft build.';
+        setError('The pinned Minecraft baseline is unavailable in the official catalog. Other releases are not offered for new worlds.');
+        status.textContent = 'No selectable Minecraft version is available for this build.';
         syncCreateButton();
         return;
       }

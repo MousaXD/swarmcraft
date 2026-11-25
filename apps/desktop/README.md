@@ -117,6 +117,18 @@ swarmcraft-runtime client-profile <WORLD_ID> --mods-dir /absolute/path/to/instan
 
 Launch Minecraft yourself through your chosen launcher. Use Multiplayer and the current verified reconnect instructions in SwarmCraft; the compatibility report does not grant a route or enable hosting.
 
+## Minecraft / Fabric compatibility matrix
+
+New Desktop Create and Import offer the pinned Minecraft 26.1.2 / Fabric Loader 0.19.3 baseline (reference Java 25). The adapter metadata declares a broader technical range, but newer matching releases are not yet qualified for new worlds. Other official versions remain visible with unavailable, not-yet-qualified, or incompatible labels. Import does not convert or upgrade a save; declare only the versions actually used by that save. Existing signed profiles remain unchanged.
+
+Inspect the build's selection policy without initializing a data directory:
+
+```sh
+swarmcraft-runtime compatibility-matrix
+```
+
+The pinned baseline is a release candidate, not a claim of completed real Fabric lifecycle or authenticated Minecraft client acceptance. See the [qualification matrix and field acceptance requirements](../../research/runtime-compatibility/REPORT.md). Local installation, hosting consent, authority, and live authenticated readiness remain separate checks.
+
 ## Exact provider artifacts and manual fallback
 
 When creating a world, the provider picker resolves required dependencies and selects exact versions. If the provider returns a restricted installable JAR with exact identity, size and hash metadata, Create asks for the absolute path to a manually obtained authorized copy before publishing the world. The native canonicalizer checks the declared bytes; the signed profile retains the manual-only restriction even when strong provider hashes exist. Do not use unofficial redistribution sources.

@@ -1,0 +1,15 @@
+{
+  "adapter_id": "swarmcraft-fabric-v1",
+  "declared_minecraft_range": "~26.1.2",
+  "declared_minimum_fabric_loader": "0.19.3",
+  "declared_minimum_java_major": 25,
+  "new_world_baselines": [
+    {
+      "minecraft_version": "26.1.2",
+      "fabric_loader_version": "0.19.3",
+      "reference_java_major": 25,
+      "qualification": "pinned_baseline",
+      "field_acceptance": "pending_real_fabric_launch_save_restore_and_authenticated_client"
+    }
+  ]
+}

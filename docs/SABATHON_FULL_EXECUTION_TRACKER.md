@@ -425,12 +425,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #42 — P2 · Partial
 - Work: Add a compatibility matrix for Minecraft versions and Fabric builds. Develop and test an adapter before widening support
 - Acceptance: Every offered tuple passes a real server launch, save, restore, and game-client connection. Unsupported versions remain visible with accurate messaging or filtering
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (exact new-world selection policy and negative compatibility gates; real Fabric lifecycle and authenticated client qualification remain pending)
+- Source: crates/swarm-protocol/src/runtime_support.rs; crates/swarm-cli/src/world_import.rs; crates/swarm-cli/src/runtime_main.rs; crates/swarm-cli/tests/runtime_matrix_cli.rs; apps/desktop/src-tauri/src/catalog_commands.rs; apps/desktop/src-tauri/src/canonical_world_commands.rs; apps/desktop/src/runtime-catalog-policy.js; [matrix and field qualification requirements](../research/runtime-compatibility/REPORT.md); [real sidecar matrix output](../research/runtime-compatibility/evidence/matrix-20261125.json).
+- Evidence: The exact pinned baseline is Minecraft 26.1.2 / Fabric Loader 0.19.3, with Java 25 as the reference runtime. Rust distinguishes the shipped bridge's declared range from the baseline candidate and unsupported combinations. Both Desktop Create and Import keep other releases visible but disabled, distinguish not-yet-qualified releases from incompatible ones, preserve changed import declarations against delayed catalog responses, and invalidate stale review when a declaration becomes unavailable. Native canonical Create and direct/reviewed import reject unqualified or incompatible tuples before publication. The runtime matrix command is read-only and does not initialize storage. Existing world fingerprints and runtime compatibility rules remain unchanged; the low-level data-only CLI Create remains a protocol/tooling primitive, not a qualification claim. Three protocol tests, 16 import/recovery tests, five real sidecar integration tests, three targeted native Desktop tests, 16 frontend unit tests, 30 source parity tests, strict targeted Rust Clippy, Svelte check/build, both browser variants at 720x560, 980x760 and 1280x900, and the five-workflow policy passed. The first import regression run had one outdated diagnostic expectation; the corrected final suite passed.
+- Remaining / next action: Build the exact Fabric candidate and exercise the pinned tuple with the real server, authenticated Fabric readiness, canonical save/stop/restore/restart, and a licensed authenticated client through a verified gateway. Record evidence for each exact tuple before adding another selectable release. The earlier vanilla capacity run (#35) is not proof of Fabric adapter qualification. Proceed to #43 without marking the pinned tuple field-qualified.
+- External dependency: Java 25 build/runtime toolchain, Gradle and exact candidate Fabric JAR, authorized live Minecraft server test and licensed authenticated Java Edition client, and native platform field environments.
+- Commit: Compatibility matrix and selection-policy checkpoint; see git history.
 
 ### #43 — P2 · Proposal
 - Work: Improve accessibility and everyday polish across main actions

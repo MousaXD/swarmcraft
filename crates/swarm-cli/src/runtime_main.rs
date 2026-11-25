@@ -31,6 +31,8 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum RuntimeCommand {
+    /// Print the build's pinned new-world baseline and declared adapter range.
+    CompatibilityMatrix,
     /// Inspect local runtime state without changing it.
     Status { world: String },
     /// Resolve official sources and describe the work required to make the runtime ready.
@@ -88,6 +90,9 @@ enum RuntimeCommand {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if matches!(args.command, RuntimeCommand::CompatibilityMatrix) {
+        return print_json(&swarm_protocol::runtime_compatibility_matrix());
+    }
     let paths = match args.data_dir {
         Some(root) => DataPaths::from_root(root),
         None => DataPaths::discover()?,
@@ -96,6 +101,7 @@ fn main() -> Result<()> {
     let installer = RuntimeInstaller::new(&paths, &storage);
 
     match args.command {
+        RuntimeCommand::CompatibilityMatrix => unreachable!("handled before opening storage"),
         RuntimeCommand::Status { world } => {
             print_json(&installer.inspect(parse_world(&world)?)?)?;
         }

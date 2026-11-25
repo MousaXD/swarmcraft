@@ -345,12 +345,17 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
     case 'minecraft_versions':
       if (typeof args.includeSnapshots !== 'boolean' || typeof args.refresh !== 'boolean') throw new Error('minecraft_versions requires includeSnapshots and refresh booleans');
       return { origin: 'network', versions: [
-        { id: '26.3', type: 'release', release_time: '2026-10-01T00:00:00Z', supported: true, adapter_supported: false },
-        { id: '26.1.2', type: 'release', release_time: '2026-01-01T00:00:00Z', supported: true, adapter_supported: true },
+        { id: '26.3', type: 'release', release_time: '2026-10-01T00:00:00Z', supported: true, adapter_supported: false, selection_state: 'unsupported_adapter' },
+        { id: '26.1.5', type: 'release', release_time: '2026-05-01T00:00:00Z', supported: true, adapter_supported: true, selection_state: 'adapter_compatible_unqualified' },
+        { id: '26.1.2', type: 'release', release_time: '2026-01-01T00:00:00Z', supported: true, adapter_supported: true, selection_state: 'pinned_baseline' },
       ] };
     case 'fabric_loader_versions':
       if (!args.minecraftVersion || typeof args.refresh !== 'boolean') throw new Error('fabric_loader_versions requires minecraftVersion and refresh');
-      return { origin: 'network', versions: [{ version: '0.19.3', stable: true, minecraft_version: args.minecraftVersion, adapter_supported: args.minecraftVersion === '26.1.2' }] };
+      return { origin: 'network', versions: [
+        { version: '0.20.1', stable: true, minecraft_version: args.minecraftVersion, adapter_supported: args.minecraftVersion === '26.1.2', selection_state: args.minecraftVersion === '26.1.2' ? 'adapter_compatible_unqualified' : 'unsupported_adapter' },
+        { version: '0.19.3', stable: true, minecraft_version: args.minecraftVersion, adapter_supported: args.minecraftVersion === '26.1.2', selection_state: args.minecraftVersion === '26.1.2' ? 'pinned_baseline' : 'unsupported_adapter' },
+        { version: '0.19.2', stable: true, minecraft_version: args.minecraftVersion, adapter_supported: false, selection_state: 'unsupported_adapter' },
+      ] };
     case 'list_worlds': return window.__swarmcraftImportedWorld
       ? window.__swarmcraftImportedWorld + '  Reviewed import  snapshots=1'
       : window.__swarmcraftRecoveryWorld
@@ -534,6 +539,19 @@ const scenario = String.raw`(async () => {
   require(fabricCalls.every((call) => call.args?.minecraftVersion && typeof call.args?.refresh === 'boolean'), 'A fabric_loader_versions call omitted required payloads');
   require(document.getElementById('createMinecraft').value === '26.1.2', 'Create did not select shipped runtime Minecraft line');
   require(document.getElementById('createLoader').value === '0.19.3', 'Create did not select minimum shipped Fabric loader');
+  for (const id of ['createMinecraft', 'importMinecraft']) {
+    const options = Array.from(document.getElementById(id).options);
+    require(options.find(o => o.value === '26.1.5')?.disabled && options.find(o => o.value === '26.1.5').textContent.includes('not yet qualified'), 'Unqualified Minecraft was selectable or mislabelled: ' + id);
+    require(options.find(o => o.value === '26.3')?.disabled && options.find(o => o.value === '26.3').textContent.includes('incompatible adapter'), 'Incompatible Minecraft was selectable or mislabelled: ' + id);
+  }
+  for (const id of ['createLoader', 'importLoader']) {
+    const options = Array.from(document.getElementById(id).options);
+    require(options.find(o => o.value === '0.20.1')?.disabled && options.find(o => o.value === '0.20.1').textContent.includes('not yet qualified'), 'Unqualified loader was selectable: ' + id);
+    require(options.find(o => o.value === '0.19.2')?.disabled && options.find(o => o.value === '0.19.2').textContent.includes('incompatible adapter'), 'Incompatible loader was selectable: ' + id);
+  }
+  require(document.getElementById('createCatalogStatus').textContent.includes('authenticated client acceptance remain pending'), 'Create overclaims field qualification');
+  require(document.getElementById('importCatalogStatus').textContent.includes('authenticated client acceptance remain pending'), 'Import overclaims field qualification');
+
 
   document.getElementById('joinWorldId').value = 'scworld:browser-public';
   document.getElementById('joinWorldIdButton').click();

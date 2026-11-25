@@ -14,8 +14,9 @@ const minecraftResponse = {
   provider: 'mojang',
   origin: 'network',
   versions: [
-    { id: '26.3-snapshot-1', type: 'snapshot', release_time: '2026-08-20T10:00:00+00:00', supported: true },
-    { id: '26.2', type: 'release', release_time: '2026-06-23T10:00:00+00:00', supported: true },
+    { id: '26.3-snapshot-1', type: 'snapshot', release_time: '2026-08-20T10:00:00+00:00', supported: true, adapter_supported: false, selection_state: 'unsupported_adapter' },
+    { id: '26.1.5', type: 'release', release_time: '2026-06-23T10:00:00+00:00', supported: true, adapter_supported: true, selection_state: 'adapter_compatible_unqualified' },
+    { id: '26.1.2', type: 'release', release_time: '2026-01-01T00:00:00+00:00', supported: true, adapter_supported: true, selection_state: 'pinned_baseline' },
   ],
 };
 
@@ -23,18 +24,19 @@ const fabricResponse = {
   provider: 'fabric',
   origin: 'network',
   versions: [
-    { version: '0.20.0-beta.1', stable: false, minecraft_version: '26.2' },
-    { version: '0.19.3', stable: true, minecraft_version: '26.2' },
+    { version: '0.20.0-beta.1', stable: false, minecraft_version: '26.1.2', adapter_supported: false, selection_state: 'unsupported_adapter' },
+    { version: '0.20.1', stable: true, minecraft_version: '26.1.2', adapter_supported: true, selection_state: 'adapter_compatible_unqualified' },
+    { version: '0.19.3', stable: true, minecraft_version: '26.1.2', adapter_supported: true, selection_state: 'pinned_baseline' },
   ],
 };
 
 test('normal Minecraft default remains a stable release when snapshots are present', () => {
   const versions = normalizeMinecraftCatalog(minecraftResponse);
-  assert.equal(chooseMinecraftVersion(versions), '26.2');
+  assert.equal(chooseMinecraftVersion(versions), '26.1.2');
 });
 
 test('Fabric default prefers an official stable loader', () => {
-  const loaders = normalizeFabricCatalog(fabricResponse, '26.2');
+  const loaders = normalizeFabricCatalog(fabricResponse, '26.1.2');
   assert.equal(chooseFabricLoader(loaders), '0.19.3');
 });
 
@@ -42,7 +44,7 @@ test('changing Minecraft invalidates the prior Fabric selection before revalidat
   const state = new CatalogSelectionState();
   state.setMinecraftCatalog(normalizeMinecraftCatalog(minecraftResponse));
   state.beginFabricLoad();
-  state.setFabricCatalog('26.2', normalizeFabricCatalog(fabricResponse, '26.2'));
+  state.setFabricCatalog('26.1.2', normalizeFabricCatalog(fabricResponse, '26.1.2'));
   assert.equal(state.fabricLoader, '0.19.3');
   assert.equal(state.ready, true);
 
@@ -63,7 +65,7 @@ test('empty Fabric catalog leaves Create World blocked', () => {
   const state = new CatalogSelectionState();
   state.setMinecraftCatalog(normalizeMinecraftCatalog(minecraftResponse));
   state.beginFabricLoad();
-  state.setFabricCatalog('26.2', [], '');
+  state.setFabricCatalog('26.1.2', [], '');
   assert.equal(state.fabricLoader, '');
   assert.equal(state.ready, false);
 });
@@ -109,8 +111,8 @@ test('Create World bootstraps real selectors and thin Tauri catalog commands', a
 test('newer official releases remain visible but cannot become default for an older shipped Fabric adapter', () => {
   const versions = normalizeMinecraftCatalog({
     versions: [
-      { id: '26.3', type: 'release', release_time: '2026-10-01T00:00:00Z', supported: true, adapter_supported: false },
-      { id: '26.1.2', type: 'release', release_time: '2026-01-01T00:00:00Z', supported: true, adapter_supported: true },
+      { id: '26.3', type: 'release', release_time: '2026-10-01T00:00:00Z', supported: true, adapter_supported: false, selection_state: 'unsupported_adapter' },
+      { id: '26.1.2', type: 'release', release_time: '2026-01-01T00:00:00Z', supported: true, adapter_supported: true, selection_state: 'pinned_baseline' },
     ],
   });
   assert.equal(versions.length, 2, 'official version data must remain visible');
@@ -120,12 +122,12 @@ test('newer official releases remain visible but cannot become default for an ol
   const state = new CatalogSelectionState();
   state.setMinecraftCatalog(versions);
   state.setFabricCatalog('26.1.2', normalizeFabricCatalog({
-    versions: [{ version: '0.20.1', stable: true, minecraft_version: '26.1.2', adapter_supported: true }],
+    versions: [{ version: '0.19.3', stable: true, minecraft_version: '26.1.2', adapter_supported: true, selection_state: 'pinned_baseline' }],
   }, '26.1.2'));
   assert.equal(state.ready, true);
   state.changeMinecraft('26.3');
   state.setFabricCatalog('26.3', normalizeFabricCatalog({
-    versions: [{ version: '0.20.1', stable: true, minecraft_version: '26.3', adapter_supported: false }],
+    versions: [{ version: '0.20.1', stable: true, minecraft_version: '26.3', adapter_supported: false, selection_state: 'unsupported_adapter' }],
   }, '26.3'));
   assert.equal(state.ready, false, 'incompatible release and loader cannot re-enable Create');
 });
@@ -133,17 +135,29 @@ test('newer official releases remain visible but cannot become default for an ol
 test('Fabric Loader defaults honor the installed adapter minimum rather than blindly using stable', () => {
   const versions = normalizeFabricCatalog({
     versions: [
-      { version: '0.19.2', stable: true, minecraft_version: '26.1.2', adapter_supported: false },
-      { version: '0.20.1', stable: true, minecraft_version: '26.1.2', adapter_supported: true },
+      { version: '0.19.2', stable: true, minecraft_version: '26.1.2', adapter_supported: false, selection_state: 'unsupported_adapter' },
+      { version: '0.20.1', stable: true, minecraft_version: '26.1.2', adapter_supported: true, selection_state: 'adapter_compatible_unqualified' },
+      { version: '0.19.3', stable: true, minecraft_version: '26.1.2', adapter_supported: true, selection_state: 'pinned_baseline' },
     ],
   }, '26.1.2');
-  assert.equal(versions.length, 2);
-  assert.equal(chooseFabricLoader(versions, '0.19.2'), '0.20.1');
-  assert.equal(chooseFabricLoader(versions), '0.20.1');
+  assert.equal(versions.length, 3);
+  assert.equal(chooseFabricLoader(versions, '0.19.2'), '0.19.3');
+  assert.equal(chooseFabricLoader(versions, '0.20.1'), '0.19.3');
+  assert.equal(chooseFabricLoader(versions), '0.19.3');
   assert.throws(
     () => normalizeMinecraftCatalog({ versions: [
       { id: '26.1.2', type: 'release', release_time: '2026-01-01Z', supported: true, adapter_supported: 'yes' },
     ] }),
     /compatibility flag/,
   );
+});
+
+test('missing or contradictory qualification metadata fails closed, and an unqualified range is never selectable', () => {
+  const entry = { id: '26.1.5', type: 'release', release_time: '2026-01-01Z', supported: true, adapter_supported: true };
+  assert.throws(() => normalizeMinecraftCatalog({ versions: [entry] }), /qualification state/);
+  assert.throws(() => normalizeMinecraftCatalog({ versions: [{ ...entry, selection_state: 'unsupported_adapter' }] }), /qualification state/);
+  const candidates = normalizeMinecraftCatalog({ versions: [{ ...entry, selection_state: 'adapter_compatible_unqualified' }] });
+  assert.equal(chooseMinecraftVersion(candidates, '26.1.5'), '');
+  const loaders = normalizeFabricCatalog({ versions: [{ version: '0.20.1', stable: true, minecraft_version: '26.1.2', adapter_supported: true, selection_state: 'adapter_compatible_unqualified' }] }, '26.1.2');
+  assert.equal(chooseFabricLoader(loaders), '');
 });

@@ -1,5 +1,6 @@
 import { discoveryUnavailable, formatDiscoveryResult, withDiscoveryDeadline } from './discovery-diagnostics.js';
 import { providerContractInvoke } from './provider-contract-bridge.js';
+import { baselineNotice, catalogChoiceLabel, catalogSelectionState } from './runtime-catalog-policy.js';
 const invoke = () => providerContractInvoke(window.__TAURI__?.core);
 const byId = (id) => document.getElementById(id);
 const clean = (value) => String(value ?? '').trim();
@@ -237,34 +238,44 @@ function hideInternalInputs() {
   if (details) details.hidden = true;
 }
 
-function importCatalogValues(response, field, { compatibleOnly = false } = {}) {
-  const values = response?.[field] || response?.versions || response?.items || response;
-  if (!Array.isArray(values)) throw new Error('Official version catalog returned an invalid response.');
-  return values
-    .filter((item) => !compatibleOnly
-      || typeof item !== 'object'
-      || (item?.supported !== false && item?.adapter_supported !== false))
-    .map((item) => clean(item?.id ?? item?.version ?? item))
-    .filter(Boolean);
+function importCatalogEntries(response, minecraftVersion = null) {
+  if (!Array.isArray(response?.versions)) throw new Error('Official version catalog returned an invalid response.');
+  return response.versions.map(item => {
+    const minecraft = minecraftVersion === null;
+    const value = clean(minecraft ? item?.id : item?.version);
+    if (!value || (minecraft
+      ? typeof item.supported !== 'boolean' || typeof item.type !== 'string'
+      : typeof item.stable !== 'boolean' || item.minecraft_version !== minecraftVersion)) {
+      throw new Error('Official version catalog contained an invalid or mismatched entry.');
+    }
+    const state = catalogSelectionState(item);
+    const available = minecraft ? item.supported && item.type === 'release' : item.stable;
+    return { value, state, available, selectable: available && state === 'pinned_baseline' };
+  });
 }
 
-function buildImportSelect(source, values, preferred = '', allowed = new Set(values)) {
+function buildImportSelect(source, entries, preferred = '') {
   const select = document.createElement('select');
   select.id = source.id;
   select.name = source.name;
   select.required = source.required;
   select.className = source.className;
-  for (const value of values) {
+  // An import declares the original save's runtime, not a new world's
+  // default. Never silently substitute the baseline for a different version.
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = 'Select the actual save version';
+  placeholder.disabled = true;
+  select.append(placeholder);
+  for (const entry of entries) {
     const option = document.createElement('option');
-    const compatible = allowed.has(value);
-    option.value = value;
-    option.textContent = compatible ? value : `${value} (requires newer SwarmCraft adapter)`;
-    option.disabled = !compatible;
+    option.value = entry.value;
+    option.textContent = catalogChoiceLabel(entry.value, entry.state, entry.available);
+    option.disabled = !entry.selectable;
     select.append(option);
   }
-  select.value = values.includes(preferred) && allowed.has(preferred)
-    ? preferred
-    : values.find((value) => allowed.has(value)) || '';
+  select.value = entries.some(entry => entry.selectable && entry.value === preferred) ? preferred : '';
+  select.disabled = !entries.some(entry => entry.selectable);
   return select;
 }
 
@@ -308,70 +319,66 @@ function setImportCatalogError(ui, message = '') {
   ui.retry.hidden = !message;
 }
 
-async function loadImportFabric(call, minecraftSelect, loaderSelect, ui, { refresh = false, preferred = '' } = {}) {
-  const minecraftVersion = clean(minecraftSelect.value);
-  ui.status.textContent = `Fetching compatible Fabric Loader versions for Minecraft ${minecraftVersion}…`;
-  setImportCatalogError(ui, '');
-  const result = await call('fabric_loader_versions', { minecraftVersion, refresh });
-  const values = importCatalogValues(result, 'loaders');
-  const allowed = new Set(importCatalogValues(result, 'loaders', { compatibleOnly: true }));
-  if (!allowed.size) throw new Error(`No Fabric Loader for Minecraft ${minecraftVersion} is compatible with the shipped SwarmCraft adapter.`);
-  const replacement = buildImportSelect(loaderSelect, values, preferred, allowed);
-  loaderSelect.replaceWith(replacement);
-  ui.loader = replacement;
-  ui.status.textContent = 'Import version catalogs are ready.';
-  return replacement;
-}
-
+let importCatalogGeneration = 0;
 export async function hydrateImportCatalogs(call, { refresh = false } = {}) {
   const ui = ensureImportCatalogUi();
   if (!ui) return null;
+  const generation = ++importCatalogGeneration;
   const preferredMinecraft = clean(ui.minecraft.value);
   const preferredLoader = clean(ui.loader.value);
+  const current = () => generation === importCatalogGeneration
+    && byId('importMinecraft') === ui.minecraft && byId('importLoader') === ui.loader;
+  const declarationsUnchanged = () => clean(ui.minecraft.value) === preferredMinecraft
+    && clean(ui.loader.value) === preferredLoader;
   ui.status.textContent = 'Fetching official Minecraft and Fabric Loader versions for import…';
   setImportCatalogError(ui, '');
   ui.retry.onclick = () => hydrateImportCatalogs(call, { refresh: true });
 
   try {
     const catalog = await call('minecraft_versions', { includeSnapshots: false, refresh });
-    const versions = importCatalogValues(catalog, 'versions');
-    const allowedMinecraft = new Set(importCatalogValues(catalog, 'versions', { compatibleOnly: true }));
-    if (!allowedMinecraft.size) throw new Error('No official Minecraft release is compatible with this shipped SwarmCraft adapter.');
-    const minecraftSelect = buildImportSelect(ui.minecraft, versions, preferredMinecraft, allowedMinecraft);
+    if (!current()) return ui;
+    if (!declarationsUnchanged()) {
+      setImportCatalogError(ui, 'Your save version declaration changed while loading. Retry version catalogs to review the new declaration.');
+      ui.status.textContent = 'Your version declaration was kept.';
+      return ui;
+    }
+    const versions = importCatalogEntries(catalog);
+    const minecraftSelect = buildImportSelect(ui.minecraft, versions, preferredMinecraft);
     const minecraftVersion = clean(minecraftSelect.value);
-    const fabric = await call('fabric_loader_versions', { minecraftVersion, refresh });
-    const loaders = importCatalogValues(fabric, 'loaders');
-    const allowedLoaders = new Set(importCatalogValues(fabric, 'loaders', { compatibleOnly: true }));
-    if (!allowedLoaders.size) throw new Error(`No Fabric Loader for Minecraft ${minecraftVersion} is compatible with the shipped SwarmCraft adapter.`);
-    const loaderSelect = buildImportSelect(ui.loader, loaders, preferredLoader, allowedLoaders);
+    const loaders = minecraftVersion
+      ? importCatalogEntries(await call('fabric_loader_versions', { minecraftVersion, refresh }), minecraftVersion)
+      : [];
+    if (!current()) return ui;
+    if (!declarationsUnchanged()) {
+      setImportCatalogError(ui, 'Your save version declaration changed while loading. Retry version catalogs to review the new declaration.');
+      ui.status.textContent = 'Your version declaration was kept.';
+      return ui;
+    }
+    const loaderSelect = buildImportSelect(ui.loader, loaders, preferredLoader);
 
     ui.minecraft.replaceWith(minecraftSelect);
     ui.loader.replaceWith(loaderSelect);
     ui.minecraft = minecraftSelect;
     ui.loader = loaderSelect;
-    ui.status.textContent = 'Import version catalogs are ready.';
+    if (minecraftSelect.value !== preferredMinecraft || loaderSelect.value !== preferredLoader) {
+      // The advisory import review must be invalidated when a previously
+      // declared value becomes unavailable.
+      minecraftSelect.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    ui.status.textContent = baselineNotice + ' Confirm the actual versions used by your save.';
+    if (!minecraftSelect.value || !loaderSelect.value) {
+      setImportCatalogError(ui, 'The declared save version is unavailable or not offered. Select the pinned baseline only if it matches your actual save.');
+    }
 
-    let lastMinecraft = minecraftSelect.value;
-    minecraftSelect.addEventListener('change', async () => {
-      const requestedMinecraft = minecraftSelect.value;
-      const previousLoader = loaderSelect.value;
-      loaderSelect.disabled = true;
-      try {
-        const replacement = await loadImportFabric(call, minecraftSelect, ui.loader, ui, {
-          refresh: false,
-          preferred: previousLoader,
-        });
-        replacement.disabled = false;
-        lastMinecraft = requestedMinecraft;
-      } catch (error) {
-        minecraftSelect.value = lastMinecraft;
-        ui.loader.disabled = false;
-        ui.status.textContent = `Could not load Fabric Loader versions for Minecraft ${requestedMinecraft}. The previous compatible selection was kept.`;
-        setImportCatalogError(ui, errorText(error));
-      }
+    minecraftSelect.addEventListener('change', () => {
+      if (!current()) return;
+      ui.loader.value = '';
+      ui.loader.disabled = true;
+      void hydrateImportCatalogs(call);
     });
     return ui;
   } catch (error) {
+    if (!current()) return ui;
     ui.status.textContent = 'Official Import version catalogs are unavailable. Exact version fields remain usable; retry when the providers are reachable.';
     setImportCatalogError(ui, errorText(error));
     return ui;

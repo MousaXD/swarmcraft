@@ -2,7 +2,9 @@ use swarm_catalog::{
     CatalogErrorPayload, CatalogOrigin, CatalogProvider, CatalogResponse, CatalogService, FabricLoaderVersion,
     MinecraftVersion,
 };
-use swarm_protocol::{minecraft_supported_by_shipped_adapter, validate_runtime_selection};
+use swarm_protocol::{
+    minecraft_qualification, runtime_qualification, validate_new_world_selection, RuntimeQualification,
+};
 
 // Official-provider availability and shipped Fabric-adapter compatibility are
 // distinct. Keep the original `supported` flag and annotate each version
@@ -13,6 +15,7 @@ pub struct DesktopCatalogVersion<T> {
     #[serde(flatten)]
     catalog: T,
     adapter_supported: bool,
+    selection_state: RuntimeQualification,
 }
 
 #[derive(serde::Serialize)]
@@ -26,7 +29,10 @@ pub struct DesktopCatalogResponse<T> {
     versions: Vec<DesktopCatalogVersion<T>>,
 }
 
-fn mark_adapter_support<T>(response: CatalogResponse<T>, compatible: impl Fn(&T) -> bool) -> DesktopCatalogResponse<T> {
+fn mark_adapter_support<T>(
+    response: CatalogResponse<T>,
+    qualify: impl Fn(&T) -> RuntimeQualification,
+) -> DesktopCatalogResponse<T> {
     DesktopCatalogResponse {
         provider: response.provider,
         source_url: response.source_url,
@@ -38,8 +44,9 @@ fn mark_adapter_support<T>(response: CatalogResponse<T>, compatible: impl Fn(&T)
             .versions
             .into_iter()
             .map(|catalog| {
-                let adapter_supported = compatible(&catalog);
-                DesktopCatalogVersion { catalog, adapter_supported }
+                let selection_state = qualify(&catalog);
+                let adapter_supported = selection_state.adapter_compatible();
+                DesktopCatalogVersion { catalog, adapter_supported, selection_state }
             })
             .collect(),
     }
@@ -59,9 +66,7 @@ pub async fn minecraft_versions(
         service
             .minecraft_versions(include_snapshots, refresh)
             .map(|response| {
-                mark_adapter_support(response, |version: &MinecraftVersion| {
-                    minecraft_supported_by_shipped_adapter(&version.id)
-                })
+                mark_adapter_support(response, |version: &MinecraftVersion| minecraft_qualification(&version.id))
             })
             .map_err(|error| error_payload(CatalogProvider::Mojang, error))
     })
@@ -84,7 +89,7 @@ pub async fn fabric_loader_versions(
             .fabric_loader_versions(&minecraft_version, refresh)
             .map(|response| {
                 mark_adapter_support(response, |loader: &FabricLoaderVersion| {
-                    validate_runtime_selection(&loader.minecraft_version, &loader.version, None).is_ok()
+                    runtime_qualification(&loader.minecraft_version, &loader.version, None)
                 })
             })
             .map_err(|error| error_payload(CatalogProvider::Fabric, error))
@@ -103,7 +108,7 @@ pub async fn validate_fabric_selection(
     fabric_loader_version: String,
 ) -> Result<(), CatalogErrorPayload> {
     tauri::async_runtime::spawn_blocking(move || {
-        validate_runtime_selection(&minecraft_version, &fabric_loader_version, None).map_err(|error| {
+        validate_new_world_selection(&minecraft_version, &fabric_loader_version).map_err(|error| {
             CatalogErrorPayload {
                 code: "unsupported_runtime_adapter".into(),
                 provider: CatalogProvider::Fabric.as_str().into(),
@@ -152,13 +157,13 @@ mod tests {
                 },
             ],
         };
-        let result = mark_adapter_support(catalog, |version: &MinecraftVersion| {
-            minecraft_supported_by_shipped_adapter(&version.id)
-        });
+        let result = mark_adapter_support(catalog, |version: &MinecraftVersion| minecraft_qualification(&version.id));
         let encoded = serde_json::to_value(result).expect("serialize native catalogue");
         assert_eq!(encoded["versions"][0]["supported"], true, "newer official releases must remain visible");
         assert_eq!(encoded["versions"][0]["adapter_supported"], false);
+        assert_eq!(encoded["versions"][0]["selection_state"], "unsupported_adapter");
         assert_eq!(encoded["versions"][1]["adapter_supported"], true);
+        assert_eq!(encoded["versions"][1]["selection_state"], "pinned_baseline");
     }
 
     #[test]
@@ -173,13 +178,17 @@ mod tests {
             versions: vec![
                 FabricLoaderVersion { version: "0.19.2".into(), stable: true, minecraft_version: "26.1.2".into() },
                 FabricLoaderVersion { version: "0.20.1".into(), stable: true, minecraft_version: "26.1.2".into() },
+                FabricLoaderVersion { version: "0.19.3".into(), stable: true, minecraft_version: "26.1.2".into() },
             ],
         };
         let result = mark_adapter_support(catalog, |loader: &FabricLoaderVersion| {
-            validate_runtime_selection(&loader.minecraft_version, &loader.version, None).is_ok()
+            runtime_qualification(&loader.minecraft_version, &loader.version, None)
         });
         let encoded = serde_json::to_value(result).expect("serialize native loader catalogue");
         assert_eq!(encoded["versions"][0]["adapter_supported"], false);
+        assert_eq!(encoded["versions"][0]["selection_state"], "unsupported_adapter");
         assert_eq!(encoded["versions"][1]["adapter_supported"], true);
+        assert_eq!(encoded["versions"][1]["selection_state"], "adapter_compatible_unqualified");
+        assert_eq!(encoded["versions"][2]["selection_state"], "pinned_baseline");
     }
 }

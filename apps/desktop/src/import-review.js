@@ -5,6 +5,7 @@ const blockers = Object.freeze({
   invalid_details: 'Enter the world name and exact Minecraft/Fabric versions.',
   invalid_source: 'Select the actual Minecraft world folder containing a readable, non-empty level.dat.',
   unsupported_runtime: 'This Minecraft/Fabric combination is not supported by the installed SwarmCraft adapter.',
+  unqualified_runtime: 'This combination is within the declared Fabric adapter range but is not offered for new worlds. Choose the pinned baseline only if it matches your actual save; otherwise keep the original save unchanged.',
   mod_requirements: 'Check every required server mod JAR, or explicitly confirm that no third-party server mods are required.',
   source_not_quiescent: 'Close Minecraft or the source server. The existing session.lock must be accessible and unlocked.',
   source_unreadable: 'The save contains an unreadable entry, symbolic link or special file. Review the source folder.',

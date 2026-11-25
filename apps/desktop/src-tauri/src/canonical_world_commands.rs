@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use swarm_catalog::CatalogService;
 use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
 use swarm_protocol::{
-    validate_runtime_selection, AuthorityPolicyV1, MembershipPolicyV1, MembershipRecordV1, WorldConfigV1,
+    validate_new_world_selection, AuthorityPolicyV1, MembershipPolicyV1, MembershipRecordV1, WorldConfigV1,
     WorldDescriptorV1, WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
@@ -37,8 +37,17 @@ pub fn create_canonical_world(
         return Err(failure("unsupported_loader", "SwarmCraft v1 currently supports the Fabric loader contract"));
     }
 
-    validate_runtime_selection(request.modpack.minecraft_version.trim(), request.modpack.loader_version.trim(), None)
-        .map_err(|error| failure("unsupported_runtime_adapter", error.to_string()))?;
+    validate_new_world_selection(request.modpack.minecraft_version.trim(), request.modpack.loader_version.trim())
+        .map_err(|error| {
+            failure(
+                if matches!(error, swarm_protocol::RuntimeSupportError::UnqualifiedNewWorld { .. }) {
+                    "unqualified_runtime"
+                } else {
+                    "unsupported_runtime_adapter"
+                },
+                error.to_string(),
+            )
+        })?;
     validate_catalog_selection(&request.modpack.minecraft_version, &request.modpack.loader_version)?;
     let canonical = canonicalize_modpack(request.modpack)?;
     let visibility = parse_visibility(&request.visibility)?;
@@ -176,4 +185,33 @@ fn parse_visibility(value: &str) -> Result<WorldVisibilityV1, CanonicalizationFa
 
 fn failure(code: &str, message: impl Into<String>) -> CanonicalizationFailure {
     CanonicalizationFailure { code: code.into(), message: message.into(), artifact_id: None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_create_rejects_unqualified_tuples_before_catalog_or_storage_access() {
+        for (minecraft, loader, expected) in [
+            ("26.1.5", "0.19.3", "unqualified_runtime"),
+            ("26.1.2", "0.20.1", "unqualified_runtime"),
+            ("26.2", "0.19.3", "unsupported_runtime_adapter"),
+            ("26.1.2", "0.19.2", "unsupported_runtime_adapter"),
+        ] {
+            let error = create_canonical_world(CreateCanonicalWorldRequest {
+                name: "Matrix rejection fixture".into(),
+                visibility: "private".into(),
+                modpack: CanonicalizeModpackRequest {
+                    minecraft_version: minecraft.into(),
+                    loader_id: "fabric".into(),
+                    loader_version: loader.into(),
+                    packages: Vec::new(),
+                    datapacks: Vec::new(),
+                },
+            })
+            .unwrap_err();
+            assert_eq!(error.code, expected);
+        }
+    }
 }

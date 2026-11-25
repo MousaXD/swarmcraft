@@ -9,7 +9,7 @@ use std::{
 };
 use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataPaths, PeerIdentity};
 use swarm_protocol::{
-    validate_runtime_selection, AuthorityPolicyV1, Hash32, MembershipPolicyV1, MembershipRecordV1,
+    validate_new_world_selection, AuthorityPolicyV1, Hash32, MembershipPolicyV1, MembershipRecordV1,
     RuntimeCompatibilityManifestV1, SnapshotManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1,
     WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, SHIPPED_RUNTIME_ADAPTER, STORAGE_SCHEMA_VERSION,
 };
@@ -70,9 +70,13 @@ pub fn preview_import(request: &ImportWorldRequest) -> ImportPreview {
     if validate_import_source(request).is_err() {
         return blocked("invalid_source");
     }
-    if validate_runtime_selection(request.minecraft_version.trim(), request.fabric_loader_version.trim(), None).is_err()
+    if let Err(error) =
+        validate_new_world_selection(request.minecraft_version.trim(), request.fabric_loader_version.trim())
     {
-        return blocked("unsupported_runtime");
+        return blocked(match error {
+            swarm_protocol::RuntimeSupportError::UnqualifiedNewWorld { .. } => "unqualified_runtime",
+            _ => "unsupported_runtime",
+        });
     }
     if validate_mod_declaration(request).is_err() {
         return blocked("mod_requirements");
@@ -366,8 +370,7 @@ fn import_world_inner(
     expected_compatibility: Option<&str>,
 ) -> Result<ImportWorldResult> {
     validate_request(request)?;
-    validate_runtime_selection(request.minecraft_version.trim(), request.fabric_loader_version.trim(), None)
-        .context("import compatibility is not supported by the shipped SwarmCraft Fabric adapter")?;
+    validate_new_world_selection(request.minecraft_version.trim(), request.fabric_loader_version.trim())?;
 
     // Minecraft's session.lock is an exclusive process-held record lock. Hold a
     // shared lock while reading: it conflicts with a running game's exclusive
@@ -1121,7 +1124,23 @@ mod tests {
         unsupported.minecraft_version = "26.2".into();
         let error = import_world(&paths, &unsupported).unwrap_err();
         assert!(error.to_string().contains("shipped SwarmCraft Fabric adapter"));
-        assert!(Storage::open(paths.root.clone()).unwrap().list_worlds().unwrap().is_empty());
+        assert!(!paths.root.exists());
+    }
+
+    #[test]
+    fn adapter_range_is_not_a_new_world_qualification() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let source = source_world(temp.path());
+        for (minecraft, loader) in [("26.1.5", "0.19.3"), ("26.1.2", "0.20.0")] {
+            let mut unqualified = request(source.clone());
+            unqualified.minecraft_version = minecraft.into();
+            unqualified.fabric_loader_version = loader.into();
+            assert!(matches!(preview_import(&unqualified), ImportPreview::Blocked { blocker: "unqualified_runtime" }));
+            let error = import_world(&paths, &unqualified).unwrap_err();
+            assert!(error.to_string().contains("has not been qualified for new worlds"));
+            assert!(!paths.root.exists());
+        }
     }
 
     #[test]
