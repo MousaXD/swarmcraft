@@ -120,7 +120,10 @@ impl VerifiedReplayProof {
 
 /// Individual manifest verification is also used for an offline *copy*.
 /// Only the envelope verifier below can construct VerifiedReplayProof.
-fn verify_manifest_against_history(proof: &HistoricalReplayProofV1, manifest: &SnapshotManifestV1) -> Result<()> {
+pub(crate) fn verify_manifest_against_history(
+    proof: &HistoricalReplayProofV1,
+    manifest: &SnapshotManifestV1,
+) -> Result<()> {
     let index = usize::try_from(manifest.snapshot_number.checked_sub(1).context("zero snapshot number")?)?;
     let expected = proof.checkpoints.get(index).context("checkpoint outside certified replay proof")?;
     let epoch =
@@ -1131,6 +1134,18 @@ pub(crate) fn verified_local_checkpoint_history(
     }
     ensure_collected_history_current(storage, &proof, &manifests)?;
     Ok((proof, manifests))
+}
+
+/// Verify an offline backup's signed history against an independently
+/// selected world. The envelope is intentionally unsigned; callers must
+/// verify each original manifest. Returns no replay/publication capability.
+pub(crate) fn verify_offline_backup_history(proof: &HistoricalReplayProofV1, expected_world: WorldId) -> Result<()> {
+    if proof.world_id != expected_world || !proof.signature.is_empty() {
+        bail!("backup history is not the selected data-only world");
+    }
+    let membership = proof.membership.last().context("backup lacks signed membership")?;
+    validate_replay_shape(proof, &proof.genesis, membership)?;
+    verify_replay_history(proof, &proof.genesis, membership)
 }
 
 /// A data-only copy may use any exact retained checkpoint, never a snapshot
@@ -2447,6 +2462,64 @@ mod tests {
         storage.commit_snapshot(&saved).unwrap();
         let fresh_manifest = saved.manifest().clone();
         let envelope = collect_replay_proof(&storage, &carol, world).unwrap();
+
+        // A storage-only member can deliberately transport a checkpoint
+        // across certified transfer, recovery and subsequent admission.
+        // It does not need the current authority's live envelope signature,
+        // and importing it on a fresh device cannot install any authority.
+        {
+            use crate::checkpoint_backup::{self, BackupExportRequest, BackupImportRequest};
+            let paths = DataPaths::from_root(storage.root());
+            paths.ensure().unwrap();
+            std::fs::write(paths.identity_key(), [27; 32]).unwrap();
+            assert_eq!(PeerIdentity::load_existing(&paths).unwrap().peer_id(), dave.peer_id());
+            let backup_dir = tempfile::tempdir().unwrap();
+            let receiver = DataPaths::from_root(backup_dir.path().join("absent-receiver"));
+            let key = backup_dir.path().join("secret.key");
+            let bundle = backup_dir.path().join("certified.scbackup");
+            let destination = backup_dir.path().join("data-only");
+            checkpoint_backup::generate_key(&receiver, &key).unwrap();
+            let checkpoint = fresh_manifest.manifest_hash().unwrap();
+            let exported = checkpoint_backup::export(
+                &paths,
+                &BackupExportRequest {
+                    world,
+                    checkpoint,
+                    acknowledged_conflicts: None,
+                    key_file: &key,
+                    destination: &bundle,
+                },
+            )
+            .unwrap();
+            assert_eq!(exported.historical_manifest_count, 4);
+            let imported = checkpoint_backup::import(
+                &receiver,
+                &BackupImportRequest {
+                    expected_world: world,
+                    expected_checkpoint: checkpoint,
+                    key_file: &key,
+                    bundle: &bundle,
+                    destination: &destination,
+                    confirm_data_only: true,
+                },
+            )
+            .unwrap();
+            assert!(!imported.registered_world && !imported.authority_granted);
+            assert!(!receiver.root.exists());
+            assert_eq!(imported.state_root, fresh_manifest.state_root.to_string());
+            assert_eq!(
+                std::fs::read(destination.join("world/level.dat")).unwrap(),
+                b"new canonical checkpoint after recovery"
+            );
+            assert_eq!(
+                std::fs::read(destination.join("world/region.dat")).unwrap(),
+                std::fs::read(fresh.path().join("region.dat")).unwrap()
+            );
+            assert_eq!(storage.load_epoch_record(world).unwrap(), third);
+            assert_eq!(storage.load_membership_record(world).unwrap(), admitted);
+            assert_eq!(storage.latest_snapshot(world).unwrap().as_ref(), Some(&fresh_manifest));
+        }
+
         assert!(verify_and_stage_first_contact_replay(
             &joining,
             &dave,

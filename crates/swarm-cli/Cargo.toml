@@ -30,14 +30,18 @@ path = "src/infra_main.rs"
 blake3.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+chacha20poly1305 = "=0.10.1"
 fs2.workspace = true
 hex.workspace = true
 postcard.workspace = true
+rand_core.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
+zeroize = "=1.9.0"
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -54,4 +58,3 @@ libc = "0.2"
 [dev-dependencies]
 futures.workspace = true
 libp2p.workspace = true
-tempfile.workspace = true

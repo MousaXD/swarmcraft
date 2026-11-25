@@ -57,6 +57,11 @@ enum Command {
         #[command(subcommand)]
         command: WorldCommand,
     },
+    /// Deliberate encrypted checkpoint transport; never grants host authority.
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
+    },
     /// Create signed world invitations.
     Invite {
         #[command(subcommand)]
@@ -69,6 +74,42 @@ enum Command {
     },
     /// Display the authorized peers for a world.
     Peers { world: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum BackupCommand {
+    /// Generate a private random 32-byte key file. Keep it separate from the bundle.
+    Keygen {
+        #[arg(long)]
+        destination: PathBuf,
+    },
+    /// Export one exact verified checkpoint and its signed history to an encrypted file.
+    Export {
+        world: String,
+        #[arg(long)]
+        checkpoint: String,
+        #[arg(long)]
+        acknowledge_conflicts: Option<String>,
+        #[arg(long)]
+        key_file: PathBuf,
+        #[arg(long)]
+        destination: PathBuf,
+    },
+    /// Verify a completed bundle and restore files outside SwarmCraft storage.
+    Import {
+        #[arg(long)]
+        expected_world: String,
+        #[arg(long)]
+        expected_checkpoint: String,
+        #[arg(long)]
+        key_file: PathBuf,
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        destination: PathBuf,
+        #[arg(long)]
+        confirm_data_only: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -369,9 +410,15 @@ fn main() -> Result<()> {
         Some(root) => DataPaths::from_root(root),
         None => DataPaths::discover()?,
     };
+    // Keygen and data-only backup import must not even open the
+    // recipient's existing canonical store (opening can resume transactions).
+    let command = match cli.command {
+        Command::Backup { command } => return handle_backup(command, &paths),
+        other => other,
+    };
     let storage = Storage::open(paths.root.clone())?;
 
-    match cli.command {
+    match command {
         Command::Init => {
             paths.ensure()?;
             let identity = PeerIdentity::load_or_create(&paths)?;
@@ -418,6 +465,7 @@ fn main() -> Result<()> {
             })?;
         }
         Command::World { command } => handle_world(command, &paths, &storage)?,
+        Command::Backup { .. } => unreachable!("backup commands are handled before canonical storage opens"),
         Command::Invite { command } => handle_invite(command, &paths, &storage)?,
         Command::Contact { command } => match command {
             ContactCommand::Add { peer, public_key, label } => {
@@ -433,6 +481,51 @@ fn main() -> Result<()> {
             }
         },
         Command::Peers { world } => show_peers(parse_world(&world)?, &storage)?,
+    }
+    Ok(())
+}
+
+fn handle_backup(command: BackupCommand, paths: &DataPaths) -> Result<()> {
+    use swarm_cli::checkpoint_backup::{self, BackupExportRequest, BackupImportRequest};
+    match command {
+        BackupCommand::Keygen { destination } => {
+            let key_file = checkpoint_backup::generate_key(paths, &destination)?;
+            println!("{}", serde_json::json!({"key_file": key_file, "keep_separate_from_bundle": true}));
+        }
+        BackupCommand::Export { world, checkpoint, acknowledge_conflicts, key_file, destination } => {
+            let result = checkpoint_backup::export(
+                paths,
+                &BackupExportRequest {
+                    world: parse_world(&world)?,
+                    checkpoint: checkpoint.parse()?,
+                    acknowledged_conflicts: acknowledge_conflicts.map(|hash| hash.parse()).transpose()?,
+                    key_file: &key_file,
+                    destination: &destination,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        BackupCommand::Import {
+            expected_world,
+            expected_checkpoint,
+            key_file,
+            bundle,
+            destination,
+            confirm_data_only,
+        } => {
+            let result = checkpoint_backup::import(
+                paths,
+                &BackupImportRequest {
+                    expected_world: parse_world(&expected_world)?,
+                    expected_checkpoint: expected_checkpoint.parse()?,
+                    key_file: &key_file,
+                    bundle: &bundle,
+                    destination: &destination,
+                    confirm_data_only,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
     }
     Ok(())
 }

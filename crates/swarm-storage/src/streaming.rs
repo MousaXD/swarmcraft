@@ -399,7 +399,9 @@ fn publish_immutable_manifest(path: &Path, bytes: &[u8]) -> Result<(), StorageEr
     sync_parent(parent)
 }
 
-fn validate_manifest_shape(manifest: &SnapshotManifestV1) -> Result<(), StorageError> {
+/// Check metadata and portable paths without downloading blobs or
+/// committing a snapshot. This is not an authority check.
+pub fn validate_manifest_shape(manifest: &SnapshotManifestV1) -> Result<(), StorageError> {
     if manifest.protocol_version != PROTOCOL_VERSION {
         return Err(StorageError::UnsupportedProtocol(manifest.protocol_version));
     }

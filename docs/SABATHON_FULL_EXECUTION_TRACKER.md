@@ -315,12 +315,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #31 — P1 · Proposal
 - Work: Offer an encrypted checkpoint export/import bundle for backup and deliberate transport. Treat Drive or object storage as optional transport adapters
 - Acceptance: An interrupted upload never becomes a current save. The recipient validates immutable manifest/blob hashes and signature before restore. Backup cannot grant host authority
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: crates/swarm-cli/src/checkpoint_backup.rs, historical_authority.rs, main.rs; crates/swarm-cli/tests/checkpoint_backup.rs; crates/swarm-storage/src/streaming.rs; docs/CHECKPOINT_BACKUP.md.
+- Evidence: Generated owner-only random key file, versioned XChaCha20-Poly1305 framed file, authenticated end and strict EOF, original signed history and exact checkpoint pins, bounded deduplicated blobs, isolated verified restore, no-clobber export/import. Real CLI test restores old checkpoint including compressed, duplicate, empty and multi-frame files; rejects partial, wrong-key, wrong-pin, modified and appended transfers and unsafe paths. Four unit tests cover malicious re-encryption, invalid original signatures/blob hashes, framing and publication races. Historical replay regression exports as a storage-only member across signed transfer, recovery and later admission. 165 CLI library tests (2 ignored), 51 CLI binary tests, both backup/recovery integration tests, 67 storage tests (1 ignored), strict CLI/storage Clippy and format/diff checks passed. Full CLI regression requires the existing umask 077 private test environment.
+- Remaining / next action: CLI file transport only; optional provider/Desktop integration and direct data-only hydration of pinned replicas require separate work. No automatic authority recovery, current-save activation or cloud upload is claimed. Next #32: bounded parallel unrelated blob scheduling across authorized replicas.
+- External dependency: Installed-platform/Windows ACL and power-loss/large-scale certification; optional provider adapters; necessary final CI under local-first policy.
+- Commit: See 25 November encrypted checkpoint backup commit.
 
 ### #32 — P2 · Partial
 - Work: Download unrelated missing blobs in parallel from multiple authorized replicas, with bounded scheduling and resume
