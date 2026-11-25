@@ -645,12 +645,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #64 — Expansion · Missing
 - Work: Add a creation-time **Ownerless / no OP** world option with a signed governance policy
 - Acceptance: The founding player receives no permanent creator privileges, player OP, unilateral rule changes, or unilateral control over recovery. Turning on more compute grants no governance privilege
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (isolated offline creation certificate and refusal of live activation; actual game permissions and shared canonical authority remain open)
+- Source: [Ownerless creation RFC](rfcs/ownerless-creation.md); `crates/swarm-protocol/src/ownerless.rs`, `crates/swarm-consensus/src/ownerless.rs`, `crates/swarm-cli/src/ownerless_creation.rs`; real CLI and cryptographic contract tests.
+- Evidence: Distinct ownerless genesis namespace, no creator or initial host key, exact immutable no-OP/solo/console/RCON/compute-vote policy, 3–15 canonical prime-order validator keys, unanimous strict Ed25519 genesis approvals pinned to exact identity and policy, proposed stable-roster majority threshold only. Seven new contract tests plus two real CLI tests; 122 protocol/consensus tests and two CLI integration tests passed. Separate temporary profiles sign; organizer and outsider get no automatic vote; duplicate, partial, forged, wrong-world and weak/mixed-torsion key cases refused. Offline commands never open canonical storage; normal world create --ownerless refuses rather than creating a creator-owned V1 world. Ordinary V1 creation regression passed.
+- Remaining / next action: #65 actual managed runtime and worker permission enforcement and binding to accepted policy; #66 durable canonical quorum, validator transitions and founder-independent recovery; #67 distinct public/private admission. This is a certificate, not an active world or proof of actual no-OP Minecraft gameplay. The initial state and compatibility pins are not verified runtime/save artifacts. No automatic recovery or maintenance authority is granted. Production ownerless and distributed hosting remain gated.
+- External dependency: Independent threat-model review, compatible managed game/worker runtime, durable shared authority and distinct enrolled failure domains, actual founder/successor-host and joint field acceptance.
+- Commit: Add isolated signed ownerless genesis and offline creation workflow; see git history.
 
 ### #65 — Expansion · Missing
 - Work: Bind enforced permission rules to the canonical runtime and each regional worker, with explicit CFT vs. BFT trust boundaries
@@ -754,4 +754,4 @@ Initial full-item implementation/acceptance totals: not yet established by item-
 - Private replication uses the current signed membership with a matching descriptor and rechecks the exact authenticated recipient before normal payload, manifest acknowledgement and every blob chunk. A half-installed signed roster denies data instead of trusting an obsolete descriptor. Removed local recipients also refuse normal snapshot bytes. Ordinary unauthorized world requests receive a generic refusal.
 - Evidence: strict CLI/storage Clippy, 51 daemon/CLI binary tests, 67 storage tests (1 optional soak ignored), and actual authenticated invite/leave/replication test passed (19.73s). A reusable grant admitted a third peer; revocation left committed membership intact; joint leave committed; a real network probe authenticated as the removed member received status/history refusal and no newer manifest/blob payload while the remaining member verified a new checkpoint. The old device retained its old verified save. Prior commit 8653c2d required CI completed successfully (run 45585530110). Broader local CLI validation underway; UI and field acceptance remain.
 
-Latest actionable continuation after #63 local negative scale qualification: #64 ownerless/no-OP signed creation-policy research. The #63 full durable service target, independent quorum, physical, compatibility and actual Minecraft gameplay gates remain open; production regional activation is not authorized.
+Latest actionable continuation after #64 offline creation-policy verification: #65 managed runtime/worker no-OP permission binding, without enabling ownerless gameplay until #66 canonical shared authority is implemented. The #63 full durable service target, independent quorum, physical, compatibility and actual Minecraft gameplay gates remain open.

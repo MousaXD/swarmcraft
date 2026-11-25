@@ -1,5 +1,6 @@
 mod daemon;
 mod invite;
+mod ownerless_creation;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -70,6 +71,11 @@ enum Command {
         /// Run only authenticated replication and voting; never supervise or launch Minecraft.
         #[arg(long)]
         replica_only: bool,
+    },
+    /// Offline ownerless/no-OP creation certificates; cannot create or activate playable worlds.
+    Ownerless {
+        #[command(subcommand)]
+        command: ownerless_creation::OwnerlessCommand,
     },
     /// Manage replicated worlds.
     World {
@@ -237,6 +243,9 @@ enum HostingCommand {
 enum WorldCommand {
     /// Create a world identity and local durable metadata.
     Create {
+        /// Ownerless mode is not playable yet; use the offline ownerless creation workflow.
+        #[arg(long)]
+        ownerless: bool,
         #[arg(long)]
         name: String,
         #[arg(long)]
@@ -499,6 +508,11 @@ fn main() -> Result<()> {
     // recipient's existing canonical store (opening can resume transactions).
     let command = match cli.command {
         Command::Support { command } => return support_metrics::run(&paths, command),
+        Command::Ownerless { command } => return ownerless_creation::run(&paths, command),
+        Command::World { command: WorldCommand::Create { ownerless: true, .. } } => {
+            bail!("ownerless runtime activation is not supported; use swarmcraft ownerless draft/inspect/approve/assemble/verify. No world created");
+        }
+
         Command::Update { command } => {
             let metric = match &command {
                 swarm_cli::updates::UpdateCommand::Check { .. } => Some(Metric::UpdateCheck),
@@ -610,6 +624,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Support { .. } => unreachable!("support reports never open canonical storage"),
+        Command::Ownerless { .. } => unreachable!("ownerless creation never opens canonical storage"),
         Command::Update { .. } => unreachable!("updates never open canonical storage"),
         Command::Profile { .. } => unreachable!("profile checks are handled before storage opens"),
         Command::Backup { .. } => unreachable!("backup commands are handled before canonical storage opens"),
@@ -697,6 +712,7 @@ fn handle_backup(command: BackupCommand, paths: &DataPaths) -> Result<()> {
 fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> Result<()> {
     match command {
         WorldCommand::Create {
+            ownerless,
             name,
             minecraft,
             fabric_loader,
@@ -706,6 +722,7 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             region,
             language,
         } => {
+            anyhow::ensure!(!ownerless, "ownerless runtime activation is unsupported");
             let visibility = parse_visibility(&visibility)?;
             let presentation = swarm_protocol::new_listing_presentation(
                 name.clone(),
