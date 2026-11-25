@@ -34,6 +34,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Explicit signed application update delivery; never executes installers.
+    Update {
+        #[command(subcommand)]
+        command: swarm_cli::updates::UpdateCommand,
+    },
     /// Check the local profile before a supported upgrade or rollback.
     Profile {
         #[command(subcommand)]
@@ -481,6 +486,7 @@ fn main() -> Result<()> {
     // Keygen and data-only backup import must not even open the
     // recipient's existing canonical store (opening can resume transactions).
     let command = match cli.command {
+        Command::Update { command } => return swarm_cli::updates::run(&paths, command),
         Command::Backup { command } => return handle_backup(command, &paths),
         Command::Profile { command: ProfileCommand::Check { target } } => {
             let report = match target {
@@ -544,6 +550,7 @@ fn main() -> Result<()> {
             })?;
         }
         Command::World { command } => handle_world(command, &paths, &storage)?,
+        Command::Update { .. } => unreachable!("updates never open canonical storage"),
         Command::Profile { .. } => unreachable!("profile checks are handled before storage opens"),
         Command::Backup { .. } => unreachable!("backup commands are handled before canonical storage opens"),
         Command::Invite { command } => handle_invite(command, &paths, &storage)?,

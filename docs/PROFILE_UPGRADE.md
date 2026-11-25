@@ -8,6 +8,10 @@ even though the latter reports the same application version as the candidate.
 
 ## Before upgrading
 
+For explicitly signed update delivery, use the [signed update client and
+manual installation contract](SIGNED_UPDATES.md); a successful stage is
+not permission to stop an unconfirmed host or replace a running package.
+
 1. Verify the complete package against its release checksums and provenance.
 2. Stop hosting through the normal save-first procedure. Wait for the final
    verified checkpoint and close Desktop, daemon, Java and all sidecars.

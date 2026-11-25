@@ -71,6 +71,16 @@ See the [published preview audit and rollback rehearsal](../research/release-ver
 Actual signed production execution requires authorized native runners and
 credentials; the Linux-only rehearsal and offline gate tests do not replace it.
 
+## Signed update delivery
+
+The explicit opt-in updater uses independently pinned channel keys and
+offline-signed indexes prepared only from already reviewed release assets.
+The [signed update contract](SIGNED_UPDATES.md) is additive to these
+release gates. No updater index, key or package is published automatically;
+the existing exact-SHA, native signing and release approval gates still
+apply. A signed update descriptor does not replace platform OS trust or
+profile compatibility and save-first installation procedures.
+
 ## Excluded Rust crates are first-class gates
 
 The root Cargo workspace intentionally excludes:

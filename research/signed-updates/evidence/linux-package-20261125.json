@@ -1,0 +1,38 @@
+{
+  "scope": "offline test-only keys, real current CLI, actual old published preview, inert next-version Debian archive and synthetic other platform artifacts; no installation",
+  "checks": {
+    "default_off_no_network_or_profile_creation": true,
+    "explicit_pin_and_independent_channels": true,
+    "actual_published_package_provenance_signed_but_not_upgradeable": true,
+    "invalid_signatures_and_incompatible_or_expired_signed_metadata_denied": true,
+    "actual_openssl_signed_manifest_verified_by_rust_client": true,
+    "corrupt_truncated_oversized_missing_package_never_published": true,
+    "verified_inert_deb_stage_and_local_tampering_denial": true,
+    "durable_replay_lock_and_opt_out": true,
+    "stable_and_preview_independent_signed_staging": true,
+    "accepted_newer_offer_cannot_fall_back_after_failed_download": true,
+    "explicit_online_transport_failure_preserves_trust_state": true,
+    "incompatible_live_profile_preflight_read_only": true,
+    "publisher_refuses_changed_bytes_and_channel_substitution": true,
+    "publisher_checks_debian_identity_not_only_filename": true,
+    "real_saved_world_and_consent_bytes_unchanged": true
+  },
+  "actual_published_preview": {
+    "commit": "aaffac22e32547983f1fd558af6eb32c0da4917b",
+    "version": "0.5.1",
+    "verified_package_records": 4,
+    "equal_or_older_version_denied": true
+  },
+  "actual_saved_checkpoint": "600bf619513b8c430ade4250432a136c37dffbafb5acbfd76a88fd12e812525d",
+  "original_save_files": 31,
+  "consent_withdrawal_preserved": true,
+  "candidate_cli_sha256": "f56c16bc3044f3f1b9cfdd113d12e67d9c151101747d115b99e59a7c037d6f33",
+  "fixture_version": "0.5.2",
+  "fixture_package_sha256": "ed813c5b4bf6d31ead381450fdf0909a51bcd5548dd429b228db2151afa5befc",
+  "fixture_package_bytes": 608,
+  "preview_manifest_sha256": "80386eba9c9563bc2e22e22cd67e9b97b1717eda9fb05065a1177d784ee5e1cd",
+  "latest_sequence": "3",
+  "complete": true,
+  "candidate_debian_package_sha256": "36a24e298c059347938b0de9522d25daee1435f4ce1fbf92fea896b92ce259df",
+  "candidate_sidecars_match_local_build": true
+}

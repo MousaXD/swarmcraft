@@ -545,12 +545,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #54 — P2 · Proposal
 - Work: Add signed update delivery and platform installation hygiene after release provenance is stable
 - Acceptance: Client verifies manifest and package signature, separates preview/stable channels, supports opt-out, and rejects an incompatible or untrusted update
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (explicit packaged CLI signed delivery and manual-install preflight; no production activation or automatic installer)
+- Source: `crates/swarm-cli/src/updates.rs`, `scripts/ci-release/sign_updates.py`, `scripts/acceptance/signed_updates.py`; [operator contract](SIGNED_UPDATES.md).
+- Evidence: [Signed-update report and exact package receipt](../research/signed-updates/REPORT.md). Seven cryptographic verification tests; 15 end-to-end checks against an actual extracted candidate Linux Debian package, ephemeral distinct channel keys, real previously published preview (equal version refused), inert next-version Debian and synthetic other platform artifacts. Signature, byte-count/digest, replay/equivocation, expiry, incompatible schema/profile/target, pin substitution and corrupt/missing package refusal. Atomic private staging, free-space reserve, explicit opt-out and re-verification. Signer rejects altered provenance/bytes and wrongly labelled Debian architecture. Actual 31-file Java save checkpoint, identity, withdrawal revision and all non-update profile bytes unchanged; no hosted CI.
+- Remaining / next action: #55 production metrics, support runbooks and compatibility policy. Production trust key/index provisioning, public HTTPS positive delivery, native Windows/macOS signing and OS installer replacement/rollback, key rotation/revocation and optional Desktop update controls remain unverified. No installer execution or production release authorized.
+- External dependency: Authorized release operator and offline channel keys, approved publication, native OS qualification.
+- Commit: Add explicit signed update delivery and offline verification; see git history.
 
 ### #55 — P2 · Missing
 - Work: Define production metrics, support runbooks, and per-version compatibility policy

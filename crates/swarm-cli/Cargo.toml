@@ -30,6 +30,7 @@ path = "src/infra_main.rs"
 blake3.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+ed25519-dalek.workspace = true
 chacha20poly1305 = "=0.10.1"
 fs2.workspace = true
 hex.workspace = true
