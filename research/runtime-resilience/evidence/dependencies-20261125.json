@@ -1,0 +1,241 @@
+{
+  "advisory_database": {
+    "commit": "52384ab5581a4487b62c549eef95cf7ba7e8bad5",
+    "date": "2026-11-23",
+    "network_refresh": false
+  },
+  "root": {
+    "before": {
+      "dependencies": 441,
+      "vulnerabilities": 0,
+      "warnings": {
+        "unmaintained": [
+          {
+            "id": "RUSTSEC-2023-0089",
+            "crate": "atomic-polyfill",
+            "version": "1.0.3"
+          },
+          {
+            "id": "RUSTSEC-2024-0436",
+            "crate": "paste",
+            "version": "1.0.15"
+          }
+        ],
+        "unsound": [
+          {
+            "id": "RUSTSEC-2026-0581",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0582",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0575",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0574",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0577",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0580",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0576",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0578",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0579",
+            "crate": "heapless",
+            "version": "0.7.17"
+          }
+        ]
+      }
+    },
+    "after": {
+      "dependencies": 437,
+      "vulnerabilities": 0,
+      "warnings": {
+        "unmaintained": [
+          {
+            "id": "RUSTSEC-2024-0436",
+            "crate": "paste",
+            "version": "1.0.15"
+          }
+        ]
+      }
+    },
+    "final_lock_sha256": "b3de266a04964e9d3f4326805c1449a1155108347b6fbf332e7a5209fa87f177"
+  },
+  "desktop": {
+    "before": {
+      "dependencies": 533,
+      "vulnerabilities": 0,
+      "warnings": {
+        "unmaintained": [
+          {
+            "id": "RUSTSEC-2023-0089",
+            "crate": "atomic-polyfill",
+            "version": "1.0.3"
+          },
+          {
+            "id": "RUSTSEC-2026-0543",
+            "crate": "chrono",
+            "version": "0.4.45"
+          },
+          {
+            "id": "RUSTSEC-2024-0370",
+            "crate": "proc-macro-error",
+            "version": "1.0.4"
+          },
+          {
+            "id": "RUSTSEC-2025-0081",
+            "crate": "unic-char-property",
+            "version": "0.9.0"
+          },
+          {
+            "id": "RUSTSEC-2025-0075",
+            "crate": "unic-char-range",
+            "version": "0.9.0"
+          },
+          {
+            "id": "RUSTSEC-2025-0080",
+            "crate": "unic-common",
+            "version": "0.9.0"
+          },
+          {
+            "id": "RUSTSEC-2025-0100",
+            "crate": "unic-ucd-ident",
+            "version": "0.9.0"
+          },
+          {
+            "id": "RUSTSEC-2025-0098",
+            "crate": "unic-ucd-version",
+            "version": "0.9.0"
+          }
+        ],
+        "unsound": [
+          {
+            "id": "RUSTSEC-2024-0429",
+            "crate": "glib",
+            "version": "0.18.5"
+          },
+          {
+            "id": "RUSTSEC-2026-0581",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0582",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0575",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0574",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0577",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0580",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0576",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0578",
+            "crate": "heapless",
+            "version": "0.7.17"
+          },
+          {
+            "id": "RUSTSEC-2026-0579",
+            "crate": "heapless",
+            "version": "0.7.17"
+          }
+        ]
+      }
+    },
+    "after": {
+      "dependencies": 528,
+      "vulnerabilities": 0,
+      "warnings": {
+        "unmaintained": [
+          {
+            "id": "RUSTSEC-2026-0543",
+            "crate": "chrono",
+            "version": "0.4.45"
+          },
+          {
+            "id": "RUSTSEC-2024-0370",
+            "crate": "proc-macro-error",
+            "version": "1.0.4"
+          },
+          {
+            "id": "RUSTSEC-2025-0081",
+            "crate": "unic-char-property",
+            "version": "0.9.0"
+          },
+          {
+            "id": "RUSTSEC-2025-0075",
+            "crate": "unic-char-range",
+            "version": "0.9.0"
+          },
+          {
+            "id": "RUSTSEC-2025-0080",
+            "crate": "unic-common",
+            "version": "0.9.0"
+          },
+          {
+            "id": "RUSTSEC-2025-0100",
+            "crate": "unic-ucd-ident",
+            "version": "0.9.0"
+          },
+          {
+            "id": "RUSTSEC-2025-0098",
+            "crate": "unic-ucd-version",
+            "version": "0.9.0"
+          }
+        ],
+        "unsound": [
+          {
+            "id": "RUSTSEC-2024-0429",
+            "crate": "glib",
+            "version": "0.18.5"
+          }
+        ]
+      }
+    },
+    "final_lock_sha256": "373c0d97a2786eb0ea78b115fcaba23ae4d8b3ea8469c0c48ac04ebc0df7e951"
+  }
+}

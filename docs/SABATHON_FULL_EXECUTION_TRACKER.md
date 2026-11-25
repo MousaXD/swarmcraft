@@ -515,12 +515,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #51 — P1 · Partial
 - Work: Extend release resilience for download outages, executable provenance, shared runtime cache publication, and dependency health
 - Acceptance: Corrupt input fails validation. Same-runtime installs from two worlds preserve the last known-good cache. Every generated or downloaded executable has explicit provenance and verification status
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (real two-world managed runtime/cache and corruption acceptance; native platform and secondary dependency provenance remain scoped)
+- Source: `crates/swarm-cli/src/runtime_installer.rs`, `migration.rs`, `runtime_setup_hardening.rs`, workspace Postcard feature selection and both Rust lockfiles; [runtime installer contract](RUNTIME_INSTALLER.md).
+- Evidence: [Resilience report and retained evidence](../research/runtime-resilience/REPORT.md). Stable per-world and shared publication locks, immutable Java/JAR generations, source/verification receipts, Java archive/tree digest, pre-launch runtime guard and fail-closed metadata/config matching. Real local official Java/Minecraft/Fabric/API acquisition, verified published bridge local override, simultaneous second-world denial and successful retry sharing exact runtime generations; no EULA, no gameplay or checkpoint changes. Actual simulated source outage reuses both verified worlds, fails repair without losing cache receipts, detects shared launcher/native Java library corruption and verifies exact restored bytes and canonical snapshots. 300 Rust tests passed, 2 existing ignored; all 11 runtime-hardening cases exercised, strict targeted Clippy, Desktop native compile and 15 bundler outage/integrity fixtures passed. Removed unused Postcard heapless dependency and nine soundness advisories from both graphs; both audits zero vulnerability findings against cached 23 November advisory DB, remaining warnings retained. No hosted CI.
+- Remaining / next action: #52 real older-preview profile migration, consent history, downgrade refusal and rollback; native Windows/macOS and live Fabric secondary-dependency provenance, fresh-world metadata outage, safe old-generation cleanup and broader interrupted staging tests remain. Corrupt managed lock requires preserved evidence/review before repair; no silent manual fallback.
+- External dependency: Native platform qualification and authorized real client/runtime acceptance, current advisory refresh and upstream dependency maintenance.
+- Commit: Preserve shared runtime generations and verify provenance; see git history.
 
 ### #52 — P1 · Partial
 - Work: Establish upgrade, downgrade, schema, and interrupted migration acceptance from the supported older preview

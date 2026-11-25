@@ -1,0 +1,11 @@
+{
+  "scope": "actual previously downloaded verified runtime cache; simulated curl unavailable only in owned subprocess environment; post-heapless-removal binary",
+  "runtime_binary_sha256": "fcb5a4771fa27b1e25225ce61a51bb419beab8879d84ad90d8add9a84a243afb",
+  "checks": {
+    "existing_worlds_verified_and_reusable_during_outage": true,
+    "failed_repair_preserved_shared_receipts": true,
+    "both_worlds_refuse_corrupt_shared_launcher": true,
+    "both_worlds_refuse_corrupt_java_library_before_version_probe": true,
+    "restored_verified_cache_and_canonical_snapshots_unchanged": true
+  }
+}

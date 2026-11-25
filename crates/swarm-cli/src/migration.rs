@@ -791,7 +791,7 @@ impl AuthorityRuntimeGuard {
     }
 
     /// Fail-fast acquisition for explicit launch entry points.
-    fn acquire(paths: &DataPaths, world: WorldId) -> Result<Self> {
+    pub(crate) fn acquire(paths: &DataPaths, world: WorldId) -> Result<Self> {
         Self::try_acquire(paths, world)?.ok_or_else(|| {
             anyhow!(
                 "this world already has an active authority runtime on this device; stop it before starting another"
@@ -918,6 +918,15 @@ async fn run_authority_runtime_inner(
     let memory_cap = HostMemoryCap::prepare(admission.heap_mib())?;
     let identity = PeerIdentity::load_or_create(paths)?;
     let metadata = storage.load_world(options.world)?;
+    crate::runtime_installer::verify_managed_launch(
+        paths,
+        options.world,
+        &metadata.genesis.minecraft_version,
+        &metadata.genesis.fabric_loader_version,
+        &options.java,
+        &options.server_jar,
+        &options.mod_jar,
+    )?;
     let initial = storage.latest_snapshot(options.world)?.context("world has no verified snapshot to host")?;
     storage.verify_snapshot(&initial)?;
     verify_snapshot_signature(&initial)?;

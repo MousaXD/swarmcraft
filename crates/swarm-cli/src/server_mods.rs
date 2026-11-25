@@ -572,7 +572,7 @@ fn sync_parent(parent: &Path) -> Result<()> {
     Ok(())
 }
 
-fn read_zip_entry(bytes: &[u8], wanted: &str) -> Result<Vec<u8>> {
+pub(crate) fn read_zip_entry(bytes: &[u8], wanted: &str) -> Result<Vec<u8>> {
     let eocd = find_eocd(bytes)?;
     if read_u16(bytes, eocd + 4)? != 0 || read_u16(bytes, eocd + 6)? != 0 {
         bail!("multi-disk ZIP/JAR files are unsupported");

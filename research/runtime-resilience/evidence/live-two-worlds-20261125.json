@@ -1,0 +1,42 @@
+{
+  "scope": "real local managed Java/Mojang/Fabric downloads; bridge is verified published local override; no EULA or gameplay",
+  "runner_binary_sha256": "a3466fae903d1f55aac505f49b5a6c27ad610d84ead56a56bf01ee7028b07625",
+  "checks": {
+    "simultaneous_second_world_denied": true,
+    "cold_install": true,
+    "managed_java_tree": true,
+    "two_worlds_share_exact_verified_generation": true,
+    "signed_worlds_unchanged_and_no_eula_or_launch": true
+  },
+  "artifacts": {
+    "fabric_api": {
+      "sha256": "7fe7bea3dbb7b2e9ff998ab583130cd62fab22ab8a5229656ff14b2e648c91dd",
+      "upstream_sha256": null,
+      "sha1": "16c30dfcceaed1ac3b6ac84cbd348a906dc5093e",
+      "verification": "Official-source SHA-1 matched; local SHA-256 retained (not a signature)"
+    },
+    "fabric_loader": {
+      "sha256": "806bf3ebf16da041f4636ced00a3bd628f47e1a13baf1b31da4f4a78c7dd0fa1",
+      "upstream_sha256": null,
+      "sha1": null,
+      "verification": "Official generated launcher; HTTPS and local SHA-256 only, no upstream checksum or signature"
+    },
+    "minecraft_server": {
+      "sha256": "cd47e7c38328f64768fd17af8fcd8b22496b40b63d4ffee81e71ae059fedcb42",
+      "upstream_sha256": null,
+      "sha1": "97ccd4c0ed3f81bbb7bfacddd1090b0c56f9bc51",
+      "verification": "Official-source SHA-1 matched; local SHA-256 retained (not a signature)"
+    },
+    "swarmcraft_fabric": {
+      "sha256": "e4b2a96e6c1d55c8ee3bfe7a41f0d0f189a6e7a6d29d9b71bde744d389bf8292",
+      "upstream_sha256": "e4b2a96e6c1d55c8ee3bfe7a41f0d0f189a6e7a6d29d9b71bde744d389bf8292",
+      "sha1": null,
+      "verification": "Local operator-supplied artifact; SHA-256 pins supplied bytes, not publisher provenance"
+    }
+  },
+  "java": {
+    "archive_sha256": "2edef9e4f81ec5ee426d023336d4cfbd7b4644e99884e7a73a6a867b70b17acf",
+    "tree_sha256": "df5f42b2748bf4b55aa11e41a40b11c0dcad7f006ddac47869fd5f489b7be887",
+    "source": "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5.1%2B2/OpenJDK25U-jre_x64_linux_hotspot_25.0.5.1_2.tar.gz"
+  }
+}

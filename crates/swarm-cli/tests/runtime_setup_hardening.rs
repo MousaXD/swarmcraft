@@ -19,6 +19,12 @@ use swarm_protocol::{
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 
+fn private_tempdir() -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    temp
+}
+
 struct RuntimeFixture {
     paths: DataPaths,
     storage: Storage,
@@ -250,7 +256,7 @@ fn manual_runtime_files(temp: &Path, minecraft: &str, loader: &str) -> (PathBuf,
 
 #[tokio::test]
 async fn revoked_host_budget_denies_direct_launch_before_changing_signed_state() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let fixture = fixture(temp.path().join("peer"));
     swarm_cli::hosting_budget::set_contribution(&fixture.paths, fixture.world, 0).unwrap();
 
@@ -274,7 +280,7 @@ async fn revoked_host_budget_denies_direct_launch_before_changing_signed_state()
 
 #[tokio::test]
 async fn eula_rejection_never_launches_or_replaces_existing_runtime() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let fixture = fixture(temp.path().join("peer"));
     let runtime = runtime_dir(&fixture);
     fs::create_dir_all(&runtime).unwrap();
@@ -305,7 +311,7 @@ async fn missing_java_never_publishes_runtime_ready_or_changes_canonical_snapsho
     if !hosting_capacity_for_process_test() {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let fixture = fixture(temp.path().join("peer"));
     let server = temp.path().join("fabric-server.jar");
     let bridge = temp.path().join("swarmcraft-fabric.jar");
@@ -342,7 +348,7 @@ async fn failed_partial_setup_retries_cleanly_and_manual_advanced_runtime_still_
     if !hosting_capacity_for_process_test() {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let fixture = fixture(temp.path().join("peer"));
     let java = temp.path().join("mock-java");
     let server = temp.path().join("fabric-server.jar");
@@ -380,7 +386,7 @@ async fn incompatible_fabric_handshake_is_rejected_before_ready_and_world_stays_
     if !hosting_capacity_for_process_test() {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let fixture = fixture(temp.path().join("peer"));
     let (java, server, bridge) = manual_runtime_files(temp.path(), "definitely-wrong", "0.19.3");
 
@@ -406,7 +412,7 @@ async fn incompatible_fabric_handshake_is_rejected_before_ready_and_world_stays_
 
 #[test]
 fn corrupt_runtime_metadata_can_be_repaired_without_touching_world_state() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let fixture = fixture(temp.path().join("peer"));
     let (java, server, bridge) = manual_runtime_files(temp.path(), "26.1.2", "0.19.3");
     let config = RuntimeLaunchConfig {
@@ -432,7 +438,7 @@ fn corrupt_runtime_metadata_can_be_repaired_without_touching_world_state() {
 
 #[test]
 fn manual_advanced_config_is_launchable_without_being_reclassified_as_missing_managed_runtime() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let fixture = fixture(temp.path().join("peer-manual-inspect"));
     let (java, server, bridge) = manual_runtime_files(temp.path(), "26.1.2", "0.19.3");
     let config = RuntimeLaunchConfig {
@@ -479,7 +485,7 @@ async fn concurrent_authority_launch_fails_fast_across_processes_and_recovers_af
     if !hosting_capacity_for_process_test() {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let fixture = fixture(temp.path().join("peer-concurrent"));
     let lock_path = fixture.paths.root.join("control").join(fixture.world.to_hex()).join("authority-runtime.lock");
     let ready_path = temp.path().join("lock-holder-ready");
@@ -555,7 +561,7 @@ async fn authority_lock_io_failure_is_not_misreported_as_contention() {
     if !hosting_capacity_for_process_test() {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let fixture = fixture(temp.path().join("peer-lock-io"));
     // The consent fixture now creates the normal control directory. Create
     // an unopenable authority lock entry without corrupting consent itself.
@@ -584,15 +590,36 @@ async fn authority_lock_io_failure_is_not_misreported_as_contention() {
     assert_eq!(canonical_hash(&fixture), fixture.baseline_hash);
 }
 
-fn write_seed_runtime_lock(fixture: &RuntimeFixture, minecraft: &str, sha256: &str) {
-    let lock_path =
-        fixture.paths.root.join("runtime-components").join(fixture.world.to_hex()).join("runtime-lock.json");
-    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+fn write_seed_runtime_lock(
+    fixture: &RuntimeFixture,
+    minecraft: &str,
+    sha256: &str,
+    java: &Path,
+    server: &Path,
+    bridge: &Path,
+) {
+    let world_root = fixture.paths.root.join("runtime-components").join(fixture.world.to_hex());
+    let lock_path = world_root.join("runtime-lock.json");
+    fs::create_dir_all(world_root.join("mods")).unwrap();
+    fs::copy(bridge, world_root.join("mods/swarmcraft-fabric.jar")).unwrap();
+    let api = world_root.join("mods/fabric-api.jar");
+    fs::write(&api, b"mock-fabric-api").unwrap();
+    let record = |path: &Path, hash: Option<&str>| {
+        serde_json::json!({
+            "version": "fixture", "path": path, "source": "local:test-fixture", "sha1": null,
+            "sha256": hash.map(str::to_owned).unwrap_or_else(|| hex::encode(Sha256::digest(fs::read(path).unwrap())))
+        })
+    };
     let lock = serde_json::json!({
-        "schema_version": 1,
-        "world_id": fixture.world.to_string(),
-        "minecraft_version": minecraft,
-        "artifacts": { "minecraft_server": { "sha256": sha256 } }
+        "schema_version": 1, "world_id": fixture.world.to_string(), "minecraft_version": minecraft,
+        "fabric_loader_version": "0.19.3", "required_java_major": 25,
+        "fabric_installer_version": "fixture", "fabric_api_version": "fixture",
+        "swarmcraft_adapter_version": env!("CARGO_PKG_VERSION"), "java_path": java, "java_managed": false,
+        "artifacts": {
+            "minecraft_server": record(&world_root.join("server/server.jar"), Some(sha256)),
+            "fabric_loader": record(server, None), "fabric_api": record(&api, None),
+            "swarmcraft_fabric": record(bridge, None)
+        }
     });
     fs::write(lock_path, serde_json::to_vec_pretty(&lock).unwrap()).unwrap();
 }
@@ -602,7 +629,7 @@ async fn fresh_runtime_is_seeded_only_from_hash_verified_staged_game_jar() {
     if !hosting_capacity_for_process_test() {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let fixture = fixture(temp.path().join("peer-seed"));
     let java = temp.path().join("mock-java");
     let server = temp.path().join("fabric-server.jar");
@@ -616,7 +643,7 @@ async fn fresh_runtime_is_seeded_only_from_hash_verified_staged_game_jar() {
     let staged_dir = fixture.paths.root.join("runtime-components").join(fixture.world.to_hex()).join("server");
     fs::create_dir_all(&staged_dir).unwrap();
     fs::write(staged_dir.join("server.jar"), staged_bytes).unwrap();
-    write_seed_runtime_lock(&fixture, "26.1.2", &staged_sha256);
+    write_seed_runtime_lock(&fixture, "26.1.2", &staged_sha256, &java, &server, &bridge);
 
     run_authority_runtime(
         &fixture.paths,
@@ -639,7 +666,7 @@ async fn corrupt_staged_game_jar_is_rejected_before_java_launch() {
     if !hosting_capacity_for_process_test() {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let fixture = fixture(temp.path().join("peer-seed-corrupt"));
     let server = temp.path().join("fabric-server.jar");
     let bridge = temp.path().join("swarmcraft-fabric.jar");
@@ -650,18 +677,13 @@ async fn corrupt_staged_game_jar_is_rejected_before_java_launch() {
     let staged_dir = fixture.paths.root.join("runtime-components").join(fixture.world.to_hex()).join("server");
     fs::create_dir_all(&staged_dir).unwrap();
     fs::write(staged_dir.join("server.jar"), b"tampered-game-jar-bytes").unwrap();
-    write_seed_runtime_lock(&fixture, "26.1.2", &expected_sha256);
+    let java = temp.path().join("java-must-not-launch");
+    write_seed_runtime_lock(&fixture, "26.1.2", &expected_sha256, &java, &server, &bridge);
 
     let error = run_authority_runtime(
         &fixture.paths,
         &fixture.storage,
-        HostOptions {
-            world: fixture.world,
-            java: temp.path().join("java-must-not-launch"),
-            server_jar: server,
-            mod_jar: bridge,
-            accept_eula: true,
-        },
+        HostOptions { world: fixture.world, java, server_jar: server, mod_jar: bridge, accept_eula: true },
     )
     .await
     .unwrap_err();

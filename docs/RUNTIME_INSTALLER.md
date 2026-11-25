@@ -85,6 +85,7 @@ Machine-local artifacts live outside signed/canonical world state:
 ```text
 <SwarmCraft data>/
   runtimes/
+    publication.lock
     java/
     minecraft/
     fabric/
@@ -99,7 +100,13 @@ Machine-local artifacts live outside signed/canonical world state:
       config/
 ```
 
-`runtime-lock.json` records the exact selected versions, artifact paths, source provenance, SHA-1 where supplied by the upstream, and a local SHA-256 used for later corruption detection.
+`runtime-lock.json` records exact selected versions, immutable generation
+paths, source provenance, upstream SHA-1/SHA-256 where supplied, and a local
+SHA-256. Managed Java additionally records the archive SHA-256, exact
+executable path and extracted-tree digest. Component status reports the
+verification level. A local operator override pins the supplied bytes, not
+publisher provenance; a generated Fabric launcher has HTTPS/local SHA-256
+and a checked JAR manifest, not an upstream signature or checksum.
 
 The migration runtime at `<data>/runtime/<world-id>` is disposable restored runtime state and is not used as durable package storage.
 
@@ -117,19 +124,49 @@ The Runtime Installer in a published preview uses the `main-snapshot-<commit>` t
 
 `SWARMCRAFT_FABRIC_MOD_JAR` is a local-file development/acceptance override. It is never interpreted as a URL.
 
-Downloads are written to temporary files, checked before publication, fsynced, and renamed into their final location. Failed hash checks remove the temporary artifact. Core SHA-1/SHA-256 verification is implemented in Rust rather than shelling out to platform hash utilities.
+Downloads are written into disposable same-filesystem staging directories,
+checked before publication, fsynced and renamed into immutable shared
+generations. A small `current.json` lookup receipt is atomically replaced
+only after the generation is valid. Previously referenced files remain
+untouched, including the legacy cache layout. Failed downloads or hash
+checks cannot replace the prior known-good generation. Explicit repair
+can publish a different generation; old world locks retain their
+original paths. Do not remove old generations without a verified
+reference inventory. SHA-1/SHA-256 checks are performed in Rust.
 
-Installer locking uses an OS-backed per-world file lock. Concurrent live installers are rejected, while a process crash does not leave a permanent PID-file wedge. Replacement preserves the known-good destination until the new verified artifact is ready to publish and attempts rollback if publication fails.
+Installer locking uses stable OS-backed per-world and machine-data-root
+publication locks. The lock files are intentionally retained after release
+to prevent inode-replacement races. A concurrent second-world installer
+must retry after the first releases its shared lock; a process crash does
+not leave a permanent PID-file wedge. The installer also holds the world
+authority-runtime slot and refuses an unaccounted residual JVM. It prepares
+all shared artifacts before updating world-local copies and invalidates
+prior runtime/readiness proofs. A partial world-local staging failure is
+unready/fail-closed until repaired; prior shared generations remain.
+A previously installed world can verify/reuse its complete setup offline;
+new-world source resolution still requires upstream metadata.
 
 Authority hosting uses the same class of protection: each world has one machine-local authority-runtime slot (`control/<world>/authority-runtime.lock`). An explicit launch (Desktop Play, `swarmcraft-runtime launch`) fails fast when another process actually holds that slot, while the daemon supervisor retries only genuine lock contention; lock-path and locking I/O failures are surfaced instead of being mistaken for an active host. A freshly prepared runtime directory is seeded from `runtime-components/<world>/server/server.jar` only when a compatible managed runtime lock exists and the staged JAR still matches its recorded SHA-256, so first launch avoids a Mojang re-download without trusting stale or stray staged bytes.
 
-The implementation uses the platform `curl` for HTTPS transfer and platform archive extraction where required, but it does not download or execute arbitrary third-party installer scripts.
+The implementation uses the platform `curl` for HTTPS-only transfer with
+bounded retries/time/size, initial and final effective source-host checks
+and disabled user curl configuration, and the platform tar tool for
+official hash-verified Java archive extraction. It does not download or
+execute arbitrary third-party installer scripts. This does not claim
+privileged filesystem race confinement, per-hop redirect confinement or
+provenance of Fabric secondary dependencies.
 
 ## Java
 
 The exact Java major version is resolved from Mojang's version metadata during planning/installation. Local status uses the recorded value when available and a conservative version heuristic only before the first successful resolution.
 
-A compatible system `java` may be reused. Otherwise SwarmCraft resolves a matching Eclipse Adoptium runtime into the managed Java directory. It never overwrites the user's system Java.
+A compatible system `java` may be reused, with an explicit external
+version-only provenance status. Otherwise SwarmCraft resolves a matching
+Eclipse Adoptium archive into an immutable managed Java generation, checks
+the archive hash and extracted tree before probing Java, and rechecks the
+tree before launch. It never overwrites system Java or a previously
+referenced managed Java directory. Historical managed Java locks without
+tree provenance require explicit repair before managed execution.
 
 The live player-journey acceptance deliberately removes the workflow build JVM from the player runtime environment and requires Runtime Installer to resolve managed Java, so an inherited CI Java installation cannot create a false green.
 
@@ -175,6 +212,11 @@ In particular, a legacy world whose signed genesis records Fabric Loader as `unk
 ## Runtime verification and Host Readiness
 
 Static artifact existence is not enough to claim a machine can safely host.
+The same managed lock, Java tree, source/staged JAR hashes and selected
+launch paths are verified inside the authority-runtime slot before any
+new canonical authority epoch is prepared. Unreadable managed locks
+do not fall back to manual configuration. Preserve corrupt metadata for
+review rather than deleting it blindly.
 
 Runtime setup and Host Readiness have separate boundaries:
 
@@ -218,3 +260,5 @@ For install/repair, stderr lines are progress JSON and stdout is the authoritati
 All supported Desktop package jobs stage `swarmcraft-runtime` together with `swarmcraft`, `swarmcraft-host`, and `swarmcraft-import`.
 
 Manual Advanced runtime configuration remains available for power users, but it passes through backend verification and does not bypass Host Readiness or authority safety.
+
+See the [runtime resilience audit](../research/runtime-resilience/REPORT.md) for actual two-world, outage, corruption and dependency evidence.
