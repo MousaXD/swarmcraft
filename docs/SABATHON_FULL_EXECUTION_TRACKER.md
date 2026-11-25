@@ -255,12 +255,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #25 — P1 · Proposal
 - Work: Add supported invite/device lifecycle, including contact removal, replacement devices, and recovery of a lost identity
 - Acceptance: Losing a PC has a documented repair path. A removed device cannot regain access through stale presence or an obsolete invite. Private recovery material is only exported with explicit user action
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **IN PROGRESS** (repair guidance and source review; retirement implementation pending)
+- Source: `docs/DEVICE_RECOVERY.md`, `docs/INVITE_LIFECYCLE.md`, `docs/RECOVERED_COPY.md`, daemon joint membership and signed invite paths.
+- Evidence: Existing process regression covers revoked invite, signed leave, and removed-peer private replication denial. Source review confirms V1 reusable grants and absence of an authority-initiated lost-device retirement command. No new identity export or unsafe key-only restoration was enabled.
+- Remaining / next action: Implement confirmed joint-quorum retirement retaining a signed banned entry; test obsolete invite replay, committed retirement and replacement; separate contact removal and reviewed recovery export.
+- External dependency: Genuine surviving quorum; no original-identity recovery without safe durable-state restoration.
+- Commit: See device recovery review checkpoint in git history.
 
 ### #26 — Sabathon P0 (baseline) / P1 (full identity mapping) · Missing
 - Work: Manage deterministic `server.properties` at Fabric launch (`server-ip=127.0.0.1`, per-world loopback port, explicit `online-mode`, `enable-rcon=false`, baseline allowlist); in P1 connect private SwarmCraft membership to full Minecraft login/session allowlist policy
