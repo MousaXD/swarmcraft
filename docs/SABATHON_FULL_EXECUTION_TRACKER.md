@@ -615,12 +615,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #61 — Expansion · Missing
 - Work: Make player, entity, and inventory transitions durable across regions, including block and global interactions in the supported ruleset
 - Acceptance: Players walk or use a supported portal across workers and preserve identity, state, and inventory through restart. Supported cross-region mechanics pass replay and correctness tests
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (custom transaction reference ruleset and single trusted local ledger; no native Minecraft, quorum or independent-host acceptance)
+- Source: [Durable transitions report](../research/distributed-simulation/DURABLE_TRANSITIONS_REPORT.md); `transition_runtime.py`, `transition_lab.py`, `verify_transition_evidence.py`, `test_transition_runtime.py`; isolated research extensions to `region_runtime.py` and `regional_authority.py`.
+- Evidence: Two real private TCP runs, 28 client sessions, 16 unique committed player commands and cross-worker player transitions, eight durable ticks across six generation instances, four actual authority-writer SIGKILL faults before/after COMMIT. Sealed inputs survive a pre-commit crash; after a post-commit lost acknowledgment the original receipts return without applying movement or inventory twice. Both runs preserve the exact agent set, world identity and resource total, independently verified full cuts and client views; cross-player and conflicting replays refused. 71 research tests passed (13 new), 16 altered evidence cases refused. Prior eight-tick static-network regression and kill/partition cases passed.
+- Remaining / next action: #62 contribution withdrawal, worker loss, scale-in and partition recovery. Reference cell-bank actions and signals are not actual Minecraft blocks, portals, inventories or modded/global mechanics. The single trusted ledger, full serial validation, synthetic client identity and local process fault model do not prove production scale, quorum, rollback resistance, independent-host or actual game acceptance. Production regional NO-GO retained.
+- External dependency: Real compatible Minecraft runtime, authenticated clients, independent enrolled physical worker/control hosts, durable quorum-backed publication/recovery and sustained comparative gameplay.
+- Commit: Add durable reference player transactions and crash-safe command replay; see git history.
 
 ### #62 — Expansion · Missing
 - Work: Handle scale-in, loss, and partition. Drain and reassign live work when volunteers leave
@@ -754,4 +754,4 @@ Initial full-item implementation/acceptance totals: not yet established by item-
 - Private replication uses the current signed membership with a matching descriptor and rechecks the exact authenticated recipient before normal payload, manifest acknowledgement and every blob chunk. A half-installed signed roster denies data instead of trusting an obsolete descriptor. Removed local recipients also refuse normal snapshot bytes. Ordinary unauthorized world requests receive a generic refusal.
 - Evidence: strict CLI/storage Clippy, 51 daemon/CLI binary tests, 67 storage tests (1 optional soak ignored), and actual authenticated invite/leave/replication test passed (19.73s). A reusable grant admitted a third peer; revocation left committed membership intact; joint leave committed; a real network probe authenticated as the removed member received status/history refusal and no newer manifest/blob payload while the remaining member verified a new checkpoint. The old device retained its old verified save. Prior commit 8653c2d required CI completed successfully (run 45585530110). Broader local CLI validation underway; UI and field acceptance remain.
 
-Latest actionable continuation after #60: #61 durable cross-region player/entity/inventory transactions and restart, without production regional activation. The independent quorum, physical, compatibility and canonical recovery gates above remain open.
+Latest actionable continuation after #61: #62 scale-in, contribution withdrawal, worker loss and partition recovery from durable accepted checkpoints, without production regional activation. The independent quorum, physical, compatibility and canonical recovery gates above remain open.

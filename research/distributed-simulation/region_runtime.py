@@ -156,11 +156,17 @@ def checked_controls(rows, resident=None):
     """Bounded, unique one-cell inputs from the trusted lab coordinator."""
     result = {}
     for row in sequence(rows, maximum=MAX_AGENTS):
-        agent, direction = sequence(row, 2)
+        sequence(row, maximum=3)
+        require(len(row) in (2, 3), "invalid control width")
+        agent, direction = row[:2]
         require(integer(agent, 0, MAX_AGENTS - 1) and integer(direction, -1, 1)
                 and agent not in result and (resident is None or agent in resident),
                 "invalid, duplicate or nonresident player control")
-        result[agent] = direction
+        if len(row) == 3:
+            require(integer(row[2], -1, 1), "invalid inventory action")
+            result[agent] = (direction, row[2])
+        else:
+            result[agent] = direction
     return result
 
 
@@ -179,13 +185,24 @@ def serial_step(regions, tick, counters=None, *, controls=None):
     crossings = 0
     for i, pos, inventory in agents:
         occupancy[pos] += 1
-        if (i + tick) % 5 == 0 and banks[pos]:
-            banks[pos] -= 1
-            inventory += 1
-        if (i + tick) % 7 == 0 and inventory:
-            banks[pos] += 1
-            inventory -= 1
-        destination = (pos + controls.get(i, movement(i, tick))) % CELLS
+        control = controls.get(i, movement(i, tick))
+        if isinstance(control, tuple):
+            direction, action = control
+            if action == 1 and banks[pos] and inventory < MAX_BANK:
+                banks[pos] -= 1
+                inventory += 1
+            elif action == -1 and inventory and banks[pos] < MAX_BANK:
+                banks[pos] += 1
+                inventory -= 1
+        else:
+            direction = control
+            if (i + tick) % 5 == 0 and banks[pos]:
+                banks[pos] -= 1
+                inventory += 1
+            if (i + tick) % 7 == 0 and inventory:
+                banks[pos] += 1
+                inventory -= 1
+        destination = (pos + direction) % CELLS
         next_agents[destination // WIDTH].append((i, destination, inventory))
         crossings += destination // WIDTH != pos // WIDTH
     signals = [(2 * old_signals[pos] + old_signals[(pos - 1) % CELLS]
@@ -216,13 +233,24 @@ def propose(region, tick, left, right, controls=None):
     for i, pos, inventory in region.agents:
         index = pos - base
         occupancy[index] += 1
-        if (i + tick) % 5 == 0 and banks[index] > 0:
-            banks[index] -= 1
-            inventory += 1
-        if (i + tick) % 7 == 0 and inventory > 0:
-            banks[index] += 1
-            inventory -= 1
-        dst = (pos + controls.get(i, movement(i, tick))) % CELLS
+        control = controls.get(i, movement(i, tick))
+        if isinstance(control, tuple):
+            direction, action = control
+            if action == 1 and banks[index] > 0 and inventory < MAX_BANK:
+                banks[index] -= 1
+                inventory += 1
+            if action == -1 and inventory > 0 and banks[index] < MAX_BANK:
+                banks[index] += 1
+                inventory -= 1
+        else:
+            direction = control
+            if (i + tick) % 5 == 0 and banks[index] > 0:
+                banks[index] -= 1
+                inventory += 1
+            if (i + tick) % 7 == 0 and inventory > 0:
+                banks[index] += 1
+                inventory -= 1
+        dst = (pos + direction) % CELLS
         if dst // WIDTH == rid:
             agents.append((i, dst, inventory))
         else:

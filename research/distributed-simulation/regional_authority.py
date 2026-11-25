@@ -116,6 +116,21 @@ class FencedWorker:
 
 class Authority:
     """Durable local serialization point. Never exposes its database to workers."""
+    app_id = APP_ID
+    schema = SCHEMA
+    ruleset = RULESET
+
+    @staticmethod
+    def cut(world, tick, root, players):
+        return cut_digest(world, tick, root, players)
+
+    @classmethod
+    def _create_extra(cls, db, state):
+        pass
+
+    def _record_candidate(self, current, state, candidate, cut):
+        pass
+
     def __init__(self, path):
         self.path = Path(path).resolve()
         # mode=rw: missing authority is NOT an empty new world.
@@ -123,8 +138,8 @@ class Authority:
                                   isolation_level=None, timeout=5)
         try:
             self.db.execute("PRAGMA synchronous=FULL")
-            require(self.db.execute("PRAGMA application_id").fetchone()[0] == APP_ID
-                    and self.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA
+            require(self.db.execute("PRAGMA application_id").fetchone()[0] == self.app_id
+                    and self.db.execute("PRAGMA user_version").fetchone()[0] == self.schema
                     and self.db.execute("PRAGMA journal_mode").fetchone()[0] == "delete",
                     "invalid local authority database")
             self.read()
@@ -142,7 +157,7 @@ class Authority:
                 "invalid player roster")
         root = world_root(0, region_roots(state))
         grants = new_grants(world, 1, 0, root, groups)
-        cut = cut_digest(world, 0, root, players)
+        cut = cls.cut(world, 0, root, players)
         path = Path(path)
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         os.close(fd)
@@ -151,8 +166,8 @@ class Authority:
             db.execute("PRAGMA journal_mode=DELETE")
             db.execute("PRAGMA synchronous=FULL")
             db.execute("BEGIN IMMEDIATE")
-            db.execute(f"PRAGMA application_id={APP_ID}")
-            db.execute(f"PRAGMA user_version={SCHEMA}")
+            db.execute(f"PRAGMA application_id={cls.app_id}")
+            db.execute(f"PRAGMA user_version={cls.schema}")
             db.execute("""CREATE TABLE world(
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                 identity TEXT NOT NULL, ruleset TEXT NOT NULL, players BLOB NOT NULL,
@@ -168,10 +183,11 @@ class Authority:
                 generation INTEGER PRIMARY KEY, base_tick INTEGER NOT NULL,
                 base_root TEXT NOT NULL, grants BLOB NOT NULL, claimed INTEGER NOT NULL CHECK(claimed IN (0,1)))""")
             db.execute("INSERT INTO world VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                       (world, RULESET, canonical(players), canonical(ids), totals(region_roots(state))[1],
+                       (world, cls.ruleset, canonical(players), canonical(ids), totals(region_roots(state))[1],
                         1, 0, 0, 0, root, cut, canonical(wire(state)), canonical(grants)))
             db.execute("INSERT INTO commits VALUES(0,0,?,?,NULL,NULL)", (root, cut))
             db.execute("INSERT INTO epochs VALUES(1,0,?,?,0)", (root, canonical(public_grants(grants))))
+            cls._create_extra(db, state)
             db.execute("COMMIT")
         finally:
             db.close()
@@ -205,7 +221,7 @@ class Authority:
         players, ids, grants = json.loads(players), json.loads(ids), json.loads(grants_rows)
         state, current_ids = validated_state(json.loads(state_rows))
         rows = region_roots(state)
-        require(digest(world) and ruleset == RULESET and integer(generation, 1, MAX_GENERATION)
+        require(digest(world) and ruleset == self.ruleset and integer(generation, 1, MAX_GENERATION)
                 and integer(accepted_generation, 0, generation) and integer(claimed, 0, 1)
                 and integer(tick, 0, MAX_TICK) and (accepted_generation != generation or claimed == 1)
                 and (accepted_generation == 0) == (tick == 0)
@@ -213,7 +229,7 @@ class Authority:
                 and isinstance(players, list) and 1 <= len(players) <= MAX_PLAYERS and players == sorted(set(players))
                 and all(integer(p, 0, MAX_AGENTS - 1) for p in players)
                 and set(players) <= set(ids) and runtime_root == world_root(tick, rows)
-                and cut_root == cut_digest(world, tick, runtime_root, players), "invalid persisted cut")
+                and cut_root == self.cut(world, tick, runtime_root, players), "invalid persisted cut")
         grants = [checked_grant(g) for g in sequence(grants, maximum=4)]
         checked_groups([g["regions"] for g in grants])
         require(len({g["session"] for g in grants}) == len(grants)
@@ -321,8 +337,9 @@ class Authority:
             rows = region_roots(state)
             require(ids == current["ids"] and totals(rows)[1] == current["resources"]
                     and candidate == world_root(tick, rows), "inconsistent global cut")
-            cut = cut_digest(current["world"], tick, candidate, current["players"])
+            cut = self.cut(current["world"], tick, candidate, current["players"])
             receipt_hash = hashlib.sha256(canonical(sorted(receipts, key=lambda r: r["body"]["session"]))).hexdigest()
+            self._record_candidate(current, state, candidate, cut)
             self.db.execute("INSERT INTO commits VALUES(?,?,?,?,?,?)",
                             (tick, current["generation"], candidate, cut, current["runtime_root"], receipt_hash))
             self.db.execute("""UPDATE world SET accepted_generation=?,tick=?,runtime_root=?,cut_root=?,state=?

@@ -55,6 +55,16 @@ and reassignment races, pre/post-commit process kills, and fresh
 worker restart from the durable cut. This is a single trusted local
 serialization point, not independent quorum or production authority.
 
+## Durable player and inventory transitions (#61, 2026-11-26)
+
+[Durable transitions report](DURABLE_TRANSITIONS_REPORT.md): isolated
+protocol-2 transaction ruleset, sealed durable input batches and atomic
+world/command receipts. Two real private TCP client experiments preserve
+cross-worker movement and inventory through authority-writer kills
+before and after commit, fresh workers and exact command retries.
+This is trusted local reference evidence, not Minecraft or quorum
+certification.
+
 ## Original R0 evidence (2026-11-08)
 
 
