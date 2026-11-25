@@ -88,7 +88,10 @@ conservatively retained; reclaiming them requires a separate ownership proof.
 Use the existing verified snapshot export for a deliberate external backup.
 Do not delete numbered manifests, epoch bases, signed transition evidence or
 pending runtime files to meet a quota. Bounded signed history compaction,
-transaction-owned crash cleanup for all replication pins, filesystem exhaustion
-campaigns, and Desktop management/diagnostics remain follow-up work. This
+transaction-owned crash cleanup for all replication pins, broader persistent
+filesystem exhaustion/power-loss campaigns, and Desktop management/diagnostics
+remain follow-up work. The [bounded Linux stress campaign](../research/stress-campaign/REPORT.md)
+now covers actual tmpfs ENOSPC, process file-size limits, killed compression,
+retention/retry and exact signed restores across three independent profiles. This
 document does not claim support for arbitrary historical pruning or a complete
 cross-platform disk-full certification.

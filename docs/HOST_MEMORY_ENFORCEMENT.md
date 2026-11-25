@@ -89,5 +89,8 @@ systemd-run --user --scope --unit=swarmcraft-memory-cap-test-local-$$ \
   --ignored --nocapture
 ```
 
-Core CI executes the kernel and launcher gates using dedicated transient
-services. Results for the exact candidate commit remain necessary.
+Under the local-first policy, execute the kernel and launcher gates locally
+in dedicated transient scopes or services. The [#53 campaign](../research/stress-campaign/REPORT.md)
+records two actual group OOM trials, descendant fencing and a capped mock-Java
+launcher with a verified signed checkpoint. Results for the exact release
+candidate remain necessary.

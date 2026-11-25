@@ -255,7 +255,22 @@ with socket.create_connection((host, port), timeout=5) as connection:
     storage.restore_snapshot(&latest, &restored).unwrap();
     if std::env::var_os("SWARMCRAFT_HOST_CGROUP_ROOT").is_some() {
         assert_eq!(fs::read_to_string(restored.join("cgroup-verified.txt")).unwrap(), "attached-before-exec\n");
+        swarm_core::verify_snapshot_signature(&initial).unwrap();
+        swarm_core::verify_snapshot_signature(&latest).unwrap();
         println!("host launch fixture verified kernel cgroup membership and cap before exec");
+        println!(
+            "memory_stress_receipt={}",
+            serde_json::json!({
+                "configured_java_heap_mib": 512,
+                "verified_kernel_limit_mib": 1536,
+                "previous_verified_checkpoint": initial.manifest_hash().unwrap().to_string(),
+                "last_accepted_checkpoint": latest.manifest_hash().unwrap().to_string(),
+                "snapshot_number": latest.snapshot_number,
+                "signed_snapshot_and_sleep_boundary_verified": true,
+                "restored_pre_exec_marker": true,
+                "scope": "actual host launcher with mock Java process, not Minecraft"
+            })
+        );
     }
     assert_eq!(
         fs::read_to_string(restored.join("swarmcraft-runtime-smoke.txt")).unwrap(),

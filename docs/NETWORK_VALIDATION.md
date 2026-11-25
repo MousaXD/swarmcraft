@@ -192,7 +192,7 @@ test is never evidence of a successful Minecraft login.
 | IPv6 loopback | IPv6 QUIC / signed Ping-Pong | IPv6 QUIC substream | No IPv4 fallback; Linux gate requires IPv6; no ISP routing evidence |
 | Local group relay | TCP/Noise circuit / signed Ping-Pong | TCP/Noise circuit | Production allowlisted relay, unlisted reservation refused |
 | Local relay outage/replacement | Old authentication removed; explicit replacement reauthenticates | Old stream fails; new stream echoes | No direct fallback in this test; no actual Minecraft login |
-| Hosted CI loopback impairment | QUIC snapshot resume under netem | Not measured | Existing impairment job; no game-latency or field evidence |
+| Isolated local Linux loopback impairment | Authenticated signed replica pull/resume under real netem and receiver/source SIGKILL | Not measured | [Two bounded #53 profiles](../research/stress-campaign/REPORT.md); exact old/new restores; no game-latency, multi-GiB release soak or field evidence |
 
 ## Manual real-world validation matrix
 

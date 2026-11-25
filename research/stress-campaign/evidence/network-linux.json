@@ -1,0 +1,195 @@
+{
+  "scope": "Linux loopback-only netem; real signed three-daemon replication, hard receiver/source loss, no Java",
+  "kernel": "7.2.15-76070215-generic",
+  "test_sha256": "5e658e78c8ea1ac6da6d055bf68bb17dc71e24142cbd1ec5292c39069ed18b89",
+  "runs": [
+    {
+      "repetition": 1,
+      "configured": {
+        "delay_ms": 15,
+        "jitter_ms": 3,
+        "loss_percent": 0.25,
+        "rate_mbit": 30
+      },
+      "qdisc_before": {
+        "kind": "netem",
+        "handle": "8003:",
+        "root": true,
+        "refcnt": 2,
+        "options": {
+          "limit": 1000,
+          "delay": {
+            "delay": 0.015,
+            "jitter": 0.003,
+            "correlation": 0
+          },
+          "loss-random": {
+            "loss": 0.0025,
+            "correlation": 0
+          },
+          "rate": {
+            "rate": 3750000,
+            "packetoverhead": 0,
+            "cellsize": 0,
+            "celloverhead": 0
+          },
+          "ecn": false,
+          "gap": 0
+        },
+        "bytes": 0,
+        "packets": 0,
+        "drops": 0,
+        "overlimits": 0,
+        "requeues": 0,
+        "backlog": 0,
+        "qlen": 0
+      },
+      "elapsed_seconds": 15.897,
+      "qdisc_after": {
+        "kind": "netem",
+        "handle": "8003:",
+        "root": true,
+        "refcnt": 2,
+        "options": {
+          "limit": 1000,
+          "delay": {
+            "delay": 0.015,
+            "jitter": 0.003,
+            "correlation": 0
+          },
+          "loss-random": {
+            "loss": 0.0025,
+            "correlation": 0
+          },
+          "rate": {
+            "rate": 3750000,
+            "packetoverhead": 0,
+            "cellsize": 0,
+            "celloverhead": 0
+          },
+          "ecn": false,
+          "gap": 0
+        },
+        "bytes": 9693520,
+        "packets": 7570,
+        "drops": 4,
+        "overlimits": 0,
+        "requeues": 0,
+        "backlog": 0,
+        "qlen": 0
+      },
+      "exit_code": 0,
+      "receipt": {
+        "all_daemons_exited": true,
+        "consent_absent": true,
+        "encoded_payload_bytes": 4194409,
+        "fault": "SIGKILL receiving daemon and original source after durable partial",
+        "final_snapshot_number": 3,
+        "last_accepted_checkpoint": "f2a02602efa71cbbc526a754b738d86c01b63e2fe8376accb0fb6fe54227f5b6",
+        "old_and_new_restores_byte_exact": true,
+        "payload_limit_kib_per_second": 512,
+        "previous_snapshot_number": 2,
+        "previous_verified_checkpoint": "88ce414e8888e71a38ee0631e0cecba2c7790c319dab9aec3db13f1024bcf3d4",
+        "receiver_partial_bytes": 131072,
+        "resume_elapsed_ms": 11755,
+        "resumed_blobs": 1,
+        "retained_signed_snapshots": 3
+      },
+      "passed": true
+    },
+    {
+      "repetition": 2,
+      "configured": {
+        "delay_ms": 30,
+        "jitter_ms": 5,
+        "loss_percent": 0.75,
+        "rate_mbit": 15
+      },
+      "qdisc_before": {
+        "kind": "netem",
+        "handle": "8004:",
+        "root": true,
+        "refcnt": 2,
+        "options": {
+          "limit": 1000,
+          "delay": {
+            "delay": 0.03,
+            "jitter": 0.005,
+            "correlation": 0
+          },
+          "loss-random": {
+            "loss": 0.0075,
+            "correlation": 0
+          },
+          "rate": {
+            "rate": 1875000,
+            "packetoverhead": 0,
+            "cellsize": 0,
+            "celloverhead": 0
+          },
+          "ecn": false,
+          "gap": 0
+        },
+        "bytes": 0,
+        "packets": 0,
+        "drops": 0,
+        "overlimits": 0,
+        "requeues": 0,
+        "backlog": 0,
+        "qlen": 0
+      },
+      "elapsed_seconds": 26.67,
+      "qdisc_after": {
+        "kind": "netem",
+        "handle": "8004:",
+        "root": true,
+        "refcnt": 2,
+        "options": {
+          "limit": 1000,
+          "delay": {
+            "delay": 0.03,
+            "jitter": 0.005,
+            "correlation": 0
+          },
+          "loss-random": {
+            "loss": 0.0075,
+            "correlation": 0
+          },
+          "rate": {
+            "rate": 1875000,
+            "packetoverhead": 0,
+            "cellsize": 0,
+            "celloverhead": 0
+          },
+          "ecn": false,
+          "gap": 0
+        },
+        "bytes": 9719580,
+        "packets": 7782,
+        "drops": 21,
+        "overlimits": 0,
+        "requeues": 0,
+        "backlog": 0,
+        "qlen": 0
+      },
+      "exit_code": 0,
+      "receipt": {
+        "all_daemons_exited": true,
+        "consent_absent": true,
+        "encoded_payload_bytes": 4194409,
+        "fault": "SIGKILL receiving daemon and original source after durable partial",
+        "final_snapshot_number": 3,
+        "last_accepted_checkpoint": "c9f643b67dcec09c22ec85ebe7ac7fde4b74f48c7da44536132a6c2b2b325e1e",
+        "old_and_new_restores_byte_exact": true,
+        "payload_limit_kib_per_second": 512,
+        "previous_snapshot_number": 2,
+        "previous_verified_checkpoint": "32e7a2d2819a133b668a2c4af93eada9329a9ce8ff28922ec260bd2aece85869",
+        "receiver_partial_bytes": 131072,
+        "resume_elapsed_ms": 21227,
+        "resumed_blobs": 1,
+        "retained_signed_snapshots": 3
+      },
+      "passed": true
+    }
+  ]
+}

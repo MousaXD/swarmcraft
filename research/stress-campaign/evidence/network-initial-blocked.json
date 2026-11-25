@@ -1,0 +1,84 @@
+{
+  "scope": "Linux loopback-only netem; real signed three-daemon replication, hard receiver/source loss, no Java",
+  "kernel": "7.2.15-76070215-generic",
+  "test_sha256": "63b8fae176b58ca212e56610d1a8539843a01a396eefe5577bec68e95e1cddba",
+  "runs": [
+    {
+      "repetition": 1,
+      "configured": {
+        "delay_ms": 15,
+        "jitter_ms": 3,
+        "loss_percent": 0.25,
+        "rate_mbit": 30
+      },
+      "qdisc_before": {
+        "kind": "netem",
+        "handle": "8002:",
+        "root": true,
+        "refcnt": 2,
+        "options": {
+          "limit": 1000,
+          "delay": {
+            "delay": 0.015,
+            "jitter": 0.003,
+            "correlation": 0
+          },
+          "loss-random": {
+            "loss": 0.0025,
+            "correlation": 0
+          },
+          "rate": {
+            "rate": 3750000,
+            "packetoverhead": 0,
+            "cellsize": 0,
+            "celloverhead": 0
+          },
+          "ecn": false,
+          "gap": 0
+        },
+        "bytes": 0,
+        "packets": 0,
+        "drops": 0,
+        "overlimits": 0,
+        "requeues": 0,
+        "backlog": 0,
+        "qlen": 0
+      },
+      "elapsed_seconds": 15.303,
+      "qdisc_after": {
+        "kind": "netem",
+        "handle": "8002:",
+        "root": true,
+        "refcnt": 2,
+        "options": {
+          "limit": 1000,
+          "delay": {
+            "delay": 0.015,
+            "jitter": 0.003,
+            "correlation": 0
+          },
+          "loss-random": {
+            "loss": 0.0025,
+            "correlation": 0
+          },
+          "rate": {
+            "rate": 3750000,
+            "packetoverhead": 0,
+            "cellsize": 0,
+            "celloverhead": 0
+          },
+          "ecn": false,
+          "gap": 0
+        },
+        "bytes": 0,
+        "packets": 0,
+        "drops": 0,
+        "overlimits": 0,
+        "requeues": 0,
+        "backlog": 0,
+        "qlen": 0
+      },
+      "exit_code": 101
+    }
+  ]
+}

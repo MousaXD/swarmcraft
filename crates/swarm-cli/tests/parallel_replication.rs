@@ -538,3 +538,107 @@ fn parallel_replication_is_bounded_and_falls_back_after_source_corruption_and_di
         vec![fixture.first.clone(), next.manifest().clone(), fallback.manifest().clone(), corrupt.manifest().clone(),]
     );
 }
+
+/// Run in a dedicated local impairment namespace. Unlike the transport-only
+/// soak, this records the exact signed checkpoints on three actual daemon
+/// processes and restores the receiver's durable payload before and after
+/// hard process loss. The admission proof is the same signed fixture as the
+/// production replica-policy tests; no host capability or Java is configured.
+#[test]
+#[ignore = "explicit local kernel impairment and process-loss stress campaign"]
+fn impaired_replica_crash_stress_preserves_signed_head() {
+    let fixture = Fixture::new();
+    let world = fixture.world;
+    for device in [&fixture.authority, &fixture.seeder, &fixture.receiver] {
+        assert!(swarm_cli::hosting_budget::load_consent(&device.paths, world).unwrap().is_none());
+        assert!(swarm_cli::migration::load_runtime_config(&device.paths, world).is_err());
+    }
+    let mut authority = fixture.authority.start(&[], "stress-authority.log");
+    wait("authority listener", Duration::from_secs(15), || {
+        assert!(authority.alive(), "stress authority exited: {}", authority.text());
+        authority.text().contains("daemon listening")
+    });
+    let mut receiver = fixture.receiver.start(&[fixture.authority.address()], "stress-receiver.log");
+    wait("receiver authentication", Duration::from_secs(30), || receiver.text().contains("peer authenticated"));
+    let (old_source, old) = fixture.prepare(&fixture.first, 2, 256 * 1024);
+    fixture.authority.storage.commit_snapshot(&old).unwrap();
+    fixture.wait_head(&mut receiver, old.manifest(), "initial nonempty signed checkpoint");
+    swarm_core::verify_snapshot_signature(old.manifest()).unwrap();
+    fixture.restore(old.manifest(), old_source.path(), "stress-old-restored");
+    let old_hash = old.manifest_hash().unwrap();
+    fixture
+        .receiver
+        .storage
+        .set_world_replica_policy(
+            world,
+            ReplicaPolicy { follow: true, hot: true, utc_window: None, max_kib_per_second: Some(512) },
+        )
+        .unwrap();
+
+    let (new_source, next) = fixture.prepare(old.manifest(), 1, 4 * 1024 * 1024);
+    fixture.authority.storage.commit_snapshot(&next).unwrap();
+    let descriptor = next.entries.iter().find(|entry| entry.blob.encoded_size > 3 * 1024 * 1024).unwrap().blob.clone();
+    let offset = || fixture.receiver.storage.partial_blob_offset(world, &descriptor).unwrap();
+    wait("durable partial payload", Duration::from_secs(45), || {
+        let bytes = offset();
+        bytes >= 64 * 1024 && bytes < descriptor.encoded_size
+    });
+    assert_eq!(fixture.receiver.storage.latest_snapshot(world).unwrap().as_ref(), Some(old.manifest()));
+    receiver.stop();
+    authority.stop();
+    assert!(!receiver.alive() && !authority.alive());
+    let reopened = Storage::open(&fixture.receiver.paths.root).unwrap();
+    let partial = reopened.partial_blob_offset(world, &descriptor).unwrap();
+    assert!(partial >= 64 * 1024 && partial < descriptor.encoded_size);
+    assert_eq!(reopened.latest_snapshot(world).unwrap().as_ref(), Some(old.manifest()));
+    reopened.verify_snapshot(old.manifest()).unwrap();
+    fixture.restore(old.manifest(), old_source.path(), "stress-after-kill-restored");
+    let mut seeder = fixture.seeder.start(&[], "stress-seeder.log");
+    wait("surviving replica listener", Duration::from_secs(15), || seeder.text().contains("daemon listening"));
+    let mut receiver = fixture.receiver.start(&[fixture.seeder.address()], "stress-receiver-restart.log");
+    let elapsed =
+        fixture.wait_head(&mut receiver, next.manifest(), "verified resume after receiver and original source SIGKILL");
+    swarm_core::verify_snapshot_signature(next.manifest()).unwrap();
+    fixture.restore(next.manifest(), new_source.path(), "stress-new-restored");
+    // The complete original signed history, not just the last payload,
+    // must still be verifiable after reconnection and restart.
+    let history = reopened.list_snapshots(world).unwrap();
+    assert_eq!(history, vec![fixture.first.clone(), old.manifest().clone(), next.manifest().clone()]);
+    for snapshot in &history {
+        swarm_core::verify_snapshot_signature(snapshot).unwrap();
+        reopened.verify_snapshot(snapshot).unwrap();
+    }
+    wait("verified resumed pull receipt", Duration::from_secs(10), || {
+        complete_line(&receiver.text(), next.snapshot_number).is_some()
+    });
+    let line = complete_line(&receiver.text(), next.snapshot_number).unwrap().to_owned();
+    let resumed = metric(&line, "resumed");
+    assert!(resumed > 0, "expected actual durable resume: {line}");
+    assert_eq!(metric(&line, "sources"), 1);
+    assert_eq!(metric(&line, "max_parallel"), 1);
+    assert!(receiver.alive() && seeder.alive());
+    receiver.stop();
+    seeder.stop();
+    assert!(!receiver.alive() && !seeder.alive());
+    let final_store = Storage::open(&fixture.receiver.paths.root).unwrap();
+    assert_eq!(final_store.latest_snapshot(world).unwrap().as_ref(), Some(next.manifest()));
+    println!(
+        "stress_receipt={}",
+        serde_json::json!({
+            "previous_verified_checkpoint": old_hash.to_string(),
+            "last_accepted_checkpoint": next.manifest_hash().unwrap().to_string(),
+            "previous_snapshot_number": old.snapshot_number,
+            "final_snapshot_number": next.snapshot_number,
+            "retained_signed_snapshots": history.len(),
+            "fault": "SIGKILL receiving daemon and original source after durable partial",
+            "receiver_partial_bytes": partial,
+            "encoded_payload_bytes": descriptor.encoded_size,
+            "payload_limit_kib_per_second": 512,
+            "resumed_blobs": resumed,
+            "resume_elapsed_ms": elapsed.as_millis(),
+            "old_and_new_restores_byte_exact": true,
+            "consent_absent": true,
+            "all_daemons_exited": true
+        })
+    );
+}

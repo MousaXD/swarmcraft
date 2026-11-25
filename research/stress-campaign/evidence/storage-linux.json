@@ -1,0 +1,150 @@
+{
+  "scope": "Linux disposable 96 MiB tmpfs; real kernel ENOSPC/EFBIG; SIGKILL of actual snapshot writer; no Java or daemon",
+  "kernel": "7.2.15-76070215-generic",
+  "cli_sha256": "8c9fc63a8161a1cf44c8066b1fb4a49a80c33b6fae9558e18609484bd8fd3dd2",
+  "source_files": 31,
+  "repetitions_requested": 3,
+  "runs": [
+    {
+      "repetition": 1,
+      "initial_checkpoint": "61728edc76f176844f8bfdaccf0560ae5b5b87083a1b53d9caa93ef8737f1dae",
+      "filesystem_capacity_bytes": 100663296,
+      "reserve_bytes": 67108864,
+      "file_size_limit_bytes": 1048576,
+      "stages": {
+        "enospc": {
+          "available_bytes": 0,
+          "filler_bytes": 100458496,
+          "kernel_errno": 28,
+          "metadata_attempts": 3,
+          "snapshot_denied": true,
+          "last_accepted_checkpoint": "61728edc76f176844f8bfdaccf0560ae5b5b87083a1b53d9caa93ef8737f1dae",
+          "restored_all_original_files": true,
+          "new_atomic_debris": 0
+        },
+        "file_size_limit": {
+          "kernel_errno": 27,
+          "file_size_limit_bytes": 1048576,
+          "exit_code": 1,
+          "last_accepted_checkpoint": "61728edc76f176844f8bfdaccf0560ae5b5b87083a1b53d9caa93ef8737f1dae",
+          "restored_all_original_files": true
+        },
+        "crash": {
+          "signal": "SIGKILL",
+          "partial_bytes": 262144,
+          "completed_uncommitted_blobs": 1,
+          "last_accepted_checkpoint": "61728edc76f176844f8bfdaccf0560ae5b5b87083a1b53d9caa93ef8737f1dae",
+          "retained_scratch_bytes": 262144,
+          "restored_all_original_files": true
+        },
+        "retention_and_retry": {
+          "reclaimed_blobs": 1,
+          "reclaimed_bytes": 2097209,
+          "removed_snapshots": 0,
+          "last_accepted_checkpoint": "0fb1840e2bf281fb4004f3d3d887e4f6c4966ef71eafd8b2bab122b05da571b7",
+          "retained_signed_checkpoints": [
+            "61728edc76f176844f8bfdaccf0560ae5b5b87083a1b53d9caa93ef8737f1dae",
+            "0fb1840e2bf281fb4004f3d3d887e4f6c4966ef71eafd8b2bab122b05da571b7"
+          ],
+          "both_restores_byte_exact": true,
+          "crash_scratch_preserved": true
+        }
+      },
+      "passed": true
+    },
+    {
+      "repetition": 2,
+      "initial_checkpoint": "b051dc2da391273011192f6951be99b4484ddd2b6f41099f88bb3168a4e656ee",
+      "filesystem_capacity_bytes": 100663296,
+      "reserve_bytes": 67108864,
+      "file_size_limit_bytes": 1048576,
+      "stages": {
+        "enospc": {
+          "available_bytes": 0,
+          "filler_bytes": 100458496,
+          "kernel_errno": 28,
+          "metadata_attempts": 3,
+          "snapshot_denied": true,
+          "last_accepted_checkpoint": "b051dc2da391273011192f6951be99b4484ddd2b6f41099f88bb3168a4e656ee",
+          "restored_all_original_files": true,
+          "new_atomic_debris": 0
+        },
+        "file_size_limit": {
+          "kernel_errno": 27,
+          "file_size_limit_bytes": 1048576,
+          "exit_code": 1,
+          "last_accepted_checkpoint": "b051dc2da391273011192f6951be99b4484ddd2b6f41099f88bb3168a4e656ee",
+          "restored_all_original_files": true
+        },
+        "crash": {
+          "signal": "SIGKILL",
+          "partial_bytes": 131072,
+          "completed_uncommitted_blobs": 1,
+          "last_accepted_checkpoint": "b051dc2da391273011192f6951be99b4484ddd2b6f41099f88bb3168a4e656ee",
+          "retained_scratch_bytes": 131072,
+          "restored_all_original_files": true
+        },
+        "retention_and_retry": {
+          "reclaimed_blobs": 1,
+          "reclaimed_bytes": 2097209,
+          "removed_snapshots": 0,
+          "last_accepted_checkpoint": "6cbcca19f7014ef3e12536d69ab12a04c6b35198dfd2a9f47ff5fea2a84b8cd5",
+          "retained_signed_checkpoints": [
+            "b051dc2da391273011192f6951be99b4484ddd2b6f41099f88bb3168a4e656ee",
+            "6cbcca19f7014ef3e12536d69ab12a04c6b35198dfd2a9f47ff5fea2a84b8cd5"
+          ],
+          "both_restores_byte_exact": true,
+          "crash_scratch_preserved": true
+        }
+      },
+      "passed": true
+    },
+    {
+      "repetition": 3,
+      "initial_checkpoint": "49fb3800ca63097fbab848c5e6bce69282c16718174799c64ebccaf48c9e2a1a",
+      "filesystem_capacity_bytes": 100663296,
+      "reserve_bytes": 67108864,
+      "file_size_limit_bytes": 1048576,
+      "stages": {
+        "enospc": {
+          "available_bytes": 0,
+          "filler_bytes": 100458496,
+          "kernel_errno": 28,
+          "metadata_attempts": 3,
+          "snapshot_denied": true,
+          "last_accepted_checkpoint": "49fb3800ca63097fbab848c5e6bce69282c16718174799c64ebccaf48c9e2a1a",
+          "restored_all_original_files": true,
+          "new_atomic_debris": 0
+        },
+        "file_size_limit": {
+          "kernel_errno": 27,
+          "file_size_limit_bytes": 1048576,
+          "exit_code": 1,
+          "last_accepted_checkpoint": "49fb3800ca63097fbab848c5e6bce69282c16718174799c64ebccaf48c9e2a1a",
+          "restored_all_original_files": true
+        },
+        "crash": {
+          "signal": "SIGKILL",
+          "partial_bytes": 786432,
+          "completed_uncommitted_blobs": 1,
+          "last_accepted_checkpoint": "49fb3800ca63097fbab848c5e6bce69282c16718174799c64ebccaf48c9e2a1a",
+          "retained_scratch_bytes": 786432,
+          "restored_all_original_files": true
+        },
+        "retention_and_retry": {
+          "reclaimed_blobs": 1,
+          "reclaimed_bytes": 2097209,
+          "removed_snapshots": 0,
+          "last_accepted_checkpoint": "15be25071d7e50cfbf41ca95c71a1eaaddea4068cf02a05c99bbad62b150ec89",
+          "retained_signed_checkpoints": [
+            "49fb3800ca63097fbab848c5e6bce69282c16718174799c64ebccaf48c9e2a1a",
+            "15be25071d7e50cfbf41ca95c71a1eaaddea4068cf02a05c99bbad62b150ec89"
+          ],
+          "both_restores_byte_exact": true,
+          "crash_scratch_preserved": true
+        }
+      },
+      "passed": true
+    }
+  ]
+}

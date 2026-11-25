@@ -535,12 +535,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #53 — P1 · Partial
 - Work: Extend crash, disk-full, retention, platform resource, and network campaigns beyond current automated gates
 - Acceptance: Published stress matrix includes repetitions, actual resource limits, last accepted checkpoint, and explicit failure causes. Saved canonical data remains recoverable
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (bounded real Linux kernel and process campaigns, not cross-platform or field certification)
+- Source: `crates/swarm-storage/src/transaction.rs`, `crates/swarm-cli/tests/{parallel_replication,host_process}.rs`, `scripts/acceptance/{storage_stress,network_stress}.py`, existing delegated cgroup gate.
+- Evidence: [Stress matrix, exact limits and checkpoint receipts](../research/stress-campaign/REPORT.md). Three independent real-Java-save profiles on 96 MiB tmpfs: nine actual ENOSPC metadata denials, three kernel 1 MiB file-limit failures, three observed partial-write SIGKILLs and exact old/new restore after retention/retry. Fixed handled atomic metadata staging leaks, no loss of existing records or crash evidence. Two actual netem profiles (15/30 ms delay, 0.25/0.75% configured loss, 30/15 Mbit/s) on isolated loopback; real signed three-device replication with receiver/source SIGKILL and durable resume from surviving seeder; old/new restored, all three signed snapshots retained, actual kernel packet counts and drops. Two 64 MiB group OOM trials, residual descendant fence and actual capped mock-Java host (512 MiB heap, 1536 MiB kernel cap) with verified signed checkpoint #2 restored. No CI dispatch.
+- Remaining / next action: #54 signed update delivery/installation hygiene. Native Windows/macOS, physical power loss, persistent filesystem exhaustion at all publication phases, multi-GiB release soak, independent-machine/network and live Minecraft recovery remain unverified by this campaign.
+- External dependency: Authorized native/field runners, persistent isolated disk and real game/network environments for broader certification.
+- Commit: Exercise bounded real crash, disk, memory and network stress; see git history.
 
 ### #54 — P2 · Proposal
 - Work: Add signed update delivery and platform installation hygiene after release provenance is stable

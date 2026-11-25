@@ -91,21 +91,21 @@ pub(crate) fn durable_atomic_write(path: &Path, bytes: &[u8]) -> Result<(), Stor
     let parent = path.parent().ok_or_else(|| StorageError::UnsafeRelativePath(path.to_string_lossy().into_owned()))?;
     fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
     let (temporary_path, mut temporary_file) = create_unique_temp(parent, "atomic", "tmp")?;
-    temporary_file.write_all(bytes).map_err(|source| io_error(&temporary_path, source))?;
-    temporary_file.sync_all().map_err(|source| io_error(&temporary_path, source))?;
+    let written = temporary_file.write_all(bytes).and_then(|()| temporary_file.sync_all());
+    // Close before removing the owned staging file (also required on Windows).
     drop(temporary_file);
+    if let Err(source) = written {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(io_error(&temporary_path, source));
+    }
 
-    #[cfg(unix)]
-    {
-        fs::rename(&temporary_path, path).map_err(|source| io_error(path, source))?;
-    }
+    #[cfg(not(windows))]
+    let published = fs::rename(&temporary_path, path);
     #[cfg(windows)]
-    {
-        move_file_write_through(&temporary_path, path, true).map_err(|source| io_error(path, source))?;
-    }
-    #[cfg(all(not(unix), not(windows)))]
-    {
-        fs::rename(&temporary_path, path).map_err(|source| io_error(path, source))?;
+    let published = move_file_write_through(&temporary_path, path, true);
+    if let Err(source) = published {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(io_error(path, source));
     }
     sync_parent(parent)
 }
@@ -294,5 +294,27 @@ mod windows_tests {
         assert_eq!(read_canonical_file(&path).unwrap(), b"replacement");
         assert!(durable_remove(&path).unwrap());
         assert!(!canonical_file_exists(&path).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod atomic_failure_tests {
+    use super::*;
+
+    #[test]
+    fn failed_atomic_replacement_removes_only_owned_staging_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("non-file-target");
+        fs::create_dir(&target).unwrap();
+        let retained = target.join("retained");
+        fs::write(&retained, b"preserve").unwrap();
+        let previous_crash = temp.path().join(".atomic-prior-crash.tmp");
+        fs::write(&previous_crash, b"evidence").unwrap();
+        for _ in 0..3 {
+            assert!(durable_atomic_write(&target, b"replacement").is_err());
+            assert_eq!(fs::read(&retained).unwrap(), b"preserve");
+            assert_eq!(fs::read(&previous_crash).unwrap(), b"evidence");
+            assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 2);
+        }
     }
 }
