@@ -1704,6 +1704,27 @@ pub fn no_local_route_transition_pending(paths: &DataPaths, epoch: &EpochRecordV
         && load_transfer_intent(paths, epoch)?.is_none())
 }
 
+/// Read-only preflight for an inert V2 cutover review. A live or unresolved
+/// local authority transition cannot be treated as a frozen source.
+pub(crate) fn ensure_no_v2_source_transition(
+    paths: &DataPaths,
+    storage: &Storage,
+    epoch: &EpochRecordV1,
+) -> Result<()> {
+    if !no_local_route_transition_pending(paths, epoch)?
+        || active_transfer_for_current_generation(storage, epoch.world_id)?.is_some()
+    {
+        bail!("source has an unresolved stop, checkpoint or authority transfer");
+    }
+    match fs::symlink_metadata(wake_intent_path(paths, epoch.world_id)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+        Ok(_) => bail!("source has a pending wake request"),
+    }
+    crate::runtime_process_guard::refuse_unaccounted_world_runtime(paths, epoch.world_id)?;
+    Ok(())
+}
+
 pub fn prepare_manual_transfer(
     paths: &DataPaths,
     storage: &Storage,

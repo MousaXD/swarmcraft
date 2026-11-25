@@ -908,8 +908,8 @@ fn ensure_collected_history_current(
 pub(crate) struct LocalRecoverySource {
     pub manifest: SnapshotManifestV1,
     pub config: WorldConfigV1,
-    epoch: EpochRecordV1,
-    membership: MembershipRecordV1,
+    pub(crate) epoch: EpochRecordV1,
+    pub(crate) membership: MembershipRecordV1,
 }
 
 impl LocalRecoverySource {
@@ -1208,6 +1208,159 @@ mod tests {
         sign_world_config(creator, &mut config).unwrap();
         storage.save_world_config(&config).unwrap();
         config
+    }
+
+    #[test]
+    fn v2_migration_review_uses_real_canonical_storage_and_never_activates() {
+        use crate::v2_migration_review::review_stable_v2_migration;
+        use swarm_protocol::{
+            ProposedHostingRealmGenesisV2, SignedHostingMigrationProposalV2, SignedHostingMigrationQuorumV2,
+            SignedHostingMigrationVoteV2, SignedRealmHostingPolicyV2, SleepRecordV1, SourceHistoryAnchorV2,
+            WorldHostingPolicyV1, HOSTING_POLICY_FORMAT_VERSION, HOSTING_REALM_FORMAT_VERSION_V2,
+            HOSTING_REALM_REQUIRED_AUTHORITY_FEATURE_V2,
+        };
+
+        let (temp, storage, creator, epoch) = fixture();
+        let world = epoch.world_id;
+        let membership = signed_membership(&epoch, &creator, vec![member(&creator)], None);
+        storage.save_membership_record(&membership).unwrap();
+        let config = initial_config(&storage, &creator, world);
+        let metadata = storage.load_world(world).unwrap();
+        storage
+            .save_world_descriptor(&swarm_protocol::WorldDescriptorV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id: world,
+                compatibility_fingerprint: metadata.genesis.compatibility_fingerprint,
+                members: membership.members.clone(),
+                preferred_replication_factor: 3,
+            })
+            .unwrap();
+        let manifest = storage.latest_snapshot(world).unwrap().unwrap();
+        let checkpoint = manifest.manifest_hash().unwrap();
+        let anchor = SourceHistoryAnchorV2 {
+            source_world_id: world,
+            source_config_sequence: config.sequence,
+            source_config_hash: config.config_hash().unwrap(),
+            source_membership_sequence: membership.sequence,
+            source_membership_hash: membership.record_hash().unwrap(),
+            source_snapshot_hash: checkpoint,
+            source_epoch: epoch.epoch_number,
+            source_fencing_token: epoch.fencing_token,
+        };
+        let envelope = |anchor: SourceHistoryAnchorV2| {
+            let realm = ProposedHostingRealmGenesisV2 {
+                format_version: HOSTING_REALM_FORMAT_VERSION_V2,
+                source: anchor,
+                migration_nonce: [42; 32],
+                required_authority_feature_version: HOSTING_REALM_REQUIRED_AUTHORITY_FEATURE_V2,
+            };
+            let target = realm.realm_id().unwrap();
+            let mut policy = SignedRealmHostingPolicyV2 {
+                format_version: HOSTING_REALM_FORMAT_VERSION_V2,
+                realm_id: target,
+                sequence: 1,
+                previous_policy_hash: None,
+                policy: WorldHostingPolicyV1 {
+                    format_version: HOSTING_POLICY_FORMAT_VERSION,
+                    allow_member_contributions: true,
+                    minimum_server_heap_mib: 1024,
+                },
+                signer_peer_id: creator.peer_id(),
+                signer_public_key: creator.public_key(),
+                signature: vec![],
+            };
+            policy.signature = creator.sign(&policy.signing_bytes().unwrap());
+            let mut proposal = SignedHostingMigrationProposalV2 {
+                format_version: HOSTING_REALM_FORMAT_VERSION_V2,
+                realm_genesis: realm,
+                target_realm_id: target,
+                initial_policy_hash: policy.record_hash().unwrap(),
+                activation_epoch: anchor.source_epoch + 1,
+                activation_fencing_token: anchor.source_fencing_token + 1,
+                source_authority_peer_id: creator.peer_id(),
+                source_authority_public_key: creator.public_key(),
+                signature: vec![],
+            };
+            proposal.signature = creator.sign(&proposal.signing_bytes().unwrap());
+            let mut vote = SignedHostingMigrationVoteV2 {
+                format_version: HOSTING_REALM_FORMAT_VERSION_V2,
+                target_realm_id: target,
+                migration_proposal_hash: proposal.proposal_hash().unwrap(),
+                source_membership_hash: anchor.source_membership_hash,
+                voter_peer_id: creator.peer_id(),
+                voter_public_key: creator.public_key(),
+                signature: vec![],
+            };
+            vote.signature = creator.sign(&vote.signing_bytes().unwrap());
+            let quorum = SignedHostingMigrationQuorumV2 {
+                format_version: HOSTING_REALM_FORMAT_VERSION_V2,
+                migration_proposal_hash: proposal.proposal_hash().unwrap(),
+                source_membership_hash: anchor.source_membership_hash,
+                votes: vec![vote],
+            };
+            (policy, proposal, quorum)
+        };
+        let (policy, proposal, quorum) = envelope(anchor);
+        let review = || review_stable_v2_migration(&storage, &creator, world, checkpoint, &policy, &proposal, &quorum);
+        assert!(review().is_err(), "an awake source is not a frozen migration boundary");
+        let mut sleep = SleepRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            latest_snapshot_hash: checkpoint,
+            epoch: epoch.epoch_number,
+            fencing_token: epoch.fencing_token,
+            authority_peer_id: creator.peer_id(),
+            authority_public_key: creator.public_key(),
+            signature: vec![],
+        };
+        creator.sign_sleep_record(&mut sleep).unwrap();
+        storage.save_sleep_record(&sleep).unwrap();
+        let verified = review().unwrap();
+        assert_eq!(verified.source().anchor, anchor);
+        assert_eq!(verified.target_realm_id(), proposal.target_realm_id);
+
+        let mut forged_anchor = anchor;
+        forged_anchor.source_snapshot_hash = Hash32([99; 32]);
+        let (forged_policy, forged_proposal, forged_quorum) = envelope(forged_anchor);
+        assert!(review_stable_v2_migration(
+            &storage,
+            &creator,
+            world,
+            checkpoint,
+            &forged_policy,
+            &forged_proposal,
+            &forged_quorum
+        )
+        .is_err());
+        assert!(review_stable_v2_migration(&storage, &creator, world, Hash32([99; 32]), &policy, &proposal, &quorum)
+            .is_err());
+
+        let joiner = PeerIdentity::from_secret_bytes([52; 32]);
+        let next = signed_membership(&epoch, &creator, vec![member(&creator), member(&joiner)], Some(&membership));
+        let transition = MembershipProposalV1 { previous: membership.clone(), proposed: next };
+        let mut pending_vote =
+            swarm_consensus::membership_vote_for(&transition, creator.peer_id(), creator.public_key()).unwrap();
+        pending_vote.signature = creator.sign(&pending_vote.signing_bytes().unwrap());
+        storage.promise_membership_proposal(&transition, &pending_vote).unwrap();
+        assert!(review().is_err(), "pending joint vote cannot be reviewed as stable");
+        assert!(storage.load_membership_promise(world).is_ok());
+        // Legacy metadata cannot be published at the distinct V2 realm ID.
+        let target = proposal.target_realm_id;
+        let mut legacy_metadata = metadata.clone();
+        legacy_metadata.world_id = target;
+        assert!(storage.create_world(&legacy_metadata).is_err());
+        assert!(storage.load_world(target).is_err());
+
+        // Neither successful nor failed review changes signed V1 state.
+        drop(storage);
+        let storage = Storage::open(temp.path().join("data")).unwrap();
+        assert_eq!(storage.load_epoch_record(world).unwrap(), epoch);
+        assert_eq!(storage.load_world_config(world).unwrap(), config);
+        assert_eq!(storage.load_membership_record(world).unwrap(), membership);
+        assert_eq!(storage.latest_snapshot(world).unwrap().unwrap(), manifest);
+        assert_eq!(storage.load_sleep_record(world).unwrap(), sleep);
+        assert_eq!(storage.list_worlds().unwrap().len(), 1);
+        assert!(storage.load_world(target).is_err());
     }
 
     fn promote(

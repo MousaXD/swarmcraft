@@ -5,6 +5,14 @@
 **Implementation branch:** `agent-11/hosting-authority-policy-migration`  
 **Approval:** Agent 00 + independent Agent 07 required **before activation**
 
+## Reconciliation update (2026-11-25)
+
+See [V2 migration reconciliation and durable cutover plan](v2-migration-reconciliation.md)
+for the exact #122/#125 source heads, implemented cryptographic preconditions,
+read-only canonical-history review and planned durable transaction. Historical
+PR/build statements below describe the original RFC baseline. Live V2
+activation remains blocked.
+
 ## Decision
 
 **NO-GO for in-place live V1 activation.** The current code does not have a

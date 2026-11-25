@@ -235,12 +235,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #23 — P1 · Partial
 - Work: Reconcile V2 transcript, signed consent, voter proof, and admission work from #122/#125. Plan durable migration from V1 separately
 - Acceptance: Exact source history, signed approvals, stable and joint voter majorities, replay bounds, no legacy stale writes, interrupted migration, and rollback behavior are reviewed and tested
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (inert cryptographic and read-only preflight components; not activated)
+- Source: PR #122 `56b50274e7e173cd6573e678df6cd0a41963b2c0`; PR #125 `c722ece5b86a41433644013bf1dabccd23142a13`; [reconciliation and cutover plan](rfcs/v2-migration-reconciliation.md).
+- Evidence: One bounded protocol verifier plus independently pinned real-Ed25519 consensus adapter, corrected V1 sequence 0 and historical config signer/current epoch authority separation; protocol contracts 12/12, crypto stable/joint and wrong-source tests 7/7, read-only actual canonical-storage review rejects unsafe source, preserves signed history on reopen and refuses V1 metadata at distinct V2 identity. Network transcript tests 10/10, V2 challenge/action tests 15/15 (including overlapping transcript tests), full network library 133/133 before extra invalidation regression, CLI library 155 passed/2 ignored; strict Clippy. Three interruption/rollback specification tests pass (model only).
+- Remaining / next action: Exact-SHA CI; durable freeze voting, atomic accepted-root publication, actual crash injection and V2-only live negotiation and authority transitions are separate implementation gates. The reviewed proposal, verified vote set, and authenticated session cannot activate V2. #24 can improve V1 role presentation without enabling V2 permissions.
+- External dependency: Independent security review and installed mixed-version/real-device acceptance before activation. Old V1 binaries may still operate on their own separate V1 identity.
+- Commit: See V2 migration reconciliation checkpoint in git history.
 
 ### #24 — P1 · Partial
 - Work: Split member, player, replica, voter, administrator, and host-candidate permissions in UI and policy

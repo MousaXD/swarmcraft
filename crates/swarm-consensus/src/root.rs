@@ -8,6 +8,7 @@ pub mod migration;
 pub mod recovery;
 pub mod simulator;
 pub mod solo;
+pub mod v2_migration_quorum;
 
 // A non-activatable design model for a possible, separate two-device policy.
 #[cfg(test)]

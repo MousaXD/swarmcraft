@@ -10,5 +10,6 @@ repository.workspace = true
 path = "src/root.rs"
 
 [dependencies]
+ed25519-dalek.workspace = true
 thiserror.workspace = true
 swarm-protocol = { path = "../swarm-protocol" }

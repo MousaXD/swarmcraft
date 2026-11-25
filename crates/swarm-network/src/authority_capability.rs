@@ -5,9 +5,13 @@
 //! for future integration; the live node still offers only /swarmcraft/1.
 //! No legacy authority path is modified or permitted by this module alone.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use std::time::{Duration, Instant};
+
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use swarm_protocol::{peer_id_from_public_key, Hash32, PeerId, WorldId};
+use swarm_protocol::{
+    peer_id_from_public_key, ExpectedHostingAuthorityHeadV2, Hash32, PeerId, SignedHostingAuthorityActionV2, WorldId,
+};
 use thiserror::Error;
 
 /// This MUST be negotiated as a real independent wire protocol and must not
@@ -59,11 +63,51 @@ pub struct SignedAuthorityFeatureV2 {
     pub fencing_token: u64,
     pub consent_revision: u64,
     pub challenge: [u8; 32],
+    #[serde(deserialize_with = "deserialize_transport_id")]
     pub claimant_transport_peer: Vec<u8>,
+    #[serde(deserialize_with = "deserialize_transport_id")]
     pub verifier_transport_peer: Vec<u8>,
     pub issued_unix_ms: u64,
     pub expires_unix_ms: u64,
+    #[serde(deserialize_with = "deserialize_signature")]
     pub signature: Vec<u8>,
+}
+
+fn deserialize_bounded_bytes<'de, D: serde::Deserializer<'de>, const MIN: usize, const MAX: usize>(
+    deserializer: D,
+) -> Result<Vec<u8>, D::Error> {
+    struct Bounded<const MIN: usize, const MAX: usize>;
+    impl<'de, const MIN: usize, const MAX: usize> serde::de::Visitor<'de> for Bounded<MIN, MAX> {
+        type Value = Vec<u8>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "between {MIN} and {MAX} bytes")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+            if seq.size_hint().is_some_and(|n| !(MIN..=MAX).contains(&n)) {
+                return Err(serde::de::Error::custom("invalid bounded authority field length"));
+            }
+            let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(MIN).min(MAX));
+            while let Some(byte) = seq.next_element::<u8>()? {
+                if bytes.len() == MAX {
+                    return Err(serde::de::Error::custom("authority field exceeds bound"));
+                }
+                bytes.push(byte);
+            }
+            if bytes.len() < MIN {
+                return Err(serde::de::Error::custom("authority field below minimum length"));
+            }
+            Ok(bytes)
+        }
+    }
+    deserializer.deserialize_seq(Bounded::<MIN, MAX>)
+}
+
+fn deserialize_transport_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    deserialize_bounded_bytes::<D, 1, MAX_AUTHORITY_TRANSPORT_ID_BYTES>(d)
+}
+
+fn deserialize_signature<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    deserialize_bounded_bytes::<D, 64, 64>(d)
 }
 
 impl SignedAuthorityFeatureV2 {
@@ -169,6 +213,9 @@ pub struct VerifiedAuthorityFeatureSession {
     consent_revision: u64,
     issued_unix_ms: u64,
     expires_unix_ms: u64,
+    session_nonce: [u8; 32],
+    connection_generation: u64,
+    monotonic_window: Option<(Instant, Instant)>,
 }
 
 impl VerifiedAuthorityFeatureSession {
@@ -202,7 +249,36 @@ impl VerifiedAuthorityFeatureSession {
     pub fn consent_revision(self) -> u64 {
         self.consent_revision
     }
-    pub fn valid_at(self, now_unix_ms: u64) -> bool {
+    pub fn connection_generation(self) -> u64 {
+        self.connection_generation
+    }
+    pub(crate) fn session_nonce(self) -> [u8; 32] {
+        self.session_nonce
+    }
+    pub(crate) fn bind_registered(
+        mut self,
+        generation: u64,
+        issued_at: Instant,
+        verified_at: Instant,
+        now_unix_ms: u64,
+    ) -> Option<Self> {
+        if generation == 0 || !self.valid_at(now_unix_ms) || verified_at < issued_at {
+            return None;
+        }
+        let deadline = issued_at
+            .checked_add(Duration::from_millis(MAX_AUTHORITY_SESSION_AGE_MS))?
+            .min(verified_at.checked_add(Duration::from_millis(self.expires_unix_ms.checked_sub(now_unix_ms)?))?);
+        if verified_at > deadline {
+            return None;
+        }
+        self.connection_generation = generation;
+        self.monotonic_window = Some((verified_at, deadline));
+        Some(self)
+    }
+    pub(crate) fn monotonic_current(self, now: Instant) -> bool {
+        self.connection_generation != 0 && self.monotonic_window.is_some_and(|(start, end)| start <= now && now <= end)
+    }
+    pub(crate) fn valid_at(self, now_unix_ms: u64) -> bool {
         now_unix_ms >= self.issued_unix_ms && now_unix_ms <= self.expires_unix_ms
     }
 }
@@ -211,7 +287,7 @@ impl VerifiedAuthorityFeatureSession {
 /// provides a connection-bound unpredictable challenge and atomically consumes
 /// it exactly once after signature validation. A successful claim is NOT proof
 /// of available RAM, enforcement by unknown binary code, or local consent.
-pub fn verify_authority_feature_session(
+pub(crate) fn verify_authority_feature_session(
     negotiated_wire_protocol: &str,
     claim: &SignedAuthorityFeatureV2,
     expected: &ExpectedAuthorityFeatureV2<'_>,
@@ -244,7 +320,7 @@ pub fn verify_authority_feature_session(
         VerifyingKey::from_bytes(&claim.public_key).map_err(|_| AuthorityCapabilityError::InvalidSignature)?;
     let signature = Signature::from_slice(&claim.signature).map_err(|_| AuthorityCapabilityError::InvalidSignature)?;
     verifying_key
-        .verify(&claim.signing_bytes()?, &signature)
+        .verify_strict(&claim.signing_bytes()?, &signature)
         .map_err(|_| AuthorityCapabilityError::InvalidSignature)?;
     if !consume_verifier_challenge() {
         return Err(AuthorityCapabilityError::ReplayOrUnknownChallenge);
@@ -262,13 +338,107 @@ pub fn verify_authority_feature_session(
         consent_revision: claim.consent_revision,
         issued_unix_ms: claim.issued_unix_ms,
         expires_unix_ms: claim.expires_unix_ms,
+        session_nonce: claim.challenge,
+        connection_generation: 0,
+        monotonic_window: None,
     })
+}
+
+/// This verifies a signed operation against an ALREADY VERIFIED V2 session.
+/// It does not mint a lease, a canonical realm, or a Minecraft hosting permit.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum V2AuthorityActionError {
+    #[error("the signed V2 authority session has expired or is not yet valid")]
+    ExpiredSession,
+    #[error("V2 authority operation is not bound to the authenticated session and canonical head")]
+    WrongSessionOrHead,
+    #[error("V2 authority operation's signature, identity or context is invalid")]
+    InvalidAction,
+    #[error("authority action nonce was already consumed or was never issued")]
+    ReplayOrUnknownAction,
+}
+
+/// Second stage of a genuine V2-only network authority exchange.
+///
+/// The expected action and permitted signer MUST be derived from independently
+/// accepted, durable canonical V2 policy/membership, not from a remote claim,
+/// world membership, replica availability, or hosting preference. The verified
+/// session must come from a real /hosting-authority/2 stream; legacy V1 stream
+/// advertisement alone cannot produce one. The caller atomically consumes an
+/// independently issued action nonce only after signature verification.
+///
+/// A success is solely an authenticated *action binding* and MUST be followed
+/// by durable policy/lease, fresh local opt-in, resource and fencing checks.
+pub(crate) fn verify_v2_authority_action_session(
+    session: VerifiedAuthorityFeatureSession,
+    action: &SignedHostingAuthorityActionV2,
+    expected: &ExpectedHostingAuthorityHeadV2,
+    now_unix_ms: u64,
+    consume_action_nonce: impl FnOnce(&[u8; 32]) -> bool,
+) -> Result<(), V2AuthorityActionError> {
+    if !session.valid_at(now_unix_ms) {
+        return Err(V2AuthorityActionError::ExpiredSession);
+    }
+    if action.realm_id != session.world_id()
+        || action.candidate_peer_id != session.peer_id()
+        || action.committed_policy_hash != session.policy_hash()
+        || action.committed_migration_hash != session.migration_hash()
+        || action.accepted_membership_hash != session.membership_hash()
+        || action.snapshot_hash != session.snapshot_hash()
+        || action.epoch != session.epoch()
+        || action.fencing_token != session.fencing_token()
+        || action.consent_revision != session.consent_revision()
+        || action.selected_heap_mib != session.selected_heap_mib()
+    {
+        return Err(V2AuthorityActionError::WrongSessionOrHead);
+    }
+    action
+        .verify_for_head(expected, |public_key, bytes, signature| {
+            let Ok(key) = VerifyingKey::from_bytes(public_key) else {
+                return false;
+            };
+            let Ok(signature) = Signature::from_slice(signature) else {
+                return false;
+            };
+            key.verify_strict(bytes, &signature).is_ok()
+        })
+        .map_err(|_| V2AuthorityActionError::InvalidAction)?;
+    if !consume_action_nonce(&action.nonce) {
+        return Err(V2AuthorityActionError::ReplayOrUnknownAction);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use swarm_protocol::HostingAuthorityOperationV2;
+
+    #[test]
+    fn authority_transcript_decode_bounds() {
+        let (valid, _) = claim();
+        let bytes = postcard::to_allocvec(&valid).unwrap();
+        assert_eq!(postcard::from_bytes::<SignedAuthorityFeatureV2>(&bytes).unwrap(), valid);
+        for length in [0, 63, 65, 8192] {
+            let mut bad = valid.clone();
+            bad.signature.resize(length, 0);
+            assert!(postcard::from_bytes::<SignedAuthorityFeatureV2>(&postcard::to_allocvec(&bad).unwrap()).is_err());
+        }
+        for length in [0, 129, 8192] {
+            for claimant in [true, false] {
+                let mut bad = valid.clone();
+                if claimant {
+                    bad.claimant_transport_peer.resize(length, 0);
+                } else {
+                    bad.verifier_transport_peer.resize(length, 0);
+                }
+                assert!(
+                    postcard::from_bytes::<SignedAuthorityFeatureV2>(&postcard::to_allocvec(&bad).unwrap()).is_err()
+                );
+            }
+        }
+    }
 
     fn claim() -> (SignedAuthorityFeatureV2, SigningKey) {
         let key = SigningKey::from_bytes(&[7; 32]);
@@ -505,5 +675,96 @@ mod tests {
             verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &bad, &expected(&v), || true),
             Err(AuthorityCapabilityError::InvalidTranscript)
         );
+    }
+
+    fn signed_action(
+        v: &SignedAuthorityFeatureV2,
+        key: &SigningKey,
+    ) -> (SignedHostingAuthorityActionV2, ExpectedHostingAuthorityHeadV2) {
+        let mut action = SignedHostingAuthorityActionV2 {
+            format_version: swarm_protocol::HOSTING_REALM_FORMAT_VERSION_V2,
+            operation: HostingAuthorityOperationV2::LeaseGrant,
+            realm_id: v.world_id,
+            committed_policy_hash: v.committed_policy_hash,
+            committed_migration_hash: v.committed_migration_hash,
+            accepted_membership_hash: v.accepted_membership_hash,
+            epoch: v.epoch,
+            fencing_token: v.fencing_token,
+            snapshot_hash: v.snapshot_hash,
+            candidate_peer_id: v.peer_id,
+            consent_revision: v.consent_revision,
+            selected_heap_mib: v.selected_heap_mib,
+            signer_peer_id: v.peer_id,
+            signer_public_key: key.verifying_key().to_bytes(),
+            nonce: [77; 32],
+            signature: Vec::new(),
+        };
+        action.signature = key.sign(&action.signing_bytes().unwrap()).to_bytes().to_vec();
+        let expected = ExpectedHostingAuthorityHeadV2 {
+            operation: action.operation,
+            realm_id: action.realm_id,
+            committed_policy_hash: action.committed_policy_hash,
+            committed_migration_hash: action.committed_migration_hash,
+            accepted_membership_hash: action.accepted_membership_hash,
+            epoch: action.epoch,
+            fencing_token: action.fencing_token,
+            snapshot_hash: action.snapshot_hash,
+            candidate_peer_id: action.candidate_peer_id,
+            expected_consent_revision: action.consent_revision,
+            expected_selected_heap_mib: action.selected_heap_mib,
+            expected_signer_peer_id: action.signer_peer_id,
+            expected_nonce: action.nonce,
+        };
+        (action, expected)
+    }
+
+    #[test]
+    fn valid_v2_signed_operation_is_session_bound_and_single_use() {
+        let (claim, key) = claim();
+        let session =
+            verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &claim, &expected(&claim), || true)
+                .unwrap();
+        let (action, expected_head) = signed_action(&claim, &key);
+        let used = Cell::new(false);
+        let verify = || {
+            verify_v2_authority_action_session(session, &action, &expected_head, 105_000, |nonce| {
+                if *nonce != action.nonce || used.get() {
+                    false
+                } else {
+                    used.set(true);
+                    true
+                }
+            })
+        };
+        assert_eq!(verify(), Ok(()));
+        assert_eq!(verify(), Err(V2AuthorityActionError::ReplayOrUnknownAction));
+    }
+
+    #[test]
+    fn stale_wrong_policy_operation_and_forged_signature_are_denied() {
+        let (claim, key) = claim();
+        let session =
+            verify_authority_feature_session(MANDATORY_AUTHORITY_WIRE_PROTOCOL, &claim, &expected(&claim), || true)
+                .unwrap();
+        let (action, mut expected_head) = signed_action(&claim, &key);
+        let verify = |action: &SignedHostingAuthorityActionV2, expected: &ExpectedHostingAuthorityHeadV2, now| {
+            verify_v2_authority_action_session(session, action, expected, now, |_| true)
+        };
+        assert_eq!(verify(&action, &expected_head, 110_001), Err(V2AuthorityActionError::ExpiredSession));
+        expected_head.operation = HostingAuthorityOperationV2::Wake;
+        assert_eq!(verify(&action, &expected_head, 105_000), Err(V2AuthorityActionError::InvalidAction));
+        expected_head.operation = HostingAuthorityOperationV2::LeaseGrant;
+        expected_head.expected_nonce = [55; 32];
+        assert_eq!(verify(&action, &expected_head, 105_000), Err(V2AuthorityActionError::InvalidAction));
+        expected_head.expected_nonce = action.nonce;
+        let mut forged = action.clone();
+        forged.signature[0] ^= 1;
+        assert_eq!(verify(&forged, &expected_head, 105_000), Err(V2AuthorityActionError::InvalidAction));
+        let mut wrong_policy = action.clone();
+        wrong_policy.committed_policy_hash = Hash32([99; 32]);
+        assert_eq!(verify(&wrong_policy, &expected_head, 105_000), Err(V2AuthorityActionError::WrongSessionOrHead));
+        let mut revoked = action.clone();
+        revoked.consent_revision += 1;
+        assert_eq!(verify(&revoked, &expected_head, 105_000), Err(V2AuthorityActionError::WrongSessionOrHead));
     }
 }

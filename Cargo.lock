@@ -3410,6 +3410,7 @@ dependencies = [
 name = "swarm-consensus"
 version = "0.5.1"
 dependencies = [
+ "ed25519-dalek 2.2.0",
  "swarm-protocol",
  "thiserror 2.0.20",
 ]
@@ -3424,6 +3425,7 @@ dependencies = [
  "postcard",
  "rand_core 0.6.4",
  "serde",
+ "swarm-consensus",
  "swarm-protocol",
  "tempfile",
  "thiserror 2.0.20",

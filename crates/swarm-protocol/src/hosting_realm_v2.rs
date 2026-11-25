@@ -39,6 +39,43 @@ pub enum HostingRealmV2Error {
     Policy(#[from] HostingPolicyError),
 }
 
+/// Decode exactly a 64-byte V2 Ed25519 signature without trusting an
+/// attacker-controlled collection length. Only deserialization is changed:
+/// signed postcard bytes and record hashes remain byte-for-byte identical.
+fn deserialize_signature_64<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ExactSignature64;
+
+    impl<'de> serde::de::Visitor<'de> for ExactSignature64 {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("exactly 64 Ed25519 signature bytes")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut signature = Vec::with_capacity(64);
+            while let Some(byte) = seq.next_element::<u8>()? {
+                if signature.len() == 64 {
+                    return Err(serde::de::Error::custom("V2 Ed25519 signature exceeds 64 bytes"));
+                }
+                signature.push(byte);
+            }
+            if signature.len() != 64 {
+                return Err(serde::de::Error::custom("V2 Ed25519 signature must have 64 bytes"));
+            }
+            Ok(signature)
+        }
+    }
+
+    deserializer.deserialize_seq(ExactSignature64)
+}
+
 fn require_signature(signature: &[u8]) -> Result<(), HostingRealmV2Error> {
     if signature.len() == 64 {
         Ok(())
@@ -146,6 +183,7 @@ pub struct SignedRealmHostingPolicyV2 {
     pub policy: WorldHostingPolicyV1,
     pub signer_peer_id: PeerId,
     pub signer_public_key: [u8; 32],
+    #[serde(deserialize_with = "deserialize_signature_64")]
     pub signature: Vec<u8>,
 }
 
@@ -233,6 +271,7 @@ pub struct SignedHostingMigrationProposalV2 {
     pub activation_fencing_token: u64,
     pub source_authority_peer_id: PeerId,
     pub source_authority_public_key: [u8; 32],
+    #[serde(deserialize_with = "deserialize_signature_64")]
     pub signature: Vec<u8>,
 }
 
@@ -293,8 +332,8 @@ impl SignedHostingMigrationProposalV2 {
     ) -> Result<(), HostingRealmV2Error> {
         self.validate_shape()?;
         self.realm_genesis.source.validate_against_accepted_v1(genesis, config, membership)?;
-        if self.source_authority_peer_id != config.authority_peer_id
-            || self.source_authority_public_key != config.authority_public_key
+        if self.source_authority_peer_id != membership.authority_peer_id
+            || self.source_authority_public_key != membership.authority_public_key
             || initial_policy.sequence != 1
             || initial_policy.record_hash()? != self.initial_policy_hash
         {
@@ -318,6 +357,7 @@ pub struct SignedHostingMigrationVoteV2 {
     pub source_membership_hash: Hash32,
     pub voter_peer_id: PeerId,
     pub voter_public_key: [u8; 32],
+    #[serde(deserialize_with = "deserialize_signature_64")]
     pub signature: Vec<u8>,
 }
 
@@ -401,6 +441,7 @@ pub struct SignedHostingAuthorityActionV2 {
     pub signer_peer_id: PeerId,
     pub signer_public_key: [u8; 32],
     pub nonce: [u8; 32],
+    #[serde(deserialize_with = "deserialize_signature_64")]
     pub signature: Vec<u8>,
 }
 

@@ -20,4 +20,5 @@ thiserror.workspace = true
 swarm-protocol = { path = "../swarm-protocol" }
 
 [dev-dependencies]
+swarm-consensus = { path = "../swarm-consensus" }
 tempfile.workspace = true

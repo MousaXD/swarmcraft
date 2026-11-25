@@ -3,12 +3,18 @@
 
 use swarm_protocol::{
     peer_id_from_public_key, AuthorityPolicyV1, ExpectedHostingAuthorityHeadV2, Hash32, HostingAuthorityOperationV2,
-    MembershipPolicyV1, MembershipRecordV1, PeerId, ProposedHostingRealmGenesisV2, RuntimeCompatibilityManifestV1,
-    SignedHostingAuthorityActionV2, SignedHostingMigrationProposalV2, SignedHostingMigrationVoteV2,
+    HostingMigrationSourceContextV2, HostingMigrationVoterSetV2, MembershipPolicyV1, MembershipRecordV1, PeerId,
+    ProposedHostingRealmGenesisV2, RuntimeCompatibilityManifestV1, SignedHostingAuthorityActionV2,
+    SignedHostingMigrationProposalV2, SignedHostingMigrationQuorumV2, SignedHostingMigrationVoteV2,
     SignedRealmHostingPolicyV2, SourceHistoryAnchorV2, WorldConfigV1, WorldGenesisV1, WorldHostingPolicyV1, WorldId,
     WorldMemberV1, WorldPresentationV1, WorldVisibilityV1, HOSTING_POLICY_FORMAT_VERSION,
-    HOSTING_REALM_FORMAT_VERSION_V2, HOSTING_REALM_REQUIRED_AUTHORITY_FEATURE_V2, PROTOCOL_VERSION,
+    HOSTING_REALM_FORMAT_VERSION_V2, HOSTING_REALM_REQUIRED_AUTHORITY_FEATURE_V2, MAX_HOSTING_MIGRATION_VOTES_V2,
+    PROTOCOL_VERSION,
 };
+
+fn reject_test_signatures(_: &[u8; 32], _: &[u8], _: &[u8]) -> bool {
+    false
+}
 
 fn accepts_test_signatures(_: &[u8; 32], _: &[u8], signature: &[u8]) -> bool {
     [7_u8, 8, 9, 10].iter().any(|byte| signature == [*byte; 64])
@@ -84,7 +90,7 @@ impl Fixture {
             protocol_version: PROTOCOL_VERSION,
             world_id: source_world_id,
             epoch: 3,
-            sequence: 1,
+            sequence: 0,
             previous_membership_hash: None,
             members,
             authority_peer_id,
@@ -215,9 +221,9 @@ fn migration_proposal_is_signed_but_does_not_grant_canonical_authority() {
         .is_ok());
     assert!(f
         .proposal
-        .verify_against_accepted_source(&f.genesis, &f.config, &f.membership, &f.policy, |_, _, _| false,)
+        .verify_against_accepted_source(&f.genesis, &f.config, &f.membership, &f.policy, reject_test_signatures,)
         .is_err());
-    assert!(f.policy.verify_for_realm(&f.realm, f.config.authority_peer_id, |_, _, _| false).is_err());
+    assert!(f.policy.verify_for_realm(&f.realm, f.config.authority_peer_id, reject_test_signatures).is_err());
     assert!(f.proposal.signing_bytes().unwrap().starts_with(b"swarmcraft/hosting-migration-proposal-sign/v2\0"));
     assert!(f.policy.signing_bytes().unwrap().starts_with(b"swarmcraft/hosting-realm-policy-sign/v2\0"));
 }
@@ -318,7 +324,7 @@ fn v2_migration_votes_are_bound_to_source_membership_and_proposal() {
     bad.signature.pop();
     assert!(bad.verify_for_proposal(&f.proposal, &f.membership, accepts_test_signatures).is_err());
     bad = vote.clone();
-    assert!(bad.verify_for_proposal(&f.proposal, &f.membership, |_, _, _| false).is_err());
+    assert!(bad.verify_for_proposal(&f.proposal, &f.membership, reject_test_signatures).is_err());
     bad.signature.clear();
     assert!(bad.signing_bytes().is_ok());
 }
@@ -329,7 +335,7 @@ fn signed_v2_authority_actions_reject_v1_downgrade_and_stale_context() {
     let action = f.action();
     let expected = f.expected();
     assert!(action.verify_for_head(&expected, accepts_test_signatures).is_ok());
-    assert!(action.verify_for_head(&expected, |_, _, _| false).is_err());
+    assert!(action.verify_for_head(&expected, reject_test_signatures).is_err());
     assert!(action.signing_bytes().unwrap().starts_with(b"swarmcraft/hosting-authority-action-sign/v2\0"));
 
     let mut bad = action.clone();
@@ -407,4 +413,226 @@ fn verifier_owned_expectations_cannot_be_replaced_by_claimed_values() {
     bad = action;
     bad.nonce = [0; 32];
     assert!(bad.signing_bytes().is_err());
+}
+
+fn quorum_vote_for(f: &Fixture, member: &WorldMemberV1) -> SignedHostingMigrationVoteV2 {
+    let mut vote = f.vote();
+    vote.voter_peer_id = member.peer_id;
+    vote.voter_public_key = member.public_key;
+    vote
+}
+
+fn signed_quorum_for(f: &Fixture, members: &[WorldMemberV1]) -> SignedHostingMigrationQuorumV2 {
+    let mut votes: Vec<_> = members.iter().map(|member| quorum_vote_for(f, member)).collect();
+    votes.sort_by_key(|vote| vote.voter_peer_id);
+    SignedHostingMigrationQuorumV2 {
+        format_version: HOSTING_REALM_FORMAT_VERSION_V2,
+        migration_proposal_hash: f.proposal.proposal_hash().unwrap(),
+        source_membership_hash: f.membership.record_hash().unwrap(),
+        votes,
+    }
+}
+
+fn check_quorum(f: &Fixture, cert: &SignedHostingMigrationQuorumV2) -> bool {
+    cert.verify_for_accepted_source(
+        &HostingMigrationSourceContextV2 {
+            genesis: &f.genesis,
+            config: &f.config,
+            current: &f.membership,
+            voter_set: HostingMigrationVoterSetV2::AcceptedStable,
+            initial_policy: &f.policy,
+            proposal: &f.proposal,
+        },
+        accepts_test_signatures,
+    )
+    .is_ok()
+}
+
+#[test]
+fn signed_v2_migration_quorum_requires_unique_authenticated_majority() {
+    let f = Fixture::new();
+    // Voter admission checks signed membership, not hosting eligibility.
+    let cert = signed_quorum_for(&f, &f.membership.members[..2]);
+    assert!(check_quorum(&f, &cert));
+    assert!(!check_quorum(&f, &signed_quorum_for(&f, &f.membership.members[..1])));
+
+    let mut bad = cert.clone();
+    bad.votes.push(bad.votes[0].clone());
+    assert!(!check_quorum(&f, &bad));
+    bad = cert.clone();
+    bad.votes.reverse();
+    assert!(!check_quorum(&f, &bad));
+    bad = cert.clone();
+    bad.format_version = 1;
+    assert!(!check_quorum(&f, &bad));
+    bad = cert.clone();
+    bad.source_membership_hash = Hash32([21; 32]);
+    assert!(!check_quorum(&f, &bad));
+    bad = cert.clone();
+    bad.migration_proposal_hash = Hash32([22; 32]);
+    assert!(!check_quorum(&f, &bad));
+    bad = cert.clone();
+    bad.votes[0].signature.clear();
+    assert!(!check_quorum(&f, &bad));
+    bad = cert.clone();
+    bad.votes[0].target_realm_id = f.genesis.world_id().unwrap();
+    assert!(!check_quorum(&f, &bad));
+    bad = cert.clone();
+    bad.votes[0].signature = vec![24; 64];
+    assert!(!check_quorum(&f, &bad));
+
+    // Signature rejection applies to V1 source history, not only V2 votes.
+    assert!(cert
+        .verify_for_accepted_source(
+            &HostingMigrationSourceContextV2 {
+                genesis: &f.genesis,
+                config: &f.config,
+                current: &f.membership,
+                voter_set: HostingMigrationVoterSetV2::AcceptedStable,
+                initial_policy: &f.policy,
+                proposal: &f.proposal,
+            },
+            reject_test_signatures,
+        )
+        .is_err());
+    let encoded = postcard::to_allocvec(&cert).unwrap();
+    assert_eq!(postcard::from_bytes::<SignedHostingMigrationQuorumV2>(&encoded).unwrap(), cert);
+}
+
+#[test]
+fn signed_v2_migration_quorum_rejects_missing_or_forged_source_membership() {
+    let f = Fixture::new();
+    let cert = signed_quorum_for(&f, &f.membership.members[..2]);
+    let mut membership = f.membership.clone();
+    membership.signature = vec![42; 64];
+    assert!(cert
+        .verify_for_accepted_source(
+            &HostingMigrationSourceContextV2 {
+                genesis: &f.genesis,
+                config: &f.config,
+                current: &membership,
+                voter_set: HostingMigrationVoterSetV2::AcceptedStable,
+                initial_policy: &f.policy,
+                proposal: &f.proposal,
+            },
+            accepts_test_signatures,
+        )
+        .is_err());
+    let mut config = f.config.clone();
+    config.signature.clear();
+    assert!(cert
+        .verify_for_accepted_source(
+            &HostingMigrationSourceContextV2 {
+                genesis: &f.genesis,
+                config: &config,
+                current: &f.membership,
+                voter_set: HostingMigrationVoterSetV2::AcceptedStable,
+                initial_policy: &f.policy,
+                proposal: &f.proposal,
+            },
+            accepts_test_signatures,
+        )
+        .is_err());
+
+    let mut prior = f.membership.clone();
+    prior.sequence = 2;
+    assert!(cert
+        .verify_for_accepted_source(
+            &HostingMigrationSourceContextV2 {
+                genesis: &f.genesis,
+                config: &f.config,
+                current: &f.membership,
+                voter_set: HostingMigrationVoterSetV2::PendingJoint { previous: &prior },
+                initial_policy: &f.policy,
+                proposal: &f.proposal,
+            },
+            accepts_test_signatures,
+        )
+        .is_err());
+
+    membership = f.membership.clone();
+    membership.members[0].public_key = [99; 32];
+    assert!(cert
+        .verify_for_accepted_source(
+            &HostingMigrationSourceContextV2 {
+                genesis: &f.genesis,
+                config: &f.config,
+                current: &membership,
+                voter_set: HostingMigrationVoterSetV2::AcceptedStable,
+                initial_policy: &f.policy,
+                proposal: &f.proposal,
+            },
+            accepts_test_signatures,
+        )
+        .is_err());
+}
+
+#[test]
+fn signed_v2_migration_quorum_rejects_banned_voters_and_unbounded_envelopes() {
+    let f = Fixture::new();
+    let mut cert = signed_quorum_for(&f, &f.membership.members[..2]);
+    cert.votes[0].voter_public_key = [42; 32];
+    assert!(!check_quorum(&f, &cert));
+    cert = signed_quorum_for(&f, &f.membership.members[..2]);
+    cert.votes[0].format_version = 1;
+    assert!(!check_quorum(&f, &cert));
+
+    // A certificate with more votes than the bounded protocol allows is
+    // rejected before expensive signature and canonical-source verification.
+    cert = signed_quorum_for(&f, &f.membership.members[..2]);
+    cert.votes = vec![cert.votes[0].clone(); MAX_HOSTING_MIGRATION_VOTES_V2 + 1];
+    assert!(!check_quorum(&f, &cert));
+    // Reject before allocating an arbitrary-sized Vec on the untrusted
+    // postcard input path, rather than relying on post-deserialize verify.
+    let oversized_bytes = postcard::to_allocvec(&cert).unwrap();
+    assert!(postcard::from_bytes::<SignedHostingMigrationQuorumV2>(&oversized_bytes).is_err());
+
+    // This source is deliberately noncanonical because the banned change
+    // is not signed again. Even under a permissive signature stub, a vote
+    // from a banned signer cannot become valid.
+    let mut membership = f.membership.clone();
+    membership.members[0].banned = true;
+    assert!(signed_quorum_for(&f, &f.membership.members[..2])
+        .verify_for_accepted_source(
+            &HostingMigrationSourceContextV2 {
+                genesis: &f.genesis,
+                config: &f.config,
+                current: &membership,
+                voter_set: HostingMigrationVoterSetV2::AcceptedStable,
+                initial_policy: &f.policy,
+                proposal: &f.proposal,
+            },
+            accepts_test_signatures,
+        )
+        .is_err());
+}
+
+#[test]
+fn v2_postcard_decode_rejects_oversized_and_missing_signature_bytes() {
+    let f = Fixture::new();
+    let vote = f.vote();
+    let valid_bytes = postcard::to_allocvec(&vote).unwrap();
+    assert_eq!(postcard::from_bytes::<SignedHostingMigrationVoteV2>(&valid_bytes).unwrap(), vote);
+
+    let mut invalid_vote = vote.clone();
+    invalid_vote.signature = vec![9; 4096];
+    let huge_vote = postcard::to_allocvec(&invalid_vote).unwrap();
+    assert!(postcard::from_bytes::<SignedHostingMigrationVoteV2>(&huge_vote).is_err());
+    invalid_vote.signature.clear();
+    let unsigned_vote = postcard::to_allocvec(&invalid_vote).unwrap();
+    assert!(postcard::from_bytes::<SignedHostingMigrationVoteV2>(&unsigned_vote).is_err());
+
+    let mut policy = f.policy.clone();
+    policy.signature = vec![7; 4096];
+    assert!(postcard::from_bytes::<SignedRealmHostingPolicyV2>(&postcard::to_allocvec(&policy).unwrap()).is_err());
+
+    let mut proposal = f.proposal.clone();
+    proposal.signature = vec![8; 4096];
+    assert!(
+        postcard::from_bytes::<SignedHostingMigrationProposalV2>(&postcard::to_allocvec(&proposal).unwrap()).is_err()
+    );
+
+    let mut action = f.action();
+    action.signature = vec![10; 4096];
+    assert!(postcard::from_bytes::<SignedHostingAuthorityActionV2>(&postcard::to_allocvec(&action).unwrap()).is_err());
 }

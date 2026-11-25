@@ -18,6 +18,7 @@ pub mod runtime_installer;
 pub mod runtime_layout;
 pub mod runtime_process_guard;
 pub mod server_mods;
+pub mod v2_migration_review;
 pub mod world_genesis;
 pub mod world_import;
 
