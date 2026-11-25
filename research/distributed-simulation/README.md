@@ -45,6 +45,16 @@ and link-partition cases freeze player-facing publication. The private
 lab protocol is not Minecraft; no production compatibility or regional
 authority is enabled.
 
+## Exclusive regional writers (#60, 2026-11-26)
+
+[Authority design and verification report](REGIONAL_AUTHORITY_REPORT.md):
+private SQLite canonical-cut ledger, one-time generation claims,
+exclusive region scopes and authenticated worker receipts. Two
+real overlapping-worker experiments, concurrent-process commit
+and reassignment races, pre/post-commit process kills, and fresh
+worker restart from the durable cut. This is a single trusted local
+serialization point, not independent quorum or production authority.
+
 ## Original R0 evidence (2026-11-08)
 
 

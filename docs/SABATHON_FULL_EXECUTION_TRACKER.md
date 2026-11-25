@@ -605,12 +605,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #60 — Expansion · Missing
 - Work: Bind every region to a single authorized writer and generation. Define the ownership of global game state
 - Acceptance: Region reassignment, overlap, and worker restart never produce two canonical writers for the same region. World-wide saves include a consistent accepted state
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (single trusted durable local reference authority; no distributed quorum, Minecraft or independent-host acceptance)
+- Source: [Regional authority report](../research/distributed-simulation/REGIONAL_AUTHORITY_REPORT.md); `regional_authority.py`, `authority_lab.py`, `verify_authority_evidence.py`, `test_regional_authority.py`; opt-in research worker mode in `network_lab.py`.
+- Evidence: Two live private-network runs with four concurrent region workers during reassignment, three generations per run, 18 accepted ticks and 34 full save observations matching the independent serial reference. Two rotation and two tick-publication process races each accept exactly one contender. Sixteen explicit overlap/stale/replay/restart refusals, four actual authority-writer SIGKILL injections before/after SQLite COMMIT, durable one-time generation claims including before tick one, old worker receipts rejected while old workers live, fresh worker restart from the exact accepted cut. All 58 research tests passed (14 new), 18 altered evidence cases refused; focused eight-tick prior network regression and kill/partition checks passed.
+- Remaining / next action: #61 durable client-controlled player/entity/inventory transitions and replay across regions and restart. The ledger is a single local serialization point with a trusted controller, not quorum-certified regional grants, Byzantine protection, full-database rollback detection, independent physical domains or real Minecraft authority. Production NO-GO retained.
+- External dependency: Reviewed compatible Minecraft runtime and actual game clients; durable independently certified regional grants and recovery protocol; field hosts and sustained gameplay evidence.
+- Commit: Add durable fenced reference regional authority and verify process races; see git history.
 
 ### #61 — Expansion · Missing
 - Work: Make player, entity, and inventory transitions durable across regions, including block and global interactions in the supported ruleset
@@ -754,4 +754,4 @@ Initial full-item implementation/acceptance totals: not yet established by item-
 - Private replication uses the current signed membership with a matching descriptor and rechecks the exact authenticated recipient before normal payload, manifest acknowledgement and every blob chunk. A half-installed signed roster denies data instead of trusting an obsolete descriptor. Removed local recipients also refuse normal snapshot bytes. Ordinary unauthorized world requests receive a generic refusal.
 - Evidence: strict CLI/storage Clippy, 51 daemon/CLI binary tests, 67 storage tests (1 optional soak ignored), and actual authenticated invite/leave/replication test passed (19.73s). A reusable grant admitted a third peer; revocation left committed membership intact; joint leave committed; a real network probe authenticated as the removed member received status/history refusal and no newer manifest/blob payload while the remaining member verified a new checkpoint. The old device retained its old verified save. Prior commit 8653c2d required CI completed successfully (run 45585530110). Broader local CLI validation underway; UI and field acceptance remain.
 
-Latest actionable continuation after #59: #60 exclusive regional writer/generation and global-state ownership research, without production regional activation. The independent physical, compatibility and canonical recovery gates above remain open.
+Latest actionable continuation after #60: #61 durable cross-region player/entity/inventory transactions and restart, without production regional activation. The independent quorum, physical, compatibility and canonical recovery gates above remain open.

@@ -59,7 +59,7 @@ def cpu_plan():
     return cpus[0], cpus[1:5], available
 
 
-def worker_main():
+def worker_main(fenced=False):
     # This entrypoint is deliberately usable only in a private mapped
     # namespace built by this harness. The session secret travels on stdin,
     # never in process arguments or retained evidence.
@@ -88,7 +88,11 @@ def worker_main():
         require(peer[0] == bind[:-1] + "1", "unexpected lab coordinator")
     with sock:
         channel = Channel(sock, key, coordinator=False)
-        worker = Worker()
+        if fenced:
+            from regional_authority import FencedWorker
+            worker = FencedWorker()
+        else:
+            worker = Worker()
         while True:
             try:
                 request = channel.recv(time.monotonic() + 12)
@@ -434,6 +438,7 @@ def run(args, report):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--fenced-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--ticks", type=int, default=32)
     parser.add_argument("--repeats", type=int, default=2)
@@ -441,8 +446,9 @@ def main():
     parser.add_argument("--profiles", default="local,near,wan")
     parser.add_argument("--scenarios", default="spread:8192,spread:16384,clustered:8192,boundary:8192")
     args = parser.parse_args()
-    if args.worker:
-        worker_main()
+    if args.worker or args.fenced_worker:
+        require(not (args.worker and args.fenced_worker), "ambiguous worker mode")
+        worker_main(args.fenced_worker)
         return
     require(args.output is not None and integer(args.ticks, 1, 512) and integer(args.repeats, 1, 5),
             "bounded ticks/repeats and a new output file required")
