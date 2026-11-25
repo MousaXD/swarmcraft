@@ -2,8 +2,25 @@ use crate::{
     transaction::{canonical_file_exists, durable_atomic_write, durable_remove, read_canonical_file},
     Storage, StorageError,
 };
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use swarm_protocol::{Hash32, JoinRequestV1, LeaveRequestV1, MembershipRecordV1, WorldDescriptorV1, WorldId};
+use swarm_protocol::{Hash32, JoinRequestV1, LeaveRequestV1, MembershipRecordV1, PeerId, WorldDescriptorV1, WorldId};
+
+/// Local diagnostic only. Never a membership or authorization record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JoinDenialReason {
+    Revoked,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PendingJoinDenial {
+    world: WorldId,
+    issuer: PeerId,
+    invite_hash: Hash32,
+    request_nonce: [u8; 32],
+    reason: JoinDenialReason,
+}
 
 impl Storage {
     pub fn save_world_descriptor(&self, descriptor: &WorldDescriptorV1) -> Result<(), StorageError> {
@@ -238,8 +255,58 @@ impl Storage {
         Ok(request)
     }
 
+    /// Only the caller's connection-authenticated, request-correlated reply
+    /// may be recorded. A concurrent replacement or completion is inert.
+    pub fn record_pending_join_denial(
+        &self,
+        world: WorldId,
+        issuer: PeerId,
+        invite_hash: Hash32,
+        request_nonce: [u8; 32],
+        reason: JoinDenialReason,
+    ) -> Result<bool, StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
+        let pending = match self.load_pending_join(world) {
+            Ok(pending) => pending,
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if pending.invite.inviter_peer_id != issuer
+            || pending.invite.record_hash()? != invite_hash
+            || pending.nonce != request_nonce
+        {
+            return Ok(false);
+        }
+        let record = PendingJoinDenial { world, issuer, invite_hash, request_nonce, reason };
+        let path = self.world_protocol_path(world, "pending-join-denial.postcard");
+        let bytes = postcard::to_allocvec(&record)?;
+        if canonical_file_exists(&path)? && read_canonical_file(&path)? == bytes {
+            return Ok(true);
+        }
+        durable_atomic_write(&path, &bytes)?;
+        Ok(true)
+    }
+
+    pub fn pending_join_denial(&self, request: &JoinRequestV1) -> Result<Option<JoinDenialReason>, StorageError> {
+        let path = self.world_protocol_path(request.world_id, "pending-join-denial.postcard");
+        if !canonical_file_exists(&path)? {
+            return Ok(None);
+        }
+        let bytes = read_canonical_file(&path)?;
+        let record: PendingJoinDenial = postcard::from_bytes(&bytes)?;
+        if postcard::to_allocvec(&record)? != bytes {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok((record.world == request.world_id
+            && record.issuer == request.invite.inviter_peer_id
+            && record.invite_hash == request.invite.record_hash()?
+            && record.request_nonce == request.nonce)
+            .then_some(record.reason))
+    }
+
     pub fn clear_pending_join(&self, world: WorldId) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(world)?;
+        remove_protocol_file(self, world, "pending-join-denial.postcard")?;
         remove_protocol_file(self, world, "pending-join.postcard")
     }
 
@@ -265,6 +332,7 @@ impl Storage {
             &self.world_protocol_path(world, "completed-join.postcard"),
             &postcard::to_allocvec(&request)?,
         )?;
+        remove_protocol_file(self, world, "pending-join-denial.postcard")?;
         remove_protocol_file(self, world, "pending-join.postcard")
     }
 
@@ -311,6 +379,7 @@ impl Storage {
             "membership-promise.postcard",
             "membership-certificate.postcard",
             "pending-join.postcard",
+            "pending-join-denial.postcard",
             "completed-join.postcard",
             "pending-leave.postcard",
         ] {

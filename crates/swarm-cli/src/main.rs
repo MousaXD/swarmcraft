@@ -561,6 +561,15 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                     });
                     if committed {
                         println!("Membership: committed admission; local synchronization pending");
+                    } else if let Some(reason) = storage.pending_join_denial(&request)? {
+                        use swarm_storage::world::JoinDenialReason;
+                        println!(
+                            "Membership: pending; issuer reported {}",
+                            match reason {
+                                JoinDenialReason::Revoked => "invitation revoked",
+                                JoinDenialReason::Expired => "invitation expired",
+                            }
+                        );
                     } else if invite::validate_invite_expiry(request.invite.expires_unix_ms, invite::unix_time_ms()?)
                         .is_err()
                     {

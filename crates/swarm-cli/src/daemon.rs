@@ -56,8 +56,9 @@ use swarm_protocol::{
     SnapshotManifestV1, TransferPhase, WorldDescriptorV1, WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{
-    control::StaleReplayAnchorV1, stale_replay::StaleReplayDownload, DurableMembershipPromiseV1,
-    DurableRecoveryPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage, StorageError,
+    control::StaleReplayAnchorV1, stale_replay::StaleReplayDownload, world::JoinDenialReason,
+    DurableMembershipPromiseV1, DurableRecoveryPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage,
+    StorageError,
 };
 use tokio::time::MissedTickBehavior;
 use tokio::{
@@ -159,6 +160,7 @@ enum OutboundContext {
     BlobChunk { world: WorldId, snapshot_number: u64, hash: Hash32, next_offset: u64, finished: bool },
     Lease { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
     RecoveryBallot { world: WorldId, peer: PeerId, ballot_hash: Hash32 },
+    Join { world: WorldId, peer: PeerId, invite_hash: Hash32, nonce: [u8; 32] },
     MembershipProposal { world: WorldId, peer: PeerId, proposal_hash: Hash32 },
     MembershipCommit { world: WorldId, peer: PeerId, sequence: u64 },
     Epoch { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
@@ -579,7 +581,7 @@ pub async fn run(
                 }
                 for (transport, peer) in &leases.authenticated_peers {
                     if node.application_peer(transport) == Some(*peer) {
-                        if let Err(error) = push_pending_membership_requests(storage, &mut node, transport, *peer) {
+                        if let Err(error) = push_pending_membership_requests(storage, &mut node, transport, *peer, &mut outbound) {
                             warn!(%peer, %error, "pending membership delivery deferred");
                         }
                     }
@@ -725,7 +727,7 @@ pub async fn run(
                     NetworkEvent::Authenticated { transport_peer, application_peer } => {
                         leases.authenticated_peers.insert(transport_peer, application_peer);
                         info!(transport = %transport_peer, peer = %application_peer, "peer authenticated");
-                        push_pending_membership_requests(storage, &mut node, &transport_peer, application_peer)?;
+                        push_pending_membership_requests(storage, &mut node, &transport_peer, application_peer, &mut outbound)?;
                         push_known_worlds(
                             storage,
                             &mut node,
@@ -767,7 +769,7 @@ pub async fn run(
                         }
                         if let WireRequest::HistoricalReplayProof { world_id } = &request {
                             let world = *world_id;
-                            let accepted = authorize_member(storage, world, application_peer).is_ok()
+                            let accepted = authorize_committed_member(storage, world, application_peer).is_ok()
                                 && storage.load_epoch_record(world).is_ok_and(|epoch| {
                                     epoch.authority_peer_id == identity.peer_id()
                                         && epoch.authority_public_key == identity.public_key()
@@ -870,6 +872,7 @@ pub async fn run(
                                     &mut node,
                                     &transport_peer,
                                     application_peer,
+                                    &mut outbound,
                                 )?;
                                 push_known_worlds(
                                     storage,
@@ -970,7 +973,7 @@ pub async fn run(
                                 OutboundContext::MembershipProposal { world, peer, .. } => {
                                     leases.membership_votes.remove(&(world, peer));
                                 }
-                                OutboundContext::MembershipCommit { .. } => {}
+                                OutboundContext::Join { .. } | OutboundContext::MembershipCommit { .. } => {}
                                 OutboundContext::Epoch { world, peer, .. } => {
                                     leases.epoch_acks.remove(&(world, peer));
                                 }
@@ -1864,6 +1867,10 @@ fn replicate_exact_checkpoint(
     let now = Instant::now();
     for member in descriptor.members.iter().filter(|member| !member.banned && member.peer_id != source) {
         let peer = member.peer_id;
+        if authorize_committed_member(storage, world, peer).is_err() {
+            all_replicated = false;
+            continue;
+        }
         if checkpoint_acknowledged(runtime, world, expected_hash, peer) {
             continue;
         }
@@ -3120,6 +3127,7 @@ fn clear_replay_runtime(runtime: &mut LeaseRuntime, outbound: &mut HashMap<Strin
             | OutboundContext::BlobChunk { world, .. }
             | OutboundContext::Lease { world, .. }
             | OutboundContext::RecoveryBallot { world, .. }
+            | OutboundContext::Join { world, .. }
             | OutboundContext::MembershipProposal { world, .. }
             | OutboundContext::MembershipCommit { world, .. }
             | OutboundContext::Epoch { world, .. }
@@ -3375,6 +3383,7 @@ fn push_pending_membership_requests(
     node: &mut SwarmNode,
     transport_peer: &TransportPeerId,
     application_peer: PeerId,
+    outbound: &mut HashMap<String, OutboundContext>,
 ) -> Result<()> {
     for metadata in storage.list_worlds()? {
         if let Ok(join) = storage.load_pending_join(metadata.world_id) {
@@ -3383,7 +3392,16 @@ fn push_pending_membership_requests(
                 && verify_invite_signature(&join.invite).is_ok()
                 && crate::invite::validate_invite_expiry(join.invite.expires_unix_ms, unix_millis()?).is_ok()
             {
-                node.send_request(transport_peer, WireRequest::JoinRequest(Box::new(join)))?;
+                let world = join.world_id;
+                let invite_hash = join.invite.record_hash()?;
+                let nonce = join.nonce;
+                if !outbound.values().any(|context| matches!(context,
+                    OutboundContext::Join { world: pending_world, peer, invite_hash: pending_hash, nonce: pending_nonce }
+                        if *pending_world == world && *peer == application_peer && *pending_hash == invite_hash && *pending_nonce == nonce))
+                {
+                    let id = node.send_request(transport_peer, WireRequest::JoinRequest(Box::new(join)))?;
+                    outbound.insert(request_key(&id), OutboundContext::Join { world, peer: application_peer, invite_hash, nonce });
+                }
             }
         }
         if let Ok(leave) = storage.load_pending_leave(metadata.world_id) {
@@ -4077,6 +4095,11 @@ fn push_committed_world_payload(
     outbound: &mut HashMap<String, OutboundContext>,
     include_membership: bool,
 ) -> Result<()> {
+    if node.application_peer(transport_peer) != Some(application_peer)
+        || authorize_committed_member(storage, world, application_peer).is_err()
+    {
+        return Ok(());
+    }
     let genesis_bootstrap = genesis_bootstrap_base(storage, world)?.is_some();
     if let Ok(config) = storage.load_world_config(world) {
         node.send_request(transport_peer, WireRequest::WorldConfig(Box::new(config)))?;
@@ -4193,8 +4216,8 @@ fn drive_genesis_catchup(
         return Ok(());
     }
     let descriptor = storage.load_world_descriptor(world)?;
-    authorized_descriptor_member(&descriptor, peer)?;
-    authorized_descriptor_member(&descriptor, context.identity.peer_id())?;
+    authorize_committed_member(storage, world, peer)?;
+    authorize_committed_member(storage, world, context.identity.peer_id())?;
     // Healthy peers already at a later head of the initial generation
     // need no history scan. This is only a no-send optimization; it cannot
     // create a receipt or satisfy a transfer/authority gate.
@@ -4327,7 +4350,19 @@ fn handle_request(
             if storage.crash_retirement_pending(world_id)? {
                 bail!("certified crash retirement fences ordinary world RPCs");
             }
-            authorize_member(storage, world_id, application_peer)?;
+            if let Err(error) = authorize_member(storage, world_id, application_peer) {
+                tracing::debug!(world = %world_id, peer = %application_peer, %error, "world RPC access denied");
+                // Identical refusal for absent worlds, removed/banned peers
+                // and ambiguous local metadata; no existence oracle.
+                node.respond(
+                    channel,
+                    WireResponse::Error {
+                        code: "WORLD_ACCESS_DENIED".into(),
+                        message: "World access unavailable".into(),
+                    },
+                )?;
+                return Ok(());
+            }
             let awaiting_join = awaiting_committed_join(storage, world_id)?;
             let replay_required = requires_historical_replay(storage, world_id)?;
             if matches!(
@@ -4384,8 +4419,6 @@ fn handle_request(
             }
             verify_join_request_signature(&request)?;
             verify_invite_signature(&request.invite)?;
-            crate::invite::validate_invite_expiry(request.invite.expires_unix_ms, unix_millis()?)
-                .context("join invite lifetime is invalid")?;
             let world = request.world_id;
             let metadata = storage.load_world(world)?;
             if request.invite.genesis.world_id()? != world
@@ -4434,7 +4467,25 @@ fn handle_request(
                 return Ok(());
             }
             if storage.is_invite_revoked(&request.invite)? {
-                return Err(StorageError::InviteRevoked.into());
+                warn!(%world, peer = %application_peer, "invite revoked by its issuer");
+                node.respond(
+                    channel,
+                    WireResponse::Error {
+                        code: "INVITE_REVOKED".into(),
+                        message: "Invitation revoked by issuer".into(),
+                    },
+                )?;
+                return Ok(());
+            }
+            if crate::invite::validate_invite_expiry(request.invite.expires_unix_ms, unix_millis()?).is_err() {
+                node.respond(
+                    channel,
+                    WireResponse::Error {
+                        code: "INVITE_EXPIRED".into(),
+                        message: "Invitation expired or invalid lifetime".into(),
+                    },
+                )?;
+                return Ok(());
             }
             if let Some(promise) = load_optional_membership_promise(storage, world)? {
                 let proposed_member = promise
@@ -4485,11 +4536,19 @@ fn handle_request(
             validate_membership_proposal_shape(&proposal)?;
             let wire_request = membership_proposal_request(storage, &proposal, application_peer)?;
             let vote = sign_membership_vote(identity, &proposal)?;
-            match storage.promise_join_membership_proposal(&proposal, &vote, &request)? {
-                MembershipPromiseResult::Accepted | MembershipPromiseResult::Idempotent => {}
-                MembershipPromiseResult::Rejected => {
+            match storage.promise_join_membership_proposal(&proposal, &vote, &request) {
+                Ok(MembershipPromiseResult::Accepted | MembershipPromiseResult::Idempotent) => {}
+                Ok(MembershipPromiseResult::Rejected) => {
                     return Err(anyhow!("membership proposal conflicts with a durable prepare"))
                 }
+                Err(error @ (StorageError::InviteRevoked | StorageError::InviteExpired)) => {
+                    let code =
+                        if matches!(error, StorageError::InviteRevoked) { "INVITE_REVOKED" } else { "INVITE_EXPIRED" };
+                    warn!(%world, peer = %application_peer, %error, "fresh join prepare denied");
+                    node.respond(channel, WireResponse::Error { code: code.into(), message: error.to_string() })?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
             }
             state.leases.membership_votes.insert((world, identity.peer_id()), vote);
             clear_permit(context.paths, world)?;
@@ -4699,6 +4758,8 @@ fn handle_request(
             }
         }
         WireRequest::SnapshotManifest(manifest) => {
+            authorize_committed_member(storage, manifest.world_id, identity.peer_id())?;
+
             if state.leases.historical_inbound.contains_key(&manifest.world_id) {
                 bail!("ordinary manifest cannot replace an active historical negotiation");
             }
@@ -4766,7 +4827,8 @@ fn handle_request(
             } else if state.leases.historical_inbound.contains_key(&world_id) {
                 bail!("historical chunk arrived after replay publication");
             } else {
-                authorize_member(storage, world_id, application_peer)?;
+                authorize_committed_member(storage, world_id, application_peer)?;
+                authorize_committed_member(storage, world_id, identity.peer_id())?;
             }
             let descriptor =
                 find_descriptor(manifest, hash).context("blob hash is not referenced by negotiated manifest")?;
@@ -5351,12 +5413,32 @@ fn handle_response(
     let storage = handler.storage;
     let now = Instant::now();
     match (context, response) {
+        (Some(OutboundContext::Join { world, peer, invite_hash, nonce }), WireResponse::Error { code, .. }) => {
+            if runtime.authenticated_peers.get(transport_peer) == Some(&peer)
+                && node.application_peer(transport_peer) == Some(peer)
+            {
+                let reason = match code.as_str() {
+                    "INVITE_REVOKED" => Some(JoinDenialReason::Revoked),
+                    "INVITE_EXPIRED" => Some(JoinDenialReason::Expired),
+                    _ => None,
+                };
+                if let Some(reason) = reason {
+                    if let Err(error) = storage.record_pending_join_denial(world, peer, invite_hash, nonce, reason) {
+                        warn!(%world, %error, "could not record authenticated invite denial");
+                    }
+                }
+            }
+        }
         (
             Some(OutboundContext::Manifest { world, transport, snapshot_number, historical_membership }),
             WireResponse::ManifestAccepted { snapshot_number: accepted, missing },
         ) => {
             if accepted != snapshot_number || transport != *transport_peer {
                 return Err(anyhow!("manifest response snapshot number mismatch"));
+            }
+            if !private_replication_recipient(storage, node, transport_peer, world) {
+                runtime.replications.remove(&(*transport_peer, world));
+                return Ok(());
             }
             if let Some(membership_hash) = historical_membership {
                 if !historical_send_is_authorized(storage, node, transport_peer, world, membership_hash) {
@@ -5458,6 +5540,13 @@ fn handle_response(
             WireResponse::LeaseAccepted { epoch, fencing_token },
         ) => {
             validate_generation_response(generation, epoch, fencing_token, "lease")?;
+            if runtime.authenticated_peers.get(transport_peer) != Some(&peer)
+                || node.application_peer(transport_peer) != Some(peer)
+                || authorize_committed_member(storage, world, peer).is_err()
+            {
+                runtime.lease_acks.remove(&(world, peer));
+                return Ok(());
+            }
             runtime.lease_acks.insert((world, peer), LeaseAck { generation, observed_at: now });
             if let Ok(epoch_record) = storage.load_epoch_record(world) {
                 if epoch_record.mode != EpochMode::Solo
@@ -6407,10 +6496,39 @@ fn authorized_descriptor_member(
     Ok(member)
 }
 
-fn authorize_member(storage: &Storage, world: WorldId, peer: PeerId) -> Result<()> {
+fn authorize_committed_member(storage: &Storage, world: WorldId, peer: PeerId) -> Result<()> {
+    let membership = storage.load_membership_record(world)?;
+    verify_membership_signature(&membership)?;
     let descriptor = storage.load_world_descriptor(world)?;
+    if descriptor.members != membership.members {
+        bail!("descriptor and accepted signed membership disagree");
+    }
     authorized_descriptor_member(&descriptor, peer)?;
     Ok(())
+}
+
+fn authorize_member(storage: &Storage, world: WorldId, peer: PeerId) -> Result<()> {
+    // The inviter's descriptor is a routing anchor before committed
+    // admission, not permission to serve private snapshots. Outgoing
+    // canonical payloads always use authorize_committed_member.
+    match storage.load_membership_record(world) {
+        Ok(_) => authorize_committed_member(storage, world, peer),
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            let descriptor = storage.load_world_descriptor(world)?;
+            authorized_descriptor_member(&descriptor, peer)?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn private_replication_recipient(
+    storage: &Storage,
+    node: &SwarmNode,
+    transport: &TransportPeerId,
+    world: WorldId,
+) -> bool {
+    node.application_peer(transport).is_some_and(|peer| authorize_committed_member(storage, world, peer).is_ok())
 }
 
 fn finalize_and_ack(
@@ -6510,7 +6628,10 @@ fn send_next_replication_chunk(
     now: Instant,
 ) -> Result<()> {
     let key = (*transport_peer, world);
-    if storage.stale_publication_pending(world)? || storage.crash_retirement_pending(world)? {
+    if storage.stale_publication_pending(world)?
+        || storage.crash_retirement_pending(world)?
+        || !private_replication_recipient(storage, node, transport_peer, world)
+    {
         runtime.replications.remove(&key);
         return Ok(());
     }

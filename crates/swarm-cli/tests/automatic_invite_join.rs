@@ -151,17 +151,23 @@ fn revoked_invite_is_denied_by_restarted_issuer_while_another_grant_works() {
             .spawn()
             .unwrap(),
     );
-    let _denied_daemon = spawn_daemon(&denied, local_ip);
-    let _allowed_daemon = spawn_daemon(&allowed, local_ip);
+    let denied_daemon = spawn_daemon(&denied, local_ip);
+    let allowed_daemon = spawn_daemon(&allowed, local_ip);
     assert!(run_cli(&denied, &["world", "join", &old_token]).contains("Join request staged"));
     wait_until("authenticated revocation denial", Duration::from_secs(30), || {
         fs::read_to_string(&logs).is_ok_and(|log| log.contains("invite revoked by its issuer"))
+            && denied.storage.load_pending_join(world).is_ok_and(|request| {
+                denied.storage.pending_join_denial(&request).ok().flatten()
+                    == Some(swarm_storage::world::JoinDenialReason::Revoked)
+            })
     });
     assert_eq!(issuer.storage.load_membership_record(world).unwrap(), initial);
     assert!(issuer.storage.load_membership_promise(world).is_err());
     assert!(denied.storage.load_membership_record(world).is_err());
     assert!(denied.storage.latest_snapshot(world).unwrap().is_none());
-    assert!(run_cli(&denied, &["world", "status", &world_arg]).contains("Membership: pending"));
+    drop(denied_daemon);
+    assert!(run_cli(&denied, &["world", "status", &world_arg])
+        .contains("Membership: pending; issuer reported invitation revoked"));
     assert!(run_cli(&allowed, &["world", "join", &new_token]).contains("Join request staged"));
     wait_until("fresh grant commits and replicates", Duration::from_secs(30), || {
         let Ok(current) = issuer.storage.load_membership_record(world) else {
@@ -175,6 +181,115 @@ fn revoked_invite_is_denied_by_restarted_issuer_while_another_grant_works() {
     });
     assert!(denied.storage.load_membership_record(world).is_err());
     assert!(denied.storage.latest_snapshot(world).unwrap().is_none());
+
+    let survivor = peer_fixture();
+    let _survivor_daemon = spawn_daemon(&survivor, local_ip);
+    let head = issuer.storage.latest_snapshot(world).unwrap().unwrap();
+    let epoch = issuer.storage.load_epoch_record(world).unwrap();
+    // A reusable, unrevoked token can admit another distinct peer.
+    assert!(run_cli(&survivor, &["world", "join", &new_token]).contains("Join request staged"));
+    wait_until("second admission and complete replicas", Duration::from_secs(45), || {
+        let Ok(current) = issuer.storage.load_membership_record(world) else { return false };
+        current.sequence == initial.sequence + 2
+            && [&allowed, &survivor].iter().all(|peer| {
+                peer.storage.load_membership_record(world).ok().as_ref() == Some(&current)
+                    && peer.storage.load_epoch_record(world).ok().as_ref() == Some(&epoch)
+                    && peer.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&head)
+            })
+            && issuer.storage.load_membership_promise(world).is_err()
+    });
+    let before_leave = issuer.storage.load_membership_record(world).unwrap();
+    assert!(run_cli(&issuer, &["invite", "revoke", &new_token]).contains(" revoked"));
+    assert_eq!(issuer.storage.load_membership_record(world).unwrap(), before_leave);
+    assert!(run_cli(&allowed, &["world", "leave", &world_arg]).contains("Leave request"));
+    wait_until("signed joint leave committed at all three members", Duration::from_secs(45), || {
+        let Ok(current) = issuer.storage.load_membership_record(world) else { return false };
+        current.sequence == before_leave.sequence + 1
+            && !current.members.iter().any(|member| member.peer_id == allowed.identity.peer_id())
+            && [&allowed, &survivor]
+                .iter()
+                .all(|peer| peer.storage.load_membership_record(world).ok().as_ref() == Some(&current))
+            && issuer.storage.load_membership_promise(world).is_err()
+    });
+    drop(allowed_daemon);
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("level.dat"), b"private checkpoint created after removal").unwrap();
+    let mut next = issuer
+        .storage
+        .snapshot_directory(
+            source.path(),
+            SnapshotContext {
+                world,
+                snapshot_number: head.snapshot_number + 1,
+                sequence: head.sequence + 1,
+                epoch: epoch.epoch_number,
+                previous_snapshot_hash: Some(head.manifest_hash().unwrap()),
+                authority_peer_id: issuer.identity.peer_id(),
+                authority_public_key: issuer.identity.public_key(),
+            },
+        )
+        .unwrap();
+    issuer.identity.sign_snapshot(&mut next).unwrap();
+    issuer.storage.commit_snapshot(&next).unwrap();
+    let next_manifest = next.manifest().clone();
+
+    // Connect with the removed device's actual application identity. Probe
+    // both private metadata and historical replay; observe the wire
+    // refusals, not just an absence of new bytes on disk. Continue polling
+    // until an authorized current replica has verified the new checkpoint.
+    use swarm_network::{NetworkEvent, SwarmNode, WireRequest, WireResponse};
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let key = load_or_create_transport_key(&allowed.paths.transport_key()).unwrap();
+        let hello = allowed.identity.signed_peer_hello(vec!["snapshot-replication-v1".into()]).unwrap();
+        let mut probe = SwarmNode::new(key, hello, allowed.identity.network_signing_key()).unwrap();
+        probe.listen(format!("/ip4/{local_ip}/udp/{}/quic-v1", allowed.port).parse().unwrap()).unwrap();
+        probe.dial(address.parse().unwrap()).unwrap();
+        let mut status_request = None;
+        let mut replay_request = None;
+        let mut status_denied = false;
+        let mut replay_denied = false;
+        tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                tokio::select! {
+                    event = probe.next_event() => {
+                        match event.unwrap() {
+                            NetworkEvent::Authenticated { transport_peer, application_peer } if application_peer == issuer.identity.peer_id() => {
+                                status_request = Some(probe.send_request(&transport_peer, WireRequest::WorldStatus { world_id: world }).unwrap());
+                                replay_request = Some(probe.send_request(&transport_peer, WireRequest::HistoricalReplayProof { world_id: world }).unwrap());
+                            }
+                            NetworkEvent::Response { transport_peer, request_id, response } if probe.application_peer(&transport_peer) == Some(issuer.identity.peer_id()) => {
+                                if Some(request_id) == status_request {
+                                    assert!(matches!(response, WireResponse::Error { code, .. } if code == "WORLD_ACCESS_DENIED"));
+                                    status_denied = true;
+                                } else if Some(request_id) == replay_request {
+                                    assert!(matches!(response, WireResponse::HistoricalReplayProof(None)));
+                                    replay_denied = true;
+                                }
+                            }
+                            NetworkEvent::InboundRequest { request, channel, .. } => {
+                                assert!(!matches!(&request, WireRequest::SnapshotManifest(manifest) if manifest.world_id == world && manifest.snapshot_number > head.snapshot_number));
+                                assert!(!matches!(&request, WireRequest::HistoricalReplayOffer { world_id, .. } if *world_id == world));
+                                assert!(!matches!(&request, WireRequest::BlobChunk { world_id, .. } if *world_id == world));
+                                // The removed peer may still receive its signed
+                                // membership removal certificate for convergence.
+                                let _ = probe.respond(channel, WireResponse::Error { code: "TEST_PROBE".into(), message: "probe has no active replica".into() });
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
+                if status_denied && replay_denied && survivor.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&next_manifest)
+                    && survivor.storage.verify_snapshot(&next_manifest).is_ok()
+                {
+                    break;
+                }
+            }
+        }).await.expect("removed identity denied while current replica obtains new save");
+    });
+    assert_eq!(allowed.storage.latest_snapshot(world).unwrap().unwrap(), head);
+    assert!(allowed.storage.verify_snapshot(&head).is_ok());
 }
 
 #[test]

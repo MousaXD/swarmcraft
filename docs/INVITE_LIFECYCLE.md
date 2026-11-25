@@ -39,14 +39,25 @@ to use that existing membership.
 signed approval, expired pending invitations, and committed admission
 with local synchronization still pending. The accepted signed membership
 and complete verified checkpoint determine whether ordinary world
-synchronization is available. A staged request cannot fetch private saves.
+synchronization is available. A staged request cannot fetch private saves. The daemon records a revoked
+or expired denial only when the response belongs to the exact outstanding
+signed join request and the connection is authenticated as its issuer.
+The persisted response is diagnostic, not proof of admission or a new
+membership record. A late response for a different request is ignored.
+Committed membership takes precedence over the diagnostic.
 
 ## Removal and retained data
 
 Token revocation does **not** remove a committed member. Membership
 changes require the established signed membership protocol. Current
-replicas must authorize new private checkpoint requests against the
-accepted membership. Existing copies on an offline or removed device
+replicas authorize new private checkpoint requests against the
+accepted signed membership and matching descriptor. They recheck
+authenticated membership before new manifest delivery, after manifest
+acknowledgement, and before every new blob chunk. A signed membership
+commit whose descriptor update has not yet completed denies private
+replication rather than trusting the stale descriptor. Removed peers
+receive a generic access refusal and may still receive the removal
+certificate itself. Existing copies on an offline or removed device
 cannot be remotely erased, and data already disclosed cannot be made
 secret again. A stale partition cannot immediately know about a newer
 membership decision. Do not describe this system as remote data deletion
@@ -61,6 +72,11 @@ need a versioned signed token, durable consumption coordinated with
 membership preparation, and explicit legacy/migration behavior. Do not
 introduce a client-only one-use checkbox.
 
-The current CLI revocation and inspection paths have local process and
-durability tests. Dedicated Desktop management and a live removed-member
-replication test are tracked separately as remaining acceptance.
+The CLI revocation, inspection, and denial feedback paths have local
+process and durability tests. The authenticated process regression also
+exercises reuse of a valid grant, revocation without removing existing
+members, an actual joint-consensus leave, removal followed by a new
+checkpoint, explicit private status/history denial to the removed
+identity, and successful replication to the surviving member. The
+removed device retains its verified old bytes. Dedicated Desktop
+management and independently networked field validation remain.

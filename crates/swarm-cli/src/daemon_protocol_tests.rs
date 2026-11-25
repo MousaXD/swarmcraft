@@ -169,6 +169,84 @@ fn signed_join(
 }
 
 #[test]
+fn join_denial_is_diagnostic_and_bound_to_the_exact_request() {
+    let fixture = fixture();
+    let (request, _, _) = signed_join(&fixture, unix_millis().unwrap() + 60_000);
+    let storage = &fixture.storage;
+    storage.save_pending_join(&request).unwrap();
+    let hash = request.invite.record_hash().unwrap();
+    let issuer = request.invite.inviter_peer_id;
+    assert!(!storage
+        .record_pending_join_denial(
+            fixture.world,
+            fixture.member.peer_id(),
+            hash,
+            request.nonce,
+            JoinDenialReason::Revoked
+        )
+        .unwrap());
+    assert!(!storage
+        .record_pending_join_denial(fixture.world, issuer, Hash32([1; 32]), request.nonce, JoinDenialReason::Revoked)
+        .unwrap());
+    assert!(!storage
+        .record_pending_join_denial(fixture.world, issuer, hash, [1; 32], JoinDenialReason::Revoked)
+        .unwrap());
+    assert_eq!(storage.pending_join_denial(&request).unwrap(), None);
+    assert!(storage
+        .record_pending_join_denial(fixture.world, issuer, hash, request.nonce, JoinDenialReason::Revoked)
+        .unwrap());
+    let reopened = Storage::open(fixture._temp.path()).unwrap();
+    assert_eq!(reopened.pending_join_denial(&request).unwrap(), Some(JoinDenialReason::Revoked));
+    assert_eq!(reopened.load_pending_join(fixture.world).unwrap(), request);
+    let mut replacement = request.clone();
+    replacement.nonce = [2; 32];
+    reopened.save_pending_join(&replacement).unwrap();
+    assert_eq!(reopened.pending_join_denial(&replacement).unwrap(), None);
+    assert!(!reopened
+        .record_pending_join_denial(fixture.world, issuer, hash, request.nonce, JoinDenialReason::Revoked)
+        .unwrap());
+    reopened.clear_pending_join(fixture.world).unwrap();
+    assert!(!reopened
+        .record_pending_join_denial(fixture.world, issuer, hash, replacement.nonce, JoinDenialReason::Revoked)
+        .unwrap());
+}
+
+#[test]
+fn removed_peer_cannot_be_authorized_by_a_stale_descriptor() {
+    let fixture = fixture();
+    let storage = &fixture.storage;
+    let world = fixture.world;
+    let peer = fixture.member.peer_id();
+    assert!(authorize_committed_member(storage, world, peer).is_ok());
+    let previous = storage.load_membership_record(world).unwrap();
+    let mut proposed = previous.clone();
+    proposed.sequence += 1;
+    proposed.previous_membership_hash = Some(previous.record_hash().unwrap());
+    proposed.members.retain(|member| member.peer_id != peer);
+    fixture.authority.sign_membership(&mut proposed).unwrap();
+    let proposal = MembershipProposalV1 { previous, proposed: proposed.clone() };
+    let certificate = MembershipCertificateV1 {
+        votes: vec![
+            sign_membership_vote(&fixture.authority, &proposal).unwrap(),
+            sign_membership_vote(&fixture.member, &proposal).unwrap(),
+        ],
+        proposal,
+    };
+    validate_membership_certificate_signatures(&certificate).unwrap();
+    storage.save_membership_certificate(&certificate).unwrap();
+    // Simulate the durable membership write winning the race with the
+    // descriptor update. Even the stale descriptor cannot grant access.
+    storage.save_membership_record(&proposed).unwrap();
+    assert!(storage.load_world_descriptor(world).unwrap().member(peer).is_some());
+    assert!(authorize_member(storage, world, peer).is_err());
+    assert!(authorize_committed_member(storage, world, peer).is_err());
+    assert!(authorize_committed_member(storage, world, fixture.authority.peer_id()).is_err());
+    apply_membership_certificate(storage, &certificate).unwrap();
+    assert!(authorize_committed_member(storage, world, fixture.authority.peer_id()).is_ok());
+    assert!(authorize_committed_member(storage, world, peer).is_err());
+}
+
+#[test]
 fn revoked_invitation_denies_fresh_prepare_after_restart() {
     let fixture = fixture();
     let (request, proposal, vote) = signed_join(&fixture, unix_millis().unwrap() + 60_000);
