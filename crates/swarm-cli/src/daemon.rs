@@ -20,6 +20,7 @@ use swarm_cli::{
     live_authority::{SignedHostFabricAttestation, SignedLiveAuthoritySource},
     live_runtime_registry::LiveFabricRuntimeRegistry,
     migration::{self, clear_world_wake_request, world_wake_requested},
+    replication_pacing::{ChunkPlan, ReplicationPacer},
 };
 use swarm_consensus::{
     elect_authority, has_quorum, membership_vote_for, reconcile_solo_history, validate_membership_certificate_shape,
@@ -226,6 +227,8 @@ struct ReplicationState {
     pending: VecDeque<BlobResumeV1>,
     in_flight: bool,
     retry_at: Option<Instant>,
+    last_sent_at: Option<Instant>,
+    paced: bool,
 }
 
 #[derive(Debug)]
@@ -254,6 +257,7 @@ struct LeaseRuntime {
     // Bounded retry bookkeeping, not replica or authority evidence.
     canonical_payload_sent: HashMap<(WorldId, PeerId), (AuthorityGeneration, Instant)>,
     replications: HashMap<(TransportPeerId, WorldId), ReplicationState>,
+    replication_pacer: ReplicationPacer,
     transfer_acks: Vec<TransferDeliveryAck>,
     transfer_replica_acks: HashMap<(WorldId, PeerId), Hash32>,
     sleep_acks: HashMap<(WorldId, PeerId), SleepRecordV1>,
@@ -329,7 +333,7 @@ pub async fn run(
 
     let mut pending_manifests: HashMap<WorldId, SnapshotManifestV1> = HashMap::new();
     let mut outbound: HashMap<String, OutboundContext> = HashMap::new();
-    let mut leases = LeaseRuntime::default();
+    let mut leases = LeaseRuntime { replication_pacer: ReplicationPacer::from_environment()?, ..Default::default() };
     let (live_quorum_client, mut live_quorum_commands) = live_quorum::channel();
     let mut live_quorum_driver = live_quorum::LiveQuorumDriver::default();
     let (remote_fabric_client, mut remote_fabric_commands) = remote_fabric::channel();
@@ -389,6 +393,8 @@ pub async fn run(
     let mut transfer_steps_in_flight = HashSet::new();
     let mut lease_tick = tokio::time::interval(PERMIT_HEARTBEAT_INTERVAL);
     lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut replication_tick = tokio::time::interval(Duration::from_millis(50));
+    replication_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut join_retry_tick = tokio::time::interval(Duration::from_secs(5));
     join_retry_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -667,6 +673,9 @@ pub async fn run(
                     }
                 });
             }
+            _ = replication_tick.tick(), if !leases.replications.is_empty() => {
+                retry_due_replication(storage, &mut node, &mut outbound, &mut leases, Instant::now())?;
+            }
             _ = lease_tick.tick() => {
                 // Status hints expire after three seconds. The slower
                 // invitation retry tick (five seconds) cannot reliably
@@ -708,13 +717,6 @@ pub async fn run(
                     &authority, &mut game_stream_receiver,
                 );
                 live_quorum_driver.expire(Instant::now());
-                retry_due_replication(
-                    storage,
-                    &mut node,
-                    &mut outbound,
-                    &mut leases,
-                    Instant::now(),
-                )?;
                 maintain_authority_leases(
                     paths,
                     storage,
@@ -1361,7 +1363,7 @@ fn maintain_game_stream_receiver(
         node.game_authenticated_peers(),
         paths.root.join("game-stream-replay"),
     ) {
-        Ok(receiver) => Arc::new(receiver),
+        Ok(receiver) => Arc::new(receiver.with_activity(node.game_traffic_activity())),
         Err(error) => {
             warn!(world = %runtime.world, %error, "refusing game stream receiver startup");
             return;
@@ -5491,9 +5493,15 @@ fn handle_response(
                         pending: missing.into(),
                         in_flight: false,
                         retry_at: None,
+                        last_sent_at: None,
+                        paced: false,
                     },
                 );
-                send_next_replication_chunk(storage, node, transport_peer, world, outbound, runtime, now)?;
+                if node.game_traffic_active() {
+                    runtime.replications.get_mut(&key).expect("replication state exists").retry_at = Some(now);
+                } else {
+                    send_next_replication_chunk(storage, node, transport_peer, world, outbound, runtime, now)?;
+                }
             }
         }
         (
@@ -5523,13 +5531,22 @@ fn handle_response(
             }
 
             replication.in_flight = false;
+            let sent_at = replication.last_sent_at;
+            let paced = replication.paced;
             replication.retry_at = None;
             if finished {
                 replication.pending.pop_front();
             } else {
                 resume.offset = accepted_offset;
             }
-            send_next_replication_chunk(storage, node, transport_peer, world, outbound, runtime, now)?;
+            if let Some(sent) = sent_at {
+                runtime.replication_pacer.acknowledge(now.saturating_duration_since(sent), paced);
+            }
+            if node.game_traffic_active() {
+                runtime.replications.get_mut(&key).expect("replication state exists").retry_at = Some(now);
+            } else {
+                send_next_replication_chunk(storage, node, transport_peer, world, outbound, runtime, now)?;
+            }
         }
         (Some(OutboundContext::BlobChunk { world, snapshot_number, .. }), WireResponse::Error { code, message })
             if code == "RATE_LIMITED" =>
@@ -6679,6 +6696,13 @@ fn send_next_replication_chunk(
             return Ok(());
         };
 
+        let (max_bytes, paced) = match runtime.replication_pacer.plan(now, node.game_traffic_active(), MAX_BLOB_CHUNK) {
+            ChunkPlan::Ready { max_bytes, paced } => (max_bytes, paced),
+            ChunkPlan::Deferred(deadline) => {
+                runtime.replications.get_mut(&key).expect("replication state exists").retry_at = Some(deadline);
+                return Ok(());
+            }
+        };
         let manifest = storage.load_snapshot(world, snapshot_number)?;
         let descriptor = find_descriptor(&manifest, resume.hash)
             .context("pending replication blob is not referenced by its snapshot manifest")?;
@@ -6691,8 +6715,9 @@ fn send_next_replication_chunk(
             continue;
         }
 
-        let (data, finished) = storage.read_encoded_blob_chunk(world, descriptor, resume.offset, MAX_BLOB_CHUNK)?;
+        let (data, finished) = storage.read_encoded_blob_chunk(world, descriptor, resume.offset, max_bytes)?;
         let next_offset = resume.offset.checked_add(data.len() as u64).context("blob replication offset overflow")?;
+        let encoded_bytes = data.len();
         let request_id = node.send_request(
             transport_peer,
             WireRequest::BlobChunk {
@@ -6711,6 +6736,9 @@ fn send_next_replication_chunk(
         let replication = runtime.replications.get_mut(&key).expect("replication state exists");
         replication.in_flight = true;
         replication.retry_at = None;
+        replication.last_sent_at = Some(now);
+        replication.paced = paced;
+        runtime.replication_pacer.sent(now, encoded_bytes, paced);
         return Ok(());
     }
 }
@@ -6722,16 +6750,18 @@ fn retry_due_replication(
     runtime: &mut LeaseRuntime,
     now: Instant,
 ) -> Result<()> {
-    let due = runtime
+    let mut due = runtime
         .replications
         .iter()
         .filter(|(_, replication)| {
             !replication.in_flight && replication.retry_at.is_some_and(|retry_at| retry_at <= now)
         })
-        .map(|((peer, world), _)| (*peer, *world))
+        .map(|((peer, world), replication)| (replication.last_sent_at, *peer, *world))
         .collect::<Vec<_>>();
+    // Least-recently-served ready pair first; deterministic tie-break.
+    due.sort_unstable();
 
-    for (peer, world) in due {
+    for (_, peer, world) in due {
         if runtime.authenticated_peers.contains_key(&peer) {
             send_next_replication_chunk(storage, node, &peer, world, outbound, runtime, now)?;
         } else {

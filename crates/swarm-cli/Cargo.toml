@@ -49,4 +49,6 @@ swarm-protocol = { path = "../swarm-protocol" }
 swarm-storage = { path = "../swarm-storage" }
 
 [dev-dependencies]
+futures.workspace = true
+libp2p.workspace = true
 tempfile.workspace = true

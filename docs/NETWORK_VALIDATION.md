@@ -281,3 +281,5 @@ Automated impairment and multi-gigabyte soak gates justify saying that SwarmCraf
 The structured diagnostics and direct-first bounded fallback code justify saying those mechanisms are implemented and testable. They do **not** justify saying SwarmCraft works behind every NAT.
 
 Until representative hardware/carrier records exist, documentation must continue to describe home NAT, symmetric NAT, CGNAT, mobile hotspot, blocked-UDP and independent-ISP IPv6 behavior as requiring field certification.
+
+See [replication pacing policy and latency gate](REPLICATION_PACING.md) for gameplay-aware outbound blob scheduling and constrained-link CI targets.

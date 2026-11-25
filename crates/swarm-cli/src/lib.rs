@@ -11,6 +11,7 @@ pub mod live_runtime_registry;
 pub mod migration;
 pub mod package_provider;
 pub mod provider_runtime;
+pub mod replication_pacing;
 pub mod runtime_installer;
 pub mod runtime_layout;
 pub mod runtime_process_guard;

@@ -183,6 +183,9 @@ async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
                 }
             }
         }
+        let host_activity = host.game_traffic_activity();
+        let player_activity = player.game_traffic_activity();
+        assert!(!host_activity.active() && !player_activity.active());
         let host_control = host.game_stream_control();
         let player_control = player.game_stream_control();
         let host_auth = host.game_authenticated_peers();
@@ -242,10 +245,14 @@ async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
                 host_auth,
                 temp.path().join("host-stream-replays"),
             )
-            .unwrap(),
+            .unwrap()
+            .with_activity(host_activity.clone()),
         );
-        let client =
-            Arc::new(GameStreamClient::new(player_app, player_transport, player_auth, source.clone()).unwrap());
+        let client = Arc::new(
+            GameStreamClient::new(player_app, player_transport, player_auth, source.clone())
+                .unwrap()
+                .with_activity(player_activity.clone()),
+        );
         let resolver: Arc<dyn GatewayRouteResolver> = Arc::new(SyntheticResolver {
             offer: offer.clone(),
             signer: host_key.clone(),
@@ -271,6 +278,7 @@ async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
         let mut answer = [0; 29];
         minecraft.read_exact(&mut answer).await.unwrap();
         assert_eq!(&answer, b"minecraft synthetic roundtrip");
+        assert!(host_activity.active() && player_activity.active());
 
         // Exercise sustained bidirectional TCP forwarding across multiple
         // live authority checks, not just a single tiny packet. A recreated
@@ -298,6 +306,13 @@ async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
         attempted.write_all(b"forbidden").await.unwrap();
         let result = timeout(Duration::from_secs(3), attempted.read(&mut buf)).await.unwrap();
         assert!(matches!(result, Ok(0) | Err(_)), "revoked route unexpectedly forwarded");
+        timeout(Duration::from_secs(3), async {
+            while host_activity.active() || player_activity.active() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("revoked/denied streams must release pacing activity");
         // Recovered consent does not resurrect the dead TCP stream. A fresh
         // session through the SAME address is allowed after fresh verification.
         source.allowed.store(true, Ordering::SeqCst);
@@ -306,6 +321,7 @@ async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
         let mut rejoined_data = [0; 24];
         rejoined.read_exact(&mut rejoined_data).await.unwrap();
         assert_eq!(&rejoined_data, b"rejoined minecraft world");
+        assert!(host_activity.active() && player_activity.active());
 
         // Abruptly abort the gateway supervisor, as can happen during a
         // world switch or daemon task failure. No detached child may keep the
@@ -315,6 +331,13 @@ async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
         let abruptly_closed = timeout(Duration::from_secs(3), rejoined.read(&mut buf)).await.unwrap();
         assert!(matches!(abruptly_closed, Ok(0) | Err(_)), "aborted gateway left an old-world TCP session alive");
 
+        timeout(Duration::from_secs(3), async {
+            while host_activity.active() || player_activity.active() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("aborted gateway must release pacing activity");
         // Recreate the gateway at the SAME port with a new RouteVerifier
         // reading the prior durable generation floor.
         let restarted_resolver: Arc<dyn GatewayRouteResolver> = Arc::new(SyntheticResolver {
@@ -342,6 +365,13 @@ async fn authenticated_quic_game_stream_round_trip_and_consent_withdrawal() {
         assert!(matches!(host_cut_off, Ok(0) | Err(_)), "aborted host receiver left a game stream alive");
         restart_stop.send(true).unwrap();
         assert!(restart_task.await.unwrap().is_ok());
+        timeout(Duration::from_secs(3), async {
+            while host_activity.active() || player_activity.active() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("aborted receiver must release pacing activity");
         host_pump.abort();
         player_pump.abort();
         mc_task.abort();

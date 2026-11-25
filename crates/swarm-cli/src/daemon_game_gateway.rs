@@ -199,8 +199,10 @@ impl GameGatewayController {
         });
         let resolver: Arc<dyn GatewayRouteResolver> =
             Arc::new(SelectedWorldResolver { paths: paths.clone(), requester: identity.peer_id(), remote, local });
-        let client =
-            Arc::new(GameStreamClient::new(identity.peer_id(), node.local_transport_peer_id(), authenticated, proof)?);
+        let client = Arc::new(
+            GameStreamClient::new(identity.peer_id(), node.local_transport_peer_id(), authenticated, proof)?
+                .with_activity(node.game_traffic_activity()),
+        );
         let (shutdown, rx) = watch::channel(false);
         let task = tokio::spawn(gateway.serve(resolver.clone(), client, node.game_stream_control(), rx));
         self.active = Some(ActiveGateway { world, address, resolver, diagnostics, shutdown, task });

@@ -185,12 +185,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #18 — P2 · Proposal
 - Work: Add adaptive replication throttling so background saves do not ruin game latency
 - Acceptance: On a limited uplink, measured game responsiveness stays within a published target while the replica continues to make bounded progress
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: crates/swarm-cli/src/replication_pacing.rs; daemon.rs; daemon_game_gateway.rs; crates/swarm-network/src/game_transport.rs; tests/paced_replication_game_latency.rs; [pacing policy and target](REPLICATION_PACING.md)
+- Evidence: Three pacer unit tests, 51 daemon tests, live join/replication and authenticated gateway lifecycle passed. Actual 131,084 encoded blob bytes replicated and verified in 4.17s with 41 overlapping synthetic game echo samples; local p95 1.03ms. Added 1 Mbit/s + 12ms loopback CI gate with p95 <=400ms and bounded replica completion <=30s.
+- Remaining / next action: Exact-SHA constrained-link CI evidence; representative actual Minecraft and multi-peer WAN workload measurements. No hard network QoS guarantee or field-certified latency claim.
+- External dependency: Actual representative Minecraft runtime and physical network.
+- Commit: See replication pacing checkpoint in git history.
 
 ### #19 — Sabathon P0 · Partial
 - Work: Prove per-world player-only default, opt-in persistence, and withdrawal through CLI, native IPC, and live hosting; make `authority.permit` updates atomic (temp + rename or loopback IPC)

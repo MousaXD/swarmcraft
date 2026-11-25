@@ -27,7 +27,10 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4},
     path::PathBuf,
     pin::Pin,
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, RwLock,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use swarm_protocol::{PeerId, WorldId};
@@ -214,6 +217,30 @@ impl VerifiedGameRouteStatus {
 /// admits a game stream. All reads re-check the registry on every tick.
 pub type GameAuthenticatedPeers = Arc<RwLock<HashMap<TransportPeerId, PeerId>>>;
 
+/// Process-local observation of actually admitted forwarding sessions.
+/// No wire message can directly set it and it is not a route/authority proof.
+#[derive(Debug, Clone, Default)]
+pub struct GameTrafficActivity(Arc<AtomicUsize>);
+
+impl GameTrafficActivity {
+    pub fn active(&self) -> bool {
+        self.0.load(Ordering::Acquire) != 0
+    }
+
+    fn begin(&self) -> GameTrafficGuard {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        GameTrafficGuard(self.clone())
+    }
+}
+
+struct GameTrafficGuard(GameTrafficActivity);
+
+impl Drop for GameTrafficGuard {
+    fn drop(&mut self) {
+        self.0 .0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// The hosting peer accepts dedicated libp2p substreams and forwards them only
 /// to its own managed 127.0.0.1 Minecraft listener. No externally supplied
 /// hostname or IP is ever dialed.
@@ -228,6 +255,7 @@ pub struct GameStreamReceiver {
     replay: Arc<DurableGameStreamReplayLedger>,
     replay_workers: Arc<Semaphore>,
     proof_workers: Arc<Semaphore>,
+    activity: GameTrafficActivity,
 }
 
 impl GameStreamReceiver {
@@ -253,7 +281,13 @@ impl GameStreamReceiver {
             replay: Arc::new(DurableGameStreamReplayLedger::new(replay_directory)),
             replay_workers: Arc::new(Semaphore::new(MAX_GAME_LIVE_PROOF_WORKERS)),
             proof_workers: Arc::new(Semaphore::new(MAX_GAME_LIVE_PROOF_WORKERS)),
+            activity: GameTrafficActivity::default(),
         })
+    }
+
+    pub fn with_activity(mut self, activity: GameTrafficActivity) -> Self {
+        self.activity = activity;
+        self
     }
 
     /// Only one receiver may register the game protocol on a SwarmNode.
@@ -404,6 +438,7 @@ impl GameStreamReceiver {
         }
         // Preserve copy state between heartbeat ticks; recreating
         // copy_bidirectional would silently discard buffered Minecraft bytes.
+        let _traffic = self.activity.begin();
         let copying = tokio::io::copy_bidirectional(&mut stream, &mut server);
         tokio::pin!(copying);
         let transfer = async {
@@ -703,6 +738,7 @@ pub struct GameStreamClient {
     authenticated: GameAuthenticatedPeers,
     evidence: Arc<dyn FreshAuthoritySource>,
     proof_workers: Arc<Semaphore>,
+    activity: GameTrafficActivity,
 }
 
 impl GameStreamClient {
@@ -721,7 +757,13 @@ impl GameStreamClient {
             authenticated,
             evidence,
             proof_workers: Arc::new(Semaphore::new(MAX_GAME_LIVE_PROOF_WORKERS)),
+            activity: GameTrafficActivity::default(),
         })
+    }
+
+    pub fn with_activity(mut self, activity: GameTrafficActivity) -> Self {
+        self.activity = activity;
+        self
     }
 
     pub async fn forward(
@@ -844,6 +886,7 @@ impl GameStreamClient {
         // Mark this conservatively before polling any application I/O.
         // Even a partial write irrevocably ends transparent admission retry.
         *payload_started = true;
+        let _traffic = self.activity.begin();
         let copying = tokio::io::copy_bidirectional(minecraft_client, &mut upstream);
         tokio::pin!(copying);
         let transfer = async {
@@ -923,6 +966,7 @@ impl GameStreamClient {
             return Err(GameTransportError::StaleRoute);
         }
         *payload_started = true;
+        let _traffic = self.activity.begin();
         let copying = tokio::io::copy_bidirectional(minecraft_client, &mut server);
         tokio::pin!(copying);
         let transfer = async {

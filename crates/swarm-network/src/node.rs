@@ -137,6 +137,7 @@ pub struct SwarmNode {
     application_signing_key: SigningKey,
     authenticated: HashMap<TransportPeerId, (PeerId, ConnectionId)>,
     game_authenticated: Arc<RwLock<HashMap<TransportPeerId, PeerId>>>,
+    game_activity: crate::game_transport::GameTrafficActivity,
     pending_game_route: HashMap<request_response::OutboundRequestId, PendingGameRouteControl>,
     game_route_budgets: HashMap<TransportPeerId, (Instant, u32)>,
     game_route_events_tx: mpsc::Sender<GameRouteControlEvent>,
@@ -231,6 +232,7 @@ impl SwarmNode {
             application_signing_key,
             authenticated: HashMap::new(),
             game_authenticated: Arc::new(RwLock::new(HashMap::new())),
+            game_activity: crate::game_transport::GameTrafficActivity::default(),
             pending_game_route: HashMap::new(),
             game_route_budgets: HashMap::new(),
             game_route_events_tx,
@@ -262,6 +264,14 @@ impl SwarmNode {
     /// Dedicated Noise-authenticated libp2p substreams. Transport identity
     /// does NOT authorize a Minecraft route; recipients must validate fresh
     /// canonical state and application membership before accepting streams.
+    pub fn game_traffic_activity(&self) -> crate::game_transport::GameTrafficActivity {
+        self.game_activity.clone()
+    }
+
+    pub fn game_traffic_active(&self) -> bool {
+        self.game_activity.active()
+    }
+
     pub fn game_stream_control(&self) -> stream::Control {
         self.swarm.behaviour().game_stream.new_control()
     }
