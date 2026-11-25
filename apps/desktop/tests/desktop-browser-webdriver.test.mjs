@@ -326,6 +326,17 @@ window.__swarmcraftPresenceProcess = false;
 window.__swarmcraftPresenceHold = false;
 window.__swarmcraftReleasePresence = null;
 window.__swarmcraftPresenceState = 'online';
+window.__supportEnabled=false;
+window.__supportEvents=[];
+window.__supportBuild={version:'0.5.1',commit:'a'.repeat(40),tree:'modified'};
+window.__supportHold=false;
+window.__supportRelease=null;
+window.__supportInvalid=false;
+window.__supportSaved=false;
+window.__supportHistory=world=>{
+  const events=window.__supportEvents.filter(e=>!world||e.world===world).map(e=>e.event);
+  return {enabled:window.__supportEnabled,retained_count:events.length,older_events_dropped:false,recording_may_be_incomplete:false,events};
+};
 window.__swarmcraftPolicy={version:1,hidden_worlds:[],directory_suppressions:[],reports:[]};
 window.__swarmcraftDirectoryReportHold=false;
 window.__swarmcraftReleaseReport=null;
@@ -556,6 +567,26 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
       }
       return {peer_id:args.peer,state:window.__swarmcraftPresenceState,
         observed_unix_ms:Date.now(),expires_unix_ms:Date.now()+500,detail:'raw private address'};
+    case 'support_history': return window.__supportHistory(args.world);
+    case 'support_recording':
+      if(args.confirm!==true)throw Error('confirmation missing');
+      window.__supportEnabled=args.enabled;
+      return window.__supportHistory(args.world);
+    case 'support_clear_history':
+      if(args.confirm!==true)throw Error('confirmation missing');
+      window.__supportEvents=[];
+      return window.__supportHistory(args.world);
+    case 'support_preview': {
+      if(args.confirm!==true)throw Error('preview consent missing');
+      if(window.__supportHold){window.__supportHold=false;await new Promise(resolve=>window.__supportRelease=resolve);}
+      const report={schema:'swarmcraft-redacted-support-v1',generated_unix_ms:Date.now(),desktop_build:window.__supportBuild,
+        last_reported_node_path:'relay',scope:args.world?'selected_world':'all_worlds',history:window.__supportHistory(args.world)};
+      if(window.__supportInvalid){window.__supportInvalid=false;report.raw='scinvite:deadbeef SECRET 10.0.0.9';}
+      return {token:'b'.repeat(64),report};
+    }
+    case 'support_save':
+      if(args.confirm!==true||args.token!=='b'.repeat(64))throw Error('invalid save');
+      return window.__supportSaved?'swarmcraft-support-1795626954103-abcdef123456.json':null;
     case 'directory_policy': return structuredClone(window.__swarmcraftPolicy);
     case 'directory_hide':
       window.__swarmcraftPolicy.hidden_worlds=window.__swarmcraftPolicy.hidden_worlds.filter(id=>id!==args.world);
@@ -1374,6 +1405,81 @@ async function runModerationGate(port,sessionId,width,height,screenshotPath) {
   await execute(port,sessionId,'document.getElementById("directoryReportCancel").click()');
 }
 
+const supportScenario = String.raw`(async()=>{
+  const $=id=>document.getElementById(id);
+  const require=(condition,message)=>{if(!condition)throw Error(message);};
+  const waitFor=async(predicate,label)=>{for(let i=0;i<240;i++){if(predicate())return;await new Promise(r=>setTimeout(r,25));}throw Error('Timed out: '+label);};
+  const calls=name=>window.__swarmcraftCalls.filter(c=>c.command===name);
+  const select=(id,value)=>{$(id).value=value;$(id).dispatchEvent(new Event('change',{bubbles:true}));};
+  const waitHistory=()=>waitFor(()=>$('supportHistoryStatus').textContent.includes('Recording')&&!$('supportRefresh').disabled,'history receipt');
+  const world='scworld:'+'a'.repeat(64);
+  $('advancedNavigation').open=true;
+  $('navActivity').click();
+  await waitHistory();
+  require($('supportHistoryStatus').textContent.includes('Recording off')&&calls('support_recording').length===0,'History enabled implicitly');
+  require($('supportPreviewPanel').hidden&&calls('support_preview').length===0&&calls('support_save').length===0,'Export prepared automatically');
+  $('supportRecording').click();
+  await waitFor(()=>$('supportHistoryStatus').textContent.includes('Recording on')&&!$('supportRecording').disabled,'explicit recording');
+  require(calls('support_recording').at(-1).args.confirm===true,'Missing explicit confirmation');
+  window.__supportEvents=[
+    {world,event:{unix_ms:Date.now()-5000,action:'verify_replica',outcome:'returned_ok',build:window.__supportBuild}},
+    {world:'scworld:'+'b'.repeat(64),event:{unix_ms:Date.now(),action:'join_request',outcome:'returned_error',build:window.__supportBuild}},
+  ];
+  $('supportRefresh').click();
+  await waitFor(()=>$('supportEvents').children.length===2&&!$('supportRefresh').disabled,'history entries');
+  require($('supportEvents').textContent.includes('Native returned error'),'Native outcome unavailable');
+  // Raw session log is not a source for report content.
+  if($('output').tagName==='TEXTAREA')$('output').value='scinvite:deadbeef SECRET 10.0.0.9 /home/private';
+  else $('output').textContent='scinvite:deadbeef SECRET 10.0.0.9 /home/private';
+  $('supportPreview').click();
+  await waitFor(()=>!$('supportPreviewPanel').hidden&&!$('supportSave').disabled,'preview');
+  const json=$('supportPreviewText').value, parsed=JSON.parse(json);
+  require(parsed.schema==='swarmcraft-redacted-support-v1'&&parsed.history.events.length===2&&parsed.desktop_build.tree==='modified'&&parsed.last_reported_node_path==='relay','Preview missing required fields');
+  require(!/scinvite|SECRET|10\.0\.0\.9|\/home\/private|scworld:/.test(json)&&!Object.hasOwn(parsed,'token'),'Preview leaks private source');
+  $('supportSave').click();
+  await waitFor(()=>$('supportExportStatus').textContent.includes('Save cancelled')&&$('supportPreviewPanel').hidden,'cancelled native save');
+  require(calls('support_save').at(-1).args.confirm===true&&Object.keys(calls('support_save').at(-1).args).length===2,'Save accepted arbitrary path or data');
+  window.__supportInvalid=true;
+  $('supportPreview').click();
+  await waitFor(()=>$('supportExportStatus').textContent.includes('could not be confirmed')&&!$('supportPreview').disabled,'malformed preview rejected');
+  require($('supportPreviewPanel').hidden&&!$('supportPreviewText').value,'Malformed preview was exposed');
+  window.__supportHold=true;
+  $('supportPreview').click();
+  await waitFor(()=>typeof window.__supportRelease==='function','held preview');
+  $('navWorlds').click();window.__supportRelease();
+  $('navActivity').click();
+  await waitHistory();
+  require($('supportPreviewPanel').hidden&&!$('supportPreviewText').value,'Late preview resurrected after navigation');
+  $('supportRecording').click();
+  await waitFor(()=>$('supportHistoryStatus').textContent.includes('Recording off')&&!$('supportRecording').disabled,'paused');
+  require($('supportEvents').children.length===2,'Pause silently deleted local history');
+  $('supportClear').click();$('supportClearCancel').click();
+  require($('supportEvents').children.length===2&&calls('support_clear_history').length===0,'Cancel deleted history');
+  $('supportClear').click();$('supportClearConfirm').click();
+  await waitFor(()=>$('supportEvents').children.length===0&&!$('supportRefresh').disabled,'clear all');
+  require(calls('support_clear_history').at(-1).args.confirm===true,'Clear missing confirmation');
+  $('supportPreview').click();
+  await waitFor(()=>!$('supportPreviewPanel').hidden&&!$('supportSave').disabled,'empty preview still available');
+  window.__supportSaved=true;
+  $('supportSave').click();
+  await waitFor(()=>$('supportExportStatus').textContent.includes('in the chosen folder')&&!$('supportPreview').disabled,'save receipt');
+  $('supportPreview').click();
+  await waitFor(()=>!$('supportPreviewPanel').hidden&&!$('supportSave').disabled,'reviewed final preview');
+  require(document.body.scrollWidth<=innerWidth&&$('activityView').scrollWidth<=$('activityView').clientWidth+2,'Support UI overflow');
+  return {status:'pass'};
+})()`;
+
+async function runSupportGate(port,sessionId,width,height,screenshotPath) {
+  const result=await executeAsync(port,sessionId,scenarioRunner,[supportScenario]);
+  assert.equal(result?.ok,true,`Support history failed at ${width}x${height}: ${result?.error}`);
+  assert.equal(result.value?.status,'pass');
+  const png=Buffer.from(await webdriverRequest(port,`/session/${sessionId}/screenshot`),'base64');
+  await writeFile(screenshotPath.replace(/\.png$/,'-support-preview.png'),png);
+  await tabTo(port,sessionId,'#supportDiscard');
+  await keyInput(port,sessionId,'Enter');
+  assert.equal(await execute(port,sessionId,'return document.getElementById("supportPreviewPanel").hidden'),true);
+}
+
 const scenarioRunner = String.raw`
 const done = arguments[arguments.length - 1];
 Promise.resolve().then(() => eval(arguments[0])).then(
@@ -1582,6 +1688,7 @@ async function runViewport(port, sessionId, documentHtml, graph, width, height, 
   await runDiscoveryGate(port, sessionId, width, height, screenshotPath);
   await runFriendsGate(port, sessionId, width, height, screenshotPath);
   await runModerationGate(port, sessionId, width, height, screenshotPath);
+  await runSupportGate(port, sessionId, width, height, screenshotPath);
 }
 
 // Exercise the actual compiled Svelte module graph, including its shared
@@ -1663,6 +1770,7 @@ async function runCandidateViewport(port, sessionId, url, width, height, screens
   await runDiscoveryGate(port, sessionId, width, height, screenshotPath);
   await runFriendsGate(port, sessionId, width, height, screenshotPath);
   await runModerationGate(port, sessionId, width, height, screenshotPath);
+  await runSupportGate(port, sessionId, width, height, screenshotPath);
 }
 
 test('current Desktop module graph initializes, owns canonical Create, and renders supported window sizes', async () => {

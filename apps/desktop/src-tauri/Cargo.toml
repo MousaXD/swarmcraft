@@ -38,6 +38,7 @@ sha2 = "0.10"
 md-5 = "0.10"
 hex = "0.4"
 anyhow = "1.0"
+fs2 = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Reuse Tauri's GTK main thread instead of starting a second GTK loop.

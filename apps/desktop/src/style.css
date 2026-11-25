@@ -440,3 +440,24 @@ input::placeholder, textarea::placeholder { color: #667069; }
   .discovery-shell { gap: var(--s2); }
   .discovery-header p { max-width: 52ch; }
 }
+
+/* Local history is a separate surface from sensitive raw session output. */
+.activity-shell { height: auto; display: grid; grid-template-rows: none; gap: var(--s3); align-content: start; }
+.support-history, .support-export { display: grid; gap: var(--s2); min-width: 0; }
+.support-export { border-top: 1px solid var(--border); padding-top: var(--s3); }
+.support-history .section-title-row, .support-export .section-title-row { margin-bottom: 0; }
+.support-export .compact-actions { margin-top: 0; }
+.support-history .meta-text, .support-export .meta-text, .raw-activity-details .meta-text { max-width: 85ch; line-height: 1.45; }
+.support-controls { display: flex; align-items: end; flex-wrap: wrap; gap: var(--s2); }
+.support-controls .field { flex: 1 1 160px; max-width: 270px; }
+.support-controls .compact-actions { margin: 0; }
+.support-events { list-style: none; margin: 0; padding: 0; max-height: 230px; overflow-y: auto; min-width: 0; }
+.support-events:empty { display: none; }
+.support-event { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--s2); border-top: 1px solid var(--border); padding: var(--s2) 0; }
+.support-event-copy { display: grid; gap: 2px; min-width: 0; }
+.support-event-copy strong { font-size: 12px; }
+.support-event time { font-variant-numeric: tabular-nums; }
+.support-json { min-height: 110px; max-height: 240px; resize: vertical; font-size: 11px; }
+.raw-activity-details > :not(summary) { margin-top: var(--s2); }
+.raw-activity-details .activity-console { width: 100%; min-height: 160px; max-height: 300px; }
+.support-diagnostic-link { margin-bottom: var(--s3); }

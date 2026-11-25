@@ -70,12 +70,28 @@ pub async fn directory_dismiss_report(app: AppHandle, report: String) -> Result<
 
 #[tauri::command]
 pub async fn world_listing(app: AppHandle, world: String, paused: Option<bool>) -> Result<Value, String> {
-    let mut args = vec!["world".into(), "discovery-listing".into(), world_id(&world)?];
-    if let Some(paused) = paused {
-        args.extend(["--paused".into(), paused.to_string()]);
+    let history = if paused.is_some() {
+        Some(crate::support_diagnostics::ActionGuard::begin(
+            crate::support_diagnostics::Action::PublicationPreference,
+            Some(&world),
+        ))
+    } else {
+        None
+    };
+    let result = async {
+        let mut args = vec!["world".into(), "discovery-listing".into(), world_id(&world)?];
+        if let Some(paused) = paused {
+            args.extend(["--paused".into(), paused.to_string()]);
+        }
+        let raw =
+            run_cli(&app, args).await.map_err(|_| "Local listing preference could not be confirmed".to_owned())?;
+        serde_json::from_str(&raw).map_err(|_| "Malformed local listing receipt".into())
     }
-    let raw = run_cli(&app, args).await.map_err(|_| "Local listing preference could not be confirmed".to_owned())?;
-    serde_json::from_str(&raw).map_err(|_| "Malformed local listing receipt".into())
+    .await;
+    if let Some(history) = history {
+        history.finish(&result);
+    }
+    result
 }
 
 #[cfg(test)]

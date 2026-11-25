@@ -1,0 +1,58 @@
+{
+  "scope": "extracted Linux Debian packages, real WebKitGTK, real bundled sidecars and isolated private world",
+  "source_base": "16f1d23ce25d9a6c5dda83eb2b48cbaec09d189b",
+  "variants": {
+    "shipping": {
+      "package_sha256": "aefa75b12da1449b8d90c04a92065ef6d9e3d4436f0709d5df243508b91a620f",
+      "files": {
+        "desktop": "5efd916605bdc9bd2716930e1cca4398a7230638c42e8e1d8dc4e9cdc8c84999",
+        "swarmcraft": "9773d1b0111282370eac765d371a81147505d0f5451f1855919e4bc4f0b86b94",
+        "swarmcraft-host": "19aacce156b4d3f0c523e27a02dc7430cc501ce598ffa6b364b36128cfe1e546",
+        "swarmcraft-runtime": "dc5bdba591f418503a8961ffc902086f4d7500290664e813d79bc03473e395b7",
+        "swarmcraft-import": "7c59fde775e85197691ded91daa9abee07a97daa7acbfa667bc4b06dd50b708c"
+      },
+      "checks": {
+        "default_off_no_implicit_collection": true,
+        "explicit_opt_in_no_backfill": true,
+        "native_success_recorded": true,
+        "native_failure_recorded": true,
+        "layout_980x760": true,
+        "layout_720x560": true,
+        "selected_scope_without_identifiers": true,
+        "actual_redaction_and_build_provenance": true,
+        "native_cancel_writes_nothing": true,
+        "native_save_exact_reviewed_bytes": true,
+        "pause_keeps_existing_history": true,
+        "history_persisted_across_restart": true,
+        "explicit_clear_and_cancel": true,
+        "canonical_world_unchanged": true
+      }
+    },
+    "candidate": {
+      "package_sha256": "75ae4ed08764614b965d9cdd047274cfbbea55e09d12b01bba548a324f925ecb",
+      "files": {
+        "desktop": "55813a7728bc298e3dc394565168e897db2cf5c82de2c7b3dc5f25fe2f8c6cbe",
+        "swarmcraft": "9773d1b0111282370eac765d371a81147505d0f5451f1855919e4bc4f0b86b94",
+        "swarmcraft-host": "19aacce156b4d3f0c523e27a02dc7430cc501ce598ffa6b364b36128cfe1e546",
+        "swarmcraft-runtime": "dc5bdba591f418503a8961ffc902086f4d7500290664e813d79bc03473e395b7",
+        "swarmcraft-import": "7c59fde775e85197691ded91daa9abee07a97daa7acbfa667bc4b06dd50b708c"
+      },
+      "checks": {
+        "default_off_no_implicit_collection": true,
+        "explicit_opt_in_no_backfill": true,
+        "native_success_recorded": true,
+        "native_failure_recorded": true,
+        "layout_980x760": true,
+        "layout_720x560": true,
+        "selected_scope_without_identifiers": true,
+        "actual_redaction_and_build_provenance": true,
+        "native_cancel_writes_nothing": true,
+        "native_save_exact_reviewed_bytes": true,
+        "pause_keeps_existing_history": true,
+        "history_persisted_across_restart": true,
+        "explicit_clear_and_cancel": true,
+        "canonical_world_unchanged": true
+      }
+    }
+  }
+}

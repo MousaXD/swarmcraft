@@ -14,6 +14,7 @@ mod launcher_commands;
 mod modrinth_commands;
 mod runtime;
 mod runtime_commands;
+mod support_diagnostics;
 mod transfer_commands;
 
 use canonical_commands::canonicalize_modpack;
@@ -36,6 +37,9 @@ use launcher_commands::{
 use modrinth_commands::{modrinth_download, modrinth_project, modrinth_resolve, modrinth_search, modrinth_versions};
 use runtime::RuntimeProcesses;
 use runtime_commands::{ensure_daemon_running, runtime_diagnostics, start_daemon, stop_daemon, stop_host};
+use support_diagnostics::{
+    support_clear_history, support_history, support_preview, support_recording, support_save, SupportPreviewCache,
+};
 use tauri::{AppHandle, State};
 use tauri_plugin_shell::ShellExt;
 use transfer_commands::{
@@ -125,33 +129,39 @@ async fn create_world(
     region: Option<String>,
     language: Option<String>,
 ) -> Result<String, String> {
-    let name = require_value(name, "World name")?;
-    let minecraft = require_value(minecraft, "Minecraft version")?;
-    let fabric_loader = require_value(fabric_loader, "Fabric loader version")?;
-    let compatibility = require_value(compatibility, "Compatibility profile")?;
-    let visibility = require_value(visibility, "Visibility")?;
-    validate_fabric_selection(minecraft.clone(), fabric_loader.clone()).await.map_err(|error| error.to_string())?;
-    let mut args = vec![
-        "world".into(),
-        "create".into(),
-        "--name".into(),
-        name,
-        "--minecraft".into(),
-        minecraft,
-        "--fabric-loader".into(),
-        fabric_loader,
-        "--compatibility".into(),
-        compatibility,
-        "--visibility".into(),
-        visibility,
-    ];
-    if let Some(region) = region {
-        args.push(format!("--region={region}"));
+    let history = crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::CreateWorld, None);
+    let result = async {
+        let name = require_value(name, "World name")?;
+        let minecraft = require_value(minecraft, "Minecraft version")?;
+        let fabric_loader = require_value(fabric_loader, "Fabric loader version")?;
+        let compatibility = require_value(compatibility, "Compatibility profile")?;
+        let visibility = require_value(visibility, "Visibility")?;
+        validate_fabric_selection(minecraft.clone(), fabric_loader.clone()).await.map_err(|error| error.to_string())?;
+        let mut args = vec![
+            "world".into(),
+            "create".into(),
+            "--name".into(),
+            name,
+            "--minecraft".into(),
+            minecraft,
+            "--fabric-loader".into(),
+            fabric_loader,
+            "--compatibility".into(),
+            compatibility,
+            "--visibility".into(),
+            visibility,
+        ];
+        if let Some(region) = region {
+            args.push(format!("--region={region}"));
+        }
+        if let Some(language) = language {
+            args.push(format!("--language={language}"));
+        }
+        run_cli(&app, args).await
     }
-    if let Some(language) = language {
-        args.push(format!("--language={language}"));
-    }
-    run_cli(&app, args).await
+    .await;
+    history.finish(&result);
+    result
 }
 
 fn import_arguments(
@@ -220,29 +230,62 @@ async fn import_world(
     no_server_mods: bool,
     expected_compatibility: Option<String>,
 ) -> Result<String, String> {
-    let fingerprint = expected_compatibility
-        .filter(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-        .ok_or_else(|| "Check the import before committing".to_string())?;
-    let mut arguments =
-        import_arguments(source, name, minecraft, fabric_loader, visibility, server_mods, no_server_mods)?;
-    arguments.extend(["--expected-compatibility".into(), fingerprint]);
-    run_import_cli(&app, arguments).await
+    let mut history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::ImportWorld, None);
+    let result = async {
+        let fingerprint = expected_compatibility
+            .filter(|value| {
+                value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+            .ok_or_else(|| "Check the import before committing".to_string())?;
+        let mut arguments =
+            import_arguments(source, name, minecraft, fabric_loader, visibility, server_mods, no_server_mods)?;
+        arguments.extend(["--expected-compatibility".into(), fingerprint]);
+        run_import_cli(&app, arguments).await
+    }
+    .await;
+    if let Ok(raw) = &result {
+        // The native import returns structured JSON. Only read the typed
+        // world identity; never store the remainder of the receipt.
+        if raw.len() <= 256 * 1024 {
+            if let Ok(receipt) = serde_json::from_str::<serde_json::Value>(raw) {
+                if let Some(id) = receipt.get("world_id").and_then(|value| value.as_str()) {
+                    history.associate_created_world(id);
+                }
+            }
+        }
+    }
+    history.finish(&result);
+    result
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn join_world(app: AppHandle, invite: String, host_candidate: Option<bool>) -> Result<String, String> {
-    let invite = require_value(invite, "Invite")?;
-    let mut args = vec!["world".into(), "join".into(), invite];
-    if host_candidate == Some(true) {
-        args.push("--host-candidate".into());
+    let history = crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::JoinRequest, None);
+    let result = async {
+        let invite = require_value(invite, "Invite")?;
+        let mut args = vec!["world".into(), "join".into(), invite];
+        if host_candidate == Some(true) {
+            args.push("--host-candidate".into());
+        }
+        run_cli(&app, args).await
     }
-    run_cli(&app, args).await
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
 async fn leave_world(app: AppHandle, world: String) -> Result<String, String> {
-    let world = require_value(world, "World ID")?;
-    run_cli(&app, vec!["world".into(), "leave".into(), world]).await
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::LeaveRequest, Some(&world));
+    let result = async {
+        let world = require_value(world, "World ID")?;
+        run_cli(&app, vec!["world".into(), "leave".into(), world]).await
+    }
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -252,14 +295,28 @@ async fn create_invite(
     expires_minutes: u64,
     bootstrap_addrs: Vec<String>,
 ) -> Result<String, String> {
-    let world = require_value(world, "World ID")?;
-    let mut arguments =
-        vec!["invite".into(), "create".into(), world, "--expires-minutes".into(), expires_minutes.max(1).to_string()];
-    for address in bootstrap_addrs.into_iter().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
-        arguments.push("--bootstrap".into());
-        arguments.push(address);
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::CreateInvite, Some(&world));
+    let result = async {
+        let world = require_value(world, "World ID")?;
+        let mut arguments = vec![
+            "invite".into(),
+            "create".into(),
+            world,
+            "--expires-minutes".into(),
+            expires_minutes.max(1).to_string(),
+        ];
+        for address in
+            bootstrap_addrs.into_iter().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+        {
+            arguments.push("--bootstrap".into());
+            arguments.push(address);
+        }
+        run_cli(&app, arguments).await
     }
-    run_cli(&app, arguments).await
+    .await;
+    history.finish(&result);
+    result
 }
 
 fn validate_invite_token(value: String) -> Result<String, String> {
@@ -293,6 +350,9 @@ async fn revoke_invite(
     invite_id: String,
     confirm_revocation: bool,
 ) -> Result<String, String> {
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::RevokeInvite, Some(&world));
+    let result = async {
     if !confirm_revocation {
         return Err("Explicitly confirm revocation of this signed grant.".into());
     }
@@ -309,6 +369,9 @@ async fn revoke_invite(
                 "Could not confirm revocation. Check that this device is the current issuer; inspect the grant before retrying.".into()
             }
         })
+    }.await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
@@ -378,27 +441,38 @@ async fn hosting_contribution_set(
     world: String,
     heap_mib: u64,
 ) -> Result<hosting_contribution_commands::HostingContributionReadinessReply, String> {
-    let world = hosting_contribution_commands::validate_world_id(&world)?;
-    hosting_contribution_commands::validate_heap_mib(heap_mib)?;
-    let raw = run_cli(
-        &app,
-        vec![
-            "world".into(),
-            "hosting".into(),
-            "set".into(),
-            world.to_string(),
-            "--heap-mib".into(),
-            heap_mib.to_string(),
-            "--json".into(),
-        ],
-    )
-    .await?;
-    let report = hosting_contribution_commands::decode_readiness(&raw, world)?;
-    if report.selected_heap_mib != heap_mib || report.consented != (heap_mib != 0) || report.consent_revision.is_none()
-    {
-        return Err("Local hosting preference was not confirmed; refresh status".into());
+    let history = crate::support_diagnostics::ActionGuard::begin(
+        crate::support_diagnostics::Action::HostingPreference,
+        Some(&world),
+    );
+    let result = async {
+        let world = hosting_contribution_commands::validate_world_id(&world)?;
+        hosting_contribution_commands::validate_heap_mib(heap_mib)?;
+        let raw = run_cli(
+            &app,
+            vec![
+                "world".into(),
+                "hosting".into(),
+                "set".into(),
+                world.to_string(),
+                "--heap-mib".into(),
+                heap_mib.to_string(),
+                "--json".into(),
+            ],
+        )
+        .await?;
+        let report = hosting_contribution_commands::decode_readiness(&raw, world)?;
+        if report.selected_heap_mib != heap_mib
+            || report.consented != (heap_mib != 0)
+            || report.consent_revision.is_none()
+        {
+            return Err("Local hosting preference was not confirmed; refresh status".into());
+        }
+        Ok(report)
     }
-    Ok(report)
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
@@ -409,24 +483,45 @@ async fn world_mods_status(app: AppHandle, world: String) -> Result<String, Stri
 
 #[tauri::command]
 async fn world_mods_acquire(app: AppHandle, world: String) -> Result<String, String> {
-    let world = hosting_contribution_commands::validate_world_id(&world)?;
-    run_runtime_cli(&app, vec!["acquire-mods".into(), world.to_string()])
-        .await
-        .map_err(|_| "Cannot acquire mods for this signed world profile. Verify the world and retry.".into())
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::ModAcquire, Some(&world));
+    let result = async {
+        let world = hosting_contribution_commands::validate_world_id(&world)?;
+        run_runtime_cli(&app, vec!["acquire-mods".into(), world.to_string()])
+            .await
+            .map_err(|_| "Cannot acquire mods for this signed world profile. Verify the world and retry.".into())
+    }
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn world_mods_add(app: AppHandle, world: String, jar_path: String) -> Result<String, String> {
-    let world = require_value(world, "World ID")?;
-    let jar_path = require_value(jar_path, "Required mod JAR path")?;
-    run_cli(&app, vec!["world".into(), "mods-add".into(), world, jar_path]).await
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::ModAdd, Some(&world));
+    let result = async {
+        let world = require_value(world, "World ID")?;
+        let jar_path = require_value(jar_path, "Required mod JAR path")?;
+        run_cli(&app, vec!["world".into(), "mods-add".into(), world, jar_path]).await
+    }
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn world_mods_remove(app: AppHandle, world: String, mod_id: String) -> Result<String, String> {
-    let world = require_value(world, "World ID")?;
-    let mod_id = require_value(mod_id, "Mod ID")?;
-    run_cli(&app, vec!["world".into(), "mods-remove".into(), world, mod_id]).await
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::ModRemove, Some(&world));
+    let result = async {
+        let world = require_value(world, "World ID")?;
+        let mod_id = require_value(mod_id, "Mod ID")?;
+        run_cli(&app, vec!["world".into(), "mods-remove".into(), world, mod_id]).await
+    }
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
@@ -460,8 +555,17 @@ async fn world_conflicts(app: AppHandle, world: String) -> Result<String, String
 
 #[tauri::command]
 async fn set_background_seeding(app: AppHandle, world: String, enabled: bool) -> Result<String, String> {
-    let world = require_value(world, "World ID")?;
-    run_cli(&app, vec!["world".into(), "seed".into(), world, enabled.to_string()]).await
+    let history = crate::support_diagnostics::ActionGuard::begin(
+        crate::support_diagnostics::Action::ReplicaPreference,
+        Some(&world),
+    );
+    let result = async {
+        let world = require_value(world, "World ID")?;
+        run_cli(&app, vec!["world".into(), "seed".into(), world, enabled.to_string()]).await
+    }
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
@@ -472,22 +576,47 @@ async fn world_peers(app: AppHandle, world: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn verify_world(app: AppHandle, world: String) -> Result<String, String> {
-    let world = require_value(world, "World ID")?;
-    run_cli(&app, vec!["world".into(), "verify".into(), world]).await
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::VerifyReplica, Some(&world));
+    let result = async {
+        let world = require_value(world, "World ID")?;
+        run_cli(&app, vec!["world".into(), "verify".into(), world]).await
+    }
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn export_world(app: AppHandle, world: String, destination: String) -> Result<String, String> {
-    let world = require_value(world, "World ID")?;
-    let destination = require_value(destination, "Export destination")?;
-    run_cli(&app, vec!["world".into(), "export".into(), world, destination]).await
+    let history = crate::support_diagnostics::ActionGuard::begin(
+        crate::support_diagnostics::Action::ExportCheckpoint,
+        Some(&world),
+    );
+    let result = async {
+        let world = require_value(world, "World ID")?;
+        let destination = require_value(destination, "Export destination")?;
+        run_cli(&app, vec!["world".into(), "export".into(), world, destination]).await
+    }
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn recover_world(app: AppHandle, world: String, snapshot: u64, destination: String) -> Result<String, String> {
-    let world = require_value(world, "World ID")?;
-    let destination = require_value(destination, "Recovery destination")?;
-    run_cli(&app, vec!["world".into(), "recover".into(), world, snapshot.to_string(), destination]).await
+    let history = crate::support_diagnostics::ActionGuard::begin(
+        crate::support_diagnostics::Action::RecoverCheckpoint,
+        Some(&world),
+    );
+    let result = async {
+        let world = require_value(world, "World ID")?;
+        let destination = require_value(destination, "Recovery destination")?;
+        run_cli(&app, vec!["world".into(), "recover".into(), world, snapshot.to_string(), destination]).await
+    }
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
@@ -513,20 +642,30 @@ async fn recovery_export(
     acknowledged_conflicts: Option<String>,
     destination: String,
 ) -> Result<String, String> {
-    let world = hosting_contribution_commands::validate_world_id(&world)?;
-    let checkpoint: swarm_protocol::Hash32 = checkpoint.parse().map_err(|_| "Invalid checkpoint hash".to_string())?;
-    let destination = require_value(destination, "New export destination")?;
-    let mut args = vec![
-        "world".into(),
-        "recovery-export".into(),
-        world.to_string(),
-        "--checkpoint".into(),
-        checkpoint.to_string(),
-        "--destination".into(),
-        destination,
-    ];
-    append_conflict_ack(&mut args, acknowledged_conflicts)?;
-    run_cli(&app, args).await
+    let history = crate::support_diagnostics::ActionGuard::begin(
+        crate::support_diagnostics::Action::ExportCheckpoint,
+        Some(&world),
+    );
+    let result = async {
+        let world = hosting_contribution_commands::validate_world_id(&world)?;
+        let checkpoint: swarm_protocol::Hash32 =
+            checkpoint.parse().map_err(|_| "Invalid checkpoint hash".to_string())?;
+        let destination = require_value(destination, "New export destination")?;
+        let mut args = vec![
+            "world".into(),
+            "recovery-export".into(),
+            world.to_string(),
+            "--checkpoint".into(),
+            checkpoint.to_string(),
+            "--destination".into(),
+            destination,
+        ];
+        append_conflict_ack(&mut args, acknowledged_conflicts)?;
+        run_cli(&app, args).await
+    }
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -538,23 +677,32 @@ async fn conflict_export(
     evidence_only: bool,
     destination: String,
 ) -> Result<String, String> {
-    let world = hosting_contribution_commands::validate_world_id(&world)?;
-    let branch: swarm_protocol::Hash32 = branch.parse().map_err(|_| "Invalid branch hash".to_string())?;
-    let destination = require_value(destination, "New export destination")?;
-    let mut args = vec![
-        "world".into(),
-        "conflict-export".into(),
-        world.to_string(),
-        "--branch".into(),
-        branch.to_string(),
-        "--destination".into(),
-        destination,
-    ];
-    append_conflict_ack(&mut args, Some(acknowledged_conflicts))?;
-    if evidence_only {
-        args.push("--evidence-only".into());
+    let history = crate::support_diagnostics::ActionGuard::begin(
+        crate::support_diagnostics::Action::ExportConflict,
+        Some(&world),
+    );
+    let result = async {
+        let world = hosting_contribution_commands::validate_world_id(&world)?;
+        let branch: swarm_protocol::Hash32 = branch.parse().map_err(|_| "Invalid branch hash".to_string())?;
+        let destination = require_value(destination, "New export destination")?;
+        let mut args = vec![
+            "world".into(),
+            "conflict-export".into(),
+            world.to_string(),
+            "--branch".into(),
+            branch.to_string(),
+            "--destination".into(),
+            destination,
+        ];
+        append_conflict_ack(&mut args, Some(acknowledged_conflicts))?;
+        if evidence_only {
+            args.push("--evidence-only".into());
+        }
+        run_cli(&app, args).await
     }
-    run_cli(&app, args).await
+    .await;
+    history.finish(&result);
+    result
 }
 
 /// A recovered copy is a new private identity, never a membership or
@@ -567,23 +715,30 @@ async fn recover_copy(
     confirm_new_identity: bool,
     acknowledged_conflicts: Option<String>,
 ) -> Result<String, String> {
-    if !confirm_new_identity {
-        return Err("Confirm that recovery creates a separate world identity.".into());
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::RecoveryCopy, Some(&world));
+    let result = async {
+        if !confirm_new_identity {
+            return Err("Confirm that recovery creates a separate world identity.".into());
+        }
+        let world = hosting_contribution_commands::validate_world_id(&world)?;
+        let checkpoint: swarm_protocol::Hash32 =
+            checkpoint.parse().map_err(|_| "A valid checkpoint manifest hash is required".to_string())?;
+        let mut args = vec![
+            "world".into(),
+            "recover-copy".into(),
+            world.to_string(),
+            "--checkpoint".into(),
+            checkpoint.to_string(),
+            "--confirm-new-identity".into(),
+            "--json".into(),
+        ];
+        append_conflict_ack(&mut args, acknowledged_conflicts)?;
+        run_cli(&app, args).await
     }
-    let world = hosting_contribution_commands::validate_world_id(&world)?;
-    let checkpoint: swarm_protocol::Hash32 =
-        checkpoint.parse().map_err(|_| "A valid checkpoint manifest hash is required".to_string())?;
-    let mut args = vec![
-        "world".into(),
-        "recover-copy".into(),
-        world.to_string(),
-        "--checkpoint".into(),
-        checkpoint.to_string(),
-        "--confirm-new-identity".into(),
-        "--json".into(),
-    ];
-    append_conflict_ack(&mut args, acknowledged_conflicts)?;
-    run_cli(&app, args).await
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
@@ -612,8 +767,15 @@ async fn migration_status(app: AppHandle, world: String) -> Result<String, Strin
 
 #[tauri::command]
 async fn wake_world(app: AppHandle, world: String) -> Result<String, String> {
-    let world = require_value(world, "World ID")?;
-    run_cli(&app, vec!["world".into(), "wake".into(), world]).await
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::WakeRequest, Some(&world));
+    let result = async {
+        let world = require_value(world, "World ID")?;
+        run_cli(&app, vec!["world".into(), "wake".into(), world]).await
+    }
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -626,31 +788,40 @@ async fn configure_world_runtime(
     accept_eula: bool,
     game_endpoint: Option<String>,
 ) -> Result<String, String> {
-    let world = require_value(world, "World ID")?;
-    let java = require_value(java, "Java executable")?;
-    let server_jar = require_value(server_jar, "Fabric server jar")?;
-    let mod_jar = require_value(mod_jar, "SwarmCraft mod jar")?;
-    if !accept_eula {
-        return Err("Minecraft server EULA acceptance is required before runtime setup".into());
-    }
+    let history = crate::support_diagnostics::ActionGuard::begin(
+        crate::support_diagnostics::Action::ConfigureRuntime,
+        Some(&world),
+    );
+    let result = async {
+        let world = require_value(world, "World ID")?;
+        let java = require_value(java, "Java executable")?;
+        let server_jar = require_value(server_jar, "Fabric server jar")?;
+        let mod_jar = require_value(mod_jar, "SwarmCraft mod jar")?;
+        if !accept_eula {
+            return Err("Minecraft server EULA acceptance is required before runtime setup".into());
+        }
 
-    let mut arguments = vec![
-        "world".into(),
-        "runtime-configure".into(),
-        world,
-        "--java".into(),
-        java,
-        "--server-jar".into(),
-        server_jar,
-        "--mod-jar".into(),
-        mod_jar,
-        "--accept-eula".into(),
-    ];
-    if let Some(endpoint) = game_endpoint.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
-        arguments.push("--game-endpoint".into());
-        arguments.push(endpoint);
+        let mut arguments = vec![
+            "world".into(),
+            "runtime-configure".into(),
+            world,
+            "--java".into(),
+            java,
+            "--server-jar".into(),
+            server_jar,
+            "--mod-jar".into(),
+            mod_jar,
+            "--accept-eula".into(),
+        ];
+        if let Some(endpoint) = game_endpoint.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
+            arguments.push("--game-endpoint".into());
+            arguments.push(endpoint);
+        }
+        run_cli(&app, arguments).await
     }
-    run_cli(&app, arguments).await
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
@@ -667,24 +838,47 @@ async fn runtime_plan(app: AppHandle, world: String) -> Result<String, String> {
 
 #[tauri::command(rename_all = "camelCase")]
 async fn runtime_install(app: AppHandle, world: String, accept_eula: bool) -> Result<String, String> {
-    let world = require_value(world, "World ID")?;
-    let mut arguments = vec!["install".into(), world];
-    if accept_eula {
-        arguments.push("--accept-eula".into());
+    let history = crate::support_diagnostics::ActionGuard::begin(
+        crate::support_diagnostics::Action::InstallRuntime,
+        Some(&world),
+    );
+    let result = async {
+        let world = require_value(world, "World ID")?;
+        let mut arguments = vec!["install".into(), world];
+        if accept_eula {
+            arguments.push("--accept-eula".into());
+        }
+        run_runtime_cli(&app, arguments).await
     }
-    run_runtime_cli(&app, arguments).await
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
 async fn runtime_repair(app: AppHandle, world: String) -> Result<String, String> {
-    let world = require_value(world, "World ID")?;
-    run_runtime_cli(&app, vec!["repair".into(), world]).await
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::RepairRuntime, Some(&world));
+    let result = async {
+        let world = require_value(world, "World ID")?;
+        run_runtime_cli(&app, vec!["repair".into(), world]).await
+    }
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
 async fn runtime_verify(app: AppHandle, world: String) -> Result<String, String> {
-    let world = require_value(world, "World ID")?;
-    run_runtime_cli(&app, vec!["verify".into(), world]).await
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::VerifyRuntime, Some(&world));
+    let result = async {
+        let world = require_value(world, "World ID")?;
+        run_runtime_cli(&app, vec!["verify".into(), world]).await
+    }
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
@@ -693,6 +887,9 @@ async fn runtime_launch(
     processes: State<'_, RuntimeProcesses>,
     world: String,
 ) -> Result<Option<u32>, String> {
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::Play, Some(&world));
+    let result = async {
     let world_id = hosting_contribution_commands::validate_world_id(&world)?;
     let world = world_id.to_string();
     // This dispatch is based on the signed canonical membership, not a
@@ -769,6 +966,9 @@ async fn runtime_launch(
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
     Err("Minecraft did not reach the shared runtime ready state before the launch timeout".into())
+    }.await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
@@ -807,6 +1007,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(RuntimeProcesses::default())
+        .manage(SupportPreviewCache::default())
         .invoke_handler(tauri::generate_handler![
             initialize_node,
             node_identity,
@@ -861,6 +1062,11 @@ fn main() {
             runtime_launch,
             runtime_diagnostics,
             connectivity_diagnostics,
+            support_history,
+            support_recording,
+            support_clear_history,
+            support_preview,
+            support_save,
             canonicalize_modpack,
             create_canonical_world,
             modrinth_search,

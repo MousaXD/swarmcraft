@@ -51,6 +51,18 @@ The Discover view searches signed public announcements, with at most 32 results 
 
 Configure reachable directory providers as described in [Private infrastructure](../../docs/PRIVATE_INFRASTRUCTURE.md). An unavailable or incomplete directory is not proof that a world does not exist.
 
+## Local support history and redacted reports
+
+In **Tools > Activity**, explicitly enable bounded local world-action
+history, filter it by selected world, pause or clear it. Preview a redacted
+support report before copying its JSON or saving it to a chosen folder.
+The report contains only timestamped action categories, native return
+outcomes, Desktop build provenance and a coarse last reported node path
+class. It never includes raw session logs, invites, credentials, addresses,
+world/peer identifiers, local paths or save data. Nothing is uploaded.
+The existing raw session console remains available separately for local
+debugging. See [support diagnostics](../../docs/SUPPORT_DIAGNOSTICS.md).
+
 ## Listing privacy and moderation
 
 New public/unlisted worlds can optionally declare a broad region and a

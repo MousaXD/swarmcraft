@@ -1,3 +1,4 @@
+import { installSupportHistory } from './support-history.js';
 import { installWorldListing, installListingMetadata } from './directory-moderation.js';
 import { installFriends } from './friends.js';
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
@@ -54,7 +55,7 @@ const viewMeta = {
   discover: ['Discover', 'Find signed public and unlisted world listings'],
   friends: ['Friends', 'Contacts and presence privacy'],
   join: ['Join', 'Join with a signed invite'],
-  activity: ['Activity', 'Recent actions and detailed errors'],
+  activity: ['Activity', 'Local action history and support export'],
   diagnostics: ['Diagnostics', 'Advanced connectivity, runtime, and recovery tools'],
 };
 
@@ -1482,14 +1483,24 @@ async function copyText(text, label) {
   setStatus(`${label} copied`, 'safe');
 }
 
+// Explicit detailed-read actions still open their existing raw results.
+// Normal Activity navigation and the support shortcut do not expose them.
+function showDetailedActivity() {
+  showView('activity');
+  const output = $('output');
+  const details = output?.closest('details');
+  if (details) details.open = true;
+  output?.focus();
+}
+
 async function worldStatus() {
   await run('Reading world status…', () => backend.worldStatus(worldId()));
-  showView('activity');
+  showDetailedActivity();
 }
 
 async function worldCompatibility() {
   await run('Checking compatibility…', () => backend.worldCompatibility(worldId()));
-  showView('activity');
+  showDetailedActivity();
 }
 
 async function worldConflicts() {
@@ -1499,7 +1510,7 @@ async function worldConflicts() {
 
 async function worldPeers() {
   await run('Reading world members…', () => backend.worldPeers(worldId()));
-  showView('activity');
+  showDetailedActivity();
 }
 
 async function verifyWorld() {
@@ -1971,6 +1982,7 @@ const clientPreparation = installClientPreparation($('clientProfilePanel'), back
 window.__swarmcraftTakeImportReview = request => importReview.take(request);
 window.__swarmcraftRefreshImportReview = () => importReview.sync();
 
+installSupportHistory(invoke, () => selectedWorldId);
 installListingMetadata();
 installWorldListing(invoke, () => selectedWorldId);
 installFriends(invoke, () => {
@@ -1995,6 +2007,7 @@ $('cancelJoin').addEventListener('click', () => showView('worlds'));
 $('discoverToJoin').addEventListener('click', () => showView('join'));
 $('joinToDiscover').addEventListener('click', () => showView('discover'));
 $('openWorldDiagnostics').addEventListener('click', () => showView('diagnostics'));
+$('openSupportHistory')?.addEventListener('click', () => showView('activity'));
 $('clearActivity').addEventListener('click', () => { $('output').textContent = 'Activity cleared.'; });
 $('inviteWorld').addEventListener('click', () => { try { openInviteDialog(); } catch (error) { setOutput(String(error), 'Invite'); } });
 $('sleepWorld').addEventListener('click', () => { try { openSleepDialog(); } catch (error) { setOutput(String(error), 'Stop world'); } });

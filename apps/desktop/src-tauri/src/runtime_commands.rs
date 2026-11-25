@@ -20,12 +20,20 @@ pub fn ensure_daemon_running(
 
 #[tauri::command]
 pub fn start_daemon(app: AppHandle, processes: State<'_, RuntimeProcesses>, listen: String) -> Result<u32, String> {
-    processes.start_daemon(&app, required(listen, "Listen multiaddress")?)
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::StartNetworking, None);
+    let result = (|| processes.start_daemon(&app, required(listen, "Listen multiaddress")?))();
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
 pub fn stop_daemon(processes: State<'_, RuntimeProcesses>) -> Result<(), String> {
-    processes.stop_daemon()
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::StopNetworking, None);
+    let result = processes.stop_daemon();
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
@@ -57,22 +65,29 @@ async fn run_cli(app: &AppHandle, arguments: Vec<String>) -> Result<String, Stri
 
 #[tauri::command]
 pub async fn stop_host(app: AppHandle, world: String) -> Result<String, String> {
-    let world = required(world, "World ID")?;
-    run_cli(&app, vec!["world".into(), "stop".into(), world.clone()]).await?;
-    for _ in 0..160 {
-        let raw =
-            run_cli(&app, vec!["world".into(), "migration-status".into(), world.clone(), "--json".into()]).await?;
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
-            let phase = value.get("phase").and_then(|v| v.as_str()).unwrap_or_default();
-            if phase == "sleeping" {
-                return Ok("World stopped safely after save barrier and canonical checkpoint.".into());
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::StopWorld, Some(&world));
+    let result = async {
+        let world = required(world, "World ID")?;
+        run_cli(&app, vec!["world".into(), "stop".into(), world.clone()]).await?;
+        for _ in 0..160 {
+            let raw =
+                run_cli(&app, vec!["world".into(), "migration-status".into(), world.clone(), "--json".into()]).await?;
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                let phase = value.get("phase").and_then(|v| v.as_str()).unwrap_or_default();
+                if phase == "sleeping" {
+                    return Ok("World stopped safely after save barrier and canonical checkpoint.".into());
+                }
+                if phase == "failed" {
+                    let detail = value.get("failure_reason").and_then(|v| v.as_str()).unwrap_or("safe stop failed");
+                    return Err(format!("World was not reported safely stopped: {detail}"));
+                }
             }
-            if phase == "failed" {
-                let detail = value.get("failure_reason").and_then(|v| v.as_str()).unwrap_or("safe stop failed");
-                return Err(format!("World was not reported safely stopped: {detail}"));
-            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        Err("World was not reported safely stopped; Minecraft was not force-killed by Desktop".into())
     }
-    Err("World was not reported safely stopped; Minecraft was not force-killed by Desktop".into())
+    .await;
+    history.finish(&result);
+    result
 }

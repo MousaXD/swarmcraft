@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -122,6 +122,30 @@ impl RuntimeProcesses {
 
     pub fn stop_daemon(&self) -> Result<(), String> {
         stop(&self.daemon, "Replication daemon")
+    }
+
+    /// Last local node path observation only. Do not return raw addresses,
+    /// diagnostic text or stale snapshots after the owned daemon stops.
+    pub fn support_path_class(&self) -> crate::support_diagnostics::PathClass {
+        use crate::support_diagnostics::{classify_path, PathClass};
+        let active = self.daemon.state.lock().ok().is_some_and(|guard| guard.owned.is_some());
+        if !active {
+            return PathClass::Unavailable;
+        }
+        let Ok(meta) = fs::symlink_metadata(&self.connectivity_json) else {
+            return PathClass::Unavailable;
+        };
+        if !meta.is_file() || meta.len() > 128 * 1024 {
+            return PathClass::Unavailable;
+        }
+        let Ok(file) = fs::File::open(&self.connectivity_json) else {
+            return PathClass::Unavailable;
+        };
+        let mut bytes = Vec::new();
+        if file.take(128 * 1024 + 1).read_to_end(&mut bytes).is_err() || bytes.len() > 128 * 1024 {
+            return PathClass::Unavailable;
+        }
+        classify_path(&bytes)
     }
 
     pub fn connectivity_diagnostics_json(&self) -> Result<String, String> {

@@ -140,6 +140,10 @@
               </div>
             </div>
 
+            <div class="compact-actions support-diagnostic-link">
+              <button id="openSupportHistory" class="button button-secondary button-small" type="button">Support history and redacted report</button>
+            </div>
+
             <section id="diagnosticWorldContext" class="diagnostic-world-context" aria-live="polite">
               <div class="context-copy">
                 <span class="context-label">Selected world</span>

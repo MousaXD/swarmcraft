@@ -485,12 +485,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #48 — P2 · Proposal
 - Work: Add opt-in, redacted diagnostics export and a useful local history of world actions
 - Acceptance: Users can export time, commit, path class, and event summaries while excluding private invites, credentials, raw private addresses, and world data
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (both Desktop frontends, actual Linux native file save and restart)
+- Source: apps/desktop/src-tauri/src/{support_diagnostics,main,runtime,runtime_commands,canonical_world_commands,directory_commands,transfer_commands,import_picker}.rs; apps/desktop/src-tauri/build.rs; shared support-history.js; both Activity/Diagnostics views; scripts/acceptance/native_support_history.py; docs/SUPPORT_DIAGNOSTICS.md.
+- Evidence: [Report](../research/support-history/REPORT.md), [native Linux](../research/support-history/evidence/linux-native-20261125.json). Default-off bounded private history, opt-in, typed results and local-only world association; pause/clear invalidates older recording revisions. Explicit allow-listed report projection includes timestamps, source-base commit/tree status, coarse last reported path class and event summaries, excludes raw logs, identifiers, names, tokens, addresses, paths and world data. Exact reviewed bytes saved via native folder selection, no overwrite or private-root destination, Unix owner-only mode. Both extracted packages passed 14/14 native checks including real success/failure, no backfill, scoped redaction, cancellation, exact save, restart, pause/clear and unchanged canonical world data. 71 Rust, 173 Node, 82 Svelte, 30 source-parity tests, both Chromium variants, native check/strict Clippy and workflow policy passed.
+- Remaining / next action: Actual Windows/macOS native dialog/filesystem and clipboard qualification remain separate. Selected Desktop command outcomes only, not signed audit or comprehensive daemon trace; coarse last path observation is not live proof. Continue to #49; main-only issue closure remains authorization-gated.
+- External dependency: Installed Windows/macOS field qualification; authorized main/release gates as applicable.
+- Commit: Opt-in redacted support history and diagnostics export; see git history.
 
 ### #49 — Sabathon P0 · Partial
 - Work: Reconcile open issues, PRs, and capability claims against main

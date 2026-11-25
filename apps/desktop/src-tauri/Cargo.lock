@@ -3694,6 +3694,7 @@ name = "swarmcraft-desktop"
 version = "0.5.1"
 dependencies = [
  "anyhow",
+ "fs2",
  "gtk",
  "hex",
  "image",

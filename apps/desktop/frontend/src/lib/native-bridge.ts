@@ -103,6 +103,11 @@ export interface NativeCommandTable {
   runtime_launch: { args: { world: string }; result: number | null };
   runtime_diagnostics: { args: { world: string }; result: string };
   connectivity_diagnostics: { args: Record<string, never>; result: string };
+  support_history: { args: { world: string | null }; result: unknown };
+  support_recording: { args: { world: string | null; enabled: boolean; confirm: boolean }; result: unknown };
+  support_clear_history: { args: { world: string | null; confirm: boolean }; result: unknown };
+  support_preview: { args: { world: string | null; confirm: boolean }; result: unknown };
+  support_save: { args: { token: string; confirm: boolean }; result: string | null };
   canonicalize_modpack: { args: { request: Record<string, unknown> }; result: unknown };
   create_canonical_world: { args: { request: Record<string, unknown> }; result: unknown };
   modrinth_search: { args: { query: Record<string, unknown> }; result: unknown };

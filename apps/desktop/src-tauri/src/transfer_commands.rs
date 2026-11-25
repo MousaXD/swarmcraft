@@ -62,12 +62,21 @@ pub async fn start_automatic_transfer(
     target: String,
     source_epoch: u64,
 ) -> Result<String, String> {
-    let world = require_value(world, "World ID")?;
-    let target = require_value(target, "Transfer target peer ID")?;
-    // The daemon, not the Desktop, advances the signed stages. Ensure the
-    // existing networking service is running before submitting the intent.
-    processes.ensure_daemon_running(&app, "/ip4/0.0.0.0/udp/0/quic-v1".into())?;
-    run_cli(&app, vec!["world".into(), "transfer-start".into(), world, target, source_epoch.to_string()]).await
+    let history = crate::support_diagnostics::ActionGuard::begin(
+        crate::support_diagnostics::Action::TransferRequest,
+        Some(&world),
+    );
+    let result = async {
+        let world = require_value(world, "World ID")?;
+        let target = require_value(target, "Transfer target peer ID")?;
+        // The daemon, not the Desktop, advances the signed stages. Ensure the
+        // existing networking service is running before submitting the intent.
+        processes.ensure_daemon_running(&app, "/ip4/0.0.0.0/udp/0/quic-v1".into())?;
+        run_cli(&app, vec!["world".into(), "transfer-start".into(), world, target, source_epoch.to_string()]).await
+    }
+    .await;
+    history.finish(&result);
+    result
 }
 
 #[tauri::command]
@@ -83,6 +92,9 @@ pub async fn manual_transfer_step(
     action: String,
     value: Option<String>,
 ) -> Result<String, String> {
+    let history =
+        crate::support_diagnostics::ActionGuard::begin(crate::support_diagnostics::Action::TransferStep, Some(&world));
+    let result = async {
     let world = require_value(world, "World ID")?;
     match action.trim() {
         "prepare" => {
@@ -127,6 +139,9 @@ pub async fn manual_transfer_step(
         }
         _ => Err("Manual transfer action must be prepare, accept, commit, activate, or observe".into()),
     }
+    }.await;
+    history.finish(&result);
+    result
 }
 
 #[cfg(test)]
