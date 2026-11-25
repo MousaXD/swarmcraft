@@ -458,7 +458,7 @@ async fn supervise_world(paths: DataPaths, world: WorldId, runtime_registry: Liv
             // Do not overwrite its report while that runtime lock is held.
             if let Some(_guard) = AuthorityRuntimeGuard::try_acquire(&paths, world)? {
                 publish_status(&paths, &storage, world, None, MigrationPhase::Blocked, false, None, None,
-                    Some("Previous checkpoint is unconfirmed; retained runtime requires recovery or archival before relaunch".into()))?;
+                    Some("Previous checkpoint is unconfirmed; retained runtime requires recovery or archival before relaunch. If storage was full, inspect world storage-status, reclaim only unreferenced blobs or raise the local quota; never delete the retained runtime.".into()))?;
             }
             sleep(SUPERVISOR_POLL).await;
             continue;
@@ -921,6 +921,16 @@ async fn run_authority_runtime_inner(
     let initial = storage.latest_snapshot(options.world)?.context("world has no verified snapshot to host")?;
     storage.verify_snapshot(&initial)?;
     verify_snapshot_signature(&initial)?;
+    // Deny new hosting before changing epoch or resetting any runtime.
+    storage.require_payload_space(options.world, 1)?;
+    let restore_bytes = initial.entries.iter().try_fold(0u64, |sum, entry| {
+        sum.checked_add(entry.blob.uncompressed_size).context("restore byte count overflow")
+    })?;
+    storage.require_restore_space(
+        options.world,
+        &paths.root.join("runtime").join(options.world.to_hex()),
+        restore_bytes,
+    )?;
 
     publish_status(
         paths,
@@ -2661,11 +2671,19 @@ fn publish_failure(
         storage,
         world,
         Some(trigger),
-        MigrationPhase::Failed,
+        if error.chain().any(|cause| {
+            cause
+                .downcast_ref::<swarm_storage::StorageError>()
+                .is_some_and(swarm_storage::StorageError::is_storage_pressure)
+        }) {
+            MigrationPhase::Blocked
+        } else {
+            MigrationPhase::Failed
+        },
         false,
         None,
         storage.latest_snapshot(world)?.and_then(|snapshot| snapshot.manifest_hash().ok()),
-        Some(error.to_string()),
+        Some(format!("{error:#}")),
     )
 }
 

@@ -1495,3 +1495,112 @@ fn world_visibility_never_authorizes_outsider_replication() {
         assert_eq!(denied, 12);
     });
 }
+
+#[test]
+fn replica_disk_quota_pauses_exact_chunk_and_resumes_without_losing_checkpoints() {
+    let issuer = peer_fixture();
+    let replica = peer_fixture();
+    let ip = local_non_loopback_ipv4();
+    let address = automatic_transport_address(&issuer, ip);
+    let created = run_cli(
+        &issuer,
+        &["world", "create", "--name", "storage quota", "--minecraft", "26.1.2", "--fabric-loader", "0.19.3"],
+    );
+    let world: WorldId = created.lines().find_map(|line| line.strip_prefix("World ID: ")).unwrap().parse().unwrap();
+    let world_arg = world.to_string();
+    let epoch = issuer.storage.load_epoch_record(world).unwrap();
+    let first = issuer.storage.latest_snapshot(world).unwrap().unwrap();
+    let token = run_cli(&issuer, &["invite", "create", &world_arg, "--bootstrap", &address]);
+    let log_path = issuer._temp.path().join("storage-admission.log");
+    let log = fs::File::create(&log_path).unwrap();
+    let _owner_daemon = ManagedChild(
+        Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+            .arg("--data-dir")
+            .arg(&issuer.paths.root)
+            .args(["daemon", "--replica-only", "--listen", &format!("/ip4/{ip}/udp/{}/quic-v1", issuer.port)])
+            .env("RUST_LOG", "info")
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    );
+    let _replica_daemon = spawn_daemon(&replica, ip);
+    assert!(run_cli(&replica, &["world", "join", &token]).contains("Join request staged"));
+    wait_until("replica has accepted genesis and membership", Duration::from_secs(50), || {
+        issuer.storage.load_membership_record(world).is_ok_and(|membership| {
+            membership.members.len() == 2
+                && replica.storage.load_membership_record(world).ok().as_ref() == Some(&membership)
+        }) && replica.storage.load_epoch_record(world).ok().as_ref() == Some(&epoch)
+            && replica.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&first)
+    });
+
+    // Create a genuinely unreferenced complete blob before applying the cap.
+    // Cleanup may reclaim it but must not touch the accepted genesis or
+    // pending negotiated replication data.
+    let orphan = replica.storage.put_blob(world, b"orphan cleanup candidate").unwrap();
+    let baseline = replica.storage.world_storage_status(world).unwrap().world_bytes;
+    let limit = (baseline + 300 * 1024).to_string();
+    let quota: serde_json::Value =
+        serde_json::from_str(&run_cli(&replica, &["world", "storage-policy", &world_arg, "--max-world-bytes", &limit]))
+            .unwrap();
+    assert_eq!(quota["retention"], "preserve_all_committed_checkpoints");
+
+    let source = tempfile::tempdir().unwrap();
+    let mut state = 0x1234_5678u32;
+    let mut bytes = Vec::with_capacity(640 * 1024);
+    for _ in 0..640 * 1024 {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        bytes.push(state as u8);
+    }
+    fs::write(source.path().join("level.dat"), &bytes).unwrap();
+    let mut next = issuer
+        .storage
+        .snapshot_directory(
+            source.path(),
+            SnapshotContext {
+                world,
+                snapshot_number: first.snapshot_number + 1,
+                epoch: epoch.epoch_number,
+                sequence: first.sequence + 1,
+                previous_snapshot_hash: Some(first.manifest_hash().unwrap()),
+                authority_peer_id: issuer.identity.peer_id(),
+                authority_public_key: issuer.identity.public_key(),
+            },
+        )
+        .unwrap();
+    issuer.identity.sign_snapshot(&mut next).unwrap();
+    issuer.storage.commit_snapshot(&next).unwrap();
+    let blob = &next.entries[0].blob;
+    assert!(blob.encoded_size > 512 * 1024);
+    wait_until("receiver writes one chunk then explicitly pauses at its quota", Duration::from_secs(65), || {
+        fs::read_to_string(&log_path).is_ok_and(|log| log.contains("STORAGE_PAUSED"))
+            && replica
+                .storage
+                .partial_blob_offset(world, blob)
+                .is_ok_and(|offset| offset > 0 && offset < blob.encoded_size)
+    });
+    let offset = replica.storage.partial_blob_offset(world, blob).unwrap();
+    assert_eq!(replica.storage.latest_snapshot(world).unwrap().unwrap(), first);
+    replica.storage.verify_snapshot(&first).unwrap();
+
+    let cleanup: serde_json::Value =
+        serde_json::from_str(&run_cli(&replica, &["world", "storage-cleanup", &world_arg, "--confirm"])).unwrap();
+    assert!(cleanup["removed_snapshots"].as_array().unwrap().is_empty());
+    assert!(cleanup["reclaimed_bytes"].as_u64().unwrap() > 0);
+    assert!(!replica.storage.has_complete_blob(world, &orphan));
+    assert_eq!(replica.storage.partial_blob_offset(world, blob).unwrap(), offset);
+    assert_eq!(replica.storage.latest_snapshot(world).unwrap().unwrap(), first);
+
+    run_cli(&replica, &["world", "storage-policy", &world_arg, "--unlimited"]);
+    wait_until("same checkpoint completes after increasing local quota", Duration::from_secs(70), || {
+        replica.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(next.manifest())
+            && replica.storage.verify_snapshot(next.manifest()).is_ok()
+    });
+    assert_eq!(replica.storage.list_snapshots(world).unwrap(), vec![first.clone(), next.manifest().clone()]);
+    replica.storage.verify_snapshot(&first).unwrap();
+    let restored = replica._temp.path().join("restored");
+    replica.storage.restore_snapshot(next.manifest(), &restored).unwrap();
+    assert_eq!(fs::read(restored.join("level.dat")).unwrap(), bytes);
+}

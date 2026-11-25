@@ -210,6 +210,9 @@ impl StaleReplayDownload {
         if !self.manifest.entries.iter().any(|entry| entry.blob == *descriptor) {
             return Err(StorageError::WorldMetadataMismatch.into());
         }
+        // The nested staging store cannot bypass the outer world's quota.
+        let budget = self.canonical.try_begin_blob_write(world)?;
+        budget.require(bytes.len() as u64)?;
         self.isolated.receive_blob_chunk(world, descriptor, offset, bytes, finished)
     }
 

@@ -295,12 +295,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #29 — P1 · Partial
 - Work: Add backup retention, disk quota, and space recovery controls on top of current storage primitives
 - Acceptance: The newest recoverable checkpoint and in-use roots survive cleanup. Low disk space pauses with a usable remediation path
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: `crates/swarm-storage/src/{space,retention,replica,streaming,scheduler,stale_replay,stale_publication}.rs`; `crates/swarm-cli/src/{main,daemon,migration,historical_authority}.rs`; `crates/swarm-storage/tests/storage_space.rs`; `crates/swarm-cli/tests/automatic_invite_join.rs`; `docs/STORAGE_RETENTION_AND_QUOTAS.md`.
+- Evidence: Persistent per-world payload quota and filesystem reserve; authenticated STORAGE_PAUSED retry preserves partial offsets; explicit verified cleanup retains all committed checkpoints and in-use roots, and refuses incomplete history or pinned replay. Local storage library 67 passed (1 ignored), all storage integration suites passed including 7/7 new storage tests; CLI library 161 passed (2 ignored), CLI binary 51 passed. Real two-daemon quota/cleanup/resume test restored exact bytes; existing multi-peer invite/bootstrap and historical successor replay regression passed. Strict all-target/all-feature Clippy and formatting passed.
+- Remaining / next action: Desktop controls, cross-platform actual disk-exhaustion field verification, safe signed-history compaction, and proof-based reclamation of legacy crash-persisted pins remain. Payload admission is not a hard global OS quota; preserve all signed checkpoints rather than unsafe count-based pruning.
+- External dependency: Installed-platform/real disk-exhaustion certification and exact-SHA CI remain outstanding.
+- Commit: See 25 November storage retention/quota checkpoint.
 
 ### #30 — P1 · Partial
 - Work: Finish manual checkpoint selection, verified restore, and conflict inspection UX

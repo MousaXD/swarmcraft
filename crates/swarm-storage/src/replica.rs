@@ -111,6 +111,7 @@ impl Storage {
         finished: bool,
     ) -> Result<u64, ReplicationError> {
         let _guard = self.lock_world_transaction(world)?;
+        let budget = self.try_begin_blob_write(world)?;
         let dir = self.world_dir(world).join("blobs");
         fs::create_dir_all(&dir).map_err(|source| StorageError::Io { path: dir.clone(), source })?;
         let partial = partial_blob_path(self, world, descriptor);
@@ -130,6 +131,7 @@ impl Storage {
         if next > descriptor.encoded_size {
             return Err(ReplicationError::SizeMismatch { expected: descriptor.encoded_size, received: next });
         }
+        budget.require(data.len() as u64)?;
         file.write_all(data).map_err(|source| StorageError::Io { path: partial.clone(), source })?;
         file.sync_data().map_err(|source| StorageError::Io { path: partial.clone(), source })?;
         drop(file);
@@ -146,9 +148,13 @@ impl Storage {
                 return Err(error);
             }
             let final_path = blob_path(self, world, descriptor);
-            if final_path.exists() {
-                fs::remove_file(&final_path).map_err(|source| StorageError::Io { path: final_path.clone(), source })?;
+            if final_path.exists() && verify_encoded_blob(&final_path, descriptor).is_ok() {
+                // Never unlink a verified existing recovery blob just to
+                // promote an identical download; a failed rename must not
+                // destroy the only committed copy.
+                fs::remove_file(&partial).map_err(|source| StorageError::Io { path: partial, source })?;
                 sync_parent(&dir)?;
+                return Ok(next);
             }
             fs::rename(&partial, &final_path)
                 .map_err(|source| StorageError::Io { path: final_path.clone(), source })?;

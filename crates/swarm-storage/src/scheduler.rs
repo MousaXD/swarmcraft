@@ -281,7 +281,7 @@ impl ReplicationScheduler {
 
         let queue = Arc::new(Mutex::new(VecDeque::from(assignments)));
         let report = Arc::new(Mutex::new(ReplicationReport { total_blobs: missing.len(), ..Default::default() }));
-        let fatal = Arc::new(Mutex::new(None::<(Hash32, String)>));
+        let fatal = Arc::new(Mutex::new(None::<SchedulerError>));
         let stop = Arc::new(AtomicBool::new(false));
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
@@ -322,10 +322,10 @@ impl ReplicationScheduler {
                             );
                             active.fetch_sub(1, Ordering::AcqRel);
 
-                            if let Err((hash, message)) = outcome {
+                            if let Err(error) = outcome {
                                 let mut slot = fatal.lock().expect("replication error slot poisoned");
                                 if slot.is_none() {
-                                    *slot = Some((hash, message));
+                                    *slot = Some(error);
                                 }
                                 stop.store(true, Ordering::Release);
                             }
@@ -342,8 +342,8 @@ impl ReplicationScheduler {
         let observed = max_active.load(Ordering::Acquire);
         report.lock().expect("replication report poisoned").max_parallel_blobs_observed = observed;
 
-        if let Some((hash, last_error)) = fatal.lock().expect("replication error slot poisoned").take() {
-            return Err(SchedulerError::AllSourcesFailed { hash, last_error });
+        if let Some(error) = fatal.lock().expect("replication error slot poisoned").take() {
+            return Err(error);
         }
 
         destination.finalize_replica(manifest)?;
@@ -371,7 +371,7 @@ fn transfer_assignment(
     source_map: &BTreeMap<PeerId, Arc<dyn BlobSource>>,
     chunk_size: usize,
     report: &Arc<Mutex<ReplicationReport>>,
-) -> Result<(), (Hash32, String)> {
+) -> Result<(), SchedulerError> {
     let descriptor = &assignment.descriptor;
     let mut last_error = String::from("no candidate source remained");
     let mut resumed_recorded = false;
@@ -387,10 +387,7 @@ fn transfer_assignment(
 
         let mut clean_retry_used = false;
         'source_attempt: loop {
-            let mut offset = match destination.partial_blob_offset(world, descriptor) {
-                Ok(offset) => offset,
-                Err(error) => return Err((descriptor.hash, error.to_string())),
-            };
+            let mut offset = destination.partial_blob_offset(world, descriptor)?;
             let attempt_start_offset = offset;
             if offset > 0 && !resumed_recorded {
                 report.lock().expect("replication report poisoned").resumed_blobs += 1;
@@ -425,6 +422,11 @@ fn transfer_assignment(
                 let next_offset = match received {
                     Ok(next_offset) => next_offset,
                     Err(error) => {
+                        if matches!(&error, ReplicationError::Storage(storage) if storage.is_storage_pressure()) {
+                            // Local disk pressure is not a corrupt/failed
+                            // remote source. Keep the durable partial intact.
+                            return Err(error.into());
+                        }
                         let partial_was_reset = finished
                             && attempt_start_offset > 0
                             && !clean_retry_used
@@ -477,7 +479,7 @@ fn transfer_assignment(
         }
     }
 
-    Err((descriptor.hash, last_error))
+    Err(SchedulerError::AllSourcesFailed { hash: descriptor.hash, last_error })
 }
 
 fn record_source_failure(

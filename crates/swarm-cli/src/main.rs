@@ -287,6 +287,24 @@ enum WorldCommand {
     },
     /// List committed snapshots.
     Snapshots { world: String },
+    /// Inspect local payload quota, actual disk headroom, and recovery guidance.
+    StorageStatus { world: String },
+    /// Set a local world storage admission policy, not a signed world configuration.
+    StoragePolicy {
+        world: String,
+        #[arg(long, conflicts_with = "unlimited", required_unless_present = "unlimited")]
+        max_world_bytes: Option<u64>,
+        #[arg(long, conflicts_with = "max_world_bytes")]
+        unlimited: bool,
+        #[arg(long, default_value_t = swarm_storage::space::DEFAULT_FREE_RESERVE_BYTES)]
+        reserve_free_bytes: u64,
+    },
+    /// Reclaim unreferenced complete blobs only; preserve every committed checkpoint.
+    StorageCleanup {
+        world: String,
+        #[arg(long)]
+        confirm: bool,
+    },
     /// Verify blob hashes, state root, and authority signature for one or all snapshots.
     Verify {
         world: String,
@@ -1147,6 +1165,42 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             println!("Committed snapshot #{}", manifest.snapshot_number);
             println!("State root: {}", manifest.state_root);
             println!("Files: {}", manifest.entries.len());
+        }
+        WorldCommand::StorageStatus { world } => {
+            let world = parse_world(&world)?;
+            println!("{}", serde_json::to_string_pretty(&storage.world_storage_status(world)?)?);
+        }
+        WorldCommand::StoragePolicy { world, max_world_bytes, unlimited, reserve_free_bytes } => {
+            let world = parse_world(&world)?;
+            let policy = swarm_storage::WorldStoragePolicy {
+                max_world_bytes: if unlimited { None } else { max_world_bytes },
+                reserve_free_bytes,
+            };
+            storage.set_world_storage_policy(world, policy)?;
+            println!("{}", serde_json::to_string_pretty(&storage.world_storage_status(world)?)?);
+        }
+        WorldCommand::StorageCleanup { world, confirm } => {
+            let world = parse_world(&world)?;
+            if !confirm {
+                bail!("storage cleanup requires --confirm; only unreferenced complete blobs are eligible");
+            }
+            storage.load_world(world)?;
+            let latest =
+                storage.latest_snapshot(world)?.context("no committed recoverable checkpoint; cleanup refused")?;
+            verify_snapshot_signature(&latest)?;
+            storage.verify_snapshot(&latest)?;
+            let report = storage.garbage_collect_blobs(world)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "world_id": world.to_string(),
+                    "removed_blobs": report.removed_blobs,
+                    "reclaimed_bytes": report.reclaimed_bytes,
+                    "removed_snapshots": report.removed_snapshots,
+                    "retention": "preserve_all_committed_checkpoints",
+                    "storage": storage.world_storage_status(world)?,
+                })
+            );
         }
         WorldCommand::Snapshots { world } => {
             let world = parse_world(&world)?;

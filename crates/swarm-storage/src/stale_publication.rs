@@ -324,6 +324,22 @@ impl Storage {
                     return Err(StorageError::WorldMetadataMismatch);
                 }
             }
+            // The isolated source remains intact through publication.
+            // Account for the additional canonical copies before fencing
+            // ordinary access with the durable publication intent.
+            let mut missing = std::collections::BTreeSet::new();
+            let mut additional = 0u64;
+            for manifest in &candidate.manifests {
+                for entry in &manifest.entries {
+                    let path = blob_path(self, world, &entry.blob);
+                    if !canonical_file_exists(&path)? && missing.insert(path) {
+                        additional = additional
+                            .checked_add(entry.blob.encoded_size)
+                            .ok_or(StorageError::CounterExhausted("replay publication bytes"))?;
+                    }
+                }
+            }
+            self.require_payload_space(world, additional)?;
             durable_atomic_write(&self.stale_publication_path(world), &postcard::to_allocvec(&intent)?)?;
         }
         Ok(())
@@ -655,13 +671,17 @@ fn copy_verified_blob(
     }
     isolated.verify_blob_streaming(world, blob)?;
     let parent = destination.parent().ok_or(StorageError::WorldMetadataMismatch)?;
-    let (temporary, mut output) = create_unique_temp(parent, "stale-replay", "tmp")?;
+    let budget = canonical.begin_blob_write(world)?;
+    budget.require(blob.encoded_size)?;
+    let (temporary, output) = create_unique_temp(parent, "stale-replay", "tmp")?;
     let result = (|| {
+        let mut output = budget.writer(output);
         let mut input = fs::File::open(&source).map_err(|error| io_error(&source, error))?;
         let copied = io::copy(&mut input, &mut output).map_err(|error| io_error(&temporary, error))?;
         if copied != blob.encoded_size {
             return Err(StorageError::BlobCorrupt(blob.hash));
         }
+        let output = output.into_file();
         output.sync_all().map_err(|error| io_error(&temporary, error))?;
         drop(output);
         durable_rename_new(&temporary, &destination)?;

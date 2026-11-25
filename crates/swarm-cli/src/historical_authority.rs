@@ -2484,6 +2484,14 @@ mod tests {
         assert!(large.encoded_size > 256 * 1024);
         let (chunk, finished) = storage.read_encoded_blob_chunk(world, large, 0, 128 * 1024).unwrap();
         assert!(!finished);
+        let quota_paused = swarm_storage::WorldStoragePolicy { max_world_bytes: Some(0), ..Default::default() };
+        stale.set_world_storage_policy(world, quota_paused).unwrap();
+        assert!(matches!(download.receive_blob_chunk(large, 0, &chunk, false),
+            Err(swarm_storage::replica::ReplicationError::Storage(error)) if error.is_storage_pressure()));
+        assert!(download.missing_blobs().unwrap().contains(&(large.hash, 0)));
+        assert!(!stale.stale_publication_pending(world).unwrap());
+        assert_eq!(stale.stale_replay_anchor(world).unwrap(), anchor);
+        stale.set_world_storage_policy(world, Default::default()).unwrap();
         assert_eq!(download.receive_blob_chunk(large, 0, &chunk, false).unwrap(), 128 * 1024);
         let (chunk, finished) =
             storage.read_encoded_blob_chunk(world, small, 0, usize::try_from(small.encoded_size).unwrap()).unwrap();
@@ -2567,6 +2575,15 @@ mod tests {
         // Preserve its canonical bytes in the primary slot before removal.
         let pending_recovery = metadata.join("recovery-certificate-pending.postcard");
         std::fs::write(&pending_recovery, postcard::to_allocvec(recovery.as_ref()).unwrap()).unwrap();
+
+        // The quota also accounts for isolated replay's additional canonical
+        // copies. Denial must not install the publication fence prematurely.
+        stale.set_world_storage_policy(world, quota_paused).unwrap();
+        assert!(stale.begin_verified_stale_publication(&candidate).unwrap_err().is_storage_pressure());
+        assert!(!stale.stale_publication_pending(world).unwrap());
+        assert!(stale.load_epoch_record(world).is_ok());
+        assert_eq!(stale.stale_publication_candidate(world).unwrap(), Some(candidate.clone()));
+        stale.set_world_storage_policy(world, Default::default()).unwrap();
 
         // Simulate process death after durable intent and a subset of the
         // exact canonical writes. No ordinary reader or writer may use

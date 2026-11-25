@@ -53,6 +53,10 @@ pub enum RetentionError {
     GarbageCollectionActive(WorldId),
     #[error("required recovery snapshot {0} is not present locally; refusing to prune")]
     MissingRequiredSnapshot(Hash32),
+    #[error("historical replay is pinned for world {0}; finish or explicitly resolve replay before cleanup")]
+    HistoricalReplayPinned(WorldId),
+    #[error("world {0} has an incomplete canonical checkpoint chain; refusing destructive cleanup")]
+    IncompleteCanonicalHistory(WorldId),
 }
 
 #[derive(Debug)]
@@ -332,6 +336,13 @@ impl Storage {
         // local publication create their pins while holding the same lock, so
         // GC either sees a durable pin or wins before complete publication.
         let snapshots = self.list_snapshots(world)?;
+        validate_retained_history(self, world, &snapshots)?;
+        // Staged replay may still reference a complete canonical blob not
+        // yet reachable from a committed manifest. Never sweep that namespace
+        // until the pinned recovery decision is resolved.
+        if self.first_contact_replay_pinned(world)? || self.load_staged_stale_replay_proof(world)?.is_some() {
+            return Err(RetentionError::HistoricalReplayPinned(world));
+        }
         let required_hashes = canonical_snapshot_retention_hashes(self, world)?;
         if !required_hashes.is_empty() {
             let manifest_hashes = snapshots
@@ -461,13 +472,44 @@ fn canonical_snapshot_retention_hashes(storage: &Storage, world: WorldId) -> Res
     Ok(required_hashes)
 }
 
+fn validate_retained_history(
+    storage: &Storage,
+    world: WorldId,
+    snapshots: &[SnapshotManifestV1],
+) -> Result<(), RetentionError> {
+    if !crate::transaction::canonical_file_exists(&storage.world_dir(world).join("metadata/world.json"))? {
+        return Ok(());
+    }
+    if snapshots.first().is_some_and(|first| first.snapshot_number != 1 || first.previous_snapshot_hash.is_some()) {
+        return Err(RetentionError::IncompleteCanonicalHistory(world));
+    }
+    for pair in snapshots.windows(2) {
+        let (prior, next) = (&pair[0], &pair[1]);
+        if prior.snapshot_number.checked_add(1) != Some(next.snapshot_number)
+            || prior.sequence.checked_add(1) != Some(next.sequence)
+            || next.previous_snapshot_hash != Some(prior.manifest_hash().map_err(StorageError::from)?)
+        {
+            return Err(RetentionError::IncompleteCanonicalHistory(world));
+        }
+    }
+    Ok(())
+}
+
 fn retention_roots(
     storage: &Storage,
     world: WorldId,
     snapshots: &[SnapshotManifestV1],
     policy: &RetentionPolicy,
 ) -> Result<BTreeSet<u64>, RetentionError> {
+    validate_retained_history(storage, world, snapshots)?;
     let mut retained = policy.protected_snapshots.clone();
+    // All actual V1 worlds retain the full signed checkpoint chain for
+    // historical admission, stale replica replay and authority verification.
+    // The lower-level pruning primitive remains useful for isolated fixture
+    // stores, but no operator path can truncate a real world's ancestry.
+    if crate::transaction::canonical_file_exists(&storage.world_dir(world).join("metadata/world.json"))? {
+        retained.extend(snapshots.iter().map(|manifest| manifest.snapshot_number));
+    }
     let latest = snapshots.last().expect("non-empty snapshot list");
     retained.insert(latest.snapshot_number);
 

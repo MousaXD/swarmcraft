@@ -59,9 +59,9 @@ use swarm_protocol::{
     SnapshotManifestV1, TransferPhase, WorldDescriptorV1, WorldId, WorldStatusV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{
-    control::StaleReplayAnchorV1, stale_replay::StaleReplayDownload, world::JoinDenialReason,
-    DurableMembershipPromiseV1, DurableRecoveryPromiseV1, MembershipPromiseResult, RecoveryPromiseResult, Storage,
-    StorageError,
+    control::StaleReplayAnchorV1, replica::ReplicationError, stale_replay::StaleReplayDownload,
+    world::JoinDenialReason, ActiveReplicationLease, DurableMembershipPromiseV1, DurableRecoveryPromiseV1,
+    MembershipPromiseResult, RecoveryPromiseResult, Storage, StorageError,
 };
 use tokio::time::MissedTickBehavior;
 use tokio::{
@@ -266,6 +266,9 @@ struct LeaseRuntime {
     transfer_manifest_requests: HashMap<(WorldId, PeerId), (Hash32, Instant)>,
     live_quorum_vote_nonces: HashMap<(WorldId, PeerId, [u8; 32]), u64>,
     historical_inbound: HashMap<WorldId, HistoricalInboundReplica>,
+    // GC roots must outlive the entire inbound manifest negotiation, not
+    // only each individual chunk write.
+    inbound_replication_pins: HashMap<WorldId, ActiveReplicationLease>,
     stale_replay_requests: HashMap<(WorldId, PeerId), Instant>,
     replay_offers_sent: HashMap<(WorldId, PeerId), Instant>,
 }
@@ -399,6 +402,7 @@ pub async fn run(
     join_retry_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
+        leases.inbound_replication_pins.retain(|world, _| pending_manifests.contains_key(world));
         tokio::select! {
             Some(command) = game_api_requests.recv() => {
                 match command.operation {
@@ -4348,6 +4352,28 @@ fn drive_genesis_catchup(
     Ok(())
 }
 
+fn pin_inbound_manifest(
+    storage: &Storage,
+    state: &RequestState<'_>,
+    manifest: &SnapshotManifestV1,
+) -> Result<Option<ActiveReplicationLease>> {
+    if state.pending_manifests.get(&manifest.world_id) == Some(manifest)
+        && state.leases.inbound_replication_pins.contains_key(&manifest.world_id)
+    {
+        return Ok(None);
+    }
+    let hashes = manifest.entries.iter().map(|entry| entry.blob.hash).collect::<Vec<_>>();
+    Ok(Some(storage.pin_replication_hashes(manifest.world_id, &hashes)?))
+}
+
+fn storage_paused_response() -> WireResponse {
+    // Do not reveal another device's free space or local filesystem paths.
+    WireResponse::Error {
+        code: "STORAGE_PAUSED".into(),
+        message: "Receiving device paused payload writes; free space or adjust its local storage quota".into(),
+    }
+}
+
 fn handle_request(
     context: &HandlerContext<'_>,
     node: &mut SwarmNode,
@@ -4753,6 +4779,7 @@ fn handle_request(
                     bail!("historical checkpoint overlaps an unfinished negotiation");
                 }
             }
+            let pins = pin_inbound_manifest(storage, state, &manifest)?;
             let missing = if let Some(download) = &stale_download {
                 download
                     .missing_blobs()?
@@ -4779,6 +4806,9 @@ fn handle_request(
                     )?;
                     return Ok(());
                 }
+            }
+            if let Some(pins) = pins {
+                state.leases.inbound_replication_pins.insert(world, pins);
             }
             state.pending_manifests.insert(world, manifest.clone());
             state.leases.historical_inbound.insert(
@@ -4808,6 +4838,7 @@ fn handle_request(
                 bail!("ordinary manifest cannot replace an active historical negotiation");
             }
             authorize_manifest(storage, application_peer, &manifest)?;
+            let pins = pin_inbound_manifest(storage, state, &manifest)?;
             let missing = storage
                 .missing_blobs(&manifest)
                 .into_iter()
@@ -4818,6 +4849,9 @@ fn handle_request(
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
+            if let Some(pins) = pins {
+                state.leases.inbound_replication_pins.insert(manifest.world_id, pins);
+            }
             state.pending_manifests.insert(manifest.world_id, manifest.clone());
             node.respond(
                 channel,
@@ -4844,7 +4878,14 @@ fn handle_request(
                     if descriptor.encoding != encoding {
                         bail!("stale replay blob encoding differs from negotiated manifest");
                     }
-                    let next_offset = download.receive_blob_chunk(descriptor, offset, &data, finished)?;
+                    let next_offset = match download.receive_blob_chunk(descriptor, offset, &data, finished) {
+                        Ok(offset) => offset,
+                        Err(ReplicationError::Storage(StorageError::StoragePressure { .. })) => {
+                            node.respond(channel, storage_paused_response())?;
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
                     if finished && download.missing_blobs()?.is_empty() {
                         download.finalize()?;
                         state.leases.historical_inbound.remove(&world_id);
@@ -4879,7 +4920,14 @@ fn handle_request(
             if descriptor.encoding != encoding {
                 return Err(anyhow!("blob encoding does not match manifest"));
             }
-            let next_offset = storage.receive_blob_chunk(world_id, descriptor, offset, &data, finished)?;
+            let next_offset = match storage.receive_blob_chunk(world_id, descriptor, offset, &data, finished) {
+                Ok(offset) => offset,
+                Err(ReplicationError::Storage(StorageError::StoragePressure { .. })) => {
+                    node.respond(channel, storage_paused_response())?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            };
             node.respond(channel, WireResponse::BlobChunkAccepted { hash, next_offset })?;
             if finished && storage.missing_blobs(manifest).is_empty() {
                 let manifest = manifest.clone();
@@ -5566,7 +5614,7 @@ fn handle_response(
             }
         }
         (Some(OutboundContext::BlobChunk { world, snapshot_number, .. }), WireResponse::Error { code, message })
-            if code == "RATE_LIMITED" =>
+            if matches!(code.as_str(), "RATE_LIMITED" | "STORAGE_PAUSED") =>
         {
             let key = (*transport_peer, world);
             if let Some(replication) =
@@ -5579,7 +5627,8 @@ fn handle_response(
                     %world,
                     snapshot = snapshot_number,
                     %message,
-                    "replication rate limited; retaining exact chunk for bounded retry"
+                    %code,
+                    "replication paused; retaining exact chunk for bounded retry"
                 );
             }
         }

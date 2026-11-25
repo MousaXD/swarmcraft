@@ -155,9 +155,13 @@ impl Storage {
         let world = lease.world();
         let blob_dir = self.world_dir(world).join("blobs");
         fs::create_dir_all(&blob_dir).map_err(|error| io_error(&blob_dir, error))?;
+        let budget = self.begin_blob_write(world)?;
         let (temporary_path, temporary_file) = create_unique_temp(&blob_dir, "blob", "zst")?;
-        let mut encoder =
-            zstd::stream::write::Encoder::new(temporary_file, 3).map_err(|error| io_error(&temporary_path, error))?;
+        // A denied or failed compression owns only this unique temp file.
+        // Never leave an ENOSPC/quota failure accumulating abandoned scratch.
+        let _temporary_cleanup = RemoveOwnedTemp(temporary_path.clone());
+        let mut encoder = zstd::stream::write::Encoder::new(budget.writer(temporary_file), 3)
+            .map_err(|error| io_error(&temporary_path, error))?;
         let mut input = File::open(source).map_err(|error| io_error(source, error))?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(BLOB_HASH_DOMAIN);
@@ -175,10 +179,13 @@ impl Storage {
                 uncompressed_size.checked_add(read as u64).ok_or(StorageError::SnapshotNumberExhausted)?;
         }
 
-        let encoded_file = encoder.finish().map_err(|error| io_error(&temporary_path, error))?;
+        let encoded_file = encoder.finish().map_err(|error| io_error(&temporary_path, error))?.into_file();
         encoded_file.sync_all().map_err(|error| io_error(&temporary_path, error))?;
         let encoded_size = encoded_file.metadata().map_err(|error| io_error(&temporary_path, error))?.len();
         drop(encoded_file);
+        // The temp file is included in future usage scans; release admission
+        // before pinning (GC -> world transaction remains the lock order).
+        drop(budget);
 
         let hash = Hash32(*hasher.finalize().as_bytes());
         lease.pin_hash(hash)?;
@@ -297,6 +304,10 @@ impl Storage {
         }
 
         let bytes = postcard::to_allocvec(manifest)?;
+        // A rejected write must occur before creating the durable commit
+        // intent. Re-check physical space for the immutable manifest and
+        // control records; the quota never blocks emergency control writes.
+        self.require_restore_space(manifest.world_id, &snapshots, bytes.len() as u64)?;
         let transaction = self.begin_snapshot_commit_transaction(manifest, fence)?;
         let publish = publish_immutable_manifest(&path, &bytes);
         if let Err(error) = publish {
@@ -327,6 +338,10 @@ impl Storage {
         if restore_marker(destination).exists() {
             return Err(StorageError::RestoreIncomplete(destination.to_path_buf()));
         }
+        let restore_bytes = manifest.entries.iter().try_fold(0u64, |sum, entry| {
+            sum.checked_add(entry.blob.uncompressed_size).ok_or(StorageError::CounterExhausted("restore bytes"))
+        })?;
+        self.require_restore_space(manifest.world_id, destination, restore_bytes)?;
         ensure_restore_root(destination)?;
         validate_existing_restore_tree(destination)?;
         let marker = restore_marker(destination);
@@ -356,6 +371,14 @@ impl Storage {
         clear_restore_destination(destination, &marker)?;
         durable_remove(&marker)?;
         Ok(true)
+    }
+}
+
+struct RemoveOwnedTemp(PathBuf);
+
+impl Drop for RemoveOwnedTemp {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
     }
 }
 

@@ -24,6 +24,8 @@ pub enum StorageError {
         #[source]
         source: std::io::Error,
     },
+    #[error("storage payload paused: {detail}")]
+    StoragePressure { detail: String },
     #[error("snapshot source is not a directory: {0}")]
     SourceNotDirectory(PathBuf),
     #[error("symlinks are not allowed in snapshots: {0}")]
@@ -94,6 +96,22 @@ pub enum StorageError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Protocol(#[from] swarm_protocol::ProtocolError),
+}
+
+impl StorageError {
+    pub fn is_storage_pressure(&self) -> bool {
+        match self {
+            Self::StoragePressure { .. } => true,
+            Self::Io { source, .. } => {
+                source.kind() == std::io::ErrorKind::StorageFull
+                    || source
+                        .get_ref()
+                        .and_then(|inner| inner.downcast_ref::<Self>())
+                        .is_some_and(Self::is_storage_pressure)
+            }
+            _ => false,
+        }
+    }
 }
 
 fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StorageError {
@@ -233,7 +251,9 @@ impl Storage {
             encoding: BlobEncoding::Zstd,
         };
         let path = self.blob_path(world, hash, BlobEncoding::Zstd);
+        let budget = self.begin_blob_write(world)?;
         if !path.exists() {
+            budget.require(encoded.len() as u64)?;
             durable_atomic_write(&path, &encoded)?;
         }
         Ok(descriptor)

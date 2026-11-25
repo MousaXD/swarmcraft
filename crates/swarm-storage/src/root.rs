@@ -8,6 +8,7 @@ pub mod recovery_v2;
 pub mod replica;
 pub mod retention;
 pub mod scheduler;
+pub mod space;
 mod stale_publication;
 pub mod stale_replay;
 pub use stale_publication::StalePublicationCandidate;
@@ -31,3 +32,5 @@ pub use scheduler::{
 };
 pub use state::{DurableRecoveryPromiseV1, RecoveryPromiseResult};
 pub use streaming::{SnapshotCommitInput, SnapshotPublication};
+
+pub use space::{WorldStoragePolicy, WorldStorageStatus};
