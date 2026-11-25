@@ -3,7 +3,7 @@ import { createImportRequest, parseImportResult } from './import-flow.js';
 import { recoveryCopySelection, recoveryCopyReceipt } from './recovery-copy.js';
 import { validateInviteToken, inspectInviteReceipt, revocationRequest, revokeInviteReceipt, pendingMembershipMessage } from './invite-lifecycle.js';
 import { clientContinuityFromMigration, ensureClientContinuityPanel } from './client-continuity.js';
-import { UNVERIFIED_GAME_ROUTE, ensureGameReconnectActions, gameReadinessCheckpoints, isUsableGameRoute, updateGameReadinessChecklist, updateGameRouteControls } from './game-route-status.js';
+import { UNVERIFIED_GAME_ROUTE, connectionDiagnosis, ensureGameReconnectActions, gameReadinessCheckpoints, isUsableGameRoute, normalizeGameRouteStatus, updateGameReadinessChecklist, updateGameRouteControls } from './game-route-status.js';
 
 const $ = (id) => document.getElementById(id);
 const invoke = window.__TAURI__?.core?.invoke;
@@ -432,6 +432,9 @@ function renderGameRoute() {
   }));
   ensureGameReconnectActions(document);
   const route = gameRouteState;
+  const diagnosis = connectionDiagnosis(route.verified && !isUsableGameRoute(route, selectedWorldId, selectedWorld()?.status?.Safety) ? UNVERIFIED_GAME_ROUTE : route, selectedWorldId);
+  if ($('routeDiagnosis')) $('routeDiagnosis').textContent =
+    diagnosis.route + '\n' + diagnosis.detail + '\n' + diagnosis.session;
   const routeVerified = updateGameRouteControls(document, route, selectedWorldId, selectedWorld()?.status?.Safety);
   // Also revoke the accessible continuity headline immediately. Do not leave
   // a green route claim visible between a stop, tab switch and next CLI poll.
@@ -469,7 +472,13 @@ async function refreshGameRoute(world) {
   renderGameRoute();
   if (!requestedWorldId) return;
   try {
-    const result = await backend.gameRouteStatus(requestedWorldId);
+    let timer;
+    const result = await Promise.race([
+      backend.gameRouteStatus(requestedWorldId),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(normalizeGameRouteStatus({ world_id: requestedWorldId, state: 'unavailable', route_verified: false, diagnostic: 'route_check_timed_out' }, requestedWorldId)), 24_000);
+      }),
+    ]).finally(() => clearTimeout(timer));
     if (requestedWorldId !== selectedWorldId || generation !== gameRouteRequestGeneration) return;
     gameRouteState = result;
     if (result.verified === true && Number.isSafeInteger(result.validUntil)) {
@@ -481,6 +490,11 @@ async function refreshGameRoute(world) {
         }
       }, Math.max(0, result.validUntil - Date.now()) + 1);
     }
+    else if (Number.isSafeInteger(result.diagnosticValidUntil)) {
+      setTimeout(() => {
+        if (generation === gameRouteRequestGeneration && gameRouteState === result) invalidateGameRoute();
+      }, Math.max(0, result.diagnosticValidUntil - Date.now()) + 1);
+    }
   } catch (_) {
     if (requestedWorldId !== selectedWorldId || generation !== gameRouteRequestGeneration) return;
     gameRouteState = UNVERIFIED_GAME_ROUTE;
@@ -491,6 +505,20 @@ async function refreshGameRoute(world) {
   // A new signed route can become available even though the local migration
   // report still describes the old authority; never fabricate that proof.
   await refreshMigrationState(selectedWorld());
+}
+
+async function retryConnectionDiagnosis() {
+  const world = selectedWorld();
+  if (!world) return;
+  if (gameRouteInFlightWorld === world.id) return;
+  await queueGameGatewaySelection(world);
+}
+
+function copyConnectionDiagnosis() {
+  if (!selectedWorldId) return;
+  const route = gameRouteState;
+  const diagnosis = connectionDiagnosis(route.verified && !isUsableGameRoute(route, selectedWorldId, selectedWorld()?.status?.Safety) ? UNVERIFIED_GAME_ROUTE : route, selectedWorldId);
+  void copyText(['SwarmCraft connection diagnosis', diagnosis.route, diagnosis.detail, diagnosis.session].join('\n'), 'Connection diagnosis');
 }
 
 function refreshVisibleGameRoute() {
@@ -1818,6 +1846,8 @@ bindAction('worldConflicts', worldConflicts);
 bindAction('worldPeers', worldPeers);
 bindAction('verifyWorld', verifyWorld);
 bindAction('diagnosticVerify', verifyWorld);
+$('retryRouteDiagnosis')?.addEventListener('click', () => { void retryConnectionDiagnosis(); });
+$('copyRouteDiagnosis')?.addEventListener('click', copyConnectionDiagnosis);
 bindAction('seedOn', () => setSeeding(true));
 bindAction('seedOff', () => setSeeding(false));
 bindAction('diagnosticSeedOn', () => setSeeding(true));

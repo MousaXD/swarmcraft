@@ -701,7 +701,7 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             let world = parse_world(&world)?;
             let runtime = tokio::runtime::Runtime::new()?;
             let status = match runtime.block_on(call_live_daemon(paths, GameRouteApiOperation::Status, world))? {
-                GameRouteApiReply::Status { value } => value,
+                GameRouteApiReply::Status { value } => *value,
                 _ => GameRouteStatusV1::unavailable(world),
             };
             if json {
@@ -710,6 +710,9 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 println!("Fresh signed Minecraft route: {}", status.local_gateway.as_deref().unwrap_or("unavailable"));
             } else {
                 println!("Minecraft route unavailable for {world}; no cached fallback is permitted.");
+                if let Some(reason) = status.diagnostic {
+                    println!("Connection diagnostic: {}", serde_json::to_value(reason)?.as_str().unwrap_or("unknown"));
+                }
             }
         }
         WorldCommand::Hosting { command } => match command {

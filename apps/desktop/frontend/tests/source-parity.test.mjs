@@ -379,7 +379,7 @@ test('World ID lookup preserves actual Rust signed discovery and capture-phase l
     source('../scripts/visual-window-acceptance.py'),
   ]);
   assert.ok(controller.includes('window.__swarmcraftSvelteDiscoveryOwned === true) return'));
-  assert.ok(controller.includes("await call('discovery_resolve', { world })"), 'Shipping lookup is retained');
+  assert.ok(controller.includes("call('discovery_resolve', { world })"), 'Shipping lookup is retained');
   assert.ok(discovery.includes("nativeBridge().invoke('discovery_resolve', { world })"), 'Svelte performs a real lookup');
   assert.ok(script.includes('app.click("#joinPanel details.task-secondary summary")'));
 });

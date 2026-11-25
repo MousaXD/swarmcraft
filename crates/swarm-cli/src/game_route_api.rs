@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 use swarm_core::{random_nonce, DataPaths};
-use swarm_network::game_transport::VerifiedGameRouteStatus;
+use swarm_network::game_transport::{GameSessionDiagnostic, VerifiedGameRouteStatus};
 use swarm_protocol::WorldId;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -73,8 +73,19 @@ struct ReplyV1 {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GameRouteApiReply {
     Selected,
-    Status { value: GameRouteStatusV1 },
+    Status { value: Box<GameRouteStatusV1> },
     Unavailable,
+}
+
+/// Denial-only diagnostic categories; never substitute for route verification.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GameRouteDiagnostic {
+    GatewayUnavailable,
+    PeerLinkUnavailable,
+    HostProofUnavailable,
+    RouteCheckTimedOut,
+    AuthorityChanged,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +104,10 @@ pub struct GameRouteStatusV1 {
     pub snapshot_hash: Option<String>,
     pub verified_at_unix_ms: Option<u64>,
     pub valid_until_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<GameRouteDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_session: Option<GameSessionDiagnostic>,
 }
 
 impl GameRouteStatusV1 {
@@ -111,7 +126,13 @@ impl GameRouteStatusV1 {
             snapshot_hash: None,
             verified_at_unix_ms: None,
             valid_until_unix_ms: None,
+            diagnostic: None,
+            recent_session: None,
         }
+    }
+
+    pub fn unavailable_with_reason(world: WorldId, diagnostic: GameRouteDiagnostic) -> Self {
+        Self { diagnostic: Some(diagnostic), ..Self::unavailable(world) }
     }
 
     /// A positive status can ONLY originate from the RouteVerifier-produced
@@ -140,6 +161,8 @@ impl GameRouteStatusV1 {
             snapshot_hash: Some(route.checkpoint_hash().to_string()),
             verified_at_unix_ms: Some(route.verified_at_unix_ms()),
             valid_until_unix_ms: Some(route.valid_until_unix_ms()),
+            diagnostic: None,
+            recent_session: None,
         })
     }
 }
@@ -423,7 +446,7 @@ mod tests {
         assert_eq!(request.world, WorldId([3; 32]));
         request
             .response
-            .send(GameRouteApiReply::Status { value: GameRouteStatusV1::unavailable(WorldId([3; 32])) })
+            .send(GameRouteApiReply::Status { value: Box::new(GameRouteStatusV1::unavailable(WorldId([3; 32]))) })
             .unwrap();
         let reply = caller.await.unwrap().unwrap();
         assert!(

@@ -228,6 +228,7 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
     case 'list_worlds': return window.__swarmcraftRecoveryWorld
       ? window.__swarmcraftRecoveryWorld + '  Recovery source  snapshots=4'
       : [];
+    case 'game_route_status': return { world_id: args.world, state: 'unavailable', route_verified: false, diagnostic: 'peer_link_unavailable', recent_session: { state: 'stream_admission_failed', age_ms: 100 } };
     case 'world_status':
       if (args.world === window.__swarmcraftRecoveryWorld) {
         return ['World: Recovery source', 'World ID: ' + args.world, 'Safety: Canonical',
@@ -273,7 +274,7 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
       if (window.__swarmcraftWorldModFailures > 0) { window.__swarmcraftWorldModFailures -= 1; throw new Error('simulated local mod installation failure'); }
       return { status: 'ok' };
     case 'discovery_search': return { results: [] };
-    case 'discovery_resolve': return { state: 'found', world: { name: 'Browser Public World', visibility: 'public' } };
+    case 'discovery_resolve': return { state: 'found', world: { world_id: args.world, name: 'Browser Public World', visibility: 'public', expires_unix_ms: Date.now() + 60_000 } };
     default: return null;
   }
 } } };
@@ -357,6 +358,9 @@ const scenario = String.raw`(async () => {
   document.getElementById('joinWorldIdButton').click();
   await waitFor(() => document.getElementById('joinWorldIdNotice').textContent.includes('Browser Public World'), 'local World ID feedback');
   require(!document.getElementById('joinWorldIdNotice').hidden, 'Local World ID feedback stayed hidden');
+  require(!document.getElementById('copyDiscoveryDiagnosis').disabled, 'Safe directory diagnosis unavailable');
+  document.getElementById('joinWorldId').dispatchEvent(new Event('input', { bubbles: true }));
+  require(document.getElementById('copyDiscoveryDiagnosis').disabled, 'Changed lookup retained stale diagnosis');
   require(!document.getElementById('publicWorldStatus').textContent.includes('Browser Public World'), 'Exact World ID feedback leaked into Public Worlds status');
 
   document.getElementById('openCreate').click();
@@ -489,6 +493,14 @@ const inviteScenario = String.raw`(async () => {
   $('refreshMembership').click();
   await waitFor(() => $('membershipNotice').textContent.includes('Membership approved'), 'synchronization pending notice');
   require($('playWorld').disabled, 'Unverified sync became playable');
+  document.querySelector('[data-view="diagnostics"]').click();
+  await waitFor(() => $('routeDiagnosis').textContent.includes('Host peer link unavailable'), 'typed peer-link diagnosis');
+  require($('routeDiagnosis').textContent.includes('stream admission'), 'Actual stream failure stage missing');
+  require(!$('copyRouteDiagnosis').disabled, 'Safe route diagnosis unavailable');
+  const count = window.__swarmcraftCalls.filter(call => call.command === 'game_route_select').length;
+  $('retryRouteDiagnosis').click();
+  await waitFor(() => window.__swarmcraftCalls.filter(call => call.command === 'game_route_select').length > count, 'retry selected gateway');
+  require($('playWorld').disabled, 'Failed route enabled play');
   require(window.__swarmcraftBrowserErrors.length === 0, 'Invite browser errors: ' + window.__swarmcraftBrowserErrors.join(' | '));
   return { status: 'pass' };
 })()`;

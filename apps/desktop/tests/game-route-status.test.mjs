@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { createBackendAdapter } from '../src/backend-adapter.js';
 import { clientContinuityFromMigration } from '../src/client-continuity.js';
-import { ensureGameReconnectActions, gameReadinessCheckpoints, isUsableGameRoute, normalizeGameRouteStatus, UNVERIFIED_GAME_ROUTE, updateGameReadinessChecklist, updateGameRouteControls } from '../src/game-route-status.js';
+import { connectionDiagnosis, ensureGameReconnectActions, gameReadinessCheckpoints, isUsableGameRoute, normalizeGameRouteStatus, UNVERIFIED_GAME_ROUTE, updateGameReadinessChecklist, updateGameRouteControls } from '../src/game-route-status.js';
 
 const WORLD = 'scworld:1111111111111111111111111111111111111111111111111111111111111111';
 const NOW = Date.now();
@@ -230,4 +230,25 @@ test('primary and advanced reconnect actions remain jointly disabled until one c
   }
   assert.equal(updateGameRouteControls(doc, UNVERIFIED_GAME_ROUTE, WORLD, 'Canonical', NOW), false);
   assert.deepEqual(elements.get('[data-reconnect-world]').map(item => item.disabled), [true, true]);
+});
+
+test('route failure and recent game-stream diagnosis are distinct, expiring, world-bound and safe to copy', () => {
+  const raw = { ...live(), state: 'unavailable', route_verified: false,
+    diagnostic: 'peer_link_unavailable', recent_session: { state: 'stream_admission_failed', age_ms: 100 } };
+  const route = normalizeGameRouteStatus(raw, WORLD, NOW);
+  assert.equal(route.verified, false);
+  assert.equal(route.connectionTarget, null);
+  const diagnosis = connectionDiagnosis(route, WORLD, NOW);
+  assert.match(diagnosis.route, /peer link unavailable/i);
+  assert.match(diagnosis.session, /stream admission/i);
+  assert.doesNotMatch(JSON.stringify(diagnosis), /127\.0\.0\.1|scpeer:|scworld:|25570/);
+  assert.match(connectionDiagnosis(route, WORLD, NOW + 10_000).route, /not yet checked/i);
+  assert.match(connectionDiagnosis(route, 'scworld:other', NOW).session, /no recent/i);
+  assert.throws(() => normalizeGameRouteStatus({ ...raw, diagnostic: 'secret token' }, WORLD, NOW));
+  assert.throws(() => normalizeGameRouteStatus({ ...raw, recent_session: { state: 'fake_login', age_ms: 0 } }, WORLD, NOW));
+  const expired = normalizeGameRouteStatus({ ...raw, recent_session: {state: 'route_refused', age_ms: 30_000} }, WORLD, NOW);
+  assert.match(connectionDiagnosis(expired, WORLD, NOW).session, /no recent/i);
+  assert.throws(() => normalizeGameRouteStatus({ ...live(), diagnostic: 'host_proof_unavailable' }, WORLD, NOW));
+  const stillVerified = normalizeGameRouteStatus({ ...live(), recent_session: {state: 'session_ended', age_ms: 5} }, WORLD, NOW);
+  assert.match(connectionDiagnosis(stillVerified, WORLD, NOW).session, /does not confirm a successful Minecraft login/i);
 });

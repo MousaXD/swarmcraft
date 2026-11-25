@@ -9,10 +9,10 @@ describe('Svelte World ID discovery uses Rust signed-announcement verification',
     vi.stubGlobal('window', { __TAURI__: { core: { invoke } } });
     const report = await resolveSignedDiscovery('scworld:abc');
     expect(invoke).toHaveBeenCalledExactlyOnceWith('discovery_resolve', { world: 'scworld:abc' });
-    expect(formatDiscoveryResult(report).message).toContain('does not grant membership');
+    expect(formatDiscoveryResult(report, 'scworld:abc').message).toContain('does not grant membership');
   });
   it('displays a Rust-verified signed public announcement without inventing membership', () => {
-    const r = formatDiscoveryResult({ state: 'found', world: {name:'Friends', visibility:'public'} });
+    const r = formatDiscoveryResult({ state: 'found', world: {world_id:'scworld:abc', name:'Friends', visibility:'public', expires_unix_ms:Date.now()+60000} }, 'scworld:abc');
     expect(r.tone).toBe('safe');
     expect(r.message).toContain('signed announcement');
     expect(r.message).toContain('does not grant membership');
@@ -20,11 +20,11 @@ describe('Svelte World ID discovery uses Rust signed-announcement verification',
   it('refuses false success on malformed and partial backend responses', () => {
     for (const report of [undefined, {state:'found'}, {state:'found',world:{}},
       {state:'found',world:{name:'Unverified',visibility:'unknown'}}]) {
-      expect(formatDiscoveryResult(report).tone).toBe('warning');
+      expect(formatDiscoveryResult(report, 'scworld:abc').tone).toBe('warning');
     }
   });
   it('redacts credential-looking native diagnostic content', () => {
-    const text = formatDiscoveryResult({state:'failed',detail:'bearer private key secret'}).message;
+    const text = formatDiscoveryResult({state:'failed',detail:'bearer private key secret'}, 'scworld:abc').message;
     expect(text).not.toContain('private key secret');
     expect(discoveryUnavailable()).toMatchObject({
       tone:'danger',message:expect.stringContaining('does not grant membership'),

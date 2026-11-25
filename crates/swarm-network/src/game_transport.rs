@@ -964,12 +964,71 @@ pub trait GatewayRouteResolver: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<VerifiedForwardRoute, GameTransportError>> + Send + '_>>;
 }
 
+/// A bounded, local observation of the most recently accepted Minecraft
+/// connection attempt. This never authorizes gameplay or confirms a login.
+pub const GAME_SESSION_DIAGNOSTIC_MAX_AGE_MS: u64 = 30_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GameSessionDiagnosticState {
+    CheckingRoute,
+    OpeningStream,
+    RouteRefused,
+    RouteTimedOut,
+    StreamAdmissionFailed,
+    StreamInterrupted,
+    SessionEnded,
+    Overloaded,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GameSessionDiagnostic {
+    pub state: GameSessionDiagnosticState,
+    pub age_ms: u64,
+}
+
+#[derive(Default)]
+struct SessionDiagnosticInner {
+    revision: u64,
+    latest: Option<(Instant, GameSessionDiagnosticState)>,
+}
+
+/// Kept only in the selected gateway's lifetime, never persisted. A late
+/// completion from an older concurrent session cannot replace a newer attempt.
+#[derive(Clone, Default)]
+pub struct GameSessionDiagnostics(Arc<Mutex<SessionDiagnosticInner>>);
+
+impl GameSessionDiagnostics {
+    fn begin(&self) -> Option<u64> {
+        let mut inner = self.0.lock().ok()?;
+        inner.revision = inner.revision.checked_add(1)?;
+        inner.latest = Some((Instant::now(), GameSessionDiagnosticState::CheckingRoute));
+        Some(inner.revision)
+    }
+
+    fn record(&self, revision: Option<u64>, state: GameSessionDiagnosticState) {
+        if let Ok(mut inner) = self.0.lock() {
+            if revision == Some(inner.revision) {
+                inner.latest = Some((Instant::now(), state));
+            }
+        }
+    }
+
+    pub fn recent(&self) -> Option<GameSessionDiagnostic> {
+        let (observed, state) = self.0.lock().ok()?.latest?;
+        let age_ms = u64::try_from(observed.elapsed().as_millis()).ok()?;
+        (age_ms < GAME_SESSION_DIAGNOSTIC_MAX_AGE_MS).then_some(GameSessionDiagnostic { state, age_ms })
+    }
+}
+
 /// A per-world, fixed-port loopback-only Minecraft TCP listener. The caller
 /// persists the port in its local per-world settings. Starting a different
 /// world requires stopping the old gateway; no prior route can be inherited.
 pub struct StableLoopbackGateway {
     listener: TcpListener,
     world_id: WorldId,
+    diagnostics: GameSessionDiagnostics,
 }
 
 impl StableLoopbackGateway {
@@ -992,7 +1051,7 @@ impl StableLoopbackGateway {
         // Minecraft servers on the LAN; already-bound ports fail closed.
         let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, stable_port);
         let listener = TcpListener::bind(address).await?;
-        Ok(Self { listener, world_id })
+        Ok(Self { listener, world_id, diagnostics: GameSessionDiagnostics::default() })
     }
 
     pub fn local_addr(&self) -> Result<SocketAddrV4, GameTransportError> {
@@ -1001,6 +1060,10 @@ impl StableLoopbackGateway {
             std::net::SocketAddr::V4(address) if address.ip().is_loopback() && address.port() != 0 => Ok(address),
             _ => Err(GameTransportError::Unauthorized),
         }
+    }
+
+    pub fn session_diagnostics(&self) -> GameSessionDiagnostics {
+        self.diagnostics.clone()
     }
 
     /// Every new Minecraft TCP session re-runs independent route resolution.
@@ -1033,8 +1096,11 @@ impl StableLoopbackGateway {
                 }
                 accepted = self.listener.accept() => {
                     let (mut tcp, _) = accepted?;
+                    let diagnostics = self.diagnostics.clone();
+                    let revision = diagnostics.begin();
                     let Ok(slot) = Arc::clone(&slots).try_acquire_owned() else {
                         // Drop immediately; never unboundedly queue join requests.
+                        diagnostics.record(revision, GameSessionDiagnosticState::Overloaded);
                         drop(tcp);
                         continue;
                     };
@@ -1049,9 +1115,11 @@ impl StableLoopbackGateway {
                         // new session, including after planned/crash migration.
                         for attempt in 0..MAX_GAME_ADMISSION_ATTEMPTS {
                             if *stopped.borrow() { break; }
+                            diagnostics.record(revision, GameSessionDiagnosticState::CheckingRoute);
                             let result = timeout(MAX_GAME_ROUTE_RESOLVE_WAIT, resolver.resolve(world_id)).await;
                             match result {
                                 Ok(Ok(verified)) if verified.world_id() == world_id => {
+                                    diagnostics.record(revision, GameSessionDiagnosticState::OpeningStream);
                                     let mut payload_started = false;
                                     match client.forward_attempt(&mut tcp, verified, control.clone(), stopped.clone(), &mut payload_started).await {
                                         Err(GameTransportError::StaleRoute) if !payload_started
@@ -1059,13 +1127,29 @@ impl StableLoopbackGateway {
                                             debug!("expired pre-payload route; resolving a new signed challenge");
                                             continue;
                                         }
-                                        Err(error) => debug!(%error, "game gateway session ended without fallback"),
-                                        Ok(()) => {}
+                                        Err(error) => {
+                                            diagnostics.record(revision, if payload_started {
+                                                GameSessionDiagnosticState::StreamInterrupted
+                                            } else {
+                                                GameSessionDiagnosticState::StreamAdmissionFailed
+                                            });
+                                            debug!(%error, "game gateway session ended without fallback");
+                                        }
+                                        Ok(()) => diagnostics.record(revision, GameSessionDiagnosticState::SessionEnded),
                                     }
                                 }
-                                Ok(Ok(_)) => warn!("game gateway resolver returned wrong world"),
-                                Ok(Err(error)) => debug!(%error, "game route resolver refused connection"),
-                                Err(_) => debug!("game route resolver timed out"),
+                                Ok(Ok(_)) => {
+                                    diagnostics.record(revision, GameSessionDiagnosticState::RouteRefused);
+                                    warn!("game gateway resolver returned wrong world");
+                                }
+                                Ok(Err(error)) => {
+                                    diagnostics.record(revision, GameSessionDiagnosticState::RouteRefused);
+                                    debug!(%error, "game route resolver refused connection");
+                                }
+                                Err(_) => {
+                                    diagnostics.record(revision, GameSessionDiagnosticState::RouteTimedOut);
+                                    debug!("game route resolver timed out");
+                                }
                             }
                             break;
                         }
@@ -1090,6 +1174,26 @@ mod tests {
 
     fn peer() -> TransportPeerId {
         Keypair::generate_ed25519().public().to_peer_id()
+    }
+
+    #[test]
+    fn session_diagnostics_are_bounded_latest_attempt_observations() {
+        let diagnostics = GameSessionDiagnostics::default();
+        assert!(diagnostics.recent().is_none());
+        let first = diagnostics.begin();
+        diagnostics.record(first, GameSessionDiagnosticState::StreamAdmissionFailed);
+        assert_eq!(diagnostics.recent().unwrap().state, GameSessionDiagnosticState::StreamAdmissionFailed);
+        let next = diagnostics.begin();
+        diagnostics.record(first, GameSessionDiagnosticState::StreamInterrupted);
+        assert_eq!(diagnostics.recent().unwrap().state, GameSessionDiagnosticState::CheckingRoute);
+        diagnostics.record(next, GameSessionDiagnosticState::RouteRefused);
+        assert_eq!(diagnostics.recent().unwrap().state, GameSessionDiagnosticState::RouteRefused);
+        diagnostics.0.lock().unwrap().latest = Some((
+            Instant::now() - Duration::from_millis(GAME_SESSION_DIAGNOSTIC_MAX_AGE_MS),
+            GameSessionDiagnosticState::RouteRefused,
+        ));
+        assert!(diagnostics.recent().is_none());
+        assert!(GameSessionDiagnostics::default().recent().is_none());
     }
 
     #[tokio::test]
@@ -1568,7 +1672,12 @@ mod tests {
         // its signed authority happens to be the same local process.
         let gateway = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let mut minecraft = TcpStream::connect(gateway.local_addr().unwrap()).await.unwrap();
-        let gateway = StableLoopbackGateway { listener: gateway, world_id: world };
+        let gateway = StableLoopbackGateway {
+            listener: gateway,
+            world_id: world,
+            diagnostics: GameSessionDiagnostics::default(),
+        };
+        let diagnostics = gateway.session_diagnostics();
         let (stop_tx, stop_rx) = watch::channel(false);
         let client = Arc::new(
             GameStreamClient::new(local_id, transport, Arc::new(RwLock::new(HashMap::new())), source.clone()).unwrap(),
@@ -1598,6 +1707,9 @@ mod tests {
         assert!(matches!(closed, Ok(0) | Err(_)));
         timeout(Duration::from_secs(2), game).await.unwrap().unwrap();
         assert_eq!(resolver.attempts.load(Ordering::SeqCst), 2, "no retry after application payload");
+        // The real admitted TCP attempt must report an interruption, never
+        // an apparent login, and older session completions cannot replace it.
+        assert_eq!(diagnostics.recent().unwrap().state, GameSessionDiagnosticState::StreamInterrupted);
         let _ = stop_tx.send(true);
         timeout(Duration::from_secs(2), forwarding).await.unwrap().unwrap().unwrap();
     }

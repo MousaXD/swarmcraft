@@ -19,6 +19,36 @@ const MAX_PROOF_AGE_MS: u64 = 5_000;
 const MAX_PROOF_LIFETIME_MS: u64 = 15_000;
 const CLOCK_SKEW_MS: u64 = 2_000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GameRouteDiagnostic {
+    GatewayUnavailable,
+    PeerLinkUnavailable,
+    HostProofUnavailable,
+    RouteCheckTimedOut,
+    AuthorityChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GameSessionDiagnosticState {
+    CheckingRoute,
+    OpeningStream,
+    RouteRefused,
+    RouteTimedOut,
+    StreamAdmissionFailed,
+    StreamInterrupted,
+    SessionEnded,
+    Overloaded,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GameSessionDiagnostic {
+    pub state: GameSessionDiagnosticState,
+    pub age_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GameRouteStatusReply {
@@ -37,6 +67,10 @@ pub struct GameRouteStatusReply {
     pub snapshot_hash: Option<String>,
     pub verified_at_unix_ms: Option<u64>,
     pub valid_until_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<GameRouteDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_session: Option<GameSessionDiagnostic>,
 }
 
 fn valid_snapshot_hash(value: &str) -> bool {
@@ -70,6 +104,9 @@ pub fn decode_game_route_status(
         return Err("Unknown game-route status state".into());
     }
 
+    if report.recent_session.is_some_and(|session| session.age_ms >= 30_000) {
+        report.recent_session = None;
+    }
     if report.state != "verified" {
         if report.route_verified {
             return Err("Unverified route state claimed game-route authorization".into());
@@ -89,6 +126,9 @@ pub fn decode_game_route_status(
         return Ok(report);
     }
 
+    if report.diagnostic.is_some() {
+        return Err("Verified route reported an inconsistent failure category".into());
+    }
     if !(report.quorum_verified && report.hosting_consent_verified && report.server_ready && report.route_verified) {
         return Err("Game route is not backed by all fresh authorization checks".into());
     }
@@ -190,6 +230,26 @@ mod tests {
         assert!(report.snapshot_hash.is_none());
         old["route_verified"] = serde_json::json!(true);
         assert!(decode(&old).is_err());
+    }
+
+    #[test]
+    fn diagnostics_are_typed_fresh_observations_and_never_grant_a_route() {
+        let mut raw = verified();
+        raw["state"] = serde_json::json!("unavailable");
+        raw["route_verified"] = serde_json::json!(false);
+        raw["diagnostic"] = serde_json::json!("peer_link_unavailable");
+        raw["recent_session"] = serde_json::json!({"state": "stream_admission_failed", "age_ms": 100});
+        let report = decode(&raw).unwrap();
+        assert_eq!(report.diagnostic, Some(GameRouteDiagnostic::PeerLinkUnavailable));
+        assert_eq!(report.recent_session.unwrap().state, GameSessionDiagnosticState::StreamAdmissionFailed);
+        assert!(report.local_gateway.is_none());
+        raw["recent_session"]["age_ms"] = serde_json::json!(30_000);
+        assert!(decode(&raw).unwrap().recent_session.is_none());
+        raw["diagnostic"] = serde_json::json!("unknown");
+        assert!(decode(&raw).is_err());
+        let mut raw = verified();
+        raw["diagnostic"] = serde_json::json!("authority_changed");
+        assert!(decode(&raw).is_err());
     }
 
     #[test]

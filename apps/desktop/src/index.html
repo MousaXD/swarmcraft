@@ -421,6 +421,7 @@
                 <button id="joinWorldIdButton" class="button button-secondary" type="button">Check</button>
               </div>
               <div id="joinWorldIdNotice" class="inline-notice" role="status" hidden></div>
+              <button id="copyDiscoveryDiagnosis" class="button button-subtle" type="button" disabled>Copy safe directory diagnosis</button>
             </details>
           </div>
         </section>
@@ -473,6 +474,12 @@
                   <button id="stopDaemon" class="button button-subtle" type="button">Stop networking</button>
                 </div>
                 <p class="helper">Relay transport can provide connectivity, but it does not make a peer the canonical host.</p>
+                <h4>Selected world connection</h4>
+                <pre id="routeDiagnosis" class="diagnostic-output" aria-live="polite">Current connection not yet checked.</pre>
+                <div class="compact-actions">
+                  <button id="retryRouteDiagnosis" class="button button-secondary world-required" type="button">Retry world connection</button>
+                  <button id="copyRouteDiagnosis" class="button button-subtle world-required" type="button">Copy safe diagnosis</button>
+                </div>
               </section>
 
               <section class="diagnostic-section" id="localNodeSection">

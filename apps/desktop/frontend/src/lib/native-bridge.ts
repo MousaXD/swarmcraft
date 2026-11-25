@@ -37,6 +37,8 @@ export interface NativeGameRouteStatus {
   snapshot_hash: string | null;
   verified_at_unix_ms: number | null;
   valid_until_unix_ms: number | null;
+  diagnostic?: 'gateway_unavailable' | 'peer_link_unavailable' | 'host_proof_unavailable' | 'route_check_timed_out' | 'authority_changed';
+  recent_session?: { state: 'checking_route' | 'opening_stream' | 'route_refused' | 'route_timed_out' | 'stream_admission_failed' | 'stream_interrupted' | 'session_ended' | 'overloaded'; age_ms: number };
 }
 
 export interface NativeCommandTable {

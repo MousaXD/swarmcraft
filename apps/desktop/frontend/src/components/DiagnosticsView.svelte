@@ -170,6 +170,12 @@
                 <p id="networkServiceNotice" class="helper" role="status" aria-live="polite" hidden={!serviceMessage}>{serviceMessage}</p>
                 <p id="networkServiceError" class="form-error" role="alert" hidden={!serviceError}>{serviceError}</p>
                 <p class="helper">Relay transport can provide connectivity, but it does not make a peer the canonical host.</p>
+                <h4>Selected world connection</h4>
+                <pre id="routeDiagnosis" class="diagnostic-output" aria-live="polite">Current connection not yet checked.</pre>
+                <div class="compact-actions">
+                  <button id="retryRouteDiagnosis" class="button button-secondary world-required" type="button">Retry world connection</button>
+                  <button id="copyRouteDiagnosis" class="button button-subtle world-required" type="button">Copy safe diagnosis</button>
+                </div>
               </section>
 
               <section class="diagnostic-section" id="localNodeSection">

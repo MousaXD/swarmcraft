@@ -11,7 +11,10 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use swarm_cli::{game_route_api::GameRouteStatusV1, live_authority::SignedLiveAuthoritySource};
+use swarm_cli::{
+    game_route_api::{GameRouteDiagnostic, GameRouteStatusV1},
+    live_authority::SignedLiveAuthoritySource,
+};
 use swarm_core::{verify_signature, DataPaths, PeerIdentity};
 use swarm_network::{
     game_port_registry::GameWorldPortRegistry,
@@ -20,8 +23,8 @@ use swarm_network::{
     game_route_host::AuthenticatedGameRouteHostSigner,
     game_route_resolver::{AuthenticatedGameRouteResolver, GameRouteCandidateSource},
     game_transport::{
-        GameStreamClient, GameTransportError, GatewayRouteResolver, StableLoopbackGateway, VerifiedForwardRoute,
-        VerifiedGameRouteStatus,
+        GameSessionDiagnostic, GameSessionDiagnostics, GameStreamClient, GameTransportError, GatewayRouteResolver,
+        StableLoopbackGateway, VerifiedForwardRoute, VerifiedGameRouteStatus,
     },
     SwarmNode, TransportPeerId,
 };
@@ -85,6 +88,7 @@ struct ActiveGateway {
     world: WorldId,
     address: SocketAddrV4,
     resolver: Arc<dyn GatewayRouteResolver>,
+    diagnostics: GameSessionDiagnostics,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<Result<(), swarm_network::game_transport::GameTransportError>>,
 }
@@ -122,6 +126,13 @@ impl GameGatewayController {
             .as_ref()
             .filter(|running| running.world == world && !running.task.is_finished())
             .map(|running| (Arc::clone(&running.resolver), running.address))
+    }
+
+    pub fn recent_session(&self, world: WorldId) -> Option<GameSessionDiagnostic> {
+        self.active
+            .as_ref()
+            .filter(|running| running.world == world && !running.task.is_finished())
+            .and_then(|running| running.diagnostics.recent())
     }
 
     /// Selecting another world immediately revokes and cancels all old-world
@@ -167,6 +178,7 @@ impl GameGatewayController {
             .await
             .context("reserved Minecraft gateway port is already occupied; refusing fallback")?;
         let address = gateway.local_addr()?;
+        let diagnostics = gateway.session_diagnostics();
         let authenticated = node.game_authenticated_peers();
         let remote = Arc::new(AuthenticatedGameRouteResolver::new(
             identity.peer_id(),
@@ -191,7 +203,7 @@ impl GameGatewayController {
             Arc::new(GameStreamClient::new(identity.peer_id(), node.local_transport_peer_id(), authenticated, proof)?);
         let (shutdown, rx) = watch::channel(false);
         let task = tokio::spawn(gateway.serve(resolver.clone(), client, node.game_stream_control(), rx));
-        self.active = Some(ActiveGateway { world, address, resolver, shutdown, task });
+        self.active = Some(ActiveGateway { world, address, resolver, diagnostics, shutdown, task });
         Ok(())
     }
 }
@@ -202,6 +214,11 @@ pub(super) async fn resolve_status(
     address: SocketAddrV4,
 ) -> (GameRouteStatusV1, Option<VerifiedGameRouteStatus>) {
     let found = timeout(STATUS_PROOF_TIMEOUT, resolver.resolve(world)).await;
+    let reason = if matches!(&found, Err(_) | Ok(Err(GameTransportError::Timeout))) {
+        GameRouteDiagnostic::RouteCheckTimedOut
+    } else {
+        GameRouteDiagnostic::HostProofUnavailable
+    };
     let verified = match found {
         Ok(Ok(route)) if route.world_id() == world => {
             let now = std::time::SystemTime::now()
@@ -214,7 +231,7 @@ pub(super) async fn resolve_status(
     };
     match verified.and_then(|proof| GameRouteStatusV1::verified(proof, address).map(|status| (status, proof))) {
         Some(pair) => (pair.0, Some(pair.1)),
-        None => (GameRouteStatusV1::unavailable(world), None),
+        None => (GameRouteStatusV1::unavailable_with_reason(world, reason), None),
     }
 }
 

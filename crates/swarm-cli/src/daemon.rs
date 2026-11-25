@@ -8,7 +8,9 @@ use std::{
 };
 use swarm_cli::{
     authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
-    game_route_api::{GameRouteApiOperation, GameRouteApiReply, GameRouteApiServer, GameRouteStatusV1},
+    game_route_api::{
+        GameRouteApiOperation, GameRouteApiReply, GameRouteApiServer, GameRouteDiagnostic, GameRouteStatusV1,
+    },
     historical_authority::{
         collect_replay_proof, load_staged_replay, publish_stale_replay, stale_replay_recipient_allowed,
         verify_and_stage_first_contact_replay, verify_and_stage_stale_replay, verify_replay_proof,
@@ -419,7 +421,7 @@ pub async fn run(
                             });
                         } else {
                             let _ = command.response.send(GameRouteApiReply::Status {
-                                value: GameRouteStatusV1::unavailable(command.world),
+                                value: Box::new(GameRouteStatusV1::unavailable_with_reason(command.world, GameRouteDiagnostic::GatewayUnavailable)),
                             });
                         }
                     }
@@ -429,17 +431,40 @@ pub async fn run(
                 if let Some(Err(error)) = finished { warn!(%error, "fresh Minecraft route status verifier failed"); }
             }
             Some(completed) = status_done_rx.recv() => {
-                let valid = gateways.revision() == completed.selection_revision
-                    && gateways.active_world() == Some(completed.world)
-                    && completed.verified.is_some_and(|proof| {
-                        current_verified_route_status_matches(
-                            paths, storage, &identity, &node, &live_runtime_registry,
-                            completed.world, &proof,
-                        )
+                let current_selection = gateways.revision() == completed.selection_revision
+                    && gateways.active_world() == Some(completed.world);
+                let mut value = if !current_selection {
+                    GameRouteStatusV1::unavailable_with_reason(completed.world, GameRouteDiagnostic::GatewayUnavailable)
+                } else if let Some(proof) = completed.verified {
+                    if current_verified_route_status_matches(
+                        paths, storage, &identity, &node, &live_runtime_registry,
+                        completed.world, &proof,
+                    ) {
+                        completed.status
+                    } else {
+                        GameRouteStatusV1::unavailable_with_reason(completed.world, GameRouteDiagnostic::AuthorityChanged)
+                    }
+                } else {
+                    // Only classify an exact current accepted remote authority
+                    // as disconnected. Discovery hints and generic NAT status
+                    // cannot establish which peer owns this world's authority.
+                    let disconnected = storage.load_epoch_record(completed.world).is_ok_and(|epoch| {
+                        epoch.authority_peer_id != identity.peer_id()
+                            && swarm_cli::live_authority::verify_playable_epoch(storage, &epoch).is_ok()
+                            && authorize_committed_member(storage, completed.world, identity.peer_id()).is_ok()
+                            && node.game_authenticated_peers().read().is_ok_and(|peers|
+                                !peers.values().any(|peer| *peer == epoch.authority_peer_id))
                     });
-                let value = if valid { completed.status }
-                    else { GameRouteStatusV1::unavailable(completed.world) };
-                let _ = completed.response.send(GameRouteApiReply::Status { value });
+                    if disconnected {
+                        GameRouteStatusV1::unavailable_with_reason(completed.world, GameRouteDiagnostic::PeerLinkUnavailable)
+                    } else {
+                        completed.status
+                    }
+                };
+                if current_selection {
+                    value.recent_session = gateways.recent_session(completed.world);
+                }
+                let _ = completed.response.send(GameRouteApiReply::Status { value: Box::new(value) });
             }
             Some(command) = live_quorum_commands.recv() => {
                 live_quorum_driver.start(storage, &identity, &mut node, &mut outbound, &leases, command);

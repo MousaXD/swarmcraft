@@ -145,12 +145,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #14 — P1 · Partial
 - Work: Finish discovery and connection diagnosis for ordinary players. Show whether directory, peer link, host proof, or Minecraft game stream failed
 - Acceptance: Per-path results are fresh and actionable. Failure has retry/copy options and no endless loading or false Ready
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: [Connection diagnosis](CONNECTION_DIAGNOSIS.md); crates/swarm-cli/src/{game_route_api,daemon,daemon_game_gateway}.rs; crates/swarm-network/src/game_transport.rs; apps/desktop/src/{game-route-status,discovery-diagnostics}.js; both Desktop views.
+- Evidence: strict core Clippy; 115 network, 140 CLI library and 51 daemon tests; real game-stream and resolver integration; local negative gateway smoke (unconsented mock, not installed Minecraft); 144 Desktop tests including ChromeDriver at three viewport sizes; 82 Svelte tests, 29 source parity tests, typecheck/build. Native Desktop decoder test execution and exact-SHA CI tracked separately.
+- Remaining / next action: Confirm native decoder test and exact-SHA CI; installed multi-network directory/peer/host/game error journey, including real Minecraft login. Typed host-proof failure does not speculate about which required proof failed.
+- External dependency: Installed devices and representative networks for field acceptance.
+- Commit: Connection-diagnosis checkpoint following ad99fd8; see git history.
 
 ### #15 — P1 · Unverified
 - Work: Certify representative LAN, WAN, home NAT, CGNAT, IPv6, mobile, blocked UDP, and packet-loss scenarios

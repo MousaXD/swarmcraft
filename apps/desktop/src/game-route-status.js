@@ -14,6 +14,50 @@ const ROUTE_STATES = Object.freeze({
   unavailable: ['Minecraft route not verified', 'No fresh, authenticated game-route proof is available from the local daemon.'],
 });
 
+const DIAGNOSTIC_STATES = Object.freeze({
+  gateway_unavailable: ['Local gateway unavailable', 'Retry the selected world. Check that networking is running and the reserved local port is available.'],
+  peer_link_unavailable: ['Host peer link unavailable', 'The accepted remote authority has no authenticated peer connection. Check that the host is online and retry networking or relay setup.'],
+  host_proof_unavailable: ['Host proof unavailable', 'A complete current signed host, quorum, consent and Fabric proof could not be verified. Check the host and the world safety state.'],
+  route_check_timed_out: ['Route check timed out', 'The bounded signed-route check did not finish. Retry when the host and network are responsive.'],
+  authority_changed: ['Authority changed during verification', 'The previous proof is no longer current. Retry for the newly accepted host and checkpoint.'],
+});
+
+const SESSION_STATES = Object.freeze({
+  checking_route: 'A recent Minecraft connection attempt was checking the signed route.',
+  opening_stream: 'A recent Minecraft connection attempt was opening the authenticated game stream.',
+  route_refused: 'The last Minecraft connection attempt was refused before stream admission.',
+  route_timed_out: 'The last Minecraft connection attempt timed out during route verification.',
+  stream_admission_failed: 'The last Minecraft connection attempt failed during authenticated stream admission or server connection.',
+  stream_interrupted: 'The last admitted game stream was interrupted. Reconnect in Minecraft after a fresh route check.',
+  session_ended: 'The last admitted game stream ended. This does not confirm a successful Minecraft login.',
+  overloaded: 'The local game-stream limit rejected the last connection attempt. Retry after other attempts finish.',
+});
+
+function normalizeRecentSession(report, now) {
+  const session = report.recent_session;
+  if (session == null) return null;
+  if (!session || !Object.hasOwn(SESSION_STATES, session.state)
+      || !Number.isSafeInteger(session.age_ms) || session.age_ms < 0) {
+    throw new Error('Invalid recent game-stream observation');
+  }
+  if (session.age_ms >= 30_000) return null;
+  return Object.freeze({ label: SESSION_STATES[session.state], validUntil: now + 30_000 - session.age_ms });
+}
+
+/** Diagnostics are read-only, world-bound and time-limited. Copy only
+ * allowlisted local descriptions, never raw native errors or addresses. */
+export function connectionDiagnosis(route, worldId, now = Date.now()) {
+  const current = Boolean(worldId && route?.worldId === worldId
+    && Number.isSafeInteger(route.diagnosticValidUntil) && route.diagnosticValidUntil > now);
+  const currentSession = current && route.recentSession?.validUntil > now;
+  return Object.freeze({
+    route: current ? route.label : 'Current connection not yet checked',
+    detail: current ? route.verified ? 'Signed route proof was verified; actual game login is not confirmed.' : route.detail
+      : 'Retry to obtain a fresh signed-route diagnostic.',
+    session: currentSession ? route.recentSession.label : 'No recent Minecraft connection attempt observed.',
+  });
+}
+
 export const UNVERIFIED_GAME_ROUTE = Object.freeze({
   state: 'unavailable',
   label: ROUTE_STATES.unavailable[0],
@@ -43,17 +87,21 @@ export function normalizeGameRouteStatus(report, expectedWorldId, now = Date.now
   if (!expectedWorldId || report.world_id !== expectedWorldId) {
     throw new Error('Game-route proof did not match the selected world');
   }
+  const recentSession = normalizeRecentSession(report, now);
   if (report.state !== 'verified') {
     if (!Object.hasOwn(ROUTE_STATES, report.state) || report.route_verified !== false) {
       throw new Error('Game-route proof reported an inconsistent state');
     }
-    const [label, detail] = ROUTE_STATES[report.state];
-    return Object.freeze({ state: report.state, label, detail, verified: false,
-      connectionTarget: null, automaticReconnect: false });
+    if (report.diagnostic != null && !Object.hasOwn(DIAGNOSTIC_STATES, report.diagnostic)) {
+      throw new Error('Unknown game-route diagnostic');
+    }
+    const [label, detail] = DIAGNOSTIC_STATES[report.diagnostic] || ROUTE_STATES[report.state];
+    return Object.freeze({ state: report.state, worldId: expectedWorldId, label, detail, verified: false,
+      diagnosticValidUntil: now + 10_000, recentSession, connectionTarget: null, automaticReconnect: false });
   }
 
   const { verified_at_unix_ms: proofTime, valid_until_unix_ms: expiry } = report;
-  if (report.route_verified !== true || report.quorum_verified !== true
+  if (report.diagnostic != null || report.route_verified !== true || report.quorum_verified !== true
       || report.hosting_consent_verified !== true || report.server_ready !== true
       || !isLocalPort(report.local_gateway)
       || !isSafeInt(report.epoch) || !isSafeInt(report.fencing_token)
@@ -79,6 +127,8 @@ export function normalizeGameRouteStatus(report, expectedWorldId, now = Date.now
     connectionTarget: report.local_gateway,
     // Never extend the live authority proof using a longer route ticket TTL.
     validUntil: effectiveUntil,
+    diagnosticValidUntil: effectiveUntil,
+    recentSession,
     automaticReconnect: false,
   });
 }

@@ -1,3 +1,4 @@
+import { discoveryUnavailable, formatDiscoveryResult, withDiscoveryDeadline } from './discovery-diagnostics.js';
 import { providerContractInvoke } from './provider-contract-bridge.js';
 const invoke = () => providerContractInvoke(window.__TAURI__?.core);
 const byId = (id) => document.getElementById(id);
@@ -653,33 +654,69 @@ export function install() {
     }
   });
 
-  byId('joinWorldIdButton')?.addEventListener(
-    'click',
-    async (event) => {
-      // Preserve real legacy discovery in the shipping UI; the Svelte
-      // candidate resolves the same announcement through typed native IPC.
-      if (window.__swarmcraftSvelteDiscoveryOwned === true) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      const world = clean(byId('joinWorldId').value);
-      if (!world) return;
-      const status = byId('joinWorldIdNotice');
-      setLocalStatus(status, 'Checking the signed discovery announcement…');
-      try {
-        const report = await call('discovery_resolve', { world });
-        setLocalStatus(
-          status,
-          report.state === 'found'
-            ? `${report.world.name} is ${report.world.visibility}. Discovery verified its signed announcement; a signed invite is still required when membership policy is invite-only.`
-            : report.detail || `World resolution: ${report.state}`,
-          report.state === 'found' ? 'safe' : 'warning',
-        );
-      } catch (error) {
-        setLocalStatus(status, errorText(error), 'danger');
-      }
-    },
-    true,
-  );
+  const discoveryInput = byId('joinWorldId');
+  const discoveryButton = byId('joinWorldIdButton');
+  const discoveryCopy = byId('copyDiscoveryDiagnosis');
+  let discoveryRevision = 0;
+  let discoveryDiagnosis = '';
+  let discoveryExpiry;
+  function clearDiscoveryDiagnosis() {
+    discoveryRevision += 1;
+    clearTimeout(discoveryExpiry);
+    discoveryDiagnosis = '';
+    if (discoveryCopy) discoveryCopy.disabled = true;
+    if (discoveryButton) {
+      discoveryButton.disabled = false;
+      discoveryButton.removeAttribute('aria-busy');
+    }
+    setLocalStatus(byId('joinWorldIdNotice'), '');
+  }
+  discoveryInput?.addEventListener('input', () => {
+    if (window.__swarmcraftSvelteDiscoveryOwned === true) return;
+    clearDiscoveryDiagnosis();
+  });
+  discoveryCopy?.addEventListener('click', async () => {
+    if (window.__swarmcraftSvelteDiscoveryOwned === true) return;
+    if (!discoveryDiagnosis) return;
+    try {
+      await navigator.clipboard.writeText(discoveryDiagnosis);
+    } catch {
+      setLocalStatus(byId('joinWorldIdNotice'), 'Could not copy directory diagnosis. Check clipboard access.', 'warning');
+    }
+  });
+  discoveryButton?.addEventListener('click', async (event) => {
+    // The shipped view owns this path only when Svelte is not active.
+    if (window.__swarmcraftSvelteDiscoveryOwned === true) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (discoveryButton.disabled) return;
+    const world = clean(discoveryInput.value);
+    if (!world) return;
+    clearDiscoveryDiagnosis();
+    const revision = discoveryRevision;
+    const status = byId('joinWorldIdNotice');
+    discoveryButton.disabled = true;
+    discoveryButton.setAttribute('aria-busy', 'true');
+    setLocalStatus(status, 'Checking the signed discovery announcement…');
+    let display;
+    try {
+      const report = await withDiscoveryDeadline(call('discovery_resolve', { world }));
+      display = formatDiscoveryResult(report, world);
+    } catch {
+      display = discoveryUnavailable();
+    }
+    if (revision !== discoveryRevision) return;
+    if (clean(discoveryInput.value) !== world) { clearDiscoveryDiagnosis(); return; }
+    discoveryButton.disabled = false;
+    discoveryButton.removeAttribute('aria-busy');
+    setLocalStatus(status, display.message, display.tone);
+    discoveryDiagnosis = display.copy;
+    if (discoveryCopy) discoveryCopy.disabled = false;
+    const lifetime = Math.min(30_000, (display.validUntil ?? Date.now() + 30_000) - Date.now());
+    discoveryExpiry = setTimeout(() => {
+      if (revision === discoveryRevision) clearDiscoveryDiagnosis();
+    }, Math.max(0, lifetime));
+  }, true);
 
   return { roots };
 }

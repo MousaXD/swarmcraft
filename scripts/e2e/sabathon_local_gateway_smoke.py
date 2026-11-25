@@ -89,7 +89,7 @@ def await_daemon(binary: Path, data: Path, world: str, process: subprocess.Popen
     raise AssertionError(f"live daemon never published its private status endpoint: {last}")
 
 
-def assert_unavailable(raw: str, world: str) -> None:
+def assert_unavailable(raw: str, world: str, *, attempted: bool = False) -> None:
     report = json.loads(raw)
     if report.get("world_id") != world or report.get("state") != "unavailable":
         raise AssertionError(f"unconsented world claimed a positive route: {report!r}")
@@ -102,6 +102,16 @@ def assert_unavailable(raw: str, world: str) -> None:
     ):
         if report.get(field) is not None:
             raise AssertionError(f"unverified route leaked previous {field}: {report!r}")
+    if report.get("diagnostic") not in {
+        "gateway_unavailable", "host_proof_unavailable", "route_check_timed_out"
+    }:
+        raise AssertionError("unconsented world failed to report a typed negative diagnostic")
+    if attempted:
+        session = report.get("recent_session") or {}
+        if session.get("state") not in {"route_refused", "route_timed_out"}:
+            raise AssertionError(f"real rejected TCP attempt was not diagnosed: {session!r}")
+        if not isinstance(session.get("age_ms"), int) or not 0 <= session["age_ms"] < 30000:
+            raise AssertionError("game session diagnostic was missing its bounded age")
 
 
 def reserved_port(world: str) -> int:
@@ -168,6 +178,10 @@ def smoke(binary: Path) -> None:
                 expect(run_cli(binary, data, "world", "game-route-status", world, "--json"), 0, "fresh status"), world,
             )
             assert_denied_gateway(port)
+            assert_unavailable(
+                expect(run_cli(binary, data, "world", "game-route-status", world, "--json"), 0, "failed session diagnosis"),
+                world, attempted=True,
+            )
 
             # Crash/restart of the daemon alone must never manufacture a
             # positive route from its saved port or migration status file.
@@ -184,6 +198,7 @@ def smoke(binary: Path) -> None:
             assert_denied_gateway(port)
             assert_unavailable(
                 expect(run_cli(binary, data, "world", "game-route-status", world, "--json"), 0, "post-restart status"), world,
+                attempted=True,
             )
             print(f"PASS: real daemon/private CLI, no cached proof, duplicate-owner refusal, stable loopback port {port},")
             print("      closed unauthorized TCP sessions, restart and continued fail-closed status")
