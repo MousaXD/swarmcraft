@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "package": "dev.swarmcraft.fabric.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": [
+    "OwnerlessDedicatedServerMixin",
+    "OwnerlessMinecraftServerMixin",
+    "OwnerlessCommandSourceMixin",
+    "OwnerlessPlayerListMixin",
+    "OwnerlessOpListMixin",
+    "OwnerlessCommandBlockMixin"
+  ],
+  "injectors": { "defaultRequire": 1 }
+}

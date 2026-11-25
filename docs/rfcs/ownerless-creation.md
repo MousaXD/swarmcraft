@@ -137,9 +137,9 @@ alone does not establish Byzantine safety. A malicious OS owner can
 modify JVM memory, files, binaries, or code; these signatures do not
 prove compliant game ticks.
 
-#65 must bind the fixed policy to actual managed Minecraft and regional
-runtime admission, disable operator/console/RCON paths, and verify
-ordinary player and successor-host permissions. #66 must establish
+The [#65 permission lab](ownerless-permissions.md) verifies isolated real
+Minecraft permissions and policy-bound reference workers; canonical runtime
+admission and actual successor-host gameplay remain gated. #66 must establish
 durable shared authority and founder-independent recovery, including
 the inability of an isolated key to publish or change membership.
 #67 must separate admission, gameplay roles, validator enrollment and

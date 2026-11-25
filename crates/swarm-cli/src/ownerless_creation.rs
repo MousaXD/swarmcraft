@@ -53,6 +53,16 @@ pub enum OwnerlessCommand {
         #[arg(long = "approval", required = true)]
         approvals: Vec<PathBuf>,
     },
+    /// Derive an isolated permission-lab pin from a verified creation certificate.
+    /// This is not a launch permit or accepted canonical authority.
+    PermissionProfile {
+        #[arg(long)]
+        certificate: PathBuf,
+        #[arg(long)]
+        expected_world: OwnerlessWorldIdV1,
+        #[arg(long)]
+        expected_compatibility: Hash32,
+    },
     /// Verify a creation certificate against an independently reviewed identity pin.
     Verify {
         #[arg(long)]
@@ -144,6 +154,30 @@ pub fn run(paths: &DataPaths, command: OwnerlessCommand) -> Result<()> {
             let certificate = OwnerlessCreationV1 { genesis, approvals: signed };
             verify_ownerless_creation(expected_world, &certificate)?;
             print_document(&certificate)
+        }
+        OwnerlessCommand::PermissionProfile { certificate, expected_world, expected_compatibility } => {
+            let certificate: OwnerlessCreationV1 = read_document(&certificate)?;
+            let verified = verify_ownerless_creation(expected_world, &certificate)?;
+            ensure!(
+                certificate.genesis.compatibility_fingerprint == expected_compatibility,
+                "certificate differs from independently expected compatibility"
+            );
+            let binding = format!(
+                "sc65v1:{}:{}:{}",
+                verified.world_id().to_string().strip_prefix("scownerless:").context("wrong identity namespace")?,
+                verified.policy_hash(),
+                expected_compatibility
+            );
+            print_document(&serde_json::json!({
+                "classification": "verified_ownerless_permission_lab_profile",
+                "binding": binding,
+                "world_id": verified.world_id().to_string(),
+                "policy_hash": verified.policy_hash().to_string(),
+                "compatibility": expected_compatibility.to_string(),
+                "canonical_authority": false,
+                "runtime_activation": false,
+                "player_admission": false,
+            }))
         }
         OwnerlessCommand::Verify { certificate, expected_world } => {
             let certificate: OwnerlessCreationV1 = read_document(&certificate)?;

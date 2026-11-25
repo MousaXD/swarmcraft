@@ -85,6 +85,13 @@ accepted ticks replay correctly; zero runs satisfy the strict 20 Hz
 target. Production scaling remains unqualified; no Minecraft or
 independent physical-machine capacity is claimed.
 
+## Ownerless permission lab (#65, 2026-11-26)
+
+The [permission RFC](../../docs/rfcs/ownerless-permissions.md) and retained
+public evidence cover real local Fabric permission tests and a distinct
+policy-pinned reference ledger with authenticated worker receipts. This
+is not canonical quorum authority or distributed Minecraft gameplay.
+
 ## Original R0 evidence (2026-11-08)
 
 

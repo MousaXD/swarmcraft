@@ -13,3 +13,7 @@ __pycache__/
 # Local Tauri sidecar binaries
 apps/desktop/src-tauri/binaries/
 apps/desktop/src-tauri/gen/
+
+# Local Fabric build outputs
+/minecraft/fabric/.gradle/
+/minecraft/fabric/build/

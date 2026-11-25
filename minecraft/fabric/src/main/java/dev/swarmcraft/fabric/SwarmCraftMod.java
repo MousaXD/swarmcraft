@@ -38,11 +38,21 @@ public final class SwarmCraftMod implements ModInitializer {
 
     @Override
     public void onInitialize() {
+        // Validate the isolated policy pin before any managed server starts.
+        OwnerlessPermissionGuard.active();
         ServerLifecycleEvents.SERVER_STARTED.register(SwarmCraftMod::serverStarted);
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> closeRuntimeGuards());
     }
 
     private static void serverStarted(MinecraftServer server) {
+        if (OwnerlessPermissionGuard.active()) {
+            if (!server.getPlayerList().getOps().isEmpty()) {
+                // Imported operator lists are not accepted in this mode.
+                throw new IllegalStateException("Ownerless permission lab requires an empty operator list");
+            }
+            LOGGER.info("SwarmCraft ownerless permission lab active: {}; no live admission", OwnerlessPermissionGuard.binding());
+            return;
+        }
         String host = System.getenv("SWARMCRAFT_IPC_HOST");
         String port = System.getenv("SWARMCRAFT_IPC_PORT");
         String token = System.getenv("SWARMCRAFT_IPC_TOKEN");

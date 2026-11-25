@@ -113,6 +113,31 @@ fn independent_signers_create_verified_offline_candidate_without_world_or_permit
     assert_eq!(verified["recovery_authorized"], false);
     assert_eq!(verified["policy"]["player_op"], false);
     assert_eq!(verified["policy"]["compute_grants_vote"], false);
+    let expected_policy = "c694ae9067292c7ea3da7cc5a825e8ff0b370cccfa6267e45dc3a6c96f76ef4f";
+    let profile_args = [
+        "ownerless",
+        "permission-profile",
+        "--certificate",
+        certificate_path,
+        "--expected-world",
+        world,
+        "--expected-compatibility",
+        &hash,
+    ];
+    let profile = json(invoke(&founder, &profile_args));
+    assert_eq!(profile["policy_hash"], expected_policy);
+    assert_eq!(
+        profile["binding"],
+        format!("sc65v1:{}:{expected_policy}:{hash}", world.strip_prefix("scownerless:").unwrap())
+    );
+    for flag in ["canonical_authority", "runtime_activation", "player_admission"] {
+        assert_eq!(profile[flag], false);
+    }
+    let mut wrong_compat = profile_args;
+    wrong_compat[6] = "--expected-compatibility";
+    wrong_compat[7] = &state;
+    rejected(invoke(&founder, &wrong_compat), "expected compatibility");
+
     assert!(!founder.exists());
     rejected(
         invoke(&founder, &["world", "create", "--ownerless", "--name", "No OP", "--minecraft", "26.1.2"]),

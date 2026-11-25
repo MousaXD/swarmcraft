@@ -848,7 +848,15 @@ impl Drop for AuthorityRuntimeGuard {
     }
 }
 
+fn refuse_ownerless_lab_environment() -> Result<()> {
+    if std::env::var_os("SWARMCRAFT_OWNERLESS_LAB_BINDING").is_some() {
+        bail!("ownerless permission lab cannot launch through the V1 managed runtime");
+    }
+    Ok(())
+}
+
 pub async fn run_authority_runtime(paths: &DataPaths, storage: &Storage, options: HostOptions) -> Result<()> {
+    refuse_ownerless_lab_environment()?;
     // Preserve the explicit EULA rejection even when the machine is under
     // pressure or player-only; consent is never a substitute for EULA.
     if !options.accept_eula {
@@ -907,6 +915,7 @@ async fn run_authority_runtime_inner(
     handle_shutdown_signal: bool,
     runtime_registry: Option<&LiveFabricRuntimeRegistry>,
 ) -> Result<()> {
+    refuse_ownerless_lab_environment()?;
     if !options.accept_eula {
         bail!("Minecraft server EULA acceptance is required; configure the runtime only after reviewing Mojang's EULA");
     }
@@ -2488,6 +2497,12 @@ fn launch_server(
     memory_cap: Option<&HostMemoryCap>,
 ) -> Result<Child> {
     let mut command = Command::new(&options.java);
+    // Do not silently downgrade a requested ownerless experiment into the
+    // legacy creator-authority runtime, or combine its pin with V1 IPC.
+    refuse_ownerless_lab_environment()?;
+    if ipc_environment.iter().any(|(name, _)| name == "SWARMCRAFT_OWNERLESS_LAB_BINDING") {
+        bail!("ownerless permission lab cannot launch through the V1 managed runtime");
+    }
     command.arg(format!("-Xmx{heap_mib}m")).arg("-jar").arg(&options.server_jar).arg("nogui").current_dir(runtime);
     for (name, value) in ipc_environment {
         command.env(name, value);

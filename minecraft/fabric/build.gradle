@@ -44,3 +44,17 @@ jar {
         rename { "${it}_${project.name}" }
     }
 }
+
+// Explicitly requested isolated test artifact. Not part of build, sourcesJar,
+// nested production dependencies or any release workflow.
+sourceSets {
+    ownerlessProbe {
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+    }
+}
+tasks.register('ownerlessProbeJar', Jar) {
+    dependsOn tasks.named('ownerlessProbeClasses')
+    archiveBaseName = 'ownerless-permission-probe-test-only'
+    destinationDirectory = layout.buildDirectory.dir('ownerless-probe')
+    from sourceSets.ownerlessProbe.output
+}

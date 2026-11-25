@@ -136,6 +136,9 @@ class Authority:
     def _before_claim(self, current):
         pass
 
+    def _validate_receipt(self, current, receipt):
+        return receipt
+
     def __init__(self, path):
         self.path = Path(path).resolve()
         # mode=rw: missing authority is NOT an empty new world.
@@ -317,6 +320,7 @@ class Authority:
             seen, regions = set(), {}
             candidate = None
             for receipt in sequence(receipts, len(grants), 4):
+                receipt = self._validate_receipt(current, receipt)
                 fields(receipt, "body", "mac")
                 body = receipt["body"]
                 fields(body, "world", "generation", "session", "tick", "parent_root", "runtime_root", "regions")

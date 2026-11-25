@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "swarmcraft_ownerless_probe",
+  "version": "1.0.0",
+  "name": "SwarmCraft Ownerless Permission Lab Probe (test only)",
+  "environment": "server",
+  "entrypoints": {"main": ["dev.swarmcraft.probe.OwnerlessProbe"]},
+  "depends": {"swarmcraft": "*", "fabric-api": "*", "minecraft": "~26.1.2", "java": ">=25"}
+}

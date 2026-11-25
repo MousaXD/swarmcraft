@@ -59,7 +59,7 @@ def cpu_plan():
     return cpus[0], cpus[1:5], available
 
 
-def worker_main(fenced=False):
+def worker_main(fenced=False, ownerless_binding=None):
     # This entrypoint is deliberately usable only in a private mapped
     # namespace built by this harness. The session secret travels on stdin,
     # never in process arguments or retained evidence.
@@ -88,7 +88,10 @@ def worker_main(fenced=False):
         require(peer[0] == bind[:-1] + "1", "unexpected lab coordinator")
     with sock:
         channel = Channel(sock, key, coordinator=False)
-        if fenced:
+        if ownerless_binding is not None:
+            from ownerless_permission import PolicyWorker
+            worker = PolicyWorker(ownerless_binding)
+        elif fenced:
             from regional_authority import FencedWorker
             worker = FencedWorker()
         else:
@@ -439,6 +442,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--fenced-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--ownerless-worker-binding", help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--ticks", type=int, default=32)
     parser.add_argument("--repeats", type=int, default=2)
@@ -446,9 +450,10 @@ def main():
     parser.add_argument("--profiles", default="local,near,wan")
     parser.add_argument("--scenarios", default="spread:8192,spread:16384,clustered:8192,boundary:8192")
     args = parser.parse_args()
-    if args.worker or args.fenced_worker:
-        require(not (args.worker and args.fenced_worker), "ambiguous worker mode")
-        worker_main(args.fenced_worker)
+    if args.worker or args.fenced_worker or args.ownerless_worker_binding is not None:
+        require(sum((args.worker, args.fenced_worker, args.ownerless_worker_binding is not None)) == 1,
+                "ambiguous worker mode")
+        worker_main(args.fenced_worker, args.ownerless_worker_binding)
         return
     require(args.output is not None and integer(args.ticks, 1, 512) and integer(args.repeats, 1, 5),
             "bounded ticks/repeats and a new output file required")
