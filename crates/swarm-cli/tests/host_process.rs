@@ -35,7 +35,8 @@ async fn real_host_process_restores_launches_and_commits_mutated_world() {
     if !hosting_capacity_for_process_test() {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
+    // Port registries must have private ancestors, even under umask 0002.
+    let temp = tempfile::Builder::new().permissions(fs::Permissions::from_mode(0o700)).tempdir().unwrap();
     let paths = DataPaths::from_root(temp.path().join("data"));
     let storage = Storage::open(paths.root.clone()).unwrap();
     let identity = PeerIdentity::load_or_create(&paths).unwrap();
