@@ -22,7 +22,6 @@ use tracing::{debug, warn};
 use crate::{
     admission::{
         application_connection_allowed, auth_challenge_expired, discovery_connection_limits, AdmissionController,
-        AUTH_CHALLENGE_TIMEOUT,
     },
     build_peer_hello_proof, verify_peer_hello, verify_peer_hello_proof, WireRequest, WireResponse, BOOTSTRAP_ENV,
 };
@@ -31,6 +30,28 @@ pub const DISCOVERY_WIRE_PROTOCOL: &str = "/swarmcraft/discovery/1";
 const PUBLIC_DIRECTORY_KEY: &[u8] = b"swarmcraft/discovery/public/v1";
 const WORLD_KEY_PREFIX: &[u8] = b"swarmcraft/discovery/world/v1\0";
 const FRIEND_KEY_PREFIX: &[u8] = b"swarmcraft/discovery/friend/v2\0";
+// A peer can settle its duplicate connections after our first challenge
+// arrives. Retry with a fresh nonce, inside the original ten-second
+// authentication deadline and below the unauthenticated request budget.
+const AUTH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+const MAX_AUTH_CHALLENGE_ATTEMPTS: u8 = 3;
+
+#[derive(Clone, Copy)]
+struct PendingDiscoveryChallenge {
+    connection: ConnectionId,
+    nonce: [u8; 32],
+    started: Instant,
+    last_sent: Instant,
+    attempts: u8,
+}
+
+impl PendingDiscoveryChallenge {
+    fn retry_due(&self, now: Instant) -> bool {
+        !auth_challenge_expired(self.started, now)
+            && self.attempts < MAX_AUTH_CHALLENGE_ATTEMPTS
+            && now.saturating_duration_since(self.last_sent) >= AUTH_RETRY_INTERVAL
+    }
+}
 
 // libp2p-swarm-derive 0.36.0 emits unreachable code for an uninhabited
 // connection_limits event on Rust 1.100. Only the generated behaviour lives
@@ -109,7 +130,7 @@ pub struct DiscoveryNode {
     local_hello: PeerHelloV1,
     application_signing_key: SigningKey,
     authenticated: HashMap<TransportPeerId, (PeerId, ConnectionId)>,
-    pending_challenges: HashMap<TransportPeerId, (ConnectionId, [u8; 32], Instant)>,
+    pending_challenges: HashMap<TransportPeerId, PendingDiscoveryChallenge>,
     active_connections: HashMap<TransportPeerId, ConnectionId>,
     established_connections: HashMap<TransportPeerId, HashSet<ConnectionId>>,
     connection_directions: HashMap<TransportPeerId, HashMap<ConnectionId, bool>>,
@@ -336,12 +357,12 @@ impl DiscoveryNode {
 
     pub async fn next_event(&mut self) -> Result<DiscoveryNetworkEvent> {
         loop {
-            self.expire_stale_auth_challenges();
-            let event = match tokio::time::timeout(AUTH_CHALLENGE_TIMEOUT, self.swarm.select_next_some()).await {
+            self.drive_auth_challenges();
+            let event = match tokio::time::timeout(AUTH_RETRY_INTERVAL, self.swarm.select_next_some()).await {
                 Ok(event) => event,
                 Err(_) => continue,
             };
-            self.expire_stale_auth_challenges();
+            self.drive_auth_challenges();
             match event {
                 SwarmEvent::NewListenAddr { address, .. } => return Ok(DiscoveryNetworkEvent::Listening { address }),
                 SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, num_established, .. } => {
@@ -410,7 +431,7 @@ impl DiscoveryNode {
                                 if self
                                     .pending_challenges
                                     .get(&peer_id)
-                                    .is_some_and(|(challenge_connection, _, _)| *challenge_connection == active)
+                                    .is_some_and(|challenge| challenge.connection == active)
                                 {
                                     self.pending_challenges.remove(&peer_id);
                                 }
@@ -473,7 +494,7 @@ impl DiscoveryNode {
                     if self
                         .pending_challenges
                         .get(&peer_id)
-                        .is_some_and(|(challenge_connection, _, _)| *challenge_connection == connection_id)
+                        .is_some_and(|challenge| challenge.connection == connection_id)
                     {
                         self.pending_challenges.remove(&peer_id);
                     }
@@ -632,9 +653,7 @@ impl DiscoveryNode {
                                         .send_request(&peer, WireRequest::HelloProof(Box::new(proof)));
                                 }
                                 WireRequest::HelloProof(proof) => {
-                                    let Some((challenge_connection, expected_challenge, _issued_at)) =
-                                        self.pending_challenges.remove(&peer)
-                                    else {
+                                    let Some(challenge) = self.pending_challenges.get(&peer).copied() else {
                                         let _ = self.respond(
                                             channel,
                                             WireResponse::Error {
@@ -644,7 +663,9 @@ impl DiscoveryNode {
                                         );
                                         continue;
                                     };
-                                    if challenge_connection != connection_id
+                                    if challenge.connection != connection_id
+                                        || proof.challenge != challenge.nonce
+                                        || auth_challenge_expired(challenge.started, Instant::now())
                                         || self
                                             .active_connections
                                             .get(&peer)
@@ -662,11 +683,12 @@ impl DiscoveryNode {
                                     }
                                     match verify_peer_hello_proof(
                                         &proof,
-                                        expected_challenge,
+                                        challenge.nonce,
                                         &peer,
                                         self.swarm.local_peer_id(),
                                     ) {
                                         Ok(()) => {
+                                            self.pending_challenges.remove(&peer);
                                             self.authenticated.insert(peer, (proof.hello.peer_id, connection_id));
                                             if let Err(error) = self.respond(
                                                 channel,
@@ -790,10 +812,7 @@ impl DiscoveryNode {
             .authenticated
             .get(&peer)
             .is_some_and(|(_, authenticated_connection)| *authenticated_connection == connection_id)
-            || self
-                .pending_challenges
-                .get(&peer)
-                .is_some_and(|(challenge_connection, _, _)| *challenge_connection == connection_id)
+            || self.pending_challenges.get(&peer).is_some_and(|challenge| challenge.connection == connection_id)
         {
             return Ok(());
         }
@@ -804,18 +823,28 @@ impl DiscoveryNode {
         let mut challenge = [0_u8; 32];
         OsRng.fill_bytes(&mut challenge);
         self.authenticated.remove(&peer);
-        self.pending_challenges.insert(peer, (connection_id, challenge, Instant::now()));
+        let now = Instant::now();
+        self.pending_challenges.insert(
+            peer,
+            PendingDiscoveryChallenge {
+                connection: connection_id,
+                nonce: challenge,
+                started: now,
+                last_sent: now,
+                attempts: 1,
+            },
+        );
         self.swarm.behaviour_mut().request_response.send_request(&peer, WireRequest::HelloChallenge { challenge });
         Ok(())
     }
 
-    fn expire_stale_auth_challenges(&mut self) {
+    fn drive_auth_challenges(&mut self) {
         let now = Instant::now();
         let stale = self
             .pending_challenges
             .iter()
-            .filter_map(|(peer, (connection_id, _, issued_at))| {
-                auth_challenge_expired(*issued_at, now).then_some((*peer, *connection_id))
+            .filter_map(|(peer, challenge)| {
+                auth_challenge_expired(challenge.started, now).then_some((*peer, challenge.connection))
             })
             .collect::<Vec<_>>();
         for (peer, connection_id) in stale {
@@ -826,6 +855,23 @@ impl DiscoveryNode {
             }
             let _ = self.swarm.close_connection(connection_id);
             warn!(transport_peer = %peer, %connection_id, "discovery authentication challenge expired; closing silent connection");
+        }
+        for (peer, challenge) in &mut self.pending_challenges {
+            if !challenge.retry_due(now)
+                || self.active_connections.get(peer) != Some(&challenge.connection)
+                || self.connection_counts.get(peer).copied() != Some(1)
+            {
+                continue;
+            }
+            // Replaced nonces and wrong-connection proofs never consume the
+            // current challenge. All retries stay inside its original deadline.
+            OsRng.fill_bytes(&mut challenge.nonce);
+            challenge.attempts += 1;
+            challenge.last_sent = now;
+            self.swarm
+                .behaviour_mut()
+                .request_response
+                .send_request(peer, WireRequest::HelloChallenge { challenge: challenge.nonce });
         }
     }
 }
@@ -903,6 +949,28 @@ mod tests {
             signature: vec![0; 64],
         };
         assert!(DiscoveryNode::new(Keypair::generate_ed25519(), hello, SigningKey::generate(&mut OsRng)).is_err());
+    }
+
+    #[test]
+    fn discovery_auth_retries_are_bounded_by_original_deadline() {
+        let started = Instant::now();
+        let mut challenge = PendingDiscoveryChallenge {
+            connection: ConnectionId::new_unchecked(7),
+            nonce: [1; 32],
+            started,
+            last_sent: started,
+            attempts: 1,
+        };
+        assert!(!challenge.retry_due(started));
+        assert!(challenge.retry_due(started + AUTH_RETRY_INTERVAL));
+        challenge.last_sent = started + AUTH_RETRY_INTERVAL;
+        challenge.attempts += 1;
+        assert!(!challenge.retry_due(challenge.last_sent));
+        assert!(challenge.retry_due(started + AUTH_RETRY_INTERVAL * 2));
+        challenge.attempts = MAX_AUTH_CHALLENGE_ATTEMPTS;
+        assert!(!challenge.retry_due(started + AUTH_RETRY_INTERVAL * 3));
+        challenge.attempts = 1;
+        assert!(!challenge.retry_due(started + crate::admission::AUTH_CHALLENGE_TIMEOUT));
     }
 
     #[tokio::test]
