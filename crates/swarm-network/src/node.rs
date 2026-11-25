@@ -163,7 +163,12 @@ impl SwarmNode {
             build_peer_hello_proof(&local_hello, &application_signing_key, [0; 32], &local_peer, &local_peer)?;
         verify_peer_hello_proof(&self_test, [0; 32], &local_peer, &local_peer)
             .context("application signing key must match the local PeerHello")?;
-        let request_response = cbor::Behaviour::new(
+        // CBOR represents Vec<u8> as up to two bytes per element. Keep the
+        // existing 1 MiB limit plus bounded envelope overhead for a maximum
+        // sized targeted signed historical proof offer.
+        let request_response = request_response::Behaviour::with_codec(
+            cbor::codec::Codec::<WireRequest, WireResponse>::default()
+                .set_request_size_maximum(2 * swarm_protocol::MAX_REPLAY_PROOF_BYTES as u64 + 1024),
             [(StreamProtocol::new(WIRE_PROTOCOL), ProtocolSupport::Full)],
             request_response::Config::default()
                 .with_request_timeout(Duration::from_secs(30))

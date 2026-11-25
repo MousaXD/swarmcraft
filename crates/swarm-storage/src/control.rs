@@ -440,6 +440,15 @@ impl Storage {
             if previous.anchor == *anchor && previous.proof == *proof {
                 return Ok(());
             }
+            // A moving checkpoint head alone is not a retargeting event.
+            // Freeze data replay until a certified membership change makes
+            // the old target obsolete; otherwise a busy host can starve it.
+            if previous.anchor == *anchor
+                && proof.membership.last().ok_or(StorageError::WorldMetadataMismatch)?.sequence
+                    <= previous.proof.membership.last().ok_or(StorageError::WorldMetadataMismatch)?.sequence
+            {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
         }
         let staged = StagedStaleReplayV1 { anchor: anchor.clone(), proof: proof.clone() };
         durable_atomic_write(&path, &postcard::to_allocvec(&staged)?)
@@ -475,6 +484,16 @@ impl Storage {
         if let Some((previous_anchor, previous)) = self.read_pinned_stale_replay(world)? {
             if !proof.extends_replay_history(&previous) || (retiring && previous_anchor != *anchor) {
                 return Err(StorageError::WorldMetadataMismatch);
+            }
+            if retiring {
+                if previous == *proof {
+                    return Ok(());
+                }
+                if proof.membership.last().ok_or(StorageError::WorldMetadataMismatch)?.sequence
+                    <= previous.membership.last().ok_or(StorageError::WorldMetadataMismatch)?.sequence
+                {
+                    return Err(StorageError::WorldMetadataMismatch);
+                }
             }
         }
         let staged = StagedStaleReplayV1 { anchor: anchor.clone(), proof: proof.clone() };

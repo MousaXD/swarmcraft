@@ -185,6 +185,13 @@ pub enum WireRequest {
         membership_hash: Hash32,
         manifest: Box<SnapshotManifestV1>,
     },
+    // Targeted to an already authorized current member. The receiver may
+    // not know the new authority yet: only a verified anchored envelope can
+    // authorize data-only replay, never this RPC or its acknowledgement.
+    HistoricalReplayOffer {
+        world_id: WorldId,
+        proof: Vec<u8>,
+    },
 }
 
 impl WireRequest {
@@ -209,7 +216,8 @@ impl WireRequest {
             | Self::HelloChallenge { .. }
             | Self::HelloProof(_)
             | Self::DiscoveryFreshnessContext { .. }
-            | Self::DiscoveryFreshnessVote(_) => None,
+            | Self::DiscoveryFreshnessVote(_)
+            | Self::HistoricalReplayOffer { .. } => None,
             Self::WorldStatus { world_id }
             | Self::WorldDescriptor { world_id }
             | Self::MissingBlobs { world_id, .. }
@@ -294,6 +302,14 @@ impl WireRequest {
             }
             Self::HistoricalReplayProof { world_id } if *world_id == WorldId::default() => {
                 Err(WireLimitError::InvalidHistoricalReplayWorld)
+            }
+            Self::HistoricalReplayOffer { world_id, .. } if *world_id == WorldId::default() => {
+                Err(WireLimitError::InvalidHistoricalReplayWorld)
+            }
+            Self::HistoricalReplayOffer { proof, .. }
+                if proof.is_empty() || proof.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES =>
+            {
+                Err(WireLimitError::HistoricalReplayProofTooLarge(proof.len()))
             }
             Self::HistoricalReplayNext { world_id, membership_hash, snapshot_number, manifest_hash }
                 if *world_id == WorldId::default()
@@ -508,6 +524,25 @@ mod tests {
         assert_eq!(request.membership_world_id(), Some(world));
         assert!(request.validate_limits().is_ok());
         assert!(WireRequest::HistoricalReplayProof { world_id: WorldId::default() }.validate_limits().is_err());
+        let offer = WireRequest::HistoricalReplayOffer { world_id: world, proof: vec![1] };
+        assert_eq!(offer.membership_world_id(), None);
+        assert!(offer.validate_limits().is_ok());
+        assert!(WireRequest::HistoricalReplayOffer { world_id: world, proof: vec![] }.validate_limits().is_err());
+        assert!(WireRequest::HistoricalReplayOffer {
+            world_id: world,
+            proof: vec![255; swarm_protocol::MAX_REPLAY_PROOF_BYTES]
+        }
+        .validate_limits()
+        .is_ok());
+        assert!(WireRequest::HistoricalReplayOffer {
+            world_id: world,
+            proof: vec![0; swarm_protocol::MAX_REPLAY_PROOF_BYTES + 1]
+        }
+        .validate_limits()
+        .is_err());
+        assert!(WireRequest::HistoricalReplayOffer { world_id: WorldId::default(), proof: vec![1] }
+            .validate_limits()
+            .is_err());
         assert!(WireResponse::HistoricalReplayProof(None).validate_limits().is_ok());
         assert!(WireResponse::HistoricalReplayProof(Some(vec![])).validate_limits().is_err());
         assert!(WireResponse::HistoricalReplayProof(Some(vec![0; swarm_protocol::MAX_REPLAY_PROOF_BYTES]))

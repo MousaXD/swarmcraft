@@ -153,16 +153,8 @@ fn verify_first_contact_replay(
     let world = admission.world_id;
     verify_membership_signature(admission)?;
     let target = proof.membership.last().context("first-contact replay lacks final membership")?.clone();
-    if proof.world_id != world
-        || proof.membership.get(usize::try_from(admission.sequence)?) != Some(admission)
-        || !admission.members.iter().any(|member| {
-            !member.banned
-                && member.authority_eligible
-                && member.peer_id == target.authority_peer_id
-                && member.public_key == target.authority_public_key
-        })
-    {
-        bail!("first-contact replay does not extend the signed admission through a known authority");
+    if proof.world_id != world || proof.membership.get(usize::try_from(admission.sequence)?) != Some(admission) {
+        bail!("first-contact replay does not extend the exact signed admission");
     }
     let verified = verify_replay_proof(proof, &storage.load_world(world)?.genesis, &target)?;
     for certificate in storage.load_membership_certificate_chain(world)? {
@@ -297,11 +289,6 @@ pub fn verify_and_stage_stale_replay(
         || !anchor.membership.members.iter().any(|member| {
             !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key()
         })
-        || !anchor
-            .membership
-            .members
-            .iter()
-            .any(|member| !member.banned && member.authority_eligible && member.peer_id == source)
         || !anchor.is_extended_by(&proof)
     {
         bail!("stale replay is not an exact successor of an accepted replica");
@@ -314,6 +301,11 @@ pub fn verify_and_stage_stale_replay(
     {
         bail!("stale replay source or recipient is not bound to final signed membership");
     }
+    // A newly admitted authority need not be present in the old anchor.
+    // The full verifier authenticates every intervening joint membership
+    // change, eligible successor and transfer/recovery certificate before
+    // its envelope may be pinned. An arbitrary authenticated peer cannot
+    // substitute a roster or a signed alternate history.
     let verified = verify_replay_proof(proof, &storage.load_world(world)?.genesis, &target)?;
     let crash_retirement = anchor.epoch.authority_peer_id == local.peer_id()
         && matches!(replay_retirement(anchor, verified.proof())?, HistoricalTransitionV1::Recovery(_));
@@ -385,16 +377,11 @@ pub fn publish_stale_replay(
         || !anchor.membership.members.iter().any(|member| {
             !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key()
         })
-        || !anchor
-            .membership
-            .members
-            .iter()
-            .any(|member| !member.banned && member.authority_eligible && member.peer_id == target.authority_peer_id)
         || !target.members.iter().any(|member| {
             !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key()
         })
     {
-        bail!("stale publication does not bind an accepted replica to a known successor");
+        bail!("stale publication does not bind an accepted replica to a certified successor");
     }
     let verified = verify_replay_proof(proof.clone(), &storage.load_world(world)?.genesis, target)?;
     for manifest in &candidate.manifests {
@@ -1300,17 +1287,69 @@ mod tests {
         assert_eq!(reopened.stale_replay_progress(world).unwrap().unwrap().completed, 1);
         assert!(reopened.load_epoch_record(world).is_err());
 
-        // Bob transfers to Carol while the crashed source is still fenced.
-        // Only a full extension of the pinned recovery history can retarget.
+        // A busy authority must not move an already pinned target merely
+        // by saving another checkpoint. A certified roster extension can
+        // advance that target, including to a previously unknown peer.
+        let previous = winner.latest_snapshot(world).unwrap().unwrap();
+        let mut extra = SnapshotManifestV1 {
+            snapshot_number: previous.snapshot_number + 1,
+            sequence: previous.sequence + 1,
+            previous_snapshot_hash: Some(previous.manifest_hash().unwrap()),
+            ..previous
+        };
+        bob.sign_snapshot(&mut extra).unwrap();
+        winner.commit_snapshot(&extra).unwrap();
+        let moving = collect_replay_proof(&winner, &bob, world).unwrap();
+        assert!(moving.extends_replay_history(&proof));
+        assert!(verify_and_stage_stale_replay(&reopened, &alice, bob.peer_id(), &anchor, moving).is_err());
+        assert_eq!(reopened.load_staged_stale_replay_proof(world).unwrap(), Some((anchor.clone(), proof.clone())));
+
+        let dora = PeerIdentity::from_secret_bytes([24; 32]);
+        assert!(!anchor.membership.members.iter().any(|member| member.peer_id == dora.peer_id()));
+        let mut members = membership2.members.clone();
+        members.push(member(&dora));
+        let admitted = signed_membership(&next, &bob, members, Some(&membership2));
+        let proposal = MembershipProposalV1 { previous: membership2.clone(), proposed: admitted.clone() };
+        let votes = [&bob, &carol, &dora]
+            .iter()
+            .map(|voter| {
+                let mut vote = MembershipVoteV1 {
+                    protocol_version: PROTOCOL_VERSION,
+                    world_id: world,
+                    previous_membership_hash: proposal.previous.record_hash().unwrap(),
+                    proposed_membership_hash: proposal.proposed.record_hash().unwrap(),
+                    proposed_sequence: proposal.proposed.sequence,
+                    voter_peer_id: voter.peer_id(),
+                    voter_public_key: voter.public_key(),
+                    signature: Vec::new(),
+                };
+                vote.signature = voter.sign(&vote.signing_bytes().unwrap());
+                vote
+            })
+            .collect();
+        winner.save_membership_certificate(&MembershipCertificateV1 { proposal, votes }).unwrap();
+        winner.save_membership_record(&admitted).unwrap();
+        winner
+            .save_world_descriptor(&swarm_protocol::WorldDescriptorV1 {
+                protocol_version: PROTOCOL_VERSION,
+                world_id: world,
+                compatibility_fingerprint: genesis.compatibility_fingerprint,
+                members: admitted.members.clone(),
+                preferred_replication_factor: 3,
+            })
+            .unwrap();
+
+        // Bob transfers to Dora, admitted while the crashed source is
+        // fenced. A full certified extension must authorize the new peer.
         let second_base = winner.latest_snapshot(world).unwrap().unwrap();
-        let third = successor(&next, &carol);
+        let third = successor(&next, &dora);
         let mut third = EpochRecordV1 { mode: EpochMode::Quorum, base_state_hash: second_base.state_root, ..third };
-        third.signature = carol.sign(&third.signing_bytes().unwrap());
+        third.signature = dora.sign(&third.signing_bytes().unwrap());
         let mut transfer = AuthorityTransferV1 {
             protocol_version: PROTOCOL_VERSION,
             world_id: world,
             from_peer_id: bob.peer_id(),
-            to_peer_id: carol.peer_id(),
+            to_peer_id: dora.peer_id(),
             base_snapshot_hash: second_base.manifest_hash().unwrap(),
             next_epoch: third.epoch_number,
             next_fencing_token: third.fencing_token,
@@ -1320,7 +1359,7 @@ mod tests {
             signature: Vec::new(),
         };
         for (kind, signer) in
-            [(TransferPhase::Prepared, &bob), (TransferPhase::Accepted, &carol), (TransferPhase::Committed, &bob)]
+            [(TransferPhase::Prepared, &bob), (TransferPhase::Accepted, &dora), (TransferPhase::Committed, &bob)]
         {
             transfer.phase = kind;
             transfer.signer_peer_id = signer.peer_id();
@@ -1328,10 +1367,16 @@ mod tests {
             transfer.signature = signer.sign(&transfer.signing_bytes().unwrap());
             winner.save_transfer_record(&transfer).unwrap();
         }
-        let (membership3, _) = promote(&winner, &third, &carol, &membership2, &config2);
-        let extended = collect_replay_proof(&winner, &carol, world).unwrap();
+        let (membership3, _) = promote(&winner, &third, &dora, &admitted, &config2);
+        let extended = collect_replay_proof(&winner, &dora, world).unwrap();
         assert!(extended.extends_replay_history(&proof));
-        verify_and_stage_stale_replay(&reopened, &alice, carol.peer_id(), &anchor, extended.clone()).unwrap();
+        let mut uncertified = extended.clone();
+        uncertified.membership_certificates.retain(|certificate| certificate.proposal.proposed != admitted);
+        uncertified.signature = dora.sign(&uncertified.signing_bytes().unwrap());
+        assert!(verify_and_stage_stale_replay(&reopened, &alice, dora.peer_id(), &anchor, uncertified).is_err());
+        assert!(verify_and_stage_stale_replay(&reopened, &alice, carol.peer_id(), &anchor, extended.clone()).is_err());
+        assert_eq!(reopened.load_staged_stale_replay_proof(world).unwrap(), Some((anchor.clone(), proof.clone())));
+        verify_and_stage_stale_replay(&reopened, &alice, dora.peer_id(), &anchor, extended.clone()).unwrap();
         assert!(verify_and_stage_stale_replay(&reopened, &alice, bob.peer_id(), &anchor, proof).is_err());
         assert_eq!(reopened.load_staged_stale_replay_proof(world).unwrap(), Some((anchor.clone(), extended.clone())));
 
@@ -1343,7 +1388,7 @@ mod tests {
                 .open_stale_replay_download(bob.peer_id(), membership3.record_hash().unwrap(), manifest)
                 .is_err());
             let download = reopened
-                .open_stale_replay_download(carol.peer_id(), membership3.record_hash().unwrap(), manifest)
+                .open_stale_replay_download(dora.peer_id(), membership3.record_hash().unwrap(), manifest)
                 .unwrap();
             for (hash, offset) in download.missing_blobs().unwrap() {
                 let blob = &manifest.entries.iter().find(|entry| entry.blob.hash == hash).unwrap().blob;
@@ -1415,7 +1460,7 @@ mod tests {
         let mut final_reservation = reservation.clone();
         final_reservation.epoch = third.epoch_number;
         final_reservation.fencing_token = third.fencing_token;
-        carol.sign_lease(&mut final_reservation).unwrap();
+        dora.sign_lease(&mut final_reservation).unwrap();
         std::fs::write(&reservation_path, postcard::to_allocvec(&final_reservation).unwrap()).unwrap();
         assert!(reopened.stale_publication_candidate(world).is_err());
         let mut forged_reservation = reservation.clone();

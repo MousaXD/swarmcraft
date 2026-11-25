@@ -558,6 +558,7 @@ fn late_join_after_signed_wake_retargets_during_download_and_publishes_only_fina
     let a = peer_fixture();
     let b = peer_fixture();
     let c = peer_fixture();
+    let d = peer_fixture();
     let local_ip = local_non_loopback_ipv4();
     let output = run_cli(
         &a,
@@ -676,7 +677,22 @@ fn late_join_after_signed_wake_retargets_during_download_and_publishes_only_fina
         c.storage.load_membership_record(world).ok().as_ref() == Some(&membership)
             && c.storage.load_world_descriptor(world).is_ok_and(|descriptor| descriptor.members == membership.members)
     });
-    drop((daemon_a, daemon_c));
+    // B is offline, so it cannot know the next host candidate. A and C
+    // must jointly admit D and D must catch up before the transfer.
+    let daemon_d = spawn_daemon(&d, local_ip);
+    thread::sleep(Duration::from_secs(1));
+    assert!(run_cli(&d, &["world", "join", &token, "--host-candidate"]).contains("Join request staged"));
+    wait_until("new candidate admitted while late player offline", Duration::from_secs(90), || {
+        let Ok(admitted) = a.storage.load_membership_record(world) else { return false };
+        admitted.members.iter().any(|member| member.peer_id == d.identity.peer_id() && member.authority_eligible)
+            && c.storage.load_membership_record(world).ok().as_ref() == Some(&admitted)
+            && d.storage.load_membership_record(world).ok().as_ref() == Some(&admitted)
+            && d.storage.load_epoch_record(world).ok().as_ref() == Some(&next)
+            && d.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&target)
+    });
+    assert!(!membership.members.iter().any(|member| member.peer_id == d.identity.peer_id()));
+    assert_eq!(b.storage.load_membership_record(world).unwrap(), membership);
+    drop((daemon_a, daemon_c, daemon_d));
     let reopened = Storage::open(b.paths.root.clone()).unwrap();
     assert_eq!(reopened.load_staged_historical_replay_proof(world, membership_hash).unwrap(), Some(bytes.clone()));
     assert_eq!(reopened.load_completed_join(world).unwrap(), completed);
@@ -712,25 +728,25 @@ fn late_join_after_signed_wake_retargets_during_download_and_publishes_only_fina
     assert_eq!(reopened.partial_blob_offset(world, small).unwrap(), small.encoded_size);
     assert!(reopened.load_epoch_record(world).is_err());
     // The inviter disappears while this player still has only a data
-    // prefix. A certified transfer to an already known eligible member
+    // prefix. A certified transfer to an newly admitted eligible member
     // must retarget the pinned replay without accepting the intermediate epoch.
     let mut successor = swarm_protocol::EpochRecordV1 {
         epoch_number: next.epoch_number + 1,
         fencing_token: next.fencing_token + 1,
         previous_epoch_hash: Some(next.record_hash().unwrap()),
         base_state_hash: target.state_root,
-        authority_peer_id: c.identity.peer_id(),
-        authority_public_key: c.identity.public_key(),
+        authority_peer_id: d.identity.peer_id(),
+        authority_public_key: d.identity.public_key(),
         reason: "signed transfer while late join is offline".into(),
         signature: Vec::new(),
         ..next.clone()
     };
-    successor.signature = c.identity.sign(&successor.signing_bytes().unwrap());
+    successor.signature = d.identity.sign(&successor.signing_bytes().unwrap());
     let mut transfer = swarm_protocol::AuthorityTransferV1 {
         protocol_version: swarm_protocol::PROTOCOL_VERSION,
         world_id: world,
         from_peer_id: a.identity.peer_id(),
-        to_peer_id: c.identity.peer_id(),
+        to_peer_id: d.identity.peer_id(),
         base_snapshot_hash: target.manifest_hash().unwrap(),
         next_epoch: successor.epoch_number,
         next_fencing_token: successor.fencing_token,
@@ -741,22 +757,22 @@ fn late_join_after_signed_wake_retargets_during_download_and_publishes_only_fina
     };
     for (phase, signer) in [
         (swarm_protocol::TransferPhase::Prepared, &a.identity),
-        (swarm_protocol::TransferPhase::Accepted, &c.identity),
+        (swarm_protocol::TransferPhase::Accepted, &d.identity),
         (swarm_protocol::TransferPhase::Committed, &a.identity),
     ] {
         transfer.phase = phase;
         transfer.signer_peer_id = signer.peer_id();
         transfer.signer_public_key = signer.public_key();
         transfer.signature = signer.sign(&transfer.signing_bytes().unwrap());
-        c.storage.save_transfer_record(&transfer).unwrap();
+        d.storage.save_transfer_record(&transfer).unwrap();
     }
-    c.storage.save_epoch_record(&successor).unwrap();
-    swarm_cli::migration::ensure_authority_artifacts(&c.storage, &c.identity, &successor).unwrap();
-    let extended = swarm_cli::historical_authority::collect_replay_proof(&c.storage, &c.identity, world).unwrap();
+    d.storage.save_epoch_record(&successor).unwrap();
+    swarm_cli::migration::ensure_authority_artifacts(&d.storage, &d.identity, &successor).unwrap();
+    let extended = swarm_cli::historical_authority::collect_replay_proof(&d.storage, &d.identity, world).unwrap();
     assert!(extended.extends_replay_history(verified.proof()));
-    let final_target = c.storage.latest_snapshot(world).unwrap().unwrap();
-    let _daemon_c = spawn_daemon(&c, local_ip);
-    let _daemon_b = spawn_daemon_with_peers(&b, local_ip, &[automatic_transport_address(&c, local_ip)]);
+    let final_target = d.storage.latest_snapshot(world).unwrap().unwrap();
+    let _daemon_d = spawn_daemon(&d, local_ip);
+    let _daemon_b = spawn_daemon_with_peers(&b, local_ip, &[automatic_transport_address(&d, local_ip)]);
     wait_until("new authority extends the durable pinned first-contact proof", Duration::from_secs(60), || {
         assert!(b.storage.load_epoch_record(world).is_err(), "intermediate epoch must not be installed");
         b.storage
@@ -772,10 +788,10 @@ fn late_join_after_signed_wake_retargets_during_download_and_publishes_only_fina
         }
         b.storage.load_epoch_record(world).ok().as_ref() == Some(&successor)
             && b.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&final_target)
-            && b.storage.load_world_config(world).ok() == c.storage.load_world_config(world).ok()
+            && b.storage.load_world_config(world).ok() == d.storage.load_world_config(world).ok()
     });
     let history = b.storage.list_snapshots(world).unwrap();
-    assert_eq!(history, c.storage.list_snapshots(world).unwrap());
+    assert_eq!(history, d.storage.list_snapshots(world).unwrap());
     assert_eq!(b.storage.load_membership_record(world).unwrap(), *extended.membership.last().unwrap());
     let verified = swarm_cli::historical_authority::verify_replay_proof(
         extended.clone(),
