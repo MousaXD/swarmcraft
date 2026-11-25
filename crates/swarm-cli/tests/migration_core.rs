@@ -27,6 +27,11 @@ use tokio::{
     time::{sleep, timeout},
 };
 
+// These fixtures represent distinct data roots in the same Linux account.
+// Real host admission deliberately serializes their JVMs; don't let parallel
+// unit-test scheduling contend with unrelated lifecycle assertions.
+static HOST_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct PeerFixture {
     paths: DataPaths,
     storage: Storage,
@@ -370,6 +375,7 @@ async fn wait_until_sleeping(peer: &PeerFixture, world: WorldId) {
 
 #[tokio::test]
 async fn safe_stop_waits_for_fabric_barrier_then_commits_latest_state_and_sleep_record() {
+    let _host_slot = HOST_TEST_LOCK.lock().await;
     if !hosting_capacity_for_process_test() {
         return;
     }
@@ -416,11 +422,14 @@ async fn safe_stop_waits_for_fabric_barrier_then_commits_latest_state_and_sleep_
     assert_eq!(fs::read_to_string(restored.join("level.dat")).unwrap(), "canonical-before-safe-stop\n");
 
     supervisor.abort();
+    let _ = supervisor.await;
     heartbeat.abort();
+    let _ = heartbeat.await;
 }
 
 #[tokio::test]
 async fn withdrawing_active_host_consent_uses_fabric_barrier_and_durable_sleep() {
+    let _host_slot = HOST_TEST_LOCK.lock().await;
     if !hosting_capacity_for_process_test() {
         return;
     }
@@ -459,11 +468,14 @@ async fn withdrawing_active_host_consent_uses_fabric_barrier_and_durable_sleep()
     assert!(swarm_cli::hosting_budget::require_contribution(&alice.paths, shared.world).is_err());
 
     supervisor.abort();
+    let _ = supervisor.await;
     heartbeat.abort();
+    let _ = heartbeat.await;
 }
 
 #[tokio::test]
 async fn invalid_transfer_target_does_not_kill_authority_and_withdrawal_still_checkpoints() {
+    let _host_slot = HOST_TEST_LOCK.lock().await;
     if !hosting_capacity_for_process_test() {
         return;
     }
@@ -537,7 +549,9 @@ async fn invalid_transfer_target_does_not_kill_authority_and_withdrawal_still_ch
     alice.storage.restore_snapshot(&latest, &restored).unwrap();
     assert_eq!(fs::read_to_string(restored.join("safe-stop-latest.txt")).unwrap(), "saved-at-shutdown\n");
     supervisor.abort();
+    let _ = supervisor.await;
     heartbeat.abort();
+    let _ = heartbeat.await;
 }
 
 #[test]
@@ -572,6 +586,7 @@ fn player_only_target_rejects_transfer_before_publishing_any_signed_transfer_sta
 
 #[tokio::test]
 async fn manual_transfer_uses_shared_runner_and_fences_alice() {
+    let _host_slot = HOST_TEST_LOCK.lock().await;
     if !hosting_capacity_for_process_test() {
         return;
     }
@@ -627,11 +642,14 @@ async fn manual_transfer_uses_shared_runner_and_fences_alice() {
     bob.storage.verify_snapshot(&final_snapshot).unwrap();
 
     supervisor.abort();
+    let _ = supervisor.await;
     heartbeat.abort();
+    let _ = heartbeat.await;
 }
 
 #[tokio::test]
 async fn recovered_bob_waits_for_exact_permit_then_restores_and_reaches_fabric_ready() {
+    let _host_slot = HOST_TEST_LOCK.lock().await;
     if !hosting_capacity_for_process_test() {
         return;
     }
@@ -683,7 +701,9 @@ async fn recovered_bob_waits_for_exact_permit_then_restores_and_reaches_fabric_r
     );
 
     supervisor.abort();
+    let _ = supervisor.await;
     heartbeat.abort();
+    let _ = heartbeat.await;
 }
 
 fn epoch_hash(record: &EpochRecordV1) -> swarm_protocol::Hash32 {
@@ -875,6 +895,7 @@ fn sequential_manual_transfers_ignore_terminal_metadata() {
 
 #[tokio::test]
 async fn former_transfer_source_can_launch_when_a_later_generation_returns_to_it() {
+    let _host_slot = HOST_TEST_LOCK.lock().await;
     if !hosting_capacity_for_process_test() {
         return;
     }
@@ -929,7 +950,9 @@ async fn former_transfer_source_can_launch_when_a_later_generation_returns_to_it
     assert_eq!(final_snapshot.authority_peer_id, alice.identity.peer_id());
 
     supervisor.abort();
+    let _ = supervisor.await;
     heartbeat.abort();
+    let _ = heartbeat.await;
 }
 
 #[test]

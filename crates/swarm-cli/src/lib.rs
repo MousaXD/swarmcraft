@@ -8,6 +8,7 @@ pub mod launch_guard;
 pub mod live_authority;
 pub mod live_fabric_readiness;
 pub mod live_runtime_registry;
+mod machine_hosting;
 pub mod migration;
 pub mod package_provider;
 pub mod provider_runtime;

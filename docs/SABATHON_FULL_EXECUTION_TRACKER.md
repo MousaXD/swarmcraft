@@ -196,31 +196,31 @@ Implementation completion: count only items whose full implementation criteria a
 - Work: Prove per-world player-only default, opt-in persistence, and withdrawal through CLI, native IPC, and live hosting; make `authority.permit` updates atomic (temp + rename or loopback IPC)
 - Acceptance: Zero-budget peer can join and replicate with no JVM. Consent stays scoped to one world and persists across restart. Every launch path rejects missing or withdrawn consent, and concurrent permit reads on Windows/POSIX never see a truncated permit file
 - State: **LOCALLY VERIFIED**
-- Source: crates/swarm-cli/src/hosting_budget.rs; authority_permit.rs
-- Evidence: Live integration status; scoped automated evidence, exact-SHA CI pending.
-- Remaining / next action: Verify live withdrawal and exact-SHA CI
-- External dependency: Not yet established; assess during execution.
-- Commit: 2d45f97 baseline; see live status for individual commits
+- Source: crates/swarm-cli/src/{hosting_budget,authority_permit,migration}.rs; tests/hosting_consent_cli.rs; native contribution commands
+- Evidence: Four real CLI consent tests pass (player-only default, persistence, invalid changes, restart of replica-only daemon without Java); live mock Fabric withdrawal, safe-stop and transfer gates pass. Existing atomic permit reader/writer and durable heartbeat-floor protections retained.
+- Remaining / next action: Exact-SHA Windows/POSIX CI and installed Minecraft consent journey.
+- External dependency: Installed clients and actual host runtime.
+- Commit: See hosting process ownership checkpoint in git history.
 
 ### #20 — Sabathon P0 · Partial
 - Work: Clarify withdrawal lifecycle and handle a hung JVM without silently losing the current save
 - Acceptance: UI shows **Stopping at checkpoint** until proof of checkpoint/fence/exit, or a truthful error with recovery choices. Stale readiness and active gateway routes are cleared immediately
 - State: **LOCALLY VERIFIED**
-- Source: crates/swarm-cli/src/migration.rs
-- Evidence: Live integration status; scoped automated evidence, exact-SHA CI pending.
-- Remaining / next action: Verify hung JVM shutdown and real withdrawal journey
-- External dependency: Not yet established; assess during execution.
-- Commit: 2d45f97 baseline; see live status for individual commits
+- Source: crates/swarm-cli/src/migration.rs; tests/migration_core.rs; Desktop hosting contribution panel
+- Evidence: Mock Fabric migration suite 10/10 and host-process test pass, including active withdrawal with verified saved marker, signed durable sleep, and invalid transfer intent preserving runtime. Existing failure-state/route-retirement checks retained.
+- Remaining / next action: Add explicit hung-barrier process regression and improve truthful pending-stop UI; actual JVM field withdrawal remains.
+- External dependency: Installed Minecraft/Fabric client and real-world recovery choices.
+- Commit: See hosting process ownership checkpoint in git history.
 
 ### #21 — P1 · Partial
 - Work: Improve process identity and coordinate a safe resource budget across data roots where supported
 - Acceptance: Local concurrency/orphan tests cover process identity, restart, and no second host when capacity or ownership is ambiguous
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: crates/swarm-cli/src/{machine_hosting,runtime_process_guard,hosting_budget,migration}.rs; [process ownership](HOSTING_PROCESS_OWNERSHIP.md)
+- Evidence: 11 ownership regressions pass: account-wide lock independent of data root, separate controller hard kill with real surviving process fixture, second-root denial, PID birth/boot/namespace checks, pending/corrupt/symlink denial and verified exit cleanup. Durable atomic Linux process identity; Windows process-handle liveness probe. Host-process, 10 migration, four consent CLI and strict Clippy gates passed.
+- Remaining / next action: Exact-SHA CI; Windows/macOS retain conservative per-data-root coordination and PID-based records. Cross-account and isolated-container coordination not claimed.
+- External dependency: Representative OS installations and local persistent Linux account home.
+- Commit: See hosting process ownership checkpoint in git history.
 
 ### #22 — P1 · Missing
 - Work: Add whole-process limits only on platforms that can enforce them. Evaluate delegated Linux cgroups, Windows Job Objects, and macOS capability separately

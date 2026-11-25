@@ -11,7 +11,7 @@ use std::{
 };
 use swarm_core::{create_private_dir_all, DataPaths, PeerIdentity};
 
-use crate::{host_readiness, runtime_process_guard};
+use crate::{host_readiness, machine_hosting::MachineHostingReservation, runtime_process_guard};
 use swarm_protocol::{PeerId, WorldId};
 
 const SCHEMA_VERSION: u16 = 1;
@@ -68,6 +68,7 @@ pub struct ContributionReadiness {
 /// launches from racing a single available-memory reading.
 pub struct HostingAdmission {
     _exclusive_memory_lock: File,
+    machine_reservation: Option<MachineHostingReservation>,
     consent: HostingConsentV1,
 }
 
@@ -113,6 +114,14 @@ impl HostingAdmission {
 
     pub fn consent(&self) -> &HostingConsentV1 {
         &self.consent
+    }
+
+    pub(crate) fn begin_runtime_process(
+        &self,
+        paths: &DataPaths,
+        world: WorldId,
+    ) -> Result<runtime_process_guard::RuntimeProcessGuard<'_>> {
+        runtime_process_guard::RuntimeProcessGuard::begin_coordinated(paths, world, self.machine_reservation.as_ref())
     }
 }
 
@@ -306,8 +315,9 @@ pub fn admit(paths: &DataPaths, world: WorldId) -> Result<HostingAdmission> {
     // but Java can survive as an orphan with an unconsumed heap reservation.
     // Protect *all worlds* in this data root, not just the new world's slot.
     runtime_process_guard::refuse_unaccounted_runtimes(paths)?;
+    let machine_reservation = MachineHostingReservation::acquire()?;
     let consent = require_contribution(paths, world)?;
-    Ok(HostingAdmission { _exclusive_memory_lock: lock, consent })
+    Ok(HostingAdmission { _exclusive_memory_lock: lock, machine_reservation, consent })
 }
 
 /// Recheck persisted consent and free headroom immediately before spawn,
@@ -897,7 +907,8 @@ mod tests {
         let first = persist_contribution(&paths, world, 512).unwrap();
         let lock = open_lock(&control_path(&paths).join("hosting-active-memory.lock")).unwrap();
         lock.try_lock_exclusive().unwrap();
-        let admission = HostingAdmission { _exclusive_memory_lock: lock, consent: first.clone() };
+        let admission =
+            HostingAdmission { _exclusive_memory_lock: lock, machine_reservation: None, consent: first.clone() };
         assert_eq!(first, *admission.consent());
         set_contribution(&paths, world, 0).unwrap();
         assert!(with_consent_guarded_spawn(&paths, world, &admission, || Ok(())).is_err());
@@ -915,7 +926,8 @@ mod tests {
         let first = persist_contribution(&paths, world, 512).unwrap();
         let lock = open_lock(&control_path(&paths).join("hosting-active-memory.lock")).unwrap();
         lock.try_lock_exclusive().unwrap();
-        let admission = HostingAdmission { _exclusive_memory_lock: lock, consent: first.clone() };
+        let admission =
+            HostingAdmission { _exclusive_memory_lock: lock, machine_reservation: None, consent: first.clone() };
 
         let revoked = set_contribution(&paths, world, 0).unwrap();
         let reauthorized = persist_contribution(&paths, world, 512).unwrap();

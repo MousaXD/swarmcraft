@@ -186,7 +186,7 @@ fn reject_unsafe_entry(path: &Path, expect_directory: bool) -> io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn replace_permit_atomically(temporary: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn replace_permit_atomically(temporary: &Path, destination: &Path) -> io::Result<()> {
     fs::rename(temporary, destination)
 }
 
@@ -194,7 +194,7 @@ fn replace_permit_atomically(temporary: &Path, destination: &Path) -> io::Result
 /// unavailable under concurrent readers. Prefer `ReplaceFileW` when the file
 /// already exists; retries are bounded and never delete an old permit.
 #[cfg(windows)]
-fn replace_permit_atomically(temporary: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn replace_permit_atomically(temporary: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;

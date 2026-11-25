@@ -3,7 +3,6 @@ use crate::{
     host_readiness, hosting_budget, launch_guard,
     live_fabric_readiness::{challenge_authenticated_session, ExpectedFabricRuntime},
     live_runtime_registry::{LiveFabricRuntimeRegistry, LiveRuntimeIdentity, RuntimeChallengeCommand},
-    runtime_process_guard::RuntimeProcessGuard,
     server_mods,
 };
 #[path = "managed_server_properties.rs"]
@@ -956,7 +955,7 @@ async fn run_authority_runtime_inner(
     // verification, including when an orphaned Java PID blocks the reset.
     // A prior launch can never certify a newly restoring Minecraft process.
     host_readiness::invalidate_runtime_verification(paths, options.world)?;
-    let mut runtime_process = RuntimeProcessGuard::begin(paths, options.world)?;
+    let mut runtime_process = admission.begin_runtime_process(paths, options.world)?;
     reset_runtime_directory(&runtime)?;
     fs::create_dir_all(runtime.join("mods"))?;
     fs::copy(&options.mod_jar, runtime.join("mods/swarmcraft-fabric.jar"))

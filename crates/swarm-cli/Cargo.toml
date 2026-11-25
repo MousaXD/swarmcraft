@@ -48,6 +48,9 @@ swarm-network = { path = "../swarm-network" }
 swarm-protocol = { path = "../swarm-protocol" }
 swarm-storage = { path = "../swarm-storage" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 futures.workspace = true
 libp2p.workspace = true

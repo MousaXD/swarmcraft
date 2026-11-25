@@ -3386,6 +3386,7 @@ dependencies = [
  "fs2",
  "futures",
  "hex",
+ "libc",
  "libp2p",
  "postcard",
  "reqwest",
