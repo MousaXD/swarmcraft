@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { createBackendAdapter } from '../src/backend-adapter.js';
 import { createImportRequest, parseImportResult } from '../src/import-flow.js';
+import { createImportReview, normalizeImportPreview } from '../src/import-review.js';
 
 const srcRoot = new URL('../src/', import.meta.url);
 
@@ -12,7 +13,7 @@ async function text(name) {
 
 test('Import existing world is a visible normal launcher entry point', async () => {
   const html = await text('index.html');
-  for (const id of ['openImport', 'quickImport', 'importPanel', 'importForm', 'importSource', 'importWorld']) {
+  for (const id of ['openImport', 'quickImport', 'importPanel', 'importForm', 'importSource', 'pickImportFolder', 'checkImport', 'importReview', 'importWorld']) {
     assert.match(html, new RegExp(`id=["']${id}["']`), `missing #${id}`);
   }
   assert.match(html, />Import existing world</);
@@ -82,10 +83,59 @@ test('backend import bridge forwards the explicit import contract without EULA s
     serverMods: ['/mods/lithium.jar'],
     noServerMods: false,
   });
-  const result = await backend.importWorld(request);
+  await backend.pickImportFolder();
+  await backend.previewImport(request);
+  const fingerprint = 'a'.repeat(64);
+  const result = await backend.importWorld({ ...request, expectedCompatibility: fingerprint });
   assert.equal(parseImportResult(result).worldId, 'scworld:imported');
-  assert.deepEqual(calls, [{ command: 'import_world', payload: request }]);
-  assert.equal(Object.hasOwn(calls[0].payload, 'acceptEula'), false);
+  assert.equal(calls[0].command, 'pick_import_folder');
+  assert.deepEqual(calls.slice(1), [
+    { command: 'preview_import_world', payload: request },
+    { command: 'import_world', payload: { ...request, expectedCompatibility: fingerprint } },
+  ]);
+  assert.equal(Object.hasOwn(calls[2].payload, 'acceptEula'), false);
+});
+
+const previewRequest = createImportRequest({
+  source: '/saves/world', name: 'Reviewed world', minecraft: '26.1.2',
+  fabricLoader: '0.19.3', visibility: 'private', noServerMods: true,
+});
+const readyPreview = {
+  state: 'ready', minecraft_version: '26.1.2', fabric_loader_version: '0.19.3',
+  minimum_java_major: 25, source_files: 12, source_bytes: 2097152,
+  required_server_mods: [], compatibility_fingerprint: 'a'.repeat(64),
+};
+
+test('native preview shows advisory source and runtime requirements without claiming eligibility', () => {
+  const report = normalizeImportPreview(JSON.stringify(readyPreview), previewRequest);
+  assert.equal(report.state, 'ready');
+  assert.match(report.message, /Java 25/);
+  assert.match(report.message, /2 MiB/);
+  assert.match(report.message, /not inferred/);
+  assert.match(report.message, /does not install Java, accept the server EULA, enable hosting/);
+  assert.ok(!report.message.includes(previewRequest.source));
+  for (const changes of [
+    { compatibility_fingerprint: 'invalid' }, { minecraft_version: '26.2' },
+    { source_files: 0 }, { source_bytes: -1 }, { required_server_mods: [{ artifact_id: 'unexpected', version: '1' }] },
+  ]) {
+    assert.throws(() => normalizeImportPreview({ ...readyPreview, ...changes }, previewRequest), /Invalid native/);
+  }
+  assert.match(normalizeImportPreview({ state: 'blocked', blocker: 'source_not_quiescent' }, previewRequest).message, /Close Minecraft/);
+});
+
+test('import review is single-use and stale asynchronous replies cannot authorize commit', () => {
+  const review = createImportReview();
+  assert.throws(() => review.take(previewRequest), /Check this import/);
+  const first = review.begin(previewRequest);
+  review.invalidate();
+  assert.equal(review.finish(first, readyPreview, previewRequest), null);
+  const second = review.begin(previewRequest);
+  assert.equal(review.finish(second, readyPreview, { ...previewRequest, visibility: 'public' }), null);
+  const third = review.begin(previewRequest);
+  assert.equal(review.finish(third, readyPreview, previewRequest).state, 'ready');
+  assert.throws(() => review.take({ ...previewRequest, source: '/different' }), /Check this import/);
+  assert.equal(review.take(previewRequest), 'a'.repeat(64));
+  assert.throws(() => review.take(previewRequest), /Check this import/);
 });
 
 test('successful import refreshes Worlds and selects the returned world', async () => {
@@ -100,7 +150,7 @@ test('backend import failure is shown and cannot fall through to success refresh
   const app = await text('app.js');
   assert.match(
     app,
-    /Could not import world:[\s\S]*?return;[\s\S]*?parseImportResult\(result\)[\s\S]*?await refreshWorlds\(\)/,
+    /Could not import world\.[\s\S]*?return;[\s\S]*?parseImportResult\(result\)[\s\S]*?await refreshWorlds\(\)/,
   );
 });
 

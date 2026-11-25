@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { onMount, tick } from 'svelte';
   import { nativeWorldActions } from '../lib/native-world-actions';
-  import { WorldFormError, type WorldVisibility } from '../lib/world-actions';
+  import { validateImport, WorldFormError, type WorldVisibility } from '../lib/world-actions';
 
   let form: HTMLFormElement | undefined;
   let source: HTMLInputElement | undefined;
@@ -13,10 +14,18 @@
   let busy = $state(false);
   let error = $state('');
 
+  onMount(() => {
+    const element = form;
+    const clear = () => { error = ''; };
+    element?.addEventListener('importreviewstart', clear);
+    return () => element?.removeEventListener('importreviewstart', clear);
+  });
+
   async function importWorld(event: SubmitEvent) {
     event.preventDefault();
     if (busy) return;
-    if (typeof window.__swarmcraftAfterSvelteImport !== 'function') {
+    if (typeof window.__swarmcraftAfterSvelteImport !== 'function' ||
+        typeof window.__swarmcraftTakeImportReview !== 'function') {
       error = 'Desktop initialization has not finished. Retry when the application is ready.';
       return;
     }
@@ -26,7 +35,7 @@
     try {
       // Source/JAR paths are validated by Rust before any canonical import;
       // no files, binaries or EULA state are imported by this renderer.
-      const response = await nativeWorldActions().import({
+      const input = {
         source: source?.value ?? '',
         name: name?.value ?? '',
         minecraft: minecraft?.value ?? '',
@@ -34,7 +43,15 @@
         visibility: (visibility?.value ?? 'private') as WorldVisibility,
         serverMods: serverMods?.value ?? '',
         noServerMods: noServerMods?.checked === true,
-      });
+      };
+      const reviewed = validateImport(input);
+      let fingerprint: string;
+      try {
+        fingerprint = window.__swarmcraftTakeImportReview(reviewed);
+      } catch {
+        throw new WorldFormError('checkImport', 'Check this import before committing. Review the source and requirements again.');
+      }
+      const response = await nativeWorldActions().import(input, fingerprint);
       nativeSucceeded = true;
       form?.reset();
       await window.__swarmcraftAfterSvelteImport(response.worldId);
@@ -53,6 +70,8 @@
       }
     } finally {
       busy = false;
+      await tick();
+      window.__swarmcraftRefreshImportReview?.();
     }
   }
 </script>
@@ -71,7 +90,8 @@
               <div class="field field-wide">
                 <label for="importSource">Minecraft world folder</label>
                 <input id="importSource" bind:this={source} class="machine-input" autocomplete="off" placeholder="/path/to/.minecraft/saves/My World" required />
-                <p class="field-help">Paste or type the existing world folder path from your file manager. The source folder stays unchanged.</p>
+                <button id="pickImportFolder" class="button button-secondary" type="button">Browse for world folder</button>
+                <p class="field-help">Choose the save folder or paste its path. Close Minecraft first. The source stays unchanged.</p>
               </div>
               <div class="field field-wide">
                 <label for="importName">World display name</label>
@@ -105,9 +125,11 @@
                 <span>I confirm this world requires no third-party server mods.</span>
               </label>
               <p class="helper field-wide">Choose either required server-mod JARs or the confirmation above. Import never accepts the Minecraft EULA and never imports Java/runtime binaries.</p>
+              <div id="importReview" class="import-review field-wide" role="status" aria-live="polite" hidden></div>
               <div id="importError" class="form-error field-wide" role="alert" hidden={!error}>{error}</div>
               <div class="form-actions field-wide">
                 <button id="cancelImport" class="button button-secondary" type="button" disabled={busy}>Cancel</button>
+                <button id="checkImport" class="button button-secondary" type="button">Check import</button>
                 <button id="importWorld" class="button button-primary" type="submit" disabled={busy}>Import world</button>
               </div>
             </form>

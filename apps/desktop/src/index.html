@@ -389,7 +389,8 @@
               <div class="field field-wide">
                 <label for="importSource">Minecraft world folder</label>
                 <input id="importSource" class="machine-input" autocomplete="off" placeholder="/path/to/.minecraft/saves/My World" required />
-                <p class="field-help">Paste or type the existing world folder path from your file manager. The source folder stays unchanged.</p>
+                <button id="pickImportFolder" class="button button-secondary" type="button">Browse for world folder</button>
+                <p class="field-help">Choose the save folder or paste its path. Close Minecraft first. The source stays unchanged.</p>
               </div>
               <div class="field field-wide">
                 <label for="importName">World display name</label>
@@ -423,10 +424,12 @@
                 <span>I confirm this world requires no third-party server mods.</span>
               </label>
               <p class="helper field-wide">Choose either required server-mod JARs or the confirmation above. Import never accepts the Minecraft EULA and never imports Java/runtime binaries.</p>
+              <div id="importReview" class="import-review field-wide" role="status" aria-live="polite" hidden></div>
               <div id="importError" class="form-error field-wide" role="alert" hidden></div>
               <div class="form-actions field-wide">
                 <button id="cancelImport" class="button button-secondary" type="button">Cancel</button>
-                <button id="importWorld" class="button button-primary" type="submit">Import world</button>
+                <button id="checkImport" class="button button-secondary" type="button">Check import</button>
+                <button id="importWorld" class="button button-primary" type="submit" disabled>Import world</button>
               </div>
             </form>
           </div>

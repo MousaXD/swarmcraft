@@ -75,7 +75,9 @@ test('typed frontend IPC table exactly matches every Rust Tauri-registered comma
   const table = bridge.match(/export interface NativeCommandTable \{([\s\S]*?)\n\}/);
   assert.ok(table, 'Native command table must be present');
   const typed = [...table[1].matchAll(/^\s+([a-z_]+): \{ args:/gm)].map(x => x[1]);
-  assert.equal(commands.length, 73, 'A Rust registry addition requires deliberate typed contract review');
+  assert.equal(commands.length, 75, 'A Rust registry addition requires deliberate typed contract review');
+  assert.ok(commands.includes('pick_import_folder'));
+  assert.ok(commands.includes('preview_import_world'));
   assert.ok(commands.includes('inspect_invite'));
   assert.ok(commands.includes('revoke_invite'));
   assert.ok(commands.includes('recover_copy'));

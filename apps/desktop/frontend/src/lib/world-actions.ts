@@ -30,6 +30,7 @@ export interface NativeImportRequest {
   visibility: WorldVisibility;
   serverMods: string[];
   noServerMods: boolean;
+  expectedCompatibility?: string;
 }
 export type ImportResult = { worldId: string; result: Record<string, unknown> };
 
@@ -121,8 +122,9 @@ export function createWorldActions(backend: WorldActionsBackend) {
       const request = validateCreate(input);
       return once('Create world', async () => parseCreatedWorld(await backend.createWorld(request)));
     },
-    import(input: ImportWorldInput): Promise<ImportResult> {
+    import(input: ImportWorldInput, expectedCompatibility?: string): Promise<ImportResult> {
       const request = validateImport(input);
+      if (expectedCompatibility !== undefined) request.expectedCompatibility = expectedCompatibility;
       return once('Import world', async () => parseImportedWorld(await backend.importWorld(request)));
     },
     join(invite: string, hostCandidate = false): Promise<string> {

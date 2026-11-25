@@ -494,6 +494,12 @@ export function createBackendAdapter(invoke) {
       return call('list_worlds');
     },
     createWorld: (payload) => call('create_world', payload),
+    pickImportFolder: () => call('pick_import_folder'),
+    previewImport: (payload) => call('preview_import_world', {
+      source: payload.source, name: payload.name, minecraft: payload.minecraft,
+      fabricLoader: payload.fabricLoader, visibility: payload.visibility,
+      serverMods: payload.serverMods, noServerMods: payload.noServerMods === true,
+    }),
     importWorld: (payload) => call('import_world', {
       source: payload.source,
       name: payload.name,
@@ -502,6 +508,7 @@ export function createBackendAdapter(invoke) {
       visibility: payload.visibility,
       serverMods: payload.serverMods,
       noServerMods: payload.noServerMods === true,
+      ...(payload.expectedCompatibility === undefined ? {} : { expectedCompatibility: payload.expectedCompatibility }),
     }),
     joinWorld: (invite, hostCandidate = false) => call('join_world', { invite, hostCandidate: hostCandidate === true }),
     leaveWorld: (world) => call('leave_world', { world }),

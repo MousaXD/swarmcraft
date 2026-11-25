@@ -55,7 +55,9 @@ export interface NativeCommandTable {
   fabric_loader_versions: { args: { minecraftVersion: string; refresh: boolean }; result: unknown };
   validate_fabric_selection: { args: { minecraftVersion: string; fabricLoaderVersion: string }; result: void };
   create_world: { args: { name: string; minecraft: string; fabricLoader: string; compatibility: string; visibility: string }; result: string };
-  import_world: { args: { source: string; name: string; minecraft: string; fabricLoader: string; visibility: string; serverMods: string[]; noServerMods: boolean }; result: string };
+  pick_import_folder: { args: Record<string, never>; result: string | null };
+  preview_import_world: { args: { source: string; name: string; minecraft: string; fabricLoader: string; visibility: string; serverMods: string[]; noServerMods: boolean }; result: string };
+  import_world: { args: { source: string; name: string; minecraft: string; fabricLoader: string; visibility: string; serverMods: string[]; noServerMods: boolean; expectedCompatibility?: string }; result: string };
   join_world: { args: { invite: string; hostCandidate: boolean }; result: string };
   leave_world: { args: { world: string }; result: string };
   create_invite: { args: { world: string; expiresMinutes: number; bootstrapAddrs: string[] }; result: string };

@@ -302,6 +302,10 @@ window.__swarmcraftWorldModFailures = 1;
 window.__swarmcraftRecoveryWorld = null;
 window.__swarmcraftPendingMembership = null;
 window.__swarmcraftInviteRevoked = false;
+window.__swarmcraftImportPicker = '/tmp/QA Minecraft Save';
+window.__swarmcraftImportBlocked = false;
+window.__swarmcraftImportDelay = false;
+window.__swarmcraftImportedWorld = null;
 addEventListener('error', (event) => {
   window.__swarmcraftBrowserErrors.push(String(event.error?.stack || event.message || event.error || 'window error'));
 });
@@ -312,6 +316,21 @@ const record = (command, args) => window.__swarmcraftCalls.push({ command, args:
 window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
   record(command, args);
   switch (command) {
+    case 'pick_import_folder': return window.__swarmcraftImportPicker;
+    case 'preview_import_world': {
+      if (window.__swarmcraftImportDelay) await new Promise(resolve => setTimeout(resolve, 180));
+      if (window.__swarmcraftImportBlocked) return JSON.stringify({ state: 'blocked', blocker: 'source_not_quiescent' });
+      return JSON.stringify({
+        state: 'ready', minecraft_version: args.minecraft, fabric_loader_version: args.fabricLoader,
+        minimum_java_major: 25, source_files: 12, source_bytes: 2097152,
+        required_server_mods: [], compatibility_fingerprint: 'a'.repeat(64),
+      });
+    }
+    case 'import_world':
+      if (args.expectedCompatibility !== 'a'.repeat(64) || args.source !== '/tmp/QA Minecraft Save'
+          || args.noServerMods !== true || Object.hasOwn(args, 'acceptEula')) throw new Error('Unexpected reviewed import');
+      window.__swarmcraftImportedWorld = 'scworld:' + '1'.repeat(64);
+      return JSON.stringify({ world_id: window.__swarmcraftImportedWorld });
     case 'minecraft_versions':
       if (typeof args.includeSnapshots !== 'boolean' || typeof args.refresh !== 'boolean') throw new Error('minecraft_versions requires includeSnapshots and refresh booleans');
       return { origin: 'network', versions: [
@@ -321,11 +340,16 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
     case 'fabric_loader_versions':
       if (!args.minecraftVersion || typeof args.refresh !== 'boolean') throw new Error('fabric_loader_versions requires minecraftVersion and refresh');
       return { origin: 'network', versions: [{ version: '0.19.3', stable: true, minecraft_version: args.minecraftVersion, adapter_supported: args.minecraftVersion === '26.1.2' }] };
-    case 'list_worlds': return window.__swarmcraftRecoveryWorld
+    case 'list_worlds': return window.__swarmcraftImportedWorld
+      ? window.__swarmcraftImportedWorld + '  Reviewed import  snapshots=1'
+      : window.__swarmcraftRecoveryWorld
       ? window.__swarmcraftRecoveryWorld + '  Recovery source  snapshots=4'
       : 'No local worlds.';
     case 'game_route_status': return { world_id: args.world, state: 'unavailable', route_verified: false, diagnostic: 'peer_link_unavailable', recent_session: { state: 'stream_admission_failed', age_ms: 100 } };
     case 'world_status':
+      if (args.world === window.__swarmcraftImportedWorld) {
+        return ['World: Reviewed import', 'World ID: ' + args.world, 'Safety: Canonical', 'Latest snapshot: 1'].join('\n');
+      }
       if (args.world === window.__swarmcraftRecoveryWorld) {
         return ['World: Recovery source', 'World ID: ' + args.world, 'Safety: Canonical',
           'Latest snapshot: 4', 'Checkpoint manifest: ' + 'c'.repeat(64),
@@ -710,6 +734,68 @@ const inviteScenario = String.raw`(async () => {
   return { status: 'pass' };
 })()`;
 
+const importScenario = String.raw`(async () => {
+  const $ = id => document.getElementById(id);
+  const require = (condition, message) => { if (!condition) throw new Error(message); };
+  const waitFor = async (predicate, label) => {
+    for (let i = 0; i < 200; i += 1) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    throw new Error('Timed out waiting for ' + label);
+  };
+  const edit = (id, value) => {
+    $(id).value = value;
+    $(id).dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const calls = name => window.__swarmcraftCalls.filter(call => call.command === name);
+  $('openImport').click();
+  await waitFor(() => !$('importPanel').hidden, 'import view');
+  $('importForm').reset();
+  require($('importWorld').disabled, 'Unreviewed import enabled');
+  $('pickImportFolder').click();
+  await waitFor(() => $('importSource').value === '/tmp/QA Minecraft Save', 'native folder selection result');
+  window.__swarmcraftImportPicker = null;
+  $('pickImportFolder').click();
+  await waitFor(() => !$('pickImportFolder').disabled, 'picker cancellation');
+  require($('importSource').value === '/tmp/QA Minecraft Save', 'Cancel discarded the source');
+  edit('importName', 'Reviewed import');
+  edit('importMinecraft', '26.1.2');
+  edit('importLoader', '0.19.3');
+  $('importNoServerMods').click();
+  require($('importNoServerMods').checked, 'No-mod declaration missing');
+  window.__swarmcraftImportBlocked = true;
+  $('checkImport').click();
+  await waitFor(() => $('importReview').dataset.state === 'blocked', 'source lock blocker');
+  require($('importWorld').disabled, 'Blocked source enabled import');
+  window.__swarmcraftImportBlocked = false;
+  window.__swarmcraftImportDelay = true;
+  $('checkImport').click();
+  edit('importName', 'Changed during review');
+  await waitFor(() => !$('checkImport').disabled, 'stale review completion');
+  require($('importWorld').disabled, 'Stale preview enabled commit');
+  window.__swarmcraftImportDelay = false;
+  edit('importName', 'Reviewed import');
+  $('checkImport').click();
+  await waitFor(() => !$('importWorld').disabled, 'valid native review');
+  require($('importReview').textContent.includes('Java 25'), 'Runtime requirements absent');
+  require($('importReview').textContent.includes('EULA'), 'EULA boundary absent');
+  edit('importVisibility', 'unlisted');
+  require($('importWorld').disabled, 'Changed visibility retained review');
+  edit('importVisibility', 'private');
+  $('checkImport').click();
+  await waitFor(() => !$('importWorld').disabled, 'fresh review');
+  require(calls('import_world').length === 0, 'Review committed a world');
+  $('importWorld').click();
+  $('importWorld').click();
+  await waitFor(() => $('importPanel').hidden, 'reviewed import completion');
+  require(calls('import_world').length === 1, 'Import executed more than once');
+  require(calls('import_world')[0].args.expectedCompatibility === 'a'.repeat(64), 'Reviewed fingerprint missing');
+  require(!calls('runtime_install').length && !calls('hosting_contribution_set').length, 'Import changed runtime or consent');
+  require(window.__swarmcraftBrowserErrors.length === 0, 'Import browser errors: ' + window.__swarmcraftBrowserErrors.join(' | '));
+  return { status: 'pass' };
+})()`;
+
 const scenarioRunner = String.raw`
 const done = arguments[arguments.length - 1];
 Promise.resolve().then(() => eval(arguments[0])).then(
@@ -763,6 +849,9 @@ async function runViewport(port, sessionId, documentHtml, graph, width, height, 
   assert.equal(invitation.value?.status, 'pass');
   const inviteScreenshot = await webdriverRequest(port, `/session/${sessionId}/screenshot`);
   await writeFile(screenshotPath.replace(/\.png$/, '-invitation.png'), Buffer.from(inviteScreenshot, 'base64'));
+  const imported = await executeAsync(port, sessionId, scenarioRunner, [importScenario]);
+  assert.equal(imported?.ok, true, `Import browser scenario failed at ${width}x${height}: ${imported?.error || JSON.stringify(imported)}`);
+  assert.equal(imported.value?.status, 'pass');
 }
 
 // Exercise the actual compiled Svelte module graph, including its shared
@@ -830,7 +919,7 @@ async function runCandidateViewport(port, sessionId, url, width, height, screens
     'Compiled candidate did not finish real controller boot: ' + JSON.stringify(state));
   for (const [name, script] of [
     ['create-provider', scenario], ['recovery', recoveryScenario],
-    ['selection', selectionScenario], ['branch', branchScenario], ['invitation', inviteScenario],
+    ['selection', selectionScenario], ['branch', branchScenario], ['invitation', inviteScenario], ['import', importScenario],
   ]) {
     const result = await executeAsync(port, sessionId, scenarioRunner, [script]);
     assert.equal(result?.ok, true, `Compiled candidate ${name} failed at ${width}x${height}: ${result?.error || JSON.stringify(result)}`);

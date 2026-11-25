@@ -92,7 +92,11 @@ Runtime readiness and server-mod readiness are separate fail-closed Host Readine
 
 **Import existing world** is a normal launcher flow backed by the Rust importer.
 
-The player provides the source directory plus exact Minecraft/Fabric compatibility and explicitly declares third-party server-mod requirements. Import publishes canonical world data atomically and leaves the source save unchanged.
+Close Minecraft or the source server first. Choose **Browse for world folder** (native folder picker on Linux, Windows and macOS), or paste the path to the actual save containing `level.dat` and `session.lock`. Enter a display name, visibility, exact Minecraft/Fabric versions and every required third-party server-mod JAR, or explicitly confirm that no third-party server mods are required.
+
+Select **Check import** to review the source file count, approximate uncompressed size, declared runtime and minimum Java requirement, and required mod identities. This uses a read-only Rust preflight and does not create a world or initialize its storage. The versions and mods are user declarations, not inferred from the contents of the save. The estimate is not a disk reservation or a hosting-readiness guarantee.
+
+Select **Import world** only after checking the review. Changing any form value invalidates the previous review. The Rust importer reacquires the existing source lock and validates compatibility against the reviewed fingerprint before atomic canonical publication. The fingerprint binds compatibility, not the source contents; the source is checked again rather than assumed unchanged since review. Import leaves the original save unchanged.
 
 EULA acceptance, Java/runtime binaries and `RuntimeLaunchConfig` are intentionally not imported. After import, the world enters the same Runtime Wizard + Play path as any other world.
 

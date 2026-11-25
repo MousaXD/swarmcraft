@@ -1,5 +1,6 @@
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
 import { createImportRequest, parseImportResult } from './import-flow.js';
+import { installImportReview } from './import-review.js';
 import { normalizeRecoveryReview, recoveryCopyReceipt, recoveryExportReceipt } from './recovery-copy.js';
 import { validateInviteToken, inspectInviteReceipt, revocationRequest, revokeInviteReceipt, pendingMembershipMessage } from './invite-lifecycle.js';
 import { clientContinuityFromMigration, ensureClientContinuityPanel } from './client-continuity.js';
@@ -1175,6 +1176,7 @@ async function importWorld() {
   let request;
   try {
     request = importRequestFromForm();
+    request.expectedCompatibility = importReview.take(request);
     showInline('importError', '');
   } catch (error) {
     showInline('importError', String(error.message || error), 'danger');
@@ -1189,7 +1191,7 @@ async function importWorld() {
       successMessage: 'Existing world imported into canonical SwarmCraft storage.',
     });
   } catch (error) {
-    showInline('importError', `Could not import world: ${String(error)}`, 'danger');
+    showInline('importError', 'Could not import world. Verify the source and refresh Worlds before checking the import again.', 'danger');
     return;
   }
 
@@ -1876,9 +1878,19 @@ function bindAction(id, handler, { submit = false } = {}) {
       busyControl.disabled = false;
       busyControl.removeAttribute('aria-busy');
       updateWorldSpecificControls();
+      if (id === 'importForm') importReview.sync();
     }
   });
 }
+
+const importReview = installImportReview($('importForm'), backend, importRequestFromForm,
+  () => {
+    if (window.__swarmcraftSvelteImportOwned === true) {
+      $('importForm').dispatchEvent(new Event('importreviewstart'));
+    } else showInline('importError', '');
+  });
+window.__swarmcraftTakeImportReview = request => importReview.take(request);
+window.__swarmcraftRefreshImportReview = () => importReview.sync();
 
 for (const nav of document.querySelectorAll('.nav-item[data-view]')) nav.addEventListener('click', () => showView(nav.dataset.view));
 for (const back of document.querySelectorAll('[data-back-worlds]')) back.addEventListener('click', () => showView('worlds'));

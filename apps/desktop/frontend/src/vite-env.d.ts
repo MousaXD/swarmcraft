@@ -39,6 +39,8 @@ declare global {
     __swarmcraftAfterSvelteLeave?: () => Promise<void>;
     __swarmcraftResetSvelteInvite?: () => void;
     __swarmcraftAfterSvelteImport?: (worldId: string) => Promise<void>;
+    __swarmcraftTakeImportReview?: (request: import('./lib/world-actions').NativeImportRequest) => string;
+    __swarmcraftRefreshImportReview?: () => void;
     __swarmcraftAfterSvelteJoin?: (worldId: string) => Promise<void>;
     __swarmcraftAfterSvelteCreate?: (worldId: string) => Promise<void>;
     __swarmcraftSvelteActivity?: {

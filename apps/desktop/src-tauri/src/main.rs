@@ -7,6 +7,7 @@ mod curseforge;
 mod desktop_play_route;
 mod game_route_commands;
 mod hosting_contribution_commands;
+mod import_picker;
 mod launcher_commands;
 mod modrinth_commands;
 mod runtime;
@@ -20,6 +21,7 @@ use curseforge::{
     curseforge_download, curseforge_project, curseforge_provider_status, curseforge_resolve, curseforge_search,
     curseforge_versions,
 };
+use import_picker::pick_import_folder;
 use launcher_commands::{
     curseforge_resolve_project, discovery_resolve, discovery_search, inspect_mod_artifact, modrinth_resolve_project,
     provider_staging_dir,
@@ -140,9 +142,7 @@ async fn create_world(
     .await
 }
 
-#[tauri::command(rename_all = "camelCase")]
-async fn import_world(
-    app: AppHandle,
+fn import_arguments(
     source: String,
     name: String,
     minecraft: String,
@@ -150,7 +150,7 @@ async fn import_world(
     visibility: String,
     server_mods: Vec<String>,
     no_server_mods: bool,
-) -> Result<String, String> {
+) -> Result<Vec<String>, String> {
     let source = require_value(source, "Minecraft world folder")?;
     let name = require_value(name, "World name")?;
     let minecraft = require_value(minecraft, "Minecraft version")?;
@@ -175,6 +175,45 @@ async fn import_world(
     if no_server_mods {
         arguments.push("--no-server-mods".into());
     }
+    Ok(arguments)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn preview_import_world(
+    app: AppHandle,
+    source: String,
+    name: String,
+    minecraft: String,
+    fabric_loader: String,
+    visibility: String,
+    server_mods: Vec<String>,
+    no_server_mods: bool,
+) -> Result<String, String> {
+    let mut arguments =
+        import_arguments(source, name, minecraft, fabric_loader, visibility, server_mods, no_server_mods)?;
+    arguments.push("--preview".into());
+    run_import_cli(&app, arguments).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)] // Preserve the explicit flat IPC contract shared by both renderers.
+async fn import_world(
+    app: AppHandle,
+    source: String,
+    name: String,
+    minecraft: String,
+    fabric_loader: String,
+    visibility: String,
+    server_mods: Vec<String>,
+    no_server_mods: bool,
+    expected_compatibility: Option<String>,
+) -> Result<String, String> {
+    let fingerprint = expected_compatibility
+        .filter(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        .ok_or_else(|| "Check the import before committing".to_string())?;
+    let mut arguments =
+        import_arguments(source, name, minecraft, fabric_loader, visibility, server_mods, no_server_mods)?;
+    arguments.extend(["--expected-compatibility".into(), fingerprint]);
     run_import_cli(&app, arguments).await
 }
 
@@ -741,6 +780,8 @@ fn main() {
             fabric_loader_versions,
             validate_fabric_selection,
             create_world,
+            pick_import_folder,
+            preview_import_world,
             import_world,
             join_world,
             leave_world,

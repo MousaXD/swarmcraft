@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use clap::Parser;
 use std::path::PathBuf;
-use swarm_cli::world_import::{import_world, ImportWorldRequest};
+use swarm_cli::world_import::{import_reviewed_world, import_world, preview_import, ImportWorldRequest};
 use swarm_core::DataPaths;
 use swarm_protocol::WorldVisibilityV1;
 
@@ -31,27 +31,37 @@ struct Args {
     /// Explicitly declare that the imported world requires no third-party server mods.
     #[arg(long, conflicts_with = "server_mods")]
     no_server_mods: bool,
+    /// Inspect source and compatibility without creating or changing a world.
+    #[arg(long, conflicts_with = "expected_compatibility")]
+    preview: bool,
+    /// Require the exact compatibility fingerprint from the reviewed preview.
+    #[arg(long)]
+    expected_compatibility: Option<String>,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let request = ImportWorldRequest {
+        source: args.source,
+        name: args.name,
+        minecraft_version: args.minecraft,
+        fabric_loader_version: args.fabric_loader,
+        visibility: parse_visibility(&args.visibility)?,
+        server_mod_jars: args.server_mods,
+        confirm_no_server_mods: args.no_server_mods,
+    };
+    if args.preview {
+        println!("{}", serde_json::to_string_pretty(&preview_import(&request))?);
+        return Ok(());
+    }
     let paths = match args.data_dir {
         Some(root) => DataPaths::from_root(root),
         None => DataPaths::discover()?,
     };
-    paths.ensure()?;
-    let result = import_world(
-        &paths,
-        &ImportWorldRequest {
-            source: args.source,
-            name: args.name,
-            minecraft_version: args.minecraft,
-            fabric_loader_version: args.fabric_loader,
-            visibility: parse_visibility(&args.visibility)?,
-            server_mod_jars: args.server_mods,
-            confirm_no_server_mods: args.no_server_mods,
-        },
-    )?;
+    let result = match args.expected_compatibility.as_deref() {
+        Some(expected) => import_reviewed_world(&paths, &request, expected)?,
+        None => import_world(&paths, &request)?,
+    };
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }

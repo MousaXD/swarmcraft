@@ -395,12 +395,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #39 — P1 · Partial
 - Work: Simplify first run and import. Add a native folder picker when supported and show source/runtime requirements before commit
 - Acceptance: A fresh user can import a supported world, finish explicit EULA, see capacity and mod blockers, and recover an interrupted install
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (reviewed import, native Linux manual-path flow and picker cancellation; full first-run acceptance pending)
+- Source: [Desktop import guide](../apps/desktop/README.md#existing-world-import); apps/desktop/src/import-review.js; apps/desktop/src-tauri/src/import_picker.rs; crates/swarm-cli/src/world_import.rs; crates/swarm-cli/tests/import_preview_cli.rs; [sanitized native evidence](../research/desktop-import/evidence/linux-native-20261125.json).
+- Evidence: Shipping and candidate forms share a read-only import review, native folder selection/manual fallback, explicit mod declaration and stale-review invalidation. Rust rechecks the source lock, inventory and compatibility fingerprint before creating identity/staging and publishing a signed world. Destination-inside-source, unsupported tuples, changed artifacts, symlink and special-file cases fail closed. 15 world-import tests, one real sidecar integration, 11 runtime setup hardening/recovery tests, 10 frontend import tests, 82 Vitest and 30 source parity tests passed. Both frontends passed six shared Chromium scenarios at each of three viewports with mocked IPC. Strict targeted Clippy, locked offline checks, formatting, production build and workflow policy passed. Real Linux Debian package opened a GTK native chooser and preserved the path on cancel; automated folder selection timed out. In a separate isolated WebKitGTK/Xvfb run the packaged app successfully reviewed a manually entered synthetic save, displayed Java 25/source inventory, disabled stale review, re-reviewed and published one signed checkpoint verified by its bundled CLI. Source bytes and player-only hosting state were preserved. No actual Minecraft gameplay or EULA acceptance credited.
+- Remaining / next action: Verify successful native folder selection on Linux and native Windows/macOS packages. Run a genuine supported Minecraft save through first-run explicit EULA, runtime install/capacity/mod blockers and interrupted-install recovery on clean machines. Keep existing runtime admission guards and production legacy frontend unchanged. Proceed to #40 without treating this scoped evidence as full release acceptance.
+- External dependency: Actual supported Minecraft save/runtime artifacts, clean interactive desktop environments and native Windows/Intel and Apple Silicon macOS validation.
+- Commit: Reviewed import implementation and local evidence checkpoint; see git history.
 
 ### #40 — P1 · Partial
 - Work: Deliver compatible game-client preparation and handoff to the chosen launcher. Preserve the user's account and settings

@@ -3407,6 +3407,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
  "zeroize",
 ]
 

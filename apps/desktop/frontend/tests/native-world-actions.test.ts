@@ -38,11 +38,13 @@ describe('Svelte native world actions bridge', () => {
       source: '/tmp/world', name: 'Existing', minecraft: '26.1.2',
       fabricLoader: '0.19.3', visibility: 'private',
       serverMods: ['/tmp/mod.jar'], noServerMods: false,
+      expectedCompatibility: 'a'.repeat(64),
     });
     await backend.createInvite({world:'scworld:real',expiresMinutes:60,bootstrapAddrs:[]});
     expect(invoke.mock.calls.map(call=>call[0])).toEqual(['join_world','import_world','create_invite']);
     expect(invoke.mock.calls[0][1]).toEqual({invite:'signed invite token', hostCandidate:false});
     expect(invoke.mock.calls[1][1]).not.toHaveProperty('acceptEula');
+    expect(invoke.mock.calls[1][1]).toHaveProperty('expectedCompatibility', 'a'.repeat(64));
     expect(invoke.mock.calls[2][1]).toEqual({
       world:'scworld:real',expiresMinutes:60,bootstrapAddrs:[],
     });

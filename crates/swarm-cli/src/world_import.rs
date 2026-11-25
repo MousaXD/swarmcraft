@@ -11,7 +11,7 @@ use swarm_core::{create_world_genesis_with_fingerprint, sign_world_config, DataP
 use swarm_protocol::{
     validate_runtime_selection, AuthorityPolicyV1, Hash32, MembershipPolicyV1, MembershipRecordV1,
     RuntimeCompatibilityManifestV1, SnapshotManifestV1, WorldConfigV1, WorldDescriptorV1, WorldId, WorldMemberV1,
-    WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, STORAGE_SCHEMA_VERSION,
+    WorldPresentationV1, WorldVisibilityV1, PROTOCOL_VERSION, SHIPPED_RUNTIME_ADAPTER, STORAGE_SCHEMA_VERSION,
 };
 use swarm_storage::{SnapshotContext, Storage, WorldMetadataV1};
 
@@ -38,6 +38,82 @@ pub struct ImportWorldResult {
     pub state_root: String,
     pub files: usize,
     pub compatibility_fingerprint: String,
+}
+
+/// Advisory preflight, not a snapshot, EULA receipt or hosting authorization.
+/// Only public compatibility information is serialized (no local paths).
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ImportPreview {
+    Blocked {
+        blocker: &'static str,
+    },
+    Ready {
+        minecraft_version: String,
+        fabric_loader_version: String,
+        minimum_java_major: u32,
+        source_files: u64,
+        source_bytes: u64,
+        required_server_mods: Vec<swarm_protocol::ArtifactRequirementV1>,
+        compatibility_fingerprint: String,
+    },
+}
+
+/// Check the selected source and declared compatibility without opening or
+/// creating any SwarmCraft data root. The source lock is released on return;
+/// the actual import MUST reacquire it and repeat compatibility validation.
+pub fn preview_import(request: &ImportWorldRequest) -> ImportPreview {
+    let blocked = |blocker| ImportPreview::Blocked { blocker };
+    if validate_import_details(request).is_err() {
+        return blocked("invalid_details");
+    }
+    if validate_import_source(request).is_err() {
+        return blocked("invalid_source");
+    }
+    if validate_runtime_selection(request.minecraft_version.trim(), request.fabric_loader_version.trim(), None).is_err()
+    {
+        return blocked("unsupported_runtime");
+    }
+    if validate_mod_declaration(request).is_err() {
+        return blocked("mod_requirements");
+    }
+    let Ok(_source_quiescence) = acquire_source_quiescence(&request.source) else {
+        return blocked("source_not_quiescent");
+    };
+    let Ok(compatibility) = import_compatibility(request) else {
+        return blocked("mod_requirements");
+    };
+    let Ok(fingerprint) = compatibility.fingerprint() else {
+        return blocked("mod_requirements");
+    };
+    let Ok((source_files, source_bytes)) = inspect_source_entries(&request.source) else {
+        return blocked("source_unreadable");
+    };
+    ImportPreview::Ready {
+        minecraft_version: compatibility.minecraft_version,
+        fabric_loader_version: compatibility.loader_version,
+        minimum_java_major: SHIPPED_RUNTIME_ADAPTER.minimum_java_major,
+        source_files,
+        source_bytes,
+        required_server_mods: compatibility.required_server_mods,
+        compatibility_fingerprint: fingerprint.to_string(),
+    }
+}
+
+fn inspect_source_entries(source: &Path) -> Result<(u64, u64)> {
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    for entry in walkdir::WalkDir::new(source).follow_links(false).follow_root_links(false).max_open(16) {
+        let entry = entry?;
+        let kind = entry.file_type();
+        if kind.is_file() {
+            files = files.checked_add(1).context("source file count overflow")?;
+            bytes = bytes.checked_add(entry.metadata()?.len()).context("source size overflow")?;
+        } else if !kind.is_dir() {
+            bail!("world source contains a symbolic link or special file");
+        }
+    }
+    Ok((files, bytes))
 }
 
 /// An explicitly selected local checkpoint becomes a separate private world.
@@ -96,7 +172,17 @@ impl Drop for MinecraftSourceQuiescence {
 /// root on the same filesystem and becomes visible only through one directory
 /// rename after every signed metadata object and canonical snapshot is durable.
 pub fn import_world(paths: &DataPaths, request: &ImportWorldRequest) -> Result<ImportWorldResult> {
-    import_world_inner(paths, request, ImportFaults::default())
+    import_world_inner(paths, request, ImportFaults::default(), None)
+}
+
+/// A changed mod artifact or runtime tuple invalidates the user's review.
+/// A matching fingerprint does not prove that the source save is unchanged.
+pub fn import_reviewed_world(
+    paths: &DataPaths,
+    request: &ImportWorldRequest,
+    expected_compatibility: &str,
+) -> Result<ImportWorldResult> {
+    import_world_inner(paths, request, ImportFaults::default(), Some(expected_compatibility))
 }
 
 pub fn recover_copy(paths: &DataPaths, request: &RecoverCopyRequest) -> Result<RecoverCopyResult> {
@@ -277,6 +363,7 @@ fn import_world_inner(
     paths: &DataPaths,
     request: &ImportWorldRequest,
     faults: ImportFaults,
+    expected_compatibility: Option<&str>,
 ) -> Result<ImportWorldResult> {
     validate_request(request)?;
     validate_runtime_selection(request.minecraft_version.trim(), request.fabric_loader_version.trim(), None)
@@ -288,19 +375,22 @@ fn import_world_inner(
     // Windows. The proof spans the complete hashed and committed snapshot.
     let _source_quiescence = acquire_source_quiescence(&request.source)?;
 
-    let identity = PeerIdentity::load_or_create(paths)?;
-    let required_server_mods = server_mods::requirements_from_jars(&request.server_mod_jars)?;
-    let compatibility = RuntimeCompatibilityManifestV1 {
-        minecraft_version: request.minecraft_version.trim().to_owned(),
-        loader_id: "fabric".into(),
-        loader_version: request.fabric_loader_version.trim().to_owned(),
-        swarmcraft_protocol_version: PROTOCOL_VERSION,
-        fabric_adapter_version: env!("CARGO_PKG_VERSION").into(),
-        required_server_mods,
-        required_client_mods: Vec::new(),
-        datapacks: Vec::new(),
-    };
+    // A source that contains the destination would otherwise be modified by
+    // staging/identity creation and could recursively capture its own import.
+    let source = fs::canonicalize(&request.source)?;
+    let destination = resolve_destination(&paths.root)?;
+    if destination.starts_with(&source) {
+        bail!("SwarmCraft storage must not be inside the selected Minecraft save");
+    }
+    if expected_compatibility.is_some() {
+        inspect_source_entries(&request.source)?;
+    }
+    let compatibility = import_compatibility(request)?;
     let compatibility_fingerprint = compatibility.fingerprint()?;
+    if expected_compatibility.is_some_and(|expected| expected != compatibility_fingerprint.to_string()) {
+        bail!("import compatibility changed after review; check the import again");
+    }
+    let identity = PeerIdentity::load_or_create(paths)?;
     let (world, genesis) = create_world_genesis_with_fingerprint(
         &identity,
         compatibility.minecraft_version.clone(),
@@ -489,6 +579,12 @@ fn publish_staged_world(paths: &DataPaths, staged_world_dir: &Path, final_world_
 }
 
 fn validate_request(request: &ImportWorldRequest) -> Result<()> {
+    validate_import_details(request)?;
+    validate_import_source(request)?;
+    validate_mod_declaration(request)
+}
+
+fn validate_import_details(request: &ImportWorldRequest) -> Result<()> {
     if request.name.trim().is_empty() {
         bail!("imported world name is required");
     }
@@ -500,7 +596,11 @@ fn validate_request(request: &ImportWorldRequest) -> Result<()> {
     {
         bail!("exact Fabric loader version is required for safe import compatibility");
     }
-    let metadata = fs::metadata(&request.source)
+    Ok(())
+}
+
+fn validate_import_source(request: &ImportWorldRequest) -> Result<()> {
+    let metadata = fs::symlink_metadata(&request.source)
         .with_context(|| format!("cannot inspect Minecraft world directory {}", request.source.display()))?;
     if !metadata.is_dir() {
         bail!("Minecraft world import source is not a directory: {}", request.source.display());
@@ -511,6 +611,32 @@ fn validate_request(request: &ImportWorldRequest) -> Result<()> {
     if !level_metadata.file_type().is_file() || level_metadata.file_type().is_symlink() || level_metadata.len() == 0 {
         bail!("Minecraft world level.dat must be a non-empty regular file");
     }
+    fs::File::open(&level).context("Minecraft world level.dat is not readable")?;
+    Ok(())
+}
+
+fn resolve_destination(path: &Path) -> Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut ancestor = absolute.as_path();
+    let mut suffix = Vec::new();
+    loop {
+        match fs::canonicalize(ancestor) {
+            Ok(mut root) => {
+                for name in suffix.iter().rev() {
+                    root.push(name);
+                }
+                return Ok(root);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                suffix.push(ancestor.file_name().context("cannot resolve SwarmCraft storage destination")?);
+                ancestor = ancestor.parent().context("cannot resolve SwarmCraft storage destination")?;
+            }
+            Err(error) => return Err(error).context("cannot resolve SwarmCraft storage destination"),
+        }
+    }
+}
+
+fn validate_mod_declaration(request: &ImportWorldRequest) -> Result<()> {
     if request.server_mod_jars.is_empty() && !request.confirm_no_server_mods {
         bail!(
             "server-mod compatibility is unknown; provide every required server mod JAR or explicitly confirm that this world requires no third-party server mods"
@@ -520,6 +646,19 @@ fn validate_request(request: &ImportWorldRequest) -> Result<()> {
         bail!("cannot both provide server mod JARs and declare that the imported world requires no third-party server mods");
     }
     Ok(())
+}
+
+fn import_compatibility(request: &ImportWorldRequest) -> Result<RuntimeCompatibilityManifestV1> {
+    Ok(RuntimeCompatibilityManifestV1 {
+        minecraft_version: request.minecraft_version.trim().to_owned(),
+        loader_id: "fabric".into(),
+        loader_version: request.fabric_loader_version.trim().to_owned(),
+        swarmcraft_protocol_version: PROTOCOL_VERSION,
+        fabric_adapter_version: env!("CARGO_PKG_VERSION").into(),
+        required_server_mods: server_mods::requirements_from_jars(&request.server_mod_jars)?,
+        required_client_mods: Vec::new(),
+        datapacks: Vec::new(),
+    })
 }
 
 fn acquire_source_quiescence(source: &Path) -> Result<MinecraftSourceQuiescence> {
@@ -745,6 +884,90 @@ mod tests {
     }
 
     #[test]
+    fn preview_checks_source_and_declared_runtime_without_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = source_world(temp.path());
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        let req = request(source.clone());
+        let level = fs::read(source.join("level.dat")).unwrap();
+        let lock = fs::read(source.join("session.lock")).unwrap();
+        let preview = preview_import(&req);
+        let ImportPreview::Ready {
+            source_files,
+            source_bytes,
+            minimum_java_major,
+            compatibility_fingerprint,
+            required_server_mods,
+            ..
+        } = preview
+        else {
+            panic!("valid stopped source did not pass preview")
+        };
+        assert_eq!(source_files, 3);
+        assert!(source_bytes > level.len() as u64);
+        assert_eq!(minimum_java_major, SHIPPED_RUNTIME_ADAPTER.minimum_java_major);
+        assert!(required_server_mods.is_empty());
+        assert!(!paths.root.exists());
+        assert_eq!(fs::read(source.join("level.dat")).unwrap(), level);
+        assert_eq!(fs::read(source.join("session.lock")).unwrap(), lock);
+
+        let mut changed = req.clone();
+        changed.fabric_loader_version = "0.20.0".into();
+        assert!(import_reviewed_world(&paths, &changed, &compatibility_fingerprint).is_err());
+        assert!(!paths.root.exists(), "stale review must fail before identity or staging writes");
+        let imported = import_reviewed_world(&paths, &req, &compatibility_fingerprint).unwrap();
+        assert_eq!(imported.compatibility_fingerprint, compatibility_fingerprint);
+        assert_eq!(fs::read(source.join("level.dat")).unwrap(), level);
+        assert_eq!(fs::read(source.join("session.lock")).unwrap(), lock);
+    }
+
+    #[test]
+    fn preflight_blocks_unsupported_runtime_missing_mods_and_missing_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = source_world(temp.path());
+        let mut req = request(source.clone());
+        req.minecraft_version = "26.2".into();
+        assert!(matches!(preview_import(&req), ImportPreview::Blocked { blocker: "unsupported_runtime" }));
+        req.minecraft_version = "26.1.2".into();
+        req.confirm_no_server_mods = false;
+        assert!(matches!(preview_import(&req), ImportPreview::Blocked { blocker: "mod_requirements" }));
+        req.server_mod_jars.push(temp.path().join("missing.jar"));
+        assert!(matches!(preview_import(&req), ImportPreview::Blocked { blocker: "mod_requirements" }));
+        req.server_mod_jars.clear();
+        req.confirm_no_server_mods = true;
+        fs::remove_file(source.join("session.lock")).unwrap();
+        assert!(matches!(preview_import(&req), ImportPreview::Blocked { blocker: "source_not_quiescent" }));
+        assert!(!source.join("session.lock").exists(), "preview must not manufacture a session lock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_rejects_symlinks_and_reviewed_commit_rechecks_source() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let source = source_world(temp.path());
+        let req = request(source.clone());
+        let ImportPreview::Ready { compatibility_fingerprint, .. } = preview_import(&req) else {
+            panic!("preview blocked")
+        };
+        symlink(source.join("level.dat"), source.join("linked.dat")).unwrap();
+        assert!(matches!(preview_import(&req), ImportPreview::Blocked { blocker: "source_unreadable" }));
+        let paths = DataPaths::from_root(temp.path().join("data"));
+        assert!(import_reviewed_world(&paths, &req, &compatibility_fingerprint).is_err());
+        assert!(!paths.root.exists());
+    }
+
+    #[test]
+    fn import_never_creates_storage_inside_the_source_save() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = source_world(temp.path());
+        let paths = DataPaths::from_root(source.join("nested").join("storage"));
+        let error = import_world(&paths, &request(source.clone())).unwrap_err();
+        assert!(error.to_string().contains("storage must not be inside"));
+        assert!(!source.join("nested").exists());
+    }
+
+    #[test]
     fn valid_import_is_atomic_restart_safe_and_leaves_source_unchanged() {
         let temp = tempfile::tempdir().unwrap();
         let paths = DataPaths::from_root(temp.path().join("data"));
@@ -955,6 +1178,10 @@ mod tests {
         }
         assert!(ready.exists(), "session-lock helper never acquired the lock");
 
+        assert!(matches!(
+            preview_import(&request(source.clone())),
+            ImportPreview::Blocked { blocker: "source_not_quiescent" }
+        ));
         let error = import_world(&paths, &request(source.clone())).unwrap_err();
         assert!(error.to_string().contains("currently open") || error.to_string().contains("session lock"));
 
@@ -971,7 +1198,7 @@ mod tests {
         let req = request(source.clone());
         let faults = ImportFaults { after_snapshot_commit: true, ..ImportFaults::default() };
 
-        assert!(import_world_inner(&paths, &req, faults).is_err());
+        assert!(import_world_inner(&paths, &req, faults, None).is_err());
         assert!(Storage::open(paths.root.clone()).unwrap().list_worlds().unwrap().is_empty());
         assert_eq!(fs::read(source.join("level.dat")).unwrap(), b"existing-level-data\n");
 
@@ -987,7 +1214,7 @@ mod tests {
         let source = source_world(temp.path());
         let req = request(source);
         let faults = ImportFaults { before_publication: true, ..ImportFaults::default() };
-        assert!(import_world_inner(&paths, &req, faults).is_err());
+        assert!(import_world_inner(&paths, &req, faults, None).is_err());
         assert!(Storage::open(paths.root.clone()).unwrap().list_worlds().unwrap().is_empty());
     }
 
