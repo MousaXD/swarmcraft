@@ -265,12 +265,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #26 — Sabathon P0 (baseline) / P1 (full identity mapping) · Missing
 - Work: Manage deterministic `server.properties` at Fabric launch (`server-ip=127.0.0.1`, per-world loopback port, explicit `online-mode`, `enable-rcon=false`, baseline allowlist); in P1 connect private SwarmCraft membership to full Minecraft login/session allowlist policy
 - Acceptance: **P0:** Launched servers never bind `0.0.0.0:25565`, never collide across worlds on one PC, and enforce explicit `online-mode` so Mojang UUIDs/inventories survive host transfer. **P1:** Swarm membership and Minecraft game identity stay consistently enforced so unauthorized game sessions are rejected
-- State: **IN PROGRESS**
-- Source: minecraft/fabric/; crates/swarm-cli/
-- Evidence: Live integration status; scoped automated evidence, exact-SHA CI pending.
-- Remaining / next action: Verify baseline runtime policy; implement P1 identity mapping separately
-- External dependency: Not yet established; assess during execution.
-- Commit: 2d45f97 baseline; see live status for individual commits
+- State: **LOCALLY VERIFIED** (deterministic baseline and Linux live socket ownership; full host-process and P1 account/session enforcement remain pending)
+- Source: `crates/swarm-cli/src/managed_server_properties.rs`, `crates/swarm-cli/src/migration.rs`, `crates/swarm-cli/tests/host_process.rs`, [Minecraft session policy](MINECRAFT_SESSION_POLICY.md).
+- Evidence: Stable unique per-world loopback ports, exclusive properties creation, explicit online mode, RCON/query disabled. Linux readiness now requires the supervised process to own the exact loopback listener, both at startup and on live Fabric challenge. Actual child-process/socket regressions reject foreign ownership and wildcard binds even when a TCP connect succeeds. Strict Clippy and CLI library 161 passed/2 ignored locally. Full host-process and migration fixtures returned early due to the unchanged RAM admission threshold; they are not counted as completed live scenarios.
+- Remaining / next action: Run the full host and migration fixtures with sufficient available memory; implement equivalent native socket-ownership checks on Windows/macOS; implement and verify the P1 authenticated Minecraft account/device binding protocol. No account allowlist or direct-local-login enforcement is claimed.
+- External dependency: At least 4543 MiB available RAM for the selected 512 MiB heap on this fixture; Java 25 and Gradle for real Fabric builds; native OS and authenticated Minecraft login/transfer acceptance.
+- Commit: 2d45f97 baseline; see locally verified listener-hardening milestone in git history.
 
 ### #27 — P2 · Proposal
 - Work: Define public/unlisted/private visibility behavior and moderation roles before public rollout

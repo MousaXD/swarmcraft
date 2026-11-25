@@ -30,8 +30,21 @@ fn hosting_capacity_for_process_test() -> bool {
     }
 }
 
+static HOST_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn real_host_process_restores_launches_and_commits_mutated_world() {
+    exercise_host_process(false).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn wildcard_child_listener_cannot_reach_runtime_ready_or_commit_snapshot() {
+    exercise_host_process(true).await;
+}
+
+async fn exercise_host_process(wildcard: bool) {
+    let _slot = HOST_FIXTURE_LOCK.lock().await;
     if !hosting_capacity_for_process_test() {
         assert!(
             std::env::var_os("SWARMCRAFT_HOST_CGROUP_ROOT").is_none(),
@@ -193,6 +206,12 @@ with socket.create_connection((host, port), timeout=5) as connection:
 "##,
     )
     .unwrap();
+    if wildcard {
+        let source = fs::read_to_string(&mock).unwrap();
+        let modified = source.replace("game_listener.bind((\"127.0.0.1\",", "game_listener.bind((\"0.0.0.0\",");
+        assert_ne!(modified, source);
+        fs::write(&mock, modified).unwrap();
+    }
     let mut permissions = fs::metadata(&mock).unwrap().permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&mock, permissions).unwrap();
@@ -204,13 +223,24 @@ with socket.create_connection((host, port), timeout=5) as connection:
 
     swarm_cli::hosting_budget::set_contribution(&paths, world, 512).unwrap();
 
-    host::run(
+    let result = host::run(
         &paths,
         &storage,
         host::HostOptions { world, java: mock, server_jar: dummy_server, mod_jar: dummy_mod, accept_eula: true },
     )
-    .await
-    .unwrap();
+    .await;
+    if wildcard {
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("not bound exclusively to IPv4 loopback"), "{error:#}");
+        assert_eq!(
+            storage.latest_snapshot(world).unwrap().unwrap().manifest_hash().unwrap(),
+            initial.manifest_hash().unwrap()
+        );
+        assert!(!swarm_cli::migration::load_migration_status(&paths, world).unwrap().runtime_ready);
+        assert!(storage.load_sleep_record(world).is_err(), "unverified runtime must not publish a sleep boundary");
+        return;
+    }
+    result.unwrap();
 
     let latest = storage.latest_snapshot(world).unwrap().unwrap();
     assert_eq!(latest.snapshot_number, 2);

@@ -1095,6 +1095,7 @@ async fn run_authority_runtime_inner(
     ) {
         return Err(anyhow!("managed Minecraft server listener on 127.0.0.1:{managed_port} is unavailable: {error}"));
     }
+    managed_server_properties::verify_process_listener(startup.pid(), managed_port)?;
     if let Err(error) = ensure_runtime_generation(storage, &identity, &epoch) {
         terminate_child(&mut *startup.child);
         publish_status(
@@ -1683,6 +1684,10 @@ async fn challenge_live_supervised_runtime(
     let verified = challenge_authenticated_session(session, &expected, Duration::from_millis(1_200)).await?;
     if child.try_wait()?.is_some() {
         bail!("managed Minecraft process exited during Fabric challenge");
+    }
+    managed_server_properties::verify_process_listener(child.id(), managed_port)?;
+    if child.try_wait()?.is_some() {
+        bail!("managed Minecraft process exited during listener verification");
     }
     ensure_authority_generation(storage, identity, epoch)?;
     if supervised_runtime_withdrawal(paths, epoch.world_id, admission, memory_cap, child.id())?.is_some()
