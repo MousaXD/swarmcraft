@@ -74,6 +74,10 @@ enum InviteCommand {
         #[arg(long = "bootstrap")]
         bootstrap_addrs: Vec<String>,
     },
+    /// Inspect a signed invite without printing the bearer token or bootstrap hints.
+    Inspect { invite: String },
+    /// Revoke an invite locally as its current issuer, before a durable membership prepare.
+    Revoke { invite: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -546,6 +550,28 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 println!("Authorized peers: {}", descriptor.members.len());
                 println!("Preferred replicas: {}", descriptor.preferred_replication_factor);
             }
+            match storage.load_pending_join(world) {
+                Ok(request) => {
+                    let committed = storage.load_membership_record(world).is_ok_and(|membership| {
+                        verify_membership_signature(&membership).is_ok()
+                            && membership
+                                .members
+                                .iter()
+                                .any(|member| member == &request.joining_member && !member.banned)
+                    });
+                    if committed {
+                        println!("Membership: committed admission; local synchronization pending");
+                    } else if invite::validate_invite_expiry(request.invite.expires_unix_ms, invite::unix_time_ms()?)
+                        .is_err()
+                    {
+                        println!("Membership: pending; invitation expired, no new admission can begin");
+                    } else {
+                        println!("Membership: pending; waiting for signed membership approval");
+                    }
+                }
+                Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
             let conflict = !storage.list_solo_conflicts(world)?.is_empty();
             let solo = storage.load_epoch_record(world).is_ok_and(|epoch| epoch.mode == EpochMode::Solo)
                 || storage.load_solo_branch(world).is_ok();
@@ -1016,6 +1042,43 @@ fn handle_invite(command: InviteCommand, paths: &DataPaths, storage: &Storage) -
             };
             identity.sign_invite(&mut invite)?;
             println!("{}", invite::encode(&invite)?);
+        }
+        InviteCommand::Inspect { invite: value } => {
+            let grant = invite::decode_verified(&value)?;
+            let identity = PeerIdentity::load_or_create(paths)?;
+            println!("Invite ID: {}", grant.record_hash()?);
+            println!("World: {}", grant.world_id);
+            println!("Issuer: {}", grant.inviter_peer_id);
+            println!("Expires (Unix milliseconds): {}", grant.expires_unix_ms);
+            println!("Reuse: reusable bearer grant");
+            let locally_issued =
+                grant.inviter_peer_id == identity.peer_id() && grant.inviter_public_key == identity.public_key();
+            if locally_issued && storage.is_invite_revoked(&grant)? {
+                println!("Status: revoked by this issuer");
+            } else if invite::validate_invite_expiry(grant.expires_unix_ms, invite::unix_time_ms()?).is_err() {
+                println!("Status: expired or invalid lifetime");
+            } else {
+                println!("Status: lifetime valid; current authority, revocation and membership approval checked at admission");
+            }
+        }
+        InviteCommand::Revoke { invite: value } => {
+            let grant = invite::decode_verified(&value)?;
+            let identity = PeerIdentity::load_or_create(paths)?;
+            if grant.inviter_peer_id != identity.peer_id() || grant.inviter_public_key != identity.public_key() {
+                bail!("only the issuing identity can revoke its invitation");
+            }
+            let membership = storage.load_membership_record(grant.world_id)?;
+            verify_membership_signature(&membership)?;
+            let epoch = storage.load_epoch_record(grant.world_id)?;
+            swarm_core::verify_signature(
+                epoch.authority_peer_id,
+                epoch.authority_public_key,
+                &epoch.signing_bytes()?,
+                &epoch.signature,
+            )?;
+            let created = storage.revoke_invite(&grant)?;
+            println!("Invite {} {}", grant.record_hash()?, if created { "revoked" } else { "already revoked" });
+            println!("Existing committed members retain membership; revocation prevents new admission preparations.");
         }
     }
     Ok(())

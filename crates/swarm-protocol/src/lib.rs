@@ -9,6 +9,7 @@ use thiserror::Error;
 
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const STORAGE_SCHEMA_VERSION: u16 = 1;
+pub const MAX_INVITE_LIFETIME_MS: u64 = 24 * 60 * 60 * 1_000;
 
 const WORLD_GENESIS_DOMAIN: &[u8] = b"swarmcraft/world-genesis/v1\0";
 pub const BLOB_HASH_DOMAIN: &[u8] = b"swarmcraft/blob/v1\0";
@@ -342,6 +343,11 @@ pub struct InviteV1 {
 }
 
 impl InviteV1 {
+    /// Exact signed bearer commitment; does not disclose the invitation token.
+    pub fn record_hash(&self) -> Result<Hash32, ProtocolError> {
+        Ok(Hash32::from_domain_bytes(b"swarmcraft/invite-record/v1\0", &postcard::to_allocvec(self)?))
+    }
+
     pub fn signing_bytes(&self) -> Result<Vec<u8>, ProtocolError> {
         let unsigned = (
             self.protocol_version,

@@ -4395,6 +4395,13 @@ fn handle_request(
             }
             let current = storage.load_membership_record(world)?;
             verify_membership_signature(&current)?;
+            let epoch = storage.load_epoch_record(world)?;
+            verify_signature(
+                epoch.authority_peer_id,
+                epoch.authority_public_key,
+                &epoch.signing_bytes()?,
+                &epoch.signature,
+            )?;
             if current.authority_peer_id != identity.peer_id() || current.authority_public_key != identity.public_key()
             {
                 return Err(anyhow!("only the current local authority may accept a join request"));
@@ -4425,6 +4432,9 @@ fn handle_request(
                     state.outbound,
                 )?;
                 return Ok(());
+            }
+            if storage.is_invite_revoked(&request.invite)? {
+                return Err(StorageError::InviteRevoked.into());
             }
             if let Some(promise) = load_optional_membership_promise(storage, world)? {
                 let proposed_member = promise
@@ -4473,9 +4483,9 @@ fn handle_request(
             identity.sign_membership(&mut next)?;
             let proposal = MembershipProposalV1 { previous: current, proposed: next };
             validate_membership_proposal_shape(&proposal)?;
-            let request = membership_proposal_request(storage, &proposal, application_peer)?;
+            let wire_request = membership_proposal_request(storage, &proposal, application_peer)?;
             let vote = sign_membership_vote(identity, &proposal)?;
-            match storage.promise_membership_proposal(&proposal, &vote)? {
+            match storage.promise_join_membership_proposal(&proposal, &vote, &request)? {
                 MembershipPromiseResult::Accepted | MembershipPromiseResult::Idempotent => {}
                 MembershipPromiseResult::Rejected => {
                     return Err(anyhow!("membership proposal conflicts with a durable prepare"))
@@ -4484,7 +4494,7 @@ fn handle_request(
             state.leases.membership_votes.insert((world, identity.peer_id()), vote);
             clear_permit(context.paths, world)?;
             state.leases.permit_heartbeats.remove(&world);
-            let id = node.send_request(&transport_peer, request)?;
+            let id = node.send_request(&transport_peer, wire_request)?;
             state.outbound.insert(
                 request_key(&id),
                 OutboundContext::MembershipProposal {

@@ -14,7 +14,7 @@ use swarm_protocol::{InviteV1, PROTOCOL_VERSION};
 const PREFIX: &str = "scinvite:";
 pub const MAX_INVITE_TOKEN_CHARS: usize = 32 * 1024;
 pub const MAX_INVITE_LIFETIME_MINUTES: u64 = 24 * 60;
-pub const MAX_INVITE_LIFETIME_MS: u64 = MAX_INVITE_LIFETIME_MINUTES * 60_000;
+pub use swarm_protocol::MAX_INVITE_LIFETIME_MS;
 
 pub fn encode(invite: &InviteV1) -> Result<String> {
     validate_invite_addresses(&invite.bootstrap_addrs).context("invite connection hints are invalid")?;
@@ -27,6 +27,13 @@ pub fn encode(invite: &InviteV1) -> Result<String> {
 }
 
 pub fn decode(value: &str) -> Result<InviteV1> {
+    let invite = decode_verified(value)?;
+    validate_invite_expiry(invite.expires_unix_ms, unix_time_ms()?)?;
+    Ok(invite)
+}
+
+/// Inspect/revoke the exact signed grant even after expiry.
+pub fn decode_verified(value: &str) -> Result<InviteV1> {
     if value.chars().count() > MAX_INVITE_TOKEN_CHARS {
         return Err(anyhow!("invite token exceeds the maximum supported size"));
     }
@@ -41,7 +48,6 @@ pub fn decode(value: &str) -> Result<InviteV1> {
     }
     validate_invite_addresses(&invite.bootstrap_addrs).context("invite connection hints are invalid")?;
     verify_invite_signature(&invite).context("invite signature is invalid")?;
-    validate_invite_expiry(invite.expires_unix_ms, unix_time_ms()?)?;
     Ok(invite)
 }
 

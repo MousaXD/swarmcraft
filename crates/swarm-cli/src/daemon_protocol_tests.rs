@@ -129,6 +129,80 @@ fn config(fixture: &Fixture, signer: &PeerIdentity) -> WorldConfigV1 {
     config
 }
 
+fn signed_join(
+    fixture: &Fixture,
+    expires_unix_ms: u64,
+) -> (swarm_protocol::JoinRequestV1, MembershipProposalV1, MembershipVoteV1) {
+    let joining = PeerIdentity::from_secret_bytes([69; 32]);
+    let mut invite = swarm_protocol::InviteV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: fixture.world,
+        display_name: "test".into(),
+        genesis: fixture.storage.load_world(fixture.world).unwrap().genesis,
+        inviter_peer_id: fixture.authority.peer_id(),
+        inviter_public_key: fixture.authority.public_key(),
+        bootstrap_addrs: Vec::new(),
+        expires_unix_ms,
+        nonce: [70; 32],
+        signature: Vec::new(),
+    };
+    fixture.authority.sign_invite(&mut invite).unwrap();
+    let mut request = swarm_protocol::JoinRequestV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: fixture.world,
+        invite,
+        joining_member: member(&joining),
+        nonce: [71; 32],
+        signature: Vec::new(),
+    };
+    joining.sign_join_request(&mut request).unwrap();
+    let previous = fixture.storage.load_membership_record(fixture.world).unwrap();
+    let mut proposed = previous.clone();
+    proposed.sequence += 1;
+    proposed.previous_membership_hash = Some(previous.record_hash().unwrap());
+    proposed.members.push(request.joining_member.clone());
+    proposed.members.sort_by_key(|member| member.peer_id);
+    fixture.authority.sign_membership(&mut proposed).unwrap();
+    let proposal = MembershipProposalV1 { previous, proposed };
+    let vote = sign_membership_vote(&fixture.authority, &proposal).unwrap();
+    (request, proposal, vote)
+}
+
+#[test]
+fn revoked_invitation_denies_fresh_prepare_after_restart() {
+    let fixture = fixture();
+    let (request, proposal, vote) = signed_join(&fixture, unix_millis().unwrap() + 60_000);
+    assert!(fixture.storage.revoke_invite(&request.invite).unwrap());
+    assert!(!fixture.storage.revoke_invite(&request.invite).unwrap());
+    let reopened = Storage::open(fixture._temp.path()).unwrap();
+    assert!(reopened.is_invite_revoked(&request.invite).unwrap());
+    assert!(matches!(
+        reopened.promise_join_membership_proposal(&proposal, &vote, &request),
+        Err(StorageError::InviteRevoked)
+    ));
+    assert!(load_optional_membership_promise(&reopened, fixture.world).unwrap().is_none());
+    assert_eq!(reopened.load_membership_record(fixture.world).unwrap(), proposal.previous);
+}
+
+#[test]
+fn expired_invitation_cannot_prepare_and_revocation_cannot_erase_a_promise() {
+    let fixture = fixture();
+    let (expired, proposal, vote) = signed_join(&fixture, unix_millis().unwrap() - 1);
+    assert!(matches!(
+        fixture.storage.promise_join_membership_proposal(&proposal, &vote, &expired),
+        Err(StorageError::InviteExpired)
+    ));
+    let (valid, proposal, vote) = signed_join(&fixture, unix_millis().unwrap() + 60_000);
+    assert_eq!(
+        fixture.storage.promise_join_membership_proposal(&proposal, &vote, &valid).unwrap(),
+        MembershipPromiseResult::Accepted
+    );
+    assert!(matches!(fixture.storage.revoke_invite(&valid.invite), Err(StorageError::InviteRevocationPrepared)));
+    let reopened = Storage::open(fixture._temp.path()).unwrap();
+    assert!(!reopened.is_invite_revoked(&valid.invite).unwrap());
+    assert_eq!(reopened.load_membership_promise(fixture.world).unwrap().proposal, proposal);
+}
+
 #[test]
 fn corrupt_membership_prepare_blocks_authority_and_recovery_transitions() {
     let fixture = fixture();

@@ -80,6 +80,12 @@ pub enum StorageError {
     WorldNotFound(WorldId),
     #[error("world metadata is inconsistent with its directory")]
     WorldMetadataMismatch,
+    #[error("invite revoked by its issuer")]
+    InviteRevoked,
+    #[error("invite expired or its lifetime is invalid")]
+    InviteExpired,
+    #[error("a membership transition is durably prepared; revocation cannot cancel a pending quorum decision")]
+    InviteRevocationPrepared,
     #[error("snapshot protocol version {0} is unsupported")]
     UnsupportedProtocol(u16),
     #[error("decode failed: {0}")]

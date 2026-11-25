@@ -106,11 +106,11 @@ Implementation completion: count only items whose full implementation criteria a
 - Work: Make invite expiry, reuse, membership approval, pending state, and revocation legible. Review a recipient-bound or one-use invite option
 - Acceptance: An expired or revoked grant cannot admit a new device. A removed device cannot fetch newer private snapshots. Existing downloaded copies have clearly documented retention limits
 - State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- Source: crates/swarm-cli/src/{invite,main,daemon,daemon_protocol_tests}.rs; crates/swarm-storage/src/membership.rs; crates/swarm-cli/tests/automatic_invite_join.rs; docs/INVITE_LIFECYCLE.md
+- Evidence: Issuer CLI inspect/revoke, durable exact-token denial, atomic fresh-prepare expiry/revocation, and pending/committed synchronization status implemented. Strict CLI/storage Clippy, 49 daemon/CLI binary tests, 67 storage library tests (1 optional soak ignored), and authenticated three-process revoked-vs-fresh invite regression passed. Earlier recovered-copy commit a6d9fe3 passed all 20 required CI jobs (45527028880).
+- Remaining / next action: Desktop lifecycle management, explicit remote admission denial feedback, live removed-member newer-checkpoint denial, and review recipient-bound/one-use policy. Existing durable prepares are never silently canceled.
+- External dependency: Installed Desktop/independent network acceptance; distributed revocation/rollback protection is not claimed.
+- Commit: See 25 November invite lifecycle checkpoint.
 
 ### #11 — P1 · Partial
 - Work: Expose a clear recovery path when a sole valid copy survives but quorum is gone. Reuse export/import and add a labeled recovered-world workflow

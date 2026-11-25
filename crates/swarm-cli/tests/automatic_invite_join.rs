@@ -110,6 +110,74 @@ fn wait_until(label: &str, timeout: Duration, mut predicate: impl FnMut() -> boo
 }
 
 #[test]
+fn revoked_invite_is_denied_by_restarted_issuer_while_another_grant_works() {
+    let issuer = peer_fixture();
+    let denied = peer_fixture();
+    let allowed = peer_fixture();
+    let local_ip = local_non_loopback_ipv4();
+    let address = automatic_transport_address(&issuer, local_ip);
+    let created = run_cli(
+        &issuer,
+        &["world", "create", "--name", "revocation", "--minecraft", "26.1.2", "--fabric-loader", "0.19.3"],
+    );
+    let world: WorldId = created.lines().find_map(|line| line.strip_prefix("World ID: ")).unwrap().parse().unwrap();
+    let initial = issuer.storage.load_membership_record(world).unwrap();
+    let world_arg = world.to_string();
+    let old_token = run_cli(&issuer, &["invite", "create", &world_arg, "--bootstrap", &address]);
+    let new_token = run_cli(&issuer, &["invite", "create", &world_arg, "--bootstrap", &address]);
+    assert_ne!(old_token, new_token);
+    let wrong_issuer = Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+        .arg("--data-dir")
+        .arg(&denied.paths.root)
+        .args(["invite", "revoke", &old_token])
+        .output()
+        .unwrap();
+    assert!(!wrong_issuer.status.success());
+    assert!(run_cli(&issuer, &["invite", "revoke", &old_token]).contains(" revoked"));
+    assert!(run_cli(&issuer, &["invite", "revoke", &old_token]).contains("already revoked"));
+    assert!(run_cli(&issuer, &["invite", "inspect", &old_token]).contains("Status: revoked"));
+    // New process reads the persisted issuer marker; capture actual denial
+    // rather than relying on a timeout or an unreachable peer.
+    let logs = issuer._temp.path().join("daemon-output.log");
+    let log = fs::File::create(&logs).unwrap();
+    let _issuer_daemon = ManagedChild(
+        Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+            .arg("--data-dir")
+            .arg(&issuer.paths.root)
+            .args(["daemon", "--listen", &format!("/ip4/{local_ip}/udp/{}/quic-v1", issuer.port)])
+            .env("RUST_LOG", "info")
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    );
+    let _denied_daemon = spawn_daemon(&denied, local_ip);
+    let _allowed_daemon = spawn_daemon(&allowed, local_ip);
+    assert!(run_cli(&denied, &["world", "join", &old_token]).contains("Join request staged"));
+    wait_until("authenticated revocation denial", Duration::from_secs(30), || {
+        fs::read_to_string(&logs).is_ok_and(|log| log.contains("invite revoked by its issuer"))
+    });
+    assert_eq!(issuer.storage.load_membership_record(world).unwrap(), initial);
+    assert!(issuer.storage.load_membership_promise(world).is_err());
+    assert!(denied.storage.load_membership_record(world).is_err());
+    assert!(denied.storage.latest_snapshot(world).unwrap().is_none());
+    assert!(run_cli(&denied, &["world", "status", &world_arg]).contains("Membership: pending"));
+    assert!(run_cli(&allowed, &["world", "join", &new_token]).contains("Join request staged"));
+    wait_until("fresh grant commits and replicates", Duration::from_secs(30), || {
+        let Ok(current) = issuer.storage.load_membership_record(world) else {
+            return false;
+        };
+        current.sequence == initial.sequence + 1
+            && current.members.iter().any(|member| member.peer_id == allowed.identity.peer_id())
+            && !current.members.iter().any(|member| member.peer_id == denied.identity.peer_id())
+            && allowed.storage.load_membership_record(world).ok().as_ref() == Some(&current)
+            && allowed.storage.latest_snapshot(world).ok().flatten().is_some()
+    });
+    assert!(denied.storage.load_membership_record(world).is_err());
+    assert!(denied.storage.latest_snapshot(world).unwrap().is_none());
+}
+
+#[test]
 fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
     let a = peer_fixture();
     let b = peer_fixture();

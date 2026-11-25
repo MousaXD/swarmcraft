@@ -1,0 +1,66 @@
+# Private world invitations and membership
+
+An invitation is a signed reusable bearer grant, not a membership
+certificate. Anyone who receives the complete token can request admission
+while it is valid. Admission still requires the current issuer and the
+existing joint membership approval rules.
+
+## Inspect and revoke
+
+```sh
+swarmcraft invite create "$WORLD" --expires-minutes 60
+swarmcraft invite inspect "$INVITE"
+swarmcraft invite revoke "$INVITE"
+```
+
+Keep the token private; do not paste it into public logs. Inspection prints
+the signed grant ID, issuer, world and expiry without printing the token
+or transport hints. Only an issuer's own local revocation record is
+authoritative for that issuer's revocation decision. A valid expiry alone
+does not prove a recipient can join.
+
+Invites can be created for 1–1440 minutes. A new admission preparation
+requires a currently valid, unrevoked invite issued by the current
+authority. Revocation is persisted under the exact signed grant hash,
+is idempotent, and survives process restart. It does not revoke other
+tokens for the same world.
+
+Revocation and the initial admission promise share a world transaction
+lock. If a membership decision has already been durably prepared,
+revocation is refused rather than pretending that a pending quorum
+decision can be canceled. Resolve the membership decision first. Expiry
+does not retroactively erase a signed durable decision either. A
+recipient who has already become a member does not need a fresh invite
+to use that existing membership.
+
+## Pending is not admitted
+
+`world join` stages a request. `world status` distinguishes waiting for
+signed approval, expired pending invitations, and committed admission
+with local synchronization still pending. The accepted signed membership
+and complete verified checkpoint determine whether ordinary world
+synchronization is available. A staged request cannot fetch private saves.
+
+## Removal and retained data
+
+Token revocation does **not** remove a committed member. Membership
+changes require the established signed membership protocol. Current
+replicas must authorize new private checkpoint requests against the
+accepted membership. Existing copies on an offline or removed device
+cannot be remotely erased, and data already disclosed cannot be made
+secret again. A stale partition cannot immediately know about a newer
+membership decision. Do not describe this system as remote data deletion
+or retroactive confidentiality.
+
+Reusable grants can request a fresh admission until expiry or revocation,
+subject to current membership and approval. Revoking an old grant is not
+a permanent ban of its recipient. The issuer's durable local marker is
+not a distributed revocation ledger or protection against full data-root
+rollback/key cloning. A separate recipient-bound or one-use policy would
+need a versioned signed token, durable consumption coordinated with
+membership preparation, and explicit legacy/migration behavior. Do not
+introduce a client-only one-use checkbox.
+
+The current CLI revocation and inspection paths have local process and
+durability tests. Dedicated Desktop management and a live removed-member
+replication test are tracked separately as remaining acceptance.

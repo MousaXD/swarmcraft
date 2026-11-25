@@ -1,11 +1,18 @@
 use crate::{
-    transaction::{durable_atomic_write, durable_create_once, durable_remove, read_canonical_file},
+    transaction::{
+        canonical_file_exists, durable_atomic_write, durable_create_once, durable_remove, read_canonical_file,
+    },
     Storage, StorageError,
 };
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use swarm_protocol::{
-    DiscoveryMembershipProofV1, MembershipCertificateV1, MembershipProposalV1, MembershipVoteV1, WorldId,
+    DiscoveryMembershipProofV1, InviteV1, JoinRequestV1, MembershipCertificateV1, MembershipProposalV1,
+    MembershipVoteV1, WorldId, MAX_INVITE_LIFETIME_MS,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +35,114 @@ impl Storage {
         vote: &MembershipVoteV1,
     ) -> Result<MembershipPromiseResult, StorageError> {
         let _guard = self.lock_world_transaction(proposal.proposed.world_id)?;
+        self.promise_membership_proposal_locked(proposal, vote)
+    }
+
+    /// The caller verifies the invite, join request, membership, epoch and vote
+    /// signatures. Serialize the fresh admission decision with issuer revocation.
+    pub fn promise_join_membership_proposal(
+        &self,
+        proposal: &MembershipProposalV1,
+        vote: &MembershipVoteV1,
+        request: &JoinRequestV1,
+    ) -> Result<MembershipPromiseResult, StorageError> {
+        let world = proposal.proposed.world_id;
+        if request.world_id != world || request.invite.world_id != world {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        let _guard = self.lock_world_transaction(world)?;
+        let current = self.validate_invite_authority_locked(&request.invite)?;
+        if proposal.previous != current
+            || vote.voter_peer_id != current.authority_peer_id
+            || vote.voter_public_key != current.authority_public_key
+            || request.joining_member.banned
+            || current.members.iter().any(|member| member.peer_id == request.joining_member.peer_id)
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        let mut expected = current.members.clone();
+        expected.push(request.joining_member.clone());
+        expected.sort_by_key(|member| member.peer_id);
+        if proposal.proposed.members != expected {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        if self.is_invite_revoked(&request.invite)? {
+            return Err(StorageError::InviteRevoked);
+        }
+        let now: u64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| StorageError::InviteExpired)?
+            .as_millis()
+            .try_into()
+            .map_err(|_| StorageError::InviteExpired)?;
+        if request.invite.expires_unix_ms <= now || request.invite.expires_unix_ms - now > MAX_INVITE_LIFETIME_MS {
+            return Err(StorageError::InviteExpired);
+        }
+        self.promise_membership_proposal_locked(proposal, vote)
+    }
+
+    fn validate_invite_authority_locked(
+        &self,
+        invite: &InviteV1,
+    ) -> Result<swarm_protocol::MembershipRecordV1, StorageError> {
+        let current = self.load_membership_record(invite.world_id)?;
+        let epoch = self.load_epoch_record(invite.world_id)?;
+        if self.load_world(invite.world_id)?.genesis != invite.genesis
+            || invite.genesis.world_id()? != invite.world_id
+            || current.authority_peer_id != invite.inviter_peer_id
+            || current.authority_public_key != invite.inviter_public_key
+            || epoch.authority_peer_id != invite.inviter_peer_id
+            || epoch.authority_public_key != invite.inviter_public_key
+            || epoch.epoch_number != current.epoch
+            || !current.members.iter().any(|member| {
+                !member.banned
+                    && member.peer_id == invite.inviter_peer_id
+                    && member.public_key == invite.inviter_public_key
+            })
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(current)
+    }
+
+    fn revoked_invite_path(&self, invite: &InviteV1) -> Result<PathBuf, StorageError> {
+        // Keep markers in the already-durable metadata directory, without a
+        // new directory whose creation would require another fsync boundary.
+        Ok(self
+            .world_dir(invite.world_id)
+            .join("metadata")
+            .join(format!("revoked-invite-{}.postcard", invite.record_hash()?)))
+    }
+
+    /// Any marker (including corrupt bytes) blocks admission. A symlink or
+    /// unreadable marker is an error, not proof that a grant remains valid.
+    pub fn is_invite_revoked(&self, invite: &InviteV1) -> Result<bool, StorageError> {
+        canonical_file_exists(&self.revoked_invite_path(invite)?)
+    }
+
+    /// Only the authenticated current issuer may call this after verifying
+    /// signatures. Never undo an already-promised membership transition.
+    pub fn revoke_invite(&self, invite: &InviteV1) -> Result<bool, StorageError> {
+        let _guard = self.lock_world_transaction(invite.world_id)?;
+        self.validate_invite_authority_locked(invite)?;
+        let path = self.revoked_invite_path(invite)?;
+        if canonical_file_exists(&path)? {
+            return Ok(false);
+        }
+        match self.load_membership_promise(invite.world_id) {
+            Ok(_) => return Err(StorageError::InviteRevocationPrepared),
+            Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        durable_atomic_write(&path, &postcard::to_allocvec(&invite.record_hash()?)?)?;
+        Ok(true)
+    }
+
+    fn promise_membership_proposal_locked(
+        &self,
+        proposal: &MembershipProposalV1,
+        vote: &MembershipVoteV1,
+    ) -> Result<MembershipPromiseResult, StorageError> {
         if self.first_contact_replay_pinned_locked(proposal.proposed.world_id)? {
             return Ok(MembershipPromiseResult::Rejected);
         }
