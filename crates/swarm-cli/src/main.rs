@@ -182,6 +182,14 @@ enum WorldCommand {
         #[arg(long)]
         confirm: bool,
     },
+    /// Review the verified local signed governance history; never grants administration rights.
+    Governance { world: String },
+    /// Inspect or explicitly pause/resume this device's discovery publication; no signed visibility change.
+    DiscoveryListing {
+        world: String,
+        #[arg(long)]
+        paused: Option<bool>,
+    },
     /// List locally known worlds.
     List,
     /// Show local world and snapshot status.
@@ -659,6 +667,28 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
                 "The daemon must obtain both old and new signed voter majorities. No authority or save was changed."
             );
         }
+        WorldCommand::Governance { world } => {
+            let world = parse_world(&world)?;
+            let identity = PeerIdentity::load_existing(paths)?;
+            let review = swarm_cli::historical_authority::review_world_governance(storage, &identity, world)?;
+            println!("{}", serde_json::to_string_pretty(&review)?);
+        }
+        WorldCommand::DiscoveryListing { world, paused } => {
+            let world = parse_world(&world)?;
+            storage.load_world(world)?;
+            if let Some(paused) = paused {
+                storage.set_discovery_listing_paused(world, paused)?;
+            }
+            println!(
+                "{}",
+                serde_json::json!({
+                    "world_id": world.to_string(),
+                    "locally_paused": storage.discovery_listing_paused(world)?,
+                    "signed_visibility_changed": false,
+                    "world_membership_changed": false,
+                })
+            );
+        }
         WorldCommand::Status { world } => {
             let world = parse_world(&world)?;
             let metadata = storage.load_world(world)?;
@@ -669,8 +699,12 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             println!("Fabric loader: {}", metadata.genesis.fabric_loader_version);
             println!("Compatibility: {}", metadata.genesis.compatibility_fingerprint);
             if let Ok(config) = storage.load_world_config(world) {
-                println!("Visibility: {:?}", config.visibility);
-                println!("Compatibility manifest: {}", config.compatibility_fingerprint()?);
+                if swarm_core::verify_world_config_signature(&config).is_ok() {
+                    println!("Visibility: {:?}", config.visibility);
+                    println!("Compatibility manifest: {}", config.compatibility_fingerprint()?);
+                } else {
+                    println!("Visibility: unknown (configuration signature not verified)");
+                }
             } else {
                 println!("Visibility: unknown (configuration not synchronized)");
             }

@@ -275,6 +275,32 @@ impl Storage {
         Ok(branches)
     }
 
+    /// Local publication preference only. Never changes signed config,
+    /// membership, storage roots, or authority. An unreadable marker denies
+    /// discovery rather than silently resuming publication.
+    pub fn discovery_listing_paused(&self, world: WorldId) -> Result<bool, StorageError> {
+        let path = self.control_path_v2(world, "discovery-listing.paused");
+        if !canonical_file_exists(&path)? {
+            return Ok(false);
+        }
+        if read_canonical_file(&path)? != b"swarmcraft-discovery-paused-v1\n" {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(true)
+    }
+
+    pub fn set_discovery_listing_paused(&self, world: WorldId, paused: bool) -> Result<(), StorageError> {
+        self.load_world(world)?;
+        let _guard = self.lock_world_transaction(world)?;
+        let path = self.control_path_v2(world, "discovery-listing.paused");
+        if paused {
+            durable_atomic_write(&path, b"swarmcraft-discovery-paused-v1\n")?;
+        } else if self.discovery_listing_paused(world)? {
+            durable_remove(&path)?;
+        }
+        Ok(())
+    }
+
     pub fn set_background_seeding(&self, world: WorldId, enabled: bool) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(world)?;
         self.load_world(world)?;

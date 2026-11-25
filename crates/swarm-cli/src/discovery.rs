@@ -12,9 +12,9 @@ use swarm_consensus::{validate_discovery_freshness_quorum, validate_discovery_me
 use swarm_core::{
     random_nonce, sign_discovery_freshness_vote, sign_friend_presence, sign_world_announcement,
     verify_discovery_freshness_challenge, verify_discovery_freshness_vote, verify_discovery_membership_proof,
-    verify_friend_presence, verify_membership_signature, verify_world_announcement, verify_world_config_signature,
-    AnnouncementReplayGuard, DataPaths, DiscoveryFreshnessReplayGuard, DiscoveryRecordError, PeerIdentity,
-    DISCOVERY_FRESHNESS_MAX_LIFETIME_MS,
+    verify_friend_presence, verify_membership_signature, verify_signature, verify_world_announcement,
+    verify_world_config_signature, AnnouncementReplayGuard, DataPaths, DiscoveryFreshnessReplayGuard,
+    DiscoveryRecordError, PeerIdentity, DISCOVERY_FRESHNESS_MAX_LIFETIME_MS,
 };
 use swarm_network::{
     generate_transport_key, load_or_create_transport_key, DiscoveryNetworkEvent, DiscoveryNode, TransportPeerId,
@@ -22,8 +22,9 @@ use swarm_network::{
 };
 use swarm_protocol::{
     peer_id_from_public_key, DiscoveryCanonicalHeadV1, DiscoveryCompatibilityV1, DiscoveryFilterV1,
-    DiscoveryFreshnessChallengeV1, DiscoveryFreshnessVoteV1, DiscoveryMembershipProofV1, FriendPresenceV1,
-    MembershipPolicyV1, PeerId, WorldAnnouncementV1, WorldId, WorldVisibilityV1, PROTOCOL_VERSION,
+    DiscoveryFreshnessChallengeV1, DiscoveryFreshnessVoteV1, DiscoveryMembershipProofV1, EpochMode, EpochRecordV1,
+    FriendPresenceV1, MembershipPolicyV1, MembershipRecordV1, PeerId, WorldAnnouncementV1, WorldConfigV1, WorldId,
+    WorldVisibilityV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{Storage, StorageError};
 use tokio::time::{timeout, Instant, MissedTickBehavior};
@@ -33,7 +34,10 @@ pub const DISCOVERY_CAPABILITY: &str = "discovery-v1";
 pub const DISCOVERY_LISTEN_DEFAULT: &str = "/ip4/0.0.0.0/udp/0/quic-v1";
 pub const WORLD_ANNOUNCEMENT_TTL_MS: u64 = 5 * 60 * 1_000;
 pub const FRIEND_PRESENCE_TTL_MS: u64 = 30 * 1_000;
-const DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+// Reconcile visibility and roster changes promptly. Keep an unchanged
+// announcement stable so a client's in-flight nonce challenge can complete.
+const DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const ANNOUNCEMENT_RENEW_BEFORE_MS: u64 = 60_000;
 const DISCOVERY_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 const DISCOVERY_FRESHNESS_TIMEOUT: Duration = Duration::from_secs(5);
 // A transient QUIC stream loss must not permanently hide a signed canonical
@@ -41,6 +45,10 @@ const DISCOVERY_FRESHNESS_TIMEOUT: Duration = Duration::from_secs(5);
 // overall discovery deadline; retries never bypass authentication or quorum.
 const DISCOVERY_EXPLICIT_PROVIDER_RETRIES: u8 = 2;
 const DISCOVERY_RETRY_DELAY: Duration = Duration::from_millis(200);
+// DiscoveryNode can legitimately need its next two-second connection-proof
+// challenge before the other endpoint has authenticated us. Do not burn the
+// independent stream-loss retry budget on pre-authentication refusals.
+const DISCOVERY_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(2250);
 const FRIENDS_FILE_VERSION: u16 = 1;
 const MAX_FRIEND_LABEL_BYTES: usize = 96;
 
@@ -104,8 +112,8 @@ pub struct WorldDiscoveryCardV1 {
     pub compatibility_fingerprint: String,
     pub visibility: String,
     pub membership_policy: String,
-    /// request_join, request_approval, or invite_required. This is descriptive;
-    /// discovery itself never changes canonical membership.
+    /// invite_required for supported V1 worlds. Unsupported membership
+    /// policies are not presented as working admission actions.
     pub join_action: String,
     pub announcer_peer_id: String,
     pub issued_unix_ms: u64,
@@ -288,19 +296,23 @@ fn refresh_publications(
     for metadata in storage.list_worlds()? {
         let world = metadata.world_id;
         let Ok(config) = storage.load_world_config(world) else { continue };
-        verify_world_config_signature(&config)?;
+        // Never create discovery records for private worlds, even while
+        // their membership or other control metadata is inconsistent.
+        if !supported_discovery_config(&config) {
+            continue;
+        }
         let Ok(membership) = storage.load_membership_record(world) else { continue };
-        verify_membership_signature(&membership)?;
+        let Ok(epoch) = storage.load_epoch_record(world) else { continue };
+        if !discovery_state_matches(storage, &config, &membership, &epoch).unwrap_or(false) {
+            continue;
+        }
         let local_is_current = membership.members.iter().any(|member| {
             member.peer_id == identity.peer_id() && member.public_key == identity.public_key() && !member.banned
         });
         let pending_membership = match storage.load_membership_promise(world) {
             Ok(promise) => Some(promise.proposal),
             Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => {
-                warn!(world = %world, %error, "refusing discovery publication with unreadable membership promise");
-                continue;
-            }
+            Err(_) => continue,
         };
         let local_is_pending = pending_membership.as_ref().is_some_and(|proposal| {
             proposal.proposed.members.iter().any(|member| {
@@ -310,21 +322,26 @@ fn refresh_publications(
         if !local_is_current && !local_is_pending {
             continue;
         }
-        match config.visibility {
-            WorldVisibilityV1::Private => continue,
-            WorldVisibilityV1::Unlisted | WorldVisibilityV1::Public => {}
+        if !discovery_state_matches(storage, &config, &membership, &epoch).unwrap_or(false) {
+            continue;
         }
-        // The DHT provider identity is only a locator. Publishing all current
-        // active members under the exact-world key makes a live quorum
-        // discoverable without granting any provider authority.
+        // DHT hints do not grant authority. Only eligible signed members
+        // advertise exact-world provider keys, never private worlds.
         next_worlds.insert(world);
-
-        let Ok(epoch) = storage.load_epoch_record(world) else { continue };
         if !local_is_current
             || epoch.authority_peer_id != identity.peer_id()
             || epoch.authority_public_key != identity.public_key()
         {
             continue;
+        }
+        if let Some(cached) = state.announcements.get(&world) {
+            if cached.expires_unix_ms > now.saturating_add(ANNOUNCEMENT_RENEW_BEFORE_MS)
+                && published_announcement_is_current(storage, cached)
+            {
+                next_announcements.insert(world, cached.clone());
+                any_public |= config.visibility == WorldVisibilityV1::Public;
+                continue;
+            }
         }
 
         let previous = state.sequences.get(&world).copied().unwrap_or(0);
@@ -334,13 +351,7 @@ fn refresh_publications(
             protocol_version: PROTOCOL_VERSION,
             world_id: world,
             presentation: config.presentation.clone(),
-            compatibility: DiscoveryCompatibilityV1 {
-                minecraft_version: config.compatibility.minecraft_version.clone(),
-                loader_id: config.compatibility.loader_id.clone(),
-                loader_version: config.compatibility.loader_version.clone(),
-                fabric_adapter_version: config.compatibility.fabric_adapter_version.clone(),
-                compatibility_fingerprint: config.compatibility.fingerprint()?,
-            },
+            compatibility: discovery_compatibility(&config)?,
             visibility: config.visibility,
             membership_policy: config.membership_policy,
             config_sequence: config.sequence,
@@ -349,12 +360,7 @@ fn refresh_publications(
             membership_hash: membership.record_hash()?,
             authority_epoch: epoch.epoch_number,
             fencing_token: epoch.fencing_token,
-            canonical_head: storage.canonical_snapshot_head(world)?.head.map(|head| DiscoveryCanonicalHeadV1 {
-                snapshot_number: head.snapshot_number,
-                manifest_hash: head.manifest_hash,
-                epoch: head.epoch,
-                sequence: head.sequence,
-            }),
+            canonical_head: discovery_head(storage, world)?,
             announcement_sequence: sequence,
             issued_unix_ms: now,
             expires_unix_ms: checked_discovery_expiry(now, WORLD_ANNOUNCEMENT_TTL_MS, "discovery")?,
@@ -364,6 +370,9 @@ fn refresh_publications(
         };
         sign_world_announcement(identity, &mut announcement)?;
         verify_world_announcement(&announcement, now).map_err(|error| anyhow!(error))?;
+        if !published_announcement_is_current(storage, &announcement) {
+            continue;
+        }
         next_announcements.insert(world, announcement);
         if matches!(config.visibility, WorldVisibilityV1::Public) {
             any_public = true;
@@ -388,16 +397,126 @@ fn refresh_publications(
     Ok(())
 }
 
-// Cached announcements must not outlive a signed visibility/configuration
-// change, even during the interval before DHT records expire or refresh.
-fn published_announcement_is_current(storage: &Storage, value: &WorldAnnouncementV1) -> bool {
-    storage.load_world_config(value.world_id).is_ok_and(|config| {
-        verify_world_config_signature(&config).is_ok()
-            && config.visibility != WorldVisibilityV1::Private
-            && config.visibility == value.visibility
-            && config.sequence == value.config_sequence
-            && config.config_hash().is_ok_and(|hash| hash == value.config_hash)
+// V1 supports signed, invite-mediated admission only. Neither a public
+// listing nor an unsupported future membership policy grants access.
+fn supported_discovery_config(config: &WorldConfigV1) -> bool {
+    config.visibility != WorldVisibilityV1::Private && config.membership_policy == MembershipPolicyV1::InviteOnly
+}
+
+fn discovery_compatibility(config: &WorldConfigV1) -> Result<DiscoveryCompatibilityV1> {
+    Ok(DiscoveryCompatibilityV1 {
+        minecraft_version: config.compatibility.minecraft_version.clone(),
+        loader_id: config.compatibility.loader_id.clone(),
+        loader_version: config.compatibility.loader_version.clone(),
+        fabric_adapter_version: config.compatibility.fabric_adapter_version.clone(),
+        compatibility_fingerprint: config.compatibility.fingerprint()?,
     })
+}
+
+fn discovery_head(storage: &Storage, world: WorldId) -> Result<Option<DiscoveryCanonicalHeadV1>> {
+    Ok(storage.canonical_snapshot_head(world)?.head.map(|head| DiscoveryCanonicalHeadV1 {
+        snapshot_number: head.snapshot_number,
+        manifest_hash: head.manifest_hash,
+        epoch: head.epoch,
+        sequence: head.sequence,
+    }))
+}
+
+fn discovery_state_matches(
+    storage: &Storage,
+    config: &WorldConfigV1,
+    membership: &MembershipRecordV1,
+    epoch: &EpochRecordV1,
+) -> Result<bool> {
+    let world = config.world_id;
+    if !supported_discovery_config(config)
+        || storage.discovery_listing_paused(world)?
+        || epoch.mode == EpochMode::Solo
+        || membership.world_id != world
+        || epoch.world_id != world
+        || verify_world_config_signature(config).is_err()
+        || verify_membership_signature(membership).is_err()
+        || verify_signature(
+            epoch.authority_peer_id,
+            epoch.authority_public_key,
+            &epoch.signing_bytes()?,
+            &epoch.signature,
+        )
+        .is_err()
+        || membership.epoch != epoch.epoch_number
+        || membership.authority_peer_id != epoch.authority_peer_id
+        || membership.authority_public_key != epoch.authority_public_key
+        || config.authority_peer_id != epoch.authority_peer_id
+        || config.authority_public_key != epoch.authority_public_key
+        || !membership.members.iter().any(|member| {
+            !member.banned
+                && member.authority_eligible
+                && member.peer_id == epoch.authority_peer_id
+                && member.public_key == epoch.authority_public_key
+        })
+        || !canonical_recovery_promise_allows_freshness(storage, world, epoch.epoch_number, epoch.fencing_token)
+    {
+        return Ok(false);
+    }
+    let metadata = storage.load_world(world)?;
+    let descriptor = storage.load_world_descriptor(world)?;
+    if descriptor.members != membership.members
+        || descriptor.compatibility_fingerprint != metadata.genesis.compatibility_fingerprint
+        || config.compatibility_fingerprint()? != metadata.genesis.compatibility_fingerprint
+        || crate::live_authority::verify_playable_epoch(storage, epoch).is_err()
+    {
+        return Ok(false);
+    }
+    // Refuse stale accepted state while a competing authority transition
+    // has been durably recorded. A completed predecessor transfer is fine.
+    match storage.load_transfer_record(world) {
+        Ok(transfer) => {
+            swarm_core::verify_transfer_signature(&transfer)?;
+            let target = (transfer.next_epoch, transfer.next_fencing_token);
+            let current = (epoch.epoch_number, epoch.fencing_token);
+            if transfer.phase != swarm_protocol::TransferPhase::Committed
+                || target > current
+                || (target == current && transfer.to_peer_id != epoch.authority_peer_id)
+            {
+                return Ok(false);
+            }
+        }
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(!storage.discovery_listing_paused(world)?
+        && storage.load_world_config(world)? == *config
+        && storage.load_membership_record(world)? == *membership
+        && storage.load_epoch_record(world)? == *epoch
+        && storage.load_world_descriptor(world)? == descriptor)
+}
+
+// Cached announcements must not outlive signed config, roster, authority
+// or checkpoint changes, even before the next DHT refresh.
+fn published_announcement_is_current(storage: &Storage, value: &WorldAnnouncementV1) -> bool {
+    fn check(storage: &Storage, value: &WorldAnnouncementV1) -> Result<bool> {
+        let config = storage.load_world_config(value.world_id)?;
+        let membership = storage.load_membership_record(value.world_id)?;
+        let epoch = storage.load_epoch_record(value.world_id)?;
+        if !discovery_state_matches(storage, &config, &membership, &epoch)? {
+            return Ok(false);
+        }
+        Ok(config.visibility == value.visibility
+            && config.membership_policy == value.membership_policy
+            && config.presentation == value.presentation
+            && discovery_compatibility(&config)? == value.compatibility
+            && config.sequence == value.config_sequence
+            && config.config_hash()? == value.config_hash
+            && membership.sequence == value.membership_sequence
+            && membership.record_hash()? == value.membership_hash
+            && epoch.epoch_number == value.authority_epoch
+            && epoch.fencing_token == value.fencing_token
+            && epoch.authority_peer_id == value.announcer_peer_id
+            && epoch.authority_public_key == value.announcer_public_key
+            && discovery_head(storage, value.world_id)? == value.canonical_head
+            && discovery_state_matches(storage, &config, &membership, &epoch)?)
+    }
+    check(storage, value).unwrap_or(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -469,6 +588,12 @@ fn handle_discovery_request(
                 return Ok(());
             }
             let proof = build_discovery_membership_proof(storage, world_id)?;
+            if verify_discovery_membership_proof(announcement, &proof).is_err()
+                || !published_announcement_is_current(storage, announcement)
+            {
+                node.respond(channel, WireResponse::DiscoveryFreshnessContext(None))?;
+                return Ok(());
+            }
             node.respond(channel, WireResponse::DiscoveryFreshnessContext(Some(Box::new(proof))))?;
         }
         WireRequest::DiscoveryFreshnessVote(challenge) => {
@@ -492,8 +617,22 @@ fn handle_discovery_request(
                 node.respond(channel, WireResponse::DiscoveryFreshnessVote(None))?;
                 return Ok(());
             }
-            state.signed_freshness_challenges.insert(replay_key, challenge.expires_unix_ms);
+            if identity.peer_id() == challenge.authority_peer_id
+                && !state.announcements.get(&challenge.world_id).is_some_and(|announcement| {
+                    announcement.expires_unix_ms >= now
+                        && announcement.announcement_hash().ok() == Some(challenge.announcement_hash)
+                        && published_announcement_is_current(storage, announcement)
+                })
+            {
+                node.respond(channel, WireResponse::DiscoveryFreshnessVote(None))?;
+                return Ok(());
+            }
             let vote = sign_discovery_freshness_vote(identity, &challenge)?;
+            if !local_state_matches_freshness_challenge(storage, identity, &challenge)? {
+                node.respond(channel, WireResponse::DiscoveryFreshnessVote(None))?;
+                return Ok(());
+            }
+            state.signed_freshness_challenges.insert(replay_key, challenge.expires_unix_ms);
             node.respond(channel, WireResponse::DiscoveryFreshnessVote(Some(Box::new(vote))))?;
         }
         WireRequest::FriendPresence { expected_peer_id, requester_peer_id, nonce } => {
@@ -602,30 +741,20 @@ fn local_state_matches_freshness_challenge(
         Ok(value) => value,
         Err(_) => return Ok(false),
     };
-    if epoch.authority_peer_id != challenge.authority_peer_id
-        || epoch.epoch_number != challenge.authority_epoch
-        || epoch.fencing_token != challenge.fencing_token
-    {
-        return Ok(false);
-    }
     let config = match storage.load_world_config(world) {
         Ok(value) => value,
         Err(_) => return Ok(false),
     };
-    verify_world_config_signature(&config)?;
-    if config.visibility == WorldVisibilityV1::Private
-        || config.authority_peer_id != challenge.authority_peer_id
+    if epoch.authority_peer_id != challenge.authority_peer_id
+        || epoch.epoch_number != challenge.authority_epoch
+        || epoch.fencing_token != challenge.fencing_token
+        || !discovery_state_matches(storage, &config, &membership, &epoch).unwrap_or(false)
         || config.sequence != challenge.config_sequence
         || config.config_hash()? != challenge.config_hash
     {
         return Ok(false);
     }
-    let head = storage.canonical_snapshot_head(world)?.head.map(|head| DiscoveryCanonicalHeadV1 {
-        snapshot_number: head.snapshot_number,
-        manifest_hash: head.manifest_hash,
-        epoch: head.epoch,
-        sequence: head.sequence,
-    });
+    let head = discovery_head(storage, world)?;
     if head != challenge.canonical_head {
         return Ok(false);
     }
@@ -668,6 +797,14 @@ pub fn validate_fresh_discovery_candidate(
         verify_discovery_freshness_vote(vote, challenge).map_err(|error| anyhow!(error))?;
     }
     validate_discovery_freshness_quorum(proof, votes).map_err(|error| anyhow!(error))?;
+    if announcement.membership_policy != MembershipPolicyV1::InviteOnly
+        || !votes.iter().any(|vote| {
+            vote.voter_peer_id == announcement.announcer_peer_id
+                && vote.voter_public_key == announcement.announcer_public_key
+        })
+    {
+        bail!("discovery requires a supported invite policy and a fresh vote from the listing authority");
+    }
     replay.accept(challenge).map_err(|error| anyhow!(error))?;
     Ok(())
 }
@@ -865,7 +1002,11 @@ async fn prove_candidate_freshness(
                         votes.sort_by_key(|value| value.voter_peer_id);
                     }
                     if let Some(candidate) = &proof {
-                        if validate_discovery_freshness_quorum(candidate, &votes).is_ok() {
+                        if votes.iter().any(|vote| {
+                            vote.voter_peer_id == announcement.announcer_peer_id
+                                && vote.voter_public_key == announcement.announcer_public_key
+                        }) && validate_discovery_freshness_quorum(candidate, &votes).is_ok()
+                        {
                             validate_fresh_discovery_candidate(
                                 announcement,
                                 candidate,
@@ -1040,6 +1181,7 @@ pub async fn search_public_worlds(
     let mut requested = HashSet::new();
     let mut pending = HashMap::<String, TransportPeerId>::new();
     let mut retry_attempts = HashMap::<TransportPeerId, u8>::new();
+    let mut handshake_retry_attempts = HashMap::<TransportPeerId, u8>::new();
     let mut queued_retries = HashMap::new();
     let request = WireRequest::DiscoveryPublic { filter: filter.clone() };
     for transport_peer in bootstrap_order.iter().copied() {
@@ -1118,20 +1260,21 @@ pub async fn search_public_worlds(
                         if matches!(code.as_str(), "HANDSHAKE_REQUIRED" | "AUTH_CONNECTION_RETRY")
                             && reserve_matching_explicit_provider_retry(
                                 &mut pending,
-                                &mut retry_attempts,
+                                &mut handshake_retry_attempts,
                                 transport_peer,
                                 request_id,
                                 &bootstrap_peers,
                             )
                         {
                             requested.remove(&transport_peer);
-                            queued_retries.insert(transport_peer, Instant::now() + DISCOVERY_RETRY_DELAY);
+                            queued_retries.insert(transport_peer, Instant::now() + DISCOVERY_HANDSHAKE_RETRY_DELAY);
                         }
                     }
                     pending.remove(&key);
                     if let WireResponse::DiscoveryWorlds(values) = response {
                         for value in values {
                             if !matches!(value.visibility, WorldVisibilityV1::Public)
+                                || value.membership_policy != MembershipPolicyV1::InviteOnly
                                 || !announcement_matches(&value, &filter)
                             {
                                 rejected_invalid += 1;
@@ -1267,6 +1410,7 @@ pub async fn resolve_world(
     // response cannot consume a legitimate retry slot.
     let mut pending = HashMap::<String, TransportPeerId>::new();
     let mut retry_attempts = HashMap::<TransportPeerId, u8>::new();
+    let mut handshake_retry_attempts = HashMap::<TransportPeerId, u8>::new();
     let mut queued_retries = HashMap::new();
     let request = WireRequest::DiscoveryResolve { world_id: world };
     for transport_peer in bootstrap_order.iter().copied() {
@@ -1338,19 +1482,22 @@ pub async fn resolve_world(
                         if matches!(code.as_str(), "HANDSHAKE_REQUIRED" | "AUTH_CONNECTION_RETRY")
                             && reserve_matching_explicit_provider_retry(
                                 &mut pending,
-                                &mut retry_attempts,
+                                &mut handshake_retry_attempts,
                                 transport_peer,
                                 request_id,
                                 &bootstrap_peers,
                             )
                         {
                             requested.remove(&transport_peer);
-                            queued_retries.insert(transport_peer, Instant::now() + DISCOVERY_RETRY_DELAY);
+                            queued_retries.insert(transport_peer, Instant::now() + DISCOVERY_HANDSHAKE_RETRY_DELAY);
                         }
                     }
                     pending.remove(&key);
                     if let WireResponse::DiscoveryResolved(Some(value)) = response {
-                        if value.world_id != world || matches!(value.visibility, WorldVisibilityV1::Private) {
+                        if value.world_id != world
+                            || matches!(value.visibility, WorldVisibilityV1::Private)
+                            || value.membership_policy != MembershipPolicyV1::InviteOnly
+                        {
                             invalid = true;
                             continue;
                         }
@@ -1619,8 +1766,8 @@ fn announcement_matches(value: &WorldAnnouncementV1, filter: &DiscoveryFilterV1)
 impl From<WorldAnnouncementV1> for WorldDiscoveryCardV1 {
     fn from(value: WorldAnnouncementV1) -> Self {
         let (membership_policy, join_action) = match value.membership_policy {
-            MembershipPolicyV1::Open => ("open", "request_join"),
-            MembershipPolicyV1::ApprovalRequired => ("approval_required", "request_approval"),
+            MembershipPolicyV1::Open => ("open", "unsupported"),
+            MembershipPolicyV1::ApprovalRequired => ("approval_required", "unsupported"),
             MembershipPolicyV1::InviteOnly => ("invite_only", "invite_required"),
         };
         Self {
@@ -2060,7 +2207,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             minecraft_version: "1.21.8".into(),
             fabric_loader_version: "0.17.2".into(),
-            compatibility_fingerprint: Hash32([34; 32]),
+            compatibility_fingerprint: canonical_fixture(&a, WorldId::default()).0.compatibility_fingerprint().unwrap(),
             creation_nonce: [35; 32],
             creator_public_key: a.public_key(),
             initial_membership: members.iter().map(|member| member.peer_id).collect(),
@@ -2100,6 +2247,15 @@ mod tests {
 
         for store in &stores {
             store.create_world(&metadata).unwrap();
+            store
+                .save_world_descriptor(&swarm_protocol::WorldDescriptorV1 {
+                    protocol_version: PROTOCOL_VERSION,
+                    world_id: world,
+                    compatibility_fingerprint: metadata.genesis.compatibility_fingerprint,
+                    members: members.clone(),
+                    preferred_replication_factor: 2,
+                })
+                .unwrap();
             store.save_membership_record(&initial).unwrap();
             store.save_world_config(&config1).unwrap();
             store.save_epoch_record(&epoch1).unwrap();
@@ -2220,9 +2376,53 @@ mod tests {
 
         let mut cached_public = sample_announcement(&b, WorldVisibilityV1::Public);
         cached_public.world_id = world;
+        cached_public.presentation = config2.presentation.clone();
+        cached_public.compatibility = discovery_compatibility(&config2).unwrap();
         cached_public.config_sequence = config2.sequence;
         cached_public.config_hash = config2.config_hash().unwrap();
+        cached_public.membership_sequence = membership2.sequence;
+        cached_public.membership_hash = membership2.record_hash().unwrap();
+        cached_public.authority_epoch = epoch2.epoch_number;
+        cached_public.fencing_token = epoch2.fencing_token;
+        sign_world_announcement(&b, &mut cached_public).unwrap();
         assert!(published_announcement_is_current(&stores[1], &cached_public));
+        for field in 0..5 {
+            let mut stale_cache = cached_public.clone();
+            match field {
+                0 => stale_cache.membership_hash = Hash32([89; 32]),
+                1 => stale_cache.authority_epoch -= 1,
+                2 => stale_cache.fencing_token -= 1,
+                3 => stale_cache.presentation.description = "not signed in config".into(),
+                _ => {
+                    stale_cache.canonical_head = Some(DiscoveryCanonicalHeadV1 {
+                        snapshot_number: 1,
+                        manifest_hash: Hash32([90; 32]),
+                        epoch: 1,
+                        sequence: 1,
+                    })
+                }
+            }
+            sign_world_announcement(&b, &mut stale_cache).unwrap();
+            assert!(!published_announcement_is_current(&stores[1], &stale_cache));
+        }
+
+        // Local unlisting takes effect before a publisher refreshes its
+        // DHT hints or replaces the cached announcement.
+        stores[1].set_discovery_listing_paused(world, true).unwrap();
+        assert!(stores[1].discovery_listing_paused(world).unwrap());
+        assert!(!published_announcement_is_current(&stores[1], &cached_public));
+        assert!(!local_state_matches_freshness_challenge(&stores[1], &b, &current).unwrap());
+        assert_eq!(stores[1].load_world_config(world).unwrap(), config2);
+        stores[1].set_discovery_listing_paused(world, false).unwrap();
+        assert!(published_announcement_is_current(&stores[1], &cached_public));
+
+        let pause_path = stores[1].world_dir(world).join("metadata/discovery-listing.paused");
+        fs::write(&pause_path, b"invalid marker").unwrap();
+        assert!(!published_announcement_is_current(&stores[1], &cached_public));
+        assert!(!local_state_matches_freshness_challenge(&stores[1], &b, &current).unwrap());
+        assert!(stores[1].set_discovery_listing_paused(world, false).is_err());
+        stores[1].set_discovery_listing_paused(world, true).unwrap();
+        stores[1].set_discovery_listing_paused(world, false).unwrap();
 
         let mut private = config2.clone();
         private.sequence += 1;

@@ -1244,6 +1244,14 @@ fn lost_device_retirement_requires_surviving_joint_quorum_and_denies_old_bearer_
     assert_eq!(issuer.storage.load_membership_record(world).unwrap(), before);
     assert_eq!(issuer.storage.load_membership_promise(world).unwrap(), promise);
     assert!(run_cli(&issuer, &["world", "status", &world_arg]).contains("Device retirement: Pending joint quorum"));
+    let audit: serde_json::Value =
+        serde_json::from_str(&run_cli(&issuer, &["world", "governance", &world_arg])).unwrap();
+    assert_eq!(audit["pending_membership"]["state"], "staged_not_committed");
+    assert_eq!(audit["pending_membership"]["proposal_hash"], promise.proposal.proposal_hash().unwrap().to_string());
+    assert_eq!(
+        audit["membership_history"].as_array().unwrap().last().unwrap()["record_hash"],
+        before.record_hash().unwrap().to_string()
+    );
     let _b = spawn_daemon_with_peers(&survivor, ip, std::slice::from_ref(&address));
     wait_until("joint retirement by actual surviving daemons", Duration::from_secs(45), || {
         issuer.storage.load_membership_record(world).ok().as_ref() == Some(&promise.proposal.proposed)
@@ -1256,6 +1264,20 @@ fn lost_device_retirement_requires_surviving_joint_quorum_and_denies_old_bearer_
     assert_eq!(issuer.storage.load_sleep_record(world).unwrap(), sleep);
     assert_eq!(issuer.storage.latest_snapshot(world).unwrap().unwrap(), head);
     assert_eq!(committed.members.iter().filter(|m| m.banned).count(), 1);
+    let governance: serde_json::Value =
+        serde_json::from_str(&run_cli(&issuer, &["world", "governance", &world_arg])).unwrap();
+    assert_eq!(governance["evidence"], "verified_local_canonical_history_not_live_authority");
+    assert_eq!(governance["signed_visibility"], "private");
+    assert_eq!(governance["locally_accepted_authority"], true);
+    assert!(governance["pending_membership"].is_null());
+    let last = governance["membership_history"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["record_hash"], committed.record_hash().unwrap().to_string());
+    assert_eq!(last["joint_quorum_voters"].as_array().unwrap().len(), 2);
+    assert_eq!(last["changes"][0]["peer_id"], target);
+    assert_eq!(last["changes"][0]["before"]["active_member"], true);
+    assert_eq!(last["changes"][0]["after"]["banned"], true);
+    assert_eq!(last["changes"][0]["after"]["voter"], false);
+    assert!(!governance.to_string().contains("scinvite:"));
     let cert = issuer.storage.load_membership_certificate(world).unwrap();
     swarm_consensus::validate_membership_certificate_shape(&cert).unwrap();
     assert_eq!(cert.votes.len(), 2);
@@ -1341,5 +1363,135 @@ fn lost_device_retirement_requires_surviving_joint_quorum_and_denies_old_bearer_
             && m.members.iter().any(|v| v.peer_id == replacement.identity.peer_id() && !v.banned)
             && replacement.storage.load_membership_record(world).ok().as_ref() == Some(&m)
             && replacement.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&head)
+    });
+}
+
+#[test]
+fn world_visibility_never_authorizes_outsider_replication() {
+    use swarm_network::{NetworkEvent, SwarmNode, WireRequest, WireResponse};
+
+    let owner = peer_fixture();
+    let stranger = peer_fixture();
+    let ip = local_non_loopback_ipv4();
+    let address = automatic_transport_address(&owner, ip);
+    let mut worlds = Vec::<WorldId>::new();
+    for visibility in ["public", "unlisted", "private"] {
+        let created = run_cli(
+            &owner,
+            &[
+                "world",
+                "create",
+                "--name",
+                visibility,
+                "--minecraft",
+                "26.1.2",
+                "--fabric-loader",
+                "0.19.3",
+                "--visibility",
+                visibility,
+            ],
+        );
+        worlds.push(created.lines().find_map(|s| s.strip_prefix("World ID: ")).unwrap().parse().unwrap());
+    }
+    let _daemon = spawn_daemon(&owner, ip);
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let key = load_or_create_transport_key(&stranger.paths.transport_key()).unwrap();
+        let hello = stranger.identity.signed_peer_hello(vec!["snapshot-replication-v1".into()]).unwrap();
+        let mut probe = SwarmNode::new(key, hello, stranger.identity.network_signing_key()).unwrap();
+        probe.listen(format!("/ip4/{ip}/udp/{}/quic-v1", stranger.port).parse().unwrap()).unwrap();
+        probe.dial(address.parse().unwrap()).unwrap();
+        let mut pending = Vec::new();
+        let mut authenticated = None;
+        let mut ping_request = None;
+        let mut started = false;
+        let mut denied = 0;
+        let mut ping_attempts = 0;
+        let mut retry = tokio::time::interval(Duration::from_millis(1200));
+        let ping_nonce = 0x2700u64;
+        tokio::time::timeout(Duration::from_secs(35), async {
+            loop {
+                // A local Authenticated event verifies the remote key; it
+                // does not assert that the remote has finished verifying
+                // ours. Require an authenticated application-level Pong
+                // before testing world authorization, not a timing sleep.
+                let event = tokio::select! {
+                    event = probe.next_event() => event.unwrap(),
+                    _ = retry.tick(), if !started && authenticated.is_some() && ping_request.is_none() => {
+                        assert!(ping_attempts < 5, "mutual application authentication never completed");
+                        let peer = authenticated.unwrap();
+                        ping_request = Some(probe.send_request(&peer, WireRequest::Ping { nonce: ping_nonce }).unwrap());
+                        ping_attempts += 1;
+                        continue;
+                    }
+                };
+                match event {
+                    NetworkEvent::Authenticated { transport_peer, application_peer }
+                        if application_peer == owner.identity.peer_id() && !started =>
+                    {
+                        authenticated = Some(transport_peer);
+                    }
+                    NetworkEvent::Response { transport_peer, request_id, response }
+                        if ping_request == Some(request_id) && authenticated == Some(transport_peer) =>
+                    {
+                        ping_request = None;
+                        match response {
+                            WireResponse::Pong { nonce } if nonce == ping_nonce => {
+                                started = true;
+                                for world in &worlds {
+                                    for request in [
+                                        WireRequest::WorldStatus { world_id: *world },
+                                        WireRequest::WorldDescriptor { world_id: *world },
+                                        WireRequest::HistoricalReplayProof { world_id: *world },
+                                        WireRequest::HostCapability { world_id: *world },
+                                    ] {
+                                        let historical = matches!(&request, WireRequest::HistoricalReplayProof { .. });
+                                        pending.push((probe.send_request(&transport_peer, request).unwrap(), historical));
+                                    }
+                                }
+                            }
+                            WireResponse::Error { code, .. } if matches!(code.as_str(),
+                                "HANDSHAKE_REQUIRED" | "AUTH_CONNECTION_RETRY") => {}
+                            other => panic!("unexpected mutual-authentication response: {other:?}"),
+                        }
+                    }
+                    NetworkEvent::Response { transport_peer, request_id, response }
+                        if probe.application_peer(&transport_peer) == Some(owner.identity.peer_id())
+                            && pending.iter().any(|(id, _)| *id == request_id) =>
+                    {
+                        let historical = pending.iter().find(|(id, _)| *id == request_id).unwrap().1;
+                        if historical {
+                            // The asynchronous replay RPC deliberately returns an opaque empty proof.
+                            assert!(matches!(&response, WireResponse::HistoricalReplayProof(None)),
+                                "unexpected outsider replay response: {response:?}");
+                        } else {
+                            assert!(matches!(&response, WireResponse::Error { code, message }
+                                if code == "WORLD_ACCESS_DENIED" && message == "World access unavailable"),
+                                "unexpected outsider response: {response:?}");
+                        }
+                        pending.retain(|(id, _)| id != &request_id);
+                        denied += 1;
+                        if pending.is_empty() { break; }
+                    }
+                    NetworkEvent::InboundRequest { request, channel, .. } => {
+                        assert!(!matches!(
+                            request,
+                            WireRequest::SnapshotManifest(_)
+                                | WireRequest::BlobChunk { .. }
+                                | WireRequest::HistoricalReplayOffer { .. }
+                                | WireRequest::WorldConfig(_)
+                                | WireRequest::Membership(_)
+                        ));
+                        let _ = probe.respond(
+                            channel,
+                            WireResponse::Error { code: "TEST_PROBE".into(), message: "outsider".into() },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("all public, unlisted, and private member-only requests must be denied");
+        assert_eq!(denied, 12);
     });
 }

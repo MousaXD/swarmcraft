@@ -801,6 +801,158 @@ pub fn collect_replay_proof(
     Ok(proof)
 }
 
+/// Local, read-only governance audit. It verifies the complete retained
+/// canonical history, including joint voter/role changes and authority
+/// transitions. It deliberately returns no authority capability or tokens.
+pub fn review_world_governance(storage: &Storage, local: &PeerIdentity, world: WorldId) -> Result<serde_json::Value> {
+    use serde_json::json;
+    use swarm_protocol::WorldMemberV1;
+    use swarm_storage::StorageError;
+
+    let (proof, manifests) = collect_local_history(storage, world)?;
+    let current = proof.membership.last().context("missing current membership")?;
+    let epoch = proof.epochs.last().context("missing current epoch")?;
+    let config = proof.configs.last().context("missing current config")?;
+    let descriptor = storage.load_world_descriptor(world)?;
+    let local_member = current
+        .members
+        .iter()
+        .find(|member| member.peer_id == local.peer_id() && member.public_key == local.public_key() && !member.banned)
+        .context("governance history is available only to a locally accepted active member")?;
+    if descriptor.members != current.members
+        || descriptor.compatibility_fingerprint != proof.genesis.compatibility_fingerprint
+        || storage.first_contact_replay_pinned(world)?
+        || storage.crash_retirement_pending(world)?
+        || !storage.list_solo_conflicts(world)?.is_empty()
+    {
+        bail!("governance history is not synchronized or has unresolved conflicts");
+    }
+    validate_replay_shape(&proof, &proof.genesis, current)?;
+    verify_replay_history(&proof, &proof.genesis, current)?;
+    for manifest in &manifests {
+        verify_manifest_against_history(&proof, manifest)?;
+    }
+
+    let pending = match storage.load_membership_promise(world) {
+        Ok(promise) => {
+            let proposal = &promise.proposal;
+            swarm_consensus::validate_membership_proposal_shape(proposal)?;
+            verify_membership_signature(&proposal.previous)?;
+            verify_membership_signature(&proposal.proposed)?;
+            if !promise.vote.matches_proposal(proposal)? {
+                bail!("pending membership vote does not match its proposal");
+            }
+            verify_signature(
+                promise.vote.voter_peer_id,
+                promise.vote.voter_public_key,
+                &promise.vote.signing_bytes()?,
+                &promise.vote.signature,
+            )?;
+            let state = if &proposal.previous == current {
+                "staged_not_committed"
+            } else if &proposal.proposed == current {
+                "committed_cleanup_pending"
+            } else {
+                bail!("pending membership does not match canonical history");
+            };
+            Some(json!({
+                "state": state,
+                "proposal_hash": proposal.proposal_hash()?.to_string(),
+                "proposed_sequence": proposal.proposed.sequence,
+            }))
+        }
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+
+    fn role(member: &WorldMemberV1) -> serde_json::Value {
+        json!({
+            "active_member": !member.banned,
+            "voter": !member.banned,
+            "replica_member": !member.banned,
+            "host_candidate": !member.banned && member.authority_eligible,
+            "banned": member.banned,
+        })
+    }
+    let mut membership_history = Vec::new();
+    let mut previous_members = BTreeMap::<_, &WorldMemberV1>::new();
+    for record in &proof.membership {
+        let next = record.members.iter().map(|member| (member.peer_id, member)).collect::<BTreeMap<_, _>>();
+        let peer_ids = previous_members.keys().chain(next.keys()).copied().collect::<BTreeSet<_>>();
+        let changes = peer_ids
+            .into_iter()
+            .filter_map(|peer| {
+                let old = previous_members.get(&peer);
+                let new = next.get(&peer);
+                (old != new).then(|| {
+                    json!({
+                        "peer_id": peer.to_string(),
+                        "before": old.map(|member| role(member)),
+                        "after": new.map(|member| role(member)),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        let certificate = proof.membership_certificates.iter().find(|cert| cert.proposal.proposed == *record);
+        membership_history.push(json!({
+            "sequence": record.sequence,
+            "epoch": record.epoch,
+            "record_hash": record.record_hash()?.to_string(),
+            "previous_hash": record.previous_membership_hash.map(|hash| hash.to_string()),
+            "signed_by": record.authority_peer_id.to_string(),
+            "changes": changes,
+            "joint_quorum_voters": certificate.map(|cert| cert.votes.iter()
+                .map(|vote| vote.voter_peer_id.to_string()).collect::<Vec<_>>()),
+        }));
+        previous_members = next;
+    }
+    let mut configs = Vec::new();
+    let mut prior: Option<&WorldConfigV1> = None;
+    for record in &proof.configs {
+        configs.push(json!({
+            "sequence": record.sequence,
+            "record_hash": record.config_hash()?.to_string(),
+            "previous_hash": record.previous_config_hash.map(|hash| hash.to_string()),
+            "signed_by": record.authority_peer_id.to_string(),
+            "visibility": format!("{:?}", record.visibility).to_lowercase(),
+            "membership_policy": format!("{:?}", record.membership_policy),
+            "presentation_changed": prior.is_some_and(|old| old.presentation != record.presentation),
+            "authority_policy_changed": prior.is_some_and(|old| old.authority_policy != record.authority_policy),
+        }));
+        prior = Some(record);
+    }
+    let mut epochs = Vec::new();
+    for record in &proof.epochs {
+        epochs.push(json!({
+            "epoch": record.epoch_number,
+            "fence": record.fencing_token,
+            "record_hash": record.record_hash()?.to_string(),
+            "authority": record.authority_peer_id.to_string(),
+            "mode": format!("{:?}", record.mode),
+        }));
+    }
+    ensure_collected_history_current(storage, &proof, &manifests)?;
+    if storage.load_world_descriptor(world)? != descriptor
+        || storage.first_contact_replay_pinned(world)?
+        || storage.crash_retirement_pending(world)?
+    {
+        bail!("governance state changed during inspection");
+    }
+    Ok(json!({
+        "schema_version": 1,
+        "world_id": world.to_string(),
+        "evidence": "verified_local_canonical_history_not_live_authority",
+        "signed_visibility": format!("{:?}", config.visibility).to_lowercase(),
+        "locally_accepted_authority": epoch.authority_peer_id == local.peer_id(),
+        "local_role": role(local_member),
+        "locally_paused": storage.discovery_listing_paused(world)?,
+        "pending_membership": pending,
+        "config_history": configs,
+        "membership_history": membership_history,
+        "authority_history": epochs,
+    }))
+}
+
 /// Assemble exact retained signed records without claiming a final-authority
 /// envelope. This private helper is shared by the authority-only signer and
 /// the offline, new-identity recovery-copy verifier.

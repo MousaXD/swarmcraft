@@ -82,7 +82,7 @@ def smoke(cli, runtime, infra):
             assert result["state"] != "found" and result["world"] is None
             owner = root / "owner"
             worlds = {}
-            for visibility in ("public", "private"):
+            for visibility in ("public", "unlisted", "private"):
                 output = command([cli, "--data-dir", owner, "world", "create", "--name",
                                   f"Infrastructure test {visibility}", "--minecraft", "26.1.2",
                                   "--fabric-loader", "0.19.3", "--visibility", visibility])
@@ -113,6 +113,39 @@ def smoke(cli, runtime, infra):
                                          "--query", "Infrastructure test", "--bootstrap", locator_address]))
             assert any(item["world_id"] == worlds["public"] for item in browse["results"]), browse
             assert all(item["world_id"] != worlds["private"] for item in browse["results"]), browse
+            assert all(item["world_id"] != worlds["unlisted"] for item in browse["results"]), browse
+            assert all(item["join_action"] == "invite_required" for item in browse["results"]), browse
+            unlisted = json.loads(command([runtime, "--data-dir", client, "discovery-resolve",
+                                           worlds["unlisted"], "--bootstrap", provider_address]))
+            assert unlisted["state"] == "found" and unlisted["world"]["visibility"] == "unlisted", unlisted
+            assert unlisted["world"]["join_action"] == "invite_required"
+            # The live publisher must refuse private exact lookup even when
+            # the caller already knows the actual provider's address.
+            direct_private = json.loads(command([runtime, "--data-dir", client, "discovery-resolve",
+                                                 worlds["private"], "--bootstrap", provider_address]))
+            assert direct_private["state"] != "found" and direct_private["world"] is None
+            before = json.loads(command([cli, "--data-dir", owner, "world", "governance", worlds["public"]]))
+            pause = json.loads(command([cli, "--data-dir", owner, "world", "discovery-listing",
+                                         worlds["public"], "--paused", "true"]))
+            assert pause["locally_paused"] and not pause["signed_visibility_changed"]
+            paused = json.loads(command([runtime, "--data-dir", client, "discovery-resolve",
+                                          worlds["public"], "--bootstrap", provider_address]))
+            assert paused["state"] != "found" and paused["world"] is None
+            paused_audit = json.loads(command([cli, "--data-dir", owner, "world", "governance", worlds["public"]]))
+            assert paused_audit["locally_paused"] and paused_audit["signed_visibility"] == "public"
+            assert paused_audit["config_history"] == before["config_history"]
+            assert paused_audit["membership_history"] == before["membership_history"]
+            command([cli, "--data-dir", owner, "world", "discovery-listing",
+                     worlds["public"], "--paused", "false"])
+            deadline = time.monotonic() + 30
+            while True:
+                resumed = json.loads(command([runtime, "--data-dir", client, "discovery-resolve",
+                                               worlds["public"], "--bootstrap", provider_address]))
+                if resumed["state"] == "found":
+                    break
+                if time.monotonic() >= deadline:
+                    raise AssertionError("resumed publisher did not restore explicit public listing")
+                time.sleep(0.3)
             private = json.loads(command([runtime, "--data-dir", client, "discovery-resolve",
                                           worlds["private"], "--bootstrap", locator_address]))
             assert private["state"] != "found" and private["world"] is None
@@ -145,7 +178,7 @@ def smoke(cli, runtime, infra):
             for service in services:
                 content = service.log.read_text(errors="replace")
                 assert "scinvite:" not in content and worlds["private"] not in content
-            print("PASS: isolated locator -> signed publisher lookup, private world excluded, duplicate owners refused, stable relay restart.")
+            print("PASS: isolated locator -> signed publisher lookup, public/unlisted/private separation, explicit listing pause/resume, duplicate owners refused, stable relay restart.")
             print("Scope: real local services with mDNS disabled; no independent-network or actual Minecraft certification.")
         finally:
             for service in reversed(services):

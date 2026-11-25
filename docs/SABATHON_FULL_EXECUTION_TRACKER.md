@@ -275,12 +275,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #27 — P2 · Proposal
 - Work: Define public/unlisted/private visibility behavior and moderation roles before public rollout
 - Acceptance: Visibility never bypasses membership. Admin actions and role changes can be reviewed, and private data does not leak to discovery
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: crates/swarm-cli/src/{discovery,historical_authority,main}.rs; crates/swarm-storage/src/state.rs; crates/swarm-cli/tests/{discovery_freshness,discovery_network_freshness,automatic_invite_join}.rs; scripts/e2e/private_infrastructure_smoke.py; docs/WORLD_GOVERNANCE.md
+- Evidence: Exact signed config/roster/epoch/fence/checkpoint rechecked before discovery; fresh announcing-authority vote required in addition to current/joint majority. Invite-only admission remains independent of visibility. Durable local listing pause/resume, malformed-marker denial, signed read-only governance history, role diffs and staged-versus-committed retirement evidence. 161 CLI library tests (2 ignored), 7 discovery freshness tests, 5 discovery network tests, authenticated outsider denial for all three visibility modes, retirement audit, strict Clippy, CLI builds, and real localhost locator/publisher/relay smoke pass. Storage regressions pass. Connection-proof retry timing repaired without bypassing authentication.
+- Remaining / next action: Canonical signed visibility editing requires bounded configuration-history catch-up for offline replicas and explicit publication confirmation. Separate moderator/owner grants, abuse-report workflow, native account/session policy, mixed-version and installed cross-platform/public-network acceptance remain pending. Local unlisting is not a global policy change or retroactive erasure of prior disclosures.
+- External dependency: Independent governance/privacy review and actual public-rollout field validation.
+- Commit: See 25 November governance/discovery privacy checkpoint.
 
 ### #28 — Sabathon P0 · Partial
 - Work: Show accepted checkpoint, last replica acknowledgment, size, lag, and progress since the last recoverable save

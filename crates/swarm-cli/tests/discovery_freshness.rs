@@ -197,6 +197,39 @@ fn current_quorum_accepts_and_replay_wrong_head_epoch_membership_world_and_verif
 }
 
 #[test]
+fn a_stale_majority_without_the_listing_authority_cannot_certify_discovery() {
+    let (ids, announcement, proof, challenge) = fixture(3);
+    let stale_replica_votes = votes([&ids[1], &ids[2]], &challenge);
+    // This is a genuine majority, but does not establish that the listing
+    // authority still consents to publication of the exact announcement.
+    validate_discovery_freshness_quorum(&proof, &stale_replica_votes).unwrap();
+    let mut guard = DiscoveryFreshnessReplayGuard::default();
+    assert!(validate_fresh_discovery_candidate(
+        &announcement,
+        &proof,
+        &challenge,
+        &stale_replica_votes,
+        challenge.verifier_peer_id,
+        challenge.nonce,
+        3_000,
+        &mut guard,
+    )
+    .is_err());
+    let current_votes = votes([&ids[0], &ids[2]], &challenge);
+    validate_fresh_discovery_candidate(
+        &announcement,
+        &proof,
+        &challenge,
+        &current_votes,
+        challenge.verifier_peer_id,
+        challenge.nonce,
+        3_000,
+        &mut guard,
+    )
+    .unwrap();
+}
+
+#[test]
 fn unrelated_self_signed_attacker_and_removed_or_banned_signers_do_not_form_current_quorum() {
     let (ids, mut announcement, mut proof, challenge) = fixture(3);
     let attacker = PeerIdentity::from_secret_bytes([88; 32]);
