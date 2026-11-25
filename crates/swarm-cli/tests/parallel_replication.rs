@@ -642,3 +642,305 @@ fn impaired_replica_crash_stress_preserves_signed_head() {
         })
     );
 }
+
+fn support_cli(device: &Device, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_swarmcraft"))
+        .arg("--data-dir")
+        .arg(&device.paths.root)
+        .args(args)
+        .env("RUST_LOG", "warn")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap()
+}
+
+fn support_value(device: &Device, args: &[&str]) -> serde_json::Value {
+    let result = support_cli(device, args);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    serde_json::from_slice(&result.stdout).unwrap()
+}
+
+fn has_observation(report: &serde_json::Value, metric: &str, outcome: &str) -> bool {
+    report["events"].as_array().unwrap().iter().any(|event| event["metric"] == metric && event["outcome"] == outcome)
+}
+
+fn support_report(device: &Device) -> serde_json::Value {
+    support_value(device, &["support", "report", "--confirm"])
+}
+
+/// Use real authenticated daemon processes and signed membership, with no
+/// runtime configuration or hosting consent. This verifies operational
+/// evidence, not a real Minecraft login or field authority transfer.
+#[test]
+fn operational_support_reports_actual_replication_lease_denial_restore_and_publication() {
+    let fixture = Fixture::new();
+    let world = fixture.world;
+    let world_id = world.to_string();
+    let authority = &fixture.authority;
+    let receiver = &fixture.receiver;
+    assert!(!support_report(authority)["collection_enabled"].as_bool().unwrap());
+    assert!(!authority.paths.root.join("support-metrics-v1.json").exists());
+    for device in [authority, receiver] {
+        assert!(support_value(device, &["support", "configure", "--collection", "on"])["collection_enabled"]
+            .as_bool()
+            .unwrap());
+    }
+    // Force the receiver-driven path, rather than allowing legacy push.
+    receiver
+        .storage
+        .set_world_replica_policy(
+            world,
+            ReplicaPolicy { follow: true, hot: true, utc_window: None, max_kib_per_second: Some(512) },
+        )
+        .unwrap();
+    let mut source_daemon = authority.start(&[], "support-authority.log");
+    wait("actual listener and missing lease quorum", Duration::from_secs(20), || {
+        assert!(source_daemon.alive(), "authority daemon exited: {}", source_daemon.text());
+        let report = support_report(authority);
+        has_observation(&report, "storage_open", "completed")
+            && has_observation(&report, "daemon_listener", "completed")
+            && has_observation(&report, "lease_permit", "quorum_missing")
+    });
+    assert!(!swarm_cli::authority_permit::permit_path(&authority.paths, world).exists());
+    let mut receiver_daemon = receiver.start(&[authority.address()], "support-receiver.log");
+    wait("actual authenticated lease refresh", Duration::from_secs(30), || {
+        assert!(receiver_daemon.alive() && source_daemon.alive());
+        swarm_cli::authority_permit::permit_path(&authority.paths, world).is_file()
+            && has_observation(&support_report(authority), "lease_permit", "permit_refreshed")
+    });
+    // A heartbeat is not permission to start Minecraft.
+    assert!(swarm_cli::hosting_budget::load_consent(&authority.paths, world).unwrap().is_none());
+    assert!(swarm_cli::migration::load_runtime_config(&authority.paths, world).is_err());
+
+    let (source, next) = fixture.prepare(&fixture.first, 1, 1024 * 1024);
+    authority.storage.commit_snapshot(&next).unwrap();
+    fixture.wait_head(&mut receiver_daemon, next.manifest(), "support signed pull");
+    fixture.restore(next.manifest(), source.path(), "support-fixture-restore");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let report = support_report(receiver);
+        let log = receiver_daemon.text();
+        if has_observation(&report, "replica_pull", "completed") && complete_line(&log, next.snapshot_number).is_some()
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "receiver pull observation missing: {report}; daemon log: {log}");
+        thread::sleep(Duration::from_millis(50));
+    }
+    let report = support_report(receiver);
+    let transfer = report["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["metric"] == "replica_pull" && event["outcome"] == "completed")
+        .unwrap()
+        .clone();
+    let log = receiver_daemon.text();
+    let line = complete_line(&log, next.snapshot_number).unwrap();
+    assert_eq!(transfer["transfer"]["payload_bytes"], metric(line, "bytes"));
+    assert_eq!(transfer["transfer"]["source_count"], metric(line, "sources"));
+    assert_eq!(transfer["transfer"]["max_parallel"], metric(line, "max_parallel"));
+    assert!(transfer["elapsed_ms"].is_number());
+
+    let selected = support_value(receiver, &["support", "report", "--confirm", "--world", &world_id, "--live-route"]);
+    assert_eq!(selected["selected_world_observation"]["live_route"]["outcome"], "gateway_unavailable");
+    assert_eq!(selected["selected_world_observation"]["live_route"]["proof_fresh_at_observation"], false);
+    let selection = support_cli(receiver, &["world", "game-route-select", &world_id]);
+    assert!(selection.status.success(), "{}", String::from_utf8_lossy(&selection.stderr));
+    // The real local Minecraft gateway must reject a new TCP session
+    // without a fresh host proof. No Minecraft process is started here.
+    let port =
+        swarm_network::game_port_registry::GameWorldPortRegistry::new(receiver.paths.root.join("game-gateway-ports"))
+            .lookup(world)
+            .unwrap()
+            .unwrap();
+    let socket_addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut socket = std::net::TcpStream::connect_timeout(&socket_addr, Duration::from_secs(2)).unwrap();
+    socket.set_read_timeout(Some(Duration::from_secs(25))).unwrap();
+    let mut byte = [0u8; 1];
+    match std::io::Read::read(&mut socket, &mut byte) {
+        Ok(0) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+        other => panic!("unauthorized gateway session did not close: {other:?}"),
+    }
+    drop(socket);
+    let denied = support_value(receiver, &["support", "report", "--confirm", "--world", &world_id, "--live-route"]);
+    let route = &denied["selected_world_observation"]["live_route"];
+    assert_eq!(route["availability"], "observed");
+    assert_eq!(route["proof_fresh_at_observation"], false);
+    assert!(
+        matches!(
+            route["recent_session"]["state"].as_str(),
+            Some("route_refused" | "route_timed_out" | "stream_admission_failed")
+        ),
+        "{route}"
+    );
+    assert!(matches!(
+        route["outcome"].as_str(),
+        Some(
+            "host_proof_unavailable"
+                | "peer_link_unavailable"
+                | "route_check_timed_out"
+                | "authority_changed"
+                | "unavailable"
+        )
+    ));
+    wait("recorded route denial", Duration::from_secs(10), || {
+        has_observation(&support_report(receiver), "game_route", route["outcome"].as_str().unwrap())
+    });
+
+    let recovered = receiver.temp.path().join("PRIVATE_RESTORE_PATH_CANARY");
+    let restore = support_cli(
+        receiver,
+        &["world", "recover", &world_id, &next.snapshot_number.to_string(), recovered.to_str().unwrap()],
+    );
+    assert!(restore.status.success(), "{}", String::from_utf8_lossy(&restore.stderr));
+    for entry in &next.entries {
+        assert_eq!(fs::read(recovered.join(&entry.path)).unwrap(), fs::read(source.path().join(&entry.path)).unwrap());
+    }
+    assert!(has_observation(&support_report(receiver), "checkpoint_restore", "completed"));
+    let bad_destination = receiver.temp.path().join("PRIVATE_BAD_RESTORE_CANARY");
+    let failed = support_cli(receiver, &["world", "recover", &world_id, "99999", bad_destination.to_str().unwrap()]);
+    assert!(!failed.status.success() && !bad_destination.exists());
+    assert!(has_observation(&support_report(receiver), "checkpoint_restore", "failed"));
+    let verify = support_cli(receiver, &["world", "verify", &world_id]);
+    assert!(verify.status.success());
+    assert!(has_observation(&support_report(receiver), "checkpoint_verify", "completed"));
+    let raw = serde_json::to_string(&support_value(
+        receiver,
+        &["support", "report", "--confirm", "--world", &world_id, "--live-route"],
+    ))
+    .unwrap();
+    for secret in [
+        world_id.clone(),
+        world.to_hex(),
+        authority.identity.peer_id().to_string(),
+        receiver.identity.peer_id().to_string(),
+        authority.transport.clone(),
+        receiver.transport.clone(),
+        next.manifest_hash().unwrap().to_string(),
+        next.state_root.to_string(),
+        authority.address(),
+        socket_addr.to_string(),
+        receiver.paths.root.to_string_lossy().into_owned(),
+        "Parallel replication fixture".into(),
+        "PRIVATE_RESTORE_PATH_CANARY".into(),
+        "PRIVATE_BAD_RESTORE_CANARY".into(),
+    ] {
+        assert!(!raw.contains(&secret), "redacted report leaked protected data");
+    }
+
+    // Remove the explicit rate limit with only one connected sender.
+    // The next distinct checkpoint must use ordinary push, and its
+    // finalization must be independently observable (no invented bytes).
+    receiver.storage.set_world_replica_policy(world, ReplicaPolicy::default()).unwrap();
+    let (push_source, pushed) = fixture.prepare(next.manifest(), 1, 128 * 1024);
+    authority.storage.commit_snapshot(&pushed).unwrap();
+    fixture.wait_head(&mut receiver_daemon, pushed.manifest(), "support ordinary push");
+    fixture.restore(pushed.manifest(), push_source.path(), "support-push-restore");
+    wait("measured ordinary replica finalization", Duration::from_secs(10), || {
+        has_observation(&support_report(receiver), "replica_finalize", "completed")
+    });
+
+    receiver_daemon.stop();
+    wait("actual lease removed after losing the peer", Duration::from_secs(15), || {
+        !swarm_cli::authority_permit::permit_path(&authority.paths, world).exists()
+    });
+    let offline = support_value(receiver, &["support", "report", "--confirm", "--world", &world_id, "--live-route"]);
+    assert_eq!(offline["selected_world_observation"]["live_route"]["availability"], "unavailable");
+    assert_eq!(offline["selected_world_observation"]["live_route"]["proof_fresh_at_observation"], false);
+    source_daemon.stop();
+    // With all daemons stopped, explicitly publish a further signed
+    // checkpoint using the actual CLI. No Minecraft process is running.
+    let publish = support_cli(
+        authority,
+        &[
+            "world",
+            "snapshot",
+            &world_id,
+            source.path().to_str().unwrap(),
+            "--epoch",
+            &pushed.epoch.to_string(),
+            "--sequence",
+            &(pushed.sequence + 1).to_string(),
+        ],
+    );
+    assert!(publish.status.success(), "{}", String::from_utf8_lossy(&publish.stderr));
+    assert!(has_observation(&support_report(authority), "checkpoint_publication", "completed"));
+    let rejected = support_cli(
+        authority,
+        &[
+            "world",
+            "snapshot",
+            &world_id,
+            "/nonexistent/PRIVATE_PUBLICATION_CANARY",
+            "--epoch",
+            &pushed.epoch.to_string(),
+            "--sequence",
+            &(pushed.sequence + 2).to_string(),
+        ],
+    );
+    assert!(!rejected.status.success());
+    assert!(has_observation(&support_report(authority), "checkpoint_publication", "failed"));
+    let published = authority.storage.latest_snapshot(world).unwrap().unwrap();
+    assert_eq!(published.snapshot_number, pushed.snapshot_number + 1);
+    authority.storage.verify_snapshot(&published).unwrap();
+    swarm_core::verify_snapshot_signature(&published).unwrap();
+    assert_eq!(published.previous_snapshot_hash, Some(pushed.manifest_hash().unwrap()));
+    let preference = support_cli(authority, &["world", "discovery-listing", &world_id, "--paused", "true"]);
+    assert!(preference.status.success(), "{}", String::from_utf8_lossy(&preference.stderr));
+    let log_path = authority.temp.path().join("support-discovery.log");
+    let log = fs::File::create(&log_path).unwrap();
+    let mut publisher = Daemon {
+        child: Command::new(env!("CARGO_BIN_EXE_swarmcraft-runtime"))
+            .arg("--data-dir")
+            .arg(&authority.paths.root)
+            .args(["discovery-serve", "--listen", "/ip4/127.0.0.1/tcp/0"])
+            .env("RUST_LOG", "info")
+            .env("NO_COLOR", "1")
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+        log: log_path,
+    };
+    wait("actual private discovery refresh", Duration::from_secs(15), || {
+        assert!(publisher.alive(), "discovery publisher exited: {}", publisher.text());
+        has_observation(&support_report(authority), "discovery_refresh", "completed")
+    });
+    let final_report = support_value(authority, &["support", "report", "--confirm", "--world", &world_id]);
+    assert_eq!(final_report["selected_world_observation"]["discovery_preference"]["locally_paused"], true);
+    assert_eq!(
+        final_report["selected_world_observation"]["discovery_preference"]["remote_publication_confirmed"],
+        false
+    );
+    assert!(has_observation(&final_report, "discovery_preference", "completed"));
+    // Clear and opt out while a previously enabled process is alive. Its
+    // pending/periodic observations must not repopulate the cleared store.
+    support_value(authority, &["support", "clear", "--confirm"]);
+    support_value(authority, &["support", "configure", "--collection", "off"]);
+    thread::sleep(Duration::from_secs(3));
+    assert_eq!(support_report(authority)["retained_count"], 0);
+    publisher.stop();
+    assert!(!publisher.alive() && !source_daemon.alive() && !receiver_daemon.alive());
+    assert!(swarm_cli::hosting_budget::load_consent(&authority.paths, world).unwrap().is_none());
+    assert!(swarm_cli::hosting_budget::load_consent(&receiver.paths, world).unwrap().is_none());
+    println!(
+        "support_receipt={}",
+        serde_json::json!({
+            "source_summary":final_report["summary"],
+            "receiver_summary":support_report(receiver)["summary"],
+            "actual_replication_sample":transfer,
+            "route_denial":route["outcome"],
+            "actual_gateway_session":route["recent_session"],
+            "offline_route_unavailable":true,
+            "last_accepted_checkpoint_number":published.snapshot_number,
+            "signed_head_verified":true,
+            "restore_byte_exact":true,
+            "ordinary_push_finalized_and_restored":true,
+            "clear_and_pause_prevent_old_process_repopulation":true,
+            "redaction_canaries_absent":true,
+            "consent_absent_and_all_processes_exited":true
+        })
+    );
+}

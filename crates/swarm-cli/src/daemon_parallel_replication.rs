@@ -72,6 +72,7 @@ struct Download {
     authority: PeerId,
     initiator: PeerId,
     blobs: BTreeMap<Hash32, BlobWork>,
+    started: Instant,
     last_progress: Instant,
     last_scheduled: Option<Instant>,
     pause_until: Option<Instant>,
@@ -87,6 +88,23 @@ pub(super) struct PullRuntime {
     downloads: HashMap<WorldId, Download>,
     fallback_until: HashMap<WorldId, Instant>,
     pub(super) pacer: ReplicationPacer,
+}
+
+impl Download {
+    fn observe(&self, outcome: Outcome) {
+        support_metrics::observe(
+            Metric::ReplicaPull,
+            outcome,
+            Some(self.started),
+            Some(support_metrics::TransferCounters::bounded(
+                self.bytes,
+                self.resumed,
+                self.failures,
+                self.sources.len(),
+                self.max_parallel,
+            )),
+        );
+    }
 }
 
 impl PullRuntime {
@@ -325,6 +343,7 @@ pub(super) fn negotiate(
             authority: epoch.authority_peer_id,
             initiator: sender,
             blobs,
+            started: now,
             last_progress: now,
             last_scheduled: None,
             pause_until: None,
@@ -496,6 +515,9 @@ pub(super) fn drive(
             _ => {
                 // Drop only the negotiation. Already verified blobs and
                 // durable partials remain; no fallback can bypass a pause.
+                if let Some(download) = runtime.pulls.downloads.get(&world) {
+                    download.observe(Outcome::Paused);
+                }
                 runtime.pulls.cancel(outbound, world);
                 pending.remove(&world);
                 info!(%world, "receiver-driven replica pull paused by local cache policy");
@@ -504,6 +526,7 @@ pub(super) fn drive(
         };
         let download = &runtime.pulls.downloads[&world];
         let Ok(membership) = eligible_current(context.storage, context.identity, manifest, download) else {
+            download.observe(Outcome::Fenced);
             runtime.pulls.cancel(outbound, world);
             pending.remove(&world);
             continue;
@@ -512,6 +535,7 @@ pub(super) fn drive(
         // complete blobs and partial offsets; a later manifest renegotiates.
         if now.saturating_duration_since(download.last_progress) >= STALL_TIMEOUT && !download.blobs.is_empty() {
             warn!(%world, controlled = policy.requires_controlled_pull(), "replica pull stalled; preserving payloads and renegotiating");
+            download.observe(Outcome::Stalled);
             runtime.pulls.cancel(outbound, world);
             if !policy.requires_controlled_pull() {
                 runtime.pulls.mark_fallback(world, now);
@@ -545,10 +569,12 @@ pub(super) fn drive(
             })();
             if let Err(error) = result {
                 if error.downcast_ref::<StorageError>().is_some_and(StorageError::is_storage_pressure) {
+                    download.observe(Outcome::StoragePressure);
                     runtime.pulls.downloads.get_mut(&world).expect("completed pull exists").pause_until =
                         Some(now + REPLICATION_RATE_LIMIT_BACKOFF);
                 } else {
                     warn!(%world, %error, "replica pull publication deferred to ordinary negotiation");
+                    download.observe(Outcome::Deferred);
                     runtime.pulls.cancel(outbound, world);
                     if !policy.requires_controlled_pull() {
                         runtime.pulls.mark_fallback(world, now);
@@ -575,6 +601,7 @@ pub(super) fn drive(
                     let _ = node.send_request(transport, WireRequest::ReplicaAck(ack.clone()));
                 }
             }
+            download.observe(Outcome::Completed);
             info!(%world, snapshot = download.target.snapshot_number, sources = download.sources.len(),
                 bytes = download.bytes, resumed = download.resumed, failures = download.failures,
                 max_parallel = download.max_parallel, "receiver-driven replica pull completed");

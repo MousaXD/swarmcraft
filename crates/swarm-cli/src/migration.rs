@@ -5,6 +5,7 @@ use crate::{
     live_fabric_readiness::{challenge_authenticated_session, ExpectedFabricRuntime},
     live_runtime_registry::{LiveFabricRuntimeRegistry, LiveRuntimeIdentity, RuntimeChallengeCommand},
     server_mods,
+    support_metrics::{self, Metric},
 };
 #[path = "managed_server_properties.rs"]
 mod managed_server_properties;
@@ -1019,7 +1020,10 @@ async fn run_authority_runtime_inner(
         Some(latest.manifest_hash()?),
         None,
     )?;
-    storage.restore_snapshot(&latest, &world_dir)?;
+    let started = Instant::now();
+    let result = storage.restore_snapshot(&latest, &world_dir);
+    support_metrics::observe_result(Metric::RuntimeRestore, started, &result);
+    result?;
     ensure_runtime_generation(storage, &identity, &epoch)?;
 
     let descriptor = storage.load_world_descriptor(options.world)?;
@@ -1280,14 +1284,17 @@ async fn run_authority_runtime_inner(
     )?;
     ensure_runtime_generation(storage, &identity, &epoch)?;
     identity.sign_snapshot(&mut final_manifest)?;
-    storage.commit_snapshot_fenced(
+    let started = Instant::now();
+    let committed = storage.commit_snapshot_fenced(
         &final_manifest,
         swarm_storage::SnapshotCommitFence {
             expected_epoch: epoch.epoch_number,
             expected_fencing_token: epoch.fencing_token,
             expected_head,
         },
-    )?;
+    );
+    support_metrics::observe_result(Metric::CheckpointPublication, started, &committed);
+    committed?;
 
     match disposition {
         RuntimeDisposition::Transfer(target) => {

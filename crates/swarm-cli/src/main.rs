@@ -8,7 +8,11 @@ use swarm_cli::game_route_api::{call_live_daemon, GameRouteApiOperation, GameRou
 use swarm_cli::live_runtime_registry::LiveFabricRuntimeRegistry;
 use swarm_cli::migration::{self, RuntimeLaunchConfig, TransferPrepareResult};
 use swarm_cli::server_mods;
-use swarm_cli::{host_readiness, hosting_budget, world_genesis};
+use swarm_cli::{
+    host_readiness, hosting_budget,
+    support_metrics::{self, Metric},
+    world_genesis,
+};
 use swarm_core::{
     create_world_genesis_with_fingerprint, random_nonce, sign_world_config, verify_membership_signature,
     verify_snapshot_signature, DataPaths, PeerIdentity,
@@ -34,6 +38,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Explicit local operational metrics and redacted support report.
+    Support {
+        #[command(subcommand)]
+        command: support_metrics::SupportCommand,
+    },
     /// Explicit signed application update delivery; never executes installers.
     Update {
         #[command(subcommand)]
@@ -486,8 +495,31 @@ fn main() -> Result<()> {
     // Keygen and data-only backup import must not even open the
     // recipient's existing canonical store (opening can resume transactions).
     let command = match cli.command {
-        Command::Update { command } => return swarm_cli::updates::run(&paths, command),
-        Command::Backup { command } => return handle_backup(command, &paths),
+        Command::Support { command } => return support_metrics::run(&paths, command),
+        Command::Update { command } => {
+            let metric = match &command {
+                swarm_cli::updates::UpdateCommand::Check { .. } => Some(Metric::UpdateCheck),
+                swarm_cli::updates::UpdateCommand::Stage { .. } => Some(Metric::UpdateStage),
+                _ => None,
+            };
+            return if let Some(metric) = metric {
+                support_metrics::measure(&paths, metric, || swarm_cli::updates::run(&paths, command))
+            } else {
+                swarm_cli::updates::run(&paths, command)
+            };
+        }
+        Command::Backup { command } => {
+            let metric = match &command {
+                BackupCommand::Export { .. } => Some(Metric::BackupExport),
+                BackupCommand::Import { .. } => Some(Metric::BackupImport),
+                _ => None,
+            };
+            return if let Some(metric) = metric {
+                support_metrics::measure(&paths, metric, || handle_backup(command, &paths))
+            } else {
+                handle_backup(command, &paths)
+            };
+        }
         Command::Profile { command: ProfileCommand::Check { target } } => {
             let report = match target {
                 ProfileTarget::Current => swarm_storage::profile::inspect(&paths.root)?,
@@ -501,7 +533,11 @@ fn main() -> Result<()> {
 
         other => other,
     };
-    let storage = Storage::open(paths.root.clone())?;
+    let storage = if matches!(&command, Command::Daemon { .. } | Command::Init) {
+        support_metrics::measure(&paths, Metric::StorageOpen, || Storage::open(paths.root.clone()))?
+    } else {
+        Storage::open(paths.root.clone())?
+    };
 
     match command {
         Command::Init => {
@@ -537,19 +573,40 @@ fn main() -> Result<()> {
                 None
             };
             invite::configure_connectivity_snapshot(&paths);
+            support_metrics::start_background(&paths);
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(async {
-                let live_runtime_registry = LiveFabricRuntimeRegistry::default();
-                let supervisor = (!replica_only)
-                    .then(|| tokio::spawn(migration::supervise(paths.clone(), live_runtime_registry.clone())));
-                let result = daemon::run(&paths, &storage, &listen, &peer_addrs, live_runtime_registry).await;
-                if let Some(supervisor) = supervisor {
-                    supervisor.abort();
-                }
-                result
+            support_metrics::measure(&paths, Metric::DaemonExit, || {
+                runtime.block_on(async {
+                    let live_runtime_registry = LiveFabricRuntimeRegistry::default();
+                    let supervisor = (!replica_only)
+                        .then(|| tokio::spawn(migration::supervise(paths.clone(), live_runtime_registry.clone())));
+                    let result = daemon::run(&paths, &storage, &listen, &peer_addrs, live_runtime_registry).await;
+                    if let Some(supervisor) = supervisor {
+                        supervisor.abort();
+                    }
+                    result
+                })
             })?;
         }
-        Command::World { command } => handle_world(command, &paths, &storage)?,
+        Command::World { command } => {
+            let metric = match &command {
+                WorldCommand::Verify { .. } => Some(Metric::CheckpointVerify),
+                WorldCommand::Recover { .. }
+                | WorldCommand::Export { .. }
+                | WorldCommand::RecoveryExport { .. }
+                | WorldCommand::RecoverCopy { .. } => Some(Metric::CheckpointRestore),
+                WorldCommand::ConflictExport { .. } => Some(Metric::ConflictExport),
+                WorldCommand::Snapshot { .. } => Some(Metric::CheckpointPublication),
+                WorldCommand::DiscoveryListing { paused: Some(_), .. } => Some(Metric::DiscoveryPreference),
+                _ => None,
+            };
+            if let Some(metric) = metric {
+                support_metrics::measure(&paths, metric, || handle_world(command, &paths, &storage))?;
+            } else {
+                handle_world(command, &paths, &storage)?;
+            }
+        }
+        Command::Support { .. } => unreachable!("support reports never open canonical storage"),
         Command::Update { .. } => unreachable!("updates never open canonical storage"),
         Command::Profile { .. } => unreachable!("profile checks are handled before storage opens"),
         Command::Backup { .. } => unreachable!("backup commands are handled before canonical storage opens"),

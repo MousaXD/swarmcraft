@@ -68,13 +68,18 @@ pub(super) struct LiveQuorumClient {
 
 impl LiveQuorumClient {
     pub fn collect_blocking(&self, challenge: DiscoveryFreshnessChallengeV1) -> Result<Vec<DiscoveryFreshnessVoteV1>> {
-        let (response, receiver) = sync_mpsc::sync_channel(1);
-        self.sender
-            .try_send(CollectVotesCommand { challenge, response })
-            .map_err(|_| anyhow!("live quorum driver unavailable or its request budget is exhausted"))?;
-        receiver
-            .recv_timeout(QUORUM_COLLECTION_TIMEOUT + Duration::from_millis(200))
-            .map_err(|_| anyhow!("live quorum vote collection exceeded its hard deadline"))?
+        let started = Instant::now();
+        let result = (|| {
+            let (response, receiver) = sync_mpsc::sync_channel(1);
+            self.sender
+                .try_send(CollectVotesCommand { challenge, response })
+                .map_err(|_| anyhow!("live quorum driver unavailable or its request budget is exhausted"))?;
+            receiver
+                .recv_timeout(QUORUM_COLLECTION_TIMEOUT + Duration::from_millis(200))
+                .map_err(|_| anyhow!("live quorum vote collection exceeded its hard deadline"))?
+        })();
+        swarm_cli::support_metrics::observe_result(swarm_cli::support_metrics::Metric::FreshQuorum, started, &result);
+        result
     }
 }
 

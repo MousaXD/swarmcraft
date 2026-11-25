@@ -3,6 +3,9 @@
 This document is the release-governance contract for SwarmCraft 0.5.1. A package build is not release evidence by itself: the exact commit being published must first pass the required validation graph.
 
 Application version `0.5.1` and wire protocol version `1` are intentionally independent release dimensions.
+See [Operational support](OPERATIONAL_SUPPORT.md) for the per-version
+compatibility and redacted field-evidence policy. Update its matrix with
+each reviewed release; support observations do not replace release gates.
 
 ## Authoritative validation status
 

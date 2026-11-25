@@ -555,12 +555,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #55 — P2 · Missing
 - Work: Define production metrics, support runbooks, and per-version compatibility policy
 - Acceptance: Field team can diagnose boot, replication, lease, game connect, restore, and publication with bounded and redacted evidence
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (opt-in CLI operational observations, bounded redacted export, field runbooks and compatibility policy; no production telemetry or live-field certification)
+- Source: `crates/swarm-cli/src/support_metrics.rs`, build provenance and actual CLI/daemon/host/runtime operation hooks; `crates/swarm-cli/tests/parallel_replication.rs`; `scripts/acceptance/operational_support.py`; [operator contract](OPERATIONAL_SUPPORT.md).
+- Evidence: [Operational support report and exact receipts](../research/operational-support/REPORT.md). Six redaction/retention/revision unit tests; real local authenticated daemon test with controlled pull (1,048,618 bytes / 2,953 ms), ordinary push finalization, quorum permit loss/refresh, real TCP gateway refusal, offline denial, exact restore/failed restore, signed checkpoint publication and local discovery refresh/pause. Actual candidate Debian package and four matching sidecars: six packaged checks, 31 genuine saved files restored byte-exact, unchanged non-support profile bytes, identity, checkpoint and withdrawn consent. 271 passing library/binary/selected regression tests; two existing cgroup-only tests ignored; strict Clippy and local gates. No hosted CI.
+- Remaining / next action: #56 reopen distributed region/tick feasibility decision. Live Fabric and authenticated client metric capture, field support exercise, native Windows/macOS report acceptance and mixed-version multi-network qualification remain unverified. No fleet collector or SLO claim.
+- External dependency: Authorized compatible runtime/player and field devices, native platform qualification and actual support operations.
+- Commit: Add bounded opt-in operational support and version policy; see git history.
 
 ### #56 — Expansion · Design prerequisite
 - Work: Reopen the distributed region/tick feasibility decision for the expanded product scope (revisiting the current Fabric NO-GO). Choose the experimental runtime before implementation

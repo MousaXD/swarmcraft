@@ -95,3 +95,7 @@ as a substitute for the redacted report.
 No remote support collector, automatic crash-report upload or signed
 authority audit is introduced. Native Windows/macOS save dialog and
 filesystem permission qualification remain separate from Linux testing.
+
+For daemon/CLI operation timings, opt-in bounded observations, field triage
+and version-specific compatibility, see [Operational support](OPERATIONAL_SUPPORT.md).
+The separate operational recorder is not enabled by Desktop history opt-in.

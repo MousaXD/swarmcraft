@@ -46,7 +46,10 @@ fn main() -> Result<()> {
         Some(root) => DataPaths::from_root(root),
         None => DataPaths::discover()?,
     };
-    let storage = Storage::open(paths.root.clone())?;
+    let storage = swarm_cli::support_metrics::measure(&paths, swarm_cli::support_metrics::Metric::StorageOpen, || {
+        Storage::open(paths.root.clone())
+    })?;
+    swarm_cli::support_metrics::start_background(&paths);
     let world = WorldId::from_str(&args.world).with_context(|| format!("invalid world ID: {}", args.world))?;
 
     if args.standby {

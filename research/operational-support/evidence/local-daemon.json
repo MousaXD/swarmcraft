@@ -1,0 +1,168 @@
+{
+  "scope": "Real local authenticated daemons and TCP loopback gateway, isolated user/network/PID/mount namespaces, no Java or external network",
+  "actual_gateway_session": {
+    "age_ms": 304,
+    "state": "route_refused"
+  },
+  "actual_replication_sample": {
+    "build": {
+      "commit": "426338c6de294d272631d834b6be325ffbafcfa4",
+      "tree": "modified",
+      "version": "0.5.1"
+    },
+    "elapsed_ms": 2953,
+    "metric": "replica_pull",
+    "observed_unix_ms": 1795634272241,
+    "outcome": "completed",
+    "transfer": {
+      "failed_requests": 0,
+      "max_parallel": 1,
+      "payload_bytes": 1048618,
+      "resumed_blobs": 0,
+      "source_count": 1
+    }
+  },
+  "clear_and_pause_prevent_old_process_repopulation": true,
+  "consent_absent_and_all_processes_exited": true,
+  "last_accepted_checkpoint_number": 4,
+  "offline_route_unavailable": true,
+  "ordinary_push_finalized_and_restored": true,
+  "receiver_summary": {
+    "checkpoint_restore": {
+      "outcomes": {
+        "completed": 1,
+        "failed": 1
+      },
+      "p50_elapsed_ms": 0,
+      "p95_elapsed_ms": 15,
+      "retained_observations": 2,
+      "timed_samples": 2
+    },
+    "checkpoint_verify": {
+      "outcomes": {
+        "completed": 1
+      },
+      "p50_elapsed_ms": 20,
+      "p95_elapsed_ms": 20,
+      "retained_observations": 1,
+      "timed_samples": 1
+    },
+    "daemon_listener": {
+      "outcomes": {
+        "completed": 1
+      },
+      "p50_elapsed_ms": 41,
+      "p95_elapsed_ms": 41,
+      "retained_observations": 1,
+      "timed_samples": 1
+    },
+    "game_route": {
+      "outcomes": {
+        "gateway_unavailable": 1,
+        "host_proof_unavailable": 1
+      },
+      "p50_elapsed_ms": 297,
+      "p95_elapsed_ms": 297,
+      "retained_observations": 2,
+      "timed_samples": 1
+    },
+    "replica_finalize": {
+      "outcomes": {
+        "completed": 1
+      },
+      "p50_elapsed_ms": 10,
+      "p95_elapsed_ms": 10,
+      "retained_observations": 1,
+      "timed_samples": 1
+    },
+    "replica_pull": {
+      "outcomes": {
+        "completed": 1
+      },
+      "p50_elapsed_ms": 2953,
+      "p95_elapsed_ms": 2953,
+      "retained_observations": 1,
+      "timed_samples": 1
+    },
+    "storage_open": {
+      "outcomes": {
+        "completed": 1
+      },
+      "p50_elapsed_ms": 0,
+      "p95_elapsed_ms": 0,
+      "retained_observations": 1,
+      "timed_samples": 1
+    }
+  },
+  "redaction_canaries_absent": true,
+  "restore_byte_exact": true,
+  "route_denial": "host_proof_unavailable",
+  "signed_head_verified": true,
+  "source_summary": {
+    "checkpoint_publication": {
+      "outcomes": {
+        "completed": 1,
+        "failed": 1
+      },
+      "p50_elapsed_ms": 0,
+      "p95_elapsed_ms": 9,
+      "retained_observations": 2,
+      "timed_samples": 2
+    },
+    "daemon_listener": {
+      "outcomes": {
+        "completed": 1
+      },
+      "p50_elapsed_ms": 41,
+      "p95_elapsed_ms": 41,
+      "retained_observations": 1,
+      "timed_samples": 1
+    },
+    "discovery_preference": {
+      "outcomes": {
+        "completed": 1
+      },
+      "p50_elapsed_ms": 9,
+      "p95_elapsed_ms": 9,
+      "retained_observations": 1,
+      "timed_samples": 1
+    },
+    "discovery_refresh": {
+      "outcomes": {
+        "completed": 1
+      },
+      "p50_elapsed_ms": 0,
+      "p95_elapsed_ms": 0,
+      "retained_observations": 1,
+      "timed_samples": 1
+    },
+    "fresh_quorum": {
+      "outcomes": {
+        "completed": 3
+      },
+      "p50_elapsed_ms": 236,
+      "p95_elapsed_ms": 257,
+      "retained_observations": 3,
+      "timed_samples": 3
+    },
+    "lease_permit": {
+      "outcomes": {
+        "permit_refreshed": 1,
+        "quorum_missing": 1
+      },
+      "p50_elapsed_ms": null,
+      "p95_elapsed_ms": null,
+      "retained_observations": 2,
+      "timed_samples": 0
+    },
+    "storage_open": {
+      "outcomes": {
+        "completed": 1
+      },
+      "p50_elapsed_ms": 0,
+      "p95_elapsed_ms": 0,
+      "retained_observations": 1,
+      "timed_samples": 1
+    }
+  }
+}

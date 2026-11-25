@@ -159,8 +159,22 @@ fn main() -> Result<()> {
         RuntimeCommand::Moderation { command } => return handle_moderation(&paths, command),
         other => other,
     };
+    let prepare = matches!(
+        &command,
+        RuntimeCommand::Install { .. } | RuntimeCommand::Repair { .. } | RuntimeCommand::Verify { .. }
+    );
+    if prepare {
+        swarm_cli::support_metrics::measure(&paths, swarm_cli::support_metrics::Metric::RuntimePrepare, || {
+            run_command(&paths, command)
+        })
+    } else {
+        run_command(&paths, command)
+    }
+}
+
+fn run_command(paths: &DataPaths, command: RuntimeCommand) -> Result<()> {
     let storage = Storage::open(paths.root.clone())?;
-    let installer = RuntimeInstaller::new(&paths, &storage);
+    let installer = RuntimeInstaller::new(paths, &storage);
 
     match command {
         RuntimeCommand::Moderation { .. } => unreachable!("moderation is handled before storage opens"),
@@ -173,14 +187,14 @@ fn main() -> Result<()> {
         }
         RuntimeCommand::Install { world, accept_eula, game_endpoint } => {
             let world = parse_world(&world)?;
-            prepare_provider_mods(&paths, &storage, world)?;
+            prepare_provider_mods(paths, &storage, world)?;
             let report =
                 installer.install(world, RuntimeInstallOptions { accept_eula, game_endpoint }, print_progress)?;
             print_json(&report)?;
         }
         RuntimeCommand::Repair { world, accept_eula, game_endpoint } => {
             let world = parse_world(&world)?;
-            prepare_provider_mods(&paths, &storage, world)?;
+            prepare_provider_mods(paths, &storage, world)?;
             let report =
                 installer.repair(world, RuntimeInstallOptions { accept_eula, game_endpoint }, print_progress)?;
             print_json(&report)?;
@@ -194,7 +208,7 @@ fn main() -> Result<()> {
             // Server-mod verification is an independent proof boundary. Record
             // the exact current result even when the platform runtime itself is
             // healthy but a required user mod is missing or incompatible.
-            let mods = server_mods::evaluate_world_mods(&paths, world, &world_config.compatibility)?;
+            let mods = server_mods::evaluate_world_mods(paths, world, &world_config.compatibility)?;
             let mod_state = if mods.ready {
                 ServerModsReadinessV1::Ready
             } else if mods.issues.iter().any(|issue| matches!(issue.kind, server_mods::ModIssueKind::MissingRequired)) {
@@ -202,21 +216,16 @@ fn main() -> Result<()> {
             } else {
                 ServerModsReadinessV1::Incompatible
             };
-            host_readiness::record_server_mod_readiness(
-                &paths,
-                world,
-                descriptor.compatibility_fingerprint,
-                mod_state,
-            )?;
+            host_readiness::record_server_mod_readiness(paths, world, descriptor.compatibility_fingerprint, mod_state)?;
 
             // Runtime proof excludes third-party server-mod readiness. This is
             // what lets Host Readiness distinguish "runtime verified, mod
             // missing" from a genuinely unverified runtime.
             if runtime_platform_ready(&status) {
-                let config = migration::load_runtime_config(&paths, world)?;
+                let config = migration::load_runtime_config(paths, world)?;
                 if status.manual_configuration {
                     let live =
-                        host_readiness::local_runtime_readiness(&paths, world, descriptor.compatibility_fingerprint)?;
+                        host_readiness::local_runtime_readiness(paths, world, descriptor.compatibility_fingerprint)?;
                     if live != HostRuntimeReadinessV1::Ready {
                         anyhow::bail!(
                             "manual Advanced runtime is configured but not authoritatively verified; launch it through the shared SwarmCraft runtime once so the authenticated Fabric compatibility handshake can prove this exact configuration"
@@ -224,7 +233,7 @@ fn main() -> Result<()> {
                     }
                 } else {
                     host_readiness::record_runtime_verified(
-                        &paths,
+                        paths,
                         world,
                         &config,
                         descriptor.compatibility_fingerprint,
@@ -237,12 +246,13 @@ fn main() -> Result<()> {
             print_json(&server_mods::inspect_fabric_mod(&path)?)?;
         }
         RuntimeCommand::AcquireMods { world } => {
-            print_json(&provider_runtime::acquire_missing_server_mods(&paths, &storage, parse_world(&world)?)?)?;
+            print_json(&provider_runtime::acquire_missing_server_mods(paths, &storage, parse_world(&world)?)?)?;
         }
         RuntimeCommand::ClientProfile { world, mods_dir } => {
             print_json(&client_profile::prepare_client_profile(&storage, parse_world(&world)?, mods_dir.as_deref())?)?;
         }
         RuntimeCommand::DiscoveryServe { listen, presence_only, bootstrap } => {
+            swarm_cli::support_metrics::start_background(paths);
             tokio::runtime::Runtime::new()?.block_on(discovery::serve(
                 paths.clone(),
                 listen,
@@ -261,7 +271,7 @@ fn main() -> Result<()> {
                 .into_iter()
                 .collect();
             let report = tokio::runtime::Runtime::new()?.block_on(discovery::search_public_worlds(
-                &paths,
+                paths,
                 DiscoverySearchInputV1 { query, approximate_region, tags, limit, ..Default::default() },
                 &bootstrap,
             ))?;
@@ -269,7 +279,7 @@ fn main() -> Result<()> {
         }
         RuntimeCommand::DiscoveryResolve { world, bootstrap } => {
             let report = tokio::runtime::Runtime::new()?.block_on(discovery::resolve_world(
-                &paths,
+                paths,
                 parse_world(&world)?,
                 &bootstrap,
             ))?;
@@ -282,7 +292,7 @@ fn main() -> Result<()> {
                 anyhow::bail!("managed runtime launch was requested before runtime verification reported Ready");
             }
             launch_guard::ensure_direct_launch_safe(&storage, world)?;
-            let config = migration::load_runtime_config(&paths, world)?;
+            let config = migration::load_runtime_config(paths, world)?;
             let options = migration::HostOptions {
                 world,
                 java: config.java,
@@ -290,7 +300,7 @@ fn main() -> Result<()> {
                 mod_jar: config.mod_jar,
                 accept_eula: config.accept_eula,
             };
-            tokio::runtime::Runtime::new()?.block_on(migration::run_authority_runtime(&paths, &storage, options))?;
+            tokio::runtime::Runtime::new()?.block_on(migration::run_authority_runtime(paths, &storage, options))?;
         }
     }
     Ok(())

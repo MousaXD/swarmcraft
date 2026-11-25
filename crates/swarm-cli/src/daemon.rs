@@ -22,6 +22,7 @@ use swarm_cli::{
     migration::{self, clear_world_wake_request, world_wake_requested},
     replica_cache::{self, PayloadBudget},
     replication_pacing::{ChunkPlan, ReplicationPacer},
+    support_metrics::{self, Metric, Outcome},
 };
 use swarm_consensus::{
     elect_authority, has_quorum, membership_vote_for, reconcile_solo_history, validate_membership_certificate_shape,
@@ -126,6 +127,7 @@ struct CompletedGameRouteStatus {
     response: tokio::sync::oneshot::Sender<GameRouteApiReply>,
     status: GameRouteStatusV1,
     verified: Option<VerifiedGameRouteStatus>,
+    started: Instant,
 }
 
 /// An unexpected daemon return must close the local game-route control TCP
@@ -313,6 +315,8 @@ pub async fn run(
     explicit_application_peers: &[String],
     live_runtime_registry: LiveFabricRuntimeRegistry,
 ) -> Result<()> {
+    let started = Instant::now();
+    let mut listener_observed = false;
     let identity = PeerIdentity::load_or_create(paths)?;
     let transport_key = load_or_create_transport_key(&paths.transport_key())?;
     let hello = identity.signed_peer_hello(vec![
@@ -437,13 +441,15 @@ pub async fn run(
                             let reply = status_done_tx.clone();
                             let revision = gateways.revision();
                             status_tasks.spawn(async move {
+                                let started = Instant::now();
                                 let (status, verified) = game_gateway::resolve_status(command.world, resolver, addr).await;
                                 let _ = reply.try_send(CompletedGameRouteStatus {
                                     world: command.world, selection_revision: revision,
-                                    response: command.response, status, verified,
+                                    response: command.response, status, verified, started,
                                 });
                             });
                         } else {
+                            support_metrics::observe(Metric::GameRoute, Outcome::GatewayUnavailable, None, None);
                             let _ = command.response.send(GameRouteApiReply::Status {
                                 value: Box::new(GameRouteStatusV1::unavailable_with_reason(command.world, GameRouteDiagnostic::GatewayUnavailable)),
                             });
@@ -488,6 +494,7 @@ pub async fn run(
                 if current_selection {
                     value.recent_session = gateways.recent_session(completed.world);
                 }
+                support_metrics::observe(Metric::GameRoute, support_metrics::route_outcome(&value), Some(completed.started), None);
                 let _ = completed.response.send(GameRouteApiReply::Status { value: Box::new(value) });
             }
             Some(command) = live_quorum_commands.recv() => {
@@ -534,6 +541,8 @@ pub async fn run(
             }
             Some(publication) = replay_publications.recv() => {
                 replay_publications_in_flight.remove(&publication.world);
+                support_metrics::observe(Metric::HistoricalPublication,
+                    if publication.result.is_ok() { Outcome::Completed } else { Outcome::Deferred }, None, None);
                 match publication.result {
                     Ok((peer, ack)) => {
                         // Do not retain observations collected immediately
@@ -778,7 +787,13 @@ pub async fn run(
             }
             event = node.next_event() => {
                 match event? {
-                    NetworkEvent::Listening { address } => info!(%address, "daemon listening"),
+                    NetworkEvent::Listening { address } => {
+                        if !listener_observed {
+                            listener_observed = true;
+                            support_metrics::observe(Metric::DaemonListener, Outcome::Completed, Some(started), None);
+                        }
+                        info!(%address, "daemon listening");
+                    }
                     NetworkEvent::Authenticated { transport_peer, application_peer } => {
                         leases.authenticated_peers.insert(transport_peer, application_peer);
                         info!(transport = %transport_peer, peer = %application_peer, "peer authenticated");
@@ -2199,11 +2214,13 @@ fn maintain_authority_leases(
         let world = metadata.world_id;
         if storage.stale_publication_pending(world)? {
             clear_permit(paths, world)?;
+            support_metrics::observe(Metric::LeasePermit, Outcome::Fenced, None, None);
             clear_replay_runtime(runtime, outbound, world);
             continue;
         }
         if storage.crash_retirement_pending(world)? {
             clear_permit(paths, world)?;
+            support_metrics::observe(Metric::LeasePermit, Outcome::Fenced, None, None);
             // Retain authenticated status hints and isolated downloads so a
             // later certified successor can extend the frozen replay. No
             // old-generation lease, vote, heartbeat or replication survives.
@@ -2219,6 +2236,7 @@ fn maintain_authority_leases(
         }
         if storage.first_contact_publication_started(world)? {
             clear_permit(paths, world)?;
+            support_metrics::observe(Metric::LeasePermit, Outcome::Fenced, None, None);
             continue;
         }
         if let Err(error) = recover_committed_membership(storage, identity, world) {
@@ -2299,6 +2317,7 @@ fn maintain_authority_leases(
             Ok(false) => {}
             Ok(true) => {
                 clear_permit(paths, world)?;
+                support_metrics::observe(Metric::LeasePermit, Outcome::Fenced, None, None);
                 runtime.permit_heartbeats.remove(&world);
                 runtime.lease_acks.retain(|(w, _), _| *w != world);
                 runtime.inbound_leases.remove(&world);
@@ -2708,6 +2727,7 @@ fn maintain_local_authority(
     let world = context.descriptor.world_id;
     if context.epoch.mode == EpochMode::Recovery && !maintain_recovery_epoch_quorum(context, node, outbound, runtime)? {
         clear_permit(context.paths, world)?;
+        support_metrics::observe(Metric::LeasePermit, Outcome::QuorumMissing, None, None);
         return Ok(());
     }
 
@@ -2753,9 +2773,23 @@ fn maintain_local_authority(
         }
         let heartbeat = runtime.permit_heartbeats.entry(world).or_default();
         *heartbeat = heartbeat.saturating_add(1);
-        refresh_permit(context.paths, world, context.generation, *heartbeat)?;
+        let result = refresh_permit(context.paths, world, context.generation, *heartbeat);
+        support_metrics::observe(
+            Metric::LeasePermit,
+            if result.is_ok() { Outcome::PermitRefreshed } else { Outcome::Failed },
+            None,
+            None,
+        );
+        result?;
     } else {
-        clear_permit(context.paths, world)?;
+        let result = clear_permit(context.paths, world);
+        support_metrics::observe(
+            Metric::LeasePermit,
+            if result.is_ok() { Outcome::QuorumMissing } else { Outcome::Failed },
+            None,
+            None,
+        );
+        result?;
         request_world_statuses(
             context.storage,
             node,
@@ -6950,8 +6984,17 @@ fn finalize_and_ack(
     transport_peer: &TransportPeerId,
     manifest: &SnapshotManifestV1,
 ) -> Result<()> {
-    verify_snapshot_signature(manifest)?;
-    storage.finalize_replica(manifest)?;
+    // Ordinary push and already-present payloads do not pass through
+    // the receiver-driven pull timer. Measure only their signed durable
+    // finalization, not an estimated transfer duration or network receipt.
+    let started = Instant::now();
+    let finalized = (|| -> Result<()> {
+        verify_snapshot_signature(manifest)?;
+        storage.finalize_replica(manifest)?;
+        Ok(())
+    })();
+    support_metrics::observe_result(Metric::ReplicaFinalize, started, &finalized);
+    finalized?;
     let ack = ReplicaAckV1 {
         world_id: manifest.world_id,
         snapshot_number: manifest.snapshot_number,

@@ -281,7 +281,10 @@ pub async fn serve(paths: DataPaths, listen: String, presence_only: bool, bootst
     let mut refresh = tokio::time::interval(DISCOVERY_REFRESH_INTERVAL);
     refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
     if !presence_only {
-        refresh_publications(&storage, &identity, &mut node, &mut published)?;
+        let started = std::time::Instant::now();
+        let result = refresh_publications(&storage, &identity, &mut node, &mut published);
+        crate::support_metrics::observe_result(crate::support_metrics::Metric::DiscoveryRefresh, started, &result);
+        result?;
     }
     refresh_presence_publications(&paths, &identity, &mut node, &mut published)?;
 
@@ -290,7 +293,10 @@ pub async fn serve(paths: DataPaths, listen: String, presence_only: bool, bootst
         tokio::select! {
             _ = refresh.tick() => {
                 if !presence_only {
-                    if let Err(error) = refresh_publications(&storage, &identity, &mut node, &mut published) {
+                    let started = std::time::Instant::now();
+                    let result = refresh_publications(&storage, &identity, &mut node, &mut published);
+                    crate::support_metrics::observe_result(crate::support_metrics::Metric::DiscoveryRefresh, started, &result);
+                    if let Err(error) = result {
                         warn!(%error, "discovery publication refresh failed");
                     }
                 }

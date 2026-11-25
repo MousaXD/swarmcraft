@@ -1,0 +1,143 @@
+{
+  "scope": "extracted local Linux Debian package, fresh real Java save import, offline operations",
+  "package_sha256": "28d9b7276153171ea67eda541a81a3c4b62bf2550f148db5dcb2cb721f468ab1",
+  "sidecar_sha256": {
+    "swarmcraft": "2b1eda474169632ea0c6a4340afd5b2cf58d8df05e847b355a669f32a55cac05",
+    "swarmcraft-host": "0971d001882e311c74c29df214fc4767b89d9da35809f4a060a88ac42638f175",
+    "swarmcraft-runtime": "a759c7a1463a72b7e45e03ea07d9ac68e6fca290ce09b311fbc4e14a587d1c1a",
+    "swarmcraft-import": "b79997ac833f527aa1296616646b9733dc57970181e4daa36c1cc35a371f548a"
+  },
+  "checks": {
+    "default_off_and_explicit_report_without_initialization": true,
+    "packaged_cli_and_runtime_observations_redacted": true,
+    "real_save_restored_byte_exact_and_report_read_only": true,
+    "pause_clear_preserve_canonical_state_and_withdrawn_consent": true,
+    "incompatible_profile_report_without_mutation": true,
+    "malformed_store_refused_without_raw_content": true
+  },
+  "report": {
+    "authorizes_hosting_or_play": false,
+    "automatically_uploaded": false,
+    "best_effort_incomplete_possible": true,
+    "build": {
+      "commit": "426338c6de294d272631d834b6be325ffbafcfa4",
+      "tree": "modified",
+      "version": "0.5.1"
+    },
+    "collection_enabled": true,
+    "events": [
+      {
+        "build": {
+          "commit": "426338c6de294d272631d834b6be325ffbafcfa4",
+          "tree": "modified",
+          "version": "0.5.1"
+        },
+        "elapsed_ms": 15,
+        "metric": "checkpoint_verify",
+        "observed_unix_ms": 1795634392075,
+        "outcome": "completed",
+        "transfer": null
+      },
+      {
+        "build": {
+          "commit": "426338c6de294d272631d834b6be325ffbafcfa4",
+          "tree": "modified",
+          "version": "0.5.1"
+        },
+        "elapsed_ms": 151,
+        "metric": "checkpoint_restore",
+        "observed_unix_ms": 1795634392237,
+        "outcome": "completed",
+        "transfer": null
+      },
+      {
+        "build": {
+          "commit": "426338c6de294d272631d834b6be325ffbafcfa4",
+          "tree": "modified",
+          "version": "0.5.1"
+        },
+        "elapsed_ms": 0,
+        "metric": "checkpoint_restore",
+        "observed_unix_ms": 1795634392255,
+        "outcome": "failed",
+        "transfer": null
+      },
+      {
+        "build": {
+          "commit": "426338c6de294d272631d834b6be325ffbafcfa4",
+          "tree": "modified",
+          "version": "0.5.1"
+        },
+        "elapsed_ms": 0,
+        "metric": "runtime_prepare",
+        "observed_unix_ms": 1795634392265,
+        "outcome": "failed",
+        "transfer": null
+      }
+    ],
+    "generated_unix_ms": 1795634392279,
+    "history_scope": "all_worlds_local_process_observations_not_selected_world",
+    "older_events_dropped": false,
+    "periodic_samples_not_totals": true,
+    "profile_marker_only": "observed",
+    "protocol_version": 1,
+    "reader_generation": 1,
+    "retained_count": 4,
+    "schema": "swarmcraft-operational-support-v1",
+    "selected_world_observation": {
+      "discovery_preference": {
+        "availability": "observed",
+        "locally_paused": false,
+        "remote_publication_confirmed": false
+      },
+      "live_route": null,
+      "migration_record": {
+        "availability": "missing",
+        "historical_only": true,
+        "last_recorded_phase": null,
+        "recorded_failure": null
+      },
+      "readiness_cache": {
+        "age_ms": null,
+        "availability": "missing",
+        "exact_replica_receipt_count": null,
+        "matching_peer_count": null,
+        "preferred_total_copies": null,
+        "state": null
+      }
+    },
+    "storage_schema_version": 1,
+    "summary": {
+      "checkpoint_restore": {
+        "outcomes": {
+          "completed": 1,
+          "failed": 1
+        },
+        "p50_elapsed_ms": 0,
+        "p95_elapsed_ms": 151,
+        "retained_observations": 2,
+        "timed_samples": 2
+      },
+      "checkpoint_verify": {
+        "outcomes": {
+          "completed": 1
+        },
+        "p50_elapsed_ms": 15,
+        "p95_elapsed_ms": 15,
+        "retained_observations": 1,
+        "timed_samples": 1
+      },
+      "runtime_prepare": {
+        "outcomes": {
+          "failed": 1
+        },
+        "p50_elapsed_ms": 0,
+        "p95_elapsed_ms": 0,
+        "retained_observations": 1,
+        "timed_samples": 1
+      }
+    }
+  },
+  "real_save_files": 31,
+  "real_save_bytes": 2215315
+}
