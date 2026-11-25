@@ -1,0 +1,1222 @@
+{
+  "observed_date": "2026-11-25",
+  "method": "Read-only GitHub metadata; paginated pull changed-path lists compared by Git tree entry (mode/type/object) against pinned main and integration; ancestry independently checked. Asset metadata is not downloaded-byte verification. Historical CI is exact to its own SHA only.",
+  "main": "aaffac22e32547983f1fd558af6eb32c0da4917b",
+  "integration": "6fd4e0a92386c54ce5171b4dfa23033cb50d5598",
+  "merge_base": "aaffac22e32547983f1fd558af6eb32c0da4917b",
+  "left_right_count": [
+    "0",
+    "159"
+  ],
+  "issues": [
+    {
+      "number": 141,
+      "title": "[P1][Native QA] Certify genuine installed Windows WebView2 and macOS WKWebView GUI using isolated Tauri test driver",
+      "url": "https://github.com/MousaXD/swarmcraft/issues/141",
+      "state": "OPEN",
+      "updatedAt": "2026-11-20T21:02:13Z"
+    },
+    {
+      "number": 140,
+      "title": "[P1][CI] Rolling main-latest preview deletes old release before new upload: stage and prove rollback",
+      "url": "https://github.com/MousaXD/swarmcraft/issues/140",
+      "state": "OPEN",
+      "updatedAt": "2026-11-20T21:00:45Z"
+    },
+    {
+      "number": 138,
+      "title": "[P1][CI] Restore Ubuntu WebKit GUI smoke and actual managed-Java live coverage",
+      "url": "https://github.com/MousaXD/swarmcraft/issues/138",
+      "state": "OPEN",
+      "updatedAt": "2026-11-20T20:58:49Z"
+    },
+    {
+      "number": 137,
+      "title": "[P0][Security] Remediate Quinn RustSec vulnerabilities in root and desktop audits",
+      "url": "https://github.com/MousaXD/swarmcraft/issues/137",
+      "state": "OPEN",
+      "updatedAt": "2026-11-20T20:58:47Z"
+    },
+    {
+      "number": 135,
+      "title": "[P0][Security][Release Veto] Remediate 3 QUIC RustSec vulnerabilities in root and Desktop lockfiles",
+      "url": "https://github.com/MousaXD/swarmcraft/issues/135",
+      "state": "OPEN",
+      "updatedAt": "2026-11-20T20:58:13Z"
+    },
+    {
+      "number": 120,
+      "title": "[E2E][QA] Require observed hosting withdrawal and player-only denial before three-machine certification",
+      "url": "https://github.com/MousaXD/swarmcraft/issues/120",
+      "state": "OPEN",
+      "updatedAt": "2026-11-20T13:00:29Z"
+    },
+    {
+      "number": 97,
+      "title": "[P1][CI] Release-gate artifact downloads repeatedly HTTP 504 (Java, AppImage, Windows NSIS)",
+      "url": "https://github.com/MousaXD/swarmcraft/issues/97",
+      "state": "OPEN",
+      "updatedAt": "2026-11-10T17:15:13Z"
+    },
+    {
+      "number": 85,
+      "title": "[P3][E2E] Three real installations: invite -> join -> play -> third peer -> crash failover",
+      "url": "https://github.com/MousaXD/swarmcraft/issues/85",
+      "state": "OPEN",
+      "updatedAt": "2026-11-20T21:00:08Z"
+    },
+    {
+      "number": 84,
+      "title": "[P2][Feature] Opt-in per-device Minecraft hosting contribution and enforceable RAM budget",
+      "url": "https://github.com/MousaXD/swarmcraft/issues/84",
+      "state": "OPEN",
+      "updatedAt": "2026-11-20T20:58:11Z"
+    }
+  ],
+  "prs": [
+    {
+      "number": 142,
+      "title": "Keep the last working preview available during publication",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/142",
+      "head": "52d138a11f86e214b448e86a90be5515c574b08a",
+      "base": "integration/swarmcraft-release-gates-agent00-20261121",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": true,
+          "same": [
+            "crates/swarm-cli/src/runtime_installer.rs",
+            "docs/IMPLEMENTATION_STATUS.md",
+            "docs/RUNTIME_INSTALLER.md",
+            "scripts/ci-release/publish_preview.py",
+            "scripts/ci-release/test_publish_preview.py"
+          ],
+          "different": [
+            ".github/workflows/main-installers.yml",
+            "docs/RELEASE_GATES.md",
+            "scripts/check_workflow_policy.py"
+          ]
+        },
+        "integration": {
+          "ancestor": true,
+          "same": [
+            "crates/swarm-cli/src/runtime_installer.rs",
+            "docs/IMPLEMENTATION_STATUS.md",
+            "docs/RUNTIME_INSTALLER.md",
+            "scripts/ci-release/publish_preview.py",
+            "scripts/ci-release/test_publish_preview.py"
+          ],
+          "different": [
+            ".github/workflows/main-installers.yml",
+            "docs/RELEASE_GATES.md",
+            "scripts/check_workflow_policy.py"
+          ]
+        }
+      }
+    },
+    {
+      "number": 129,
+      "title": "test(storage): RED regression suite for recovery certificate corruption and rollback (#102)",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/129",
+      "head": "1c5f411f9ca56b6597786454fc2fa237de9f6330",
+      "base": "main",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "crates/swarm-storage/src/recovery_v2.rs"
+          ]
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "crates/swarm-storage/src/recovery_v2.rs"
+          ]
+        }
+      }
+    },
+    {
+      "number": 125,
+      "title": "feat(protocol): fail-closed signed V2 migration quorum verification (#84)",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/125",
+      "head": "c722ece5b86a41433644013bf1dabccd23142a13",
+      "base": "integration/main-safety-hosting-svelte-v2-20261111",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "crates/swarm-core/tests/v2_migration_quorum_crypto.rs",
+            "crates/swarm-protocol/src/hosting_migration_quorum_v2.rs",
+            "crates/swarm-protocol/src/hosting_realm_v2.rs",
+            "crates/swarm-protocol/src/root.rs",
+            "crates/swarm-protocol/tests/hosting_realm_v2_contract.rs",
+            "docs/rfcs/hosting-policy-migration.md"
+          ]
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "crates/swarm-core/tests/v2_migration_quorum_crypto.rs",
+            "crates/swarm-protocol/src/hosting_migration_quorum_v2.rs",
+            "crates/swarm-protocol/src/hosting_realm_v2.rs",
+            "crates/swarm-protocol/src/root.rs",
+            "crates/swarm-protocol/tests/hosting_realm_v2_contract.rs",
+            "docs/rfcs/hosting-policy-migration.md"
+          ]
+        }
+      }
+    },
+    {
+      "number": 124,
+      "title": "test(security): RED regression for dangling replication pin root (#102)",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/124",
+      "head": "56778341d62264619b633fc987d6955bd8938290",
+      "base": "main",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "crates/swarm-storage/tests/adversarial_replication_pin_root.rs"
+          ]
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "crates/swarm-storage/tests/adversarial_replication_pin_root.rs"
+          ]
+        }
+      }
+    },
+    {
+      "number": 122,
+      "title": "feat(consensus): verify cryptographic V2 migration vote majority before realm activation (#84)",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/122",
+      "head": "56b50274e7e173cd6573e678df6cd0a41963b2c0",
+      "base": "integration/main-safety-hosting-svelte-v2-20261111",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "Cargo.lock",
+            "crates/swarm-consensus/Cargo.toml",
+            "crates/swarm-consensus/src/root.rs",
+            "crates/swarm-consensus/src/v2_migration_quorum.rs",
+            "crates/swarm-network/src/authority_capability.rs",
+            "crates/swarm-network/src/lib.rs",
+            "crates/swarm-network/src/v2_action_nonce_book.rs",
+            "crates/swarm-network/src/v2_challenge_book.rs",
+            "docs/rfcs/agent-01-v2-quorum-admission-handoff.md"
+          ]
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "Cargo.lock",
+            "crates/swarm-consensus/Cargo.toml",
+            "crates/swarm-consensus/src/root.rs",
+            "crates/swarm-consensus/src/v2_migration_quorum.rs",
+            "crates/swarm-network/src/authority_capability.rs",
+            "crates/swarm-network/src/lib.rs",
+            "crates/swarm-network/src/v2_action_nonce_book.rs",
+            "crates/swarm-network/src/v2_challenge_book.rs",
+            "docs/rfcs/agent-01-v2-quorum-admission-handoff.md"
+          ]
+        }
+      }
+    },
+    {
+      "number": 119,
+      "title": "test(storage): RED fail-closed solo-conflict and GC pin roots (#102)",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/119",
+      "head": "b632d46095955f2d616738841e3f7dc6af2f7e82",
+      "base": "main",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "crates/swarm-storage/tests/retention_gc.rs"
+          ]
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "crates/swarm-storage/tests/retention_gc.rs"
+          ]
+        }
+      }
+    },
+    {
+      "number": 114,
+      "title": "test(ci): stabilize exact ChromeDriver viewport calibration on Linux",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/114",
+      "head": "0ebfede706a397c3f0cefc05feda54cfd5fc85b6",
+      "base": "main",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [
+            "apps/desktop/tests/desktop-browser-webdriver.test.mjs"
+          ],
+          "different": []
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "apps/desktop/tests/desktop-browser-webdriver.test.mjs"
+          ]
+        }
+      }
+    },
+    {
+      "number": 111,
+      "title": "test(integration): distinct V2 authority realm protocol and network foundation (#84)",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/111",
+      "head": "c4933878e3be3dd7a003d574a174c69283977047",
+      "base": "main",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [
+            "crates/swarm-consensus/src/hosting_policy_migration.rs",
+            "crates/swarm-consensus/src/root.rs",
+            "crates/swarm-network/src/authority_capability.rs",
+            "crates/swarm-network/src/lib.rs",
+            "crates/swarm-protocol/src/hosting_policy.rs",
+            "crates/swarm-protocol/src/hosting_realm_v2.rs",
+            "crates/swarm-protocol/src/root.rs",
+            "crates/swarm-protocol/tests/hosting_contribution_policy.rs",
+            "crates/swarm-protocol/tests/hosting_realm_v2_contract.rs",
+            "docs/HOSTING_CONTRIBUTION_PROTOCOL.md",
+            "docs/rfcs/hosting-policy-migration.md"
+          ],
+          "different": [
+            ".github/workflows/ci.yml"
+          ]
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [
+            "crates/swarm-consensus/src/hosting_policy_migration.rs",
+            "crates/swarm-protocol/src/hosting_policy.rs",
+            "crates/swarm-protocol/tests/hosting_contribution_policy.rs",
+            "docs/HOSTING_CONTRIBUTION_PROTOCOL.md"
+          ],
+          "different": [
+            ".github/workflows/ci.yml",
+            "crates/swarm-consensus/src/root.rs",
+            "crates/swarm-network/src/authority_capability.rs",
+            "crates/swarm-network/src/lib.rs",
+            "crates/swarm-protocol/src/hosting_realm_v2.rs",
+            "crates/swarm-protocol/src/root.rs",
+            "crates/swarm-protocol/tests/hosting_realm_v2_contract.rs",
+            "docs/rfcs/hosting-policy-migration.md"
+          ]
+        }
+      }
+    },
+    {
+      "number": 110,
+      "title": "feat(desktop): real hosting contribution Tauri IPC (#84)",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/110",
+      "head": "6fddb5c54e346fdb6535fd789ef5174cb082ca2f",
+      "base": "integration/hosting-cli-local-consent-20261111",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": true,
+          "same": [],
+          "different": [
+            "apps/desktop/src-tauri/src/hosting_contribution_commands.rs",
+            "apps/desktop/src-tauri/src/main.rs"
+          ]
+        },
+        "integration": {
+          "ancestor": true,
+          "same": [],
+          "different": [
+            "apps/desktop/src-tauri/src/hosting_contribution_commands.rs",
+            "apps/desktop/src-tauri/src/main.rs"
+          ]
+        }
+      }
+    },
+    {
+      "number": 101,
+      "title": "feat(security): inert canonical hosting migration and V2 authority gates (#84)",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/101",
+      "head": "ca59421f332165822ae6b03b269934181e805028",
+      "base": "main",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [
+            "crates/swarm-consensus/src/hosting_policy_migration.rs",
+            "crates/swarm-consensus/src/root.rs",
+            "crates/swarm-network/src/authority_capability.rs",
+            "crates/swarm-network/src/lib.rs",
+            "docs/rfcs/hosting-policy-migration.md"
+          ],
+          "different": []
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [
+            "crates/swarm-consensus/src/hosting_policy_migration.rs"
+          ],
+          "different": [
+            "crates/swarm-consensus/src/root.rs",
+            "crates/swarm-network/src/authority_capability.rs",
+            "crates/swarm-network/src/lib.rs",
+            "docs/rfcs/hosting-policy-migration.md"
+          ]
+        }
+      }
+    },
+    {
+      "number": 100,
+      "title": "test(desktop): stage validated Rust hosting-contribution IPC contract (Agent 09)",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/100",
+      "head": "5aa12deb556c4d3e1155366991ad482d2dd93ae6",
+      "base": "main",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "apps/desktop/src-tauri/HOSTING_CONTRIBUTION_API_CONTRACT.md",
+            "apps/desktop/src-tauri/src/hosting_contribution_commands.rs",
+            "apps/desktop/src-tauri/src/main.rs"
+          ]
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "apps/desktop/src-tauri/HOSTING_CONTRIBUTION_API_CONTRACT.md",
+            "apps/desktop/src-tauri/src/hosting_contribution_commands.rs",
+            "apps/desktop/src-tauri/src/main.rs"
+          ]
+        }
+      }
+    },
+    {
+      "number": 99,
+      "title": "test(agent-10): stage explicit CLI consent contract and real Minecraft acceptance",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/99",
+      "head": "b20eacced03259f0e8120006ec27d73c475d9bcd",
+      "base": "main",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [
+            "docs/HOSTING_CONSENT_CLI_INTEGRATION.md",
+            "scripts/acceptance/hosting-consent-denial-live.sh",
+            "scripts/acceptance/hosting-consent-opt-in.sh",
+            "scripts/acceptance/player-only-offline-join.sh"
+          ],
+          "different": []
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [
+            "docs/HOSTING_CONSENT_CLI_INTEGRATION.md",
+            "scripts/acceptance/hosting-consent-denial-live.sh",
+            "scripts/acceptance/hosting-consent-opt-in.sh",
+            "scripts/acceptance/player-only-offline-join.sh"
+          ],
+          "different": []
+        }
+      }
+    },
+    {
+      "number": 96,
+      "title": "test(e2e): scaffold fail-closed three-machine Minecraft field certification",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/96",
+      "head": "e1fc58af7f0376e8e3cd40a7626e7f3f945ecb4a",
+      "base": "main",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [
+            ".github/workflows/three-machine-certification.yml",
+            "scripts/e2e/three_machine/config.example.json",
+            "scripts/e2e/three_machine/ops.py",
+            "scripts/e2e/three_machine/test_crash_approval.py",
+            "scripts/e2e/three_machine/test_crash_pidfd.py",
+            "scripts/e2e/three_machine/test_ops.py"
+          ],
+          "different": [
+            "scripts/e2e/three_machine/README.md",
+            "scripts/e2e/three_machine/evidence.py",
+            "scripts/e2e/three_machine/node.py",
+            "scripts/e2e/three_machine/review.example.json",
+            "scripts/e2e/three_machine/run.py",
+            "scripts/e2e/three_machine/test_evidence.py",
+            "scripts/e2e/three_machine/test_gate.py",
+            "scripts/e2e/three_machine/test_probe.py"
+          ]
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [
+            "scripts/e2e/three_machine/config.example.json",
+            "scripts/e2e/three_machine/ops.py",
+            "scripts/e2e/three_machine/test_crash_approval.py",
+            "scripts/e2e/three_machine/test_crash_pidfd.py",
+            "scripts/e2e/three_machine/test_ops.py"
+          ],
+          "different": [
+            ".github/workflows/three-machine-certification.yml",
+            "scripts/e2e/three_machine/README.md",
+            "scripts/e2e/three_machine/evidence.py",
+            "scripts/e2e/three_machine/node.py",
+            "scripts/e2e/three_machine/review.example.json",
+            "scripts/e2e/three_machine/run.py",
+            "scripts/e2e/three_machine/test_evidence.py",
+            "scripts/e2e/three_machine/test_gate.py",
+            "scripts/e2e/three_machine/test_probe.py"
+          ]
+        }
+      }
+    },
+    {
+      "number": 93,
+      "title": "feat(hosting): fail-closed per-device consent, JVM budgets and safe withdrawal (Agent 03)",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/93",
+      "head": "a847cce761c9f6420d3838da9b2b754414b3f552",
+      "base": "main",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [
+            "crates/swarm-cli/src/lib.rs",
+            "crates/swarm-cli/tests/consensus_partition_safety.rs",
+            "crates/swarm-cli/tests/host_process.rs",
+            "crates/swarm-cli/tests/manual_transfer_process_gate.rs",
+            "crates/swarm-cli/tests/migration_core.rs",
+            "crates/swarm-cli/tests/recovery_successor_dies.rs",
+            "crates/swarm-cli/tests/runtime_setup_hardening.rs",
+            "crates/swarm-cli/tests/sleep_state_fail_closed.rs",
+            "crates/swarm-cli/tests/three_daemon_recovery.rs"
+          ],
+          "different": [
+            "crates/swarm-cli/HOSTING_BUDGET_CONTRACT.md",
+            "crates/swarm-cli/src/host_readiness.rs",
+            "crates/swarm-cli/src/hosting_budget.rs",
+            "crates/swarm-cli/src/migration.rs"
+          ]
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "crates/swarm-cli/HOSTING_BUDGET_CONTRACT.md",
+            "crates/swarm-cli/src/host_readiness.rs",
+            "crates/swarm-cli/src/hosting_budget.rs",
+            "crates/swarm-cli/src/lib.rs",
+            "crates/swarm-cli/src/migration.rs",
+            "crates/swarm-cli/tests/consensus_partition_safety.rs",
+            "crates/swarm-cli/tests/host_process.rs",
+            "crates/swarm-cli/tests/manual_transfer_process_gate.rs",
+            "crates/swarm-cli/tests/migration_core.rs",
+            "crates/swarm-cli/tests/recovery_successor_dies.rs",
+            "crates/swarm-cli/tests/runtime_setup_hardening.rs",
+            "crates/swarm-cli/tests/sleep_state_fail_closed.rs",
+            "crates/swarm-cli/tests/three_daemon_recovery.rs"
+          ]
+        }
+      }
+    },
+    {
+      "number": 92,
+      "title": "feat(protocol): foundations for voluntary hosting consent (blocked on migration)",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/92",
+      "head": "6a7e910b89b53b78ea779d9efcf411c245775aff",
+      "base": "main",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [
+            "crates/swarm-protocol/src/hosting_policy.rs",
+            "crates/swarm-protocol/src/hosting_realm_v2.rs",
+            "crates/swarm-protocol/src/root.rs",
+            "crates/swarm-protocol/tests/hosting_contribution_policy.rs",
+            "crates/swarm-protocol/tests/hosting_realm_v2_contract.rs",
+            "docs/HOSTING_CONTRIBUTION_PROTOCOL.md"
+          ],
+          "different": []
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [
+            "crates/swarm-protocol/src/hosting_policy.rs",
+            "crates/swarm-protocol/tests/hosting_contribution_policy.rs",
+            "docs/HOSTING_CONTRIBUTION_PROTOCOL.md"
+          ],
+          "different": [
+            "crates/swarm-protocol/src/hosting_realm_v2.rs",
+            "crates/swarm-protocol/src/root.rs",
+            "crates/swarm-protocol/tests/hosting_realm_v2_contract.rs"
+          ]
+        }
+      }
+    },
+    {
+      "number": 91,
+      "title": "docs(qa): independent SwarmCraft release certification ledger (BLOCKED)",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/91",
+      "head": "96a7da7e9d358d3496a98102c266c26b0ffce856",
+      "base": "main",
+      "draft": true,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "docs/audits/agent-07-qa-certification.md"
+          ]
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "docs/audits/agent-07-qa-certification.md"
+          ]
+        }
+      }
+    },
+    {
+      "number": 77,
+      "title": "fix(rust safety): fail closed on corrupted consensus and authority state",
+      "url": "https://github.com/MousaXD/swarmcraft/pull/77",
+      "head": "f71684c5b4ed9381161e0fb08fa7872ae993451d",
+      "base": "finalize/audit-remediation-v1",
+      "draft": false,
+      "comparison": {
+        "main": {
+          "ancestor": false,
+          "same": [
+            "crates/swarm-storage/src/integrity.rs",
+            "crates/swarm-storage/src/membership.rs",
+            "crates/swarm-storage/src/transaction.rs",
+            "crates/swarm-storage/src/world.rs"
+          ],
+          "different": [
+            "crates/swarm-cli/src/daemon.rs",
+            "crates/swarm-cli/src/daemon_protocol_tests.rs",
+            "crates/swarm-storage/src/control.rs",
+            "crates/swarm-storage/src/state.rs"
+          ]
+        },
+        "integration": {
+          "ancestor": false,
+          "same": [],
+          "different": [
+            "crates/swarm-cli/src/daemon.rs",
+            "crates/swarm-cli/src/daemon_protocol_tests.rs",
+            "crates/swarm-storage/src/control.rs",
+            "crates/swarm-storage/src/integrity.rs",
+            "crates/swarm-storage/src/membership.rs",
+            "crates/swarm-storage/src/state.rs",
+            "crates/swarm-storage/src/transaction.rs",
+            "crates/swarm-storage/src/world.rs"
+          ]
+        }
+      }
+    }
+  ],
+  "historical_runs": [
+    {
+      "name": "Main Desktop Installers",
+      "headSha": "aaffac22e32547983f1fd558af6eb32c0da4917b",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651",
+      "jobs": [
+        {
+          "name": "Exact-SHA required validation / Release identity / Verify release metadata",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387601763"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Network impairment (QUIC resume)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387601953"
+        },
+        {
+          "name": "Exact-SHA required validation / Specialist validation / Migrated catalog/provider checks",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387601958"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Fuzz smoke",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387601963"
+        },
+        {
+          "name": "Exact-SHA required validation / Live player journey / Clean machine live artifacts + Minecraft",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387601975"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Acceptance (process-level)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387601980"
+        },
+        {
+          "name": "Exact-SHA required validation / Network soak / Interrupted QUIC multi-GiB soak",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387601990"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Rust (windows-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387602011"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Rust dependency audit",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387602019"
+        },
+        {
+          "name": "Exact-SHA required validation / CI governance regressions / Excluded crates fail closed",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387602039"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Desktop package (macos-x86_64)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387602048"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Desktop package (windows)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387602053"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Fabric server mod",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387602054"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Rust (ubuntu-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387602058"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Desktop package (linux)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387602089"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Desktop package (macos-arm64)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387602098"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Desktop + provider direct gates",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387602113"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Desktop Rust dependency audit",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387602147"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Rust (macos-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137387602159"
+        },
+        {
+          "name": "Exact-SHA required validation / Core CI / Real installed desktop GUI smoke (Linux/WebKitGTK)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137395150376"
+        },
+        {
+          "name": "Exact-SHA required validation / Required validation gate",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137395824992"
+        },
+        {
+          "name": "Windows .exe installer",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137395855967"
+        },
+        {
+          "name": "macOS .dmg (arm64)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137395856002"
+        },
+        {
+          "name": "Fabric bridge jar",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137395856028"
+        },
+        {
+          "name": "Linux .deb",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137395856029"
+        },
+        {
+          "name": "macOS .dmg (x86_64)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137395856113"
+        },
+        {
+          "name": "Verify all preview packages and checksums",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137404329768"
+        },
+        {
+          "name": "Publish immutable main snapshot",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577651/job/137404383842"
+        }
+      ]
+    },
+    {
+      "name": "Required Validation",
+      "headSha": "aaffac22e32547983f1fd558af6eb32c0da4917b",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660",
+      "jobs": [
+        {
+          "name": "Release identity / Verify release metadata",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387601869"
+        },
+        {
+          "name": "Live player journey / Clean machine live artifacts + Minecraft",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602024"
+        },
+        {
+          "name": "Core CI / Desktop + provider direct gates",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602041"
+        },
+        {
+          "name": "Core CI / Network impairment (QUIC resume)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602043"
+        },
+        {
+          "name": "Specialist validation / Migrated catalog/provider checks",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602055"
+        },
+        {
+          "name": "Core CI / Rust dependency audit",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602060"
+        },
+        {
+          "name": "CI governance regressions / Excluded crates fail closed",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602083"
+        },
+        {
+          "name": "Core CI / Acceptance (process-level)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602091"
+        },
+        {
+          "name": "Core CI / Desktop package (linux)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602103"
+        },
+        {
+          "name": "Core CI / Rust (windows-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602111"
+        },
+        {
+          "name": "Core CI / Desktop Rust dependency audit",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602116"
+        },
+        {
+          "name": "Core CI / Rust (macos-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602133"
+        },
+        {
+          "name": "Core CI / Fuzz smoke",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602150"
+        },
+        {
+          "name": "Core CI / Desktop package (windows)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602174"
+        },
+        {
+          "name": "Core CI / Fabric server mod",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602201"
+        },
+        {
+          "name": "Core CI / Desktop package (macos-x86_64)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602206"
+        },
+        {
+          "name": "Core CI / Rust (ubuntu-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602210"
+        },
+        {
+          "name": "Core CI / Desktop package (macos-arm64)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387602261"
+        },
+        {
+          "name": "Network soak",
+          "conclusion": "skipped",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137387603584"
+        },
+        {
+          "name": "Core CI / Real installed desktop GUI smoke (Linux/WebKitGTK)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137395088509"
+        },
+        {
+          "name": "Required validation gate",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45080577660/job/137395849958"
+        }
+      ]
+    },
+    {
+      "name": "Required Validation",
+      "headSha": "e1f7bce3ab9ff1646e45cfeb84a5f0b92866c5a9",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685",
+      "jobs": [
+        {
+          "name": "CI governance regressions / Excluded crates fail closed",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905624550"
+        },
+        {
+          "name": "Release identity / Verify release metadata",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905624788"
+        },
+        {
+          "name": "Core CI / Fabric server mod",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905624808"
+        },
+        {
+          "name": "Live player journey / Clean machine live artifacts + Minecraft",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905624817"
+        },
+        {
+          "name": "Core CI / Rust dependency audit",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905624880"
+        },
+        {
+          "name": "Core CI / Desktop + provider direct gates",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905624995"
+        },
+        {
+          "name": "Core CI / Desktop package (windows)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905625005"
+        },
+        {
+          "name": "Core CI / Rust (macos-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905625011"
+        },
+        {
+          "name": "Core CI / Acceptance (process-level)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905625027"
+        },
+        {
+          "name": "Core CI / Rust (ubuntu-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905625047"
+        },
+        {
+          "name": "Specialist validation / Migrated catalog/provider checks",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905625077"
+        },
+        {
+          "name": "Core CI / Desktop package (linux)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905625094"
+        },
+        {
+          "name": "Core CI / Network impairment (QUIC resume)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905625110"
+        },
+        {
+          "name": "Core CI / Desktop package (macos-x86_64)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905625111"
+        },
+        {
+          "name": "Core CI / Fuzz smoke",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905625122"
+        },
+        {
+          "name": "Core CI / Desktop package (macos-arm64)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905625131"
+        },
+        {
+          "name": "Core CI / Rust (windows-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905625203"
+        },
+        {
+          "name": "Core CI / Desktop Rust dependency audit",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905625445"
+        },
+        {
+          "name": "Network soak",
+          "conclusion": "skipped",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138905626228"
+        },
+        {
+          "name": "Core CI / Real installed desktop GUI smoke (Linux/WebKitGTK)",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138909862461"
+        },
+        {
+          "name": "Required validation gate",
+          "conclusion": "success",
+          "url": "https://github.com/MousaXD/swarmcraft/actions/runs/45524776685/job/138910985210"
+        }
+      ]
+    }
+  ],
+  "quinn_lock_versions": {
+    "main": {
+      "Cargo.lock": {
+        "quinn-proto": [
+          "0.11.19"
+        ],
+        "quinn-udp": [
+          "0.5.16"
+        ]
+      },
+      "apps/desktop/src-tauri/Cargo.lock": {
+        "quinn-proto": [
+          "0.11.19"
+        ],
+        "quinn-udp": [
+          "0.5.16"
+        ]
+      }
+    },
+    "integration": {
+      "Cargo.lock": {
+        "quinn-proto": [
+          "0.11.19"
+        ],
+        "quinn-udp": [
+          "0.5.16"
+        ]
+      },
+      "apps/desktop/src-tauri/Cargo.lock": {
+        "quinn-proto": [
+          "0.11.19"
+        ],
+        "quinn-udp": [
+          "0.5.16"
+        ]
+      }
+    }
+  },
+  "published_release_metadata": [
+    {
+      "assets": [
+        {
+          "digest": "sha256:87ad0f42fadf0687df28ea20953187e414579cb61287d55d78f23a712649ce55",
+          "name": "swarmcraft-fabric-0.5.0.jar",
+          "size": 2535775,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:83658f39e6bc51c5fa26bfb43403ca2b41efef90b26b78dfc1e4cd061afca1e7",
+          "name": "swarmcraft-fabric-0.5.0.jar.sha256",
+          "size": 94,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:35c65a3581dbeeee4d9a8e04c83316590999a344cd0c0244edf16368a8d5f5cd",
+          "name": "SwarmCraft_0.5.0_amd64.deb",
+          "size": 28941374,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:cbd7e28311d90608a75b1574110e318b2a3e6335a453992fa6cfbf1e714c4884",
+          "name": "SwarmCraft_0.5.0_amd64.deb.sha256",
+          "size": 98,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:060352fb6d70a04428baf805787d8ee1b74e29a22a235bb989b56b48b77842c0",
+          "name": "SwarmCraft_0.5.0_arm64.dmg",
+          "size": 26646649,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:f7681dc116b59e8c40782b318f986b4150dce023a23ed83083c70456c4aee468",
+          "name": "SwarmCraft_0.5.0_arm64.dmg.sha256",
+          "size": 98,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:c7d1a65b1f3b2c17d316767e6e28fe3a9de8c8eb0917bc08e2b2bda39b5b77e8",
+          "name": "SwarmCraft_0.5.0_x64-setup.exe",
+          "size": 14653496,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:108383051556d3936d4e8936811723c727e20d86fbd8e36cc2a108da0a4d8264",
+          "name": "SwarmCraft_0.5.0_x64-setup.exe.sha256",
+          "size": 96,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:190e6bb1ec9b4a545ac840915d4b4f93c1e6776effbdb0d7aa7c518051fc744a",
+          "name": "SwarmCraft_0.5.0_x86_64.dmg",
+          "size": 29703715,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:88a4cdf06d9609b8129992d4c4956bf3eedfa9d94e74c48d3880effef8240d4e",
+          "name": "SwarmCraft_0.5.0_x86_64.dmg.sha256",
+          "size": 99,
+          "state": "uploaded"
+        }
+      ],
+      "draft": false,
+      "prerelease": true,
+      "published_at": "2026-11-11T02:44:21Z",
+      "tag_name": "main-latest",
+      "tag_target": "682c78f522aff53a59720de6c864e4e536eea778"
+    },
+    {
+      "assets": [
+        {
+          "digest": "sha256:18cb0ae08fdb8f7106362237133d321e217f8cd1d1953eb85c0b22df89386b34",
+          "name": "release-provenance.json",
+          "size": 1643,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:e4b2a96e6c1d55c8ee3bfe7a41f0d0f189a6e7a6d29d9b71bde744d389bf8292",
+          "name": "swarmcraft-fabric-0.5.1.jar",
+          "size": 2535776,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:5358ea3ecd491a1d9fd3b089ed6b4185240cc8b76f3736663c0a079b249fbd8d",
+          "name": "swarmcraft-fabric-0.5.1.jar.sha256",
+          "size": 94,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:7a9c52e2e75f0a5d4966e7e2393fa1522973bff1d0154ac8e3594262bb6e980e",
+          "name": "SwarmCraft_0.5.1_amd64.deb",
+          "size": 29604888,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:a8d1577054c7b175e75189afdca19cb81c70ba3821433db85785391024fa67b4",
+          "name": "SwarmCraft_0.5.1_amd64.deb.sha256",
+          "size": 98,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:5569e4e7c848afa35bdaed5d8d06dc0d746ca4156e4c8141b7d16229b5f3087e",
+          "name": "SwarmCraft_0.5.1_arm64.dmg",
+          "size": 26826681,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:7b26a3b663125f833e984794eb5365061a5c16fc85ef6389702a7fab43cea379",
+          "name": "SwarmCraft_0.5.1_arm64.dmg.sha256",
+          "size": 98,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:7ccb94951bc41d9e96c2ae353ea70dfb3528f50ad12205fec7ac636b255a3394",
+          "name": "SwarmCraft_0.5.1_x64-setup.exe",
+          "size": 14770846,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:083e3ef90f9c5ceb6d1e190c9048c934e0c98ed75e969a149d55314cc7f80dd3",
+          "name": "SwarmCraft_0.5.1_x64-setup.exe.sha256",
+          "size": 96,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:2eae0eb9ecc33f9c65bcea920ab908f8058a140eb4c4608eae841b2e8838f94a",
+          "name": "SwarmCraft_0.5.1_x86_64.dmg",
+          "size": 30537628,
+          "state": "uploaded"
+        },
+        {
+          "digest": "sha256:e76ef3142d127a30f6900c68feed3251c6ff1a050267eb0e1bdf46c8ba5369ed",
+          "name": "SwarmCraft_0.5.1_x86_64.dmg.sha256",
+          "size": 99,
+          "state": "uploaded"
+        }
+      ],
+      "draft": false,
+      "prerelease": true,
+      "published_at": "2026-11-22T23:56:47Z",
+      "tag_name": "main-snapshot-aaffac22e32547983f1fd558af6eb32c0da4917b",
+      "tag_target": "aaffac22e32547983f1fd558af6eb32c0da4917b"
+    }
+  ],
+  "local_checks": {
+    "recovery_v2_tests": 12,
+    "adversarial_replication_pin_root_tests": 1,
+    "retention_gc_tests": 11,
+    "corrupt_membership_prepare_tests": 1,
+    "three_machine_harness_tests": 112
+  }
+}

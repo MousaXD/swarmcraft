@@ -64,6 +64,15 @@ Start with the [open issue ledger](#open-issue-ledger), then the [implementation
 
 ## Open issue ledger
 
+**Historical baseline only (23 November).** For the live 25 November
+read-only audit of all nine issues and 17 PRs, exact ancestry, landed
+commits, residuals and historical terminal CI results, use
+[SABATHON_ISSUE_RECONCILIATION.md](SABATHON_ISSUE_RECONCILIATION.md).
+Current capability and release status come from the
+[execution tracker](SABATHON_FULL_EXECUTION_TRACKER.md) and
+[local-first policy](CI_LOCAL_FIRST.md); the tables below preserve the
+original audit context, not current implementation claims.
+
 Nine GitHub issues were open when checked. The table gives the closure or completion criterion at this baseline.
 
 | Issue | State at audit | Work before closure |

@@ -2,6 +2,13 @@
 
 SwarmCraft Desktop is the player-facing Tauri 2 launcher for replicated Minecraft worlds.
 
+This guide covers the current integration source. Install the published
+0.5.1 technical preview using the
+[root README package and checksum guidance](../../README.md#install-the-published-technical-preview);
+the new integration features described below are not all in that older
+release. Legacy HTML/JS remains the shipping frontend and Svelte remains
+a separately tested candidate.
+
 The frontend intentionally stays small and dependency-free:
 
 ```text
@@ -121,7 +128,14 @@ The Desktop consumes structured backend capabilities and state including:
 
 If a backend capability is absent, the matching Desktop action stays unavailable instead of being simulated in JavaScript. The finalized migration-core `snake_case` phases are translated into the smaller player-facing progress model used by the launcher.
 
-Manual authority transfer is **not yet a complete Desktop flow**. Migration Core has a signed staged transfer protocol and shared runtime orchestration, but the current Tauri capability probe exposes migration status and wake only, and the Desktop adapter keeps `transferAuthority` unavailable. The frontend must not collapse the backend transfer protocol into a fake one-click authority change.
+The integration branch wires native `start_automatic_transfer` and
+`transfer_progress` to the daemon-driven signed transfer stages; the
+manual token wizard remains a capability-gated fallback. Target consent,
+exact checkpoint, canonical generation and fencing stay in Rust. A
+fresh signed `game_route_status` permits a manual reconnect through the
+world's stable localhost gateway; it is not actual Minecraft login proof.
+Do not collapse the backend stages into a fake one-click authority change.
+Real independent-device handoff remains unverified.
 
 Structured connectivity uses backend path state rather than guessing from peer counts. Player-facing presentation distinguishes direct, relayed, connecting, offline/limited and actionable failure states while preserving the underlying backend diagnostics for Advanced views.
 
@@ -209,9 +223,9 @@ The JSON response can report incomplete inventory even with a successful command
 
 The player-facing shutdown question renders the backend `HostReadinessReport`; JavaScript does not recompute whether another device can safely take over.
 
-For exactly two voting members, one survivor after a crash is not a quorum. Desktop therefore preserves `BlockedByQuorum` instead of showing a false **Safe to shut down** result. Backend explicit authority transfer while both peers are present is a different operation, but its complete Desktop workflow remains future integration work.
+For exactly two voting members, one survivor after a crash is not a quorum. Desktop therefore preserves `BlockedByQuorum` instead of showing a false **Safe to shut down** result. The signed daemon-driven Desktop transfer while both peers are present is a distinct operation and does not remove the two-voter quorum requirement.
 
-Multi-member wake also remains fail-closed until the backend implements a sleep-bound quorum wake transition. Desktop must not implement first-click-wins wake behavior.
+Multi-member wake uses the implemented signed sleep-bound majority transition and remains fail-closed when the required surviving quorum or checkpoint cannot be verified. Desktop must not implement first-click-wins wake behavior.
 
 ## Packaged sidecars
 
@@ -238,7 +252,7 @@ For the Rust/Tauri shell, also run when the required native dependencies are ava
 cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
 ```
 
-Normal CI runs the full JavaScript test glob and packages the Desktop application on Linux, Windows, macOS ARM64 and macOS x86_64 with the four required sidecars staged.
+Run the full JavaScript test glob locally and stage all four required sidecars for native packaging. The [local-first policy](../../docs/CI_LOCAL_FIRST.md) requires explicit approval for final hosted native or release workflows; Linux, Windows, macOS ARM64 and macOS x86_64 builds do not by themselves certify installed GUI journeys.
 
 Visual changes should be inspected at the configured default `980x760` window and minimum `720x560` window. The Tauri global bridge must remain enabled with `app.withGlobalTauri: true` because the frontend consumes `window.__TAURI__.core.invoke`.
 

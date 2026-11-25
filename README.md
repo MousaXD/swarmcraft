@@ -31,6 +31,14 @@ The long-term goal is a Minecraft world with **no permanent host** and **no perm
 
 **Current application version: 0.5.1 technical preview.** Wire protocol version remains `1`.
 
+This README describes the source in the current checkout, including
+unreleased Sabathon integration work. The published 0.5.1 preview is pinned
+to the audited main commit
+[`aaffac22`](https://github.com/MousaXD/swarmcraft/tree/aaffac22e32547983f1fd558af6eb32c0da4917b).
+New integration capabilities do **not** imply that the downloadable preview
+contains them. See [current issue/PR reconciliation](docs/SABATHON_ISSUE_RECONCILIATION.md)
+and the [execution tracker](docs/SABATHON_FULL_EXECUTION_TRACKER.md).
+
 SwarmCraft is no longer only an architecture prototype. The repository contains an executable Rust core, authenticated peer networking, snapshot replication, authority/recovery logic, a Fabric lifecycle bridge, a Tauri desktop application, managed Minecraft runtime preparation, existing-world import, and cross-platform packaging workflows.
 
 ### Implemented today
@@ -52,7 +60,8 @@ SwarmCraft is no longer only an architecture prototype. The repository contains 
 - backend Host Readiness for the player-facing **Can I turn off this PC?** decision;
 - safe existing-world import through the Rust backend and normal Desktop flow;
 - fail-closed corrupt/unreadable sleep-state handling across direct launch, standby and migration;
-- desktop flows for world creation, import, joining, invites, play, sleep, seeding, compatibility, conflicts and diagnostics;
+- desktop flows for world creation, reviewed import, joining, invite lifecycle, play, sleep, seeding, compatibility, conflicts and diagnostics;
+- on the integration branch: fresh signed multiplayer route verification and stable local loopback gateway, daemon-driven staged authority handoff, authenticated parallel replica pulls, explicit cache policies, headless replica-only voting, signed discovery and opt-in friend presence, and redacted local action history (scoped local evidence, not yet a new release);
 - Linux, Windows and macOS CI/package builds plus RustSec dependency audit;
 - four bundled Desktop sidecars on every supported target: `swarmcraft`, `swarmcraft-host`, `swarmcraft-runtime`, and `swarmcraft-import`.
 
@@ -63,16 +72,16 @@ SwarmCraft 0.5.1 is still a technical preview, not a claim of universal producti
 Important remaining work includes:
 
 - seamless automatic Minecraft client redirection/reconnection after authority migration;
-- a dedicated quorum-backed wake protocol for sleeping multi-member worlds;
+- real independent-device gameplay and sleep/wake proof for the implemented sleep-record-bound quorum protocol;
 - representative field validation across home routers, symmetric NAT, CGNAT, mobile carriers, blocked-UDP networks and independent-ISP IPv6 paths;
-- automatic redistribution of arbitrary third-party server-mod JARs, which are currently supplied locally and verified against canonical requirements;
-- public/friend world discovery and lobby services that remain non-authoritative;
+- broader authorized provider and client-artifact acquisition; the integration branch supports verified server-mod acquisition and manual fallback, not arbitrary redistribution;
+- public/friend discovery deployment and field qualification; signed search and local consent/moderation controls exist on the integration branch, not global admission or a central service;
 - longer hostile-peer, fuzz, soak, disk-failure and repeated real-Minecraft migration campaigns;
 - production signing/notarization operations where repository credentials are available.
 
-For exactly two voting members, crash failover intentionally remains fail-closed: if Alice disappears, Bob alone cannot form majority quorum. Use an explicit authority transfer while both peers are present, or a three-voter topology for automatic crash recovery. Multi-member wake likewise remains fail-closed rather than using first-click-wins semantics.
+For exactly two voting members, crash failover intentionally remains fail-closed: if Alice disappears, Bob alone cannot form majority quorum. A planned authority transfer while both peers are present does not change the voter count or allow a lone survivor to keep writing canonically. Use a three-voter topology for automatic crash recovery. Multi-member wake requires a surviving canonical majority bound to the durable signed sleep record; unavailable quorum remains fail-closed rather than using first-click-wins semantics.
 
-For a third storage voter without Minecraft or Java, use
+For a third storage voter without Minecraft or Java, the integration branch provides
 `swarmcraft daemon --replica-only`. See the
 [headless replica deployment guide](docs/HEADLESS_REPLICA.md) for admission,
 service configuration, and the remaining field-verification boundaries.
@@ -158,7 +167,7 @@ The authority is a role, not ownership.
 
 The runtime uses epochs, fencing tokens, signed leases and quorum-backed recovery to prevent stale authorities from silently re-entering canonical history.
 
-The control-plane recovery logic is implemented and process-level recovery is tested. When a successor safely wins authority, the shared migration/runtime orchestration path can restore canonical state, prepare the configured Minecraft runtime, launch it, verify Fabric readiness and publish the running authority endpoint. Seamless client redirection/reconnection remains separate product work.
+The control-plane recovery logic is implemented and process-level recovery is tested. When a successor safely wins authority, the shared migration/runtime orchestration path can restore canonical state, prepare the configured Minecraft runtime, launch it, verify Fabric readiness and publish the running authority endpoint. On the integration branch, the authenticated gateway provides a verified manual reconnect path. Automatic client reconnection and actual independent-network gameplay remain separate qualification/product work.
 
 ---
 
@@ -178,7 +187,7 @@ Snapshots are content-addressed, signed and verified before acceptance. Peers ne
 
 When all peers are offline, nothing runs. The world simply sleeps. Durable state remains on replicas, and a valid replica can later restore the world.
 
-Sleep records are signed and bound to the canonical snapshot/authority generation. Single-member wake uses the supported safe path. Multi-member wake intentionally remains blocked until SwarmCraft has a sleep-bound quorum transition rather than treating the first peer to click Play as authority.
+Sleep records are signed and bound to the canonical snapshot/authority generation. Single-member wake uses the supported safe path. Multi-member wake uses the sleep-bound quorum transition and fails closed if the exact accepted checkpoint and surviving majority cannot be proved. Clicking Play alone cannot grant authority.
 
 ---
 
@@ -289,7 +298,7 @@ The central product milestone is now best represented by a topology that can act
 9. Everyone shuts down.
 10. A valid peer later restores the world without Alice being online.
 
-The repository implements and permanently tests the storage, replication, fencing/recovery and successor-runtime portions of that path, with a real clean-machine Minecraft acceptance gate for runtime setup, launch, stop, restart and world restoration. Step 7, seamless automatic client reconnection/redirection, remains the largest visible UX gap. A two-voter Alice/Bob crash topology is intentionally not used as positive automatic-failover evidence because Bob alone would not have quorum.
+The repository implements and permanently tests the storage, replication, fencing/recovery and successor-runtime portions of that path, with a real clean-machine Minecraft acceptance gate for runtime setup, launch, stop, restart and world restoration. The integration branch exposes verified manual reconnect via a stable localhost gateway; automatic client reconnect and the full real three-machine sequence remain open, including step 7. A two-voter Alice/Bob crash topology is intentionally not used as positive automatic-failover evidence because Bob alone would not have quorum.
 
 ---
 
@@ -306,11 +315,38 @@ Per-world signed compatibility manifests may impose additional exact mod/datapac
 
 ---
 
+## Install the published technical preview
+
+Use the [commit-pinned 0.5.1 preview](https://github.com/MousaXD/swarmcraft/releases/tag/main-snapshot-aaffac22e32547983f1fd558af6eb32c0da4917b),
+not an arbitrary branch artifact. Choose the Linux x86-64 `.deb`, Windows
+x64 setup `.exe`, or macOS `.dmg` for Apple Silicon (arm64) or Intel
+(x86_64). Check the accompanying SHA-256 file and release provenance before
+installing. These are unsigned Windows / ad-hoc-signed macOS technical
+preview packages, not a production release. AppImage and mobile packages
+are not provided by this observed release. The previous
+[legacy 0.5.0 preview](https://github.com/MousaXD/swarmcraft/releases/tag/main-latest)
+remains available; preserve a verified backup and follow
+[release/rollback gates](docs/RELEASE_GATES.md) before changing versions.
+A supported downgrade of live data is not inferred from package availability.
+See the [Desktop guide](apps/desktop/README.md) for runtime/EULA and client
+setup; build the integration branch locally only for development testing.
+
 ## Validation and release discipline
 
-Normal CI covers Rust format/lint/test gates, process-level replication/recovery/migration scenarios, import and corrupt-sleep regressions, Fabric build, RustSec, fuzz smoke, impaired QUIC resume, Desktop tests and native packaging on Linux, Windows and both macOS architectures.
+Development is local-first; see [CI_LOCAL_FIRST.md](docs/CI_LOCAL_FIRST.md).
+The integration branch runs only a lightweight automatic main/PR metadata
+gate and reserves manual workflows for approved final native validation,
+packaging and certification. Rust format/lint/test, process-level
+replication/recovery/migration, Fabric, RustSec, fuzz, impaired QUIC/soak
+and installed Linux GUI/live player-journey evidence remain local release
+requirements. Windows/macOS package construction is not installed GUI proof.
 
-The separate live player-journey workflow uses a fresh SwarmCraft data directory and official Minecraft/Fabric/Adoptium services, forces managed-Java resolution, requires explicit EULA acceptance, launches real Minecraft twice, stops through the safe durability barrier, restores known world data and verifies monotonically advancing canonical snapshots without divergence.
+The historical live player-journey gate used a fresh SwarmCraft data directory
+and official Minecraft/Fabric/Adoptium services, forced managed-Java
+resolution, required explicit EULA acceptance, launched real Minecraft twice,
+stopped safely, restored known world data and verified canonical snapshots.
+Historical green runs certify their own source only; current integration
+release gates require fresh exact-source evidence.
 
 Real public-network NAT behavior remains a separate manual validation requirement.
 

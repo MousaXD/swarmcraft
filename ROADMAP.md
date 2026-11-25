@@ -4,25 +4,32 @@ This roadmap describes the order in which SwarmCraft's architecture and product 
 
 For the exact current-code assessment, use [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md).
 
-## Current 0.2.1 position
+## Current 0.5.1 source position
+
+This describes the integration source, not a newer published installer.
+See the [issue reconciliation](docs/SABATHON_ISSUE_RECONCILIATION.md),
+[execution tracker](docs/SABATHON_FULL_EXECUTION_TRACKER.md) and
+[README install guidance](README.md#install-the-published-technical-preview).
+All phase descriptions are scoped to implemented components and evidence,
+not a declaration of full field/release acceptance.
 
 | Phase | Status | Summary |
 | --- | --- | --- |
 | 0 — Research and protocol skeleton | ✅ Preview-complete | Identity, protocol, signed records, durable storage and deterministic state are established. |
 | 1 — Peer networking | ✅ Preview-complete | Authenticated libp2p/QUIC, durable identity/reconnect, bounded requests and resumable transfer are permanently gated, including impaired multi-GiB soak. |
-| 2 — Snapshot swarm | 🟢 Mostly complete | Real resumable snapshot replication exists; multi-source/retention maturity remains. |
+| 2 — Snapshot swarm | 🟢 Mostly complete | Real resumable replication and bounded parallel source pulls exist on integration; extended retention and field qualification remain. |
 | 3 — Minecraft save integration | ✅ Preview-complete | Fabric IPC, restore, save barriers and final snapshot commit are implemented/tested. |
-| 4 — Manual host migration | 🟢 Mostly complete | Signed CLI/desktop transfer wizard exists; real-device acceptance and player reconnection polish remain. |
-| 5 — Automatic host migration | 🟡 Control plane complete | Election, quorum recovery and fencing work; automatic successor Minecraft launch/reconnect remains. |
-| 6 — World sleep/wake | 🟢 Mostly complete internally | Durable sleep/wake semantics exist; orchestration still exposes runtime plumbing. |
+| 4 — Manual host migration | 🟢 Mostly complete | Signed staged handoff and daemon-driven Desktop transfer exist on integration; real-device/game-client acceptance remains. |
+| 5 — Automatic host migration | 🟡 Control plane complete | Election, fencing, successor runtime and authenticated manual reconnect exist; full field journey and automatic client reconnect remain. |
+| 6 — World sleep/wake | 🟢 Mostly complete internally | Sleep-bound quorum wake and UI controls exist; installed real-client wake remains unverified. |
 | 7 — Solo mode | ✅ Preview-complete | Explicit solo history, reconciliation and divergence preservation are implemented/tested. |
-| 8 — Better replication | 🟠 Early/partial | Background replica support exists; incremental/journal/erasure-code work remains. |
+| 8 — Better replication | 🟠 Early/partial | Bounded local cache policy and parallel pulls exist; incremental/journal/erasure prototypes are research only. |
 | 9 — NAT/public usability | 🟠 Partial | Protocol support exists; representative real-network certification remains. |
-| 10 — UX | 🟠 Partial | Desktop app exists; automatic runtime preparation and lobby UX remain. |
-| 11 — Production hardening | 🟠 Partial | Strong CI/recovery/audit gates exist; fuzzing, field validation and signing operations remain. |
+| 10 — UX | 🟠 Partial | Managed runtime, signed lobby, friend presence, support history and staged Svelte parity exist; client and platform qualification remain. |
+| 11 — Production hardening | 🟠 Partial | Local-first validation plus approved final native/release gates; field validation and signing operations remain. |
 | 12 — Distributed simulation | ⚪ Future research | Not implemented by design. |
 
-The most important MVP gap is now the bridge between **safe authority recovery** and **automatic Minecraft runtime migration/player reconnection**.
+The most important MVP gap is the independent three-device real gameplay acceptance of **safe authority recovery, successor runtime startup and verified manual reconnect**. The loopback game gateway is implemented on integration; optional automatic reconnect is not.
 
 ---
 
@@ -111,7 +118,7 @@ Exit criteria:
 - a new peer can reconstruct the world from surviving replicas;
 - corrupt replica data is ignored.
 
-Real live-join replication and resumable blob negotiation are implemented. Multi-source reconstruction strategy and retention/GC maturity remain areas for improvement.
+Real live-join replication, resumable negotiation, authenticated parallel source scheduling and bounded cache admission are implemented in integration. Long-duration retention/GC churn and independent field measurements remain.
 
 ---
 
@@ -174,7 +181,7 @@ Exit criteria:
 6. Alice/players reconnect to Bob.
 7. No manual world-file copying occurs.
 
-The complete signed transfer flow now runs end-to-end through the CLI and the Desktop Transfer host wizard. Player reconnection polish and broader real-device acceptance across adverse networks remain.
+The signed CLI and Desktop wizard exist; integration adds daemon-driven staged exchange and a verified manual reconnect route. Actual real-client handoff under independent networks remains a gate. Two voting devices do not become a one-voter world after a transfer.
 
 ---
 
@@ -207,7 +214,7 @@ Exit criteria:
 - Alice returns and cannot write using stale authority;
 - repeated crash/recovery cycles preserve safety and liveness.
 
-Quorum election, fencing, durable recovery ballots and stale-peer protection are implemented and covered by process-level tests. Automatic Minecraft launch/reconnection on the elected successor is the critical remaining integration step.
+Quorum election, fencing, durable recovery ballots and stale-peer protection are implemented and covered by process-level tests. Automatic successor runtime startup and verified manual reconnect are implemented on integration; the full independent-device crash/reconnect journey and optional client automatic reconnection remain gates.
 
 ---
 
@@ -239,7 +246,7 @@ Exit criteria:
 
 No permanent VPS is involved.
 
-Durable sleep records and wake generation checks exist. The remaining work is making the multi-peer wake experience automatic and ordinary-player friendly.
+Durable sleep records, sleep-generation-bound majority wake and Desktop orchestration exist. Real gameplay after a full shutdown, with the original host absent and surviving quorum online, remains unverified.
 
 ---
 
@@ -295,7 +302,7 @@ Exit criteria:
 - recovery point is clearly reported;
 - replication cost scales better than repeated full-world checkpoints.
 
-Background seeding exists today; the lower-loss incremental strategies remain future work.
+Background seeding, bounded cache policies and authenticated parallel replica pulls exist on integration. Incremental blocks, operation journal and erasure-code experiments are isolated research, not the canonical production recovery format.
 
 ---
 
@@ -373,13 +380,13 @@ Create recovery snapshot
 Diagnostics
 ```
 
-Major remaining UX work:
-
-- automatic Java/Minecraft/Fabric preparation;
-- mod/datapack compatibility acquisition flow;
-- automatic host migration/reconnection UX;
-- public/friend discovery/lobby;
-- reducing manual runtime paths and diagnostics to advanced-only surfaces.
+Managed Java/Minecraft/Fabric preparation already exists. Integration includes
+reviewed server-provider acquisition, manual compatible-client handoff,
+verified manual reconnect, signed discovery and opt-in friend presence.
+Remaining UX work includes actual authorized provider/client and installed
+platform qualification, automatic client reconnect, public discovery
+deployment, and production Svelte cutover. Keep raw diagnostics separate
+from redacted opt-in support export.
 
 ---
 
@@ -482,4 +489,9 @@ When that complete flow is repeatable under crashes and packet loss, SwarmCraft 
 
 SwarmCraft succeeds when this sentence becomes operationally true, not merely true in a data-structure unit test:
 
-> If one valid replicated copy of the world survives, the community can bring the world back.
+> If one valid replicated copy of the world survives, the community can recover its data.
+
+Continuing writes under the **original shared identity** additionally
+requires a valid canonical authority transition. Without quorum, recover
+a new private world identity from a verified copy instead of silently
+overwriting canonical history.

@@ -1,8 +1,13 @@
-# SwarmCraft 0.5.0 Implementation Status
+# SwarmCraft 0.5.1 Implementation Status
 
-This document is the current source of truth for what the repository **actually implements** versus what remains roadmap or product-vision work.
+This document describes implemented source versus product/field acceptance.
+The [execution tracker](SABATHON_FULL_EXECUTION_TRACKER.md) and
+[issue reconciliation](SABATHON_ISSUE_RECONCILIATION.md) identify exact
+integration evidence. The published 0.5.1 preview is the older pinned main
+snapshot; new branch features are not claimed as released. See the
+[installation guidance](../README.md#install-the-published-technical-preview).
 
-Application version and wire protocol version are separate concepts. SwarmCraft 0.5.0 still uses protocol version 1 unless a protocol-breaking change explicitly requires otherwise.
+Application version and wire protocol version are separate concepts. SwarmCraft 0.5.1 still uses protocol version 1 unless a protocol-breaking change explicitly requires otherwise.
 
 ## Executive summary
 
@@ -27,7 +32,12 @@ The repository implements the difficult control-plane and runtime foundations:
 - a player-facing Tauri desktop shell;
 - cross-platform CI and installer packaging.
 
-Safe authority recovery is now connected to automatic successor Minecraft runtime orchestration. The largest visible migration gap is **seamless client redirection/reconnection after the successor is running**, not successor runtime startup itself.
+Safe authority recovery is connected to successor Minecraft runtime
+orchestration. Integration adds an authenticated loopback gateway and
+verified manual reconnect, daemon-driven staged transfer, parallel
+replica pulls/cache policies, and signed public discovery and consent-gated
+presence. These have scoped local evidence; the full real three-device
+gameplay and automatic client reconnect remain unverified or absent.
 
 One important safety limitation is intentional: a two-voter world cannot automatically recover after one voter disappears because the survivor lacks majority quorum. Multi-member wake is supported only when a surviving canonical quorum can prove the exact durable sleep boundary; it never falls back to first-click or one-of-two authority.
 
@@ -79,7 +89,7 @@ One important safety limitation is intentional: a two-voter world cannot automat
 - Fourth-peer reconstruction from surviving replicas is covered by a permanent acceptance gate.
 - Corrupt replica data is rejected, and poisoned partial blobs are discarded so a clean retry can proceed from another replica.
 - A permanent impaired-network gate proves reconnect/resume behavior under latency variation, packet loss and bandwidth shaping.
-- A path-scoped, weekly/manual multi-gigabyte QUIC soak defaults to 2 GiB, repeatedly hard-restarts the sender, deliberately loses acknowledgements, re-authenticates the durable peer identity and resumes from the receiver's committed offset.
+- The local release-gate multi-gigabyte QUIC soak (historically path-scoped and weekly/manual in hosted CI) defaults to 2 GiB, repeatedly hard-restarts the sender, deliberately loses acknowledgements, re-authenticates the durable peer identity and resumes from the receiver's committed offset.
 
 ### Authority, recovery and safety
 
@@ -147,7 +157,7 @@ One important safety limitation is intentional: a two-voter world cannot automat
 - Missing, wrong-version, wrong-hash, duplicate/conflicting, invalid or client-only required mods block readiness.
 - Machine-local user-mod bytes remain separate from signed world history.
 - Deleting/replacing a previously verified mod invalidates readiness rather than inheriting stale green proof.
-- Arbitrary third-party mod bytes are **not** silently downloaded or redistributed.
+- Arbitrary third-party mod bytes are **not** silently downloaded or redistributed. Integration can explicitly acquire authorized exact server artifacts from configured providers or request a verified manually supplied JAR. Actual client artifact setup remains a manual handoff.
 
 ### Migration orchestration and backend manual transfer
 
@@ -156,7 +166,7 @@ One important safety limitation is intentional: a two-voter world cannot automat
 - Migration status is exposed to Desktop as structured phases.
 - The backend manual-transfer protocol has signed generation-scoped prepare/export/accept/commit/activate/observe stages.
 - A migration successor that lacks valid runtime/mod/sleep prerequisites blocks rather than launching an unsafe host.
-- **Desktop manual authority transfer is not yet fully wired:** the current Tauri migration capability bridge exposes status and wake, and the frontend adapter keeps `transferAuthority` unavailable rather than pretending a one-click handoff exists.
+- The signed staged Desktop wizard is wired. Integration adds `start_automatic_transfer` / `transfer_progress` and daemon-driven exchange with exact canonical and consent checks. The separately authenticated local gateway provides verified manual reconnect; its Ready state is not game login proof.
 
 ### Host Readiness
 
@@ -203,6 +213,11 @@ One important safety limitation is intentional: a two-voter world cannot automat
 
 ### CI and packaging
 
+The [local-first policy](CI_LOCAL_FIRST.md) supersedes the automatic
+hosted validation matrix. The checks below describe required evidence and
+historical coverage, not a claim that every check ran on the latest SHA.
+Only approved final native/release/certification workflows may be dispatched.
+
 - Linux, Windows and macOS Rust build/test coverage.
 - Formatting and strict Clippy gates.
 - RustSec dependency audit against the committed lockfile.
@@ -221,11 +236,11 @@ One important safety limitation is intentional: a two-voter world cannot automat
   - recovery successor disappearing before epoch promotion;
   - solo-history acceptance and divergence detection.
 - Dedicated QUIC impairment gate with latency variation, packet loss, bandwidth limiting, repeated hard restarts and lost-ack resume recovery.
-- Multi-gigabyte interrupted QUIC soak on networking/storage pull requests and matching `main` changes, plus weekly and manual profiles.
+- Multi-gigabyte interrupted QUIC soak is a local release requirement; historical hosted PR/main/weekly profiles are superseded by the local-first policy.
 - Fabric server-mod build plus embedded Fabric API verification.
-- Native Desktop package builds for Linux `.deb` + AppImage, Windows NSIS, macOS ARM64 `.dmg`, and macOS x86_64 `.dmg`.
+- Native Desktop package targets are Linux `.deb`, Windows NSIS, macOS ARM64 `.dmg`, and macOS x86_64 `.dmg`; AppImage is a production-channel gate, not an asset in the observed pinned preview.
 - Commit-pinned development snapshots with verified draft uploads before publication.
-- Tagged release workflow support for checksums, versioned Fabric artifacts and optional platform signing credentials.
+- Tagged production release workflow requires versioned Fabric artifacts, checksums, Windows Authenticode and Apple Developer ID/notarization credentials; no unsigned production fallback.
 - Main and tagged Desktop packaging stage the same four required runtime sidecars.
 
 ---
@@ -253,12 +268,12 @@ Implemented:
 
 - the full signed transfer protocol (prepare, export, accept, commit, activate, observe) wired through the Tauri command/capability layer with fail-closed capability gating;
 - a Desktop Transfer host wizard with source/target role detection, ineligible/banned peer filtering, and Host Readiness-guided target recommendation;
-- a Minecraft checkpoint wait before prepared tokens are exposed to either participant.
+- a Minecraft checkpoint wait before prepared tokens are exposed to either participant;
+- integrated daemon-driven exchange, generation-fenced handoff and fresh manual reconnect through the local signed route.
 
 Still incomplete:
 
-- player reconnection UX during the handoff;
-- broader real-device transfer acceptance across adverse networks.
+- automatic client reconnect and independent real-client transfer acceptance across adverse networks.
 
 ### World sleep/wake
 
@@ -272,7 +287,7 @@ The roadmap-shaped fourth-peer reconstruction scenario is automated: a source re
 
 Publication ownership, GC coordination and retention races now have stronger correctness gates. Remaining maturity work can still include:
 
-- a production scheduler that downloads different missing blobs from multiple peers in parallel rather than relying primarily on source fallback;
+- broader field and long-churn qualification of the integration branch’s authenticated parallel scheduler and bounded local replica cache;
 - longer retention/GC soak campaigns under sustained churn;
 - broader hardware/disk-failure profiles beyond deterministic failure injection.
 
@@ -289,21 +304,18 @@ The desktop application now owns the normal managed Runtime Wizard path, import,
 Technical-preview friction remains around:
 
 - explicit EULA acceptance, which is intentionally required;
-- locally supplying arbitrary third-party server-mod JARs when a world requires them;
-- seamless client reconnection after migration;
-- public/friend discovery and broader first-run polish.
+- manually supplying restricted/unavailable third-party JARs or verifying the client's exact compatible mods;
+- automatic client reconnection after migration;
+- public/friend discovery deployment and broader first-run/installed platform qualification (signed lobby and consent-gated local presence are implemented on integration).
 
 ---
 
 ## Not implemented yet
 
 - Seamless automatic Minecraft client reconnection/redirection after authority migration.
-- Central or federated public-world search/lobby services.
-- Friends/social discovery.
-- Automatic third-party mod redistribution.
-- Operation-level Minecraft journal replication.
-- Incremental region/chunk replication as the primary recovery path.
-- Erasure-coded world storage.
+- Production deployment of public directory services and global social discovery; bounded signed lobby and opt-in device-local friend presence exist on integration.
+- Arbitrary automatic third-party mod redistribution (authorized verified server-provider acquisition is implemented on integration).
+- Production operation-level journal, incremental region/chunk or erasure-coded canonical recovery; isolated research prototypes are not active storage formats.
 - Production-grade metrics/telemetry infrastructure.
 - Universal production signing/notarization setup for every release environment.
 - Comprehensive real-world NAT/carrier certification.
@@ -320,15 +332,15 @@ The roadmap is intentionally aspirational and phases have not landed in a perfec
 | --- | --- | --- |
 | 0 — Research/protocol skeleton | Complete for preview | Core identity, storage, signed state and deterministic protocol machinery are established. |
 | 1 — Peer networking | Complete for preview | Authenticated networking, durable reconnect, resume semantics and impaired multi-GiB transfer are gated; representative NAT/carrier certification is tracked in Phase 9. |
-| 2 — Snapshot swarm | Mostly complete | Fourth-peer reconstruction, corruption rejection, cross-replica resume and stronger publication/GC safety are gated; parallel scheduling and long-duration retention maturity remain. |
+| 2 — Snapshot swarm | Mostly complete | Fourth-peer reconstruction, corruption rejection, cross-replica resume and GC safety are gated; integration adds authenticated parallel pulls and cache policies; long-duration field maturity remains. |
 | 3 — Minecraft save integration | Complete for preview | Fabric IPC, restore, save/shutdown barrier and final snapshot flow are implemented and tested. |
-| 4 — Manual host migration | Mostly complete | Signed transfer stages and the Desktop transfer wizard (role detection, peer filtering, readiness-guided targets) exist; real-device acceptance and player reconnection polish remain. |
-| 5 — Automatic host migration | Runtime path complete for preview, client UX partial | Recovery/election/fencing plus successor runtime startup are real; seamless player reconnect remains. |
+| 4 — Manual host migration | Mostly complete | Signed stages and daemon-driven Desktop transfer exist on integration; real-device and automatic client reconnection acceptance remain. |
+| 5 — Automatic host migration | Runtime and manual gateway implemented; field partial | Recovery/fencing, successor runtime and verified manual reconnect exist on integration; actual independent gameplay and automatic reconnect remain. |
 | 6 — World sleep/wake | Complete for preview | Durable signed sleep plus sleep-record-bound quorum wake are implemented; unavailable quorum remains fail-closed. |
 | 7 — Solo mode | Complete for preview | Explicit solo history, reconciliation and divergence preservation are implemented/tested. |
 | 8 — Better replication | Partial | Background replicas, resume and source fallback exist; incremental/journal/erasure-code work remains. |
 | 9 — NAT/public usability | Partial | Protocol support and diagnostics exist; representative field certification does not. |
-| 10 — UX | Advanced preview | Managed runtime, import, readiness, transfer and wake status UI exist; reconnect, lobby and broader first-run polish remain. |
+| 10 — UX | Advanced preview | Managed runtime, reviewed import, readiness, transfer/wake, verified manual reconnect, signed lobby/presence and opt-in redacted history exist on integration; native/client/field qualification remains. |
 | 11 — Production hardening | Partial/strong preview | CI, fuzz smoke, failure injection and process recovery are strong; longer campaigns, signing and field validation remain. |
 | 12 — Distributed simulation | Not implemented | Deliberately future research. |
 
@@ -347,7 +359,7 @@ The crash-recovery demo must use a topology that can genuinely retain majority q
 7. stale Alice later returns and synchronizes without being able to overwrite canonical history;
 8. the world can later sleep and a supported peer can restore it without the original creator.
 
-The repository now proves the storage/replication, recovery/fencing, successor-runtime and sleep-record-bound quorum-wake portions of that sequence and separately proves the real clean-machine Minecraft setup/launch/stop/restart path. Seamless client reconnection in step 6 remains the major player-continuity gap.
+The repository now proves the storage/replication, recovery/fencing, successor-runtime and sleep-record-bound quorum-wake portions of that sequence and separately proves the real clean-machine Minecraft setup/launch/stop/restart path. Integration supports a verified manual reconnect in step 6; the complete real three-machine sequence remains unverified and seamless automatic client reconnect remains separate.
 
 An Alice/Bob-only crash test is **not** a valid positive automatic-failover target: after Alice disappears, Bob alone is one of two voters and must remain `BlockedByQuorum`.
 
@@ -375,14 +387,14 @@ Safe claims:
 Claims to avoid for now:
 
 - "host migration is seamless";
-- "manual authority transfer is fully productized in Desktop";
+- "the integrated Desktop handoff has passed all real independent-device field scenarios";
 - "players automatically reconnect after any host crash";
 - "two-player worlds can always fail over after either player crashes";
 - "multi-member sleeping worlds use first-click automatic wake";
 - "works behind every NAT without configuration";
 - "production ready";
-- "public decentralized lobby is complete";
-- "third-party mods install automatically";
+- "public decentralized lobby is deployed and globally complete";
+- "arbitrary third-party or client mods install automatically";
 - "Minecraft simulation itself is distributed across peers".
 
 Those distinctions are deliberate. SwarmCraft should under-claim rather than blur protocol capability into product completeness.

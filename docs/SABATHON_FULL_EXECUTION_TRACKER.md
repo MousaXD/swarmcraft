@@ -495,12 +495,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #49 — Sabathon P0 · Partial
 - Work: Reconcile open issues, PRs, and capability claims against main
 - Acceptance: Every stale ticket has a landed commit or exact residual; open acceptance blockers remain linked. README, roadmap, and install instructions agree
-- State: **EXTERNALLY BLOCKED**
-- Source: docs/SABATHON_IMPLEMENTATION_PLAN.md
-- Evidence: Live integration status; scoped automated evidence, exact-SHA CI pending.
-- Remaining / next action: Compare integration changes to issue ledger; defer main-only reconciliation until authorized merge
-- External dependency: Authorized main merge for main-only closure
-- Commit: 2d45f97 baseline; see live status for individual commits
+- State: **LOCALLY VERIFIED** (read-only full reconciliation and documentation; remote ticket closure/merge not authorized)
+- Source: [Live issue/PR reconciliation](SABATHON_ISSUE_RECONCILIATION.md); README.md; ROADMAP.md; docs/IMPLEMENTATION_STATUS.md; apps/desktop/README.md; docs/FINAL_PREVIEW_GATE.md.
+- Evidence: [Pinned metadata and exact changed-path evidence](../research/issue-reconciliation/evidence/ledger-20261125.json). Main `aaffac22` is the ancestor of audited integration `6fd4e0a` (159 ahead, 0 behind). All 9 open issues and 17 open PRs mapped to main/integration source, historical CI, or specific residual; no remote edits. Both exact-main historical runs completed successfully, Quinn fixed lock versions verified in both trees, and published pinned preview plus legacy release observed (asset metadata only). 12 recovery certificate, 11 retention, one pin-root, one corrupt membership prepare and 112 field-harness tests passed locally. Updated source-vs-release claims, version, runtime/migration/wake/lobby/replication and local-first CI docs. No broad CI or release certification.
+- Remaining / next action: Maintainer review/authorized main integration before remote stale closure; original Quinn and Linux baseline issues are closure candidates, six product/release/field issues retain exact blockers. Continue #50 for downloaded bytes, rollback and release-signing evidence. Integration-only work is not yet released.
+- External dependency: Authorization to merge/edit issues or PRs and independent field/security/release qualification for their remaining criteria.
+- Commit: Reconcile Sabathon issues, PRs and capability claims; see git history.
 
 ### #50 — Release-Gate P0 · Partial
 - Work: Verify an immutable main snapshot and rollback, then establish production release evidence
