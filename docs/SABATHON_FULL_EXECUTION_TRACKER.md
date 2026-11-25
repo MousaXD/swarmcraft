@@ -335,12 +335,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #33 — P2 · Missing
 - Work: Evaluate incremental region/chunk checkpoints and snapshot scheduling
 - Acceptance: Demonstrate lower bytes and shorter save window on a controlled dataset. A known full restore still works and is cross-checked
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: crates/swarm-storage/tests/incremental_checkpoint_lab.rs; crates/swarm-storage/tests/support/checkpoint_schedule_lab.rs; research/incremental-checkpoints/REPORT.md.
+- Evidence: Actual V1 production streaming capture/commit/restore vs isolated 256 KiB block checkpoint candidate on eight 4 MiB synthetic region-shaped files. Initial, three sparse and dense rounds compare actual encoded payload plus manifest bytes, local transfer and durable capture timing. Three local runs measured median sparse capture 1.029/1.089/1.083 s vs 0.256/0.231/0.262 s; median sparse transfer 25,195,436 vs 1,582,212 bytes (93.7% lower). Initial/dense overhead is recorded rather than hidden. Every restored tree matches the original byte-for-byte; original and latest are cross-checked after reopening both stores. Wrong/noncanonical pins, malformed paths, reordered/missing/corrupt blocks and immutable numbered slots are tested. Deterministic schedule model requires an immutable view and exact verified receipt, preserves edits made in flight, rejects stale generations/receipts, coalesces explicit requests and reports missed recovery targets instead of bypassing gates. Full storage suite (67 library tests, one optional soak ignored, all integration tests including 4 new research regressions), strict all-target/all-feature Clippy and formatting passed.
+- Remaining / next action: #34 independent operation journal and erasure coding evaluation. #33 evidence is quiescent synthetic capture-stage research, not actual Minecraft pause or live recovery-window certification. No new production format or online cadence activated. Preserve V1 until immutable capture, production retention/GC, signed format, fault recovery and installed-platform/real-world performance are independently verified.
+- External dependency: Actual Fabric consistent-view protocol and real game/world/network measurement; necessary final CI under local-first policy.
+- Commit: See 25 November incremental checkpoint research commit.
 
 ### #34 — P2 · Research
 - Work: Evaluate operation journaling and erasure coding independently
