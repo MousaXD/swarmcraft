@@ -167,6 +167,22 @@ fn open_lock(path: &Path) -> Result<File> {
         .with_context(|| format!("cannot open hosting lock {}", path.display()))
 }
 
+/// Serializes an explicitly player-only local recovery operation with all
+/// consent mutations. This is not hosting admission or authority permission.
+#[cfg(unix)]
+pub(crate) fn with_player_only_recovery<T>(
+    paths: &DataPaths,
+    world: WorldId,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let lock = open_lock(&control_path(paths).join("hosting-consent-write.lock"))?;
+    lock.lock_exclusive().context("cannot serialize runtime archival with local consent")?;
+    if load_consent(paths, world)?.is_some_and(|consent| consent.enabled) {
+        bail!("withdraw local hosting contribution before archiving an unconfirmed runtime");
+    }
+    operation()
+}
+
 fn verify_record(world: WorldId, peer: PeerId, value: &HostingConsentV1) -> Result<()> {
     if value.schema_version != SCHEMA_VERSION || value.world_id != world || value.peer_id != peer {
         bail!("hosting consent schema/world/peer identity mismatch; hosting disabled");

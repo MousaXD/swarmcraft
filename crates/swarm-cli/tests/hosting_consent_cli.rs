@@ -107,6 +107,121 @@ fn opt_in_requires_actual_local_world_record() {
     assert!(!denied.status.success(), "nonexistent local world accepted hosting preference");
 }
 
+#[cfg(unix)]
+#[test]
+fn explicit_archive_preserves_retained_bytes_and_never_changes_signed_history() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let world_text = fresh_world(&data);
+    let world: WorldId = world_text.parse().unwrap();
+    let paths = DataPaths::from_root(data.clone());
+    let storage = Storage::open(data.clone()).unwrap();
+    let epoch = storage.load_epoch_record(world).unwrap();
+    let config = storage.load_world_config(world).unwrap();
+    let membership = storage.load_membership_record(world).unwrap();
+    let checkpoint = storage.latest_snapshot(world).unwrap().map(|v| v.manifest_hash().unwrap());
+    let runtime = data.join("runtime").join(world.to_hex());
+    let save = runtime.join("world");
+    let control = data.join("control").join(world.to_hex());
+    swarm_core::create_private_dir_all(&save).unwrap();
+    swarm_core::create_private_dir_all(&control).unwrap();
+    fs::set_permissions(&control, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(save.join("level.dat"), b"unconfirmed-world-data").unwrap();
+    fs::write(save.join("session.lock"), b"").unwrap();
+    fs::write(runtime.join("latest.log"), b"local runtime log").unwrap();
+    let marker = control.join("shutdown-checkpoint-pending.json");
+    fs::write(
+        &marker,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1, "world_id": world,
+            "epoch": epoch.epoch_number, "fencing_token": epoch.fencing_token,
+            "authority_peer_id": epoch.authority_peer_id,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let run_archive = || {
+        invoke(&data, &["world", "archive-unconfirmed-runtime", &world_text, "--confirm-unconfirmed-data", "--json"])
+    };
+    assert!(!invoke(&data, &["world", "archive-unconfirmed-runtime", &world_text]).status.success());
+    assert!(marker.exists());
+
+    // A still-live recorded process must deny even when no supervisor holds
+    // the advisory runtime lock. This fixture only refers to our test PID.
+    let process_record = control.join("runtime-process.json");
+    fs::write(
+        &process_record,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1, "controller_pid": std::process::id(), "java_pid": std::process::id()
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(!run_archive().status.success());
+    assert!(save.join("level.dat").exists());
+    assert!(marker.exists());
+    fs::remove_file(&process_record).unwrap();
+
+    // Minecraft-compatible exclusive POSIX record lock held by a separate
+    // OS process, not a same-process flock or a mock liveness verdict.
+    let ready = temp.path().join("lock-ready");
+    let release = temp.path().join("lock-release");
+    let mut owner = ReplicaDaemon(
+        Command::new("python3")
+            .args([
+                "-c",
+                r#"
+import fcntl, pathlib, sys, time
+with open(sys.argv[1], 'r+b') as f:
+    fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    pathlib.Path(sys.argv[2]).write_text("ready")
+    end = time.monotonic() + 30
+    while not pathlib.Path(sys.argv[3]).exists() and time.monotonic() < end:
+        time.sleep(0.02)
+"#,
+            ])
+            .arg(save.join("session.lock"))
+            .arg(&ready)
+            .arg(&release)
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !ready.exists() {
+        assert!(owner.0.try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline, "fixture did not acquire Minecraft session lock");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let refused = run_archive();
+    assert!(!refused.status.success(), "archival bypassed the Minecraft session lock");
+    assert!(marker.exists());
+    assert!(save.join("level.dat").exists());
+    fs::write(&release, "").unwrap();
+    assert!(owner.0.wait().unwrap().success());
+
+    let archived = run_archive();
+    assert_success(&archived);
+    let result: swarm_cli::migration::RuntimeArchiveResult = serde_json::from_slice(&archived.stdout).unwrap();
+    assert_eq!(result.world_id, world_text);
+    assert!(result.unconfirmed_save);
+    assert_eq!(fs::read(result.world_save_path.join("level.dat")).unwrap(), b"unconfirmed-world-data");
+    assert_eq!(fs::read(result.archive_path.join("latest.log")).unwrap(), b"local runtime log");
+    assert!(!runtime.exists());
+    assert!(!marker.exists());
+    assert!(!run_archive().status.success());
+    assert_eq!(storage.load_epoch_record(world).unwrap(), epoch);
+    assert_eq!(storage.load_world_config(world).unwrap(), config);
+    assert_eq!(storage.load_membership_record(world).unwrap(), membership);
+    assert_eq!(storage.latest_snapshot(world).unwrap().map(|v| v.manifest_hash().unwrap()), checkpoint);
+    assert!(storage.load_sleep_record(world).is_err());
+    let status = status_json(&data, &world_text);
+    assert_eq!(status["checkpoint_state"], "no_pending_checkpoint");
+    assert_eq!(status["consented"], false);
+    assert_eq!(status["may_host_now"], false);
+    assert!(paths.root.join("runtime-archives").exists());
+}
+
 struct ReplicaDaemon(Child);
 
 impl Drop for ReplicaDaemon {

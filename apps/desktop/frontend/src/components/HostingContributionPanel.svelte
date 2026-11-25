@@ -141,6 +141,7 @@
     {#if readiness}
       {#if readiness.checkpoint_state === 'checkpoint_blocked'}
         <p class="form-error" role="alert">Keep the controller running if Java is still active. Review Diagnostics, wait for the save barrier if it can finish, or preserve the runtime files for recovery. Do not force-stop or reset the world.</p>
+        <p class="section-note">After Java has definitely exited and hosting is withdrawn, Linux/macOS operators can use the local CLI <code>world archive-unconfirmed-runtime</code> to preserve the save separately. Windows archival remains unsupported; keep the retained files and pending marker.</p>
       {/if}
       <p id="hostingContributionReason" class="section-note">
         {readiness.reason} This is a local capacity check, not permission to take authority.

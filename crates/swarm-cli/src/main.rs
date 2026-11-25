@@ -188,6 +188,14 @@ enum WorldCommand {
     },
     /// Request a safe stop. Success is reported only after the Fabric save barrier, final checkpoint and durable sleep record complete.
     Stop { world: String },
+    /// Preserve a definitely stopped, unconfirmed runtime without changing signed history. Requires player-only preference.
+    ArchiveUnconfirmedRuntime {
+        world: String,
+        #[arg(long)]
+        confirm_unconfirmed_data: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Request a safe wake of a sleeping world. Multi-member wake requires a sleep-bound surviving quorum transition.
     Wake { world: String },
     /// Request a final checkpoint and prepare a manual authority transfer.
@@ -776,6 +784,17 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             let world = parse_world(&world)?;
             migration::request_world_stop(paths, storage, world)?;
             println!("Safe stop requested for {world}; wait for migration status to become sleeping before treating shutdown as complete.");
+        }
+        WorldCommand::ArchiveUnconfirmedRuntime { world, confirm_unconfirmed_data, json } => {
+            let result =
+                migration::archive_unconfirmed_runtime(paths, storage, parse_world(&world)?, confirm_unconfirmed_data)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("Unconfirmed runtime preserved at {}", result.archive_path.display());
+                println!("Separate-world import source: {}", result.world_save_path.display());
+                println!("No canonical checkpoint or hosting consent was changed. Use the original world's verified history or explicitly import a copy as a new world.");
+            }
         }
         WorldCommand::Wake { world } => {
             let world = parse_world(&world)?;

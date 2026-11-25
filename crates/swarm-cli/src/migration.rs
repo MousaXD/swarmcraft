@@ -8,8 +8,11 @@ use crate::{
 };
 #[path = "managed_server_properties.rs"]
 mod managed_server_properties;
+#[path = "runtime_archive.rs"]
+mod runtime_archive;
 use anyhow::{anyhow, bail, Context, Result};
 use fs2::FileExt;
+pub use runtime_archive::{archive_unconfirmed_runtime, RuntimeArchiveResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -330,6 +333,9 @@ pub fn managed_minecraft_port(paths: &DataPaths, world: WorldId) -> Result<Optio
 
 pub fn request_world_stop(paths: &DataPaths, storage: &Storage, world: WorldId) -> Result<()> {
     storage.load_world(world)?;
+    let control = control_dir(paths, world);
+    prepare_control_parent(&control)?;
+    let _request_lock = lock_control_file(&control.join("transfer-request.lock"))?;
     if launch_guard::load_sleep_record_fail_closed(storage, world)?.is_some() {
         return Ok(());
     }

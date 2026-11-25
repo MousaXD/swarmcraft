@@ -69,8 +69,16 @@ struct ImportFaults {
     before_publication: bool,
 }
 
-struct MinecraftSourceQuiescence {
+pub(crate) struct MinecraftSourceQuiescence {
     file: fs::File,
+}
+
+#[cfg(unix)]
+impl MinecraftSourceQuiescence {
+    pub(crate) fn sync_lock_file(&self) -> Result<()> {
+        self.file.sync_all()?;
+        Ok(())
+    }
 }
 
 impl Drop for MinecraftSourceQuiescence {
@@ -510,6 +518,15 @@ fn validate_request(request: &ImportWorldRequest) -> Result<()> {
 }
 
 fn acquire_source_quiescence(source: &Path) -> Result<MinecraftSourceQuiescence> {
+    acquire_minecraft_source_lock(source, false)
+}
+
+#[cfg(unix)]
+pub(crate) fn acquire_archive_quiescence(source: &Path) -> Result<MinecraftSourceQuiescence> {
+    acquire_minecraft_source_lock(source, true)
+}
+
+fn acquire_minecraft_source_lock(source: &Path, exclusive: bool) -> Result<MinecraftSourceQuiescence> {
     let lock_path = source.join("session.lock");
     let metadata = fs::symlink_metadata(&lock_path).with_context(|| {
         format!(
@@ -525,7 +542,7 @@ fn acquire_source_quiescence(source: &Path) -> Result<MinecraftSourceQuiescence>
         .write(true)
         .open(&lock_path)
         .with_context(|| format!("cannot open Minecraft session.lock at {}", lock_path.display()))?;
-    try_minecraft_session_lock(&file, false).with_context(|| {
+    try_minecraft_session_lock(&file, exclusive).with_context(|| {
         format!(
             "Minecraft world is currently open or its session lock cannot be acquired; stop Minecraft before importing {}",
             source.display()
