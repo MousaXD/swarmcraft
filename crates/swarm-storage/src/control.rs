@@ -1,6 +1,6 @@
 use crate::{
     transaction::{canonical_file_exists, durable_atomic_write, durable_remove, io_error, read_canonical_file},
-    CanonicalSnapshotRefV1, Storage, StorageError,
+    CanonicalSnapshotHeadV1, CanonicalSnapshotRefV1, Storage, StorageError,
 };
 use serde::{Deserialize, Serialize};
 use std::{fs, io, path::PathBuf};
@@ -41,11 +41,26 @@ impl StaleReplayAnchorV1 {
     }
 }
 
+pub(crate) fn crash_retirement_history_matches(anchor: &StaleReplayAnchorV1, proof: &HistoricalReplayProofV1) -> bool {
+    let Some(index) = anchor.epoch.epoch_number.checked_sub(1).and_then(|epoch| usize::try_from(epoch).ok()) else {
+        return false;
+    };
+    anchor.is_extended_by(proof)
+        && matches!(proof.transitions.get(index), Some(HistoricalTransitionV1::Recovery(certificate))
+            if certificate.ballot.base_epoch == anchor.epoch.epoch_number
+                && certificate.ballot.base_fencing_token == anchor.epoch.fencing_token
+                && certificate.ballot.candidate_peer_id != anchor.epoch.authority_peer_id)
+        && proof.epochs.last().is_some_and(|epoch| epoch.authority_peer_id != anchor.epoch.authority_peer_id)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct StagedStaleReplayV1 {
     anchor: StaleReplayAnchorV1,
     proof: HistoricalReplayProofV1,
 }
+
+const STALE_REPLAY_PROOF: &str = "stale-replay-proof.postcard";
+const CRASH_RETIREMENT_REPLAY: &str = "crash-retirement-replay.postcard";
 
 const FIRST_CONTACT_REPLAY: &str = "first-contact-replay.postcard";
 const FIRST_CONTACT_PUBLICATION: &str = "first-contact-publication.postcard";
@@ -413,7 +428,7 @@ impl Storage {
         {
             return Err(StorageError::WorldMetadataMismatch);
         }
-        let path = self.control_path(world, "stale-replay-proof.postcard");
+        let path = self.control_path(world, STALE_REPLAY_PROOF);
         if canonical_file_exists(&path)? {
             let previous: StagedStaleReplayV1 = postcard::from_bytes(&read_canonical_file(&path)?)?;
             // Even if ordinary synchronization advanced the anchor, do not
@@ -430,11 +445,97 @@ impl Storage {
         durable_atomic_write(&path, &postcard::to_allocvec(&staged)?)
     }
 
+    pub fn crash_retirement_pending(&self, world: WorldId) -> Result<bool, StorageError> {
+        canonical_file_exists(&self.control_path(world, CRASH_RETIREMENT_REPLAY))
+    }
+
+    /// Install a data-only replay fence after the application verifies the
+    /// complete signed successor history and excludes any local JVM. One
+    /// durable file both pins the exact envelope and denies ordinary canonical
+    /// operations, including after restart. Never publish an epoch here.
+    pub fn stage_verified_crash_retirement_replay(
+        &self,
+        anchor: &StaleReplayAnchorV1,
+        proof: &HistoricalReplayProofV1,
+    ) -> Result<(), StorageError> {
+        let world = anchor.epoch.world_id;
+        let _guard = self.lock_world_transaction_for_stale_download(world)?;
+        if !crash_retirement_history_matches(anchor, proof)
+            || proof.genesis != self.load_world(world)?.genesis
+            || postcard::to_allocvec(proof)?.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        let retiring = self.crash_retirement_pending(world)?;
+        if retiring {
+            self.validate_frozen_stale_anchor_locked(anchor)?;
+        } else if self.stale_replay_anchor_locked(world)? != *anchor {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        if let Some((previous_anchor, previous)) = self.read_pinned_stale_replay(world)? {
+            if !proof.extends_replay_history(&previous) || (retiring && previous_anchor != *anchor) {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+        }
+        let staged = StagedStaleReplayV1 { anchor: anchor.clone(), proof: proof.clone() };
+        durable_atomic_write(&self.control_path(world, CRASH_RETIREMENT_REPLAY), &postcard::to_allocvec(&staged)?)
+    }
+
+    /// Read only the old, frozen canonical boundary. Do not invoke ordinary
+    /// control APIs while the retirement marker is present or initialize a
+    /// missing head to make a corrupt retirement appear valid.
+    fn validate_frozen_stale_anchor_locked(&self, anchor: &StaleReplayAnchorV1) -> Result<(), StorageError> {
+        let world = anchor.epoch.world_id;
+        for (name, expected) in [
+            ("epoch.postcard", postcard::to_allocvec(&anchor.epoch)?),
+            ("membership.postcard", postcard::to_allocvec(&anchor.membership)?),
+            ("world-config.postcard", postcard::to_allocvec(&anchor.config)?),
+            (
+                "canonical-snapshot-head.postcard",
+                postcard::to_allocvec(&CanonicalSnapshotHeadV1 { world_id: world, head: Some(anchor.head) })?,
+            ),
+        ] {
+            if read_canonical_file(&self.control_path(world, name))? != expected {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+        }
+        let descriptor: WorldDescriptorV1 =
+            serde_json::from_slice(&read_canonical_file(&self.control_path(world, "descriptor.json"))?)?;
+        if descriptor != anchor.descriptor
+            || canonical_file_exists(&self.control_path(world, "snapshot-commit.intent.postcard"))?
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(())
+    }
+
+    /// Preserve the pinned envelope under its ordinary historical name before
+    /// removing the retirement fence. The separate publication intent remains
+    /// present throughout, including on a crash between these two operations.
+    pub(crate) fn finish_crash_retirement_replay_locked(
+        &self,
+        anchor: &StaleReplayAnchorV1,
+        proof: &HistoricalReplayProofV1,
+    ) -> Result<(), StorageError> {
+        let world = anchor.epoch.world_id;
+        if self.crash_retirement_pending(world)? {
+            if self.read_pinned_stale_replay(world)?.as_ref() != Some(&(anchor.clone(), proof.clone()))
+                || !crash_retirement_history_matches(anchor, proof)
+            {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+            let staged = StagedStaleReplayV1 { anchor: anchor.clone(), proof: proof.clone() };
+            durable_atomic_write(&self.control_path(world, STALE_REPLAY_PROOF), &postcard::to_allocvec(&staged)?)?;
+            durable_remove(&self.control_path(world, CRASH_RETIREMENT_REPLAY))?;
+        }
+        Ok(())
+    }
+
     pub fn load_staged_stale_replay_proof(
         &self,
         world: WorldId,
     ) -> Result<Option<(StaleReplayAnchorV1, HistoricalReplayProofV1)>, StorageError> {
-        let _guard = self.lock_world_transaction(world)?;
+        let _guard = self.lock_world_transaction_for_stale_download(world)?;
         self.load_staged_stale_replay_proof_locked(world)
     }
 
@@ -445,7 +546,12 @@ impl Storage {
         let Some((anchor, proof)) = self.read_pinned_stale_replay(world)? else {
             return Ok(None);
         };
-        if self.stale_replay_anchor_locked(world)? != anchor {
+        if self.crash_retirement_pending(world)? {
+            self.validate_frozen_stale_anchor_locked(&anchor)?;
+            if !crash_retirement_history_matches(&anchor, &proof) {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+        } else if self.stale_replay_anchor_locked(world)? != anchor {
             // The candidate is no longer bound to the current control
             // state. It remains historical evidence but cannot be resumed.
             return Ok(None);
@@ -457,12 +563,16 @@ impl Storage {
         &self,
         world: WorldId,
     ) -> Result<Option<(StaleReplayAnchorV1, HistoricalReplayProofV1)>, StorageError> {
-        let path = self.control_path(world, "stale-replay-proof.postcard");
+        let retiring = self.crash_retirement_pending(world)?;
+        let path = self.control_path(world, if retiring { CRASH_RETIREMENT_REPLAY } else { STALE_REPLAY_PROOF });
         if !canonical_file_exists(&path)? {
             return Ok(None);
         }
-        let staged: StagedStaleReplayV1 = postcard::from_bytes(&read_canonical_file(&path)?)?;
-        if staged.anchor.epoch.world_id != world
+        let bytes = read_canonical_file(&path)?;
+        let staged: StagedStaleReplayV1 = postcard::from_bytes(&bytes)?;
+        if bytes != postcard::to_allocvec(&staged)?
+            || (retiring && !crash_retirement_history_matches(&staged.anchor, &staged.proof))
+            || staged.anchor.epoch.world_id != world
             || !staged.anchor.is_extended_by(&staged.proof)
             || postcard::to_allocvec(&staged.proof)?.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES
         {

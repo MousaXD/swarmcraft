@@ -2,7 +2,7 @@
 //! The intent fences every ordinary storage transaction and live control read.
 //! Only a reverified, byte-exact pinned successor can finish it.
 use crate::{
-    control::{transfer_history_name, StaleReplayAnchorV1},
+    control::{crash_retirement_history_matches, transfer_history_name, StaleReplayAnchorV1},
     stale_replay::{staged_manifest_path, validate_staged_manifest},
     transaction::{
         canonical_file_exists, create_unique_temp, durable_atomic_write, durable_remove, durable_rename_new, io_error,
@@ -48,6 +48,9 @@ impl Storage {
     pub(crate) fn ensure_stale_publication_clear(&self, world: WorldId) -> Result<(), StorageError> {
         if self.stale_publication_pending(world)? {
             return Err(StorageError::StaleReplayPublicationIncomplete(world));
+        }
+        if self.crash_retirement_pending(world)? {
+            return Err(StorageError::CrashRetirementReplayIncomplete(world));
         }
         Ok(())
     }
@@ -243,7 +246,7 @@ impl Storage {
     /// return the exact durable intent has fenced all ordinary live reads
     /// and writes. It is safe to exit the process at this boundary.
     pub fn begin_verified_stale_publication(&self, candidate: &StalePublicationCandidate) -> Result<(), StorageError> {
-        self.begin_verified_stale_publication_inner(candidate, None)
+        self.begin_verified_stale_publication_inner(candidate, None, false)
     }
 
     /// A formerly authoritative replica must still hold its exact local
@@ -271,13 +274,26 @@ impl Storage {
         {
             return Err(StorageError::WorldMetadataMismatch);
         }
-        self.begin_verified_stale_publication_inner(candidate, Some(retirement))
+        self.begin_verified_stale_publication_inner(candidate, Some(retirement), false)
+    }
+
+    /// A crash-retired authority must have its independently verified,
+    /// durable retirement envelope before canonical publication can start.
+    pub fn begin_verified_crash_retirement_publication(
+        &self,
+        candidate: &StalePublicationCandidate,
+    ) -> Result<(), StorageError> {
+        if !crash_retirement_history_matches(&candidate.anchor, &candidate.proof) {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        self.begin_verified_stale_publication_inner(candidate, None, true)
     }
 
     fn begin_verified_stale_publication_inner(
         &self,
         candidate: &StalePublicationCandidate,
         retirement: Option<&AuthorityTransferV1>,
+        crash_retirement: bool,
     ) -> Result<(), StorageError> {
         let world = candidate.proof.world_id;
         let _gc = self.lock_blob_gc_for_snapshot_commit(world)?;
@@ -286,7 +302,13 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
         let intent = make_intent(&candidate.anchor, &candidate.proof)?;
+        if self.crash_retirement_pending(world)? && !crash_retirement {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
         if !self.stale_publication_pending(world)? {
+            if self.crash_retirement_pending(world)? != crash_retirement {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
             if let Some(expected) = retirement {
                 let path = self.world_dir(world).join("metadata/transfer.postcard");
                 if read_canonical_file(&path)? != postcard::to_allocvec(expected)? {
@@ -418,6 +440,7 @@ impl Storage {
         for name in consumed_decisions(&metadata, proof)? {
             durable_remove(&metadata.join(name))?;
         }
+        self.finish_crash_retirement_replay_locked(anchor, proof)?;
         durable_remove(&self.stale_publication_path(world))?;
         Ok(())
     }

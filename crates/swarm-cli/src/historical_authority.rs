@@ -206,8 +206,8 @@ pub fn verify_and_stage_first_contact_replay(
 }
 
 /// A locally committed outbound transfer already denies old-generation
-/// leases and hosting. Only this exact, signed local fence allows retired
-/// authority replay for now; crash recovery needs a separate durable fence.
+/// leases and hosting. Planned retirement requires this exact local fence;
+/// crash retirement instead uses a certified, durable replay envelope.
 pub fn local_committed_retirement(
     storage: &Storage,
     local: &PeerIdentity,
@@ -239,12 +239,9 @@ pub fn local_committed_retirement(
 fn replay_retirement<'a>(
     anchor: &StaleReplayAnchorV1,
     proof: &'a HistoricalReplayProofV1,
-) -> Result<&'a AuthorityTransferV1> {
+) -> Result<&'a HistoricalTransitionV1> {
     let index = usize::try_from(anchor.epoch.epoch_number.checked_sub(1).context("invalid retired epoch")?)?;
-    let Some(HistoricalTransitionV1::Transfer { committed, .. }) = proof.transitions.get(index) else {
-        bail!("retired authority requires its exact committed outbound transfer");
-    };
-    Ok(committed.as_ref())
+    proof.transitions.get(index).context("retired authority requires its exact immediate certified transition")
 }
 
 /// Data-only admission; the verified proof must include the local signed
@@ -258,7 +255,20 @@ pub fn stale_replay_recipient_allowed(
     if anchor.epoch.authority_peer_id != local.peer_id() {
         return Ok(true);
     }
-    Ok(local_committed_retirement(storage, local, &anchor.epoch)?.as_ref() == Some(replay_retirement(anchor, proof)?))
+    match replay_retirement(anchor, proof)? {
+        HistoricalTransitionV1::Transfer { committed, .. } => {
+            Ok(local_committed_retirement(storage, local, &anchor.epoch)?.as_ref() == Some(committed.as_ref()))
+        }
+        HistoricalTransitionV1::Recovery(_) => {
+            if !storage.crash_retirement_pending(anchor.epoch.world_id)? {
+                return Ok(false);
+            }
+            Ok(storage
+                .load_staged_stale_replay_proof(anchor.epoch.world_id)?
+                .is_some_and(|(pinned_anchor, pinned)| pinned_anchor == *anchor && pinned == *proof))
+        }
+        HistoricalTransitionV1::SoleMemberWake(_) => Ok(false),
+    }
 }
 
 /// Verify an authenticated newer authority's complete history against the
@@ -273,7 +283,16 @@ pub fn verify_and_stage_stale_replay(
     proof: HistoricalReplayProofV1,
 ) -> Result<()> {
     let world = anchor.epoch.world_id;
-    if storage.stale_replay_anchor(world)? != *anchor
+    let prior_crash = if storage.crash_retirement_pending(world)? {
+        Some(storage.load_staged_stale_replay_proof(world)?.context("missing frozen retirement envelope")?)
+    } else {
+        None
+    };
+    let current_anchor = match &prior_crash {
+        Some((pinned, _)) => pinned.clone(),
+        None => storage.stale_replay_anchor(world)?,
+    };
+    if current_anchor != *anchor
         || source == local.peer_id()
         || !anchor.membership.members.iter().any(|member| {
             !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key()
@@ -296,7 +315,18 @@ pub fn verify_and_stage_stale_replay(
         bail!("stale replay source or recipient is not bound to final signed membership");
     }
     let verified = verify_replay_proof(proof, &storage.load_world(world)?.genesis, &target)?;
-    if !stale_replay_recipient_allowed(storage, local, anchor, verified.proof())? {
+    let crash_retirement = anchor.epoch.authority_peer_id == local.peer_id()
+        && matches!(replay_retirement(anchor, verified.proof())?, HistoricalTransitionV1::Recovery(_));
+    if let Some((_, previous)) = prior_crash {
+        if !crash_retirement || !verified.proof().extends_replay_history(&previous) {
+            bail!("new recovery envelope does not extend the frozen retirement history");
+        }
+        let _runtime_exclusion =
+            crate::migration::acquire_retired_replay_guard(&DataPaths::from_root(storage.root()), world)?;
+        storage.stage_verified_crash_retirement_replay(anchor, verified.proof())?;
+        return Ok(());
+    }
+    if !crash_retirement && !stale_replay_recipient_allowed(storage, local, anchor, verified.proof())? {
         bail!("retired authority has no matching locally committed transfer fence");
     }
     // Preserve every locally retained canonical manifest, not just the
@@ -323,7 +353,17 @@ pub fn verify_and_stage_stale_replay(
             bail!("stale replay changes the local accepted recovery certificate");
         }
     }
-    storage.stage_stale_replay_proof(anchor, verified.proof())?;
+    if crash_retirement {
+        // Never freeze a running or ambiguous local Minecraft process. A
+        // certified successor is not itself permission to discard local data.
+        // Holding the same runtime slot as every host launch closes the race
+        // between quiescence, permit revocation and installing the fence.
+        let _runtime_exclusion =
+            crate::migration::acquire_retired_replay_guard(&DataPaths::from_root(storage.root()), world)?;
+        storage.stage_verified_crash_retirement_replay(anchor, verified.proof())?;
+    } else {
+        storage.stage_stale_replay_proof(anchor, verified.proof())?;
+    }
     Ok(())
 }
 
@@ -367,13 +407,20 @@ pub fn publish_stale_replay(
         None
     };
     if retired {
-        let retirement = replay_retirement(anchor, verified.proof())?;
         if !storage.stale_publication_pending(world)?
             && !stale_replay_recipient_allowed(storage, local, anchor, verified.proof())?
         {
-            bail!("retired authority has no matching locally committed transfer fence");
+            bail!("retired authority has no matching durable retirement fence");
         }
-        storage.begin_verified_retired_stale_publication(&candidate, retirement)?;
+        match replay_retirement(anchor, verified.proof())? {
+            HistoricalTransitionV1::Transfer { committed, .. } => {
+                storage.begin_verified_retired_stale_publication(&candidate, committed)?;
+            }
+            HistoricalTransitionV1::Recovery(_) => {
+                storage.begin_verified_crash_retirement_publication(&candidate)?;
+            }
+            HistoricalTransitionV1::SoleMemberWake(_) => bail!("sole-member wake cannot retire a local authority"),
+        }
     } else {
         storage.begin_verified_stale_publication(&candidate)?;
     }
@@ -1073,6 +1120,252 @@ mod tests {
             storage.save_world_config(&config).unwrap();
         }
         (membership, config)
+    }
+
+    #[test]
+    fn crash_retirement_fences_old_authority_and_resumes_certified_suffix() {
+        let (_temp, old, alice, first) = fixture();
+        let bob = PeerIdentity::from_secret_bytes([22; 32]);
+        let carol = PeerIdentity::from_secret_bytes([23; 32]);
+        let world = first.world_id;
+        let genesis = old.load_world(world).unwrap().genesis;
+        let initial = signed_membership(&first, &alice, vec![member(&alice)], None);
+        old.save_membership_record(&initial).unwrap();
+        let config = initial_config(&old, &alice, world);
+        let membership =
+            signed_membership(&first, &alice, vec![member(&alice), member(&bob), member(&carol)], Some(&initial));
+        let proposal = MembershipProposalV1 { previous: initial, proposed: membership.clone() };
+        let votes = [&alice, &bob, &carol]
+            .iter()
+            .map(|voter| {
+                let mut vote = MembershipVoteV1 {
+                    protocol_version: PROTOCOL_VERSION,
+                    world_id: world,
+                    previous_membership_hash: proposal.previous.record_hash().unwrap(),
+                    proposed_membership_hash: proposal.proposed.record_hash().unwrap(),
+                    proposed_sequence: proposal.proposed.sequence,
+                    voter_peer_id: voter.peer_id(),
+                    voter_public_key: voter.public_key(),
+                    signature: Vec::new(),
+                };
+                vote.signature = voter.sign(&vote.signing_bytes().unwrap());
+                vote
+            })
+            .collect();
+        old.save_membership_certificate(&MembershipCertificateV1 { proposal, votes }).unwrap();
+        old.save_membership_record(&membership).unwrap();
+        old.save_world_descriptor(&swarm_protocol::WorldDescriptorV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            compatibility_fingerprint: genesis.compatibility_fingerprint,
+            members: membership.members.clone(),
+            preferred_replication_factor: 3,
+        })
+        .unwrap();
+        let anchor = old.stale_replay_anchor(world).unwrap();
+        let first_checkpoint = old.latest_snapshot(world).unwrap().unwrap();
+        // Clone the fully accepted on-disk prefix into a separate fixture.
+        // The successor has a replicated checkpoint not retained by the
+        // crashed source. No live authority or consent is manufactured.
+        fn copy_fixture_tree(source: &std::path::Path, destination: &std::path::Path) {
+            std::fs::create_dir_all(destination).unwrap();
+            for entry in std::fs::read_dir(source).unwrap() {
+                let entry = entry.unwrap();
+                let target = destination.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {
+                    copy_fixture_tree(&entry.path(), &target);
+                } else {
+                    std::fs::copy(entry.path(), target).unwrap();
+                }
+            }
+        }
+        let winner_dir = tempfile::tempdir().unwrap();
+        let winner = Storage::open(winner_dir.path().join("data")).unwrap();
+        copy_fixture_tree(&old.world_dir(world), &winner.world_dir(world));
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("level.dat"), b"replicated save before host crash").unwrap();
+        let mut boundary = winner
+            .snapshot_directory(
+                source.path(),
+                SnapshotContext {
+                    world,
+                    snapshot_number: 2,
+                    sequence: 2,
+                    epoch: 1,
+                    previous_snapshot_hash: Some(first_checkpoint.manifest_hash().unwrap()),
+                    authority_peer_id: alice.peer_id(),
+                    authority_public_key: alice.public_key(),
+                },
+            )
+            .unwrap();
+        alice.sign_snapshot(&mut boundary).unwrap();
+        winner.commit_snapshot(&boundary).unwrap();
+        let mut next = successor(&first, &bob);
+        next.mode = EpochMode::Recovery;
+        next.base_state_hash = boundary.state_root;
+        next.signature = bob.sign(&next.signing_bytes().unwrap());
+        let mut ballot = RecoveryBallotV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            base_epoch: first.epoch_number,
+            base_fencing_token: first.fencing_token,
+            target_epoch: next.epoch_number,
+            target_fencing_token: next.fencing_token,
+            round: 1,
+            candidate_peer_id: bob.peer_id(),
+            candidate_public_key: bob.public_key(),
+            base_snapshot_hash: boundary.manifest_hash().unwrap(),
+            base_state_hash: boundary.state_root,
+            membership_hash: membership.record_hash().unwrap(),
+            signature: Vec::new(),
+        };
+        ballot.signature = bob.sign(&ballot.signing_bytes().unwrap());
+        let votes = [&bob, &carol]
+            .iter()
+            .map(|voter| {
+                let mut vote = RecoveryVoteV1 {
+                    protocol_version: PROTOCOL_VERSION,
+                    world_id: world,
+                    ballot_hash: ballot.ballot_hash().unwrap(),
+                    base_epoch: ballot.base_epoch,
+                    target_epoch: ballot.target_epoch,
+                    round: ballot.round,
+                    candidate_peer_id: ballot.candidate_peer_id,
+                    voter_peer_id: voter.peer_id(),
+                    voter_public_key: voter.public_key(),
+                    signature: Vec::new(),
+                };
+                vote.signature = voter.sign(&vote.signing_bytes().unwrap());
+                vote
+            })
+            .collect();
+        let certificate = RecoveryCertificateV1 { ballot, votes };
+        winner.save_recovery_certificate(&certificate).unwrap();
+        let (membership2, config2) = promote(&winner, &next, &bob, &membership, &config);
+        let proof = collect_replay_proof(&winner, &bob, world).unwrap();
+        let mut invalid = proof.clone();
+        let HistoricalTransitionV1::Recovery(invalid_certificate) = &mut invalid.transitions[0] else {
+            panic!("expected certified recovery");
+        };
+        invalid_certificate.votes[0].signature[0] ^= 1;
+        invalid.signature = bob.sign(&invalid.signing_bytes().unwrap());
+        assert!(verify_and_stage_stale_replay(&old, &alice, bob.peer_id(), &anchor, invalid).is_err());
+        assert!(!old.crash_retirement_pending(world).unwrap());
+
+        let paths = DataPaths::from_root(old.root());
+        let control = paths.root.join("control").join(world.to_hex());
+        swarm_core::create_private_dir_all(&control).unwrap();
+        let process_record = control.join("runtime-process.json");
+        std::fs::write(
+            &process_record,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1, "controller_pid": 1, "java_pid": std::process::id()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(verify_and_stage_stale_replay(&old, &alice, bob.peer_id(), &anchor, proof.clone()).is_err());
+        assert!(!old.crash_retirement_pending(world).unwrap());
+        assert_eq!(old.load_epoch_record(world).unwrap(), first);
+        std::fs::remove_file(&process_record).unwrap();
+        verify_and_stage_stale_replay(&old, &alice, bob.peer_id(), &anchor, proof.clone()).unwrap();
+        assert!(old.crash_retirement_pending(world).unwrap());
+        assert!(!old.stale_publication_pending(world).unwrap());
+        assert!(old.load_epoch_record(world).is_err());
+        assert!(old.load_membership_record(world).is_err());
+        assert!(old.load_world_config(world).is_err());
+        assert!(old.load_world_descriptor(world).is_err());
+        assert!(old.latest_snapshot(world).is_err());
+        assert!(old.save_epoch_record(&first).is_err());
+        assert!(old.save_membership_record(&membership).is_err());
+        assert!(old.garbage_collect_blobs(world).is_err());
+        assert!(crate::live_authority::verify_playable_epoch(&old, &first).is_err());
+        assert!(publish_stale_replay(&old, &alice, world).is_err());
+
+        let marker = old.world_dir(world).join("metadata/crash-retirement-replay.postcard");
+        let original = std::fs::read(&marker).unwrap();
+        std::fs::write(&marker, b"unreadable retirement marker").unwrap();
+        assert!(old.load_epoch_record(world).is_err());
+        assert!(old.stale_replay_progress(world).is_err());
+        std::fs::write(&marker, original).unwrap();
+        let reopened = Storage::open(old.root()).unwrap();
+        assert_eq!(reopened.stale_replay_progress(world).unwrap().unwrap().completed, 1);
+        assert!(reopened.load_epoch_record(world).is_err());
+
+        // Bob transfers to Carol while the crashed source is still fenced.
+        // Only a full extension of the pinned recovery history can retarget.
+        let second_base = winner.latest_snapshot(world).unwrap().unwrap();
+        let third = successor(&next, &carol);
+        let mut third = EpochRecordV1 { mode: EpochMode::Quorum, base_state_hash: second_base.state_root, ..third };
+        third.signature = carol.sign(&third.signing_bytes().unwrap());
+        let mut transfer = AuthorityTransferV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            from_peer_id: bob.peer_id(),
+            to_peer_id: carol.peer_id(),
+            base_snapshot_hash: second_base.manifest_hash().unwrap(),
+            next_epoch: third.epoch_number,
+            next_fencing_token: third.fencing_token,
+            phase: TransferPhase::Prepared,
+            signer_peer_id: bob.peer_id(),
+            signer_public_key: bob.public_key(),
+            signature: Vec::new(),
+        };
+        for (kind, signer) in
+            [(TransferPhase::Prepared, &bob), (TransferPhase::Accepted, &carol), (TransferPhase::Committed, &bob)]
+        {
+            transfer.phase = kind;
+            transfer.signer_peer_id = signer.peer_id();
+            transfer.signer_public_key = signer.public_key();
+            transfer.signature = signer.sign(&transfer.signing_bytes().unwrap());
+            winner.save_transfer_record(&transfer).unwrap();
+        }
+        let (membership3, _) = promote(&winner, &third, &carol, &membership2, &config2);
+        let extended = collect_replay_proof(&winner, &carol, world).unwrap();
+        assert!(extended.extends_replay_history(&proof));
+        verify_and_stage_stale_replay(&reopened, &alice, carol.peer_id(), &anchor, extended.clone()).unwrap();
+        assert!(verify_and_stage_stale_replay(&reopened, &alice, bob.peer_id(), &anchor, proof).is_err());
+        assert_eq!(reopened.load_staged_stale_replay_proof(world).unwrap(), Some((anchor.clone(), extended.clone())));
+
+        let verified = verify_replay_proof(extended.clone(), &genesis, &membership3).unwrap();
+        let canonical = winner.list_snapshots(world).unwrap();
+        for manifest in canonical.iter().skip(1) {
+            verified.verify_manifest(manifest).unwrap();
+            assert!(reopened
+                .open_stale_replay_download(bob.peer_id(), membership3.record_hash().unwrap(), manifest)
+                .is_err());
+            let download = reopened
+                .open_stale_replay_download(carol.peer_id(), membership3.record_hash().unwrap(), manifest)
+                .unwrap();
+            for (hash, offset) in download.missing_blobs().unwrap() {
+                let blob = &manifest.entries.iter().find(|entry| entry.blob.hash == hash).unwrap().blob;
+                let (data, finished) = winner
+                    .read_encoded_blob_chunk(world, blob, offset, usize::try_from(blob.encoded_size - offset).unwrap())
+                    .unwrap();
+                assert!(finished);
+                download.receive_blob_chunk(blob, offset, &data, true).unwrap();
+            }
+            download.finalize().unwrap();
+            assert!(reopened.load_epoch_record(world).is_err());
+        }
+        let candidate = reopened.stale_publication_candidate(world).unwrap().unwrap();
+        assert_eq!(candidate.manifests, canonical);
+        assert!(reopened.begin_verified_stale_publication(&candidate).is_err());
+        reopened.begin_verified_crash_retirement_publication(&candidate).unwrap();
+        assert!(reopened.crash_retirement_pending(world).unwrap());
+        assert!(reopened.stale_publication_pending(world).unwrap());
+        assert!(reopened.stale_replay_progress(world).is_err());
+        drop(reopened);
+        let reopened = Storage::open(old.root()).unwrap();
+        assert_eq!(publish_stale_replay(&reopened, &alice, world).unwrap(), extended);
+        assert!(!reopened.crash_retirement_pending(world).unwrap());
+        assert!(!reopened.stale_publication_pending(world).unwrap());
+        assert_eq!(reopened.load_epoch_record(world).unwrap(), third);
+        assert_eq!(reopened.load_membership_record(world).unwrap(), membership3);
+        assert_eq!(reopened.list_snapshots(world).unwrap(), canonical);
+        assert!(reopened.load_staged_stale_replay_proof(world).unwrap().is_none());
+        assert!(crate::hosting_budget::load_consent(&paths, world).unwrap().is_none());
+        crate::live_authority::verify_playable_epoch(&reopened, &third).unwrap();
     }
 
     #[test]

@@ -895,3 +895,11 @@ The publisher holds the same world-specific exclusive runtime lock as the migrat
 The real process-level invite regression was extended to reconnect the original source after missing successor checkpoint bytes, observe isolated replay with its old epoch unchanged, then re-enter as an ordinary replica without creating local hosting consent. Both extended runs passed, including direct live-record and held-lock denial assertions (final run: 46.32 seconds). The injected live PID models a persistent orphan record; it is not a physical JVM crash test. Strict CLI/storage Clippy and 135 CLI library tests passed.
 
 Crash-recovery retirement without a locally committed transfer, recovery reservations, signed sleep boundaries and previously unknown successor discovery remain open.
+
+### Crash-recovered retired authority re-entry (25 November)
+
+Required validation 45521764635 on d6bf294 finished successfully (20 selected jobs passed, optional sustained soak skipped).
+
+An old local authority lacking a committed outbound transfer can now stage the exact anchored recovery history only after full signed recovery-quorum validation and exclusive runtime exclusion. A single durable crash-retirement replay envelope pins the proof and fences ordinary canonical visibility/writes, old permits, runtime startup, and live world RPCs. Historical download requests remain confined to that pinned successor. Retargeting requires a verified exact extension, and restart retains the fence. Canonical publication repeats runtime exclusion and verification and clears the retirement marker only under the separate publication intent after installation. Live access still requires a fresh quorum.
+
+Regression evidence: 67 storage tests passed (1 optional soak ignored), all 136 CLI library tests passed, strict all-target/all-feature Clippy and formatting passed. The real daemon invite regression also passed (65.65 seconds), including a former authority missing a signed checkpoint, a certified recovery from other voters, durable retirement, daemon restart and exact suffix re-entry. The recovery certificate is constructed in the fixture; physical JVM crash and multi-machine Minecraft validation remain outstanding. Pending recovery certificates, reservations, signed sleep and unknown successor discovery remain separate work.

@@ -52,7 +52,7 @@ impl Storage {
     }
 
     pub fn stale_replay_progress(&self, world: WorldId) -> Result<Option<StaleReplayProgress>, StorageError> {
-        let _guard = self.lock_world_transaction(world)?;
+        let _guard = self.lock_world_transaction_for_stale_download(world)?;
         let Some((anchor, proof)) = self.load_staged_stale_replay_proof_locked(world)? else {
             return Ok(None);
         };
@@ -98,7 +98,7 @@ impl Storage {
         manifest: &SnapshotManifestV1,
     ) -> Result<StaleReplayDownload, StorageError> {
         let world = manifest.world_id;
-        let _guard = self.lock_world_transaction(world)?;
+        let _guard = self.lock_world_transaction_for_stale_download(world)?;
         let (anchor, proof) =
             self.load_staged_stale_replay_proof_locked(world)?.ok_or(StorageError::WorldMetadataMismatch)?;
         let completed = self.stale_replay_progress_locked(&anchor, &proof)?;
@@ -125,7 +125,7 @@ impl Storage {
     /// any subsequent canonical publication transaction.
     pub fn verified_stale_replay_suffix(&self, world: WorldId) -> Result<Vec<SnapshotManifestV1>, StorageError> {
         let _gc = self.lock_blob_gc_for_snapshot_commit(world)?;
-        let _guard = self.lock_world_transaction(world)?;
+        let _guard = self.lock_world_transaction_for_stale_download(world)?;
         let (anchor, proof) =
             self.load_staged_stale_replay_proof_locked(world)?.ok_or(StorageError::WorldMetadataMismatch)?;
         if self.stale_replay_progress_locked(&anchor, &proof)? != proof.checkpoints.len() {
@@ -152,7 +152,9 @@ impl Storage {
 
 impl StaleReplayDownload {
     pub fn is_current(&self) -> bool {
-        let Ok(_guard) = self.canonical.lock_world_transaction(self.manifest.world_id) else { return false };
+        let Ok(_guard) = self.canonical.lock_world_transaction_for_stale_download(self.manifest.world_id) else {
+            return false;
+        };
         self.ensure_current_locked().is_ok()
     }
 
@@ -179,7 +181,7 @@ impl StaleReplayDownload {
 
     pub fn missing_blobs(&self) -> Result<Vec<(Hash32, u64)>, ReplicationError> {
         let world = self.manifest.world_id;
-        let _guard = self.canonical.lock_world_transaction(world)?;
+        let _guard = self.canonical.lock_world_transaction_for_stale_download(world)?;
         self.ensure_current_locked()?;
         let mut seen = BTreeSet::new();
         let mut missing = Vec::new();
@@ -203,7 +205,7 @@ impl StaleReplayDownload {
         finished: bool,
     ) -> Result<u64, ReplicationError> {
         let world = self.manifest.world_id;
-        let _guard = self.canonical.lock_world_transaction(world)?;
+        let _guard = self.canonical.lock_world_transaction_for_stale_download(world)?;
         self.ensure_current_locked()?;
         if !self.manifest.entries.iter().any(|entry| entry.blob == *descriptor) {
             return Err(StorageError::WorldMetadataMismatch.into());
@@ -216,7 +218,7 @@ impl StaleReplayDownload {
     pub fn finalize(&self) -> Result<(), ReplicationError> {
         let world = self.manifest.world_id;
         let _gc = self.canonical.lock_blob_gc_for_snapshot_commit(world)?;
-        let _guard = self.canonical.lock_world_transaction(world)?;
+        let _guard = self.canonical.lock_world_transaction_for_stale_download(world)?;
         self.ensure_current_locked()?;
         if self.manifest.entries.iter().any(|entry| !self.has_blob(&entry.blob)) {
             return Err(ReplicationError::Incomplete(self.manifest.snapshot_number));

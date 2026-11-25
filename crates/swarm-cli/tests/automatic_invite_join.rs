@@ -442,6 +442,115 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
     let reopened = Storage::open(a.paths.root.clone()).unwrap();
     assert_eq!(reopened.load_epoch_record(world).unwrap(), next);
     assert_eq!(reopened.list_snapshots(world).unwrap(), history);
+
+    // Now the newer authority crashes without a locally committed outbound
+    // transfer. A different peer has an additional old-generation checkpoint
+    // and a certified recovery. The crashed source must freeze immediately
+    // upon verifying that history and resume the isolated replay on restart.
+    drop(_new_host);
+    let crash_anchor = b.storage.stale_replay_anchor(world).unwrap();
+    let recovery_membership = a.storage.load_membership_record(world).unwrap();
+    let crash_head = a.storage.latest_snapshot(world).unwrap().unwrap();
+    fs::write(source.path().join("level.dat"), b"last replicated checkpoint before authority crash").unwrap();
+    let mut boundary = a
+        .storage
+        .snapshot_directory(
+            source.path(),
+            SnapshotContext {
+                world,
+                snapshot_number: crash_head.snapshot_number + 1,
+                sequence: crash_head.sequence + 1,
+                epoch: next.epoch_number,
+                previous_snapshot_hash: Some(crash_head.manifest_hash().unwrap()),
+                authority_peer_id: b.identity.peer_id(),
+                authority_public_key: b.identity.public_key(),
+            },
+        )
+        .unwrap();
+    b.identity.sign_snapshot(&mut boundary).unwrap();
+    a.storage.commit_snapshot(&boundary).unwrap();
+    let mut recovered = swarm_protocol::EpochRecordV1 {
+        epoch_number: next.epoch_number + 1,
+        fencing_token: next.fencing_token + 1,
+        previous_epoch_hash: Some(next.record_hash().unwrap()),
+        base_state_hash: boundary.state_root,
+        authority_peer_id: a.identity.peer_id(),
+        authority_public_key: a.identity.public_key(),
+        mode: EpochMode::Recovery,
+        reason: "certified crash recovery with retained replica suffix".into(),
+        signature: Vec::new(),
+        ..next.clone()
+    };
+    recovered.signature = a.identity.sign(&recovered.signing_bytes().unwrap());
+    let mut ballot = swarm_protocol::RecoveryBallotV1 {
+        protocol_version: swarm_protocol::PROTOCOL_VERSION,
+        world_id: world,
+        base_epoch: next.epoch_number,
+        base_fencing_token: next.fencing_token,
+        target_epoch: recovered.epoch_number,
+        target_fencing_token: recovered.fencing_token,
+        round: 1,
+        candidate_peer_id: a.identity.peer_id(),
+        candidate_public_key: a.identity.public_key(),
+        base_snapshot_hash: boundary.manifest_hash().unwrap(),
+        base_state_hash: boundary.state_root,
+        membership_hash: recovery_membership.record_hash().unwrap(),
+        signature: Vec::new(),
+    };
+    ballot.signature = a.identity.sign(&ballot.signing_bytes().unwrap());
+    let votes = [&a.identity, &c.identity]
+        .iter()
+        .map(|voter| {
+            let mut vote = swarm_protocol::RecoveryVoteV1 {
+                protocol_version: swarm_protocol::PROTOCOL_VERSION,
+                world_id: world,
+                ballot_hash: ballot.ballot_hash().unwrap(),
+                base_epoch: ballot.base_epoch,
+                target_epoch: ballot.target_epoch,
+                round: ballot.round,
+                candidate_peer_id: ballot.candidate_peer_id,
+                voter_peer_id: voter.peer_id(),
+                voter_public_key: voter.public_key(),
+                signature: Vec::new(),
+            };
+            vote.signature = voter.sign(&vote.signing_bytes().unwrap());
+            vote
+        })
+        .collect();
+    let certificate = swarm_protocol::RecoveryCertificateV1 { ballot, votes };
+    a.storage.save_recovery_certificate(&certificate).unwrap();
+    a.storage.save_epoch_record(&recovered).unwrap();
+    swarm_cli::migration::ensure_authority_artifacts(&a.storage, &a.identity, &recovered).unwrap();
+    let crash_proof = swarm_cli::historical_authority::collect_replay_proof(&a.storage, &a.identity, world).unwrap();
+    let recovered_host = spawn_daemon(&a, local_ip);
+    let crashed_host = spawn_daemon_with_peers(&b, local_ip, &[automatic_transport_address(&a, local_ip)]);
+    wait_until("crashed authority durably freezes exact recovery envelope", Duration::from_secs(60), || {
+        b.storage.crash_retirement_pending(world).ok() == Some(true)
+            && b.storage.load_staged_stale_replay_proof(world).ok().flatten().as_ref()
+                == Some(&(crash_anchor.clone(), crash_proof.clone()))
+    });
+    assert!(b.storage.load_epoch_record(world).is_err());
+    assert!(b.storage.latest_snapshot(world).is_err());
+    assert!(b.storage.save_epoch_record(&next).is_err());
+    assert!(swarm_cli::live_authority::verify_playable_epoch(&b.storage, &next).is_err());
+    drop(crashed_host);
+    let reopened = Storage::open(b.paths.root.clone()).unwrap();
+    assert!(reopened.crash_retirement_pending(world).unwrap());
+    assert!(reopened.load_epoch_record(world).is_err());
+    let resumed = spawn_daemon_with_peers(&b, local_ip, &[automatic_transport_address(&a, local_ip)]);
+    wait_until("crashed authority resumes isolated suffix and re-enters as replica", Duration::from_secs(90), || {
+        b.storage.load_epoch_record(world).ok().as_ref() == Some(&recovered)
+            && b.storage.latest_snapshot(world).ok().flatten().as_ref()
+                == a.storage.latest_snapshot(world).ok().flatten().as_ref()
+            && b.storage.stale_publication_pending(world).ok() == Some(false)
+            && b.storage.crash_retirement_pending(world).ok() == Some(false)
+    });
+    assert_eq!(b.storage.list_snapshots(world).unwrap(), a.storage.list_snapshots(world).unwrap());
+    assert_eq!(b.storage.load_recovery_certificate(world).unwrap(), certificate);
+    assert_eq!(b.storage.load_membership_record(world).unwrap(), *crash_proof.membership.last().unwrap());
+    assert!(swarm_cli::hosting_budget::load_consent(&b.paths, world).unwrap().is_none());
+    swarm_cli::live_authority::verify_playable_epoch(&b.storage, &recovered).unwrap();
+    drop((resumed, recovered_host));
 }
 
 #[test]

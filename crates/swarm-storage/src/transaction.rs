@@ -28,8 +28,21 @@ impl Storage {
         Ok(guard)
     }
 
-    /// Only the replay publisher may use the raw lock to resume a fenced
-    /// transaction. All ordinary state writers must use the guarded lock.
+    /// Only isolated replay downloads may access a crash-retired anchor.
+    /// Once canonical publication starts, downloads also remain fenced.
+    pub(crate) fn lock_world_transaction_for_stale_download(
+        &self,
+        world: WorldId,
+    ) -> Result<WorldTransactionGuard, StorageError> {
+        let guard = self.lock_world_transaction_for_replay(world)?;
+        if self.stale_publication_pending(world)? {
+            return Err(StorageError::StaleReplayPublicationIncomplete(world));
+        }
+        Ok(guard)
+    }
+
+    /// Only the replay implementation may use the raw lock. All ordinary
+    /// state writers must use the guarded lock.
     pub(crate) fn lock_world_transaction_for_replay(
         &self,
         world: WorldId,

@@ -432,6 +432,21 @@ async fn supervise_world(paths: DataPaths, world: WorldId, runtime_registry: Liv
     let storage = Storage::open(paths.root.clone())?;
     let identity = PeerIdentity::load_or_create(&paths)?;
     loop {
+        if storage.crash_retirement_pending(world)? || storage.stale_publication_pending(world)? {
+            publish_status(
+                &paths,
+                &storage,
+                world,
+                None,
+                MigrationPhase::WaitingForAuthority,
+                false,
+                None,
+                None,
+                Some("certified historical replay is fencing local authority".into()),
+            )?;
+            sleep(SUPERVISOR_POLL).await;
+            continue;
+        }
         let config = match load_runtime_config(&paths, world) {
             Ok(config) => config,
             Err(error) => {
@@ -774,7 +789,7 @@ impl AuthorityRuntimeGuard {
     fn try_acquire(paths: &DataPaths, world: WorldId) -> Result<Option<Self>> {
         let path = Self::lock_path(paths, world);
         let parent = path.parent().context("authority runtime lock path has no parent directory")?;
-        fs::create_dir_all(parent)
+        swarm_core::create_private_dir_all(parent)
             .with_context(|| format!("cannot prepare authority runtime lock directory {}", parent.display()))?;
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -806,6 +821,7 @@ pub(crate) fn acquire_retired_replay_guard(paths: &DataPaths, world: WorldId) ->
     crate::runtime_process_guard::refuse_unaccounted_world_runtime(paths, world)?;
     crate::authority_permit::clear_permit(paths, world)?;
     host_readiness::invalidate_runtime_verification(paths, world)?;
+    host_readiness::invalidate_cached_readiness(paths, world)?;
     Ok(slot)
 }
 

@@ -10,9 +10,8 @@ use swarm_cli::{
     authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
     game_route_api::{GameRouteApiOperation, GameRouteApiReply, GameRouteApiServer, GameRouteStatusV1},
     historical_authority::{
-        collect_replay_proof, load_staged_replay, local_committed_retirement, publish_stale_replay,
-        stale_replay_recipient_allowed, verify_and_stage_first_contact_replay, verify_and_stage_stale_replay,
-        verify_replay_proof,
+        collect_replay_proof, load_staged_replay, publish_stale_replay, stale_replay_recipient_allowed,
+        verify_and_stage_first_contact_replay, verify_and_stage_stale_replay, verify_replay_proof,
     },
     host_readiness::{self, PeerReadinessObservation},
     hosting_budget, launch_guard,
@@ -2075,6 +2074,21 @@ fn maintain_authority_leases(
             clear_replay_runtime(runtime, outbound, world);
             continue;
         }
+        if storage.crash_retirement_pending(world)? {
+            clear_permit(paths, world)?;
+            // Retain authenticated status hints and isolated downloads so a
+            // later certified successor can extend the frozen replay. No
+            // old-generation lease, vote, heartbeat or replication survives.
+            runtime.lease_acks.retain(|(w, _), _| *w != world);
+            runtime.recovery_ballots.remove(&world);
+            runtime.recovery_votes.retain(|(w, _), _| *w != world);
+            runtime.membership_votes.retain(|(w, _), _| *w != world);
+            runtime.epoch_acks.retain(|(w, _), _| *w != world);
+            runtime.permit_heartbeats.remove(&world);
+            runtime.inbound_leases.remove(&world);
+            runtime.replications.retain(|(_, w), _| *w != world);
+            continue;
+        }
         if storage.first_contact_publication_started(world)? {
             clear_permit(paths, world)?;
             continue;
@@ -3324,6 +3338,10 @@ fn push_pending_membership_requests(
 /// latest epoch. Never run ordinary live snapshot/epoch admission until the
 /// certified historical replay has finished.
 fn requires_historical_replay(storage: &Storage, world: WorldId) -> Result<bool> {
+    // Crash-retirement replay is isolated stale replay, not first contact.
+    if storage.crash_retirement_pending(world)? {
+        return Ok(false);
+    }
     if load_optional_epoch_record(storage, world)?.is_some() {
         return Ok(false);
     }
@@ -3373,6 +3391,7 @@ fn request_historical_replay_proofs(
     for metadata in storage.list_worlds()? {
         let world = metadata.world_id;
         if storage.stale_publication_pending(world)?
+            || storage.crash_retirement_pending(world)?
             || storage.first_contact_publication_started(world)?
             || load_optional_epoch_record(storage, world)?.is_some()
         {
@@ -3486,16 +3505,24 @@ fn request_stale_replay_proofs(
         .count();
     for metadata in storage.list_worlds()? {
         let world = metadata.world_id;
-        let Ok(epoch) = storage.load_epoch_record(world) else { continue };
+        if storage.stale_publication_pending(world)? {
+            continue;
+        }
+        let pinned_retirement = if storage.crash_retirement_pending(world)? {
+            storage.load_staged_stale_replay_proof(world)?
+        } else {
+            None
+        };
+        let (epoch, descriptor) = if let Some((anchor, _)) = &pinned_retirement {
+            (anchor.epoch.clone(), anchor.descriptor.clone())
+        } else {
+            let Ok(epoch) = storage.load_epoch_record(world) else { continue };
+            let Ok(descriptor) = storage.load_world_descriptor(world) else { continue };
+            (epoch, descriptor)
+        };
         if epoch.epoch_number == 0 || epoch.mode == EpochMode::Solo {
             continue;
         }
-        if epoch.authority_peer_id == identity.peer_id()
-            && !local_committed_retirement(storage, identity, &epoch).is_ok_and(|record| record.is_some())
-        {
-            continue;
-        }
-        let Ok(descriptor) = storage.load_world_descriptor(world) else { continue };
         if !descriptor
             .member(identity.peer_id())
             .is_some_and(|member| !member.banned && member.public_key == identity.public_key())
@@ -3514,10 +3541,14 @@ fn request_stale_replay_proofs(
         {
             continue;
         }
-        let minimum = storage
-            .load_staged_stale_replay_proof(world)?
-            .and_then(|(_, proof)| proof.epochs.last().map(|target| target.epoch_number))
-            .unwrap_or(epoch.epoch_number);
+        let minimum = if let Some((_, proof)) = &pinned_retirement {
+            proof.epochs.last().map(|target| target.epoch_number).unwrap_or(epoch.epoch_number)
+        } else {
+            storage
+                .load_staged_stale_replay_proof(world)?
+                .and_then(|(_, proof)| proof.epochs.last().map(|target| target.epoch_number))
+                .unwrap_or(epoch.epoch_number)
+        };
         let candidate = runtime
             .authenticated_peers
             .iter()
@@ -3540,7 +3571,12 @@ fn request_stale_replay_proofs(
             })
             .max_by_key(|(_, peer, generation)| (*generation, *peer));
         let Some((transport, peer, _)) = candidate else { continue };
-        let Ok(anchor) = storage.stale_replay_anchor(world) else { continue };
+        let anchor = if let Some((anchor, _)) = pinned_retirement {
+            anchor
+        } else {
+            let Ok(anchor) = storage.stale_replay_anchor(world) else { continue };
+            anchor
+        };
         if anchor.epoch != epoch {
             continue;
         }
@@ -3568,7 +3604,10 @@ fn drive_historical_replay_downloads(
         outbound.values().filter(|context| matches!(context, OutboundContext::HistoricalReplayNext { .. })).count();
     for metadata in storage.list_worlds()? {
         let world = metadata.world_id;
-        if storage.stale_publication_pending(world)? || !requires_historical_replay(storage, world)? {
+        if storage.stale_publication_pending(world)?
+            || storage.crash_retirement_pending(world)?
+            || !requires_historical_replay(storage, world)?
+        {
             continue;
         }
         let Some(staged) = storage.load_first_contact_replay(world)? else { continue };
@@ -4081,32 +4120,52 @@ fn handle_request(
     let identity = context.identity;
     let storage = context.storage;
     if let Some(world_id) = request.membership_world_id() {
-        authorize_member(storage, world_id, application_peer)?;
-        let awaiting_join = awaiting_committed_join(storage, world_id)?;
-        let replay_required = requires_historical_replay(storage, world_id)?;
-        if matches!(
-            &request,
-            WireRequest::SnapshotManifest(_)
-                | WireRequest::Epoch(_)
-                | WireRequest::RecoveryEpoch { .. }
-                | WireRequest::WorldConfig(_)
-                | WireRequest::AuthorityTransfer(_)
-                | WireRequest::Sleep(_)
-                | WireRequest::SoloBranch(_)
-                | WireRequest::LeaseGrant(_)
-                | WireRequest::RecoveryBallot(_)
-        ) && (awaiting_join || replay_required)
-            || awaiting_join
-                && matches!(&request, WireRequest::BlobChunk { .. } | WireRequest::HistoricalReplayManifest { .. })
-        {
-            node.respond(
+        if storage.crash_retirement_pending(world_id)? {
+            // The frozen anchor cannot authorize any ordinary RPC. The
+            // sole exception is a data-only historical manifest/chunk from
+            // the exact pinned successor, independently checked below.
+            if !matches!(&request, WireRequest::HistoricalReplayManifest { .. } | WireRequest::BlobChunk { .. }) {
+                bail!("certified crash retirement fences ordinary world RPCs");
+            }
+            let (anchor, proof) =
+                storage.load_staged_stale_replay_proof(world_id)?.context("missing frozen retirement proof")?;
+            let target = proof.membership.last().context("missing frozen retirement membership")?;
+            if anchor.epoch.authority_peer_id != identity.peer_id()
+                || target.authority_peer_id != application_peer
+                || !target.members.iter().any(|member| {
+                    !member.banned && member.peer_id == identity.peer_id() && member.public_key == identity.public_key()
+                })
+            {
+                bail!("historical RPC is not from the pinned crash-retirement successor");
+            }
+        } else {
+            authorize_member(storage, world_id, application_peer)?;
+            let awaiting_join = awaiting_committed_join(storage, world_id)?;
+            let replay_required = requires_historical_replay(storage, world_id)?;
+            if matches!(
+                &request,
+                WireRequest::SnapshotManifest(_)
+                    | WireRequest::Epoch(_)
+                    | WireRequest::RecoveryEpoch { .. }
+                    | WireRequest::WorldConfig(_)
+                    | WireRequest::AuthorityTransfer(_)
+                    | WireRequest::Sleep(_)
+                    | WireRequest::SoloBranch(_)
+                    | WireRequest::LeaseGrant(_)
+                    | WireRequest::RecoveryBallot(_)
+            ) && (awaiting_join || replay_required)
+                || awaiting_join
+                    && matches!(&request, WireRequest::BlobChunk { .. } | WireRequest::HistoricalReplayManifest { .. })
+            {
+                node.respond(
                 channel,
                 WireResponse::Error {
                     code: "HISTORICAL_REPLAY_REQUIRED".into(),
                 message: "world requires committed membership and any necessary certified historical replay before live synchronization".into(),
                 },
             )?;
-            return Ok(());
+                return Ok(());
+            }
         }
     }
     match request {
@@ -4467,7 +4526,6 @@ fn handle_request(
             }
         }
         WireRequest::BlobChunk { world_id, hash, encoding, offset, data, finished } => {
-            authorize_member(storage, world_id, application_peer)?;
             let manifest =
                 state.pending_manifests.get(&world_id).context("blob chunk arrived without a negotiated manifest")?;
             if let Some(pending) = state.leases.historical_inbound.get(&world_id) {
@@ -4493,6 +4551,9 @@ fn handle_request(
                     return Ok(());
                 }
             }
+            // Only the exact isolated stale-download path above may bypass
+            // the live canonical membership read during crash retirement.
+            authorize_member(storage, world_id, application_peer)?;
             let historical = requires_historical_replay(storage, world_id)?;
             if historical {
                 let pending = state
@@ -6247,7 +6308,7 @@ fn send_next_replication_chunk(
     now: Instant,
 ) -> Result<()> {
     let key = (*transport_peer, world);
-    if storage.stale_publication_pending(world)? {
+    if storage.stale_publication_pending(world)? || storage.crash_retirement_pending(world)? {
         runtime.replications.remove(&key);
         return Ok(());
     }

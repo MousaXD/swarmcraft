@@ -56,6 +56,8 @@ pub enum StorageError {
     SnapshotCommitIncomplete { world: WorldId, snapshot_number: u64 },
     #[error("stale replica publication for world {0} is incomplete; live control is fenced")]
     StaleReplayPublicationIncomplete(WorldId),
+    #[error("crash-retired authority for world {0} is replaying certified history; live control is fenced")]
+    CrashRetirementReplayIncomplete(WorldId),
     #[error("uncommitted snapshot #{snapshot_number} exists above the canonical head for world {world}")]
     UncommittedSnapshotOrphan { world: WorldId, snapshot_number: u64 },
     #[error("snapshot #{snapshot_number} does not directly extend the canonical snapshot head")]
