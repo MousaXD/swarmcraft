@@ -20,6 +20,7 @@ impl Storage {
     }
 
     pub fn load_world_descriptor(&self, world: WorldId) -> Result<WorldDescriptorV1, StorageError> {
+        self.ensure_stale_publication_clear(world)?;
         let path = self.world_protocol_path(world, "descriptor.json");
         let bytes = read_canonical_file(&path)?;
         let descriptor: WorldDescriptorV1 = serde_json::from_slice(&bytes)?;
@@ -27,6 +28,7 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
         descriptor.validate_semantics()?;
+        self.ensure_stale_publication_clear(world)?;
         Ok(descriptor)
     }
 
@@ -193,6 +195,7 @@ impl Storage {
     }
 
     pub fn load_membership_record(&self, world: WorldId) -> Result<MembershipRecordV1, StorageError> {
+        self.ensure_stale_publication_clear(world)?;
         let path = self.world_protocol_path(world, "membership.postcard");
         let bytes = read_canonical_file(&path)?;
         let record: MembershipRecordV1 = postcard::from_bytes(&bytes)?;
@@ -200,6 +203,7 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
         record.validate_semantics()?;
+        self.ensure_stale_publication_clear(world)?;
         Ok(record)
     }
 

@@ -136,6 +136,7 @@ impl Storage {
         &self,
         world: WorldId,
     ) -> Result<Vec<MembershipCertificateV1>, StorageError> {
+        self.ensure_stale_publication_clear(world)?;
         let directory = self.world_dir(world).join("metadata/membership-certificates");
         let mut paths = match fs::read_dir(&directory) {
             Ok(entries) => entries
@@ -164,6 +165,7 @@ impl Storage {
     }
 
     pub fn load_membership_certificate(&self, world: WorldId) -> Result<MembershipCertificateV1, StorageError> {
+        self.ensure_stale_publication_clear(world)?;
         let path = self.world_dir(world).join("metadata/membership-certificate.postcard");
         let bytes = read_canonical_file(&path)?;
         let certificate: MembershipCertificateV1 = postcard::from_bytes(&bytes)?;

@@ -54,6 +54,8 @@ pub enum StorageError {
     CanonicalHeadMismatch { world: WorldId, snapshot_number: u64 },
     #[error("snapshot commit for world {world} snapshot #{snapshot_number} was interrupted and requires recovery")]
     SnapshotCommitIncomplete { world: WorldId, snapshot_number: u64 },
+    #[error("stale replica publication for world {0} is incomplete; live control is fenced")]
+    StaleReplayPublicationIncomplete(WorldId),
     #[error("uncommitted snapshot #{snapshot_number} exists above the canonical head for world {world}")]
     UncommittedSnapshotOrphan { world: WorldId, snapshot_number: u64 },
     #[error("snapshot #{snapshot_number} does not directly extend the canonical snapshot head")]
@@ -293,19 +295,24 @@ impl Storage {
     }
 
     pub fn load_snapshot(&self, world: WorldId, number: u64) -> Result<SnapshotManifestV1, StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
         let manifest = self.load_snapshot_file_unchecked(world, number)?;
-        self.validate_canonical_snapshot_namespace(world)?;
+        let head = self.load_or_initialize_canonical_head_locked(world)?;
+        self.validate_no_orphan_manifests_locked(world, head.head)?;
         Ok(manifest)
     }
 
     pub fn list_snapshots(&self, world: WorldId) -> Result<Vec<SnapshotManifestV1>, StorageError> {
-        self.validate_canonical_snapshot_namespace(world)?;
+        let _guard = self.lock_world_transaction(world)?;
+        let head = self.load_or_initialize_canonical_head_locked(world)?;
+        self.validate_no_orphan_manifests_locked(world, head.head)?;
         self.raw_snapshot_manifests(world)
     }
 
     pub fn latest_snapshot(&self, world: WorldId) -> Result<Option<SnapshotManifestV1>, StorageError> {
-        self.validate_canonical_snapshot_namespace(world)?;
-        let head = self.canonical_snapshot_head(world)?;
+        let _guard = self.lock_world_transaction(world)?;
+        let head = self.load_or_initialize_canonical_head_locked(world)?;
+        self.validate_no_orphan_manifests_locked(world, head.head)?;
         head.head.map(|reference| self.load_snapshot_file_unchecked(world, reference.snapshot_number)).transpose()
     }
 

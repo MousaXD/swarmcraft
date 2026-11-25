@@ -777,3 +777,49 @@ resume and an extended proof through recovery and later admission.
 The final existing-state publication transaction and its crash fencing
 are still required. Pruned histories and missing or corrupt staged data
 must not be treated as a complete canonical replica.
+
+### Fenced stale-replica publication and restart recovery (25 November)
+
+An existing non-authority replica with a complete isolated suffix can now
+publish the exact verified successor history automatically. Publication is
+separate from first-contact replay. The application rechecks the signed
+genesis/epoch/membership/config/transition envelope and every manifest
+signature. The storage transaction independently checks the exact pinned
+anchor, full local prefix, staged suffix and blob contents under the GC
+and world locks. A durable intent commits to the pinned anchor/proof
+before any canonical writes; ordinary control reads, transaction writes,
+snapshot access and retention fail closed until the intent is removed.
+
+Publication streams missing blobs into the canonical store without
+overwriting existing blob bytes, installs immutable manifests and signed
+history, and writes the final config, membership, descriptor, canonical
+head and epoch. The intent remains the visibility fence even after the
+new epoch is on disk. Restart accepts only exact old or intended target
+records and exact copied manifest slots; the same proof and all bytes
+must be verified again before clearing the intent. No intermediate
+authority, hosting consent, freshness quorum, or lease is manufactured.
+The daemon clears obsolete per-world runtime observations and only sends
+a complete replica receipt after publication.
+
+The real daemon integration now completes the stale player's replay
+after missing a checkpoint and signed transfer, including new blob
+bytes, exact final membership/epoch/head and restart persistence.
+Signed fixtures exercise transfer, recovery and joint admission,
+partial blob resume, a conflicting durable promise before publication,
+mixed canonical writes after an intent, conflicting control record
+rejection, and recovery with the final epoch already written but still
+fenced. This is a simulated interruption at explicit durable boundaries,
+not a physical power-loss campaign.
+
+The automatic publisher deliberately excludes the retired local
+authority and refuses existing sleep/transfer/recovery/membership
+promises, pending admission/removal, solo conflicts, unresolved ordinary
+snapshot commits, and incomplete/pruned history. It does not silently
+clear local decisions. Compatible consumption of those exact fences and
+first-contact re-targeting across authority changes remain outstanding;
+independent three-machine field acceptance is still required.
+
+Prior required validation run 45511308191 on 7b5b4fe initially failed
+before the installed Linux GUI test: the hosted runner package index had
+no supported native WebKitGTK WebDriver. A failed-job retry passed all
+20 selected jobs (optional network soak skipped); no gate was relaxed.

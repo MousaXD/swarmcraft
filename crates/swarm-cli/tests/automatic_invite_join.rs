@@ -339,37 +339,39 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
         c.storage.load_staged_stale_replay_proof(world).ok().flatten().as_ref()
             == Some(&(anchor.clone(), expected.clone()))
     });
-    wait_until("complete isolated successor checkpoint suffix", Duration::from_secs(90), || {
-        c.storage
-            .stale_replay_progress(world)
-            .ok()
-            .flatten()
-            .is_some_and(|progress| progress.completed == expected.checkpoints.len())
+    wait_until("complete stale replica publication", Duration::from_secs(90), || {
+        c.storage.load_epoch_record(world).ok().as_ref() == Some(&next)
+            && c.storage.latest_snapshot(world).ok().flatten().as_ref()
+                == b.storage.latest_snapshot(world).ok().flatten().as_ref()
+            && c.storage.stale_publication_pending(world).ok() == Some(false)
     });
-    let suffix = c.storage.verified_stale_replay_suffix(world).unwrap();
-    assert_eq!(suffix, b.storage.list_snapshots(world).unwrap()[3..]);
+    let history = c.storage.list_snapshots(world).unwrap();
+    assert_eq!(history, b.storage.list_snapshots(world).unwrap());
     let verified = swarm_cli::historical_authority::verify_replay_proof(
         expected.clone(),
         &c.storage.load_world(world).unwrap().genesis,
         expected.membership.last().unwrap(),
     )
     .unwrap();
-    for manifest in &suffix {
+    for manifest in &history {
         verified.verify_manifest(manifest).unwrap();
+        c.storage.verify_snapshot(manifest).unwrap();
     }
     let new_blob = &boundary.entries.iter().max_by_key(|entry| entry.blob.encoded_size).unwrap().blob;
     assert!(new_blob.encoded_size > 256 * 1024);
-    assert!(!c.storage.has_complete_blob(world, new_blob), "download must not modify canonical blob namespace");
-    assert_eq!(c.storage.stale_replay_anchor(world).unwrap(), anchor);
-    assert_eq!(c.storage.load_epoch_record(world).unwrap(), epoch);
-    assert_eq!(c.storage.latest_snapshot(world).unwrap().unwrap(), head);
-    assert_eq!(c.storage.load_membership_record(world).unwrap(), committed);
+    assert!(c.storage.has_complete_blob(world, new_blob));
+    assert_eq!(c.storage.load_epoch_record(world).unwrap(), next);
+    assert_eq!(c.storage.load_membership_record(world).unwrap(), *expected.membership.last().unwrap());
+    assert_eq!(c.storage.load_epoch_by_hash(world, epoch.record_hash().unwrap()).unwrap(), epoch);
+    assert_eq!(c.storage.load_transfer_phase(&transfer, swarm_protocol::TransferPhase::Committed).unwrap(), transfer);
+    assert!(c.storage.load_transfer_record(world).is_err());
+    swarm_cli::live_authority::verify_playable_epoch(&c.storage, &next).unwrap();
     assert!(swarm_cli::hosting_budget::load_consent(&c.paths, world).unwrap().is_none());
     drop(_stale_player);
     let reopened = Storage::open(c.paths.root.clone()).unwrap();
-    assert_eq!(reopened.stale_replay_anchor(world).unwrap(), anchor);
-    assert_eq!(reopened.verified_stale_replay_suffix(world).unwrap(), suffix);
-    assert_eq!(reopened.list_snapshots(world).unwrap().len(), 3);
+    assert_eq!(reopened.load_epoch_record(world).unwrap(), next);
+    assert_eq!(reopened.list_snapshots(world).unwrap(), history);
+    assert!(reopened.load_staged_stale_replay_proof(world).unwrap().is_none());
 }
 
 #[test]

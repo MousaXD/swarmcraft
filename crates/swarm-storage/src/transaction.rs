@@ -22,6 +22,18 @@ pub(crate) struct WorldTransactionGuard {
 
 impl Storage {
     pub(crate) fn lock_world_transaction(&self, world: WorldId) -> Result<WorldTransactionGuard, StorageError> {
+        self.ensure_stale_publication_clear(world)?;
+        let guard = self.lock_world_transaction_for_replay(world)?;
+        self.ensure_stale_publication_clear(world)?;
+        Ok(guard)
+    }
+
+    /// Only the replay publisher may use the raw lock to resume a fenced
+    /// transaction. All ordinary state writers must use the guarded lock.
+    pub(crate) fn lock_world_transaction_for_replay(
+        &self,
+        world: WorldId,
+    ) -> Result<WorldTransactionGuard, StorageError> {
         let metadata = self.world_dir(world).join("metadata");
         fs::create_dir_all(&metadata).map_err(|source| io_error(&metadata, source))?;
         let path = metadata.join(".storage-control.lock");
@@ -100,6 +112,19 @@ pub(crate) fn durable_create_once(path: &Path, bytes: &[u8]) -> Result<bool, Sto
     drop(file);
     sync_parent(parent)?;
     Ok(true)
+}
+
+/// Publish a synced streaming temporary file without replacing an existing
+/// canonical value. Callers serialize the destination namespace.
+pub(crate) fn durable_rename_new(source: &Path, destination: &Path) -> Result<(), StorageError> {
+    if canonical_file_exists(destination)? {
+        return Err(StorageError::WorldMetadataMismatch);
+    }
+    #[cfg(windows)]
+    move_file_write_through(source, destination, false).map_err(|error| io_error(destination, error))?;
+    #[cfg(not(windows))]
+    fs::rename(source, destination).map_err(|error| io_error(destination, error))?;
+    sync_parent(destination.parent().ok_or(StorageError::WorldMetadataMismatch)?)
 }
 
 pub(crate) fn durable_remove(path: &Path) -> Result<bool, StorageError> {

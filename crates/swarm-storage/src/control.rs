@@ -96,6 +96,7 @@ impl Storage {
     }
 
     pub fn load_epoch_record(&self, world: WorldId) -> Result<EpochRecordV1, StorageError> {
+        self.ensure_stale_publication_clear(world)?;
         let path = self.control_path(world, "epoch.postcard");
         let bytes = read_canonical_file(&path)?;
         let record: EpochRecordV1 = postcard::from_bytes(&bytes)?;
@@ -103,6 +104,7 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
         record.validate_semantics()?;
+        self.ensure_stale_publication_clear(world)?;
         Ok(record)
     }
 
@@ -292,7 +294,7 @@ impl Storage {
         Ok(true)
     }
 
-    fn archive_sleep_locked(&self, record: &SleepRecordV1) -> Result<(), StorageError> {
+    pub(crate) fn archive_sleep_locked(&self, record: &SleepRecordV1) -> Result<(), StorageError> {
         self.archive_history_locked(
             record.world_id,
             &sleep_history_name(record.epoch, record.fencing_token, record.latest_snapshot_hash),
@@ -424,6 +426,21 @@ impl Storage {
         &self,
         world: WorldId,
     ) -> Result<Option<(StaleReplayAnchorV1, HistoricalReplayProofV1)>, StorageError> {
+        let Some((anchor, proof)) = self.read_pinned_stale_replay(world)? else {
+            return Ok(None);
+        };
+        if self.stale_replay_anchor_locked(world)? != anchor {
+            // The candidate is no longer bound to the current control
+            // state. It remains historical evidence but cannot be resumed.
+            return Ok(None);
+        }
+        Ok(Some((anchor, proof)))
+    }
+
+    pub(crate) fn read_pinned_stale_replay(
+        &self,
+        world: WorldId,
+    ) -> Result<Option<(StaleReplayAnchorV1, HistoricalReplayProofV1)>, StorageError> {
         let path = self.control_path(world, "stale-replay-proof.postcard");
         if !canonical_file_exists(&path)? {
             return Ok(None);
@@ -434,11 +451,6 @@ impl Storage {
             || postcard::to_allocvec(&staged.proof)?.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES
         {
             return Err(StorageError::WorldMetadataMismatch);
-        }
-        if self.stale_replay_anchor_locked(world)? != staged.anchor {
-            // The candidate is no longer bound to the current control
-            // state. It remains historical evidence but cannot be resumed.
-            return Ok(None);
         }
         Ok(Some((staged.anchor, staged.proof)))
     }
@@ -666,7 +678,7 @@ fn write_exact_or_absent(path: &std::path::Path, bytes: &[u8]) -> Result<(), Sto
     durable_atomic_write(path, bytes)
 }
 
-fn transfer_history_name(record: &AuthorityTransferV1, phase: TransferPhase) -> String {
+pub(crate) fn transfer_history_name(record: &AuthorityTransferV1, phase: TransferPhase) -> String {
     let phase = match phase {
         TransferPhase::Prepared => "prepared",
         TransferPhase::Accepted => "accepted",

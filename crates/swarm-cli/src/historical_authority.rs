@@ -207,6 +207,45 @@ pub fn verify_and_stage_stale_replay(
     Ok(())
 }
 
+/// Reverify the entire candidate, including on restart after a durable
+/// publication intent. The anchored local identity must remain a member,
+/// and this path cannot make that identity the authority.
+pub fn publish_stale_replay(
+    storage: &Storage,
+    local: &PeerIdentity,
+    world: WorldId,
+) -> Result<HistoricalReplayProofV1> {
+    let candidate =
+        storage.stale_publication_candidate(world)?.context("stale replay is incomplete or no longer anchored")?;
+    let proof = &candidate.proof;
+    let anchor = &candidate.anchor;
+    let target = proof.membership.last().context("stale replay lacks target membership")?;
+    if !anchor.is_extended_by(proof)
+        || anchor.epoch.authority_peer_id == local.peer_id()
+        || target.authority_peer_id == local.peer_id()
+        || !anchor.membership.members.iter().any(|member| {
+            !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key()
+        })
+        || !anchor
+            .membership
+            .members
+            .iter()
+            .any(|member| !member.banned && member.authority_eligible && member.peer_id == target.authority_peer_id)
+        || !target.members.iter().any(|member| {
+            !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key()
+        })
+    {
+        bail!("stale publication does not bind an accepted non-authority replica to a known successor");
+    }
+    let verified = verify_replay_proof(proof.clone(), &storage.load_world(world)?.genesis, target)?;
+    for manifest in &candidate.manifests {
+        verified.verify_manifest(manifest)?;
+    }
+    storage.begin_verified_stale_publication(&candidate)?;
+    storage.finish_verified_stale_publication(&candidate)?;
+    Ok(verified.proof)
+}
+
 /// Strictly data-only proof validation. The expected membership must be the
 /// receiver's already committed signed join configuration, not an arbitrary
 /// roster supplied by the sender. Currentness still requires a fresh quorum.
@@ -1248,6 +1287,72 @@ mod tests {
         assert_eq!(stale.stale_replay_anchor(world).unwrap(), anchor);
         assert!(!stale.has_complete_blob(world, large));
         assert!(!stale.has_complete_blob(world, small));
+
+        // A complete suffix is not an authority grant. An outstanding
+        // durable local decision must prevent the publication intent.
+        let candidate = stale.stale_publication_candidate(world).unwrap().unwrap();
+        assert_eq!(candidate.manifests, storage.list_snapshots(world).unwrap());
+        for manifest in &candidate.manifests {
+            verified.verify_manifest(manifest).unwrap();
+        }
+        let metadata = stale.world_dir(world).join("metadata");
+        let fence = metadata.join("recovery-promise.postcard");
+        std::fs::write(&fence, b"unreadable durable recovery promise").unwrap();
+        assert!(stale.begin_verified_stale_publication(&candidate).is_err());
+        assert!(!stale.stale_publication_pending(world).unwrap());
+        assert_eq!(std::fs::read(&fence).unwrap(), b"unreadable durable recovery promise");
+        std::fs::remove_file(&fence).unwrap();
+
+        // Simulate process death after durable intent and a subset of the
+        // exact canonical writes. No ordinary reader or writer may use
+        // this mixed state. Conflicting data cannot be silently replaced.
+        stale.begin_verified_stale_publication(&candidate).unwrap();
+        assert!(stale.stale_publication_pending(world).unwrap());
+        assert!(stale.load_epoch_record(world).is_err());
+        assert!(stale.load_membership_record(world).is_err());
+        assert!(stale.load_world_descriptor(world).is_err());
+        assert!(stale.load_world_config(world).is_err());
+        assert!(stale.latest_snapshot(world).is_err());
+        assert!(stale.save_epoch_record(&third).is_err());
+        assert!(stale.save_membership_record(&admitted).is_err());
+        assert!(stale.garbage_collect_blobs(world).is_err());
+        let copied_manifest = &candidate.manifests[1];
+        std::fs::write(
+            stale.world_dir(world).join("snapshots").join(format!("{:020}.postcard", copied_manifest.snapshot_number)),
+            postcard::to_allocvec(copied_manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(metadata.join("membership.postcard"), postcard::to_allocvec(&admitted).unwrap()).unwrap();
+        let config_path = metadata.join("world-config.postcard");
+        let old_config = std::fs::read(&config_path).unwrap();
+        std::fs::write(&config_path, b"conflicting control record").unwrap();
+        drop(stale);
+        let stale = Storage::open(stale_dir.path()).unwrap();
+        assert!(publish_stale_replay(&stale, &dave, world).is_err());
+        assert!(stale.stale_publication_pending(world).unwrap());
+        assert!(stale.load_epoch_record(world).is_err());
+        assert_eq!(std::fs::read(&config_path).unwrap(), b"conflicting control record");
+        std::fs::write(&config_path, old_config).unwrap();
+        // Even if the new epoch has reached disk, the intent is the
+        // visibility fence until every other canonical write has finished.
+        std::fs::write(metadata.join("epoch.postcard"), postcard::to_allocvec(&third).unwrap()).unwrap();
+        assert!(stale.load_epoch_record(world).is_err());
+        assert!(stale.latest_snapshot(world).is_err());
+        assert_eq!(stale.stale_publication_candidate(world).unwrap(), Some(candidate));
+        assert_eq!(publish_stale_replay(&stale, &dave, world).unwrap(), envelope);
+        assert!(!stale.stale_publication_pending(world).unwrap());
+        assert_eq!(stale.load_epoch_record(world).unwrap(), third);
+        assert_eq!(stale.load_membership_record(world).unwrap(), admitted);
+        assert_eq!(stale.load_world_descriptor(world).unwrap(), descriptor);
+        assert_eq!(stale.load_world_config(world).unwrap(), storage.load_world_config(world).unwrap());
+        assert_eq!(stale.list_snapshots(world).unwrap(), storage.list_snapshots(world).unwrap());
+        assert_eq!(stale.load_recovery_certificate(world).unwrap(), storage.load_recovery_certificate(world).unwrap());
+        assert_eq!(stale.load_transfer_phase(&phase, TransferPhase::Committed).unwrap(), phase);
+        assert!(stale.load_transfer_record(world).is_err());
+        assert!(stale.has_complete_blob(world, large));
+        assert!(stale.has_complete_blob(world, small));
+        crate::live_authority::verify_playable_epoch(&stale, &third).unwrap();
+        assert!(stale.load_staged_stale_replay_proof(world).unwrap().is_none());
 
         // Build the real storage first-contact path with a signed invite,
         // committed certificate, and descriptor, but no authority epoch.

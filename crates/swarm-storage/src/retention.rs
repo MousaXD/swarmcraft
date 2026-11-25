@@ -288,6 +288,9 @@ impl Storage {
     /// Removes snapshot manifests outside the retention set. No blobs are
     /// deleted here, so interruption can only retain extra data.
     pub fn prune_snapshots(&self, world: WorldId, policy: &RetentionPolicy) -> Result<RetentionReport, RetentionError> {
+        // Serialize pruning against publication as well as GC. The list's
+        // world lock is acquired after this lock, matching snapshot commits.
+        let _gc = self.lock_blob_gc_for_snapshot_commit(world)?;
         let snapshots = self.list_snapshots(world)?;
         if snapshots.is_empty() {
             return Ok(RetentionReport::default());

@@ -10,7 +10,8 @@ use swarm_cli::{
     authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
     game_route_api::{GameRouteApiOperation, GameRouteApiReply, GameRouteApiServer, GameRouteStatusV1},
     historical_authority::{
-        collect_replay_proof, load_staged_replay, verify_and_stage_stale_replay, verify_replay_proof,
+        collect_replay_proof, load_staged_replay, publish_stale_replay, verify_and_stage_stale_replay,
+        verify_replay_proof,
     },
     host_readiness::{self, PeerReadinessObservation},
     hosting_budget, launch_guard,
@@ -480,6 +481,9 @@ pub async fn run(
                 replay_publications_in_flight.remove(&publication.world);
                 match publication.result {
                     Ok((peer, ack)) => {
+                        // Do not retain observations collected immediately
+                        // before a publication's durable fence was installed.
+                        clear_replay_runtime(&mut leases, &mut outbound, publication.world);
                         // Completion is only a replica receipt. It cannot
                         // create a lease or bypass the live freshness quorum.
                         if storage.load_epoch_record(publication.world).is_ok_and(|epoch| epoch.authority_peer_id == peer)
@@ -587,8 +591,29 @@ pub async fn run(
                     }
                     Err(error) => warn!(%error, "historical replay download deferred"),
                 }
-                if let Err(error) = drive_stale_replay_downloads(storage, &identity, &mut node, &mut outbound, &leases) {
-                    warn!(%error, "isolated stale replay download deferred");
+                match drive_stale_replay_downloads(storage, &identity, &mut node, &mut outbound, &leases) {
+                    Ok(ready) => {
+                        for world in ready {
+                            if replay_publications_in_flight.contains(&world) { continue; }
+                            let Ok(slot) = Arc::clone(&replay_workers).try_acquire_owned() else { break };
+                            replay_publications_in_flight.insert(world);
+                            // Do not carry stale lease/readiness observations
+                            // across the publication boundary.
+                            clear_permit(paths, world)?;
+                            clear_replay_runtime(&mut leases, &mut outbound, world);
+                            pending_manifests.remove(&world);
+                            leases.historical_inbound.remove(&world);
+                            let storage = storage.clone();
+                            let local = PeerIdentity::from_secret_bytes(identity.network_signing_key().to_bytes());
+                            let replies = replay_publication_tx.clone();
+                            replay_tasks.spawn_blocking(move || {
+                                let _slot = slot;
+                                let result = publish_stale_historical_replay(&storage, &local, world);
+                                let _ = replies.blocking_send(HistoricalReplayPublication { world, result });
+                            });
+                        }
+                    }
+                    Err(error) => warn!(%error, "isolated stale replay download deferred"),
                 }
                 leases.historical_inbound.retain(|world, pending| {
                     if pending.stale_download.as_ref().is_some_and(|download| !download.is_current()) {
@@ -2037,6 +2062,11 @@ fn maintain_authority_leases(
     let recovery_initial_delay = Duration::from_millis(AUTHORITY_LEASE_DURATION_MS) + RECOVERY_SETTLE_DELAY;
     for metadata in storage.list_worlds()? {
         let world = metadata.world_id;
+        if storage.stale_publication_pending(world)? {
+            clear_permit(paths, world)?;
+            clear_replay_runtime(runtime, outbound, world);
+            continue;
+        }
         if let Err(error) = recover_committed_membership(storage, identity, world) {
             clear_permit(paths, world)?;
             clear_runtime_world(runtime, world);
@@ -2982,6 +3012,43 @@ fn clear_runtime_world(runtime: &mut LeaseRuntime, world: WorldId) {
     runtime.canonical_payload_sent.retain(|(replica_world, _), _| *replica_world != world);
 }
 
+/// A publication is not a handoff acknowledgement or a fresh lease. Drop
+/// observations and in-flight generation-specific requests for this world,
+/// retaining unrelated worlds and independently validated quorum RPCs.
+fn clear_replay_runtime(runtime: &mut LeaseRuntime, outbound: &mut HashMap<String, OutboundContext>, world: WorldId) {
+    clear_runtime_world(runtime, world);
+    runtime.replications.retain(|(_, replica_world), _| *replica_world != world);
+    runtime.transfer_acks.retain(|ack| ack.record.world_id != world);
+    runtime.transfer_replica_acks.retain(|(ack_world, _), _| *ack_world != world);
+    runtime.sleep_acks.retain(|(ack_world, _), _| *ack_world != world);
+    runtime.last_checkpoint_ack.remove(&world);
+    runtime.transfer_manifest_requests.retain(|(replica_world, _), _| *replica_world != world);
+    runtime.historical_inbound.remove(&world);
+    runtime.stale_replay_requests.retain(|(replay_world, _), _| *replay_world != world);
+    outbound.retain(|_, context| {
+        let request_world = match context {
+            OutboundContext::Manifest { world, .. }
+            | OutboundContext::BlobChunk { world, .. }
+            | OutboundContext::Lease { world, .. }
+            | OutboundContext::RecoveryBallot { world, .. }
+            | OutboundContext::MembershipProposal { world, .. }
+            | OutboundContext::MembershipCommit { world, .. }
+            | OutboundContext::Epoch { world, .. }
+            | OutboundContext::Status { world, .. }
+            | OutboundContext::HostCapability { world, .. }
+            | OutboundContext::HistoricalReplayProof { world, .. }
+            | OutboundContext::HistoricalReplayNext { world } => *world,
+            OutboundContext::StaleReplayProof { anchor, .. } => anchor.epoch.world_id,
+            OutboundContext::Transfer { record, .. } => record.world_id,
+            OutboundContext::Sleep { record, .. } => record.world_id,
+            // Quorum responses are independently bound to their exact
+            // challenge and canonical generation by LiveQuorumDriver.
+            OutboundContext::LiveQuorum { .. } => return true,
+        };
+        request_world != world
+    });
+}
+
 fn lease_request_pending(
     outbound: &HashMap<String, OutboundContext>,
     world: WorldId,
@@ -3291,7 +3358,7 @@ fn request_historical_replay_proofs(
             break;
         }
         let world = metadata.world_id;
-        if !requires_historical_replay(storage, world)? {
+        if storage.stale_publication_pending(world)? || !requires_historical_replay(storage, world)? {
             continue;
         }
         let membership = storage.load_membership_record(world)?;
@@ -3444,7 +3511,7 @@ fn drive_historical_replay_downloads(
         outbound.values().filter(|context| matches!(context, OutboundContext::HistoricalReplayNext { .. })).count();
     for metadata in storage.list_worlds()? {
         let world = metadata.world_id;
-        if !requires_historical_replay(storage, world)? {
+        if storage.stale_publication_pending(world)? || !requires_historical_replay(storage, world)? {
             continue;
         }
         let membership = storage.load_membership_record(world)?;
@@ -3525,22 +3592,24 @@ fn publish_historical_replay(storage: &Storage, world: WorldId) -> Result<(PeerI
     ))
 }
 
-/// Stale replicas request only missing suffix checkpoints. Completion is
-/// intentionally data-only; never run first-contact publication over an
-/// existing accepted generation.
+/// Stale replicas request only missing suffix checkpoints. A completed
+/// suffix (or interrupted publication intent) is handed to the dedicated
+/// fenced publication worker, not the first-contact path.
 fn drive_stale_replay_downloads(
     storage: &Storage,
     identity: &PeerIdentity,
     node: &mut SwarmNode,
     outbound: &mut HashMap<String, OutboundContext>,
     runtime: &LeaseRuntime,
-) -> Result<()> {
+) -> Result<Vec<WorldId>> {
+    let mut ready = Vec::new();
     let mut pending =
         outbound.values().filter(|context| matches!(context, OutboundContext::HistoricalReplayNext { .. })).count();
     for metadata in storage.list_worlds()? {
         let world = metadata.world_id;
-        if pending >= MAX_HISTORICAL_REPLAY_WORKERS {
-            break;
+        if storage.stale_publication_pending(world)? {
+            ready.push(world);
+            continue;
         }
         let Some(progress) = storage.stale_replay_progress(world)? else { continue };
         let membership = progress.proof.membership.last().context("stale replay has no target membership")?;
@@ -3552,10 +3621,12 @@ fn drive_stale_replay_downloads(
             continue;
         }
         let Some(checkpoint) = progress.proof.checkpoints.get(progress.completed) else {
-            // All data is staged; a separate publication transaction is
-            // required. No ReplicaAck or lease is generated here.
+            ready.push(world);
             continue;
         };
+        if pending >= MAX_HISTORICAL_REPLAY_WORKERS {
+            continue;
+        }
         if outbound.values().any(|context| matches!(context, OutboundContext::HistoricalReplayNext { world: existing } if *existing == world)) {
             continue;
         }
@@ -3576,7 +3647,27 @@ fn drive_stale_replay_downloads(
         outbound.insert(request_key(&id), OutboundContext::HistoricalReplayNext { world });
         pending += 1;
     }
-    Ok(())
+    Ok(ready)
+}
+
+fn publish_stale_historical_replay(
+    storage: &Storage,
+    local: &PeerIdentity,
+    world: WorldId,
+) -> Result<(PeerId, ReplicaAckV1)> {
+    let proof = publish_stale_replay(storage, local, world)?;
+    let epoch = proof.epochs.last().context("stale replay final epoch missing")?;
+    let target = proof.checkpoints.last().context("stale replay final checkpoint missing")?;
+    Ok((
+        epoch.authority_peer_id,
+        ReplicaAckV1 {
+            world_id: world,
+            snapshot_number: target.snapshot_number,
+            manifest_hash: target.manifest_hash,
+            state_root: target.state_root,
+            complete: true,
+        },
+    ))
 }
 
 fn authorize_stale_manifest(
@@ -6077,6 +6168,10 @@ fn send_next_replication_chunk(
     now: Instant,
 ) -> Result<()> {
     let key = (*transport_peer, world);
+    if storage.stale_publication_pending(world)? {
+        runtime.replications.remove(&key);
+        return Ok(());
+    }
     loop {
         let Some(replication) = runtime.replications.get(&key) else {
             return Ok(());

@@ -177,6 +177,7 @@ impl Storage {
     }
 
     pub fn load_world_config(&self, world: WorldId) -> Result<WorldConfigV1, StorageError> {
+        self.ensure_stale_publication_clear(world)?;
         let path = self.control_path_v2(world, "world-config.postcard");
         let bytes = read_canonical_file(&path)?;
         let config: WorldConfigV1 = postcard::from_bytes(&bytes)?;
@@ -184,6 +185,7 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
         config.validate_semantics()?;
+        self.ensure_stale_publication_clear(world)?;
         Ok(config)
     }
 

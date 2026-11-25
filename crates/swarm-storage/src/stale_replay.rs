@@ -32,7 +32,7 @@ pub struct StaleReplayDownload {
 }
 
 impl Storage {
-    fn stale_replay_data_dir(&self, anchor: &StaleReplayAnchorV1) -> Result<PathBuf, StorageError> {
+    pub(crate) fn stale_replay_data_dir(&self, anchor: &StaleReplayAnchorV1) -> Result<PathBuf, StorageError> {
         let bytes = postcard::to_allocvec(anchor)?;
         let hash = blake3::hash(&bytes).to_hex();
         let root = self.world_dir(anchor.epoch.world_id).join("metadata").join("stale-replay-data").join(hash.as_str());
@@ -60,7 +60,7 @@ impl Storage {
         Ok(Some(StaleReplayProgress { anchor, proof, completed }))
     }
 
-    fn stale_replay_progress_locked(
+    pub(crate) fn stale_replay_progress_locked(
         &self,
         anchor: &StaleReplayAnchorV1,
         proof: &HistoricalReplayProofV1,
@@ -231,7 +231,7 @@ impl StaleReplayDownload {
     }
 }
 
-fn staged_manifest_path(root: &std::path::Path, number: u64) -> PathBuf {
+pub(crate) fn staged_manifest_path(root: &std::path::Path, number: u64) -> PathBuf {
     root.join("manifests").join(format!("{number:020}.postcard"))
 }
 
@@ -244,7 +244,7 @@ fn matches_target(
     Ok(membership.authority_peer_id == source && membership.record_hash()? == membership_hash)
 }
 
-fn validate_staged_manifest(
+pub(crate) fn validate_staged_manifest(
     proof: &HistoricalReplayProofV1,
     index: usize,
     manifest: &SnapshotManifestV1,

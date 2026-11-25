@@ -110,6 +110,7 @@ impl Storage {
         data: &[u8],
         finished: bool,
     ) -> Result<u64, ReplicationError> {
+        let _guard = self.lock_world_transaction(world)?;
         let dir = self.world_dir(world).join("blobs");
         fs::create_dir_all(&dir).map_err(|source| StorageError::Io { path: dir.clone(), source })?;
         let partial = partial_blob_path(self, world, descriptor);
