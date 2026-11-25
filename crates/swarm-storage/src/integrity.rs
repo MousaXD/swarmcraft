@@ -65,6 +65,7 @@ impl Storage {
         &self,
         manifest: &SnapshotManifestV1,
         fence: Option<SnapshotCommitFence>,
+        replica_membership: Option<(Hash32, Hash32, swarm_protocol::PeerId)>,
     ) -> Result<SnapshotCommitTransaction, StorageError> {
         let guard = self.lock_world_transaction(manifest.world_id)?;
         let current = self.load_or_initialize_canonical_head_locked(manifest.world_id)?;
@@ -102,6 +103,23 @@ impl Storage {
                     expected_epoch: fence.expected_epoch,
                     expected_fencing_token: fence.expected_fencing_token,
                 });
+            }
+        }
+
+        if let Some((expected_epoch_hash, expected_membership, recipient)) = replica_membership {
+            let membership = self.load_membership_record(manifest.world_id)?;
+            let descriptor = self.load_world_descriptor(manifest.world_id)?;
+            if self.load_epoch_record(manifest.world_id)?.record_hash()? != expected_epoch_hash
+                || !self.list_solo_conflicts(manifest.world_id)?.is_empty()
+                || membership.record_hash()? != expected_membership
+                || descriptor.members != membership.members
+                || membership.epoch != manifest.epoch
+                || membership.authority_peer_id != manifest.authority_peer_id
+                || membership.authority_public_key != manifest.authority_public_key
+                || !membership.members.iter().any(|member| !member.banned && member.peer_id == recipient)
+                || self.first_contact_replay_pinned_locked(manifest.world_id)?
+            {
+                return Err(StorageError::WorldMetadataMismatch);
             }
         }
 

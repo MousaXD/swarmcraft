@@ -135,7 +135,7 @@ pub struct SwarmNode {
     swarm: Swarm<Behaviour>,
     local_hello: PeerHelloV1,
     application_signing_key: SigningKey,
-    authenticated: HashMap<TransportPeerId, (PeerId, ConnectionId)>,
+    authenticated: HashMap<TransportPeerId, (PeerId, ConnectionId, Vec<String>)>,
     game_authenticated: Arc<RwLock<HashMap<TransportPeerId, PeerId>>>,
     game_activity: crate::game_transport::GameTrafficActivity,
     pending_game_route: HashMap<request_response::OutboundRequestId, PendingGameRouteControl>,
@@ -258,7 +258,15 @@ impl SwarmNode {
     }
 
     pub fn application_peer(&self, transport_peer: &TransportPeerId) -> Option<PeerId> {
-        self.authenticated.get(transport_peer).map(|(peer, _)| *peer)
+        self.authenticated.get(transport_peer).map(|(peer, _, _)| *peer)
+    }
+
+    /// Feature hints are taken only from the current connection-bound
+    /// signed PeerHello; they are not membership or authority evidence.
+    pub fn application_supports(&self, transport_peer: &TransportPeerId, capability: &str) -> bool {
+        self.authenticated
+            .get(transport_peer)
+            .is_some_and(|(_, _, capabilities)| capabilities.iter().any(|value| value == capability))
     }
 
     /// Dedicated Noise-authenticated libp2p substreams. Transport identity
@@ -541,10 +549,10 @@ impl SwarmNode {
         let connection_id = self
             .authenticated
             .get(peer)
-            .filter(|(_, id)| {
+            .filter(|(_, id, _)| {
                 self.active_connections.get(peer) == Some(id) && self.connection_counts.get(peer) == Some(&1)
             })
-            .map(|(_, id)| *id)
+            .map(|(_, id, _)| *id)
             .ok_or_else(|| anyhow!("game route peer must complete connection-bound application authentication"))?;
         // A successful candidate can finish a multi-host race while slower
         // attempts are cancelled. Do not let abandoned one-shot requests
@@ -706,7 +714,7 @@ impl SwarmNode {
                     if self
                         .authenticated
                         .get(&peer_id)
-                        .is_some_and(|(_, authenticated_connection)| *authenticated_connection == connection_id)
+                        .is_some_and(|(_, authenticated_connection, _)| *authenticated_connection == connection_id)
                     {
                         self.authenticated.remove(&peer_id);
                         self.game_authenticated.write().expect("game auth registry poisoned").remove(&peer_id);
@@ -821,10 +829,9 @@ impl SwarmNode {
                         request_response::Event::Message { peer, connection_id, message } => {
                             match message {
                                 request_response::Message::Request { request, channel, .. } => {
-                                    let authenticated_request =
-                                        self.authenticated.get(&peer).is_some_and(|(_, authenticated_connection)| {
-                                            *authenticated_connection == connection_id
-                                        });
+                                    let authenticated_request = self.authenticated.get(&peer).is_some_and(
+                                        |(_, authenticated_connection, _)| *authenticated_connection == connection_id,
+                                    );
                                     if !self.admission.admit_request(peer, authenticated_request, Instant::now()) {
                                         let _ = self.respond(
                                             channel,
@@ -931,7 +938,7 @@ impl SwarmNode {
                                         self.swarm.local_peer_id(),
                                     ) {
                                         Ok(()) => {
-                                            self.authenticated.insert(peer, (proof.hello.peer_id, connection_id));
+                                            self.authenticated.insert(peer, (proof.hello.peer_id, connection_id, proof.hello.capabilities.clone()));
                                             self.game_authenticated.write().expect("game auth registry poisoned").insert(peer, proof.hello.peer_id);
                                             if let Err(response_error) = self.respond(
                                                 channel,
@@ -959,7 +966,7 @@ impl SwarmNode {
                                         }
                                     }
                                 }
-                                request if self.authenticated.get(&peer).is_some_and(|(_, authenticated_connection)| *authenticated_connection == connection_id) => {
+                                request if self.authenticated.get(&peer).is_some_and(|(_, authenticated_connection, _)| *authenticated_connection == connection_id) => {
                                     return Ok(NetworkEvent::InboundRequest { transport_peer: peer, request, channel });
                                 }
                                 _ => {
@@ -980,6 +987,24 @@ impl SwarmNode {
                             }
                                 }
                                 request_response::Message::Response { request_id, response } => {
+                                    if matches!(
+                                        &response,
+                                        WireResponse::ReplicaBlobData { .. }
+                                            | WireResponse::ManifestPullAccepted { .. }
+                                    ) && !self.authenticated.get(&peer).is_some_and(
+                                        |(_, authenticated_connection, _)| {
+                                            *authenticated_connection == connection_id
+                                                && self.connection_counts.get(&peer) == Some(&1)
+                                                && self.active_connections.get(&peer) == Some(authenticated_connection)
+                                        },
+                                    ) {
+                                        return Ok(NetworkEvent::OutboundFailure {
+                                            transport_peer: peer,
+                                            request_id,
+                                            error: "replica pull response from a stale authentication connection"
+                                                .into(),
+                                        });
+                                    }
                                     return Ok(NetworkEvent::Response { transport_peer: peer, request_id, response });
                                 }
                             }
@@ -1002,12 +1027,12 @@ impl SwarmNode {
                                 let application_peer = self
                                     .authenticated
                                     .get(&peer)
-                                    .filter(|(_, authenticated_connection)| {
+                                    .filter(|(_, authenticated_connection, _)| {
                                         *authenticated_connection == connection_id
                                             && self.active_connections.get(&peer) == Some(authenticated_connection)
                                             && self.connection_counts.get(&peer) == Some(&1)
                                     })
-                                    .map(|(application_peer, _)| *application_peer);
+                                    .map(|(application_peer, _, _)| *application_peer);
                                 let Some(application_peer) = application_peer else {
                                     let _ = self.respond_game_route(
                                         channel,
@@ -1067,7 +1092,7 @@ impl SwarmNode {
                                     continue; // Never accept unsolicited or late responses.
                                 };
                                 let current =
-                                    self.authenticated.get(&peer).is_some_and(|(_, authenticated_connection)| {
+                                    self.authenticated.get(&peer).is_some_and(|(_, authenticated_connection, _)| {
                                         *authenticated_connection == connection_id
                                             && self.connection_counts.get(&peer) == Some(&1)
                                             && self.active_connections.get(&peer) == Some(authenticated_connection)

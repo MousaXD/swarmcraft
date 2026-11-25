@@ -40,10 +40,10 @@ pub use libp2p::PeerId as TransportPeerId;
 pub use node::{NetworkEvent, SwarmNode, BOOTSTRAP_ENV, RELAY_ENV, WIRE_PROTOCOL};
 pub use transport::{generate_transport_key, load_or_create_transport_key, read_transport_peer_id};
 pub use wire::{
-    BlobResumeV1, HostCapabilityV1, HostRuntimeReadinessV1, PeerHelloProofV1, ReplicaAckV1, ServerModsReadinessV1,
-    WireLimitError, WireRequest, WireResponse, MAX_BLOB_CHUNK, MAX_DISCOVERY_ANNOUNCEMENT_BYTES,
+    BlobResumeV1, HostCapabilityV1, HostRuntimeReadinessV1, PeerHelloProofV1, ReplicaAckV1, ReplicaPullTargetV1,
+    ServerModsReadinessV1, WireLimitError, WireRequest, WireResponse, MAX_BLOB_CHUNK, MAX_DISCOVERY_ANNOUNCEMENT_BYTES,
     MAX_DISCOVERY_QUERY_BYTES, MAX_DISCOVERY_RESULTS, MAX_DISCOVERY_TAGS, MAX_MEMBERSHIP_VOTES, MAX_MISSING_BLOBS,
-    MAX_RECOVERY_VOTES, MAX_WORLD_ARTIFACTS, MAX_WORLD_MEMBERS,
+    MAX_RECOVERY_VOTES, MAX_WORLD_ARTIFACTS, MAX_WORLD_MEMBERS, REPLICA_PULL_CAPABILITY,
 };
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};

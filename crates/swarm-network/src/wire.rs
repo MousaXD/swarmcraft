@@ -75,6 +75,29 @@ pub struct BlobResumeV1 {
     pub offset: u64,
 }
 
+/// Data-only target. The receiver has already accepted the manifest and
+/// current signed membership; this is never a lease or a replica receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReplicaPullTargetV1 {
+    pub world_id: WorldId,
+    pub membership_hash: Hash32,
+    pub epoch_hash: Hash32,
+    pub snapshot_number: u64,
+    pub manifest_hash: Hash32,
+}
+
+impl ReplicaPullTargetV1 {
+    fn valid(&self) -> bool {
+        self.world_id != WorldId::default()
+            && self.membership_hash != Hash32::default()
+            && self.epoch_hash != Hash32::default()
+            && self.snapshot_number > 0
+            && self.manifest_hash != Hash32::default()
+    }
+}
+
+pub const REPLICA_PULL_CAPABILITY: &str = "snapshot-multi-source-pull-v1";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerHelloProofV1 {
     pub hello: PeerHelloV1,
@@ -192,6 +215,13 @@ pub enum WireRequest {
         world_id: WorldId,
         proof: Vec<u8>,
     },
+    // Append only. Negotiate support using the connection-bound signed hello.
+    ReplicaBlobRead {
+        target: ReplicaPullTargetV1,
+        hash: Hash32,
+        offset: u64,
+        max_bytes: u32,
+    },
 }
 
 impl WireRequest {
@@ -229,6 +259,7 @@ impl WireRequest {
             Self::LeaveRequest(request) => Some(request.world_id),
             Self::SnapshotManifest(manifest) => Some(manifest.world_id),
             Self::HistoricalReplayManifest { manifest, .. } => Some(manifest.world_id),
+            Self::ReplicaBlobRead { target, .. } => Some(target.world_id),
             Self::ReplicaAck(ack) => Some(ack.world_id),
             Self::Membership(record) => Some(record.world_id),
             Self::Epoch(record) => Some(record.world_id),
@@ -328,6 +359,15 @@ impl WireRequest {
             {
                 Err(WireLimitError::InvalidHistoricalReplayWorld)
             }
+            Self::ReplicaBlobRead { target, hash, offset, max_bytes }
+                if !target.valid()
+                    || *hash == Hash32::default()
+                    || *max_bytes == 0
+                    || *max_bytes as usize > MAX_BLOB_CHUNK
+                    || offset.checked_add(*max_bytes as u64).is_none() =>
+            {
+                Err(WireLimitError::InvalidReplicaPull)
+            }
             _ => Ok(()),
         }
     }
@@ -373,6 +413,9 @@ pub enum WireResponse {
     // a latest epoch without validating the historical transition chain.
     HistoricalReplayProof(Option<Vec<u8>>),
     HistoricalReplayScheduled,
+    // Not a completed replica ACK. Receiver will request missing blobs.
+    ManifestPullAccepted { target: ReplicaPullTargetV1 },
+    ReplicaBlobData { target: ReplicaPullTargetV1, hash: Hash32, offset: u64, data: Vec<u8>, finished: bool },
 }
 
 fn validate_membership_proof_size(proof: &DiscoveryMembershipProofV1) -> Result<(), WireLimitError> {
@@ -430,6 +473,16 @@ impl WireResponse {
             {
                 Err(WireLimitError::HistoricalReplayProofTooLarge(bytes.len()))
             }
+            Self::ManifestPullAccepted { target } if !target.valid() => Err(WireLimitError::InvalidReplicaPull),
+            Self::ReplicaBlobData { target, hash, offset, data, .. }
+                if !target.valid()
+                    || *hash == Hash32::default()
+                    || data.is_empty()
+                    || data.len() > MAX_BLOB_CHUNK
+                    || offset.checked_add(data.len() as u64).is_none() =>
+            {
+                Err(WireLimitError::InvalidReplicaPull)
+            }
             _ => Ok(()),
         }
     }
@@ -456,6 +509,8 @@ fn validate_announcement_size(value: &WorldAnnouncementV1) -> Result<(), WireLim
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WireLimitError {
+    #[error("replica pull request or response violates its exact target/chunk bounds")]
+    InvalidReplicaPull,
     #[error("historical replay query lacks a valid world")]
     InvalidHistoricalReplayWorld,
     #[error("historical replay proof is empty or exceeds the encoded byte limit: {0}")]
@@ -636,6 +691,41 @@ mod tests {
         assert_eq!(decoded, challenge);
         // Fail closed: a malformed or overly large signed report is not a
         // transport permit, even from an already authenticated remote peer.
+    }
+
+    #[test]
+    fn replica_pull_is_world_scoped_bounded_and_roundtrips() {
+        let target = ReplicaPullTargetV1 {
+            world_id: WorldId([1; 32]),
+            membership_hash: Hash32([2; 32]),
+            epoch_hash: Hash32([3; 32]),
+            snapshot_number: 2,
+            manifest_hash: Hash32([4; 32]),
+        };
+        let hash = Hash32([5; 32]);
+        let request = |target, offset, max_bytes| WireRequest::ReplicaBlobRead { target, hash, offset, max_bytes };
+        let valid = request(target, 17, MAX_BLOB_CHUNK as u32);
+        assert_eq!(valid.membership_world_id(), Some(target.world_id));
+        assert!(valid.validate_limits().is_ok());
+        assert_eq!(postcard::from_bytes::<WireRequest>(&postcard::to_allocvec(&valid).unwrap()).unwrap(), valid);
+        for invalid in [
+            request(target, 0, 0),
+            request(target, 0, MAX_BLOB_CHUNK as u32 + 1),
+            request(target, u64::MAX, 2),
+            request(ReplicaPullTargetV1 { epoch_hash: Hash32::default(), ..target }, 0, 1),
+            request(ReplicaPullTargetV1 { membership_hash: Hash32::default(), ..target }, 0, 1),
+            request(ReplicaPullTargetV1 { snapshot_number: 0, ..target }, 0, 1),
+        ] {
+            assert_eq!(invalid.validate_limits(), Err(WireLimitError::InvalidReplicaPull));
+        }
+        let data = |offset, bytes| WireResponse::ReplicaBlobData { target, hash, offset, data: bytes, finished: false };
+        let response = data(17, vec![0; MAX_BLOB_CHUNK]);
+        assert!(response.validate_limits().is_ok());
+        assert_eq!(postcard::from_bytes::<WireResponse>(&postcard::to_allocvec(&response).unwrap()).unwrap(), response);
+        for invalid in [data(0, vec![]), data(0, vec![0; MAX_BLOB_CHUNK + 1]), data(u64::MAX, vec![1])] {
+            assert_eq!(invalid.validate_limits(), Err(WireLimitError::InvalidReplicaPull));
+        }
+        assert!(WireResponse::ManifestPullAccepted { target }.validate_limits().is_ok());
     }
 
     #[test]

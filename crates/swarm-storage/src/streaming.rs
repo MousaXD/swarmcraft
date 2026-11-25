@@ -236,7 +236,7 @@ impl Storage {
     }
 
     pub fn commit_snapshot_streaming<T: SnapshotCommitInput>(&self, target: &T) -> Result<(), StorageError> {
-        self.commit_snapshot_streaming_inner(target, None)
+        self.commit_snapshot_streaming_inner(target, None, None)
     }
 
     pub fn commit_snapshot_fenced<T: SnapshotCommitInput>(
@@ -244,13 +244,28 @@ impl Storage {
         target: &T,
         fence: SnapshotCommitFence,
     ) -> Result<(), StorageError> {
-        self.commit_snapshot_streaming_inner(target, Some(fence))
+        self.commit_snapshot_streaming_inner(target, Some(fence), None)
+    }
+
+    /// Publish an ordinary, already authenticated replica only if the
+    /// exact previously verified membership and generation still hold
+    /// under the canonical transaction lock. Never installs control state.
+    pub fn commit_replica_snapshot_fenced(
+        &self,
+        manifest: &SnapshotManifestV1,
+        fence: SnapshotCommitFence,
+        epoch_hash: Hash32,
+        membership_hash: Hash32,
+        recipient: swarm_protocol::PeerId,
+    ) -> Result<(), StorageError> {
+        self.commit_snapshot_streaming_inner(manifest, Some(fence), Some((epoch_hash, membership_hash, recipient)))
     }
 
     fn commit_snapshot_streaming_inner<T: SnapshotCommitInput>(
         &self,
         target: &T,
         fence: Option<SnapshotCommitFence>,
+        replica_membership: Option<(Hash32, Hash32, swarm_protocol::PeerId)>,
     ) -> Result<(), StorageError> {
         let manifest = target.snapshot_manifest();
         let publication = (target as &dyn Any).downcast_ref::<SnapshotPublication>();
@@ -286,6 +301,12 @@ impl Storage {
         // immutable forever once present. Validate the canonical namespace first
         // so an interrupted orphan above the head can never be blessed as a duplicate.
         if path.exists() {
+            // A pull publication is a fenced direct extension, not a generic
+            // historical duplicate. A racing commit must be renegotiated;
+            // never report success through the unfenced idempotent path.
+            if replica_membership.is_some() {
+                return Err(StorageError::SnapshotHistoryConflict { snapshot_number: manifest.snapshot_number });
+            }
             self.validate_canonical_snapshot_namespace(manifest.world_id)?;
             let existing = self.load_snapshot_file_unchecked(manifest.world_id, manifest.snapshot_number)?;
             let existing_hash = existing.manifest_hash()?;
@@ -308,7 +329,7 @@ impl Storage {
         // intent. Re-check physical space for the immutable manifest and
         // control records; the quota never blocks emergency control writes.
         self.require_restore_space(manifest.world_id, &snapshots, bytes.len() as u64)?;
-        let transaction = self.begin_snapshot_commit_transaction(manifest, fence)?;
+        let transaction = self.begin_snapshot_commit_transaction(manifest, fence, replica_membership)?;
         let publish = publish_immutable_manifest(&path, &bytes);
         if let Err(error) = publish {
             // Keep the durable intent for ambiguous I/O failures. Only a known

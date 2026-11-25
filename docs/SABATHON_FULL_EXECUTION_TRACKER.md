@@ -325,12 +325,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #32 — P2 · Partial
 - Work: Download unrelated missing blobs in parallel from multiple authorized replicas, with bounded scheduling and resume
 - Acceptance: Compare time to verified restore against source fallback. Failure or corruption from one source does not restart or invalidate safe work from others
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: crates/swarm-cli/src/daemon_parallel_replication.rs, daemon.rs, crates/swarm-network/src/wire.rs and node.rs, crates/swarm-storage/src/integrity.rs and streaming.rs, docs/SNAPSHOT_REPLICATION.md.
+- Evidence: Signed connection capability; exact world/manifest/membership/epoch pins; four global outstanding reads/four active worlds, one writer per blob and logical source; background seeding consent; game traffic pacing; durable offset resume, corrupt-prefix clean retry, per-source backoff, pressure pause, legacy fallback and transaction-locked final publication. Two independent successful three-daemon process runs measured 4.74 s vs 8.33 s verified restore for roughly 6 MiB, with two distinct contributing sources, two concurrent reads, and unchanged unrelated verified blob through corrupt-source interruption (roughly 12 MiB, one resumed blob, two failures). All 165 CLI library tests (2 ignored), 51 binary tests, 135 network library tests, 67 storage library tests (1 ignored), focused wire/handshake/input, storage integrity/space/scheduler/resume tests, and strict Clippy passed. All six real invitation/bootstrap/successor replay/retirement/quota/privacy process tests passed, including new removed-member replica-pull denial, and the paced QUIC game-echo regression passed. The randomly generated fixture membership was sorted before signing to fix a setup-only rerun failure; the corrected process test passed without loosening validation.
+- Remaining / next action: Next #33: controlled incremental region/chunk checkpoint evaluation. Receiver-driven ordinary replication only; separate historical replay remains on its certified protocol. Independent-device/WAN throughput, larger-fleet fairness and installed-platform validation remain open; explicit remote inventories are optional future optimization.
+- External dependency: Field and necessary final CI under local-first policy.
+- Commit: See 25 November receiver-driven replica pull commit.
 
 ### #33 — P2 · Missing
 - Work: Evaluate incremental region/chunk checkpoints and snapshot scheduling

@@ -76,6 +76,8 @@ mod game_gateway;
 mod live_quorum;
 #[path = "daemon_local_live_authority.rs"]
 mod local_live_authority;
+#[path = "daemon_parallel_replication.rs"]
+mod parallel_replication;
 #[path = "daemon_remote_fabric.rs"]
 mod remote_fabric;
 
@@ -161,6 +163,7 @@ const MAX_IN_MEMORY_LIVE_QUORUM_VOTES: usize = 1_024;
 enum OutboundContext {
     Manifest { world: WorldId, transport: TransportPeerId, snapshot_number: u64, historical_membership: Option<Hash32> },
     BlobChunk { world: WorldId, snapshot_number: u64, hash: Hash32, next_offset: u64, finished: bool },
+    PullChunk(parallel_replication::PullRequest),
     Lease { world: WorldId, peer: PeerId, generation: AuthorityGeneration },
     RecoveryBallot { world: WorldId, peer: PeerId, ballot_hash: Hash32 },
     Join { world: WorldId, peer: PeerId, invite_hash: Hash32, nonce: [u8; 32] },
@@ -258,6 +261,7 @@ struct LeaseRuntime {
     canonical_payload_sent: HashMap<(WorldId, PeerId), (AuthorityGeneration, Instant)>,
     replications: HashMap<(TransportPeerId, WorldId), ReplicationState>,
     replication_pacer: ReplicationPacer,
+    pulls: parallel_replication::PullRuntime,
     transfer_acks: Vec<TransferDeliveryAck>,
     transfer_replica_acks: HashMap<(WorldId, PeerId), Hash32>,
     sleep_acks: HashMap<(WorldId, PeerId), SleepRecordV1>,
@@ -307,6 +311,7 @@ pub async fn run(
     let transport_key = load_or_create_transport_key(&paths.transport_key())?;
     let hello = identity.signed_peer_hello(vec![
         "snapshot-replication-v1".into(),
+        swarm_network::REPLICA_PULL_CAPABILITY.into(),
         "membership-v1".into(),
         "membership-leave-v1".into(),
         "membership-joint-consensus-v1".into(),
@@ -398,6 +403,9 @@ pub async fn run(
     lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut replication_tick = tokio::time::interval(Duration::from_millis(50));
     replication_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    leases.pulls.pacer = ReplicationPacer::from_environment()?;
+    let mut pull_tick = tokio::time::interval(Duration::from_millis(100));
+    pull_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut join_retry_tick = tokio::time::interval(Duration::from_secs(5));
     join_retry_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -677,6 +685,12 @@ pub async fn run(
                     }
                 });
             }
+            _ = pull_tick.tick(), if leases.pulls.has_work() => {
+                let context = HandlerContext { paths, identity: &identity, storage };
+                if let Err(error) = parallel_replication::drive(&context, &mut node, &mut pending_manifests, &mut outbound, &mut leases, Instant::now()) {
+                    warn!(%error, "receiver-driven replication deferred");
+                }
+            }
             _ = replication_tick.tick(), if !leases.replications.is_empty() => {
                 retry_due_replication(storage, &mut node, &mut outbound, &mut leases, Instant::now())?;
             }
@@ -917,6 +931,11 @@ pub async fn run(
                         }
                         let context = outbound.remove(&request_key(&request_id));
                         match context {
+                            Some(OutboundContext::PullChunk(request)) => {
+                                let context = HandlerContext { paths, identity: &identity, storage };
+                                parallel_replication::response(&context, &node, (transport_peer, request, response),
+                                    &pending_manifests, &mut leases, Instant::now());
+                            }
                             Some(OutboundContext::LiveQuorum { id, peer }) => {
                                 live_quorum_driver.on_response(
                                     storage,
@@ -1020,6 +1039,9 @@ pub async fn run(
                                 }
                                 OutboundContext::Manifest { .. } => {}
                                 OutboundContext::HistoricalReplayProof { .. } | OutboundContext::HistoricalReplayNext { .. } | OutboundContext::StaleReplayProof { .. } => {}
+                                OutboundContext::PullChunk(request) => {
+                                    leases.pulls.failure(&request, Instant::now(), Duration::from_secs(3));
+                                }
                                 OutboundContext::BlobChunk { world, .. } => {
                                     leases.replications.remove(&(transport_peer, world));
                                 }
@@ -1059,6 +1081,7 @@ pub async fn run(
                             leases.replay_offers_sent.retain(|(_, peer), _| *peer != application_peer);
                         }
                         leases.replications.retain(|(peer, _), _| *peer != transport_peer);
+                        leases.pulls.disconnect(&mut outbound, transport_peer, Instant::now());
                         info!(transport = %transport_peer, "peer disconnected");
                     }
                     NetworkEvent::Connected { transport_peer } => {
@@ -3150,6 +3173,7 @@ fn clear_replay_runtime(runtime: &mut LeaseRuntime, outbound: &mut HashMap<Strin
     runtime.last_checkpoint_ack.remove(&world);
     runtime.transfer_manifest_requests.retain(|(replica_world, _), _| *replica_world != world);
     runtime.historical_inbound.remove(&world);
+    runtime.pulls.cancel(outbound, world);
     runtime.stale_replay_requests.retain(|(replay_world, _), _| *replay_world != world);
     runtime.replay_offers_sent.retain(|(replay_world, _), _| *replay_world != world);
     outbound.retain(|_, context| {
@@ -3167,6 +3191,7 @@ fn clear_replay_runtime(runtime: &mut LeaseRuntime, outbound: &mut HashMap<Strin
             | OutboundContext::HistoricalReplayProof { world, .. }
             | OutboundContext::HistoricalReplayNext { world } => *world,
             OutboundContext::StaleReplayProof { anchor, .. } => anchor.epoch.world_id,
+            OutboundContext::PullChunk(request) => request.target.world_id,
             OutboundContext::Transfer { record, .. } => record.world_id,
             OutboundContext::Sleep { record, .. } => record.world_id,
             // Quorum responses are independently bound to their exact
@@ -4768,6 +4793,9 @@ fn handle_request(
             } else {
                 Some(authorize_stale_manifest(storage, identity, application_peer, membership_hash, &manifest)?)
             };
+            // A verified historical negotiation supersedes an ordinary pull
+            // only after the independent historical admission gate above.
+            state.leases.pulls.cancel(state.outbound, world);
             // A duplicate negotiation may resume partial blob offsets; a
             // conflicting in-flight manifest must never replace the cursor.
             if let Some(prior) = state.pending_manifests.get(&world) {
@@ -4838,21 +4866,52 @@ fn handle_request(
                 bail!("ordinary manifest cannot replace an active historical negotiation");
             }
             authorize_manifest(storage, application_peer, &manifest)?;
+            if state.leases.pulls.active(manifest.world_id) {
+                let target = parallel_replication::negotiate(
+                    context,
+                    node,
+                    (transport_peer, application_peer),
+                    &manifest,
+                    &[],
+                    state,
+                )?
+                .context("active pull negotiation disappeared")?;
+                node.respond(channel, WireResponse::ManifestPullAccepted { target })?;
+                return Ok(());
+            }
             let pins = pin_inbound_manifest(storage, state, &manifest)?;
-            let missing = storage
-                .missing_blobs(&manifest)
-                .into_iter()
-                .map(|descriptor| {
-                    Ok(BlobResumeV1 {
-                        hash: descriptor.hash,
-                        offset: storage.partial_blob_offset(manifest.world_id, &descriptor)?,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let mut missing = Vec::new();
+            for descriptor in storage.missing_blobs(&manifest) {
+                match storage.resume_historical_blob(manifest.world_id, &descriptor) {
+                    Ok(Some(offset)) => missing.push(BlobResumeV1 { hash: descriptor.hash, offset }),
+                    Ok(None) => {}
+                    Err(ReplicationError::Storage(StorageError::BlobCorrupt(_))) => {
+                        // Final verification removed only the corrupt partial.
+                        missing.push(BlobResumeV1 { hash: descriptor.hash, offset: 0 });
+                    }
+                    Err(ReplicationError::Storage(ref error)) if error.is_storage_pressure() => {
+                        node.respond(channel, storage_paused_response())?;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            let pull = parallel_replication::negotiate(
+                context,
+                node,
+                (transport_peer, application_peer),
+                &manifest,
+                &missing,
+                state,
+            )?;
             if let Some(pins) = pins {
                 state.leases.inbound_replication_pins.insert(manifest.world_id, pins);
             }
             state.pending_manifests.insert(manifest.world_id, manifest.clone());
+            if let Some(target) = pull {
+                node.respond(channel, WireResponse::ManifestPullAccepted { target })?;
+                return Ok(());
+            }
             node.respond(
                 channel,
                 WireResponse::ManifestAccepted { snapshot_number: manifest.snapshot_number, missing: missing.clone() },
@@ -4862,7 +4921,13 @@ fn handle_request(
                 state.pending_manifests.remove(&manifest.world_id);
             }
         }
+        request @ WireRequest::ReplicaBlobRead { .. } => {
+            parallel_replication::serve(storage, identity, node, application_peer, request, channel, state)?;
+        }
         WireRequest::BlobChunk { world_id, hash, encoding, offset, data, finished } => {
+            if state.leases.pulls.active(world_id) {
+                bail!("ordinary push cannot overlap receiver-driven replication");
+            }
             let manifest =
                 state.pending_manifests.get(&world_id).context("blob chunk arrived without a negotiated manifest")?;
             if let Some(pending) = state.leases.historical_inbound.get(&world_id) {
@@ -4914,6 +4979,7 @@ fn handle_request(
             } else {
                 authorize_committed_member(storage, world_id, application_peer)?;
                 authorize_committed_member(storage, world_id, identity.peer_id())?;
+                authorize_manifest(storage, application_peer, manifest)?;
             }
             let descriptor =
                 find_descriptor(manifest, hash).context("blob hash is not referenced by negotiated manifest")?;
@@ -5520,6 +5586,26 @@ fn handle_response(
                     }
                 }
             }
+        }
+        (
+            Some(OutboundContext::Manifest { world, transport, snapshot_number, historical_membership }),
+            WireResponse::ManifestPullAccepted { target },
+        ) => {
+            if historical_membership.is_some()
+                || transport != *transport_peer
+                || target.world_id != world
+                || target.snapshot_number != snapshot_number
+                || !node.application_supports(transport_peer, swarm_network::REPLICA_PULL_CAPABILITY)
+                || !private_replication_recipient(storage, node, transport_peer, world)
+                || storage.load_membership_record(world)?.record_hash()? != target.membership_hash
+                || storage.load_epoch_record(world)?.record_hash()? != target.epoch_hash
+                || storage.load_snapshot(world, snapshot_number)?.manifest_hash()? != target.manifest_hash
+            {
+                bail!("invalid receiver-driven replica negotiation");
+            }
+            // No bytes and no ACK claimed here. Only verified completion
+            // can trigger the existing ReplicaAck handling path.
+            runtime.replications.remove(&(*transport_peer, world));
         }
         (
             Some(OutboundContext::Manifest { world, transport, snapshot_number, historical_membership }),

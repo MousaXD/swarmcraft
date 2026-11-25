@@ -7,7 +7,8 @@ use std::{
 };
 use swarm_protocol::{
     peer_id_from_public_key, snapshot_state_root, BlobDescriptor, BlobEncoding, EpochMode, EpochRecordV1, Hash32,
-    PeerId, RecoveryBallotV1, RecoveryVoteV1, SnapshotEntry, SnapshotManifestV1, WorldId, PROTOCOL_VERSION,
+    MembershipRecordV1, PeerId, RecoveryBallotV1, RecoveryVoteV1, SnapshotEntry, SnapshotManifestV1, WorldDescriptorV1,
+    WorldId, WorldMemberV1, PROTOCOL_VERSION,
 };
 use swarm_storage::{RecoveryPromiseResult, SnapshotCommitFence, SnapshotContext, Storage, StorageError};
 
@@ -476,4 +477,123 @@ fn dangling_canonical_authority_transfer_cannot_be_overwritten() {
 
     assert!(storage.save_transfer_record(&prepared_transfer_for_corrupt_write_test(world)).is_err());
     assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+}
+
+#[test]
+fn replica_publication_requires_exact_membership_epoch_and_head() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::open(temp.path().join("store")).unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("level.dat"), b"replica base").unwrap();
+    let world = WorldId([71; 32]);
+    let authority_key = [72; 32];
+    let recipient_key = [73; 32];
+    let authority = peer_id_from_public_key(&authority_key);
+    let recipient = peer_id_from_public_key(&recipient_key);
+    let epoch = EpochRecordV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        epoch_number: 1,
+        previous_epoch_hash: None,
+        base_state_hash: Hash32([74; 32]),
+        authority_peer_id: authority,
+        authority_public_key: authority_key,
+        mode: EpochMode::Quorum,
+        fencing_token: 1,
+        reason: "initial".into(),
+        signature: vec![1; 64],
+    };
+    storage.save_epoch_record(&epoch).unwrap();
+    let mut members = vec![
+        WorldMemberV1 { peer_id: authority, public_key: authority_key, authority_eligible: true, banned: false },
+        WorldMemberV1 { peer_id: recipient, public_key: recipient_key, authority_eligible: false, banned: false },
+    ];
+    members.sort_by_key(|member| member.peer_id);
+    let initial = MembershipRecordV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        epoch: 1,
+        sequence: 0,
+        previous_membership_hash: None,
+        members: members.clone(),
+        authority_peer_id: authority,
+        authority_public_key: authority_key,
+        signature: vec![2; 64],
+    };
+    storage.save_membership_record(&initial).unwrap();
+    let mut descriptor = WorldDescriptorV1 {
+        protocol_version: PROTOCOL_VERSION,
+        world_id: world,
+        compatibility_fingerprint: Hash32([75; 32]),
+        members,
+        preferred_replication_factor: 2,
+    };
+    storage.save_world_descriptor(&descriptor).unwrap();
+    let first = snapshot(&storage, &source, world, 1, 1, None, (authority, authority_key));
+    storage.commit_snapshot(&first).unwrap();
+    let first_hash = first.manifest_hash().unwrap();
+    let head = storage.canonical_snapshot_head(world).unwrap().head;
+    let fence = SnapshotCommitFence { expected_epoch: 1, expected_fencing_token: 1, expected_head: head };
+    fs::write(source.join("level.dat"), b"verified new replica").unwrap();
+    let second = snapshot(&storage, &source, world, 2, 2, Some(first_hash), (authority, authority_key));
+    let epoch_hash = epoch.record_hash().unwrap();
+    let initial_hash = initial.record_hash().unwrap();
+
+    let mut updated = initial.clone();
+    updated.sequence = 1;
+    updated.previous_membership_hash = Some(initial_hash);
+    updated.signature = vec![3; 64];
+    let new_member_key = [76; 32];
+    updated.members.push(WorldMemberV1 {
+        peer_id: peer_id_from_public_key(&new_member_key),
+        public_key: new_member_key,
+        authority_eligible: false,
+        banned: false,
+    });
+    updated.members.sort_by_key(|member| member.peer_id);
+    storage.save_membership_record(&updated).unwrap();
+    let updated_hash = updated.record_hash().unwrap();
+    // Even an exact new membership cannot be used with a stale descriptor.
+    assert!(storage
+        .commit_replica_snapshot_fenced(second.manifest(), fence, epoch_hash, updated_hash, recipient)
+        .is_err());
+    descriptor.members = updated.members.clone();
+    storage.save_world_descriptor(&descriptor).unwrap();
+    assert!(storage
+        .commit_replica_snapshot_fenced(second.manifest(), fence, epoch_hash, initial_hash, recipient)
+        .is_err());
+    assert!(storage
+        .commit_replica_snapshot_fenced(second.manifest(), fence, Hash32([77; 32]), updated_hash, recipient)
+        .is_err());
+    assert!(storage
+        .commit_replica_snapshot_fenced(second.manifest(), fence, epoch_hash, updated_hash, PeerId([78; 32]))
+        .is_err());
+    assert!(storage
+        .commit_replica_snapshot_fenced(
+            second.manifest(),
+            SnapshotCommitFence { expected_head: None, ..fence },
+            epoch_hash,
+            updated_hash,
+            recipient
+        )
+        .is_err());
+    assert_eq!(storage.latest_snapshot(world).unwrap().unwrap().manifest_hash().unwrap(), first_hash);
+
+    storage.commit_replica_snapshot_fenced(second.manifest(), fence, epoch_hash, updated_hash, recipient).unwrap();
+    assert_eq!(
+        storage.latest_snapshot(world).unwrap().unwrap().manifest_hash().unwrap(),
+        second.manifest_hash().unwrap()
+    );
+    // A stale fenced duplicate must not succeed through generic idempotency.
+    assert!(storage
+        .commit_replica_snapshot_fenced(second.manifest(), fence, epoch_hash, initial_hash, recipient)
+        .is_err());
+    assert!(storage
+        .commit_replica_snapshot_fenced(second.manifest(), fence, epoch_hash, updated_hash, recipient)
+        .is_err());
+    assert_eq!(
+        storage.latest_snapshot(world).unwrap().unwrap().manifest_hash().unwrap(),
+        second.manifest_hash().unwrap()
+    );
 }

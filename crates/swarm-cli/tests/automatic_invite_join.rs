@@ -293,6 +293,14 @@ fn revoked_invite_is_denied_by_restarted_issuer_while_another_grant_works() {
     issuer.identity.sign_snapshot(&mut next).unwrap();
     issuer.storage.commit_snapshot(&next).unwrap();
     let next_manifest = next.manifest().clone();
+    let pull_target = swarm_network::ReplicaPullTargetV1 {
+        world_id: world,
+        membership_hash: issuer.storage.load_membership_record(world).unwrap().record_hash().unwrap(),
+        epoch_hash: issuer.storage.load_epoch_record(world).unwrap().record_hash().unwrap(),
+        snapshot_number: next_manifest.snapshot_number,
+        manifest_hash: next_manifest.manifest_hash().unwrap(),
+    };
+    let pull_hash = next_manifest.entries[0].blob.hash;
 
     // Connect with the removed device's actual application identity. Probe
     // both private metadata and historical replay; observe the wire
@@ -302,14 +310,16 @@ fn revoked_invite_is_denied_by_restarted_issuer_while_another_grant_works() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         let key = load_or_create_transport_key(&allowed.paths.transport_key()).unwrap();
-        let hello = allowed.identity.signed_peer_hello(vec!["snapshot-replication-v1".into()]).unwrap();
+        let hello = allowed.identity.signed_peer_hello(vec!["snapshot-replication-v1".into(), swarm_network::REPLICA_PULL_CAPABILITY.into()]).unwrap();
         let mut probe = SwarmNode::new(key, hello, allowed.identity.network_signing_key()).unwrap();
         probe.listen(format!("/ip4/{local_ip}/udp/{}/quic-v1", allowed.port).parse().unwrap()).unwrap();
         probe.dial(address.parse().unwrap()).unwrap();
         let mut status_request = None;
         let mut replay_request = None;
+        let mut pull_request = None;
         let mut status_denied = false;
         let mut replay_denied = false;
+        let mut pull_denied = false;
         tokio::time::timeout(Duration::from_secs(45), async {
             loop {
                 tokio::select! {
@@ -318,6 +328,7 @@ fn revoked_invite_is_denied_by_restarted_issuer_while_another_grant_works() {
                             NetworkEvent::Authenticated { transport_peer, application_peer } if application_peer == issuer.identity.peer_id() => {
                                 status_request = Some(probe.send_request(&transport_peer, WireRequest::WorldStatus { world_id: world }).unwrap());
                                 replay_request = Some(probe.send_request(&transport_peer, WireRequest::HistoricalReplayProof { world_id: world }).unwrap());
+                                pull_request = Some(probe.send_request(&transport_peer, WireRequest::ReplicaBlobRead { target: pull_target, hash: pull_hash, offset: 0, max_bytes: 128 }).unwrap());
                             }
                             NetworkEvent::Response { transport_peer, request_id, response } if probe.application_peer(&transport_peer) == Some(issuer.identity.peer_id()) => {
                                 if Some(request_id) == status_request {
@@ -326,6 +337,9 @@ fn revoked_invite_is_denied_by_restarted_issuer_while_another_grant_works() {
                                 } else if Some(request_id) == replay_request {
                                     assert!(matches!(response, WireResponse::HistoricalReplayProof(None)));
                                     replay_denied = true;
+                                } else if Some(request_id) == pull_request {
+                                    assert!(matches!(response, WireResponse::Error { code, .. } if code == "WORLD_ACCESS_DENIED"));
+                                    pull_denied = true;
                                 }
                             }
                             NetworkEvent::InboundRequest { request, channel, .. } => {
@@ -341,7 +355,7 @@ fn revoked_invite_is_denied_by_restarted_issuer_while_another_grant_works() {
                     }
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {}
                 }
-                if status_denied && replay_denied && survivor.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&next_manifest)
+                if status_denied && replay_denied && pull_denied && survivor.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&next_manifest)
                     && survivor.storage.verify_snapshot(&next_manifest).is_ok()
                 {
                     break;
