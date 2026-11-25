@@ -33,7 +33,7 @@ The launcher centers normal use around:
 - choosing a world and playing;
 - running the managed Runtime Wizard when Java/Minecraft/Fabric setup is incomplete;
 - explicitly accepting the Minecraft server EULA when required;
-- inviting friends;
+- managing local friend contacts, explicitly consenting to presence, and inviting friends;
 - seeing safety, host and structured connectivity summaries;
 - seeing backend-derived **Can I turn off this PC?** Host Readiness;
 - keeping or verifying a background replica;
@@ -50,6 +50,27 @@ Conflict, solo/degraded, canonical, authority-eligibility, membership and relay 
 The Discover view searches signed public announcements, with at most 32 results and six per page. A blank search browses the bounded snapshot; a name or tag narrows it. Verification times, signed expiry, provider response counts, and partial-result warnings describe what was actually checked. Expired cards are removed. Exact public or unlisted World IDs can be checked separately. A private world is never listed, and a listing does not grant membership, hosting permission, or a Minecraft route. The separate Join view accepts a signed invitation.
 
 Configure reachable directory providers as described in [Private infrastructure](../../docs/PRIVATE_INFRASTRUCTURE.md). An unavailable or incomplete directory is not proof that a world does not exist.
+
+## Friends and presence privacy
+
+Add a contact by comparing the complete device peer ID and public key via a
+trusted channel. Contact acceptance does not give anyone membership or consent
+to see your presence. New and migrated contacts start hidden. For a friend to
+receive an online observation, you must enable sharing globally, explicitly
+allow that contact, and run a reachable presence publisher. Start the
+presence-only service from Friends; its process status is not proof that the
+network can reach it. Hide or withdraw a contact grant to deny new proofs.
+Removing a contact never revokes existing signed world membership or bearer
+invitations. Received observations can remain visible only until their expiry
+(at most 30 seconds). Absence of a response is **not confirmed**, not offline.
+
+The presence-only service does not advertise world records. A deliberate
+presence check is itself an authenticated network request, not anonymous.
+Configure the reachable directory and listen interface in
+[Private infrastructure](../../docs/PRIVATE_INFRASTRUCTURE.md). Use **Create
+world invite** to open the existing signed invitation workflow for a selected
+local world. Share the bearer invitation manually through a trusted channel;
+it is not bound to a friend identity and does not approve membership.
 
 ## Keyboard and accessibility
 

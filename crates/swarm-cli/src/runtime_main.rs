@@ -70,6 +70,11 @@ enum RuntimeCommand {
     DiscoveryServe {
         #[arg(long, default_value = "/ip4/127.0.0.1/tcp/0")]
         listen: String,
+        /// Publish only explicitly consented contact presence, no world metadata or votes.
+        #[arg(long)]
+        presence_only: bool,
+        #[arg(long = "bootstrap")]
+        bootstrap: Vec<String>,
     },
     /// Search authenticated public world announcements. Discovery never grants membership.
     DiscoverySearch {
@@ -182,8 +187,13 @@ fn main() -> Result<()> {
         RuntimeCommand::ClientProfile { world, mods_dir } => {
             print_json(&client_profile::prepare_client_profile(&storage, parse_world(&world)?, mods_dir.as_deref())?)?;
         }
-        RuntimeCommand::DiscoveryServe { listen } => {
-            tokio::runtime::Runtime::new()?.block_on(discovery::serve(paths.clone(), listen))?;
+        RuntimeCommand::DiscoveryServe { listen, presence_only, bootstrap } => {
+            tokio::runtime::Runtime::new()?.block_on(discovery::serve(
+                paths.clone(),
+                listen,
+                presence_only,
+                &bootstrap,
+            ))?;
         }
         RuntimeCommand::DiscoverySearch { query, limit, bootstrap } => {
             let report = tokio::runtime::Runtime::new()?.block_on(discovery::search_public_worlds(

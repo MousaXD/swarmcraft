@@ -5,6 +5,7 @@ mod canonical_world_commands;
 mod catalog_commands;
 mod curseforge;
 mod desktop_play_route;
+mod friend_commands;
 mod game_route_commands;
 mod hosting_contribution_commands;
 mod import_picker;
@@ -20,6 +21,10 @@ use catalog_commands::{fabric_loader_versions, minecraft_versions, validate_fabr
 use curseforge::{
     curseforge_download, curseforge_project, curseforge_provider_status, curseforge_resolve, curseforge_search,
     curseforge_versions,
+};
+use friend_commands::{
+    friend_add, friend_presence_mode, friend_probe, friend_remove, friend_service_start, friend_service_status,
+    friend_service_stop, friend_settings, friend_share_presence,
 };
 use import_picker::pick_import_folder;
 use launcher_commands::{
@@ -868,6 +873,15 @@ fn main() {
             inspect_mod_artifact,
             discovery_search,
             discovery_resolve,
+            friend_settings,
+            friend_add,
+            friend_remove,
+            friend_share_presence,
+            friend_presence_mode,
+            friend_probe,
+            friend_service_status,
+            friend_service_start,
+            friend_service_stop,
             ensure_daemon_running,
             start_daemon,
             stop_daemon,

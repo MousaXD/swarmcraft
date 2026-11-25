@@ -20,6 +20,9 @@
         <button id="openDiscover" class="nav-item" type="button" data-view="discover">
           <span class="nav-glyph" aria-hidden="true">⌕</span><span>Discover</span>
         </button>
+        <button id="openFriends" class="nav-item" type="button" data-view="friends">
+          <span class="nav-glyph" aria-hidden="true">♧</span><span>Friends</span>
+        </button>
         <button id="openJoin" class="nav-item" type="button" data-view="join">
           <span class="nav-glyph" aria-hidden="true">↳</span><span>Join</span>
         </button>

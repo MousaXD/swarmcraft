@@ -1,0 +1,36 @@
+{
+  "scope": "real loopback authenticated publisher, three independent local identities",
+  "checks": {
+    "default_hidden_start_refused": true,
+    "global_enable_alone_refused": true,
+    "allowed_contact": {
+      "state": "online",
+      "seconds": 0.104
+    },
+    "locator_only_allowed_contact": {
+      "state": "online",
+      "seconds": 0.15
+    },
+    "ungranted_contact": {
+      "state": "not_observed",
+      "seconds": 0.093
+    },
+    "presence_only_world_metadata_refused": true,
+    "withdrawal_while_running": {
+      "state": "not_observed",
+      "seconds": 0.134
+    },
+    "removed_contact_stale_locator": {
+      "state": "not_observed",
+      "seconds": 0.144
+    },
+    "readded_contact_hidden": {
+      "state": "not_observed",
+      "seconds": 0.176
+    },
+    "removed_local_contact_probe_refused": true,
+    "hide_stops_presence_only_process": true,
+    "no_membership_created": true,
+    "hide_retains_explicit_grants_without_sharing": true
+  }
+}

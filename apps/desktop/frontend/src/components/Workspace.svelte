@@ -4,6 +4,7 @@
   import CreateWorldView from './CreateWorldView.svelte';
   import ImportWorldView from './ImportWorldView.svelte';
   import DiscoveryView from './DiscoveryView.svelte';
+  import FriendsView from './FriendsView.svelte';
   import JoinWorldView from './JoinWorldView.svelte';
   import ActivityView from './ActivityView.svelte';
   import DiagnosticsView from './DiagnosticsView.svelte';
@@ -17,6 +18,7 @@
     <ImportWorldView />
     <DiscoveryView />
     <JoinWorldView />
+    <FriendsView />
     <ActivityView />
     <DiagnosticsView />
   </div>

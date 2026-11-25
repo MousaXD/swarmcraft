@@ -166,7 +166,7 @@ fn add_discovery_bootstraps(arguments: &mut Vec<String>) {
     }
 }
 
-fn configured_discovery_bootstraps() -> Vec<String> {
+pub(crate) fn configured_discovery_bootstraps() -> Vec<String> {
     env::var("SWARMCRAFT_DISCOVERY_BOOTSTRAP")
         .ok()
         .into_iter()

@@ -390,3 +390,26 @@ input::placeholder, textarea::placeholder { color: #667069; }
   .discovery-result-actions { justify-items: start; }
   .discovery-search-controls { grid-template-columns: minmax(0,1fr); }
 }
+
+/* Contacts are local identity records, not membership or routing grants. */
+.friends-shell { display: grid; gap: var(--s3); }
+.friends-header { justify-content: space-between; flex-wrap: wrap; margin-bottom: 0; }
+.friends-header > div { flex: 1 1 260px; min-width: 0; }
+.friends-privacy { display: grid; gap: var(--s2); padding: var(--s3); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--sidebar); }
+.friends-privacy-heading { display: flex; justify-content: space-between; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+.friends-privacy-heading > div { min-width: 0; }
+.friends-shell .field-help { color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.friends-list-section { display: grid; gap: var(--s2); min-width: 0; }
+.friends-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 0; }
+.friends-list > li { padding: var(--s3) 0; border-bottom: 1px solid var(--border); }
+.friend-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: var(--s3); align-items: start; }
+.friend-copy { min-width: 0; display: grid; gap: var(--s1); overflow-wrap: anywhere; }
+.friend-copy > strong { font-size: 13px; }
+.friend-presence { color: var(--text-2); font-size: 12px; }
+.friend-actions { display: grid; gap: var(--s1); justify-items: end; }
+.friends-shell .task-secondary { margin-top: 0; }
+.friends-add-form, .friends-identity[open] { display: grid; gap: var(--s2); }
+@media (max-width: 600px) {
+  .friend-row { grid-template-columns: minmax(0,1fr); }
+  .friend-actions { display: flex; flex-wrap: wrap; justify-content: flex-start; }
+}

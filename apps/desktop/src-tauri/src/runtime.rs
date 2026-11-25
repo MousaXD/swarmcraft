@@ -86,6 +86,7 @@ struct RuntimeDiagnostic {
 pub struct RuntimeProcesses {
     daemon: ProcessSlot,
     host: ProcessSlot,
+    presence: ProcessSlot,
     connectivity_json: PathBuf,
 }
 
@@ -94,6 +95,7 @@ impl Default for RuntimeProcesses {
         Self {
             daemon: ProcessSlot::default(),
             host: ProcessSlot::default(),
+            presence: ProcessSlot::default(),
             connectivity_json: std::env::temp_dir()
                 .join(format!("swarmcraft-connectivity-{}.json", std::process::id())),
         }
@@ -129,6 +131,28 @@ impl RuntimeProcesses {
                 self.connectivity_json.display()
             )
         })
+    }
+
+    pub fn start_presence_service(
+        &self,
+        app: &AppHandle,
+        listen: String,
+        locators: Vec<String>,
+    ) -> Result<u32, String> {
+        let mut args = vec!["discovery-serve".into(), "--presence-only".into(), format!("--listen={listen}")];
+        for locator in locators {
+            args.push(format!("--bootstrap={locator}"));
+        }
+        spawn(app, "swarmcraft-runtime", args, &self.presence, "Presence service", None, None)
+    }
+
+    pub fn presence_service_pid(&self) -> Result<Option<u32>, String> {
+        let guard = self.presence.state.lock().map_err(|_| "Desktop presence process state is unavailable")?;
+        Ok(guard.existing_pid(CommandChild::pid))
+    }
+
+    pub fn stop_presence_service(&self) -> Result<(), String> {
+        stop(&self.presence, "Presence service")
     }
 
     pub fn start_managed_host(&self, app: &AppHandle, world: String) -> Result<u32, String> {
@@ -170,6 +194,7 @@ impl RuntimeProcesses {
 
 impl Drop for RuntimeProcesses {
     fn drop(&mut self) {
+        let _ = self.stop_presence_service();
         let _ = self.stop_daemon();
     }
 }

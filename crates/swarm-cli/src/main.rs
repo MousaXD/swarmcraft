@@ -126,6 +126,25 @@ enum ContactCommand {
     List,
     /// Forget a local contact by peer ID. Does not alter signed membership.
     Remove { peer: String },
+    /// Read local presence settings and contact cards.
+    Settings,
+    /// Globally show or hide consented presence. Hidden is the default.
+    PresenceMode {
+        #[arg(long, action = clap::ArgAction::Set)]
+        enabled: bool,
+    },
+    /// Explicitly grant or withdraw presence sharing for one contact.
+    SharePresence {
+        peer: String,
+        #[arg(long, action = clap::ArgAction::Set)]
+        enabled: bool,
+    },
+    /// Request a fresh nonce-bound presence observation, never infer offline.
+    Presence {
+        peer: String,
+        #[arg(long = "bootstrap")]
+        bootstrap: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -498,6 +517,23 @@ fn main() -> Result<()> {
             ContactCommand::Remove { peer } => {
                 let removed = swarm_cli::discovery::remove_friend(&paths, &peer)?;
                 println!("{}", serde_json::json!({"removed": removed, "world_membership_changed": false}));
+            }
+            ContactCommand::Settings => {
+                println!("{}", serde_json::to_string_pretty(&swarm_cli::discovery::friend_settings(&paths)?)?);
+            }
+            ContactCommand::PresenceMode { enabled } => {
+                swarm_cli::discovery::set_friend_presence_enabled(&paths, enabled)?;
+                println!("{}", serde_json::to_string_pretty(&swarm_cli::discovery::friend_settings(&paths)?)?);
+            }
+            ContactCommand::SharePresence { peer, enabled } => {
+                swarm_cli::discovery::set_friend_presence_sharing(&paths, &peer, enabled)?;
+                println!("{}", serde_json::to_string_pretty(&swarm_cli::discovery::friend_settings(&paths)?)?);
+            }
+            ContactCommand::Presence { peer, bootstrap } => {
+                let peer = peer.parse().context("invalid friend peer ID")?;
+                let report = tokio::runtime::Runtime::new()?
+                    .block_on(swarm_cli::discovery::friend_presence(&paths, peer, &bootstrap))?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
             }
         },
         Command::Peers { world } => show_peers(parse_world(&world)?, &storage)?,

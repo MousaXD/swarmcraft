@@ -465,12 +465,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #46 — P2 · Partial
 - Work: Connect friend contact/presence primitives to explicit consent, hide/offline mode, and useful invitations
 - Acceptance: Friends see only the metadata a user agreed to share. Removing a contact stops future private presence access. Offline has honest freshness
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED** (real consent-gated loopback discovery, native Linux both variants; independent-network/platform qualification pending)
+- Source: crates/swarm-cli/src/{discovery,main,runtime_main}.rs; crates/swarm-cli/tests/discovery_network_freshness.rs; apps/desktop/src/friends.js; apps/desktop/src-tauri/src/{friend_commands,runtime}.rs; FriendsView, Sidebar, Workspace; scripts/e2e/friend_presence_smoke.py; scripts/acceptance/native_friends.py.
+- Evidence: [Report](../research/friend-presence/REPORT.md), [real signed loopback and locator](../research/friend-presence/evidence/loopback-cli-20261125.json), [final native Linux](../research/friend-presence/evidence/linux-native-20261125.json). Contact-store V2 migration persists hidden and no per-contact grants under the proof lock; acceptance is not consent. Global hide and individual grants gate fresh signed responses/publication; presence-only service refuses world records and exits after last effective grant. Exact authenticated response/nonce verification and durable mutation revision prevent stale contact resurrection; unanswered probes are not-confirmed, positive observations expire within 30 seconds. Both Desktop variants use native settings and explicit removal confirmation; existing signed bearer-invite workflow remains separate from membership. 12 discovery library tests, signed-presence core regression, six existing real-network regressions plus one real delayed-proof remove/re-add test, native validation, strict Clippy, 164 Node tests, 82 Svelte tests, 30 source-parity tests, build/check, and both Chromium variants at three sizes passed. Actual three-identity loopback/locator with mDNS disabled denied ungranted/withdrawn/removed/re-added contacts and world metadata; both final extracted Debian packages passed 12/12 native checks including actual signed probes in both directions, hide, consent/removal persistence, 980x760 and 720x560, and separate invite flow. No membership authority changed.
+- Remaining / next action: Field verification with reachable private LAN/VPN locators and independently operated Windows/macOS devices; default presence listen is loopback. Hidden denies new proofs, not transport anonymity; prior hints and delivered proofs expire. Invitations are manually shared bearer tokens, not automatic friend delivery. Continue to #47.
+- External dependency: Independent devices, configured reachable private directory/listen interface, and native platform field environments.
+- Commit: Consent-gated friend presence and local evidence checkpoint; see git history.
 
 ### #47 — P2 · Proposal
 - Work: Add public-world governance and abuse handling once private play is stable

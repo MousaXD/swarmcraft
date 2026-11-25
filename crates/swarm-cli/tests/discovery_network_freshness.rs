@@ -967,3 +967,64 @@ async fn signed_but_unproven_browse_candidates_exhaust_only_bounded_budget() {
     provider_task.abort();
     assert!(provider_task.await.is_err_and(|error| error.is_cancelled()));
 }
+
+/// An already in-flight proof cannot revive a contact removed and re-added
+/// with the same identity/label while the remote signer was responding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removed_and_readded_contact_retires_inflight_signed_presence() {
+    use swarm_cli::discovery::{add_friend, friend_presence, remove_friend};
+    use swarm_core::sign_friend_presence;
+    use swarm_protocol::FriendPresenceV1;
+    use tokio::sync::Notify;
+
+    let (friend, mut provider, address, _) = make_node([107; 32]).await;
+    let peer = friend.peer_id();
+    let peer_string = peer.to_string();
+    let key = hex::encode(friend.public_key());
+    let temp = tempfile::tempdir().unwrap();
+    let paths = DataPaths::from_root(temp.path());
+    add_friend(&paths, &peer_string, &key, "Friend").unwrap();
+    let received = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let service_received = received.clone();
+    let service_release = release.clone();
+    let service = tokio::spawn(async move {
+        loop {
+            if let DiscoveryNetworkEvent::InboundRequest {
+                request: WireRequest::FriendPresence { expected_peer_id, requester_peer_id, nonce },
+                channel,
+                application_peer,
+                ..
+            } = provider.next_event().await.unwrap()
+            {
+                assert_eq!(expected_peer_id, friend.peer_id());
+                assert_eq!(requester_peer_id, application_peer);
+                service_received.notify_one();
+                service_release.notified().await;
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+                let mut presence = FriendPresenceV1 {
+                    protocol_version: PROTOCOL_VERSION,
+                    peer_id: friend.peer_id(),
+                    public_key: friend.public_key(),
+                    requester_peer_id,
+                    nonce,
+                    issued_unix_ms: now,
+                    expires_unix_ms: now + 30_000,
+                    signature: Vec::new(),
+                };
+                sign_friend_presence(&friend, &mut presence).unwrap();
+                provider.respond(channel, WireResponse::FriendPresence(Some(presence))).unwrap();
+            }
+        }
+    });
+    let probe_paths = paths.clone();
+    let probe = tokio::spawn(async move { friend_presence(&probe_paths, peer, &[address]).await });
+    timeout(Duration::from_secs(18), received.notified()).await.expect("actual signed probe did not arrive");
+    assert!(remove_friend(&paths, &peer_string).unwrap());
+    assert!(!add_friend(&paths, &peer_string, &key, "Friend").unwrap().share_presence);
+    release.notify_one();
+    let result = timeout(Duration::from_secs(18), probe).await.unwrap().unwrap();
+    assert!(result.unwrap_err().to_string().contains("contact changed"));
+    service.abort();
+    assert!(service.await.is_err_and(|error| error.is_cancelled()));
+}

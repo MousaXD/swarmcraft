@@ -321,6 +321,11 @@ window.__swarmcraftHoldRuntimeStatus = false;
 window.__swarmcraftReleaseRuntimeStatus = null;
 window.__swarmcraftReleaseInstall = null;
 window.__swarmcraftReleaseInvite = null;
+window.__swarmcraftFriends = {own_peer_id:'scpeer:'+'a'.repeat(64),own_public_key_hex:'a'.repeat(64),presence_enabled:false,contacts:[]};
+window.__swarmcraftPresenceProcess = false;
+window.__swarmcraftPresenceHold = false;
+window.__swarmcraftReleasePresence = null;
+window.__swarmcraftPresenceState = 'online';
 window.__swarmcraftDiscoveryReport = null;
 window.__swarmcraftDiscoveryHold = false;
 window.__swarmcraftReleaseDiscovery = null;
@@ -513,6 +518,40 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
           project_id: '123', version_id: '456', file_name: 'restricted.jar', state: 'manual_required' },
       ],
     });
+    case 'friend_settings': return structuredClone(window.__swarmcraftFriends);
+    case 'friend_add': {
+      const old=window.__swarmcraftFriends.contacts.find(c=>c.peer_id===args.peer);
+      if (old) { old.label=args.label; return structuredClone(old); }
+      const card={peer_id:args.peer,public_key_hex:args.publicKey,label:args.label,share_presence:false,
+        presence:'unknown',shared_worlds:[],accepted_unix_ms:Date.now()};
+      window.__swarmcraftFriends.contacts.push(card);
+      return structuredClone(card);
+    }
+    case 'friend_remove': {
+      const before=window.__swarmcraftFriends.contacts.length;
+      window.__swarmcraftFriends.contacts=window.__swarmcraftFriends.contacts.filter(c=>c.peer_id!==args.peer);
+      return {removed:before!==window.__swarmcraftFriends.contacts.length,world_membership_changed:false};
+    }
+    case 'friend_share_presence': {
+      const c=window.__swarmcraftFriends.contacts.find(c=>c.peer_id===args.peer);
+      if (!c) throw Error('missing');
+      c.share_presence=args.enabled;
+      return structuredClone(window.__swarmcraftFriends);
+    }
+    case 'friend_presence_mode':
+      window.__swarmcraftFriends.presence_enabled=args.enabled;
+      if (!args.enabled) window.__swarmcraftPresenceProcess=false;
+      return structuredClone(window.__swarmcraftFriends);
+    case 'friend_service_status': return {process_started:window.__swarmcraftPresenceProcess};
+    case 'friend_service_start': window.__swarmcraftPresenceProcess=true;return {process_started:true};
+    case 'friend_service_stop': window.__swarmcraftPresenceProcess=false;return {process_started:false};
+    case 'friend_probe':
+      if (window.__swarmcraftPresenceHold) {
+        window.__swarmcraftPresenceHold=false;
+        return await new Promise(resolve=>window.__swarmcraftReleasePresence=resolve);
+      }
+      return {peer_id:args.peer,state:window.__swarmcraftPresenceState,
+        observed_unix_ms:Date.now(),expires_unix_ms:Date.now()+500,detail:'raw private address'};
     case 'discovery_search':
       if (window.__swarmcraftDiscoveryHold) {
         window.__swarmcraftDiscoveryHold = false;
@@ -1116,6 +1155,91 @@ async function runDiscoveryGate(port, sessionId, width, height, screenshotPath) 
   assert.equal(await execute(port,sessionId,'return document.getElementById("publicWorldPage").textContent.includes("Page 2 of 3")'),true);
 }
 
+const friendsScenario = String.raw`(async()=>{
+  const $=id=>document.getElementById(id);
+  const require=(value,message)=>{if(!value)throw new Error(message);};
+  const waitFor=async(predicate,label)=>{
+    for(let i=0;i<240;i++){if(predicate())return;await new Promise(r=>setTimeout(r,25));}
+    throw Error('Timed out: '+label);
+  };
+  const calls=name=>window.__swarmcraftCalls.filter(c=>c.command===name);
+  const peer='scpeer:'+'b'.repeat(64);
+  const row=()=>[...$('friendsContacts').children].find(el=>el.dataset.peer===peer);
+  const action=(name)=>row()?.querySelector('[data-action="'+name+'"]');
+  const set=(id,value)=>{$(id).value=value;$(id).dispatchEvent(new Event('input',{bubbles:true}));};
+  const joinCalls=calls('join_world').length, inviteCalls=calls('create_invite').length;
+  $('openFriends').click();
+  await waitFor(()=>$('friendsModeText').textContent.includes('Hidden')&&!$('friendAdd').disabled,'hidden default');
+  require($('friendsServiceToggle').disabled,'Hidden service can start');
+  require($('friendsContacts').textContent.includes('No contacts yet'),'Missing empty contact state');
+  $('friendAddForm').closest('details').open=true;
+  set('friendLabel','Friend');set('friendPeer','scinvite:abcd');set('friendKey','c'.repeat(64));
+  $('friendAdd').click();
+  await waitFor(()=>$('friendsStatus').textContent.includes('complete peer ID'),'invalid local input');
+  require(calls('friend_add').length===0,'Invalid contact reached native');
+  set('friendPeer',peer);
+  set('friendLabel','Long <b>literal</b> '+ 'Contact'.repeat(9));
+  $('friendAdd').click();
+  await waitFor(()=>row()&&!$('friendAdd').disabled,'add contact');
+  require(row().textContent.includes('Presence not shared')&&!row().querySelector('b'),'Add implied sharing or unsafe text');
+  $('friendAddForm').closest('details').open=false;
+  $('friendsModeToggle').click();
+  await waitFor(()=>$('friendsModeText').textContent.includes('Sharing enabled')&&!$('friendsModeToggle').disabled,'global mode');
+  require($('friendsServiceToggle').disabled,'Global enable without per-contact grant started service');
+  action('share').click();
+  await waitFor(()=>row()?.textContent.includes('Allowed to see your presence')&&!$('friendsServiceToggle').disabled,'explicit per contact');
+  $('friendsServiceToggle').click();
+  await waitFor(()=>$('friendsServiceStatus').textContent.includes('process started'),'process start');
+  require($('friendsServiceStatus').textContent.includes('reachability not verified'),'Process implies online');
+  action('probe').click();
+  await waitFor(()=>row()?.textContent.includes('Online observed at'),'verified observation');
+  await waitFor(()=>row()?.textContent.includes('observation expired'),'expiry');
+  window.__swarmcraftPresenceState='not_observed';
+  action('probe').click();
+  await waitFor(()=>row()?.textContent.includes('hidden, not shared or unreachable'),'silent observation');
+  require(!row().textContent.includes('raw private address'),'Native detail leaked');
+  window.__swarmcraftPresenceHold=true;
+  action('probe').click();
+  await waitFor(()=>typeof window.__swarmcraftReleasePresence==='function','held probe');
+  action('remove').click();
+  require(action('confirm')&&action('cancel'),'Remove lacks explicit confirmation');
+  action('cancel').click();
+  require(row()&&action('remove'),'Cancel removed contact');
+  action('remove').click();action('confirm').click();
+  await waitFor(()=>!row()&&!$('friendAdd').disabled,'confirmed remove');
+  window.__swarmcraftReleasePresence({peer_id:peer,state:'online',observed_unix_ms:Date.now(),expires_unix_ms:Date.now()+30000});
+  await waitFor(()=>$('friendsContacts').textContent.includes('No contacts yet'),'stale observation retired');
+  require(!row(),'Late probe resurrected removed contact');
+  $('friendAddForm').closest('details').open=true;
+  set('friendLabel','Friend again');set('friendPeer',peer);set('friendKey','c'.repeat(64));$('friendAdd').click();
+  await waitFor(()=>row()?.textContent.includes('Presence not shared'),'re-add hidden');
+  $('friendsModeToggle').click();
+  await waitFor(()=>$('friendsModeText').textContent.includes('Hidden')&&!$('friendsModeToggle').disabled,'global hide');
+  require(!$('friendsServiceStatus').textContent.includes('process started'),'Hide did not stop owned service');
+  $('friendAddForm').closest('details').open=false;
+  $('friendsInvite').click();
+  await waitFor(()=>!$('worldsView').hidden,'invite navigation');
+  if ($('inviteDialog').open) {
+    require(calls('create_invite').length===inviteCalls,'Friend navigation generated bearer invite without action');
+    const close=$('inviteDialog').querySelector('button[data-close-dialog]')||$('inviteDialog').querySelector('button');
+    close.click();
+  }
+  require(calls('join_world').length===joinCalls,'Contact operations changed membership');
+  $('openFriends').click();
+  await waitFor(()=>row()&&!$('friendsModeToggle').disabled,'return contacts');
+  $('friendsPanel').scrollTop=0;
+  require(document.body.scrollWidth<=innerWidth && $('friendsPanel').scrollWidth<=$('friendsPanel').clientWidth+2,'Friends layout overflows');
+  return {status:'pass'};
+})()`;
+
+async function runFriendsGate(port,sessionId,width,height,screenshotPath) {
+  const result=await executeAsync(port,sessionId,scenarioRunner,[friendsScenario]);
+  assert.equal(result?.ok,true,`Friends scenario failed at ${width}x${height}: ${result?.error}`);
+  assert.equal(result.value?.status,'pass');
+  const png=Buffer.from(await webdriverRequest(port,`/session/${sessionId}/screenshot`),'base64');
+  await writeFile(screenshotPath.replace(/\.png$/,'-friends.png'),png);
+}
+
 const scenarioRunner = String.raw`
 const done = arguments[arguments.length - 1];
 Promise.resolve().then(() => eval(arguments[0])).then(
@@ -1322,6 +1446,7 @@ async function runViewport(port, sessionId, documentHtml, graph, width, height, 
   assert.equal(clientProfile.value?.status, 'pass');
   await runAccessibilityGate(port, sessionId, width, height, screenshotPath);
   await runDiscoveryGate(port, sessionId, width, height, screenshotPath);
+  await runFriendsGate(port, sessionId, width, height, screenshotPath);
 }
 
 // Exercise the actual compiled Svelte module graph, including its shared
@@ -1401,6 +1526,7 @@ async function runCandidateViewport(port, sessionId, url, width, height, screens
   }
   await runAccessibilityGate(port, sessionId, width, height, screenshotPath);
   await runDiscoveryGate(port, sessionId, width, height, screenshotPath);
+  await runFriendsGate(port, sessionId, width, height, screenshotPath);
 }
 
 test('current Desktop module graph initializes, owns canonical Create, and renders supported window sizes', async () => {

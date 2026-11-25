@@ -84,6 +84,52 @@ describe coverage. `verified_unix_ms` records successful freshness verification,
 not current online status or authorization. Desktop pages that snapshot locally;
 there is no network-wide pagination cursor in discovery V1.
 
+### Consent-gated friend presence
+
+A local contact is a verified peer ID/public-key pair, not membership and not
+permission to share metadata. The V2 contact store defaults to hidden with all
+individual grants off. The first settings/list read migrates V1 contacts under
+the existing advisory lock and writes V2 atomically; older publishers refuse
+the unsupported store instead of silently retaining implicit grants. Upgrade
+all publisher binaries before enabling sharing.
+
+Enable global presence and allow individual contacts explicitly. Only the
+exact authenticated requester receives a short-lived, nonce-bound signed
+identity/liveness observation. The protocol carries no world names, world IDs,
+labels, invites, or game routes in presence proofs. Shared-world names shown
+locally come from local signed membership records, not a remote profile.
+
+```bash
+swarmcraft --data-dir ./player-data contact settings
+swarmcraft --data-dir ./player-data contact add '<peer-id>' --public-key '<public-key-hex>' --label 'Friend'
+swarmcraft --data-dir ./player-data contact share-presence '<peer-id>' --enabled=true
+swarmcraft --data-dir ./player-data contact presence-mode --enabled=true
+swarmcraft-runtime --data-dir ./player-data discovery-serve --presence-only \
+  --listen /ip4/127.0.0.1/tcp/0 --bootstrap '<complete locator multiaddress>'
+swarmcraft --data-dir ./other-player contact presence '<peer-id>' --bootstrap '<complete locator multiaddress>'
+```
+
+The loopback listener is for same-device test setups. For a private group,
+configure a concrete reachable private LAN/VPN interface and the intended
+locator. Desktop uses `SWARMCRAFT_PRESENCE_LISTEN` (default loopback),
+`SWARMCRAFT_DISCOVERY_BOOTSTRAP` and the existing discovery mDNS setting.
+Starting a presence-only publisher requires at least one effective grant;
+it shares no world listings, membership proofs or discovery votes. It exits
+after global hide or final grant withdrawal. The full discovery publisher
+also respects the same consent settings, but remains running to serve its
+independently configured world listings.
+
+Disable global sharing with `contact presence-mode --enabled=false`, revoke
+a single grant with `contact share-presence '<peer-id>' --enabled=false`, or
+remove a contact using `contact remove '<peer-id>'`. Global hide preserves
+individual preferences for a deliberate later re-enable. Removal and
+re-addition never restore old consent. A completed withdrawal prevents new
+signed proofs even if remote DHT provider hints remain cached; an already
+issued proof cannot be unsent and expires within 30 seconds on the client.
+A hide request is not network anonymity: transport handshakes, DHT hints
+for known identity pairs, and deliberate probes can reveal connectivity.
+No unanswered probe proves that someone is offline or has denied sharing.
+
 The locator is not a proxy for an unreachable discovery publisher: a client
 must still reach the publisher and enough current world members for freshness.
 The standalone discovery transport does not implement relay-client routing.

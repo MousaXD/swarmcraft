@@ -1,0 +1,54 @@
+{
+  "scope": "extracted Linux Debian packages, real WebKitGTK, real bundled sidecars and signed loopback friend presence",
+  "source_base": "68e82354dc25f8a3b51b829bb3b0a31df0f5da70",
+  "variants": {
+    "shipping": {
+      "package_sha256": "4fe2b7b35c75857044171ef9c33e396b535fa3748f426399c31631853fd8dd80",
+      "files": {
+        "desktop": "4e6ff2ec3a5d956c27efd39f412aa4a4297820468eb0423174f8c55e3f9e45b2",
+        "swarmcraft": "4efd23450b072d72c45037c18936c704e072beae2ca89309d006eb52f8268fc9",
+        "swarmcraft-host": "9961ef3d1da220ff9481e3064320debade8599d73fc706a8229186f5bf0b8dc4",
+        "swarmcraft-runtime": "d61c8a245bd124d2c74e7200ff60925b786475747bbb862bfa4d31c3fe36551a",
+        "swarmcraft-import": "501d902a6d0a05003fecb07ffec6688864528e9b0068b3d56c9206abc32f6b92"
+      },
+      "checks": {
+        "boot": true,
+        "hidden_default": true,
+        "add_without_consent": true,
+        "actual_signed_probe": true,
+        "global_without_contact_grant_refused": true,
+        "desktop_publisher_remote_proof": true,
+        "layout_980x760": true,
+        "layout_720x560": true,
+        "hide_persisted_and_service_stopped": true,
+        "remove_confirmation_and_persistence": true,
+        "signed_invite_workflow_no_automatic_token": true,
+        "world_membership_unchanged": true
+      }
+    },
+    "candidate": {
+      "package_sha256": "f937bcd449e50f673c4168faeb77a9d1608fe0c6ff992f49622183b210839212",
+      "files": {
+        "desktop": "7827920bf1f6c86bef7493934d9916e40e8a50a8527eb7051be0055aeea5173e",
+        "swarmcraft": "4efd23450b072d72c45037c18936c704e072beae2ca89309d006eb52f8268fc9",
+        "swarmcraft-host": "9961ef3d1da220ff9481e3064320debade8599d73fc706a8229186f5bf0b8dc4",
+        "swarmcraft-runtime": "d61c8a245bd124d2c74e7200ff60925b786475747bbb862bfa4d31c3fe36551a",
+        "swarmcraft-import": "501d902a6d0a05003fecb07ffec6688864528e9b0068b3d56c9206abc32f6b92"
+      },
+      "checks": {
+        "boot": true,
+        "hidden_default": true,
+        "add_without_consent": true,
+        "actual_signed_probe": true,
+        "global_without_contact_grant_refused": true,
+        "desktop_publisher_remote_proof": true,
+        "layout_980x760": true,
+        "layout_720x560": true,
+        "hide_persisted_and_service_stopped": true,
+        "remove_confirmation_and_persistence": true,
+        "signed_invite_workflow_no_automatic_token": true,
+        "world_membership_unchanged": true
+      }
+    }
+  }
+}

@@ -7,7 +7,7 @@ const source = async (name) => readFile(new URL(name, import.meta.url), 'utf8');
 const ids = (value) => [...value.matchAll(/\bid=["']([^"']+)["']/g)].map((match) => match[1]);
 const componentNames = [
   'Sidebar', 'Topbar', 'WorldsView', 'CreateWorldView', 'ImportWorldView',
-  'JoinWorldView', 'DiscoveryView', 'ActivityView', 'DiagnosticsView', 'Dialogs', 'Workspace',
+  'JoinWorldView', 'DiscoveryView', 'FriendsView', 'ActivityView', 'DiagnosticsView', 'Dialogs', 'Workspace',
   'HostingContributionPanel',
 ];
 
@@ -40,7 +40,7 @@ test('Svelte component split retains every legacy DOM binding and every view', a
     [],
     'Every existing native/UI binding must survive Svelte migration',
   );
-  for (const view of ['worlds', 'create', 'import', 'discover', 'join', 'activity', 'diagnostics']) {
+  for (const view of ['worlds', 'create', 'import', 'discover', 'join', 'friends', 'activity', 'diagnostics']) {
     assert.ok(parts.join('\n').includes('data-view-panel="' + view + '"'), 'Missing view ' + view);
   }
   assert.ok(app.includes('onMount(() => {'));
@@ -75,7 +75,7 @@ test('typed frontend IPC table exactly matches every Rust Tauri-registered comma
   const table = bridge.match(/export interface NativeCommandTable \{([\s\S]*?)\n\}/);
   assert.ok(table, 'Native command table must be present');
   const typed = [...table[1].matchAll(/^\s+([a-z_]+): \{ args:/gm)].map(x => x[1]);
-  assert.equal(commands.length, 77, 'A Rust registry addition requires deliberate typed contract review');
+  assert.equal(commands.length, 86, 'A Rust registry addition requires deliberate typed contract review');
   assert.ok(commands.includes('world_mods_acquire'));
   assert.ok(commands.includes('client_profile'));
   assert.ok(commands.includes('pick_import_folder'));

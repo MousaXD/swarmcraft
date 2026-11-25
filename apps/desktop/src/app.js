@@ -1,3 +1,4 @@
+import { installFriends } from './friends.js';
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
 import { createImportRequest, parseImportResult } from './import-flow.js';
 import { installImportReview } from './import-review.js';
@@ -50,6 +51,7 @@ const viewMeta = {
   create: ['Create', 'Start a replicated Minecraft world'],
   import: ['Import', 'Bring an existing Minecraft world into SwarmCraft'],
   discover: ['Discover', 'Find signed public and unlisted world listings'],
+  friends: ['Friends', 'Contacts and presence privacy'],
   join: ['Join', 'Join with a signed invite'],
   activity: ['Activity', 'Recent actions and detailed errors'],
   diagnostics: ['Diagnostics', 'Advanced connectivity, runtime, and recovery tools'],
@@ -1965,6 +1967,15 @@ const importReview = installImportReview($('importForm'), backend, importRequest
 const clientPreparation = installClientPreparation($('clientProfilePanel'), backend);
 window.__swarmcraftTakeImportReview = request => importReview.take(request);
 window.__swarmcraftRefreshImportReview = () => importReview.sync();
+
+installFriends(invoke, () => {
+  // Existing signed invitation workflow; the user must select a local world
+  // and explicitly issue an invite. No contact ID grants admission.
+  showView('worlds');
+  if (selectedWorld() && !$('inviteWorld').disabled && !$('inviteWorld').hidden) {
+    $('inviteWorld').click();
+  }
+});
 
 for (const nav of document.querySelectorAll('.nav-item[data-view]')) nav.addEventListener('click', () => showView(nav.dataset.view));
 $('skipToCurrentView')?.addEventListener('click', focusCurrentView);

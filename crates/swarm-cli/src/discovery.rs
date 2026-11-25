@@ -55,7 +55,9 @@ const DISCOVERY_RETRY_DELAY: Duration = Duration::from_millis(200);
 // challenge before the other endpoint has authenticated us. Do not burn the
 // independent stream-loss retry budget on pre-authentication refusals.
 const DISCOVERY_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(2250);
-const FRIENDS_FILE_VERSION: u16 = 1;
+const FRIENDS_FILE_VERSION: u16 = 2;
+const MAX_FRIEND_CONTACTS: usize = 256;
+const MAX_PRESENCE_PROVIDERS: usize = 64;
 const MAX_FRIEND_LABEL_BYTES: usize = 96;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,17 +66,24 @@ pub struct FriendContactV1 {
     pub public_key_hex: String,
     pub label: String,
     pub accepted_unix_ms: u64,
+    /// Acceptance alone never grants presence access.
+    #[serde(default)]
+    pub share_presence: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct FriendStoreV1 {
     version: u16,
     friends: Vec<FriendContactV1>,
+    #[serde(default)]
+    presence_enabled: bool,
+    #[serde(default)]
+    revision: u64,
 }
 
 impl Default for FriendStoreV1 {
     fn default() -> Self {
-        Self { version: FRIENDS_FILE_VERSION, friends: Vec::new() }
+        Self { version: FRIENDS_FILE_VERSION, friends: Vec::new(), presence_enabled: false, revision: 0 }
     }
 }
 
@@ -92,13 +101,23 @@ pub struct FriendCardV1 {
     pub accepted_unix_ms: u64,
     /// `unknown` until a live presence probe is performed.
     pub presence: String,
+    pub share_presence: bool,
     pub shared_worlds: Vec<SharedWorldV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FriendSettingsV1 {
+    pub own_peer_id: String,
+    pub own_public_key_hex: String,
+    pub presence_enabled: bool,
+    pub contacts: Vec<FriendCardV1>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FriendPresenceReportV1 {
     pub peer_id: String,
-    /// online, offline, network_unavailable, stale, or invalid.
+    /// online, not_observed, network_unavailable, stale, or invalid.
+    /// Silence is never proof of offline status.
     pub state: String,
     pub observed_unix_ms: Option<u64>,
     pub expires_unix_ms: Option<u64>,
@@ -212,7 +231,13 @@ struct PublishedDiscoveryState {
     signed_freshness_challenges: HashMap<(PeerId, [u8; 32]), u64>,
 }
 
-pub async fn serve(paths: DataPaths, listen: String) -> Result<()> {
+pub async fn serve(paths: DataPaths, listen: String, presence_only: bool, bootstrap_addrs: &[String]) -> Result<()> {
+    if bootstrap_addrs.len() > MAX_DIRECTORY_PROVIDERS {
+        bail!("too many configured discovery locators");
+    }
+    if presence_only && consented_friend_peers(&paths)?.is_empty() {
+        bail!("presence-only service requires global sharing and at least one explicit contact grant");
+    }
     let storage = Storage::open(paths.root.clone())?;
     let identity = PeerIdentity::load_or_create(&paths)?;
     let hello = identity.signed_peer_hello(vec![DISCOVERY_CAPABILITY.into()])?;
@@ -230,6 +255,10 @@ pub async fn serve(paths: DataPaths, listen: String) -> Result<()> {
     let transport_key = load_or_create_transport_key(&transport_path)?;
     let mut node = DiscoveryNode::new(transport_key, hello, identity.network_signing_key())?;
     node.listen(listen.parse().context("invalid discovery listen multiaddress")?)?;
+    let locators = add_explicit_locator_addresses(&mut node, bootstrap_addrs)?;
+    if !locators.is_empty() {
+        node.bootstrap()?;
+    }
 
     // Provider records need a real bound address before DHT publication.
     let first_address = timeout(Duration::from_secs(10), async {
@@ -247,18 +276,28 @@ pub async fn serve(paths: DataPaths, listen: String) -> Result<()> {
     let mut published = PublishedDiscoveryState::default();
     let mut refresh = tokio::time::interval(DISCOVERY_REFRESH_INTERVAL);
     refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    refresh_publications(&storage, &identity, &mut node, &mut published)?;
+    if !presence_only {
+        refresh_publications(&storage, &identity, &mut node, &mut published)?;
+    }
     refresh_presence_publications(&paths, &identity, &mut node, &mut published)?;
 
     info!(peer = %identity.peer_id(), "discovery service starting");
     loop {
         tokio::select! {
             _ = refresh.tick() => {
-                if let Err(error) = refresh_publications(&storage, &identity, &mut node, &mut published) {
-                    warn!(%error, "discovery publication refresh failed");
+                if !presence_only {
+                    if let Err(error) = refresh_publications(&storage, &identity, &mut node, &mut published) {
+                        warn!(%error, "discovery publication refresh failed");
+                    }
                 }
                 if let Err(error) = refresh_presence_publications(&paths, &identity, &mut node, &mut published) {
                     warn!(%error, "friend presence publication refresh failed");
+                    if presence_only { return Err(error); }
+                }
+                if presence_only && published.presence_requesters.is_empty() {
+                    // Exit rather than leave an unnecessary listener alive
+                    // after the final grant or global visibility is withdrawn.
+                    return Ok(());
                 }
             }
             event = node.next_event() => {
@@ -269,6 +308,14 @@ pub async fn serve(paths: DataPaths, listen: String) -> Result<()> {
                         }
                     }
                     DiscoveryNetworkEvent::InboundRequest { application_peer, request, channel, .. } => {
+                        if presence_only && !matches!(request, WireRequest::FriendPresence { .. }) {
+                            // No world announcements, membership proof or
+                            // freshness votes from a presence-only service.
+                            let _ = node.respond(channel, WireResponse::Error {
+                                code: "PRESENCE_ONLY".into(), message: "presence-only service".into(),
+                            });
+                            continue;
+                        }
                         if let Err(error) = handle_discovery_request(
                             &paths,
                             &storage,
@@ -662,7 +709,7 @@ fn handle_discovery_request(
             // A completed removal must not authorize new signatures, even
             // if the DHT still advertises a stale provider record.
             let _contacts = lock_friend_store(paths)?;
-            if !accepted_friend_peers(paths)?.contains(&requester_peer_id) {
+            if !consented_friend_peers(paths)?.contains(&requester_peer_id) {
                 node.respond(channel, WireResponse::FriendPresence(None))?;
                 return Ok(());
             }
@@ -678,7 +725,7 @@ fn handle_discovery_request(
                 requester_peer_id,
                 nonce,
                 issued_unix_ms: now,
-                expires_unix_ms: now.saturating_add(FRIEND_PRESENCE_TTL_MS),
+                expires_unix_ms: checked_discovery_expiry(now, FRIEND_PRESENCE_TTL_MS, "presence")?,
                 signature: Vec::new(),
             };
             sign_friend_presence(identity, &mut presence)?;
@@ -1059,8 +1106,12 @@ pub fn add_friend(paths: &DataPaths, peer: &str, public_key_hex: &str, label: &s
         bail!("friend peer ID does not match the supplied public key");
     }
     let label = label.trim();
-    if label.len() > MAX_FRIEND_LABEL_BYTES {
-        bail!("friend label is too long");
+    if label.is_empty() || label.len() > MAX_FRIEND_LABEL_BYTES || label.chars().any(char::is_control) {
+        bail!("friend label must contain 1 to 96 UTF-8 bytes without control characters");
+    }
+    let identity = PeerIdentity::load_or_create(paths)?;
+    if peer_id == identity.peer_id() {
+        bail!("cannot add your own peer identity as a friend");
     }
     let _contacts = lock_friend_store(paths)?;
     let mut store = load_friend_store(paths)?;
@@ -1070,18 +1121,22 @@ pub fn add_friend(paths: &DataPaths, peer: &str, public_key_hex: &str, label: &s
         }
         existing.label = label.to_owned();
         let existing = existing.clone();
-        save_friend_store(paths, &store)?;
+        persist_friend_mutation(paths, &mut store)?;
         return Ok(existing);
+    }
+    if store.friends.len() >= MAX_FRIEND_CONTACTS {
+        bail!("local friend contact limit reached");
     }
     let contact = FriendContactV1 {
         peer_id: peer_id.to_string(),
         public_key_hex: hex::encode(public_key),
         label: label.to_owned(),
         accepted_unix_ms: unix_millis()?,
+        share_presence: false,
     };
     store.friends.push(contact.clone());
     store.friends.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
-    save_friend_store(paths, &store)?;
+    persist_friend_mutation(paths, &mut store)?;
     Ok(contact)
 }
 
@@ -1093,17 +1148,64 @@ pub fn remove_friend(paths: &DataPaths, peer: &str) -> Result<bool> {
     store.friends.retain(|friend| friend.peer_id != peer_id.to_string());
     let changed = store.friends.len() != before;
     if changed {
-        save_friend_store(paths, &store)?;
+        persist_friend_mutation(paths, &mut store)?;
     }
     Ok(changed)
 }
 
-pub fn list_friends(paths: &DataPaths) -> Result<Vec<FriendCardV1>> {
-    let store = load_friend_store(paths)?;
-    let storage = Storage::open(paths.root.clone())?;
-    let identity = PeerIdentity::load_or_create(paths)?;
-    store
+/// Explicit global hide/show switch. Hidden retains per-contact preferences
+/// but authorizes no fresh proof or provider publication.
+pub fn set_friend_presence_enabled(paths: &DataPaths, enabled: bool) -> Result<()> {
+    let _contacts = lock_friend_store(paths)?;
+    let mut store = load_friend_store(paths)?;
+    store.presence_enabled = enabled;
+    persist_friend_mutation(paths, &mut store)
+}
+
+/// A separate deliberate grant for an already verified local contact.
+pub fn set_friend_presence_sharing(paths: &DataPaths, peer: &str, enabled: bool) -> Result<()> {
+    let peer_id = PeerId::from_str(peer).context("invalid friend peer ID")?;
+    let _contacts = lock_friend_store(paths)?;
+    let mut store = load_friend_store(paths)?;
+    let contact = store
         .friends
+        .iter_mut()
+        .find(|friend| friend.peer_id == peer_id.to_string())
+        .context("peer is not an accepted local friend")?;
+    contact.share_presence = enabled;
+    persist_friend_mutation(paths, &mut store)
+}
+
+pub fn friend_settings(paths: &DataPaths) -> Result<FriendSettingsV1> {
+    let _contacts = lock_friend_store(paths)?;
+    let (mut store, legacy) = load_friend_store_with_migration(paths)?;
+    if legacy {
+        // Persist the safe migration while holding the same lock as old
+        // publishers. They reject the unsupported new store version rather
+        // than continuing the old implicit-sharing policy.
+        persist_friend_mutation(paths, &mut store)?;
+    }
+    let identity = PeerIdentity::load_or_create(paths)?;
+    let storage = Storage::open(paths.root.clone())?;
+    let contacts = friend_cards(&storage, &identity, store.friends)?;
+    Ok(FriendSettingsV1 {
+        own_peer_id: identity.peer_id().to_string(),
+        own_public_key_hex: hex::encode(identity.public_key()),
+        presence_enabled: store.presence_enabled,
+        contacts,
+    })
+}
+
+pub fn list_friends(paths: &DataPaths) -> Result<Vec<FriendCardV1>> {
+    Ok(friend_settings(paths)?.contacts)
+}
+
+fn friend_cards(
+    storage: &Storage,
+    identity: &PeerIdentity,
+    friends: Vec<FriendContactV1>,
+) -> Result<Vec<FriendCardV1>> {
+    friends
         .into_iter()
         .map(|friend| {
             let peer_id = PeerId::from_str(&friend.peer_id).context("stored friend peer ID is invalid")?;
@@ -1112,12 +1214,13 @@ pub fn list_friends(paths: &DataPaths) -> Result<Vec<FriendCardV1>> {
                 bail!("stored friend identity is inconsistent");
             }
             Ok(FriendCardV1 {
-                shared_worlds: shared_worlds(&storage, identity.peer_id(), peer_id, public_key)?,
+                shared_worlds: shared_worlds(storage, identity.peer_id(), peer_id, public_key)?,
                 peer_id: friend.peer_id,
                 public_key_hex: friend.public_key_hex,
-                label: friend.label,
+                label: if friend.label.trim().is_empty() { "Unnamed contact".into() } else { friend.label },
                 accepted_unix_ms: friend.accepted_unix_ms,
                 presence: "unknown".into(),
+                share_presence: friend.share_presence,
             })
         })
         .collect()
@@ -1675,6 +1778,9 @@ pub async fn friend_presence(
     peer: PeerId,
     bootstrap_addrs: &[String],
 ) -> Result<FriendPresenceReportV1> {
+    if bootstrap_addrs.len() > MAX_PRESENCE_PROVIDERS {
+        bail!("too many configured presence locators");
+    }
     let contacts = load_friend_store(paths)?;
     let contact = contacts
         .friends
@@ -1685,100 +1791,188 @@ pub async fn friend_presence(
     if peer_id_from_public_key(&public_key) != peer {
         bail!("stored friend identity is inconsistent");
     }
-
     let identity = PeerIdentity::load_or_create(paths)?;
     let requester = identity.peer_id();
     let nonce = random_nonce();
     let hello = identity.signed_peer_hello(vec![DISCOVERY_CAPABILITY.into()])?;
     let mut node = DiscoveryNode::new(generate_transport_key(), hello, identity.network_signing_key())?;
     node.listen("/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap())?;
-    add_explicit_bootstraps(&mut node, bootstrap_addrs)?;
+    let locators = add_explicit_locator_addresses(&mut node, bootstrap_addrs)?;
+    warm_explicit_locators(&mut node, &locators).await?;
+    let mut providers: HashSet<_> = locators.iter().copied().collect();
+    if !locators.is_empty() {
+        node.bootstrap()?;
+    }
     let query = node.find_friend_providers(peer, requester);
-    let mut providers = HashSet::new();
+    let request = WireRequest::FriendPresence { expected_peer_id: peer, requester_peer_id: requester, nonce };
     let mut requested = HashSet::new();
-    let mut detail = None;
+    let mut pending = HashMap::new();
+    let mut network_error = false;
     let mut report = None;
-
+    let mut query_finished = false;
+    let mut retry_attempts = HashMap::<TransportPeerId, u8>::new();
+    let mut queued_retries = HashMap::new();
+    let mut tick = tokio::time::interval(DISCOVERY_RETRY_DELAY);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // Only the exact authenticated application peer may be asked for its
+    // presence. Locator peers, even when reachable, cannot answer for it.
+    for transport in locators.iter().copied() {
+        if node.application_peer(&transport) == Some(peer) {
+            requested.insert(transport);
+            let id = node.send_request(&transport, request.clone())?;
+            pending.insert(format!("{id:?}"), transport);
+        }
+    }
     let run = timeout(DISCOVERY_QUERY_TIMEOUT, async {
         loop {
-            match node.next_event().await? {
+            let event = tokio::select! {
+                event = node.next_event() => event?,
+                _ = tick.tick(), if !queued_retries.is_empty() => {
+                    let now = Instant::now();
+                    let due: Vec<_> = queued_retries.iter().filter(|(_, time)| **time <= now).map(|(peer, _)| *peer).collect();
+                    for transport in due {
+                        if node.application_peer(&transport) == Some(peer) {
+                            queued_retries.remove(&transport);
+                            let id = node.send_request(&transport, request.clone())?;
+                            pending.insert(format!("{id:?}"), transport);
+                        } else {
+                            let _ = node.dial_peer(transport);
+                        }
+                    }
+                    continue;
+                }
+            };
+            match event {
                 DiscoveryNetworkEvent::ProvidersFound { query_id, providers: found } if query_id == query => {
                     for provider in found {
+                        if !providers.contains(&provider) && providers.len() >= MAX_PRESENCE_PROVIDERS {
+                            network_error = true;
+                            break;
+                        }
                         providers.insert(provider);
-                        let _ = node.dial_peer(provider);
+                        if node.application_peer(&provider) == Some(peer) {
+                            if requested.insert(provider) {
+                                let id = node.send_request(&provider, request.clone())?;
+                                pending.insert(format!("{id:?}"), provider);
+                            }
+                        } else { let _ = node.dial_peer(provider); }
                     }
                 }
-                DiscoveryNetworkEvent::ProvidersFinished { query_id } if query_id == query && providers.is_empty() => {
-                    break
+                DiscoveryNetworkEvent::ProvidersFinished { query_id } if query_id == query => {
+                    query_finished = true;
                 }
-                DiscoveryNetworkEvent::ProvidersFailed { query_id, error } if query_id == query => {
-                    detail = Some(error);
-                    if providers.is_empty() {
-                        break;
+                DiscoveryNetworkEvent::ProvidersFailed { query_id, .. } if query_id == query => {
+                    query_finished = true;
+                    network_error = true;
+                }
+                DiscoveryNetworkEvent::Authenticated { transport_peer, application_peer } if providers.contains(&transport_peer) => {
+                    if application_peer == peer && requested.insert(transport_peer) {
+                        let id = node.send_request(&transport_peer, request.clone())?;
+                        pending.insert(format!("{id:?}"), transport_peer);
                     }
                 }
-                DiscoveryNetworkEvent::Authenticated { transport_peer, application_peer }
-                    if providers.contains(&transport_peer) =>
-                {
-                    if application_peer != peer {
+                DiscoveryNetworkEvent::Response { transport_peer, request_id, response } => {
+                    let key = format!("{request_id:?}");
+                    if pending.get(&key) != Some(&transport_peer)
+                        || node.application_peer(&transport_peer) != Some(peer) {
                         continue;
                     }
-                    if requested.insert(transport_peer) {
-                        node.send_request(
-                            &transport_peer,
-                            WireRequest::FriendPresence { expected_peer_id: peer, requester_peer_id: requester, nonce },
-                        )?;
+                    pending.remove(&key);
+                    match response {
+                        WireResponse::FriendPresence(Some(presence)) => {
+                            let now = unix_millis()?;
+                            let state = match verify_friend_presence(&presence, peer, requester, nonce, now) {
+                                Ok(()) if presence.public_key == public_key && presence.expires_unix_ms > now => "online",
+                                Ok(()) if presence.expires_unix_ms <= now => "stale",
+                                Ok(()) => "invalid",
+                                Err(DiscoveryRecordError::Expired) => "stale",
+                                Err(_) => "invalid",
+                            };
+                            let online = state == "online";
+                            report = Some(FriendPresenceReportV1 {
+                                peer_id: peer.to_string(), state: state.into(),
+                                observed_unix_ms: online.then_some(now),
+                                expires_unix_ms: online.then_some(presence.expires_unix_ms.min(now.saturating_add(FRIEND_PRESENCE_TTL_MS))),
+                                detail: None,
+                            });
+                            if online { break; }
+                        }
+                        WireResponse::FriendPresence(None) => {
+                            // A refusal cannot distinguish hidden from not
+                            // sharing with this requester. No signed offline.
+                            report = Some(FriendPresenceReportV1 {
+                                peer_id: peer.to_string(), state: "not_observed".into(),
+                                observed_unix_ms: None, expires_unix_ms: None, detail: None,
+                            });
+                            break;
+                        }
+                        WireResponse::Error { code, .. }
+                            if matches!(code.as_str(), "HANDSHAKE_REQUIRED" | "AUTH_CONNECTION_RETRY")
+                                && reserve_explicit_provider_retry(retry_attempts.entry(transport_peer).or_default()) =>
+                        {
+                            queued_retries.insert(transport_peer, Instant::now() + DISCOVERY_HANDSHAKE_RETRY_DELAY);
+                        }
+                        _ => { network_error = true; }
                     }
                 }
-                DiscoveryNetworkEvent::Response { response: WireResponse::FriendPresence(Some(presence)), .. } => {
-                    let now = unix_millis()?;
-                    let state = match verify_friend_presence(&presence, peer, requester, nonce, now) {
-                        Ok(()) if presence.public_key == public_key => "online",
-                        Ok(()) => "invalid",
-                        Err(DiscoveryRecordError::Expired) => "stale",
-                        Err(_) => "invalid",
-                    };
-                    report = Some(FriendPresenceReportV1 {
-                        peer_id: peer.to_string(),
-                        state: state.into(),
-                        observed_unix_ms: Some(now),
-                        expires_unix_ms: Some(presence.expires_unix_ms),
-                        detail: None,
-                    });
-                    break;
-                }
-                DiscoveryNetworkEvent::OutboundFailure { error, .. } => {
-                    detail.get_or_insert(error);
+                DiscoveryNetworkEvent::OutboundFailure { transport_peer, request_id, .. } => {
+                    let key = format!("{request_id:?}");
+                    if pending.get(&key) == Some(&transport_peer) {
+                        pending.remove(&key);
+                        network_error = true;
+                        if reserve_explicit_provider_retry(retry_attempts.entry(transport_peer).or_default()) {
+                            queued_retries.insert(transport_peer, Instant::now() + DISCOVERY_RETRY_DELAY);
+                        }
+                    }
                 }
                 _ => {}
             }
+            if query_finished && pending.is_empty() && queued_retries.is_empty()
+                && providers.iter().all(|p| node.application_peer(p).is_some() || providers.is_empty()) {
+                break;
+            }
         }
         Ok::<(), anyhow::Error>(())
-    })
-    .await;
-    if let Ok(value) = run {
-        value?;
+    }).await;
+    match run {
+        Ok(result) => result?,
+        Err(_) => network_error = true,
     }
 
-    // A query may complete after the user removed the contact. Do not
-    // project the old observation into the now-changed local contact list.
     let _contacts = lock_friend_store(paths)?;
-    if !load_friend_store(paths)?.friends.iter().any(|current| current == contact) {
+    let current = load_friend_store(paths)?;
+    // A remove/re-add (even with the same timestamp/label), consent change,
+    // or other contact mutation retires every outstanding observation.
+    if current.revision != contacts.revision || !current.friends.iter().any(|current| current == contact) {
         bail!("friend contact changed while checking presence");
     }
     Ok(report.unwrap_or_else(|| FriendPresenceReportV1 {
         peer_id: peer.to_string(),
-        state: if providers.is_empty() && detail.is_some() { "network_unavailable".into() } else { "offline".into() },
+        state: if network_error { "network_unavailable".into() } else { "not_observed".into() },
         observed_unix_ms: None,
         expires_unix_ms: None,
-        detail,
+        detail: None,
     }))
 }
 
+#[cfg(test)]
 fn accepted_friend_peers(paths: &DataPaths) -> Result<HashSet<PeerId>> {
     load_friend_store(paths)?
         .friends
         .into_iter()
+        .map(|friend| PeerId::from_str(&friend.peer_id).context("stored friend peer ID is invalid"))
+        .collect()
+}
+
+fn consented_friend_peers(paths: &DataPaths) -> Result<HashSet<PeerId>> {
+    let store = load_friend_store(paths)?;
+    if !store.presence_enabled {
+        return Ok(HashSet::new());
+    }
+    store
+        .friends
+        .into_iter()
+        .filter(|friend| friend.share_presence)
         .map(|friend| PeerId::from_str(&friend.peer_id).context("stored friend peer ID is invalid"))
         .collect()
 }
@@ -1789,14 +1983,20 @@ fn refresh_presence_publications(
     node: &mut DiscoveryNode,
     state: &mut PublishedDiscoveryState,
 ) -> Result<()> {
-    let next = accepted_friend_peers(paths)?;
+    let _contacts = lock_friend_store(paths)?;
+    let consent = consented_friend_peers(paths);
+    // On invalid/unreadable local state withdraw every hint we previously
+    // published. A stale remote DHT record can never authorize a proof.
+    let next = consent.as_ref().cloned().unwrap_or_default();
     for requester in state.presence_requesters.difference(&next).copied().collect::<Vec<_>>() {
         node.stop_providing_friend_presence(identity.peer_id(), requester);
+        state.presence_requesters.remove(&requester);
     }
+    consent?;
     for requester in next.difference(&state.presence_requesters).copied().collect::<Vec<_>>() {
         let _ = node.start_providing_friend_presence(identity.peer_id(), requester)?;
+        state.presence_requesters.insert(requester);
     }
-    state.presence_requesters = next;
     Ok(())
 }
 
@@ -1952,35 +2152,46 @@ async fn warm_explicit_locators(node: &mut DiscoveryNode, peers: &[TransportPeer
     Ok(())
 }
 
-fn add_explicit_bootstraps(node: &mut DiscoveryNode, values: &[String]) -> Result<HashSet<TransportPeerId>> {
-    let peers = add_explicit_locator_addresses(node, values)?;
-    if !peers.is_empty() {
-        node.bootstrap()?;
-    }
-    Ok(peers.into_iter().collect())
+fn load_friend_store(paths: &DataPaths) -> Result<FriendStoreV1> {
+    load_friend_store_with_migration(paths).map(|(store, _)| store)
 }
 
-fn load_friend_store(paths: &DataPaths) -> Result<FriendStoreV1> {
+fn load_friend_store_with_migration(paths: &DataPaths) -> Result<(FriendStoreV1, bool)> {
     let path = friends_path(paths);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(FriendStoreV1::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((FriendStoreV1::default(), false)),
         Err(error) => return Err(error).with_context(|| format!("could not read {}", path.display())),
     };
     let mut store: FriendStoreV1 = serde_json::from_slice(&bytes).context("friend store is malformed")?;
-    if store.version != FRIENDS_FILE_VERSION {
+    // V1 acceptance previously implied sharing. Migrate conservatively:
+    // never infer the new explicit grant from old contact membership.
+    let legacy = store.version == 1;
+    if legacy {
+        store.version = FRIENDS_FILE_VERSION;
+        store.presence_enabled = false;
+        store.revision = 0;
+        for friend in &mut store.friends {
+            friend.share_presence = false;
+        }
+    } else if store.version != FRIENDS_FILE_VERSION {
         bail!("unsupported friend store version {}", store.version);
     }
     store.friends.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
-    store.friends.dedup_by(|a, b| a.peer_id == b.peer_id && a.public_key_hex == b.public_key_hex);
+    if store.friends.windows(2).any(|pair| pair[0].peer_id == pair[1].peer_id) {
+        bail!("duplicate peer in friend store");
+    }
     for friend in &store.friends {
         let peer = PeerId::from_str(&friend.peer_id).context("stored friend peer ID is invalid")?;
         let public_key = parse_public_key(&friend.public_key_hex)?;
-        if peer_id_from_public_key(&public_key) != peer {
+        if peer_id_from_public_key(&public_key) != peer
+            || friend.peer_id != peer.to_string()
+            || friend.public_key_hex != hex::encode(public_key)
+        {
             bail!("stored friend peer ID does not match its public key");
         }
     }
-    Ok(store)
+    Ok((store, legacy))
 }
 
 // All writers hold the same advisory lock across their read-modify-write.
@@ -1998,6 +2209,11 @@ fn lock_friend_store(paths: &DataPaths) -> Result<fs::File> {
     let file = options.open(paths.root.join("friends.lock"))?;
     fs2::FileExt::lock_exclusive(&file).context("cannot serialize contact store access")?;
     Ok(file)
+}
+
+fn persist_friend_mutation(paths: &DataPaths, store: &mut FriendStoreV1) -> Result<()> {
+    store.revision = store.revision.checked_add(1).context("friend store revision exhausted")?;
+    save_friend_store(paths, store)
 }
 
 fn save_friend_store(paths: &DataPaths, store: &FriendStoreV1) -> Result<()> {
@@ -2162,6 +2378,88 @@ mod tests {
 
         let err = add_friend(&paths, &a.peer_id().to_string(), &hex::encode(b.public_key()), "collision").unwrap_err();
         assert!(err.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn legacy_contacts_migrate_hidden_and_require_two_explicit_grants() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(tmp.path());
+        let peer = PeerIdentity::from_secret_bytes([71; 32]);
+        fs::write(
+            friends_path(&paths),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "friends": [{
+                    "peer_id": peer.peer_id().to_string(),
+                    "public_key_hex": hex::encode(peer.public_key()),
+                    "label": "Existing contact",
+                    "accepted_unix_ms": 1,
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let id = peer.peer_id().to_string();
+        let initial = friend_settings(&paths).unwrap();
+        assert!(!initial.presence_enabled);
+        assert!(!initial.contacts[0].share_presence);
+        let persisted: serde_json::Value = serde_json::from_slice(&fs::read(friends_path(&paths)).unwrap()).unwrap();
+        assert_eq!(persisted["version"], 2);
+        assert_eq!(persisted["presence_enabled"], false);
+        assert_eq!(persisted["friends"][0]["share_presence"], false);
+        assert!(consented_friend_peers(&paths).unwrap().is_empty());
+        set_friend_presence_sharing(&paths, &id, true).unwrap();
+        assert!(consented_friend_peers(&paths).unwrap().is_empty());
+        set_friend_presence_enabled(&paths, true).unwrap();
+        assert_eq!(consented_friend_peers(&paths).unwrap(), HashSet::from([peer.peer_id()]));
+        assert_eq!(load_friend_store(&paths).unwrap().version, 2);
+        set_friend_presence_enabled(&paths, false).unwrap();
+        assert!(consented_friend_peers(&paths).unwrap().is_empty());
+        assert!(friend_settings(&paths).unwrap().contacts[0].share_presence);
+        set_friend_presence_enabled(&paths, true).unwrap();
+        set_friend_presence_sharing(&paths, &id, false).unwrap();
+        assert!(consented_friend_peers(&paths).unwrap().is_empty());
+    }
+
+    #[test]
+    fn contact_removal_and_readdition_never_restore_old_consent_or_revision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(tmp.path());
+        let peer = PeerIdentity::from_secret_bytes([72; 32]);
+        let id = peer.peer_id().to_string();
+        let key = hex::encode(peer.public_key());
+        add_friend(&paths, &id, &key, "Friend").unwrap();
+        set_friend_presence_enabled(&paths, true).unwrap();
+        set_friend_presence_sharing(&paths, &id, true).unwrap();
+        let old = load_friend_store(&paths).unwrap();
+        remove_friend(&paths, &id).unwrap();
+        add_friend(&paths, &id, &key, "Friend").unwrap();
+        let new = load_friend_store(&paths).unwrap();
+        assert!(new.revision > old.revision);
+        assert!(!new.friends[0].share_presence);
+        assert!(consented_friend_peers(&paths).unwrap().is_empty());
+        assert!(set_friend_presence_sharing(
+            &paths,
+            &PeerIdentity::from_secret_bytes([73; 32]).peer_id().to_string(),
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn duplicate_consent_and_invalid_friend_store_fail_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::from_root(tmp.path());
+        let peer = PeerIdentity::from_secret_bytes([74; 32]);
+        add_friend(&paths, &peer.peer_id().to_string(), &hex::encode(peer.public_key()), "Friend").unwrap();
+        set_friend_presence_enabled(&paths, true).unwrap();
+        set_friend_presence_sharing(&paths, &peer.peer_id().to_string(), true).unwrap();
+        let mut store = load_friend_store(&paths).unwrap();
+        let mut duplicate = store.friends[0].clone();
+        duplicate.share_presence = false;
+        store.friends.push(duplicate);
+        save_friend_store(&paths, &store).unwrap();
+        assert!(consented_friend_peers(&paths).is_err());
     }
 
     #[tokio::test]

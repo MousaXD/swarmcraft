@@ -122,6 +122,15 @@ export interface NativeCommandTable {
   inspect_mod_artifact: { args: { path: string }; result: unknown };
   discovery_search: { args: { query: string | null }; result: unknown };
   discovery_resolve: { args: { world: string }; result: unknown };
+  friend_settings: { args: Record<string, never>; result: unknown };
+  friend_add: { args: { peer: string; publicKey: string; label: string }; result: unknown };
+  friend_remove: { args: { peer: string }; result: unknown };
+  friend_share_presence: { args: { peer: string; enabled: boolean }; result: unknown };
+  friend_presence_mode: { args: { enabled: boolean }; result: unknown };
+  friend_probe: { args: { peer: string }; result: unknown };
+  friend_service_status: { args: Record<string, never>; result: unknown };
+  friend_service_start: { args: Record<string, never>; result: unknown };
+  friend_service_stop: { args: Record<string, never>; result: unknown };
   ensure_daemon_running: { args: { listen: string }; result: number };
   start_daemon: { args: { listen: string }; result: number };
   stop_daemon: { args: Record<string, never>; result: void };
