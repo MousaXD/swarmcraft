@@ -17,8 +17,9 @@ use std::{
     path::{Path, PathBuf},
 };
 use swarm_protocol::{
-    AuthorityTransferV1, BlobDescriptor, BlobEncoding, EpochMode, Hash32, HistoricalReplayProofV1,
-    HistoricalTransitionV1, MembershipCertificateV1, RecoveryCertificateV1, SnapshotManifestV1, WorldId,
+    AuthorityLeaseGrantV1, AuthorityTransferV1, BlobDescriptor, BlobEncoding, EpochMode, Hash32,
+    HistoricalReplayProofV1, HistoricalTransitionV1, MembershipCertificateV1, RecoveryCertificateV1, SleepRecordV1,
+    SnapshotManifestV1, WorldId,
 };
 
 const INTENT: &str = "stale-replay-publish.intent.postcard";
@@ -28,6 +29,10 @@ pub struct StalePublicationCandidate {
     pub anchor: StaleReplayAnchorV1,
     pub proof: HistoricalReplayProofV1,
     pub manifests: Vec<SnapshotManifestV1>,
+    /// Local evidence not itself contained in the signed replay envelope.
+    /// The application must independently verify these signatures.
+    pub sleep: Option<SleepRecordV1>,
+    pub reservation: Option<AuthorityLeaseGrantV1>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,7 +130,9 @@ impl Storage {
             }
             manifests.push(manifest);
         }
-        let candidate = StalePublicationCandidate { anchor, proof, manifests };
+        let metadata = self.world_dir(world).join("metadata");
+        let (sleep, reservation) = local_boundary_records(&metadata, &proof)?;
+        let candidate = StalePublicationCandidate { anchor, proof, manifests, sleep, reservation };
         self.validate_publication_control_locked(&candidate, interrupted)?;
         Ok(Some(candidate))
     }
@@ -135,17 +142,14 @@ impl Storage {
         candidate: &StalePublicationCandidate,
         interrupted: bool,
     ) -> Result<(), StorageError> {
-        let StalePublicationCandidate { anchor, proof, manifests } = candidate;
+        let StalePublicationCandidate { anchor, proof, manifests, .. } = candidate;
         let world = proof.world_id;
         let metadata = self.world_dir(world).join("metadata");
         // Only exact decisions already incorporated in the verified history
         // can be consumed. Unrelated, incomplete or corrupt decisions block.
         consumed_decisions(&metadata, proof)?;
         for name in [
-            "sleep.postcard",
-            "recovery-reservation.postcard",
             "solo-branch.postcard",
-            "recovery-certificate-pending.postcard",
             "pending-join.postcard",
             "pending-leave.postcard",
             "snapshot-commit.intent.postcard",
@@ -220,23 +224,27 @@ impl Storage {
                 return Err(StorageError::WorldMetadataMismatch);
             }
         }
-        let path = metadata.join("recovery-certificate.postcard");
-        if canonical_file_exists(&path)? {
-            let live: RecoveryCertificateV1 = postcard::from_bytes(&read_canonical_file(&path)?)?;
-            if !proof.transitions.iter().any(|transition| {
-                matches!(transition, HistoricalTransitionV1::Recovery(cert) if **cert == live
-                    && (cert.ballot.target_epoch <= anchor.epoch.epoch_number
-                        || interrupted && final_epoch.mode == EpochMode::Recovery && cert.ballot.target_epoch == final_epoch.epoch_number))
-            }) {
-                return Err(StorageError::WorldMetadataMismatch);
+        // A certified recovery may still occupy either durable slot after a
+        // failed promotion. Preserve every byte-exact certificate in the
+        // archived chain; no merely matching epoch or ballot is sufficient.
+        let mut anchor_recovery_present = false;
+        for name in ["recovery-certificate.postcard", "recovery-certificate-pending.postcard"] {
+            if let Some(live) = exact_local_record::<RecoveryCertificateV1>(&metadata.join(name))? {
+                if !proof
+                    .transitions
+                    .iter()
+                    .any(|transition| matches!(transition, HistoricalTransitionV1::Recovery(cert) if **cert == live))
+                {
+                    return Err(StorageError::WorldMetadataMismatch);
+                }
+                if live.ballot.target_epoch == anchor.epoch.epoch_number
+                    && live.ballot.target_fencing_token == anchor.epoch.fencing_token
+                {
+                    anchor_recovery_present = true;
+                }
             }
-            if !interrupted
-                && anchor.epoch.mode == EpochMode::Recovery
-                && live.ballot.target_epoch != anchor.epoch.epoch_number
-            {
-                return Err(StorageError::WorldMetadataMismatch);
-            }
-        } else if !interrupted && anchor.epoch.mode == EpochMode::Recovery {
+        }
+        if !interrupted && anchor.epoch.mode == EpochMode::Recovery && !anchor_recovery_present {
             return Err(StorageError::WorldMetadataMismatch);
         }
         Ok(())
@@ -332,7 +340,7 @@ impl Storage {
         {
             return Err(StorageError::WorldMetadataMismatch);
         }
-        let StalePublicationCandidate { anchor, proof, manifests } = candidate;
+        let StalePublicationCandidate { anchor, proof, manifests, sleep, reservation } = candidate;
         let root = self.stale_replay_data_dir(anchor)?;
         let isolated = Storage::open(root)?;
         let start = usize::try_from(anchor.head.snapshot_number).map_err(|_| StorageError::WorldMetadataMismatch)?;
@@ -398,6 +406,17 @@ impl Storage {
                 HistoricalTransitionV1::SoleMemberWake(record) => self.archive_sleep_locked(record)?,
             }
         }
+        // Independently verified local boundaries are immutable historical
+        // evidence before any live decision is removed. Replaying after a
+        // crash repeats this exact archival operation, never grants a lease.
+        if let Some(record) = sleep {
+            self.archive_sleep_locked(record)?;
+        }
+        if let Some(record) = reservation {
+            let bytes = postcard::to_allocvec(record)?;
+            let hash = Hash32(*blake3::hash(&bytes).as_bytes());
+            self.archive_history_locked(world, &format!("recovery-reservation-{hash}.postcard"), &bytes)?;
+        }
         let metadata = self.world_dir(world).join("metadata");
         if epoch.mode == EpochMode::Recovery {
             durable_atomic_write(
@@ -440,10 +459,84 @@ impl Storage {
         for name in consumed_decisions(&metadata, proof)? {
             durable_remove(&metadata.join(name))?;
         }
+        // All recovery certificates (including the pending slot) are now
+        // archived and the primary slot is the exact final accepted proof.
+        durable_remove(&metadata.join("recovery-certificate-pending.postcard"))?;
+        if sleep.is_some() {
+            durable_remove(&metadata.join("sleep.postcard"))?;
+        }
+        if reservation.is_some() {
+            durable_remove(&metadata.join("recovery-reservation.postcard"))?;
+        }
         self.finish_crash_retirement_replay_locked(anchor, proof)?;
         durable_remove(&self.stale_publication_path(world))?;
         Ok(())
     }
+}
+
+/// Local records outside the envelope require both exact semantic binding
+/// here and independent cryptographic verification by the application.
+fn exact_local_record<T>(path: &Path) -> Result<Option<T>, StorageError>
+where
+    T: serde::de::DeserializeOwned + Serialize,
+{
+    if !canonical_file_exists(path)? {
+        return Ok(None);
+    }
+    let bytes = read_canonical_file(path)?;
+    let record = postcard::from_bytes(&bytes)?;
+    if bytes != postcard::to_allocvec(&record)? {
+        return Err(StorageError::WorldMetadataMismatch);
+    }
+    Ok(Some(record))
+}
+
+fn local_boundary_records(
+    metadata: &Path,
+    proof: &HistoricalReplayProofV1,
+) -> Result<(Option<SleepRecordV1>, Option<AuthorityLeaseGrantV1>), StorageError> {
+    let sleep = exact_local_record::<SleepRecordV1>(&metadata.join("sleep.postcard"))?;
+    if let Some(record) = &sleep {
+        record.validate_semantics()?;
+        if record.world_id != proof.world_id
+            || !proof.transitions.iter().enumerate().any(|(index, transition)| {
+                let predecessor = &proof.epochs[index];
+                record.epoch == predecessor.epoch_number
+                    && record.fencing_token == predecessor.fencing_token
+                    && record.authority_peer_id == predecessor.authority_peer_id
+                    && record.authority_public_key == predecessor.authority_public_key
+                    && match transition {
+                        HistoricalTransitionV1::SoleMemberWake(certified) => certified.as_ref() == record,
+                        HistoricalTransitionV1::Recovery(certified) => {
+                            certified.ballot.base_snapshot_hash == record.latest_snapshot_hash
+                                && certified.ballot.base_epoch == record.epoch
+                                && certified.ballot.base_fencing_token == record.fencing_token
+                        }
+                        HistoricalTransitionV1::Transfer { .. } => false,
+                    }
+            })
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+    }
+    let reservation = exact_local_record::<AuthorityLeaseGrantV1>(&metadata.join("recovery-reservation.postcard"))?;
+    if let Some(record) = &reservation {
+        record.validate_semantics()?;
+        // Only a strictly superseded generation in the certified chain can
+        // consume a reservation. A final/newer or conflicting one is retained.
+        if record.world_id != proof.world_id
+            || record.lease_duration_ms == 0
+            || !proof.epochs.iter().take(proof.epochs.len().saturating_sub(1)).any(|epoch| {
+                record.epoch == epoch.epoch_number
+                    && record.fencing_token == epoch.fencing_token
+                    && record.authority_peer_id == epoch.authority_peer_id
+                    && record.authority_public_key == epoch.authority_public_key
+            })
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+    }
+    Ok((sleep, reservation))
 }
 
 /// Compare the complete canonical encoding, not just an epoch or ballot

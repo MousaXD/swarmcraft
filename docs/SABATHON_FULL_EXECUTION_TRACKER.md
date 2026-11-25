@@ -48,7 +48,7 @@ Implementation completion: count only items whose full implementation criteria a
 - State: **IN PROGRESS**
 - Source: crates/swarm-cli/src/daemon.rs; crates/swarm-storage/src/stale_publication.rs
 - Evidence: Live integration status; scoped automated evidence, exact-SHA CI pending.
-- Remaining / next action: Exact transfer phases and included recovery/membership votes are consumed only after certified replay publication. Planned-retirement re-entry now holds the existing runtime exclusion and exact committed-transfer guard. Crash-recovery retirement now uses a durable anchored replay fence and runtime exclusion; continue recovery certificates, reservations, sleep and unknown successors.
+- Remaining / next action: Exact transfer phases and included recovery/membership votes are consumed only after certified replay publication. Planned-retirement re-entry now holds the existing runtime exclusion and exact committed-transfer guard. Crash-recovery retirement and exact recovery certificate/independently signed sleep and reservation reconciliation are implemented; continue unknown successor discovery and other unresolved decisions.
 - External dependency: Not yet established; assess during execution.
 - Commit: 2d45f97 baseline; see live status for individual commits
 
@@ -694,7 +694,7 @@ Implementation completion: count only items whose full implementation criteria a
 
 ## Next checkpoint
 
-Continue #4: planned and crash-recovered authority re-entry, exact certified voting fences, and durable crash-retirement replay implemented. Next: exact pending recovery certificates, signed reservations/sleep and previously unknown successor discovery. Keep publication and runtime fail-closed. #9 precedes #8; #23 precedes activation of V2-dependent permissions; #56 precedes distributed-runtime adoption; #64–68 require signed governance and independent acceptance.
+Continue #4: planned and crash-recovered authority re-entry, exact certified voting fences, and durable crash-retirement replay implemented. Next: previously unknown successor discovery and automatic retargeting after membership changes; pending join/leave and solo conflicts remain conservatively blocked. Keep publication and runtime fail-closed. #9 precedes #8; #23 precedes activation of V2-dependent permissions; #56 precedes distributed-runtime adoption; #64–68 require signed governance and independent acceptance.
 
 Initial full-item implementation/acceptance totals: not yet established by item-specific audit; zero items asserted fully accepted by this ledger.
 
@@ -717,3 +717,9 @@ Initial full-item implementation/acceptance totals: not yet established by item-
 - #4: a recovered-away former authority now verifies the anchored recovery quorum and entire history, obtains exclusive runtime ownership, denies live/ambiguous JVM records, clears old permits/readiness, and installs an exact durable retirement envelope before isolated downloads. Ordinary authority/replica writes, reads and game routing remain fenced; only the pinned successor can send historical bytes. Retargeting must extend the pinned signed history. The marker survives restart and is consumed only under the publication intent after exact canonical installation.
 - Evidence: strict storage/CLI Clippy, formatting, 67 storage library tests passed (1 optional soak ignored), 136 CLI library tests passed, and real authenticated multi-daemon invite/recovery/restart test passed (65.65 seconds). The test uses signed synthetic recovery fixtures rather than a physical Minecraft JVM crash. No complete roadmap item is newly claimed.
 - Next: reconcile exact pending recovery certificates, signed sleep and reservation decisions; investigate authenticated discovery of successors admitted after the local anchor.
+
+### 25 November: certified boundary reconciliation
+
+- #4: stale publication now accepts either recovery-certificate slot only when the complete canonical record appears in the verified history; an accepted recovery anchor still requires its exact proof. Pending certificates are cleared only after archival and canonical installation. Signed sleep records must match a certified wake/recovery boundary, and signed reservations must bind a strictly superseded epoch in the proof. CLI verifies both local signatures independently. Both records are archived before removal under the publication intent. Final/newer reservations, unrelated sleep, malformed records and unresolved decisions remain blocking.
+- Evidence: all 7 historical-authority regressions, all 136 CLI library tests, 67 storage library tests (1 optional soak ignored), formatting and strict all-target/all-feature storage/CLI Clippy passed. Includes forged signatures, conflicting and trailing-byte certificates, exact pending slot, signed boundary preservation and restart. No complete roadmap item is newly claimed.
+- Next: authenticate and certify successors admitted after the stale anchor, without broadcasting private world IDs or trusting unauthenticated hints.

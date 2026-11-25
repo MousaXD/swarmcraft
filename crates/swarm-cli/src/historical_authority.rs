@@ -400,6 +400,14 @@ pub fn publish_stale_replay(
     for manifest in &candidate.manifests {
         verified.verify_manifest(manifest)?;
     }
+    // These local signed records are not necessarily included in the
+    // replay envelope. Structural binding alone cannot authorize removal.
+    if let Some(record) = &candidate.sleep {
+        swarm_core::lifecycle::verify_sleep_record_signature(record)?;
+    }
+    if let Some(record) = &candidate.reservation {
+        swarm_core::verify_lease_signature(record)?;
+    }
     let retired = anchor.epoch.authority_peer_id == local.peer_id();
     let _runtime_exclusion = if retired {
         Some(crate::migration::acquire_retired_replay_guard(&DataPaths::from_root(storage.root()), world)?)
@@ -1348,8 +1356,80 @@ mod tests {
             download.finalize().unwrap();
             assert!(reopened.load_epoch_record(world).is_err());
         }
+        // A crash can also leave signed sleep/recovery records on disk.
+        // Inject exact durable bytes because ordinary writes are already
+        // fenced. Corruption, unrelated boundaries and future reservations
+        // must remain blocking, without consuming any record.
+        let metadata = reopened.world_dir(world).join("metadata");
+        let accepted_path = metadata.join("recovery-certificate.postcard");
+        let pending_path = metadata.join("recovery-certificate-pending.postcard");
+        let sleep_path = metadata.join("sleep.postcard");
+        let reservation_path = metadata.join("recovery-reservation.postcard");
+        let certificate_bytes = postcard::to_allocvec(&certificate).unwrap();
+        let mut corrupted = certificate_bytes.clone();
+        corrupted.push(0);
+        std::fs::write(&pending_path, &corrupted).unwrap();
+        assert!(reopened.stale_publication_candidate(world).is_err());
+        assert_eq!(std::fs::read(&pending_path).unwrap(), corrupted);
+        let mut conflicting = certificate.clone();
+        conflicting.votes[0].signature[0] ^= 1;
+        std::fs::write(&accepted_path, postcard::to_allocvec(&conflicting).unwrap()).unwrap();
+        std::fs::write(&pending_path, &certificate_bytes).unwrap();
+        assert!(reopened.stale_publication_candidate(world).is_err());
+        std::fs::write(&accepted_path, &certificate_bytes).unwrap();
+        let mut sleep = swarm_protocol::SleepRecordV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            latest_snapshot_hash: boundary.manifest_hash().unwrap(),
+            epoch: first.epoch_number,
+            fencing_token: first.fencing_token,
+            authority_peer_id: alice.peer_id(),
+            authority_public_key: alice.public_key(),
+            signature: Vec::new(),
+        };
+        alice.sign_sleep_record(&mut sleep).unwrap();
+        let mut different_sleep = sleep.clone();
+        different_sleep.latest_snapshot_hash = first_checkpoint.manifest_hash().unwrap();
+        alice.sign_sleep_record(&mut different_sleep).unwrap();
+        std::fs::write(&sleep_path, postcard::to_allocvec(&different_sleep).unwrap()).unwrap();
+        assert!(reopened.stale_publication_candidate(world).is_err());
+        let mut forged_sleep = sleep.clone();
+        forged_sleep.signature[0] ^= 1;
+        std::fs::write(&sleep_path, postcard::to_allocvec(&forged_sleep).unwrap()).unwrap();
+        assert!(reopened.stale_publication_candidate(world).unwrap().is_some());
+        assert!(publish_stale_replay(&reopened, &alice, world).is_err());
+        assert!(!reopened.stale_publication_pending(world).unwrap());
+        std::fs::write(&sleep_path, postcard::to_allocvec(&sleep).unwrap()).unwrap();
+        let mut reservation = swarm_protocol::AuthorityLeaseGrantV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            epoch: next.epoch_number,
+            fencing_token: next.fencing_token,
+            lease_duration_ms: 5_000,
+            authority_peer_id: bob.peer_id(),
+            authority_public_key: bob.public_key(),
+            nonce: [71; 32],
+            signature: Vec::new(),
+        };
+        bob.sign_lease(&mut reservation).unwrap();
+        let mut final_reservation = reservation.clone();
+        final_reservation.epoch = third.epoch_number;
+        final_reservation.fencing_token = third.fencing_token;
+        carol.sign_lease(&mut final_reservation).unwrap();
+        std::fs::write(&reservation_path, postcard::to_allocvec(&final_reservation).unwrap()).unwrap();
+        assert!(reopened.stale_publication_candidate(world).is_err());
+        let mut forged_reservation = reservation.clone();
+        forged_reservation.signature[0] ^= 1;
+        std::fs::write(&reservation_path, postcard::to_allocvec(&forged_reservation).unwrap()).unwrap();
+        assert!(reopened.stale_publication_candidate(world).unwrap().is_some());
+        assert!(publish_stale_replay(&reopened, &alice, world).is_err());
+        assert!(!reopened.stale_publication_pending(world).unwrap());
+        let reservation_bytes = postcard::to_allocvec(&reservation).unwrap();
+        std::fs::write(&reservation_path, &reservation_bytes).unwrap();
         let candidate = reopened.stale_publication_candidate(world).unwrap().unwrap();
         assert_eq!(candidate.manifests, canonical);
+        assert_eq!(candidate.sleep.as_ref(), Some(&sleep));
+        assert_eq!(candidate.reservation.as_ref(), Some(&reservation));
         assert!(reopened.begin_verified_stale_publication(&candidate).is_err());
         reopened.begin_verified_crash_retirement_publication(&candidate).unwrap();
         assert!(reopened.crash_retirement_pending(world).unwrap());
@@ -1361,6 +1441,23 @@ mod tests {
         assert!(!reopened.crash_retirement_pending(world).unwrap());
         assert!(!reopened.stale_publication_pending(world).unwrap());
         assert_eq!(reopened.load_epoch_record(world).unwrap(), third);
+        assert!(!accepted_path.exists());
+        assert!(!pending_path.exists());
+        assert!(!sleep_path.exists());
+        assert!(!reservation_path.exists());
+        assert_eq!(
+            reopened.load_recovery_certificate_for_epoch(world, next.record_hash().unwrap()).unwrap(),
+            certificate
+        );
+        assert_eq!(reopened.load_sleep_boundary(&first, boundary.manifest_hash().unwrap()).unwrap(), sleep);
+        let reservation_hash = Hash32(*blake3::hash(&reservation_bytes).as_bytes());
+        assert_eq!(
+            std::fs::read(
+                metadata.join("authority-history").join(format!("recovery-reservation-{reservation_hash}.postcard"))
+            )
+            .unwrap(),
+            reservation_bytes
+        );
         assert_eq!(reopened.load_membership_record(world).unwrap(), membership3);
         assert_eq!(reopened.list_snapshots(world).unwrap(), canonical);
         assert!(reopened.load_staged_stale_replay_proof(world).unwrap().is_none());
@@ -1893,6 +1990,10 @@ mod tests {
         assert!(stale.begin_verified_stale_publication(&candidate).is_err());
         assert_eq!(std::fs::read(&membership_fence).unwrap(), corrupt_bytes);
         std::fs::write(&membership_fence, postcard::to_allocvec(&membership_promise).unwrap()).unwrap();
+        // A pending certificate can also be the exact final recovery proof.
+        // Preserve its canonical bytes in the primary slot before removal.
+        let pending_recovery = metadata.join("recovery-certificate-pending.postcard");
+        std::fs::write(&pending_recovery, postcard::to_allocvec(recovery.as_ref()).unwrap()).unwrap();
 
         // Simulate process death after durable intent and a subset of the
         // exact canonical writes. No ordinary reader or writer may use
@@ -1938,6 +2039,7 @@ mod tests {
         assert!(!transfer_path.exists());
         assert!(!fence.exists());
         assert!(!membership_fence.exists());
+        assert!(!pending_recovery.exists());
         assert_eq!(stale.load_epoch_record(world).unwrap(), third);
         assert_eq!(stale.load_membership_record(world).unwrap(), admitted);
         assert_eq!(stale.load_world_descriptor(world).unwrap(), descriptor);
