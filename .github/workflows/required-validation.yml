@@ -1,110 +1,131 @@
 name: Required Validation
 
+# Deliberately requested final native verification only. A normal push or
+# PR update cannot start this workflow or satisfy its final status context.
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_call:
     inputs:
+      local_validation_sha:
+        description: Exact commit already validated locally by the operator
+        required: true
+        type: string
       release_tag:
-        description: Optional production release tag to bind to application metadata.
         required: false
         type: string
         default: ''
-      run_network_soak:
-        description: Include the multi-GiB network soak in this exact-SHA gate.
+      expected_ref:
         required: false
-        type: boolean
-        default: false
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: Optional production release tag to validate.
-        required: false
+      local_validation_sha:
+        description: Exact commit already validated locally (operator attestation)
+        required: true
         type: string
-        default: ''
-      run_network_soak:
-        description: Include the multi-GiB network soak.
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: required-validation-${{ github.event.pull_request.number || github.ref }}-${{ inputs.run_network_soak }}-${{ inputs.release_tag || 'none' }}
+  group: required-validation-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  core:
-    name: Core CI
-    uses: ./.github/workflows/ci.yml
-    permissions:
-      contents: read
-      checks: write
+  preflight:
+    name: Local-first final check preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify exact local-validation attestation and selected ref
+        shell: bash
+        env:
+          LOCAL_SHA: ${{ inputs.local_validation_sha }}
+          EXPECTED_REF: ${{ inputs.expected_ref }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          test "$LOCAL_SHA" = "$GITHUB_SHA"
+          if [[ -n "$EXPECTED_REF" ]]; then
+            test "$EXPECTED_REF" = "$GITHUB_REF"
+          fi
+          python3 scripts/check_workflow_policy.py
+          if [[ -n "$RELEASE_TAG" ]]; then
+            test "$GITHUB_REF_TYPE" = tag
+            test "$RELEASE_TAG" = "$GITHUB_REF_NAME"
+            python3 scripts/check_release_version.py --tag "$RELEASE_TAG"
+          else
+            python3 scripts/check_release_version.py
+          fi
+          echo "Local tests are operator-attested, not executed or independently certified by this workflow."
 
-  specialist:
-    name: Specialist validation
-    uses: ./.github/workflows/specialist-validation.yml
-    permissions:
-      contents: read
-
-  governance_regressions:
-    name: CI governance regressions
-    uses: ./.github/workflows/governance-regressions.yml
-    permissions:
-      contents: read
-
-  version:
-    name: Release identity
-    uses: ./.github/workflows/version-guard.yml
-    with:
-      release_tag: ${{ inputs.release_tag }}
-    permissions:
-      contents: read
-
-  player_journey:
-    name: Live player journey
-    uses: ./.github/workflows/player-journey-live.yml
-    permissions:
-      contents: read
-
-  network_soak:
-    name: Network soak
-    if: ${{ inputs.run_network_soak == true }}
-    uses: ./.github/workflows/network-soak.yml
-    permissions:
-      contents: read
+  native:
+    needs: preflight
+    name: Native Rust and Desktop checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-05
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+      - name: Verify committed native lockfiles
+        shell: bash
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null
+          cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --format-version 1 > /dev/null
+      - name: Native workspace lint and test
+        run: |
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-features --locked
+      - name: Build native Desktop sidecars
+        run: cargo build -p swarm-cli --locked
+      - name: Stage native sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc --print host-tuple)"
+          mkdir -p apps/desktop/src-tauri/binaries
+          ext=''
+          if [[ "$RUNNER_OS" == Windows ]]; then ext='.exe'; fi
+          for name in swarmcraft swarmcraft-host swarmcraft-runtime swarmcraft-import; do
+            cp "target/debug/${name}${ext}" "apps/desktop/src-tauri/binaries/${name}-${target}${ext}"
+          done
+      - name: Native Desktop lint and test
+        run: |
+          cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features --locked
 
   gate:
     name: Required validation gate
     if: ${{ always() }}
-    needs: [core, specialist, governance_regressions, version, player_journey, network_soak]
+    needs: [preflight, native]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     env:
-      CORE_RESULT: ${{ needs.core.result }}
-      SPECIALIST_RESULT: ${{ needs.specialist.result }}
-      GOVERNANCE_RESULT: ${{ needs.governance_regressions.result }}
-      VERSION_RESULT: ${{ needs.version.result }}
-      PLAYER_RESULT: ${{ needs.player_journey.result }}
-      SOAK_RESULT: ${{ needs.network_soak.result }}
-      REQUIRE_SOAK: ${{ inputs.run_network_soak }}
+      PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+      NATIVE_RESULT: ${{ needs.native.result }}
     steps:
-      - name: Require selected exact-SHA validation components
+      - name: Require exact-SHA local attestation and native verification
         shell: bash
         run: |
           set -euo pipefail
-          test "$CORE_RESULT" = success
-          test "$SPECIALIST_RESULT" = success
-          test "$GOVERNANCE_RESULT" = success
-          test "$VERSION_RESULT" = success
-          test "$PLAYER_RESULT" = success
-          if [[ "$REQUIRE_SOAK" == true ]]; then
-            test "$SOAK_RESULT" = success
-          else
-            [[ "$SOAK_RESULT" == skipped || "$SOAK_RESULT" == success ]]
-          fi
-          echo "Required validation accepted exact SHA $GITHUB_SHA"
+          test "$PREFLIGHT_RESULT" = success
+          test "$NATIVE_RESULT" = success
+          echo "Final native checks passed for $GITHUB_SHA; local validation is separately operator-attested."

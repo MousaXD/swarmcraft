@@ -6,21 +6,25 @@ Application version `0.5.1` and wire protocol version `1` are intentionally inde
 
 ## Authoritative validation status
 
-`.github/workflows/required-validation.yml` is the authoritative same-SHA gate. Its terminal status is:
+The local-first policy supersedes the former automatic full validation graph.
+See [CI_LOCAL_FIRST.md](CI_LOCAL_FIRST.md) for local commands and evidence.
 
-`Required validation gate`
+`ci.yml` runs one lightweight metadata check on main/PR code changes only.
+It is not a test or build certificate. It never emits the protected final
+status `Required validation gate`.
 
-For ordinary pull requests and `main` validation it requires, for the same commit:
+`required-validation.yml` is manual or release-called only, after explicit
+operator approval. It requires the exact locally validated SHA, checks the
+requested ref and release metadata, and then runs final native Windows/macOS
+Rust and Desktop checks. Its terminal `Required validation gate` requires both
+preflight and native verification to succeed. The SHA input is an operator
+attestation, **not** independent proof that the local tests ran. Retain exact
+local logs and do not attest a failed, skipped, or unrun required test.
 
-1. Core CI: multi-OS workspace lint/tests, process-level acceptance, fuzz smoke, network impairment, Desktop package matrix, Fabric build, root RustSec, direct excluded Desktop/provider checks, and Desktop RustSec.
-2. Specialist validation: deterministic/live catalog tests, Modrinth provider tests, CurseForge provider tests and Tauri command registration.
-3. CI governance regressions: stale Desktop lock rejection plus deliberate failing Desktop/provider tests that must be rejected.
-4. Release identity: shipped-version/lock coherence, immutable workflow/action policy, Fabric build-tool policy, and negative release-policy regressions.
-5. Live player journey acceptance against the candidate commit.
-
-Release-producing callers set `run_network_soak: true`, adding the multi-GiB interrupted QUIC soak to the same exact-SHA gate.
-
-The terminal gate uses `if: always()` and inspects every selected reusable-workflow result. Failed, cancelled, or still-running selected validation therefore cannot satisfy the publisher dependency.
+The former Linux workspace/process, excluded Desktop/provider, deterministic
+and authorized live catalog, fuzz, impairment/soak, installed Linux GUI,
+Fabric, RustSec and clean-machine acceptance requirements remain local release
+requirements. Removing their hosted workflows does not certify those gates.
 
 ## Release publication DAG
 
@@ -30,9 +34,9 @@ The terminal gate uses `if: always()` and inspects every selected reusable-workf
 
 The order is:
 
-`exact-SHA Required Validation + network soak -> platform/Fabric packages -> verify -> upload draft -> verify uploads -> publish`
+`local validation including network soak -> manual exact-SHA native validation -> platform/Fabric packages -> verify -> upload draft -> verify uploads -> publish`
 
-All builder jobs depend on validation. The read-only package verification job also runs on pull requests and records the five package groups and their checksums. The publisher depends on successful verification and then checks the same run's artifacts again before staging the draft. Publication is restricted to `refs/heads/main`.
+All builder jobs depend on validation. The read-only package verification job runs only during explicitly dispatched packaging and records the five package groups and their checksums. The publisher depends on successful verification and then checks the same run's artifacts again before staging the draft. Publication is restricted to `refs/heads/main`.
 
 Each preview is published under `main-snapshot-<full commit SHA>`. The publisher checks the byte count and SHA-256 digest of every uploaded asset while the release is still a draft, then binds the tag to that commit and publishes the prerelease. An interrupted upload leaves the previous releases available on the GitHub Releases page. A rerun can resume a draft whose existing assets match the verified files. A conflicting draft or tag requires operator review.
 
@@ -44,7 +48,7 @@ The existing `main-latest` release is retained for legacy clients. To roll back,
 
 Before any package job starts it requires both:
 
-- Required Validation for the exact tag target SHA, including network soak; and
+- local validation including network soak, attested for the exact tag target SHA, plus final native Required Validation; and
 - production signing/notarization credential policy.
 
 `scripts/check_release_version.py --tag "$GITHUB_REF_NAME"` semantics are exercised through the reusable release-identity gate. The tag must equal `v<workspace.package.version>` exactly, and shipped Rust/Tauri/Fabric metadata plus both committed Rust lock graphs must agree with that application version.
@@ -58,7 +62,7 @@ The root Cargo workspace intentionally excludes:
 - `apps/desktop/src-tauri`
 - `crates/swarm-provider`
 
-Authoritative CI therefore validates them explicitly rather than assuming `--workspace` includes them.
+Local validation must cover them explicitly rather than assuming `--workspace` includes them. Final native Desktop checks also run on Windows/macOS.
 
 Desktop requirements include:
 
@@ -80,7 +84,9 @@ Active workflow policy is:
 - workflow permissions default to `contents: read`;
 - `contents: write` is allowed only on the final publisher jobs in `main-installers.yml` and `release.yml`;
 - release builders and publishers must depend on exact-SHA Required Validation;
-- release-producing validation must include network soak;
+- release-producing local validation must include network soak;
+- no temporary/agent workflows, schedules or automatic heavy jobs;
+- only the five reviewed workflows are permitted; see the local-first policy;
 - production release must bind the tag name and invoke the signing credential policy.
 
 Fabric build inputs are explicit released coordinates. Fabric Loom is pinned to released `1.17.2`; snapshot Loom coordinates are rejected by both release-version and workflow policy checks. Minecraft, Fabric Loader, Fabric API, Gradle, and Java versions remain explicit in repository/workflow metadata rather than dynamic `latest` ranges.
@@ -89,7 +95,7 @@ Fabric build inputs are explicit released coordinates. Fabric Loom is pinned to 
 
 Retention is standardized by evidence class:
 
-- ordinary CI package/build artifacts: **7 days**;
+- local test/build evidence: retain for the applicable review;
 - live player-journey evidence: **14 days**;
 - preview/versioned release staging artifacts: **14 days**;
 - network-soak logs/metadata/qdisc evidence: **30 days**;
@@ -97,7 +103,7 @@ Retention is standardized by evidence class:
 
 Historical audit reports and Git commits remain durable evidence. Branch-specific Agent 1/2/3 validation workflows and the historical PR 10 screenshot workflow were removed only after useful checks were migrated to current validation.
 
-## Repository ruleset requirement
+## Repository ruleset requirement (historical configuration; verify before rollout)
 
 Repository governance is enforced by two active repository rulesets, both with an empty bypass-actor list:
 
@@ -108,7 +114,7 @@ Live effective-rules inspection on 2026-09-18 confirms that `main` receives both
 
 ## Evidence lifecycle and cleanup
 
-Current validation belongs in current workflows, not branch-named archaeology.
+Current validation belongs on local machines, not temporary or agent-specific workflows.
 
 The following historical workflow files were retired after migration:
 
@@ -127,21 +133,19 @@ See `docs/NETWORK_VALIDATION.md`, `docs/FINAL_PLAYER_JOURNEY_ACCEPTANCE.md`, and
 
 ## Mandatory packaged desktop acceptance
 
-The reusable Core CI graph now includes `desktop-packaged-smoke`, which
-depends on the Linux desktop package produced for the **same workflow run and
-commit**. Since `Required validation gate` requires the whole Core CI
-reusable workflow to succeed, a real desktop startup regression blocks merge
-and publication; passing a compilation or the mocked Chrome test alone cannot
-satisfy the gate.
+Run installed Linux Tauri/WebKitGTK acceptance locally, using the exact
+candidate Debian package. The existing harness at
+`scripts/acceptance/packaged-desktop-webdriver.py` checks actual packaged
+application startup, signed/native behavior, and restart persistence.
+Also retain the missing-CLI-sidecar negative control in an isolated
+test installation. For candidate Svelte, exercise the missing-module
+negative and viewport checks as documented in the candidate README.
 
-This job extracts the candidate Debian package, launches the actual
-Tauri/WebKitGTK window with all four packaged sidecars, verifies first-boot
-identity and world-list completion, creates a world through the actual GUI,
-restarts the app, and checks persistent identity and world selection. It
-also removes the required CLI sidecar and asserts the identical acceptance
-fails with an observable startup error. Screenshots, sanitized state
-snapshots, WebDriver logs and package SHA-256 are retained as CI artifacts.
+This is Linux GUI/runtime coverage, not Windows or macOS installed GUI
+acceptance. Final Windows/macOS package construction is not evidence that
+the GUI was opened. Keep actual reviewed local evidence and record skipped
+or blocked checks; no hosted workflow success may substitute for them.
 
-This gate is **Linux GUI/runtime coverage**, not Windows or macOS packaged
-GUI acceptance. Existing Windows/macOS package jobs provide construction
-coverage only; the full platform test matrix remains a tracked limitation.
+The prior CI definitions and command recipes remain available in git
+history (the pre-policy integration checkpoint `49ca1f5`); use them as
+local execution recipes only, never restore or dispatch those workflows.

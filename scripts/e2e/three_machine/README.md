@@ -468,13 +468,21 @@ actual reviewed artifacts.
 
 ## Isolated optional GitHub Action
 
-The new .github/workflows/three-machine-certification.yml runs **negative-only
-harness unit tests** on relevant PR changes. When manually dispatched it
-performs **preflight only**, using three repository secrets:
+Run the harness locally using the commands below. The retained
+`.github/workflows/three-machine-certification.yml` has **manual dispatch only**
+and is restricted to a separately approved, isolated self-hosted field-lab
+runner. It never runs on push, PR, a schedule, or a GitHub-hosted runner.
+It performs **preflight only** if explicitly requested, using three repository secrets:
 
 - SWARMCRAFT_E2E_CONFIG_JSON — private config matching workflow source commit.
 - SWARMCRAFT_E2E_SSH_PRIVATE_KEY — scoped field-lab SSH identity.
 - SWARMCRAFT_E2E_SSH_KNOWN_HOSTS — independently verified host-key pins.
+
+The manual preflight uses isolated temporary SSH credentials rather than
+writing to the runner account's existing SSH configuration or identities.
+Use directly resolvable SSH targets in the secret configuration (not aliases
+that rely on a personal SSH config). Prefer an ephemeral lab runner; a
+hard-killed job may require secure cleanup of its temporary files.
 
 A green preflight means only that three installed .deb packages and network
 endpoints passed preliminary checks. It does **not** mean the complete E2E

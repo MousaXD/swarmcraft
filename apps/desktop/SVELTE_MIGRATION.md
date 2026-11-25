@@ -1,3 +1,8 @@
+> Local-first policy update (2026-11-25): the Svelte candidate Actions
+> workflows described below are historical evidence, not active workflows.
+> Run their checks locally, never recreate agent workflows, and request only
+> necessary final native verification under [CI_LOCAL_FIRST.md](../../docs/CI_LOCAL_FIRST.md).
+
 # Issue #87 — SwarmCraft Svelte/TypeScript migration and feature-parity audit
 
 **Baseline:** `main` at `45174310d1433116e64b9b6978cb4f2aa1c22c15`, including merged PR #88. **Branch:** `agent-04/svelte-typescript-desktop`. **Status:** IN PROGRESS / NOT READY TO MERGE.

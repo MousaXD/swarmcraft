@@ -28,9 +28,10 @@ node --test tests/source-parity.test.mjs
 
 Production still serves `../src`, but the candidate can be packaged **without modifying production Tauri configuration** using `frontend/tauri.candidate.conf.json`, whose only override is `build.frontendDist`. See:
 
-- `.github/workflows/svelte-migration-validation.yml` — locked Svelte, TypeScript, Vitest and source parity.
-- `.github/workflows/svelte-candidate-native-gui.yml` — actual installed Linux Debian/WebKitGTK first boot, create, restart, persistence, missing-sidecar negative control, and visual/error checks at 980×760 / 720×560.
-- `.github/workflows/svelte-candidate-platform-builds.yml` — Windows NSIS and macOS arm64/Intel DMG **packaging only**. These are not proof the UI was opened on those platforms.
+- Run the locked frontend checks above locally; do not recreate candidate agent workflows.
+- Use the existing installed Linux Debian/WebKitGTK harness locally for actual first boot, create, restart, persistence, missing-sidecar, damaged-module and viewport checks (980 x 760 / 720 x 560).
+- Request approved final native Windows/macOS packaging only if needed. Packaging does not prove installed GUI behavior.
+- The former Svelte workflows were removed by the local-first policy. Their exact command recipes are in pre-policy git history (`49ca1f5`); see [CI_LOCAL_FIRST.md](../../../docs/CI_LOCAL_FIRST.md).
 
 The new Svelte Create, Join and Import forms use exact Rust command names and a legacy **completion-only** world-list refresh bridge. Duplicate native submissions from the legacy form handlers are suppressed only while the Svelte owner flags are active. Tests and native screenshot evidence are mandatory before qualifying these new paths as stable.
 
@@ -72,7 +73,7 @@ are written to evidence artifacts.
 
 - The Svelte Diagnostics `node_identity` refresh now has a 15-second UI-bound read timeout and can retry after an unresolved native IPC request. A stale callback cannot overwrite newer identity state or falsely increment the verified native-read counter. The Rust command and the shipping startup controller are unchanged.
 - Real Linux installed-app evidence from run `42917948627` identified a candidate test navigation blocker: the Leave World membership disclosure is nested inside collapsed **Advanced world controls**. The candidate WebDriver test now opens both real summaries in order and still requires the actual Cancel action to preserve the selected canonical world.
-- Run source/TypeScript/Vitest, real installed Linux/WebKitGTK positive and negative controls, and Windows/macOS packaging on the **exact final feature-branch SHA**. There is no claim of successful native certification for this follow-up until those Actions finish.
+- Run source/TypeScript/Vitest, real installed Linux/WebKitGTK positive and negative controls, and Windows/macOS packaging on the **exact final feature-branch SHA**. There is no claim of successful native certification for this follow-up until exact-commit local and approved native evidence is available.
 
 The migration is still a hybrid compatibility candidate with delegated world-list, managed Minecraft, provider/mod, replication, and migration/recovery flows. Keep `frontendDist` on the legacy shipping UI until Agent 00 and independent installed-app QA approve complete parity.
 

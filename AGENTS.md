@@ -2,6 +2,30 @@
 
 These instructions apply to the entire repository.
 
+## Mandatory local-first CI policy
+
+- Run formatting, linting, lockfile generation, tests, integration/E2E checks
+  and builds directly on the local machine first. Never use GitHub Actions
+  as an agent worker, patch applicator, formatter, lockfile generator or
+  temporary test harness.
+- Do not create temporary, agent-specific or one-off workflows, scheduled
+  workflows, cron triggers, or hosted live third-party service probes.
+- Batch changes, verify locally, and push once per verified milestone or
+  PR. Do not make rapid commit/push loops. If an intermediate push is
+  explicitly needed, use `[skip ci]` and account for required-check rules.
+- Only the lightweight main/PR metadata workflow may run automatically.
+  It must ignore docs and Markdown-only changes and cancel obsolete runs.
+  Heavy E2E, certification and packaging require explicit manual dispatch.
+- Use hosted runners only for necessary final PR/release verification or
+  native targets unavailable locally. Never dispatch without explicit
+  authorization and successful local validation of the exact commit.
+  Manual Linux packaging/field-lab workflows require separately approved,
+  isolated operator-owned runners; do not register the daily workstation
+  or launch a runner to bypass this rule.
+- Run `python3 scripts/check_workflow_policy.py` locally after any CI change.
+  See `docs/CI_LOCAL_FIRST.md`. Do not push or change repository settings
+  while awaiting explicit approval.
+
 ## Desktop frontend
 
 SwarmCraft's desktop UI is a Tauri 2 application with a deliberately small frontend stack:

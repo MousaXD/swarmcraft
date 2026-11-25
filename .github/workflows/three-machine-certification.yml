@@ -1,19 +1,10 @@
 name: Three-machine real E2E certification (manual / non-release)
 
 on:
-  # Cheap, real GitHub-hosted negative controls on every integration commit.
-  # This MUST NOT be represented as three real installed Minecraft clients.
-  push:
-    branches:
-      - integration/sabathon-p0-20261123
-  pull_request:
-    paths:
-      - 'scripts/e2e/**'
-      - '.github/workflows/three-machine-certification.yml'
   workflow_dispatch:
     inputs:
       run_remote_preflight:
-        description: Explicitly connect provisioned real machines (requires pinned SSH secrets)
+        description: Explicitly connect operator-owned machines from a dedicated self-hosted runner (requires pinned SSH secrets)
         required: false
         type: boolean
         default: false
@@ -21,13 +12,19 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: three-machine-certification
+  cancel-in-progress: true
+
 jobs:
   harness-negative-controls:
     name: Three-machine harness negative assertions
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, swarmcraft-certification]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Syntax and fail-closed unit tests (NOT real E2E certification)
         run: |
           python3 -m compileall -q scripts/e2e/three_machine
@@ -37,7 +34,7 @@ jobs:
     name: Three remote installations (preflight ONLY, not certification)
     if: github.event_name == 'workflow_dispatch' && inputs.run_remote_preflight == true
     needs: harness-negative-controls
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, swarmcraft-certification]
     timeout-minutes: 15
     env:
       E2E_CONFIG_JSON: ${{ secrets.SWARMCRAFT_E2E_CONFIG_JSON }}
@@ -45,6 +42,8 @@ jobs:
       E2E_SSH_KNOWN_HOSTS: ${{ secrets.SWARMCRAFT_E2E_SSH_KNOWN_HOSTS }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Require explicitly provisioned hosts and pinned SSH trust
         shell: bash
         run: |
@@ -54,23 +53,36 @@ jobs:
             echo 'BLOCKED: dedicated machines, SSH key, and pinned known_hosts are required.'
             exit 2
           fi
-          install -d -m 700 "$HOME/.ssh"
-          printf '%s\n' "$E2E_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
-          chmod 600 "$HOME/.ssh/id_ed25519"
-          printf '%s\n' "$E2E_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/known_hosts"
-          printf '%s' "$E2E_CONFIG_JSON" > "$RUNNER_TEMP/e2e-config.json"
-          python3 - "$RUNNER_TEMP/e2e-config.json" "$GITHUB_SHA" <<'PY'
+          # A dedicated runner may already have unrelated SSH identities.
+          # Keep the lab credentials and config strictly within this step.
+          E2E_SSH_DIR="$(mktemp -d "$RUNNER_TEMP/swarmcraft-e2e-ssh.XXXXXX")"
+          trap 'rm -rf -- "$E2E_SSH_DIR"' EXIT
+          REAL_SSH="$(command -v ssh)"
+          export E2E_SSH_DIR REAL_SSH
+          printf '%s\n' "$E2E_SSH_PRIVATE_KEY" > "$E2E_SSH_DIR/id_ed25519"
+          chmod 600 "$E2E_SSH_DIR/id_ed25519"
+          printf '%s\n' "$E2E_SSH_KNOWN_HOSTS" > "$E2E_SSH_DIR/known_hosts"
+          chmod 600 "$E2E_SSH_DIR/known_hosts"
+          printf '%s' "$E2E_CONFIG_JSON" > "$E2E_SSH_DIR/config.json"
+          unset E2E_SSH_PRIVATE_KEY E2E_SSH_KNOWN_HOSTS E2E_CONFIG_JSON
+          cat > "$E2E_SSH_DIR/ssh" <<'SH'
+          #!/bin/sh
+          exec "$REAL_SSH" -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o IdentitiesOnly=yes -o IdentityAgent=none -o UpdateHostKeys=no \
+            -o UserKnownHostsFile="$E2E_SSH_DIR/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+            -i "$E2E_SSH_DIR/id_ed25519" "$@"
+          SH
+          chmod 700 "$E2E_SSH_DIR/ssh"
+          export PATH="$E2E_SSH_DIR:$PATH"
+          python3 - "$E2E_SSH_DIR/config.json" "$GITHUB_SHA" <<'PY'
           import json
           import sys
           config = json.load(open(sys.argv[1], encoding='utf-8'))
           if config.get('commit') != sys.argv[2]:
               raise SystemExit('BLOCKED: configured package provenance commit differs from workflow SHA')
           PY
-      - name: Verify three independently installed Debian packages and networks
-        run: |
           python3 scripts/e2e/three_machine/run.py preflight \
-            --config "$RUNNER_TEMP/e2e-config.json" \
+            --config "$E2E_SSH_DIR/config.json" \
             --output "$RUNNER_TEMP/three-machine-e2e"
       - name: Upload only sanitized preflight record
         if: always()

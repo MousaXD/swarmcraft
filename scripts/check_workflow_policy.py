@@ -18,6 +18,128 @@ ALLOWED_CONTENTS_WRITE = {
 }
 
 
+# Keep a deliberately small, explicit workflow allowlist. New workflow
+# files or event types require a reviewed policy change, not an agent task.
+ALLOWED_EVENTS = {
+    "ci.yml": {"push", "pull_request"},
+    "required-validation.yml": {"workflow_call", "workflow_dispatch"},
+    "main-installers.yml": {"workflow_dispatch"},
+    "release.yml": {"workflow_dispatch"},
+    "three-machine-certification.yml": {"workflow_dispatch"},
+}
+DOCS_IGNORE = {"docs/**", "*.md", "**/*.md"}
+
+
+def top_level_block(text: str, name: str) -> str:
+    """Require the repository's explicit, block-style workflow structure.
+
+    This lightweight guard is not a general YAML parser. Refuse alternative
+    trigger spellings/structures instead of assuming they are harmless.
+    """
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if line == name + ":"]
+    if len(starts) != 1:
+        fail(f"expected exactly one explicit {name}: block")
+    start = starts[0] + 1
+    end = next(
+        (i for i in range(start, len(lines))
+         if lines[i] and not lines[i][0].isspace() and not lines[i].startswith("#")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def check_local_first(path: Path, text: str) -> None:
+    if path.name not in ALLOWED_EVENTS:
+        fail(f"{path.name}: unapproved workflow (temporary/agent workflows are forbidden)")
+    events_block = top_level_block(text, "on")
+    events = []
+    for line in events_block.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line.startswith("  ") and not line.startswith("   "):
+            match = re.fullmatch(r"  ([a-z_]+):", line)
+            if match is None:
+                fail(f"{path.name}: use explicit block-style event declarations")
+            events.append(match[1])
+    if len(events) != len(set(events)) or set(events) != ALLOWED_EVENTS[path.name]:
+        fail(f"{path.name}: unexpected trigger(s); expected {sorted(ALLOWED_EVENTS[path.name])}")
+    if re.search(r"(?m)^\s*(?:schedule|cron)\s*:", events_block):
+        fail(f"{path.name}: scheduled workflows are forbidden")
+    if not re.search(r"(?m)^  cancel-in-progress: true\s*$", top_level_block(text, "concurrency")):
+        fail(f"{path.name}: concurrency must cancel obsolete runs")
+
+    blocks = job_blocks(text)
+    if path.name == "ci.yml":
+        for event in ("push", "pull_request"):
+            event_block = re.search(
+                rf"(?ms)^  {event}:\s*\n(.*?)(?=^  [a-z_]+:|\Z)", events_block
+            )
+            if not event_block or not re.search(r"(?m)^    branches: \[main\]\s*$", event_block[1]):
+                fail(f"{path.name}: {event} must be restricted to main")
+            ignore = re.search(r"(?m)^    paths-ignore:\s*\n((?:^      - .+\n?)+)", event_block[1])
+            if ignore is None or set(re.findall(r"(?m)^      - ['\"]([^'\"]+)['\"]\s*$", ignore[1])) != DOCS_IGNORE:
+                fail(f"{path.name}: {event} must ignore docs and Markdown-only changes")
+        if set(blocks) != {"metadata"}:
+            fail(f"{path.name}: automatic CI must contain only the lightweight metadata job")
+        metadata = blocks["metadata"]
+        if "runs-on: ubuntu-latest" not in metadata or "timeout-minutes: 5" not in metadata:
+            fail(f"{path.name}: metadata runner must have a five-minute limit")
+        if "uses: ./" in metadata or "strategy:" in metadata:
+            fail(f"{path.name}: automatic CI cannot invoke reusable or matrix jobs")
+        if re.search(r"(?m)^\s*- uses: (?!actions/checkout@)", metadata):
+            fail(f"{path.name}: automatic CI may only use the pinned checkout action")
+        # The sole automatic job must not acquire dependencies or run builds,
+        # tests, live source probes, patching scripts, or other arbitrary commands.
+        allowed_commands = [
+            "python3 scripts/check_workflow_policy.py",
+            "python3 scripts/check_release_version.py",
+        ]
+        lines = metadata.splitlines()
+        run_indexes = [i for i, line in enumerate(lines) if line.strip().startswith("run:")]
+        if len(run_indexes) != 1 or lines[run_indexes[0]].strip() != "run: |":
+            fail(f"{path.name}: expected one metadata-only script")
+        commands = []
+        for line in lines[run_indexes[0] + 1:]:
+            if line and not line.startswith("          "):
+                break
+            if line.strip():
+                commands.append(line.strip())
+        if commands != allowed_commands:
+            fail(f"{path.name}: unexpected automatic CI commands")
+        if "Required validation gate" in metadata:
+            fail(f"{path.name}: metadata alone must not satisfy the final validation status")
+    elif path.name == "required-validation.yml":
+        if set(blocks) != {"preflight", "native", "gate"}:
+            fail(f"{path.name}: final validation must have preflight, native and gate jobs")
+        preflight, native, gate = (blocks[n] for n in ("preflight", "native", "gate"))
+        for required in ('test "$LOCAL_SHA" = "$GITHUB_SHA"', "inputs.local_validation_sha"):
+            if required not in preflight:
+                fail(f"{path.name}: missing exact-SHA local-first attestation")
+        if "needs: preflight" not in native or "os: [windows-latest, macos-latest]" not in native:
+            fail(f"{path.name}: native verification must follow preflight and use Windows/macOS only")
+        if ("name: Required validation gate" not in gate or "needs: [preflight, native]" not in gate
+            or 'test "$PREFLIGHT_RESULT" = success' not in gate or 'test "$NATIVE_RESULT" = success' not in gate):
+            fail(f"{path.name}: final status must require successful preflight and native verification")
+    elif path.name in {"main-installers.yml", "release.yml"}:
+        for job in ("linux", "fabric"):
+            if "runs-on: [self-hosted, linux, swarmcraft-release]" not in blocks.get(job, ""):
+                fail(f"{path.name}: {job} packaging must use the dedicated local release builder")
+    elif path.name == "three-machine-certification.yml":
+        for job, block in blocks.items():
+            if "runs-on: [self-hosted, linux, swarmcraft-certification]" not in block:
+                fail(f"{path.name}: {job} must use an explicitly provisioned local certification runner")
+
+    for line in text.splitlines():
+        match = USES_LINE.match(line)
+        if match and match[1].startswith("./.github/workflows/"):
+            if path.name not in {"main-installers.yml", "release.yml"} or match[1] != "./.github/workflows/required-validation.yml":
+                fail(f"{path.name}: unapproved reusable workflow invocation")
+
+    if re.search(r"(?i)(?:--test\s+live_sources|scripts/acceptance/clean-machine-live\.sh|SWARMCRAFT_LIVE_[A-Z_]+)", text):
+        fail(f"{path.name}: live third-party service probes must run locally, outside hosted Actions")
+
+
 def fail(message: str) -> None:
     raise SystemExit(f"workflow policy failed: {message}")
 
@@ -92,8 +214,10 @@ def require_validation_dependency(path: Path, builder_jobs: tuple[str, ...]) -> 
     validation = blocks.get("validation", "")
     if "uses: ./.github/workflows/required-validation.yml" not in validation:
         fail(f"{path.name}: validation job must call required-validation.yml")
-    if "run_network_soak: true" not in validation:
-        fail(f"{path.name}: release-candidate validation must include network soak")
+    if "local_validation_sha: ${{ inputs.local_validation_sha }}" not in validation:
+        fail(f"{path.name}: final validation requires the exact locally validated SHA")
+    if path.name == "main-installers.yml" and "expected_ref: refs/heads/main" not in validation:
+        fail(f"{path.name}: preview validation must be bound to main")
 
     for job in builder_jobs:
         block = blocks.get(job)
@@ -137,10 +261,11 @@ def require_validation_dependency(path: Path, builder_jobs: tuple[str, ...]) -> 
 
 def main() -> None:
     paths = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
-    if not paths:
-        fail("no workflow files found")
+    if {path.name for path in paths} != set(ALLOWED_EVENTS):
+        fail("workflow files differ from the reviewed local-first allowlist")
     for path in paths:
         text = path.read_text(encoding="utf-8")
+        check_local_first(path, text)
         check_actions(path, text)
         check_permissions(path, text)
 
@@ -156,6 +281,8 @@ def main() -> None:
         fail("release.yml must bind the exact tag name into release identity validation")
     if "python3 scripts/check_release_credentials.py" not in release:
         fail("release.yml must fail closed through the production credential policy")
+    if 'test "$GITHUB_REF_TYPE" = tag' not in release or 'test "$LOCAL_SHA" = "$GITHUB_SHA"' not in release:
+        fail("release.yml must require a version tag and exact local-validation attestation")
     # Presence of credentials alone does not certify the produced binaries.
     # Verify Authenticode and Apple's developer identity/stapled tickets
     # *after* signing/notarization and before artifact publication.
