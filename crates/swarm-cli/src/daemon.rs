@@ -10,8 +10,8 @@ use swarm_cli::{
     authority_permit::{clear_permit, refresh_permit, PERMIT_HEARTBEAT_INTERVAL},
     game_route_api::{GameRouteApiOperation, GameRouteApiReply, GameRouteApiServer, GameRouteStatusV1},
     historical_authority::{
-        collect_replay_proof, load_staged_replay, publish_stale_replay, verify_and_stage_stale_replay,
-        verify_replay_proof,
+        collect_replay_proof, load_staged_replay, publish_stale_replay, verify_and_stage_first_contact_replay,
+        verify_and_stage_stale_replay, verify_replay_proof,
     },
     host_readiness::{self, PeerReadinessObservation},
     hosting_budget, launch_guard,
@@ -571,9 +571,6 @@ pub async fn run(
                         }
                     }
                 }
-                if let Err(error) = request_historical_replay_proofs(storage, &identity, &mut node, &mut outbound, &leases) {
-                    warn!(%error, "historical replay proof request deferred");
-                }
                 match drive_historical_replay_downloads(storage, &identity, &mut node, &mut outbound, &leases) {
                     Ok(ready) => {
                         for world in ready {
@@ -581,10 +578,11 @@ pub async fn run(
                             let Ok(slot) = Arc::clone(&replay_workers).try_acquire_owned() else { break };
                             replay_publications_in_flight.insert(world);
                             let storage = storage.clone();
+                            let local = PeerIdentity::from_secret_bytes(identity.network_signing_key().to_bytes());
                             let replies = replay_publication_tx.clone();
                             replay_tasks.spawn_blocking(move || {
                                 let _slot = slot;
-                                let result = publish_historical_replay(&storage, world);
+                                let result = publish_historical_replay(&storage, &local, world);
                                 let _ = replies.blocking_send(HistoricalReplayPublication { world, result });
                             });
                         }
@@ -616,7 +614,12 @@ pub async fn run(
                     Err(error) => warn!(%error, "isolated stale replay download deferred"),
                 }
                 leases.historical_inbound.retain(|world, pending| {
-                    if pending.stale_download.as_ref().is_some_and(|download| !download.is_current()) {
+                    let current = if let Some(download) = &pending.stale_download {
+                        download.is_current()
+                    } else {
+                        first_contact_target_matches(storage, *world, pending.authority, pending.membership_hash).unwrap_or(false)
+                    };
+                    if !current {
                         pending_manifests.remove(world);
                         false
                     } else {
@@ -628,6 +631,9 @@ pub async fn run(
                 // Status hints expire after three seconds. The slower
                 // invitation retry tick (five seconds) cannot reliably
                 // consume a player-only peer's previous status response.
+                if let Err(error) = request_historical_replay_proofs(storage, &identity, &mut node, &mut outbound, &mut leases) {
+                    warn!(%error, "historical replay proof request deferred");
+                }
                 if let Err(error) = request_stale_replay_proofs(storage, &identity, &mut node, &mut outbound, &mut leases) {
                     warn!(%error, "stale replica proof request deferred");
                 }
@@ -846,9 +852,10 @@ pub async fn run(
                                 if let WireResponse::HistoricalReplayProof(Some(bytes)) = response {
                                     if let Ok(slot) = Arc::clone(&replay_workers).try_acquire_owned() {
                                         let storage = storage.clone();
+                                        let local = PeerIdentity::from_secret_bytes(identity.network_signing_key().to_bytes());
                                         replay_tasks.spawn_blocking(move || {
                                             let _slot = slot;
-                                            if let Err(error) = verify_and_stage_replay_proof(&storage, world, peer, membership_hash, &bytes) {
+                                            if let Err(error) = verify_and_stage_replay_proof(&storage, &local, world, peer, membership_hash, &bytes) {
                                                 warn!(%world, %peer, %error, "historical replay proof rejected");
                                             } else {
                                                 info!(%world, %peer, "signed historical replay proof staged; live authority remains unavailable");
@@ -2065,6 +2072,10 @@ fn maintain_authority_leases(
         if storage.stale_publication_pending(world)? {
             clear_permit(paths, world)?;
             clear_replay_runtime(runtime, outbound, world);
+            continue;
+        }
+        if storage.first_contact_publication_started(world)? {
+            clear_permit(paths, world)?;
             continue;
         }
         if let Err(error) = recover_committed_membership(storage, identity, world) {
@@ -3315,6 +3326,9 @@ fn requires_historical_replay(storage: &Storage, world: WorldId) -> Result<bool>
     if load_optional_epoch_record(storage, world)?.is_some() {
         return Ok(false);
     }
+    if storage.first_contact_replay_pinned(world)? {
+        return Ok(true);
+    }
     match storage.load_membership_record(world) {
         Ok(record) => {
             verify_membership_signature(&record)?;
@@ -3345,8 +3359,10 @@ fn request_historical_replay_proofs(
     identity: &PeerIdentity,
     node: &mut SwarmNode,
     outbound: &mut HashMap<String, OutboundContext>,
-    runtime: &LeaseRuntime,
+    runtime: &mut LeaseRuntime,
 ) -> Result<()> {
+    let now = Instant::now();
+    runtime.stale_replay_requests.retain(|_, sent| now.saturating_duration_since(*sent) < STALE_REPLAY_RETRY);
     let mut pending = outbound
         .values()
         .filter(|context| {
@@ -3354,36 +3370,75 @@ fn request_historical_replay_proofs(
         })
         .count();
     for metadata in storage.list_worlds()? {
-        if pending >= MAX_HISTORICAL_REPLAY_WORKERS {
-            break;
-        }
         let world = metadata.world_id;
-        if storage.stale_publication_pending(world)? || !requires_historical_replay(storage, world)? {
+        if storage.stale_publication_pending(world)?
+            || storage.first_contact_publication_started(world)?
+            || load_optional_epoch_record(storage, world)?.is_some()
+        {
             continue;
         }
-        let membership = storage.load_membership_record(world)?;
+        let Ok(membership) = storage.load_membership_record(world) else { continue };
         if !membership.members.iter().any(|member| {
             !member.banned && member.peer_id == identity.peer_id() && member.public_key == identity.public_key()
         }) || authorize_member(storage, world, identity.peer_id()).is_err()
         {
             continue;
         }
-        let peer = membership.authority_peer_id;
+        let descriptor = storage.load_world_descriptor(world)?;
+        if descriptor.members != membership.members {
+            continue;
+        }
+        request_world_statuses(storage, node, outbound, runtime, &descriptor, identity.peer_id())?;
         let membership_hash = membership.record_hash()?;
-        if storage.load_staged_historical_replay_proof(world, membership_hash)?.is_some()
+        if pending >= MAX_HISTORICAL_REPLAY_WORKERS
             || outbound.values().any(|context| matches!(context, OutboundContext::HistoricalReplayProof { world: existing, .. } if *existing == world))
         {
             continue;
         }
-        let Some((transport, _)) = runtime
+        let pinned = storage.load_first_contact_replay(world)?;
+        let minimum = pinned
+            .as_ref()
+            .and_then(|staged| staged.proof.epochs.last().map(|epoch| epoch.epoch_number))
+            .unwrap_or(membership.epoch);
+        let newer = runtime
             .authenticated_peers
             .iter()
-            .find(|(transport, app)| **app == peer && node.application_peer(transport) == Some(peer))
-        else {
-            continue;
-        };
-        let request = node.send_request(transport, WireRequest::HistoricalReplayProof { world_id: world })?;
+            .filter_map(|(transport, peer)| {
+                if node.application_peer(transport) != Some(*peer)
+                    || !descriptor.member(*peer).is_some_and(|member| !member.banned && member.authority_eligible)
+                    || runtime.stale_replay_requests.contains_key(&(world, *peer))
+                {
+                    return None;
+                }
+                let observed = runtime.peer_status.get(&(world, *peer))?;
+                if observed.status.epoch <= minimum
+                    || observed.status.latest_snapshot.is_none()
+                    || observed.status.compatibility_fingerprint != descriptor.compatibility_fingerprint
+                    || now.saturating_duration_since(observed.observed_at) >= STATUS_FRESHNESS
+                {
+                    return None;
+                }
+                Some((*transport, *peer, observed.status.epoch))
+            })
+            .max_by_key(|(_, peer, epoch)| (*epoch, *peer));
+        // Genesis first-use normally follows ordinary direct replication.
+        // Use replay there only if a newer generation has been observed.
+        let candidate = newer.map(|(transport, peer, _)| (transport, peer)).or_else(|| {
+            if pinned.is_some()
+                || membership.epoch <= swarm_cli::world_genesis::GENESIS_EPOCH
+                || runtime.stale_replay_requests.contains_key(&(world, membership.authority_peer_id))
+            {
+                return None;
+            }
+            runtime.authenticated_peers.iter().find_map(|(transport, peer)| {
+                (*peer == membership.authority_peer_id && node.application_peer(transport) == Some(*peer))
+                    .then_some((*transport, *peer))
+            })
+        });
+        let Some((transport, peer)) = candidate else { continue };
+        let request = node.send_request(&transport, WireRequest::HistoricalReplayProof { world_id: world })?;
         outbound.insert(request_key(&request), OutboundContext::HistoricalReplayProof { world, peer, membership_hash });
+        runtime.stale_replay_requests.insert((world, peer), now);
         pending += 1;
     }
     Ok(())
@@ -3391,6 +3446,7 @@ fn request_historical_replay_proofs(
 
 fn verify_and_stage_replay_proof(
     storage: &Storage,
+    local: &PeerIdentity,
     world: WorldId,
     authority: PeerId,
     membership_hash: Hash32,
@@ -3398,20 +3454,15 @@ fn verify_and_stage_replay_proof(
 ) -> Result<()> {
     if bytes.is_empty()
         || bytes.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES
-        || !requires_historical_replay(storage, world)?
+        || load_optional_epoch_record(storage, world)?.is_some()
     {
         bail!("historical replay proof is oversized or world is not awaiting historical replay");
     }
-    let membership = storage.load_membership_record(world)?;
-    if membership.record_hash()? != membership_hash || membership.authority_peer_id != authority {
-        bail!("historical replay source no longer matches the committed membership");
-    }
-    let metadata = storage.load_world(world)?;
     let proof: HistoricalReplayProofV1 = postcard::from_bytes(bytes)?;
-    let verified = verify_replay_proof(proof, &metadata.genesis, &membership)?;
-    let canonical_bytes = postcard::to_allocvec(verified.proof())?;
-    storage.stage_historical_replay_proof(world, membership_hash, &canonical_bytes)?;
-    Ok(())
+    if proof.world_id != world {
+        bail!("historical proof references the wrong world");
+    }
+    verify_and_stage_first_contact_replay(storage, local, authority, membership_hash, proof)
 }
 
 /// A remote status is an untrusted discovery hint. Request a signed
@@ -3514,17 +3565,16 @@ fn drive_historical_replay_downloads(
         if storage.stale_publication_pending(world)? || !requires_historical_replay(storage, world)? {
             continue;
         }
-        let membership = storage.load_membership_record(world)?;
+        let Some(staged) = storage.load_first_contact_replay(world)? else { continue };
+        let proof = staged.proof;
+        let membership = proof.membership.last().context("staged replay lacks target membership")?;
         if !membership.members.iter().any(|member| {
             !member.banned && member.peer_id == identity.peer_id() && member.public_key == identity.public_key()
         }) {
             continue;
         }
         let membership_hash = membership.record_hash()?;
-        let Some(bytes) = storage.load_staged_historical_replay_proof(world, membership_hash)? else { continue };
-        let proof: HistoricalReplayProofV1 = postcard::from_bytes(&bytes)?;
         if proof.world_id != world
-            || proof.membership.last() != Some(&membership)
             || proof.checkpoints.is_empty()
             || proof.checkpoints.len() > swarm_protocol::MAX_REPLAY_CHECKPOINTS
         {
@@ -3574,9 +3624,21 @@ fn drive_historical_replay_downloads(
     Ok(ready)
 }
 
-fn publish_historical_replay(storage: &Storage, world: WorldId) -> Result<(PeerId, ReplicaAckV1)> {
+fn publish_historical_replay(
+    storage: &Storage,
+    local: &PeerIdentity,
+    world: WorldId,
+) -> Result<(PeerId, ReplicaAckV1)> {
     let verified = load_staged_replay(storage, world)?.context("staged historical replay proof is missing")?;
     let proof = verified.proof();
+    let membership = proof.membership.last().context("missing final historical membership")?;
+    if membership.authority_peer_id == local.peer_id()
+        || !membership.members.iter().any(|member| {
+            !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key()
+        })
+    {
+        bail!("first-contact publication is not for the admitted local replica");
+    }
     let epoch = proof.epochs.last().context("missing final historical epoch")?;
     let target = proof.checkpoints.last().context("missing final historical checkpoint")?;
     verified.publish(storage)?;
@@ -3704,14 +3766,25 @@ fn authorize_historical_manifest(
     if !requires_historical_replay(storage, world)? {
         bail!("historical manifest arrived outside first-contact replay");
     }
-    let membership = storage.load_membership_record(world)?;
-    if membership.record_hash()? != membership_hash || membership.authority_peer_id != application_peer {
-        bail!("historical manifest source is not the exact committed authority");
-    }
     let verified = load_staged_replay(storage, world)?.context("no verified replay proof for manifest")?;
+    let target = verified.proof().membership.last().context("missing replay target membership")?;
+    if target.record_hash()? != membership_hash || target.authority_peer_id != application_peer {
+        bail!("historical manifest source is not the exact pinned target authority");
+    }
     verified.verify_manifest(manifest)?;
     storage.validate_replica_history(manifest)?;
     Ok(())
+}
+
+fn first_contact_target_matches(
+    storage: &Storage,
+    world: WorldId,
+    source: PeerId,
+    membership_hash: Hash32,
+) -> Result<bool> {
+    let Some(staged) = storage.load_first_contact_replay(world)? else { return Ok(false) };
+    let target = staged.proof.membership.last().context("missing replay target membership")?;
+    Ok(target.authority_peer_id == source && target.record_hash()? == membership_hash)
 }
 
 fn push_known_worlds(
@@ -4419,11 +4492,9 @@ fn handle_request(
                     .historical_inbound
                     .get(&world_id)
                     .context("historical chunk lacks a verified negotiation")?;
-                let membership = storage.load_membership_record(world_id)?;
                 if pending.transport != transport_peer
                     || pending.authority != application_peer
-                    || membership.authority_peer_id != application_peer
-                    || membership.record_hash()? != pending.membership_hash
+                    || !first_contact_target_matches(storage, world_id, application_peer, pending.membership_hash)?
                     || manifest.manifest_hash()? != pending.manifest_hash
                 {
                     bail!("historical chunk is not bound to the authenticated replay negotiation");

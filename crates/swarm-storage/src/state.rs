@@ -115,6 +115,9 @@ impl Storage {
     /// * sequence and previous hash must extend the accepted config exactly.
     pub fn save_world_config(&self, config: &WorldConfigV1) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(config.world_id)?;
+        if self.first_contact_replay_pinned_locked(config.world_id)? {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
         let mut config = config.clone();
         config.normalize_canonical();
         config.validate_semantics()?;

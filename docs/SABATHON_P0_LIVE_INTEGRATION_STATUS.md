@@ -823,3 +823,57 @@ Prior required validation run 45511308191 on 7b5b4fe initially failed
 before the installed Linux GUI test: the hosted runner package index had
 no supported native WebKitGTK WebDriver. A failed-job retry passed all
 20 selected jobs (optional network soak skipped); no gate was relaxed.
+
+### First-contact replay retargeting and discovery authentication (25 November)
+
+Required validation run 45515921964 on a7f2326 failed the Windows
+simultaneous bidirectional discovery dial convergence test. Inspection
+found a plausible connection-election race: a proof on a superseded
+connection could consume the current receiver challenge, and a challenge
+rejected during remote duplicate cleanup was not retried. Commit
+b35125c preserves the current nonce on stale/wrong-connection proofs
+and permits at most three fresh challenges within the existing
+ten-second authentication deadline and request admission budget.
+Local discovery network tests and strict Clippy passed. The failed-job
+rerun on a7f2326 subsequently passed all 20 selected jobs; this confirms
+the original failure was intermittent, not that the new fix is already
+certified on Windows. Exact-SHA validation of the new commits is required.
+
+First-contact history is now pinned separately from the accepted
+admission membership. The receiver may use authenticated status hints
+to request a newer generation from a known eligible member, but checks
+the full signed history, exact original admission, local recipient,
+source, retained membership certificates and checkpoint bytes before
+changing the pin. The new proof must extend the complete pinned history
+and target a strictly later certified membership; checkpoint-only growth
+does not move the original finish line. A superseded source cannot
+negotiate or continue the old download. No epoch or final membership is
+installed during this data-only phase.
+
+The publication transaction binds a stable record and exact intent
+before writing target metadata; the original signed admission survives
+restart even if the final descriptor or membership has already reached
+disk. Ordinary epoch, membership, config and membership-promise writers
+cannot bypass a pinned first-contact replay. Existing unrelated promises,
+pending admission/removal, conflict records and nonmatching canonical
+config/certificates are refused. The final epoch is still the last
+canonical write, with live routing subject to its independent freshness,
+quorum, consent and IPC requirements.
+
+The daemon regression uses three real processes: a late player has a
+pinned proof and durable partial blobs from the original authority,
+then that authority stops and a known candidate supplies a signed
+successor transfer history. The player must resume the prefix, reject
+the retired epoch and publish the exact final generation. Signed
+fixtures exercise rollback rejection, recovery plus joint admission,
+and simulated restart during retargeted publication.
+
+Limitations: discovery currently requires the new authority to have
+been an eligible member in the original admission; a previously
+unknown successor, an unreachable eligible member, pruned history or
+conflicting local decisions still fail closed. Once an exact publication
+intent is durable, it must complete before a subsequent catch-up;
+retargeting cannot replace an in-progress publication. Same-epoch
+membership changes are validated if a new proof is requested, but
+automatic retarget discovery is driven by a newer epoch. This is not
+independent-machine Minecraft gameplay certification.

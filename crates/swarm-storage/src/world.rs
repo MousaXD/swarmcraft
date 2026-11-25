@@ -15,6 +15,13 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
         descriptor.validate_semantics()?;
+        if self.first_contact_replay_pinned_locked(descriptor.world_id)? {
+            return if self.load_world_descriptor(descriptor.world_id)? == descriptor {
+                Ok(())
+            } else {
+                Err(StorageError::WorldMetadataMismatch)
+            };
+        }
         let bytes = serde_json::to_vec_pretty(&descriptor)?;
         durable_atomic_write(&self.world_protocol_path(descriptor.world_id, "descriptor.json"), &bytes)
     }
@@ -40,6 +47,9 @@ impl Storage {
             let current = self.load_membership_record(record.world_id)?;
             if record == &current {
                 return self.archive_membership_locked(&current);
+            }
+            if self.first_contact_replay_pinned_locked(record.world_id)? {
+                return Err(StorageError::WorldMetadataMismatch);
             }
             let expected_sequence =
                 current.sequence.checked_add(1).ok_or(StorageError::CounterExhausted("membership sequence"))?;
@@ -70,6 +80,9 @@ impl Storage {
             // Preserve the exact signed predecessor before replacing it.
             self.archive_membership_locked(&current)?;
         } else {
+            if self.first_contact_replay_pinned_locked(record.world_id)? {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
             let certified_bootstrap = self.certified_membership_bootstrap(record)?;
             if !certified_bootstrap && (record.sequence != 0 || record.previous_membership_hash.is_some()) {
                 return Err(StorageError::WorldMetadataMismatch);

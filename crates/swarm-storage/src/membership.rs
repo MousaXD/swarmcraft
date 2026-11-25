@@ -28,6 +28,9 @@ impl Storage {
         vote: &MembershipVoteV1,
     ) -> Result<MembershipPromiseResult, StorageError> {
         let _guard = self.lock_world_transaction(proposal.proposed.world_id)?;
+        if self.first_contact_replay_pinned_locked(proposal.proposed.world_id)? {
+            return Ok(MembershipPromiseResult::Rejected);
+        }
         if !proposal.validate_shape()? || !vote.matches_proposal(proposal)? {
             return Ok(MembershipPromiseResult::Rejected);
         }
@@ -81,6 +84,13 @@ impl Storage {
     pub fn save_membership_certificate(&self, certificate: &MembershipCertificateV1) -> Result<(), StorageError> {
         let world = certificate.proposal.proposed.world_id;
         let _guard = self.lock_world_transaction(world)?;
+        if self.first_contact_replay_pinned_locked(world)? {
+            return if self.load_membership_certificate(world)? == *certificate {
+                Ok(())
+            } else {
+                Err(StorageError::WorldMetadataMismatch)
+            };
+        }
         let encoded = postcard::to_allocvec(certificate)?;
         self.archive_membership_certificate_locked(certificate, &encoded)?;
         durable_atomic_write(&self.world_dir(world).join("metadata/membership-certificate.postcard"), &encoded)

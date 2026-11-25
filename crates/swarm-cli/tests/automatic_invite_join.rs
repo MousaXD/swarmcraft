@@ -375,9 +375,10 @@ fn automatic_invite_bootstrap_joins_and_replicates_without_manual_multiaddr() {
 }
 
 #[test]
-fn late_join_after_signed_wake_resumes_checkpoints_and_publishes_only_verified_final_epoch() {
+fn late_join_after_signed_wake_retargets_during_download_and_publishes_only_final_epoch() {
     let a = peer_fixture();
     let b = peer_fixture();
+    let c = peer_fixture();
     let local_ip = local_non_loopback_ipv4();
     let output = run_cli(
         &a,
@@ -452,7 +453,15 @@ fn late_join_after_signed_wake_resumes_checkpoints_and_publishes_only_verified_f
     fs::write(a.paths.root.join(DEFAULT_CONNECTIVITY_DIAGNOSTICS_JSON_FILE), serde_json::to_vec(&diagnostics).unwrap())
         .unwrap();
     let token = run_cli(&a, &["invite", "create", &world.to_string()]);
-    let _daemon_a = spawn_daemon(&a, local_ip);
+    let daemon_a = spawn_daemon(&a, local_ip);
+    let daemon_c = spawn_daemon(&c, local_ip);
+    thread::sleep(Duration::from_secs(1));
+    assert!(run_cli(&c, &["world", "join", &token, "--host-candidate"]).contains("Join request staged"));
+    wait_until("eligible successor receives signed epoch and full history", Duration::from_secs(90), || {
+        c.storage.load_epoch_record(world).ok().as_ref() == Some(&next)
+            && c.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&target)
+            && c.storage.load_membership_record(world).ok() == a.storage.load_membership_record(world).ok()
+    });
     let daemon_b = spawn_daemon(&b, local_ip);
     thread::sleep(Duration::from_secs(1));
     assert!(run_cli(&b, &["world", "join", &token]).contains("Join request staged"));
@@ -484,6 +493,11 @@ fn late_join_after_signed_wake_resumes_checkpoints_and_publishes_only_verified_f
     assert_eq!(completed.invite.bootstrap_addrs, vec![automatic_transport_address(&a, local_ip)]);
     assert!(b.storage.load_pending_join(world).is_err(), "a committed invite must never be resent as a join");
     drop(daemon_b);
+    wait_until("successor receives the late player's signed admission", Duration::from_secs(60), || {
+        c.storage.load_membership_record(world).ok().as_ref() == Some(&membership)
+            && c.storage.load_world_descriptor(world).is_ok_and(|descriptor| descriptor.members == membership.members)
+    });
+    drop((daemon_a, daemon_c));
     let reopened = Storage::open(b.paths.root.clone()).unwrap();
     assert_eq!(reopened.load_staged_historical_replay_proof(world, membership_hash).unwrap(), Some(bytes.clone()));
     assert_eq!(reopened.load_completed_join(world).unwrap(), completed);
@@ -518,21 +532,89 @@ fn late_join_after_signed_wake_resumes_checkpoints_and_publishes_only_verified_f
     assert_eq!(reopened.partial_blob_offset(world, large).unwrap(), 128 * 1024);
     assert_eq!(reopened.partial_blob_offset(world, small).unwrap(), small.encoded_size);
     assert!(reopened.load_epoch_record(world).is_err());
-    let _daemon_b = spawn_daemon(&b, local_ip);
-    wait_until("cross-generation replay reaches exact final epoch and checkpoint", Duration::from_secs(90), || {
-        b.storage.load_epoch_record(world).ok().as_ref() == Some(&next)
-            && b.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&target)
-            && b.storage.load_world_config(world).ok() == a.storage.load_world_config(world).ok()
+    // The inviter disappears while this player still has only a data
+    // prefix. A certified transfer to an already known eligible member
+    // must retarget the pinned replay without accepting the intermediate epoch.
+    let mut successor = swarm_protocol::EpochRecordV1 {
+        epoch_number: next.epoch_number + 1,
+        fencing_token: next.fencing_token + 1,
+        previous_epoch_hash: Some(next.record_hash().unwrap()),
+        base_state_hash: target.state_root,
+        authority_peer_id: c.identity.peer_id(),
+        authority_public_key: c.identity.public_key(),
+        reason: "signed transfer while late join is offline".into(),
+        signature: Vec::new(),
+        ..next.clone()
+    };
+    successor.signature = c.identity.sign(&successor.signing_bytes().unwrap());
+    let mut transfer = swarm_protocol::AuthorityTransferV1 {
+        protocol_version: swarm_protocol::PROTOCOL_VERSION,
+        world_id: world,
+        from_peer_id: a.identity.peer_id(),
+        to_peer_id: c.identity.peer_id(),
+        base_snapshot_hash: target.manifest_hash().unwrap(),
+        next_epoch: successor.epoch_number,
+        next_fencing_token: successor.fencing_token,
+        phase: swarm_protocol::TransferPhase::Prepared,
+        signer_peer_id: a.identity.peer_id(),
+        signer_public_key: a.identity.public_key(),
+        signature: Vec::new(),
+    };
+    for (phase, signer) in [
+        (swarm_protocol::TransferPhase::Prepared, &a.identity),
+        (swarm_protocol::TransferPhase::Accepted, &c.identity),
+        (swarm_protocol::TransferPhase::Committed, &a.identity),
+    ] {
+        transfer.phase = phase;
+        transfer.signer_peer_id = signer.peer_id();
+        transfer.signer_public_key = signer.public_key();
+        transfer.signature = signer.sign(&transfer.signing_bytes().unwrap());
+        c.storage.save_transfer_record(&transfer).unwrap();
+    }
+    c.storage.save_epoch_record(&successor).unwrap();
+    swarm_cli::migration::ensure_authority_artifacts(&c.storage, &c.identity, &successor).unwrap();
+    let extended = swarm_cli::historical_authority::collect_replay_proof(&c.storage, &c.identity, world).unwrap();
+    assert!(extended.extends_replay_history(verified.proof()));
+    let final_target = c.storage.latest_snapshot(world).unwrap().unwrap();
+    let _daemon_c = spawn_daemon(&c, local_ip);
+    let _daemon_b = spawn_daemon_with_peers(&b, local_ip, &[automatic_transport_address(&c, local_ip)]);
+    wait_until("new authority extends the durable pinned first-contact proof", Duration::from_secs(60), || {
+        assert!(b.storage.load_epoch_record(world).is_err(), "intermediate epoch must not be installed");
+        b.storage
+            .load_first_contact_replay(world)
+            .ok()
+            .flatten()
+            .is_some_and(|staged| staged.admission == membership && staged.proof == extended)
+    });
+    assert_eq!(b.storage.load_membership_record(world).unwrap(), membership);
+    wait_until("retargeted replay reaches exact final epoch and checkpoint", Duration::from_secs(90), || {
+        if let Ok(accepted) = b.storage.load_epoch_record(world) {
+            assert_eq!(accepted, successor);
+        }
+        b.storage.load_epoch_record(world).ok().as_ref() == Some(&successor)
+            && b.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&final_target)
+            && b.storage.load_world_config(world).ok() == c.storage.load_world_config(world).ok()
     });
     let history = b.storage.list_snapshots(world).unwrap();
-    assert_eq!(history, a.storage.list_snapshots(world).unwrap());
+    assert_eq!(history, c.storage.list_snapshots(world).unwrap());
+    assert_eq!(b.storage.load_membership_record(world).unwrap(), *extended.membership.last().unwrap());
+    let verified = swarm_cli::historical_authority::verify_replay_proof(
+        extended.clone(),
+        &b.storage.load_world(world).unwrap().genesis,
+        extended.membership.last().unwrap(),
+    )
+    .unwrap();
     for manifest in &history {
         verified.verify_manifest(manifest).unwrap();
         b.storage.verify_snapshot(manifest).unwrap();
     }
     assert_eq!(b.storage.load_epoch_by_hash(world, first.record_hash().unwrap()).unwrap(), first);
+    assert_eq!(b.storage.load_epoch_by_hash(world, next.record_hash().unwrap()).unwrap(), next);
+    assert_eq!(b.storage.load_transfer_phase(&transfer, swarm_protocol::TransferPhase::Committed).unwrap(), transfer);
+    assert!(b.storage.load_transfer_record(world).is_err());
     assert_eq!(b.storage.load_sleep_boundary(&first, base.manifest_hash().unwrap()).unwrap(), sleep);
     assert!(b.storage.load_sleep_record(world).is_err());
     assert!(swarm_cli::hosting_budget::load_consent(&b.paths, world).unwrap().is_none());
-    swarm_cli::live_authority::verify_playable_epoch(&b.storage, &next).unwrap();
+    assert!(swarm_cli::live_authority::verify_playable_epoch(&b.storage, &next).is_err());
+    swarm_cli::live_authority::verify_playable_epoch(&b.storage, &successor).unwrap();
 }

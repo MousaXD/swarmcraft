@@ -47,26 +47,42 @@ struct StagedStaleReplayV1 {
     proof: HistoricalReplayProofV1,
 }
 
+const FIRST_CONTACT_REPLAY: &str = "first-contact-replay.postcard";
+const FIRST_CONTACT_PUBLICATION: &str = "first-contact-publication.postcard";
+
+/// A first-contact recipient retains its original signed admission and
+/// descriptor while a newer certified authority supplies data. The target
+/// membership is not installed by staging an envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstContactReplayV1 {
+    pub admission: MembershipRecordV1,
+    pub descriptor: WorldDescriptorV1,
+    pub proof: HistoricalReplayProofV1,
+}
+
+impl FirstContactReplayV1 {
+    fn target_descriptor(&self) -> Result<WorldDescriptorV1, StorageError> {
+        let mut descriptor = self.descriptor.clone();
+        descriptor.members = self.proof.membership.last().ok_or(StorageError::WorldMetadataMismatch)?.members.clone();
+        descriptor.normalize();
+        descriptor.validate_semantics()?;
+        Ok(descriptor)
+    }
+
+    fn commitment(&self) -> Result<Hash32, StorageError> {
+        Ok(Hash32(*blake3::hash(&postcard::to_allocvec(self)?).as_bytes()))
+    }
+}
+
 impl Storage {
     pub fn save_epoch_record(&self, record: &EpochRecordV1) -> Result<(), StorageError> {
         let _guard = self.lock_world_transaction(record.world_id)?;
         record.validate_semantics()?;
         let path = self.control_path(record.world_id, "epoch.postcard");
-        if !canonical_file_exists(&path)? {
-            // A staged replay can publish only through its dedicated final
-            // transaction, never by installing an ordinary inbound epoch.
-            match self.load_membership_record(record.world_id) {
-                Ok(membership) => {
-                    if canonical_file_exists(&self.control_path(
-                        record.world_id,
-                        &format!("pending-replay-{}.postcard", membership.record_hash()?),
-                    ))? {
-                        return Err(StorageError::WorldMetadataMismatch);
-                    }
-                }
-                Err(StorageError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
+        if self.first_contact_replay_pinned_locked(record.world_id)? {
+            // Only the dedicated verified publication transaction can
+            // install a first-contact epoch over a pinned envelope.
+            return Err(StorageError::WorldMetadataMismatch);
         }
         if canonical_file_exists(&path)? {
             let existing = self.load_epoch_record(record.world_id)?;
@@ -455,9 +471,9 @@ impl Storage {
         Ok(Some((staged.anchor, staged.proof)))
     }
 
-    /// Store a data-only replay envelope after the caller verifies its
-    /// signatures and transition evidence. It is tied to the exact already
-    /// committed membership and is never read by live authority admission.
+    /// Store a verified data-only envelope anchored to the original signed
+    /// admission. A later authority may extend it, but not replace a
+    /// checkpoint or any signed record in the pinned prefix.
     pub fn stage_historical_replay_proof(
         &self,
         world: WorldId,
@@ -468,22 +484,143 @@ impl Storage {
         if encoded.is_empty()
             || encoded.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES
             || canonical_file_exists(&self.control_path(world, "epoch.postcard"))?
+            || canonical_file_exists(&self.control_path(world, FIRST_CONTACT_PUBLICATION))?
             || self.load_membership_record(world)?.record_hash()? != membership_hash
         {
             return Err(StorageError::WorldMetadataMismatch);
         }
-        let path = self.control_path(world, &format!("pending-replay-{membership_hash}.postcard"));
-        // Keep the first verified replay target for this membership until
-        // catch-up is finished. A new save may advance the sender's head;
-        // it must not replace a partially downloaded replay's commitment.
-        if canonical_file_exists(&path)? {
-            return if read_canonical_file(&path)? == encoded {
-                Ok(())
-            } else {
-                Err(StorageError::WorldMetadataMismatch)
-            };
+        let admission = self.load_membership_record(world)?;
+        let descriptor = self.load_world_descriptor(world)?;
+        let proof: HistoricalReplayProofV1 = postcard::from_bytes(encoded)?;
+        if proof.world_id != world
+            || proof.genesis != self.load_world(world)?.genesis
+            || usize::try_from(admission.sequence).ok().and_then(|index| proof.membership.get(index))
+                != Some(&admission)
+            || descriptor.members != admission.members
+        {
+            return Err(StorageError::WorldMetadataMismatch);
         }
-        durable_atomic_write(&path, encoded)
+        let target = proof.membership.last().ok_or(StorageError::WorldMetadataMismatch)?;
+        if let Some(previous) = self.read_first_contact_replay_locked(world)? {
+            if previous.admission != admission || previous.descriptor != descriptor {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+            if previous.proof == proof {
+                return Ok(());
+            }
+            let previous_target = previous.proof.membership.last().ok_or(StorageError::WorldMetadataMismatch)?;
+            // Freeze checkpoint-only growth. A strictly later certified
+            // membership may retarget the replay, preserving all prior data.
+            if target.sequence <= previous_target.sequence || !proof.extends_replay_history(&previous.proof) {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+        }
+        // Check the exact retained prefix while holding the world lock;
+        // a concurrent completed download cannot race a conflicting pin.
+        let head = self.load_or_initialize_canonical_head_locked(world)?.head;
+        self.validate_no_orphan_manifests_locked(world, head)?;
+        let manifests = self.raw_snapshot_manifests(world)?;
+        if manifests.len()
+            != usize::try_from(head.map_or(0, |head| head.snapshot_number))
+                .map_err(|_| StorageError::WorldMetadataMismatch)?
+            || manifests.len() > proof.checkpoints.len()
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        let mut prior = None;
+        for (manifest, expected) in manifests.iter().zip(&proof.checkpoints) {
+            if HistoricalCheckpointV1::from_manifest(manifest)? != *expected || manifest.previous_snapshot_hash != prior
+            {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+            prior = Some(expected.manifest_hash);
+        }
+        let staged = FirstContactReplayV1 { admission, descriptor, proof };
+        durable_atomic_write(&self.control_path(world, FIRST_CONTACT_REPLAY), &postcard::to_allocvec(&staged)?)
+    }
+
+    pub(crate) fn first_contact_replay_pinned_locked(&self, world: WorldId) -> Result<bool, StorageError> {
+        if canonical_file_exists(&self.control_path(world, "epoch.postcard"))? {
+            return Ok(false);
+        }
+        if canonical_file_exists(&self.control_path(world, FIRST_CONTACT_REPLAY))?
+            || canonical_file_exists(&self.control_path(world, FIRST_CONTACT_PUBLICATION))?
+        {
+            return Ok(true);
+        }
+        match self.load_membership_record(world) {
+            Ok(membership) => canonical_file_exists(
+                &self.control_path(world, &format!("pending-replay-{}.postcard", membership.record_hash()?)),
+            ),
+            Err(StorageError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn first_contact_publication_started(&self, world: WorldId) -> Result<bool, StorageError> {
+        Ok(!canonical_file_exists(&self.control_path(world, "epoch.postcard"))?
+            && canonical_file_exists(&self.control_path(world, FIRST_CONTACT_PUBLICATION))?)
+    }
+
+    pub fn first_contact_replay_pinned(&self, world: WorldId) -> Result<bool, StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
+        self.first_contact_replay_pinned_locked(world)
+    }
+
+    pub fn load_first_contact_replay(&self, world: WorldId) -> Result<Option<FirstContactReplayV1>, StorageError> {
+        let _guard = self.lock_world_transaction(world)?;
+        self.read_first_contact_replay_locked(world)
+    }
+
+    fn read_first_contact_replay_locked(&self, world: WorldId) -> Result<Option<FirstContactReplayV1>, StorageError> {
+        if canonical_file_exists(&self.control_path(world, "epoch.postcard"))? {
+            return Ok(None);
+        }
+        let current = self.load_membership_record(world)?;
+        let descriptor = self.load_world_descriptor(world)?;
+        let path = self.control_path(world, FIRST_CONTACT_REPLAY);
+        let marker = self.control_path(world, FIRST_CONTACT_PUBLICATION);
+        let publishing = canonical_file_exists(&marker)?;
+        let staged: FirstContactReplayV1 = if canonical_file_exists(&path)? {
+            postcard::from_bytes(&read_canonical_file(&path)?)?
+        } else {
+            if publishing {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+            // Migrate a pinned envelope from versions before retargeting.
+            let legacy = self.control_path(world, &format!("pending-replay-{}.postcard", current.record_hash()?));
+            if !canonical_file_exists(&legacy)? {
+                return Ok(None);
+            }
+            let bytes = read_canonical_file(&legacy)?;
+            if bytes.is_empty() || bytes.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
+            FirstContactReplayV1 {
+                admission: current.clone(),
+                descriptor: descriptor.clone(),
+                proof: postcard::from_bytes(&bytes)?,
+            }
+        };
+        let proof = &staged.proof;
+        let target = proof.membership.last().ok_or(StorageError::WorldMetadataMismatch)?;
+        if proof.world_id != world
+            || staged.admission.world_id != world
+            || proof.genesis != self.load_world(world)?.genesis
+            || staged.descriptor.world_id != world
+            || staged.descriptor.members != staged.admission.members
+            || usize::try_from(staged.admission.sequence).ok().and_then(|index| proof.membership.get(index))
+                != Some(&staged.admission)
+            || postcard::to_allocvec(proof)?.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES
+            || current != staged.admission && (!publishing || current != *target)
+            || descriptor != staged.descriptor && (!publishing || descriptor != staged.target_descriptor()?)
+        {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        if publishing && read_canonical_file(&marker)? != postcard::to_allocvec(&staged.commitment()?)? {
+            return Err(StorageError::WorldMetadataMismatch);
+        }
+        Ok(Some(staged))
     }
 
     pub fn load_staged_historical_replay_proof(
@@ -495,15 +632,9 @@ impl Storage {
         if self.load_membership_record(world)?.record_hash()? != membership_hash {
             return Err(StorageError::WorldMetadataMismatch);
         }
-        let path = self.control_path(world, &format!("pending-replay-{membership_hash}.postcard"));
-        if !canonical_file_exists(&path)? {
-            return Ok(None);
-        }
-        let bytes = read_canonical_file(&path)?;
-        if bytes.is_empty() || bytes.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES {
-            return Err(StorageError::WorldMetadataMismatch);
-        }
-        Ok(Some(bytes))
+        self.read_first_contact_replay_locked(world)?
+            .map(|staged| postcard::to_allocvec(&staged.proof).map_err(StorageError::from))
+            .transpose()
     }
 
     /// Publish an already cryptographically verified replay. The caller
@@ -523,12 +654,20 @@ impl Storage {
         let target = proof.checkpoints.last().ok_or(StorageError::WorldMetadataMismatch)?;
         let epoch_path = self.control_path(world, "epoch.postcard");
         let encoded = postcard::to_allocvec(proof)?;
-        let pending_path = self.control_path(world, &format!("pending-replay-{}.postcard", membership.record_hash()?));
+        if canonical_file_exists(&epoch_path)? {
+            return if self.load_epoch_record(world)? == *epoch
+                && self.load_membership_record(world)? == *membership
+                && self.load_world_descriptor(world)?.members == membership.members
+            {
+                Ok(())
+            } else {
+                Err(StorageError::WorldMetadataMismatch)
+            };
+        }
+        let staged = self.read_first_contact_replay_locked(world)?.ok_or(StorageError::WorldMetadataMismatch)?;
         if encoded.len() > swarm_protocol::MAX_REPLAY_PROOF_BYTES
-            || read_canonical_file(&pending_path)? != encoded
+            || staged.proof != *proof
             || self.load_world(world)?.genesis != proof.genesis
-            || self.load_membership_record(world)? != *membership
-            || self.load_world_descriptor(world)?.members != membership.members
             || epoch.world_id != world
             || membership.world_id != world
             || config.world_id != world
@@ -539,16 +678,10 @@ impl Storage {
             || epoch.authority_peer_id != config.authority_peer_id
             || epoch.authority_public_key != config.authority_public_key
             || epoch.mode == EpochMode::Solo
+            || config.compatibility_fingerprint()? != staged.descriptor.compatibility_fingerprint
             || proof.transitions.len() != proof.epochs.len() - 1
         {
             return Err(StorageError::WorldMetadataMismatch);
-        }
-        if canonical_file_exists(&epoch_path)? {
-            return if self.load_epoch_record(world)? == *epoch {
-                Ok(())
-            } else {
-                Err(StorageError::WorldMetadataMismatch)
-            };
         }
         // Never erase or overwrite an existing fencing decision, conflict
         // ledger, or newer membership/recovery promise to finish replay.
@@ -560,6 +693,8 @@ impl Storage {
             "membership-promise.postcard",
             "solo-branch.postcard",
             "recovery-certificate-pending.postcard",
+            "pending-join.postcard",
+            "pending-leave.postcard",
         ] {
             if canonical_file_exists(&self.control_path(world, name))? {
                 return Err(StorageError::WorldMetadataMismatch);
@@ -567,6 +702,19 @@ impl Storage {
         }
         if !self.list_solo_conflicts(world)?.is_empty() {
             return Err(StorageError::WorldMetadataMismatch);
+        }
+        let certificate_path = self.control_path(world, "membership-certificate.postcard");
+        if canonical_file_exists(&certificate_path)? {
+            let existing = self.load_membership_certificate(world)?;
+            // The canonical certificate slot is also durable evidence.
+            // Never silently replace a conflicting or newer certificate.
+            if !proof.membership_certificates.contains(&existing)
+                || (existing.proposal.proposed.sequence > staged.admission.sequence
+                    && (!self.first_contact_publication_started(world)?
+                        || proof.membership_certificates.last() != Some(&existing)))
+            {
+                return Err(StorageError::WorldMetadataMismatch);
+            }
         }
         let head =
             self.load_or_initialize_canonical_head_locked(world)?.head.ok_or(StorageError::WorldMetadataMismatch)?;
@@ -591,6 +739,14 @@ impl Storage {
             self.verify_snapshot_streaming(manifest)?;
             previous = Some(expected.manifest_hash);
         }
+        // A stable record and exact commit marker survive a crash even if
+        // the final membership replaces the admission before the epoch.
+        // No retargeting is allowed after this boundary.
+        write_exact_or_absent(&self.control_path(world, FIRST_CONTACT_REPLAY), &postcard::to_allocvec(&staged)?)?;
+        write_exact_or_absent(
+            &self.control_path(world, FIRST_CONTACT_PUBLICATION),
+            &postcard::to_allocvec(&staged.commitment()?)?,
+        )?;
         for historical in &proof.epochs {
             self.archive_history_locked(
                 world,
@@ -645,6 +801,17 @@ impl Storage {
             return Err(StorageError::WorldMetadataMismatch);
         }
         write_exact_or_absent(&self.control_path(world, "world-config.postcard"), &postcard::to_allocvec(config)?)?;
+        if let Some(certificate) = proof.membership_certificates.last() {
+            durable_atomic_write(
+                &self.control_path(world, "membership-certificate.postcard"),
+                &postcard::to_allocvec(certificate)?,
+            )?;
+        }
+        durable_atomic_write(
+            &self.control_path(world, "descriptor.json"),
+            &serde_json::to_vec_pretty(&staged.target_descriptor()?)?,
+        )?;
+        durable_atomic_write(&self.control_path(world, "membership.postcard"), &postcard::to_allocvec(membership)?)?;
         // The epoch file is the commit marker. It is deliberately last.
         durable_atomic_write(&epoch_path, &postcard::to_allocvec(epoch)?)
     }

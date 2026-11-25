@@ -135,12 +135,73 @@ impl VerifiedReplayProof {
 }
 
 pub fn load_staged_replay(storage: &Storage, world: WorldId) -> Result<Option<VerifiedReplayProof>> {
-    let membership = storage.load_membership_record(world)?;
-    let Some(bytes) = storage.load_staged_historical_replay_proof(world, membership.record_hash()?)? else {
+    let Some(staged) = storage.load_first_contact_replay(world)? else {
         return Ok(None);
     };
-    let proof: HistoricalReplayProofV1 = postcard::from_bytes(&bytes)?;
-    Ok(Some(verify_replay_proof(proof, &storage.load_world(world)?.genesis, &membership)?))
+    Ok(Some(verify_first_contact_replay(storage, &staged.admission, staged.proof)?))
+}
+
+/// A later authority's envelope must extend the exact locally signed
+/// admission, not merely prove an arbitrary branch from the same genesis.
+/// Do not install the later membership or epoch during download.
+fn verify_first_contact_replay(
+    storage: &Storage,
+    admission: &MembershipRecordV1,
+    proof: HistoricalReplayProofV1,
+) -> Result<VerifiedReplayProof> {
+    let world = admission.world_id;
+    verify_membership_signature(admission)?;
+    let target = proof.membership.last().context("first-contact replay lacks final membership")?.clone();
+    if proof.world_id != world
+        || proof.membership.get(usize::try_from(admission.sequence)?) != Some(admission)
+        || !admission.members.iter().any(|member| {
+            !member.banned
+                && member.authority_eligible
+                && member.peer_id == target.authority_peer_id
+                && member.public_key == target.authority_public_key
+        })
+    {
+        bail!("first-contact replay does not extend the signed admission through a known authority");
+    }
+    let verified = verify_replay_proof(proof, &storage.load_world(world)?.genesis, &target)?;
+    for certificate in storage.load_membership_certificate_chain(world)? {
+        if !verified.proof.membership_certificates.contains(&certificate) {
+            bail!("first-contact replay replaces accepted membership evidence");
+        }
+    }
+    Ok(verified)
+}
+
+pub fn verify_and_stage_first_contact_replay(
+    storage: &Storage,
+    local: &PeerIdentity,
+    source: swarm_protocol::PeerId,
+    admission_hash: swarm_protocol::Hash32,
+    proof: HistoricalReplayProofV1,
+) -> Result<()> {
+    let world = proof.world_id;
+    let admission = storage.load_membership_record(world)?;
+    let target = proof.membership.last().context("first-contact replay lacks target membership")?;
+    if admission.record_hash()? != admission_hash
+        || target.authority_peer_id != source
+        || source == local.peer_id()
+        || !admission.members.iter().any(|member| {
+            !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key()
+        })
+        || !target.members.iter().any(|member| {
+            !member.banned && member.peer_id == local.peer_id() && member.public_key == local.public_key()
+        })
+    {
+        bail!("first-contact replay is not addressed to the admitted local member");
+    }
+    let verified = verify_first_contact_replay(storage, &admission, proof)?;
+    for manifest in storage.list_snapshots(world)? {
+        verified.verify_manifest(&manifest)?;
+        storage.verify_snapshot(&manifest)?;
+    }
+    let bytes = postcard::to_allocvec(verified.proof())?;
+    storage.stage_historical_replay_proof(world, admission_hash, &bytes)?;
+    Ok(())
 }
 
 /// Verify an authenticated newer authority's complete history against the
@@ -1061,6 +1122,69 @@ mod tests {
             verified.verify_manifest(&manifest).unwrap();
         }
 
+        // A separate first-contact replica has the original signed joint
+        // admission, but has not accepted any epoch. Its pinned proof may
+        // advance from the first successor to a later certified authority.
+        let joining_dir = tempfile::tempdir().unwrap();
+        let joining = Storage::open(joining_dir.path()).unwrap();
+        joining.create_world(&storage.load_world(world).unwrap()).unwrap();
+        let mut invite = swarm_protocol::InviteV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            display_name: "retargeted first contact".into(),
+            genesis: genesis.clone(),
+            inviter_peer_id: alice.peer_id(),
+            inviter_public_key: alice.public_key(),
+            bootstrap_addrs: Vec::new(),
+            expires_unix_ms: u64::MAX,
+            nonce: [71; 32],
+            signature: Vec::new(),
+        };
+        alice.sign_invite(&mut invite).unwrap();
+        let mut join = swarm_protocol::JoinRequestV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            invite,
+            joining_member: admitted.members.iter().find(|member| member.peer_id == dave.peer_id()).unwrap().clone(),
+            nonce: [72; 32],
+            signature: Vec::new(),
+        };
+        dave.sign_join_request(&mut join).unwrap();
+        joining.save_pending_join(&join).unwrap();
+        let admission_proof = swarm_protocol::DiscoveryMembershipProofV1 {
+            protocol_version: PROTOCOL_VERSION,
+            world_id: world,
+            genesis: genesis.clone(),
+            initial_membership: first_pinned.membership[0].clone(),
+            membership_certificates: first_pinned.membership_certificates.clone(),
+            current_membership: admitted.clone(),
+            pending_membership: None,
+        };
+        crate::live_authority::verify_genesis_anchored_membership(&admission_proof).unwrap();
+        joining.archive_join_membership_history(&admission_proof).unwrap();
+        joining.save_membership_certificate(first_pinned.membership_certificates.last().unwrap()).unwrap();
+        joining.save_membership_record(&admitted).unwrap();
+        joining.save_world_descriptor(&anchor.descriptor).unwrap();
+        joining.clear_pending_join(world).unwrap();
+        let first_contact_admission = admitted.clone();
+        let admission_hash = first_contact_admission.record_hash().unwrap();
+        verify_and_stage_first_contact_replay(&joining, &dave, bob.peer_id(), admission_hash, first_pinned.clone())
+            .unwrap();
+        for entry in &base.entries {
+            let blob = &entry.blob;
+            if joining.has_complete_blob(world, blob) {
+                continue;
+            }
+            let (bytes, finished) =
+                storage.read_encoded_blob_chunk(world, blob, 0, usize::try_from(blob.encoded_size).unwrap()).unwrap();
+            assert!(finished);
+            joining.receive_blob_chunk(world, blob, 0, &bytes, true).unwrap();
+        }
+        joining.finalize_replica(&base).unwrap();
+        assert!(joining.load_epoch_record(world).is_err());
+        assert!(joining.save_epoch_record(&second).is_err());
+        assert!(joining.save_membership_record(&membership2).is_err());
+
         let base2 = storage.latest_snapshot(world).unwrap().unwrap();
         let previous_download =
             stale.open_stale_replay_download(bob.peer_id(), membership2.record_hash().unwrap(), &base2).unwrap();
@@ -1244,6 +1368,70 @@ mod tests {
         storage.commit_snapshot(&saved).unwrap();
         let fresh_manifest = saved.manifest().clone();
         let envelope = collect_replay_proof(&storage, &carol, world).unwrap();
+        assert!(verify_and_stage_first_contact_replay(
+            &joining,
+            &dave,
+            bob.peer_id(),
+            admission_hash,
+            envelope.clone()
+        )
+        .is_err());
+        verify_and_stage_first_contact_replay(&joining, &dave, carol.peer_id(), admission_hash, envelope.clone())
+            .unwrap();
+        assert!(verify_and_stage_first_contact_replay(
+            &joining,
+            &dave,
+            bob.peer_id(),
+            admission_hash,
+            first_pinned.clone()
+        )
+        .is_err());
+        assert_eq!(joining.load_membership_record(world).unwrap(), first_contact_admission);
+        assert_eq!(joining.load_first_contact_replay(world).unwrap().unwrap().proof, envelope);
+        assert!(joining.load_epoch_record(world).is_err());
+        drop(joining);
+        let joining = Storage::open(joining_dir.path()).unwrap();
+        let first_contact = load_staged_replay(&joining, world).unwrap().unwrap();
+        assert_eq!(first_contact.proof(), &envelope);
+        assert!(first_contact.publish(&joining).is_err());
+        let history = storage.list_snapshots(world).unwrap();
+        for manifest in history.iter().skip(1) {
+            first_contact.verify_manifest(manifest).unwrap();
+            for entry in &manifest.entries {
+                let blob = &entry.blob;
+                if joining.has_complete_blob(world, blob) {
+                    continue;
+                }
+                let (bytes, finished) = storage
+                    .read_encoded_blob_chunk(world, blob, 0, usize::try_from(blob.encoded_size).unwrap())
+                    .unwrap();
+                assert!(finished);
+                joining.receive_blob_chunk(world, blob, 0, &bytes, true).unwrap();
+            }
+            joining.finalize_replica(manifest).unwrap();
+            assert!(joining.load_epoch_record(world).is_err());
+        }
+        // Simulate an interruption after the retargeted publication has
+        // committed its intent and written some target control records.
+        let metadata = joining.world_dir(world).join("metadata");
+        let config_path = metadata.join("world-config.postcard");
+        std::fs::write(&config_path, b"conflicting config").unwrap();
+        assert!(first_contact.publish(&joining).is_err());
+        assert!(joining.first_contact_publication_started(world).unwrap());
+        std::fs::remove_file(&config_path).unwrap();
+        std::fs::write(metadata.join("membership.postcard"), postcard::to_allocvec(&admitted).unwrap()).unwrap();
+        std::fs::write(metadata.join("descriptor.json"), serde_json::to_vec_pretty(&descriptor).unwrap()).unwrap();
+        assert!(joining.save_epoch_record(&third).is_err());
+        drop(joining);
+        let joining = Storage::open(joining_dir.path()).unwrap();
+        load_staged_replay(&joining, world).unwrap().unwrap().publish(&joining).unwrap();
+        assert_eq!(joining.load_epoch_record(world).unwrap(), third);
+        assert_eq!(joining.load_membership_record(world).unwrap(), admitted);
+        assert_eq!(joining.load_world_descriptor(world).unwrap(), descriptor);
+        assert_eq!(joining.list_snapshots(world).unwrap(), history);
+        assert!(!joining.first_contact_publication_started(world).unwrap());
+        crate::live_authority::verify_playable_epoch(&joining, &third).unwrap();
+
         verify_and_stage_stale_replay(&stale, &dave, carol.peer_id(), &anchor, envelope.clone()).unwrap();
         assert_eq!(stale.load_staged_stale_replay_proof(world).unwrap(), Some((anchor.clone(), envelope.clone())));
         assert_eq!(stale.stale_replay_anchor(world).unwrap(), anchor);
