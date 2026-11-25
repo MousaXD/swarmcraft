@@ -75,11 +75,11 @@ test('typed frontend IPC table exactly matches every Rust Tauri-registered comma
   const table = bridge.match(/export interface NativeCommandTable \{([\s\S]*?)\n\}/);
   assert.ok(table, 'Native command table must be present');
   const typed = [...table[1].matchAll(/^\s+([a-z_]+): \{ args:/gm)].map(x => x[1]);
-  assert.equal(commands.length, 70, 'A Rust registry addition requires deliberate typed contract review');
+  assert.equal(commands.length, 73, 'A Rust registry addition requires deliberate typed contract review');
   assert.ok(commands.includes('inspect_invite'));
   assert.ok(commands.includes('revoke_invite'));
   assert.ok(commands.includes('recover_copy'));
-  assert.match(bridge, /recover_copy:\s*\{\s*args:\s*\{\s*world:\s*string;\s*checkpoint:\s*string;\s*confirmNewIdentity:\s*boolean\s*\};\s*result:\s*string\s*\}/);
+  assert.match(bridge, /recover_copy:\s*\{\s*args:\s*\{\s*world:\s*string;\s*checkpoint:\s*string;\s*confirmNewIdentity:\s*boolean;\s*acknowledgedConflicts\?:\s*string\s*\};\s*result:\s*string\s*\}/);
   assert.ok(commands.includes('start_automatic_transfer'));
   assert.match(bridge, /start_automatic_transfer:\s*\{\s*args:\s*\{\s*world:\s*string;\s*target:\s*string;\s*sourceEpoch:\s*number\s*\};\s*result:\s*string\s*\}/);
   assert.ok(commands.includes('transfer_progress'));
@@ -129,12 +129,13 @@ test('native responsiveness guards prevent horizontal scrollers and min-window r
   const [styles, player, workflow] = await Promise.all([
     source('../../src/style.css'),
     source('../../src/player-experience.css'),
-    source('../../../../.github/workflows/svelte-candidate-native-gui.yml'),
+    source('../scripts/local-native-acceptance.sh'),
   ]);
   assert.ok(styles.includes('overflow-x: hidden;'), 'world-detail must not force page-width overflow');
   assert.ok(player.includes('overflow-wrap: anywhere;'), 'paths and IDs must be allowed to wrap');
   assert.match(player, /flex-wrap: wrap;/);
   assert.ok(workflow.includes('visual-window-acceptance.py'));
+  assert.ok(workflow.includes('visual-window-acceptance.py 240 positive'), 'visual acceptance must reuse the isolated positive profile');
 });
 
 test('candidate Diagnostics navigation is visible despite the legacy wizard rule', async () => {
@@ -230,12 +231,12 @@ test('Svelte Import World owns native form submission without implicit EULA or d
 test('deliberately broken Svelte entry must retain classic watchdog and use a separate Tauri package override', async () => {
   const [badOverlay, nativeWorkflow] = await Promise.all([
     source('../tauri.candidate.broken.conf.json'),
-    source('../../../../.github/workflows/svelte-candidate-native-gui.yml'),
+    source('../scripts/local-native-acceptance.sh'),
   ]);
   assert.deepEqual(JSON.parse(badOverlay), {build: {frontendDist: '../frontend/broken-dist'}});
   assert.ok(nativeWorkflow.includes('required-entry-deliberately-missing.js'));
   assert.ok(nativeWorkflow.includes('svelte-broken-installed'));
-  assert.ok(nativeWorkflow.includes('svelte-evidence/broken-bootstrap/last-state.json'));
+  assert.ok(nativeWorkflow.includes('$artifacts/broken-bootstrap/last-state.json'));
   assert.ok(nativeWorkflow.includes("state['startup'] == 'failed'"));
   assert.ok(nativeWorkflow.includes("state['retryVisible']"));
 });
@@ -448,7 +449,7 @@ test('Svelte identity diagnostics use genuine typed Rust IPC without duplicate l
 test('native visual failures emit only stage, class and allowlisted UI observations', async () => {
   const [script, workflow, regression] = await Promise.all([
     source('../scripts/visual-window-acceptance.py'),
-    source('../../../../.github/workflows/svelte-candidate-native-gui.yml'),
+    source('../scripts/local-native-acceptance.sh'),
     source('../scripts/test_visual_failure_evidence.py'),
   ]);
   assert.ok(script.includes("'failure.json'"));

@@ -315,12 +315,39 @@ enum WorldCommand {
     Recover { world: String, snapshot: u64, destination: PathBuf },
     /// Export the newest valid snapshot as a normal Minecraft world folder.
     Export { world: String, destination: PathBuf },
+    /// Review locally retained signed checkpoints and conflicting branch evidence.
+    RecoveryReview { world: String },
+    /// Export one exact certified checkpoint to a fresh directory outside the data root.
+    RecoveryExport {
+        world: String,
+        #[arg(long)]
+        checkpoint: String,
+        #[arg(long)]
+        acknowledge_conflicts: Option<String>,
+        #[arg(long)]
+        destination: PathBuf,
+    },
+    /// Export a signed solo branch's evidence, or its exact local head files if available.
+    ConflictExport {
+        world: String,
+        #[arg(long)]
+        branch: String,
+        #[arg(long)]
+        acknowledge_conflicts: String,
+        #[arg(long)]
+        evidence_only: bool,
+        #[arg(long)]
+        destination: PathBuf,
+    },
     /// Create a separate private world from the exact locally verified checkpoint, without recovering original authority.
     RecoverCopy {
         world: String,
-        /// Exact checkpoint manifest hash displayed by world status.
+        /// Exact checkpoint manifest hash from recovery review.
         #[arg(long)]
         checkpoint: String,
+        /// Exact reviewed conflict-set digest; the original remains fenced.
+        #[arg(long)]
+        acknowledge_conflicts: Option<String>,
         #[arg(long)]
         name: Option<String>,
         /// Confirm that this creates a new world ID and cannot restore the original world.
@@ -1241,7 +1268,7 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             let manifest = storage.load_snapshot(world, snapshot)?;
             storage.verify_snapshot(&manifest)?;
             verify_snapshot_signature(&manifest)?;
-            ensure_empty_or_missing(&destination)?;
+            ensure_empty_or_missing(storage.root(), &destination)?;
             storage.restore_snapshot(&manifest, &destination)?;
             println!("Recovered snapshot #{} to {}", snapshot, destination.display());
         }
@@ -1250,16 +1277,53 @@ fn handle_world(command: WorldCommand, paths: &DataPaths, storage: &Storage) -> 
             let manifest = storage.latest_snapshot(world)?.context("world has no committed snapshots")?;
             storage.verify_snapshot(&manifest)?;
             verify_snapshot_signature(&manifest)?;
-            ensure_empty_or_missing(&destination)?;
+            ensure_empty_or_missing(storage.root(), &destination)?;
             storage.restore_snapshot(&manifest, &destination)?;
             println!("Exported snapshot #{} to {}", manifest.snapshot_number, destination.display());
         }
-        WorldCommand::RecoverCopy { world, checkpoint, name, confirm_new_identity, json } => {
+        WorldCommand::RecoveryReview { world } => {
+            let identity = PeerIdentity::load_or_create(paths)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&swarm_cli::recovery_review::review(
+                    storage,
+                    &identity,
+                    parse_world(&world)?,
+                )?)?
+            );
+        }
+        WorldCommand::RecoveryExport { world, checkpoint, acknowledge_conflicts, destination } => {
+            let identity = PeerIdentity::load_or_create(paths)?;
+            let receipt = swarm_cli::recovery_review::export_checkpoint(
+                storage,
+                &identity,
+                parse_world(&world)?,
+                checkpoint.parse()?,
+                acknowledge_conflicts.map(|value| value.parse()).transpose()?,
+                &destination,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+        }
+        WorldCommand::ConflictExport { world, branch, acknowledge_conflicts, evidence_only, destination } => {
+            let identity = PeerIdentity::load_or_create(paths)?;
+            let receipt = swarm_cli::recovery_review::export_conflict(
+                storage,
+                &identity,
+                parse_world(&world)?,
+                branch.parse()?,
+                acknowledge_conflicts.parse()?,
+                evidence_only,
+                &destination,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+        }
+        WorldCommand::RecoverCopy { world, checkpoint, acknowledge_conflicts, name, confirm_new_identity, json } => {
             let result = swarm_cli::world_import::recover_copy(
                 paths,
                 &swarm_cli::world_import::RecoverCopyRequest {
                     source_world: parse_world(&world)?,
                     expected_checkpoint: checkpoint.parse().context("invalid exact recovery checkpoint hash")?,
+                    acknowledged_conflicts: acknowledge_conflicts.map(|value| value.parse()).transpose()?,
                     name,
                     confirm_new_identity,
                 },
@@ -1545,7 +1609,29 @@ fn parse_world(value: &str) -> Result<WorldId> {
     WorldId::from_str(value).with_context(|| format!("invalid world ID: {value}"))
 }
 
-fn ensure_empty_or_missing(path: &std::path::Path) -> Result<()> {
+fn ensure_empty_or_missing(root: &std::path::Path, path: &std::path::Path) -> Result<()> {
+    use std::path::{Component, Path};
+    if path.components().any(|component| component == Component::ParentDir) {
+        bail!("export destination must not contain parent-directory traversal");
+    }
+    let mut ancestor = path;
+    loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                if ancestor == path && metadata.file_type().is_symlink() {
+                    bail!("export destination cannot be a symbolic link");
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = ancestor.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if ancestor.canonicalize()?.starts_with(root.canonicalize()?) {
+        bail!("export destination must be outside the original SwarmCraft data root");
+    }
     if path.exists() {
         let mut entries =
             std::fs::read_dir(path).with_context(|| format!("cannot inspect destination {}", path.display()))?;

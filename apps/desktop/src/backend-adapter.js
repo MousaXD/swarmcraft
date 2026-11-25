@@ -537,9 +537,14 @@ export function createBackendAdapter(invoke) {
     verifyWorld: (world) => call('verify_world', { world }),
     exportWorld: (world, destination) => call('export_world', { world, destination }),
     recoverWorld: (world, snapshot, destination) => call('recover_world', { world, snapshot, destination }),
-    recoverCopy: (world, checkpoint, confirmNewIdentity) => {
+    recoveryReview: (world) => callOptional('recovery_review', { world }, 'Recovery review'),
+    recoveryExport: (world, checkpoint, destination, acknowledgedConflicts) =>
+      callOptional('recovery_export', { world, checkpoint, destination, ...(acknowledgedConflicts ? { acknowledgedConflicts } : {}) }, 'Verified recovery export'),
+    conflictExport: (world, branch, destination, acknowledgedConflicts, evidenceOnly) =>
+      callOptional('conflict_export', { world, branch, destination, acknowledgedConflicts, evidenceOnly: evidenceOnly === true }, 'Signed conflict export'),
+    recoverCopy: (world, checkpoint, confirmNewIdentity, acknowledgedConflicts) => {
       if (confirmNewIdentity !== true) return Promise.reject(new Error('Confirm creation of a separate world identity.'));
-      return call('recover_copy', { world, checkpoint, confirmNewIdentity });
+      return call('recover_copy', { world, checkpoint, confirmNewIdentity, ...(acknowledgedConflicts ? { acknowledgedConflicts } : {}) });
     },
     ensureDaemonRunning: (listen) => call('ensure_daemon_running', { listen }),
     startDaemon: (listen) => call('start_daemon', { listen }),

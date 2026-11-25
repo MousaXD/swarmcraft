@@ -1,6 +1,6 @@
 import { createBackendAdapter, connectivityFromStatus, MIGRATION_PHASES, normalizeMigrationState } from './backend-adapter.js';
 import { createImportRequest, parseImportResult } from './import-flow.js';
-import { recoveryCopySelection, recoveryCopyReceipt } from './recovery-copy.js';
+import { normalizeRecoveryReview, recoveryCopyReceipt, recoveryExportReceipt } from './recovery-copy.js';
 import { validateInviteToken, inspectInviteReceipt, revocationRequest, revokeInviteReceipt, pendingMembershipMessage } from './invite-lifecycle.js';
 import { clientContinuityFromMigration, ensureClientContinuityPanel } from './client-continuity.js';
 import { UNVERIFIED_GAME_ROUTE, connectionDiagnosis, ensureGameReconnectActions, gameReadinessCheckpoints, isUsableGameRoute, normalizeGameRouteStatus, updateGameReadinessChecklist, updateGameRouteControls } from './game-route-status.js';
@@ -31,6 +31,7 @@ let serviceWarning = '';
 let startupInProgress = false;
 let lastWorldError = null;
 let recoveryCopyTarget = null;
+let recoveryReview = null;
 let recoveryCopyPending = false;
 let inviteManagementWorld = '';
 let inviteManagementSelection = null;
@@ -1435,8 +1436,8 @@ async function worldCompatibility() {
 }
 
 async function worldConflicts() {
-  await run('Reading preserved conflicts…', () => backend.worldConflicts(worldId()));
-  showView('activity');
+  showView('diagnostics');
+  await openRecoveryCopy();
 }
 
 async function worldPeers() {
@@ -1596,61 +1597,145 @@ async function recoverWorld() {
   await run('Recovering verified snapshot…', () => backend.recoverWorld(worldId(), Number($('snapshotNumber').value || 1), destination));
 }
 
+function updateRecoveryChoiceControls() {
+  const target = recoveryCopyTarget;
+  const acknowledged = !target?.conflictDigest || $('recoveryConflictAck').checked;
+  const ready = Boolean(target && acknowledged && !recoveryCopyPending);
+  const hasDestination = Boolean($('recoveryExportDestination').value.trim());
+  $('recoveryChoice').disabled = recoveryCopyPending || !recoveryReview?.choices.length;
+  $('recoveryConflictAck').disabled = recoveryCopyPending;
+  $('recoveryExportDestination').disabled = recoveryCopyPending;
+  $('confirmRecoveryCopy').hidden = target?.kind !== 'checkpoint';
+  $('confirmRecoveryCopy').disabled = !ready || target?.kind !== 'checkpoint';
+  $('exportRecoveryChoice').hidden = !target || (target.kind === 'branch' && target.localHistory !== 'matching_signed_manifests');
+  $('exportRecoveryChoice').disabled = !ready || !hasDestination;
+  $('exportRecoveryEvidence').hidden = target?.kind !== 'branch';
+  $('exportRecoveryEvidence').disabled = !ready || !hasDestination;
+}
+
+function selectRecoveryChoice() {
+  recoveryCopyTarget = recoveryReview?.choices.find(choice => choice.value === $('recoveryChoice').value) ?? null;
+  const target = recoveryCopyTarget;
+  $('recoveryConflictAck').checked = false;
+  $('recoveryConflictAckWrap').hidden = !target?.conflictDigest;
+  showInline('recoveryCopyResult', '');
+  if (!target) {
+    $('recoveryCopySource').textContent = 'No locally verified recovery choice is available.';
+  } else if (target.kind === 'checkpoint') {
+    $('recoveryCopySource').textContent = [
+      'Snapshot: ' + target.snapshot + (target.latest ? ' (local head)' : ' (earlier checkpoint)'),
+      'Manifest: ' + target.checkpoint, 'Original: ' + target.world, 'Epoch / sequence: ' + target.epoch + ' / ' + target.sequence,
+      'State: ' + target.stateRoot, 'Signer: ' + target.signer,
+      'Signed history checked; ' + target.files + ' files will be verified before action.',
+    ].join('\n');
+  } else {
+    $('recoveryCopySource').textContent = [
+      target.localHistory === 'matching_signed_manifests' ? 'Matching signed local manifests' : 'Evidence only here',
+      'Branch: ' + target.branch, 'Head: ' + target.checkpoint,
+      'Original: ' + target.world, 'Base: ' + target.base,
+      'Epoch / sequence: ' + target.epoch + ' / ' + target.sequence,
+      'State: ' + target.stateRoot, 'Signer: ' + target.signer,
+      target.localHistory === 'matching_signed_manifests'
+        ? 'Matching signed local manifests. Head files must pass verification before export.'
+        : 'Evidence only here. Export files from the branch holder; no remote data is assumed available.',
+    ].join('\n');
+  }
+  updateRecoveryChoiceControls();
+}
+
 async function openRecoveryCopy() {
+  if (recoveryCopyPending || $('recoveryCopyDialog').open) return;
   const requestedWorld = worldId();
-  showInline('recoveryCopyNotice', '');
+  showInline('recoveryCopyNotice', 'Reading local signed history…');
   try {
-    const status = await backend.worldStatus(requestedWorld);
+    const raw = await backend.recoveryReview(requestedWorld);
     if (selectedWorldId !== requestedWorld || currentView !== 'diagnostics'
         || recoveryCopyPending || $('recoveryCopyDialog').open) return;
-    recoveryCopyTarget = recoveryCopySelection(requestedWorld, status);
-    $('recoveryCopySource').textContent = 'Original: ' + requestedWorld
-      + '\nSnapshot: ' + recoveryCopyTarget.snapshot + '\nManifest: ' + recoveryCopyTarget.checkpoint;
-    $('recoveryCopyTitle').textContent = 'Create a separate recovered world?';
-    $('confirmRecoveryCopy').hidden = false;
-    $('confirmRecoveryCopy').disabled = false;
+    recoveryReview = normalizeRecoveryReview(requestedWorld, raw);
+    const options = recoveryReview.choices.map(choice => {
+      const option = document.createElement('option');
+      option.value = choice.value;
+      option.textContent = choice.kind === 'checkpoint'
+        ? 'Checkpoint #' + choice.snapshot + (choice.latest ? ' · local head' : ' · earlier')
+        : 'Branch ' + choice.branch.slice(0, 12) + '… · ' + (choice.localHistory === 'matching_signed_manifests' ? 'local manifests' : 'evidence only');
+      return option;
+    });
+    $('recoveryChoice').replaceChildren(...options);
+    $('recoveryReviewBody').hidden = false;
+    $('recoveryReviewBody').scrollTop = 0;
+    $('recoveryCopyTitle').textContent = 'Review recovery choices';
     $('cancelRecoveryCopy').textContent = 'Cancel';
-    showInline('recoveryCopyResult', '');
+    $('recoveryExportDestination').value = '';
+    $('recoveryConflictAck').checked = false;
+    const count = recoveryReview.choices.filter(choice => choice.kind === 'branch').length;
+    const notice = [count ? count + ' preserved signed branch record(s). Review each branch before choosing; existing hosting fences stay in place.' : '',
+      recoveryReview.checkpointError ? 'Certified checkpoint review unavailable: ' + recoveryReview.checkpointError : ''].filter(Boolean).join(' ');
+    showInline('recoveryChoiceNotice', notice, count || recoveryReview.checkpointError ? 'warning' : 'neutral');
+    showInline('recoveryCopyNotice', '');
+    selectRecoveryChoice();
     $('recoveryCopyDialog').showModal();
   } catch (error) {
     if (selectedWorldId === requestedWorld) showInline('recoveryCopyNotice', String(error), 'warning');
   }
 }
 
-async function confirmRecoveryCopy() {
+async function performRecoveryChoice(action) {
   if (!recoveryCopyTarget || recoveryCopyPending || !$('recoveryCopyDialog').open) return;
   const target = recoveryCopyTarget;
   if (selectedWorldId !== target.world) {
     recoveryCopyTarget = null;
-    $('confirmRecoveryCopy').disabled = true;
-    showInline('recoveryCopyResult', 'The selected world changed. Close and confirm the intended world again.', 'warning');
+    updateRecoveryChoiceControls();
+    showInline('recoveryCopyResult', 'The selected world changed. Close and review the intended world again.', 'warning');
     return;
   }
+  if (target.conflictDigest && !$('recoveryConflictAck').checked) return;
+  const destination = $('recoveryExportDestination').value.trim();
+  if (action === 'copy' && target.kind !== 'checkpoint') return;
+  if (action !== 'copy' && !destination) return;
+  if (action === 'evidence' && target.kind !== 'branch') return;
+  if (action === 'export' && target.kind === 'branch' && target.localHistory !== 'matching_signed_manifests') return;
   recoveryCopyPending = true;
-  $('confirmRecoveryCopy').disabled = true;
   $('cancelRecoveryCopy').disabled = true;
-  showInline('recoveryCopyResult', 'Verifying history and copying checkpoint…');
+  updateRecoveryChoiceControls();
+  showInline('recoveryCopyResult', 'Verifying the exact selected history and data…');
   try {
-    const raw = await backend.recoverCopy(target.world, target.checkpoint, true);
-    const receipt = recoveryCopyReceipt(target, raw);
-    const message = receipt.name + ' created.\nOriginal: ' + receipt.source + '\nNew world: ' + receipt.world
-      + '\nSelect the new world in Worlds; hosting setup is separate.';
-    $('recoveryCopyTitle').textContent = 'Recovered world created';
+    let message;
+    if (action === 'copy') {
+      const raw = await backend.recoverCopy(target.world, target.checkpoint, true, target.conflictDigest);
+      const receipt = recoveryCopyReceipt(target, raw);
+      message = receipt.name + ' created.\nOriginal: ' + receipt.source + '\nNew world: ' + receipt.world
+        + '\nSelect the new world in Worlds; hosting setup is separate.';
+      $('recoveryCopyTitle').textContent = 'Recovered world created';
+    } else {
+      const evidenceOnly = action === 'evidence';
+      const raw = target.kind === 'branch'
+        ? await backend.conflictExport(target.world, target.branch, destination, target.conflictDigest, evidenceOnly)
+        : await backend.recoveryExport(target.world, target.checkpoint, destination, target.conflictDigest);
+      const receipt = recoveryExportReceipt(target, raw, evidenceOnly);
+      message = (receipt.files ? 'Verified head files and signed evidence exported.' : 'Signed evidence exported. No world files were exported.')
+        + '\nDestination: ' + receipt.destination + '\nThe original world was not changed.';
+      $('recoveryCopyTitle').textContent = 'Recovery export completed';
+    }
     showInline('recoveryCopyResult', message, 'safe');
     showInline('recoveryCopyNotice', message, 'safe');
-    setOutput(message, 'Recovered copy');
-    await refreshWorlds();
+    setOutput(message, action === 'copy' ? 'Recovered copy' : 'Recovery export');
+    if (action === 'copy') await refreshWorlds();
   } catch (error) {
     $('recoveryCopyTitle').textContent = 'Recovery outcome not confirmed';
-    showInline('recoveryCopyResult', 'Could not confirm the recovered copy. Refresh Worlds before trying again. ' + String(error), 'danger');
+    showInline('recoveryCopyResult', 'Could not confirm the operation. Inspect Worlds or the destination before retrying. ' + String(error), 'danger');
   } finally {
     recoveryCopyTarget = null;
+    recoveryReview = null;
     recoveryCopyPending = false;
-    $('confirmRecoveryCopy').hidden = true;
+    $('recoveryReviewBody').hidden = true;
+    updateRecoveryChoiceControls();
     $('cancelRecoveryCopy').disabled = false;
+    $('cancelRecoveryCopy').focus();
     $('cancelRecoveryCopy').textContent = 'Done';
   }
 }
+
+async function confirmRecoveryCopy() { await performRecoveryChoice('copy'); }
 
 async function transferHost() {
   invalidateGameRoute();
@@ -1869,6 +1954,11 @@ bindAction('exportWorld', exportWorld);
 bindAction('recoverWorld', recoverWorld);
 bindAction('openRecoveryCopy', openRecoveryCopy);
 $('confirmRecoveryCopy')?.addEventListener('click', confirmRecoveryCopy);
+$('recoveryChoice')?.addEventListener('change', selectRecoveryChoice);
+$('recoveryConflictAck')?.addEventListener('change', updateRecoveryChoiceControls);
+$('recoveryExportDestination')?.addEventListener('input', updateRecoveryChoiceControls);
+$('exportRecoveryChoice')?.addEventListener('click', () => performRecoveryChoice('export'));
+$('exportRecoveryEvidence')?.addEventListener('click', () => performRecoveryChoice('evidence'));
 $('recoveryCopyDialog')?.addEventListener('cancel', (event) => {
   if (recoveryCopyPending) event.preventDefault();
 });
@@ -1878,7 +1968,7 @@ $('recoveryCopyDialog')?.querySelector('form')?.addEventListener('submit', (even
 $('recoveryCopyDialog')?.addEventListener('close', () => {
   // Native close events are queued; an immediately reopened dialog already
   // owns a different selection, which the previous close must not clear.
-  if (!$('recoveryCopyDialog').open) recoveryCopyTarget = null;
+  if (!$('recoveryCopyDialog').open) { recoveryCopyTarget = null; recoveryReview = null; }
 });
 bindAction('transferHost', transferHost);
 bindAction('wakeWorld', wakeWorld);

@@ -416,6 +416,73 @@ async fn recover_world(app: AppHandle, world: String, snapshot: u64, destination
     run_cli(&app, vec!["world".into(), "recover".into(), world, snapshot.to_string(), destination]).await
 }
 
+#[tauri::command]
+async fn recovery_review(app: AppHandle, world: String) -> Result<String, String> {
+    let world = hosting_contribution_commands::validate_world_id(&world)?;
+    run_cli(&app, vec!["world".into(), "recovery-review".into(), world.to_string()]).await
+}
+
+fn append_conflict_ack(args: &mut Vec<String>, acknowledged_conflicts: Option<String>) -> Result<(), String> {
+    if let Some(digest) = acknowledged_conflicts {
+        let digest: swarm_protocol::Hash32 =
+            digest.parse().map_err(|_| "Invalid reviewed conflict digest".to_string())?;
+        args.extend(["--acknowledge-conflicts".into(), digest.to_string()]);
+    }
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn recovery_export(
+    app: AppHandle,
+    world: String,
+    checkpoint: String,
+    acknowledged_conflicts: Option<String>,
+    destination: String,
+) -> Result<String, String> {
+    let world = hosting_contribution_commands::validate_world_id(&world)?;
+    let checkpoint: swarm_protocol::Hash32 = checkpoint.parse().map_err(|_| "Invalid checkpoint hash".to_string())?;
+    let destination = require_value(destination, "New export destination")?;
+    let mut args = vec![
+        "world".into(),
+        "recovery-export".into(),
+        world.to_string(),
+        "--checkpoint".into(),
+        checkpoint.to_string(),
+        "--destination".into(),
+        destination,
+    ];
+    append_conflict_ack(&mut args, acknowledged_conflicts)?;
+    run_cli(&app, args).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn conflict_export(
+    app: AppHandle,
+    world: String,
+    branch: String,
+    acknowledged_conflicts: String,
+    evidence_only: bool,
+    destination: String,
+) -> Result<String, String> {
+    let world = hosting_contribution_commands::validate_world_id(&world)?;
+    let branch: swarm_protocol::Hash32 = branch.parse().map_err(|_| "Invalid branch hash".to_string())?;
+    let destination = require_value(destination, "New export destination")?;
+    let mut args = vec![
+        "world".into(),
+        "conflict-export".into(),
+        world.to_string(),
+        "--branch".into(),
+        branch.to_string(),
+        "--destination".into(),
+        destination,
+    ];
+    append_conflict_ack(&mut args, Some(acknowledged_conflicts))?;
+    if evidence_only {
+        args.push("--evidence-only".into());
+    }
+    run_cli(&app, args).await
+}
+
 /// A recovered copy is a new private identity, never a membership or
 /// authority change to the original world. Pin the exact selected checkpoint.
 #[tauri::command(rename_all = "camelCase")]
@@ -424,6 +491,7 @@ async fn recover_copy(
     world: String,
     checkpoint: String,
     confirm_new_identity: bool,
+    acknowledged_conflicts: Option<String>,
 ) -> Result<String, String> {
     if !confirm_new_identity {
         return Err("Confirm that recovery creates a separate world identity.".into());
@@ -431,19 +499,17 @@ async fn recover_copy(
     let world = hosting_contribution_commands::validate_world_id(&world)?;
     let checkpoint: swarm_protocol::Hash32 =
         checkpoint.parse().map_err(|_| "A valid checkpoint manifest hash is required".to_string())?;
-    run_cli(
-        &app,
-        vec![
-            "world".into(),
-            "recover-copy".into(),
-            world.to_string(),
-            "--checkpoint".into(),
-            checkpoint.to_string(),
-            "--confirm-new-identity".into(),
-            "--json".into(),
-        ],
-    )
-    .await
+    let mut args = vec![
+        "world".into(),
+        "recover-copy".into(),
+        world.to_string(),
+        "--checkpoint".into(),
+        checkpoint.to_string(),
+        "--confirm-new-identity".into(),
+        "--json".into(),
+    ];
+    append_conflict_ack(&mut args, acknowledged_conflicts)?;
+    run_cli(&app, args).await
 }
 
 #[tauri::command]
@@ -699,6 +765,9 @@ fn main() {
             export_world,
             recover_world,
             recover_copy,
+            recovery_review,
+            recovery_export,
+            conflict_export,
             migration_capabilities,
             migration_status,
             manual_transfer_step,

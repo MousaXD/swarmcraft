@@ -1,14 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const sourceRoot = path.resolve(here, '../src');
-const evidenceRoot = path.resolve(here, '../test-artifacts/agent-7-browser');
+const evidenceRoot = process.env.SWARMCRAFT_BROWSER_ARTIFACTS || path.resolve(here, '../test-artifacts/agent-7-browser');
 const entryModule = 'app.js';
 
 async function existingChromeDriver() {
@@ -98,6 +99,7 @@ async function freePort() {
 }
 
 async function webdriverRequest(port, pathname, { method = 'GET', body } = {}) {
+  if (typeof port === 'object') return port.request(pathname, body);
   const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
     method,
     headers: body === undefined ? undefined : { 'content-type': 'application/json' },
@@ -108,6 +110,92 @@ async function webdriverRequest(port, pathname, { method = 'GET', body } = {}) {
     throw new Error(`WebDriver ${method} ${pathname} failed: ${JSON.stringify(payload)}`);
   }
   return payload.value;
+}
+
+// Explicit local alternative when Chrome is installed but a matching
+// ChromeDriver is not. The default CI/real WebDriver path remains unchanged.
+// One temporary profile and one browser are reused for all viewport checks.
+async function startLocalCdp() {
+  const profile = await mkdtemp(path.join(os.tmpdir(), 'swarmcraft-local-cdp-'));
+  const child = spawn(process.env.SWARMCRAFT_CHROME_BINARY || 'google-chrome', [
+    '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--hide-scrollbars',
+    '--disable-background-networking', '--disable-component-update', '--no-first-run',
+    '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
+    '--user-data-dir=' + profile, 'about:blank',
+  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let output = '';
+  let socket;
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', chunk => { output = (output + chunk).slice(-4000); });
+  const cleanup = async () => {
+    socket?.close();
+    if (child.exitCode === null) child.kill('SIGTERM');
+    await Promise.race([new Promise(resolve => child.once('exit', resolve)), new Promise(resolve => setTimeout(resolve, 1500))]);
+    if (child.exitCode === null) child.kill('SIGKILL');
+    await rm(profile, { recursive: true, force: true, maxRetries: 3 });
+  };
+  try {
+    let target;
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      if (child.exitCode !== null) throw new Error('Chrome exited: ' + output);
+      try {
+        const port = Number((await readFile(path.join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]);
+        const pages = await (await fetch('http://127.0.0.1:' + port + '/json/list')).json();
+        target = pages.find(page => page.type === 'page');
+        if (target?.webSocketDebuggerUrl) break;
+      } catch {}
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.ok(target?.webSocketDebuggerUrl, 'Chrome DevTools unavailable: ' + output);
+    socket = new WebSocket(target.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => {
+      socket.addEventListener('open', resolve, { once: true });
+      socket.addEventListener('error', reject, { once: true });
+    });
+    const pending = new Map();
+    let next = 0;
+    socket.addEventListener('message', event => {
+      const message = JSON.parse(event.data);
+      if (!pending.has(message.id)) return;
+      const { resolve, reject, timeout } = pending.get(message.id);
+      pending.delete(message.id);
+      clearTimeout(timeout);
+      if (message.error) reject(new Error(JSON.stringify(message.error)));
+      else resolve(message.result);
+    });
+    const send = (method, params = {}) => new Promise((resolve, reject) => {
+      const id = ++next;
+      const timeout = setTimeout(() => { pending.delete(id); reject(new Error('CDP timeout: ' + method)); }, 30000);
+      pending.set(id, { resolve, reject, timeout });
+      socket.send(JSON.stringify({ id, method, params }));
+    });
+    await send('Page.enable');
+    await send('Runtime.enable');
+    const evaluate = async expression => {
+      const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+      if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
+      return result.result.value;
+    };
+    return {
+      close: cleanup,
+      async request(pathname, body) {
+        if (pathname.endsWith('/window/rect')) {
+          return send('Emulation.setDeviceMetricsOverride', { width: body.width, height: body.height, deviceScaleFactor: 1, mobile: false });
+        }
+        if (pathname.endsWith('/execute/sync')) {
+          return evaluate('(function(){' + body.script + '}).apply(null,' + JSON.stringify(body.args) + ')');
+        }
+        if (pathname.endsWith('/execute/async')) {
+          return evaluate('new Promise(resolve => (function(){' + body.script + '}).apply(null,[...' + JSON.stringify(body.args) + ',resolve]))');
+        }
+        if (pathname.endsWith('/screenshot')) return (await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })).data;
+        throw new Error('Unsupported local CDP request: ' + pathname);
+      },
+    };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
 }
 
 async function startDriver(executable) {
@@ -236,6 +324,28 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
           ...(window.__swarmcraftPendingMembership ? ['Membership: ' + window.__swarmcraftPendingMembership] : [])].join('\n');
       }
       return '';
+    case 'recovery_review':
+      return JSON.stringify({
+        world_id: args.world, evidence: 'local_signed_history_not_live_authority',
+        checkpoint_history: 'verified_history_files_checked_on_action', checkpoint_error: null,
+        conflict_digest: '9'.repeat(64),
+        checkpoints: [
+          { checkpoint_hash: 'c'.repeat(64), snapshot_number: '4', epoch: '2', sequence: '4', state_root: '1'.repeat(64), signer: 'scpeer:' + 'd'.repeat(64), files: 12, latest: true },
+          { checkpoint_hash: 'e'.repeat(64), snapshot_number: '3', epoch: '1', sequence: '3', state_root: '2'.repeat(64), signer: 'scpeer:' + 'd'.repeat(64), files: 8, latest: false },
+        ],
+        conflicts: [
+          { branch_hash: 'f'.repeat(64), base_checkpoint: 'e'.repeat(64), head_checkpoint: '7'.repeat(64), head_epoch: '2', head_sequence: '4', state_root: '3'.repeat(64), signer: 'scpeer:' + 'a'.repeat(64), local_history: 'evidence_only' },
+          { branch_hash: '8'.repeat(64), base_checkpoint: 'e'.repeat(64), head_checkpoint: 'c'.repeat(64), head_epoch: '2', head_sequence: '4', state_root: '1'.repeat(64), signer: 'scpeer:' + 'd'.repeat(64), local_history: 'matching_signed_manifests' },
+        ],
+      });
+    case 'conflict_export':
+      if (args.world !== window.__swarmcraftRecoveryWorld || args.branch !== 'f'.repeat(64)
+          || args.acknowledgedConflicts !== '9'.repeat(64) || args.evidenceOnly !== true
+          || args.destination !== '/tmp/swarmcraft-evidence') throw new Error('Unexpected branch evidence selection');
+      return JSON.stringify({
+        world_id: args.world, branch_hash: args.branch, checkpoint_hash: '7'.repeat(64),
+        destination: args.destination, evidence: 'signed_branch_evidence_only', files_exported: false, manifest_count: 0,
+      });
     case 'inspect_invite':
       return JSON.stringify({
         world_id: args.invite === 'scinvite:ffff' ? 'scworld:' + 'e'.repeat(64) : window.__swarmcraftRecoveryWorld,
@@ -249,10 +359,12 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
       window.__swarmcraftInviteRevoked = true;
       return JSON.stringify({ world_id: args.world, invite_id: args.inviteId, revoked: true, newly_revoked: true });
     case 'recover_copy':
-      if (args.world !== window.__swarmcraftRecoveryWorld || args.checkpoint !== 'c'.repeat(64)
+      if (args.world !== window.__swarmcraftRecoveryWorld || args.checkpoint !== 'e'.repeat(64)
+          || args.acknowledgedConflicts !== '9'.repeat(64)
           || args.confirmNewIdentity !== true) throw new Error('Unexpected recovery selection');
       return JSON.stringify({
-        source_world_id: args.world, source_snapshot_hash: args.checkpoint, source_snapshot_number: 4,
+        source_world_id: args.world, source_snapshot_hash: args.checkpoint, source_snapshot_number: 3,
+        source_conflict_digest: args.acknowledgedConflicts,
         world_id: 'scworld:' + 'b'.repeat(64), snapshot_hash: 'd'.repeat(64),
         display_name: 'Recovered: Recovery source',
       });
@@ -418,6 +530,21 @@ const recoveryScenario = String.raw`(async () => {
   button.click();
   await waitFor(() => dialog.open, 'reopen confirmation');
   const confirm = document.getElementById('confirmRecoveryCopy');
+  const choice = document.getElementById('recoveryChoice');
+  const ack = document.getElementById('recoveryConflictAck');
+  require(choice.options.length === 4, 'Missing historical checkpoint or branch choice');
+  choice.value = 'checkpoint:' + 'e'.repeat(64);
+  choice.dispatchEvent(new Event('change', { bubbles: true }));
+  require(document.getElementById('recoveryCopySource').textContent.includes('earlier checkpoint'), 'Earlier checkpoint not displayed');
+  require(confirm.disabled, 'Conflict acknowledgement was bypassed');
+  ack.click();
+  require(!confirm.disabled, 'Explicit acknowledgement did not enable copy');
+  choice.focus();
+  require(document.activeElement === choice, 'Recovery choice is not keyboard focusable');
+  ack.focus();
+  require(document.activeElement === ack, 'Conflict acknowledgement is not keyboard focusable');
+  confirm.focus();
+  require(document.activeElement === confirm, 'Confirmation is not keyboard focusable');
   confirm.click();
   confirm.click();
   await waitFor(() => document.getElementById('cancelRecoveryCopy').textContent === 'Done',
@@ -430,7 +557,69 @@ const recoveryScenario = String.raw`(async () => {
   const bounds = dialog.getBoundingClientRect();
   require(bounds.left >= 0 && bounds.top >= 0 && bounds.right <= innerWidth && bounds.bottom <= innerHeight, 'Recovery dialog exceeds viewport');
   require(dialog.scrollWidth <= dialog.clientWidth + 2, 'Recovery dialog has horizontal overflow');
+  const done = document.getElementById('cancelRecoveryCopy').getBoundingClientRect();
+  require(done.top >= bounds.top && done.bottom <= bounds.bottom, 'Recovery Done control clipped');
   require(window.__swarmcraftBrowserErrors.length === 0, 'Recovery browser errors: ' + window.__swarmcraftBrowserErrors.join(' | '));
+  return { status: 'pass' };
+})()`;
+
+const selectionScenario = String.raw`(async () => {
+  const $ = id => document.getElementById(id);
+  const waitFor = async predicate => {
+    for (let i = 0; i < 160; i += 1) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    throw new Error('Timed out opening recovery review');
+  };
+  $('cancelRecoveryCopy').click();
+  await waitFor(() => !$('recoveryCopyDialog').open);
+  $('openRecoveryCopy').click();
+  await waitFor(() => $('recoveryCopyDialog').open);
+  const dialog = $('recoveryCopyDialog').getBoundingClientRect();
+  for (const id of ['cancelRecoveryCopy', 'confirmRecoveryCopy', 'exportRecoveryChoice']) {
+    const bounds = $(id).getBoundingClientRect();
+    if (bounds.top < dialog.top || bounds.bottom > dialog.bottom || bounds.left < dialog.left || bounds.right > dialog.right) {
+      throw new Error('Recovery action clipped: ' + id);
+    }
+  }
+  return { status: 'pass' };
+})()`;
+
+const branchScenario = String.raw`(async () => {
+  const waitFor = async (predicate, label) => {
+    for (let i = 0; i < 160; i += 1) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    throw new Error('Timed out waiting for ' + label);
+  };
+  const require = (condition, message) => { if (!condition) throw new Error(message); };
+  const $ = id => document.getElementById(id);
+  $('cancelRecoveryCopy').click();
+  await waitFor(() => !$('recoveryCopyDialog').open, 'copy dialog close');
+  $('openRecoveryCopy').click();
+  await waitFor(() => $('recoveryCopyDialog').open, 'branch review');
+  $('recoveryChoice').value = 'branch:' + 'f'.repeat(64);
+  $('recoveryChoice').dispatchEvent(new Event('change', { bubbles: true }));
+  require($('confirmRecoveryCopy').hidden && $('exportRecoveryChoice').hidden, 'Missing branch files offered as available');
+  require($('recoveryCopySource').textContent.includes('Evidence only here'), 'Evidence-only warning missing');
+  $('recoveryExportDestination').value = '/tmp/swarmcraft-evidence';
+  $('recoveryExportDestination').dispatchEvent(new Event('input', { bubbles: true }));
+  require($('exportRecoveryEvidence').disabled, 'Missing exact conflict acknowledgement');
+  $('recoveryConflictAck').click();
+  require(!$('exportRecoveryEvidence').disabled, 'Evidence export unavailable after confirmation');
+  $('exportRecoveryEvidence').focus();
+  require(document.activeElement === $('exportRecoveryEvidence'), 'Evidence export not keyboard focusable');
+  $('exportRecoveryEvidence').click();
+  $('exportRecoveryEvidence').click();
+  await waitFor(() => $('cancelRecoveryCopy').textContent === 'Done', 'evidence receipt');
+  require(window.__swarmcraftCalls.filter(call => call.command === 'conflict_export').length === 1, 'Duplicate evidence export');
+  require($('recoveryCopyResult').textContent.includes('No world files were exported.'), 'Evidence-only receipt misrepresents files');
+  const bounds = $('recoveryCopyDialog').getBoundingClientRect();
+  require(bounds.left >= 0 && bounds.top >= 0 && bounds.right <= innerWidth && bounds.bottom <= innerHeight, 'Branch dialog exceeds viewport');
+  require($('recoveryCopyDialog').scrollWidth <= $('recoveryCopyDialog').clientWidth + 2, 'Branch dialog has horizontal overflow');
+  require(window.__swarmcraftBrowserErrors.length === 0, 'Branch browser errors: ' + window.__swarmcraftBrowserErrors.join(' | '));
   return { status: 'pass' };
 })()`;
 
@@ -544,6 +733,15 @@ async function runViewport(port, sessionId, documentHtml, graph, width, height, 
   assert.equal(recovery.value?.status, 'pass');
   const recoveryScreenshot = await webdriverRequest(port, `/session/${sessionId}/screenshot`);
   await writeFile(screenshotPath.replace(/\.png$/, '-recovery.png'), Buffer.from(recoveryScreenshot, 'base64'));
+  const selection = await executeAsync(port, sessionId, scenarioRunner, [selectionScenario]);
+  assert.equal(selection?.ok, true, `Selection browser scenario failed at ${width}x${height}: ${selection?.error || JSON.stringify(selection)}`);
+  const selectionScreenshot = await webdriverRequest(port, `/session/${sessionId}/screenshot`);
+  await writeFile(screenshotPath.replace(/\.png$/, '-selection.png'), Buffer.from(selectionScreenshot, 'base64'));
+  const branch = await executeAsync(port, sessionId, scenarioRunner, [branchScenario]);
+  assert.equal(branch?.ok, true, `Branch browser scenario failed at ${width}x${height}: ${branch?.error || JSON.stringify(branch)}`);
+  assert.equal(branch.value?.status, 'pass');
+  const branchScreenshot = await webdriverRequest(port, `/session/${sessionId}/screenshot`);
+  await writeFile(screenshotPath.replace(/\.png$/, '-branch.png'), Buffer.from(branchScreenshot, 'base64'));
   const invitation = await executeAsync(port, sessionId, scenarioRunner, [inviteScenario]);
   assert.equal(invitation?.ok, true, `Invite browser scenario failed at ${width}x${height}: ${invitation?.error || JSON.stringify(invitation)}`);
   assert.equal(invitation.value?.status, 'pass');
@@ -552,10 +750,21 @@ async function runViewport(port, sessionId, documentHtml, graph, width, height, 
 }
 
 test('current Desktop module graph initializes, owns canonical Create, and renders supported window sizes', async () => {
-  const driver = await existingChromeDriver();
-  assert.ok(driver, 'ChromeDriver is required for Agent 7 real-browser smoke gate on Linux CI');
   await mkdir(evidenceRoot, { recursive: true });
   const [documentHtml, graph] = await Promise.all([instrumentedDocument(), collectModuleGraph()]);
+  if (process.env.SWARMCRAFT_LOCAL_CDP === '1') {
+    const local = await startLocalCdp();
+    try {
+      for (const [width, height] of [[980, 760], [720, 560], [1280, 900]]) {
+        const screenshot = path.join(evidenceRoot, `${width}x${height}.png`);
+        await runViewport(local, 'local', documentHtml, graph, width, height, screenshot);
+        assert.deepEqual(pngDimensions(await readFile(screenshot)), { width, height });
+      }
+    } finally { await local.close(); }
+    return;
+  }
+  const driver = await existingChromeDriver();
+  assert.ok(driver, 'ChromeDriver is required for Agent 7 real-browser smoke gate on Linux CI');
   const running = await startDriver(driver);
   let sessionId;
   try {

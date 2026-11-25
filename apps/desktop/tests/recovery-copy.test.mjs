@@ -49,3 +49,48 @@ test('native recovery dispatch requires explicit new-identity confirmation', asy
   assert.equal(await backend.recoverCopy(world, checkpoint, true), 'receipt');
   assert.deepEqual(calls, [{ command: 'recover_copy', args: { world, checkpoint, confirmNewIdentity: true } }]);
 });
+
+test('recovery review pins historical choices and never treats branch evidence as available files', async () => {
+  const { normalizeRecoveryReview, recoveryExportReceipt } = await import('../src/recovery-copy.js');
+  const digest = '9'.repeat(64);
+  const branchHash = 'f'.repeat(64);
+  const raw = {
+    world_id: world, evidence: 'local_signed_history_not_live_authority',
+    checkpoint_history: 'verified_history_files_checked_on_action', checkpoint_error: null,
+    conflict_digest: digest,
+    checkpoints: [
+      { checkpoint_hash: checkpoint, snapshot_number: '4', epoch: '1', sequence: '4',
+        state_root: 'a'.repeat(64), signer: 'scpeer:' + 'd'.repeat(64), files: 2, latest: true },
+      { checkpoint_hash: 'e'.repeat(64), snapshot_number: '3', epoch: '1', sequence: '3',
+        state_root: 'b'.repeat(64), signer: 'scpeer:' + 'd'.repeat(64), files: 1, latest: false },
+    ],
+    conflicts: [{ branch_hash: branchHash, base_checkpoint: 'e'.repeat(64), head_checkpoint: '7'.repeat(64),
+      head_epoch: '1', head_sequence: '4', state_root: 'a'.repeat(64), signer: 'scpeer:' + 'd'.repeat(64),
+      local_history: 'evidence_only' }],
+  };
+  const review = normalizeRecoveryReview(world, JSON.stringify(raw));
+  assert.equal(review.choices[1].snapshot, '3');
+  assert.equal(review.choices[1].conflictDigest, digest);
+  const branch = review.choices[2];
+  assert.equal(branch.localHistory, 'evidence_only');
+  const result = { world_id: world, branch_hash: branchHash, checkpoint_hash: branch.checkpoint,
+    evidence: 'signed_branch_evidence_only', files_exported: false, manifest_count: 0, destination: '/tmp/evidence' };
+  assert.deepEqual(recoveryExportReceipt(branch, result, true), { destination: '/tmp/evidence', files: false });
+  for (const change of [{ world_id: copy }, { branch_hash: '1'.repeat(64) }, { files_exported: true },
+    { manifest_count: 1 }, { evidence: 'verified_local_checkpoint_not_authority' }]) {
+    assert.throws(() => recoveryExportReceipt(branch, { ...result, ...change }, true), /could not be confirmed/);
+  }
+  for (const change of [{ world_id: copy }, { conflict_digest: null },
+    { checkpoints: [raw.checkpoints[0], raw.checkpoints[0]] },
+    { checkpoint_history: 'unavailable' }]) {
+    assert.throws(() => normalizeRecoveryReview(world, { ...raw, ...change }), /recovery|checkpoint/i);
+  }
+});
+
+test('explicit conflict acknowledgement must match recovered-copy receipt', () => {
+  const selection = { ...recoveryCopySelection(world, status), conflictDigest: '9'.repeat(64) };
+  const result = { source_world_id: world, source_snapshot_hash: checkpoint, source_snapshot_number: 4,
+    world_id: copy, snapshot_hash: 'd'.repeat(64), display_name: 'Recovered: Example' };
+  assert.throws(() => recoveryCopyReceipt(selection, result), /Refresh Worlds/);
+  assert.equal(recoveryCopyReceipt(selection, { ...result, source_conflict_digest: selection.conflictDigest }).world, copy);
+});

@@ -305,12 +305,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #30 — P1 · Partial
 - Work: Finish manual checkpoint selection, verified restore, and conflict inspection UX
 - Acceptance: User can inspect/export both divergent histories, choose an explicit recovery outcome, and keep a recoverable original copy
-- State: **IN PROGRESS**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **LOCALLY VERIFIED**
+- Source: `crates/swarm-cli/src/{recovery_review,historical_authority,world_import,main}.rs`; `crates/swarm-cli/tests/recovery_review.rs`; Desktop native bridge, shipping and Svelte diagnostics/recovery dialogs, recovery copy and browser regressions; `docs/RECOVERY_REVIEW.md`.
+- Evidence: Exact historical checkpoint selection verifies certified history and payloads; conflict-set digest binds explicit acknowledgement. Independent divergent stores exported their exact respective head bytes and signed evidence without changing either original. Missing/invalid branch data, changed evidence, corrupt signatures/payloads, and unsafe destinations fail closed; selected earlier checkpoint creates a separate private identity. CLI integration passed; CLI library 161 passed (2 ignored), binary 51 passed; strict CLI/Tauri Clippy and native check passed. Desktop 147/147 (including actual Chrome rendering with mocked IPC at three window sizes), Svelte 82/82, source parity 30/30, zero Svelte diagnostics, local native acceptance script syntax and six Python acceptance regression tests passed.
+- Remaining / next action: Installed native GUI/platform verification; unavailable divergent payloads must be exported on the retaining device, not silently recreated. Unsupported legacy solo history remains evidence-only where certified verification fails. No in-place merge, authority recovery, or encrypted portable backup/import is claimed. Next: #31 encrypted checkpoint bundle.
+- External dependency: Installed-platform field certification; necessary final CI only under local-first policy.
+- Commit: See 25 November historical recovery checkpoint.
 
 ### #31 — P1 · Proposal
 - Work: Offer an encrypted checkpoint export/import bundle for backup and deliberate transport. Treat Drive or object storage as optional transport adapters

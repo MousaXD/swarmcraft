@@ -80,7 +80,10 @@ export interface NativeCommandTable {
   verify_world: { args: { world: string }; result: string };
   export_world: { args: { world: string; destination: string }; result: string };
   recover_world: { args: { world: string; snapshot: number; destination: string }; result: string };
-  recover_copy: { args: { world: string; checkpoint: string; confirmNewIdentity: boolean }; result: string };
+  recover_copy: { args: { world: string; checkpoint: string; confirmNewIdentity: boolean; acknowledgedConflicts?: string }; result: string };
+  recovery_review: { args: { world: string }; result: string };
+  recovery_export: { args: { world: string; checkpoint: string; acknowledgedConflicts?: string; destination: string }; result: string };
+  conflict_export: { args: { world: string; branch: string; acknowledgedConflicts: string; evidenceOnly: boolean; destination: string }; result: string };
   migration_capabilities: { args: Record<string, never>; result: string };
   migration_status: { args: { world: string }; result: string };
   manual_transfer_step: { args: { world: string; action: string; value: string | null }; result: string };

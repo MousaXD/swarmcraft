@@ -110,3 +110,19 @@ it does not automatically waive an existing required status.
 
 Historical evidence, logs and workflows can be inspected in git history.
 No old branch or workflow run may be deleted remotely without approval.
+
+### Local Svelte native GUI acceptance
+
+The previous hosted Svelte native GUI workflow was removed deliberately.
+Its positive, visual, missing-sidecar and broken-bootstrap checks now have
+a local entry point: `apps/desktop/frontend/scripts/local-native-acceptance.sh`.
+After checking/building the candidate and staging exact-commit sidecars,
+build and extract the positive installer into a disposable directory.
+Run the script with `prepare-broken` to create a separate broken frontend;
+build with `frontend/tauri.candidate.broken.conf.json` and extract into a
+different disposable directory. Then use `verify <positive-binary>
+<broken-binary> <new-evidence-directory>`. Both installers and native
+WebDriver/WebKitGTK/Xvfb must already be available. The script does not
+install dependencies, run hosted jobs, or modify the shipping configuration.
+It removes a sidecar only from its own disposable copy for the negative
+control. An unavailable native runtime is a blocked field check, not a pass.

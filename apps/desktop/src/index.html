@@ -578,8 +578,14 @@
 
               <section class="diagnostic-section diagnostic-wide" id="recoverySection">
                 <div class="section-title-row">
-                  <div><h3>Export and recovery</h3><p>Copy verified state or recover a specific snapshot into a destination.</p></div>
+                  <div><h3>Export and recovery</h3><p>Inspect exact signed checkpoints and preserved branch evidence.</p></div>
                 </div>
+                <div class="compact-actions">
+                  <button id="openRecoveryCopy" class="button button-primary world-required" type="button">Review checkpoints and conflicts</button>
+                </div>
+                <p class="helper">Export a selected checkpoint or create a new private world. The original and all unresolved conflicts stay intact.</p>
+                <details>
+                  <summary>Basic file export</summary>
                 <div class="field-grid">
                   <div class="field field-wide">
                     <label for="destination">Destination</label>
@@ -594,10 +600,7 @@
                   <button id="exportWorld" class="button button-secondary world-required" type="button">Export latest</button>
                   <button id="recoverWorld" class="button button-warning world-required" type="button">Recover snapshot</button>
                 </div>
-                <p class="helper">If the original world cannot safely resume, create a separate private world from this device's verified checkpoint. The original stays unchanged.</p>
-                <div class="compact-actions">
-                  <button id="openRecoveryCopy" class="button button-secondary world-required" type="button">Create recovered copy</button>
-                </div>
+                </details>
                 <div id="recoveryCopyNotice" class="inline-notice" role="status" aria-live="polite" hidden></div>
               </section>
             </div>
@@ -672,15 +675,33 @@
   </dialog>
 
 <dialog id="recoveryCopyDialog" class="dialog" aria-labelledby="recoveryCopyTitle">
-    <form class="dialog-card" method="dialog">
+    <form class="dialog-card recovery-dialog-card" method="dialog">
       <div>
-        <h2 id="recoveryCopyTitle">Create a separate recovered world?</h2>
-        <p>This copies the exact local checkpoint after verifying its signed history and files. It does not restore authority over the original, and may not include its newest remote changes. Hosting permission and runtime setup are not inherited.</p>
+        <h2 id="recoveryCopyTitle">Review recovery choices</h2>
+        <p>Local signed history is not live authority. A recovered copy is a new private world. The original, its checkpoints and its conflict fences are never replaced.</p>
       </div>
-      <pre id="recoveryCopySource" class="diagnostic-output"></pre>
+      <div id="recoveryReviewBody" class="recovery-review-body">
+        <div id="recoveryChoiceNotice" class="inline-notice" role="status" aria-live="polite" hidden></div>
+        <div class="field">
+          <label for="recoveryChoice">Checkpoint or preserved branch</label>
+          <select id="recoveryChoice"></select>
+        </div>
+        <pre id="recoveryCopySource" class="diagnostic-output" tabindex="0" aria-label="Exact signed recovery selection"></pre>
+        <label id="recoveryConflictAckWrap" class="check-row" for="recoveryConflictAck" hidden>
+          <input id="recoveryConflictAck" type="checkbox" />
+          <span>I reviewed the signed conflict evidence. This action will not resolve or replace the original history.</span>
+        </label>
+        <div class="field">
+          <label for="recoveryExportDestination">New export directory (optional for recovered copy)</label>
+          <input id="recoveryExportDestination" class="machine-input" placeholder="/path/to/new-export" />
+          <p class="helper">The parent must exist and the new directory must be outside the SwarmCraft data root.</p>
+        </div>
+      </div>
       <div id="recoveryCopyResult" class="inline-notice" role="status" aria-live="polite" hidden></div>
       <div class="dialog-actions">
         <button id="cancelRecoveryCopy" class="button button-secondary" value="cancel" type="submit">Cancel</button>
+        <button id="exportRecoveryEvidence" class="button button-secondary" type="button" hidden>Export signed evidence only</button>
+        <button id="exportRecoveryChoice" class="button button-secondary" type="button">Export selected files</button>
         <button id="confirmRecoveryCopy" class="button button-warning" type="button">Create new private world</button>
       </div>
     </form>

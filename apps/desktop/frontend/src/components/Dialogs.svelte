@@ -173,15 +173,34 @@
   </dialog>
 
 <dialog id="recoveryCopyDialog" class="dialog" aria-labelledby="recoveryCopyTitle">
-    <form class="dialog-card" method="dialog">
+    <form class="dialog-card recovery-dialog-card" method="dialog">
       <div>
-        <h2 id="recoveryCopyTitle">Create a separate recovered world?</h2>
-        <p>This copies the exact local checkpoint after verifying its signed history and files. It does not restore authority over the original, and may not include its newest remote changes. Hosting permission and runtime setup are not inherited.</p>
+        <h2 id="recoveryCopyTitle">Review recovery choices</h2>
+        <p>Local signed history is not live authority. A recovered copy is a new private world. The original, its checkpoints and its conflict fences are never replaced.</p>
       </div>
-      <pre id="recoveryCopySource" class="diagnostic-output"></pre>
+      <div id="recoveryReviewBody" class="recovery-review-body">
+        <div id="recoveryChoiceNotice" class="inline-notice" role="status" aria-live="polite" hidden></div>
+        <div class="field">
+          <label for="recoveryChoice">Checkpoint or preserved branch</label>
+          <select id="recoveryChoice"></select>
+        </div>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users must be able to scroll the long signed history evidence.) -->
+        <pre id="recoveryCopySource" class="diagnostic-output" tabindex="0" aria-label="Exact signed recovery selection"></pre>
+        <label id="recoveryConflictAckWrap" class="check-row" for="recoveryConflictAck" hidden>
+          <input id="recoveryConflictAck" type="checkbox" />
+          <span>I reviewed the signed conflict evidence. This action will not resolve or replace the original history.</span>
+        </label>
+        <div class="field">
+          <label for="recoveryExportDestination">New export directory (optional for recovered copy)</label>
+          <input id="recoveryExportDestination" class="machine-input" placeholder="/path/to/new-export" />
+          <p class="helper">The parent must exist and the new directory must be outside the SwarmCraft data root.</p>
+        </div>
+      </div>
       <div id="recoveryCopyResult" class="inline-notice" role="status" aria-live="polite" hidden></div>
       <div class="dialog-actions">
         <button id="cancelRecoveryCopy" class="button button-secondary" value="cancel" type="submit">Cancel</button>
+        <button id="exportRecoveryEvidence" class="button button-secondary" type="button" hidden>Export signed evidence only</button>
+        <button id="exportRecoveryChoice" class="button button-secondary" type="button">Export selected files</button>
         <button id="confirmRecoveryCopy" class="button button-warning" type="button">Create new private world</button>
       </div>
     </form>

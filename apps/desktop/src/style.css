@@ -271,7 +271,12 @@ input::placeholder, textarea::placeholder { color: #667069; }
 .dialog-card p { margin-top: 5px; color: var(--muted); font-size: 11px; }
 .dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s4); }
 .dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--s2); padding-top: var(--s2); }
-#recoveryCopyResult, #recoveryCopyNotice { white-space: pre-line; }
+#recoveryCopyResult, #recoveryCopyNotice { white-space: pre-line; overflow-wrap: anywhere; }
+#recoveryCopySource { min-height: 110px; max-height: 156px; }
+.recovery-dialog-card { display: flex; flex-direction: column; gap: var(--s3); max-height: calc(100vh - 36px); overflow: hidden; }
+.recovery-review-body { display: grid; align-content: start; gap: var(--s3); flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.recovery-dialog-card > .dialog-actions { flex: 0 0 auto; }
+#recoveryCopyResult { max-height: 36vh; overflow-y: auto; }
 #inviteInspection { white-space: pre-wrap; overflow-wrap: anywhere; }
 .invite-result { display: grid; gap: var(--s2); }
 .invite-result textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }

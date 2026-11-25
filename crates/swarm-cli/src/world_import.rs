@@ -46,6 +46,7 @@ pub struct ImportWorldResult {
 pub struct RecoverCopyRequest {
     pub source_world: WorldId,
     pub expected_checkpoint: Hash32,
+    pub acknowledged_conflicts: Option<Hash32>,
     pub name: Option<String>,
     pub confirm_new_identity: bool,
 }
@@ -55,6 +56,7 @@ pub struct RecoverCopyResult {
     pub source_world_id: String,
     pub source_snapshot_number: u64,
     pub source_snapshot_hash: String,
+    pub source_conflict_digest: Option<String>,
     pub world_id: String,
     pub display_name: String,
     pub snapshot_hash: String,
@@ -111,11 +113,12 @@ fn recover_copy_inner(
     }
     let storage = Storage::open(paths.root.clone())?;
     let identity = PeerIdentity::load_or_create(paths)?;
-    let source = crate::historical_authority::verify_local_recovery_source(
+    let source = crate::historical_authority::verify_selected_recovery_source(
         &storage,
         &identity,
         request.source_world,
         request.expected_checkpoint,
+        request.acknowledged_conflicts,
     )?;
     let name = request.name.as_deref().unwrap_or(&source.config.presentation.name).trim();
     if name.is_empty() {
@@ -226,8 +229,9 @@ fn recover_copy_inner(
             presentation: WorldPresentationV1 {
                 name: display_name.clone(),
                 description: format!(
-                    "Independent recovered copy of {} at checkpoint #{} ({}). Not a continuation of the original authority history.",
-                    request.source_world, source.manifest.snapshot_number, request.expected_checkpoint
+                    "Independent recovered copy of {} at checkpoint #{} ({}). Not a continuation of the original authority history.{}",
+                    request.source_world, source.manifest.snapshot_number, request.expected_checkpoint,
+                    request.acknowledged_conflicts.map(|hash| format!(" Reviewed conflict set: {hash}.")).unwrap_or_default()
                 ),
                 tags: Vec::new(),
                 icon_hash: None,
@@ -252,6 +256,7 @@ fn recover_copy_inner(
             source_world_id: request.source_world.to_string(),
             source_snapshot_number: source.manifest.snapshot_number,
             source_snapshot_hash: request.expected_checkpoint.to_string(),
+            source_conflict_digest: request.acknowledged_conflicts.map(|hash| hash.to_string()),
             world_id: world.to_string(),
             display_name,
             snapshot_hash: snapshot.manifest_hash()?.to_string(),
@@ -788,6 +793,7 @@ mod tests {
         let mut recovery = RecoverCopyRequest {
             source_world: world,
             expected_checkpoint: original_snapshot.manifest_hash().unwrap(),
+            acknowledged_conflicts: None,
             name: Some("Survival backup".into()),
             confirm_new_identity: false,
         };
@@ -858,6 +864,7 @@ mod tests {
             &RecoverCopyRequest {
                 source_world: world,
                 expected_checkpoint: snapshot.manifest_hash().unwrap(),
+                acknowledged_conflicts: None,
                 name: None,
                 confirm_new_identity: true,
             }

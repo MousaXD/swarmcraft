@@ -229,8 +229,14 @@
 
               <section class="diagnostic-section diagnostic-wide" id="recoverySection">
                 <div class="section-title-row">
-                  <div><h3>Export and recovery</h3><p>Copy verified state or recover a specific snapshot into a destination.</p></div>
+                  <div><h3>Export and recovery</h3><p>Inspect exact signed checkpoints and preserved branch evidence.</p></div>
                 </div>
+                <div class="compact-actions">
+                  <button id="openRecoveryCopy" class="button button-primary world-required" type="button">Review checkpoints and conflicts</button>
+                </div>
+                <p class="helper">Export a selected checkpoint or create a new private world. The original and all unresolved conflicts stay intact.</p>
+                <details>
+                  <summary>Basic file export</summary>
                 <div class="field-grid">
                   <div class="field field-wide">
                     <label for="destination">Destination</label>
@@ -245,10 +251,7 @@
                   <button id="exportWorld" class="button button-secondary world-required" type="button">Export latest</button>
                   <button id="recoverWorld" class="button button-warning world-required" type="button">Recover snapshot</button>
                 </div>
-                <p class="helper">If the original world cannot safely resume, create a separate private world from this device's verified checkpoint. The original stays unchanged.</p>
-                <div class="compact-actions">
-                  <button id="openRecoveryCopy" class="button button-secondary world-required" type="button">Create recovered copy</button>
-                </div>
+                </details>
                 <div id="recoveryCopyNotice" class="inline-notice" role="status" aria-live="polite" hidden></div>
               </section>
             </div>

@@ -1062,6 +1062,8 @@ pub(crate) struct LocalRecoverySource {
     pub config: WorldConfigV1,
     pub(crate) epoch: EpochRecordV1,
     pub(crate) membership: MembershipRecordV1,
+    head: SnapshotManifestV1,
+    conflicts: Option<swarm_protocol::Hash32>,
 }
 
 impl LocalRecoverySource {
@@ -1071,27 +1073,41 @@ impl LocalRecoverySource {
         if storage.load_epoch_record(world)? != self.epoch
             || storage.load_membership_record(world)? != self.membership
             || storage.load_world_config(world)? != self.config
-            || storage.latest_snapshot(world)?.as_ref() != Some(&self.manifest)
+            || storage.latest_snapshot(world)?.as_ref() != Some(&self.head)
+            || storage.load_snapshot(world, self.manifest.snapshot_number)? != self.manifest
             || descriptor.members != self.membership.members
             || descriptor.compatibility_fingerprint != self.config.compatibility_fingerprint()?
-            || storage.first_contact_publication_started(world)?
-            || !storage.list_solo_conflicts(world)?.is_empty()
+            || storage.first_contact_replay_pinned(world)?
+            || crate::recovery_review::conflict_digest(storage, world)? != self.conflicts
         {
-            bail!("source world changed during recovery copy; inspect the checkpoint and retry");
+            bail!("source world changed during recovery; inspect the exact checkpoint and conflict evidence and retry");
         }
         Ok(())
     }
 }
 
+/// Strict current-head verifier for authority-affecting review/retirement.
+/// Do not relax this when extending the data-only recovery-copy interface.
 pub(crate) fn verify_local_recovery_source(
     storage: &Storage,
     local: &PeerIdentity,
     world: WorldId,
     expected_checkpoint: swarm_protocol::Hash32,
 ) -> Result<LocalRecoverySource> {
-    if !storage.list_solo_conflicts(world)?.is_empty() {
-        bail!("conflicting solo branches require explicit conflict inspection before recovery");
+    let source = verify_selected_recovery_source(storage, local, world, expected_checkpoint, None)?;
+    if source.manifest != source.head {
+        bail!("the explicitly selected checkpoint is not the current accepted head");
     }
+    Ok(source)
+}
+
+/// Read-only verification of the whole retained certified history. Conflict
+/// evidence is reviewed separately; this never certifies live authority.
+pub(crate) fn verified_local_checkpoint_history(
+    storage: &Storage,
+    local: &PeerIdentity,
+    world: WorldId,
+) -> Result<(HistoricalReplayProofV1, Vec<SnapshotManifestV1>)> {
     let (proof, manifests) = collect_local_history(storage, world)?;
     let membership = proof.membership.last().context("missing accepted membership")?;
     if !membership
@@ -1101,24 +1117,50 @@ pub(crate) fn verify_local_recovery_source(
     {
         bail!("local identity is not an authorized retained-world member");
     }
+    let descriptor = storage.load_world_descriptor(world)?;
+    if descriptor.members != membership.members
+        || descriptor.compatibility_fingerprint != proof.genesis.compatibility_fingerprint
+        || storage.first_contact_replay_pinned(world)?
+    {
+        bail!("canonical history is not synchronized");
+    }
     validate_replay_shape(&proof, &proof.genesis, membership)?;
     verify_replay_history(&proof, &proof.genesis, membership)?;
-    // The final signer need not be online to recover a separate world, but
-    // every original retained manifest must carry its own verified signature
-    // and match the complete certified epoch/transition history.
     for manifest in &manifests {
         verify_manifest_against_history(&proof, manifest)?;
     }
-    let manifest = manifests.last().context("missing retained canonical checkpoint")?.clone();
-    if manifest.manifest_hash()? != expected_checkpoint {
-        bail!("retained canonical checkpoint differs from the explicitly selected recovery hash");
+    ensure_collected_history_current(storage, &proof, &manifests)?;
+    Ok((proof, manifests))
+}
+
+/// A data-only copy may use any exact retained checkpoint, never a snapshot
+/// number supplied without its hash. A conflict requires explicit
+/// acknowledgement of the exact reviewed evidence set.
+pub(crate) fn verify_selected_recovery_source(
+    storage: &Storage,
+    local: &PeerIdentity,
+    world: WorldId,
+    expected_checkpoint: swarm_protocol::Hash32,
+    acknowledged_conflicts: Option<swarm_protocol::Hash32>,
+) -> Result<LocalRecoverySource> {
+    let conflicts = crate::recovery_review::conflict_digest(storage, world)?;
+    if conflicts != acknowledged_conflicts {
+        bail!("conflict evidence changed or was not explicitly acknowledged; review recovery before copying");
     }
+    let (proof, manifests) = verified_local_checkpoint_history(storage, local, world)?;
+    let manifest = manifests
+        .iter()
+        .find(|manifest| manifest.manifest_hash().ok() == Some(expected_checkpoint))
+        .context("exact selected checkpoint is not in the retained verified history")?
+        .clone();
     storage.verify_snapshot(&manifest)?;
     let source = LocalRecoverySource {
         manifest,
         config: proof.configs.last().context("missing accepted config")?.clone(),
         epoch: proof.epochs.last().context("missing accepted epoch")?.clone(),
-        membership: membership.clone(),
+        membership: proof.membership.last().context("missing accepted membership")?.clone(),
+        head: manifests.last().context("missing retained canonical checkpoint")?.clone(),
+        conflicts,
     };
     source.ensure_unchanged(storage)?;
     Ok(source)
