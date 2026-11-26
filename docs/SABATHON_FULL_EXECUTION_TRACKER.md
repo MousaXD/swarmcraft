@@ -75,12 +75,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #7 — P1 · Missing
 - Work: Add an optional first-party Fabric **client** auto-reconnect mod on top of the P0 loopback gateway
 - Acceptance: On disconnect, the gateway closes the old game stream; with explicit opt-in, the client mod starts a fresh Minecraft connection to the same loopback entry only after a new trusted route is verified. Retry is bounded and cancelable
-- State: **NOT STARTED**
-- Source: Pending item-specific source mapping; see original roadmap links.
-- Evidence: Historical roadmap baseline only; current item-specific evidence pending.
-- Remaining / next action: Inspect current source against acceptance; implement missing dependencies and test.
-- External dependency: Not yet established; assess during execution.
-- Commit: Pending item-specific attribution
+- State: **IN PROGRESS — separate client artifact and policy locally verified; actual client acceptance open**
+- Source: [Client reconnect guide](CLIENT_RECONNECT.md); `minecraft/fabric/src/clientReconnect/`, `src/clientReconnectTest/`, and explicit Gradle client tasks.
+- Evidence: Client-only Fabric JAR builds against Minecraft 26.1.2/Java 25/Fabric, separate from unchanged server bridge. Optional per-disconnect action or explicit default-off automatic mode with visible grace period; exact prior joined socket, fixed native status query, strict current proof and exact loopback entry, bounded single-flight probes, cancellation and one fresh vanilla login. All 89 local policy/process assertions passed, including malformed and stale proof, exact socket, default-off, no default-port DNS SRV redirect, actual cancellation, timeout/output caps and real no-daemon CLI denial. Both JAR builds passed; artifact inspection proves client-only metadata, no embedded test/server code and byte-exact unchanged server JAR. Workflow policy/release checks passed.
+- Remaining / next action: Actual authenticated Minecraft client GUI, exact successor handoff/crash and saved marker with stable loopback; test opt-out, cancellation, login failure, quorum loss and representative native OSes. Packaging/release of the optional artifact requires its own review.
+- External dependency: Real supported client/accounts and independent-host gameplay verification. Local compile and subprocess tests are not an installed-client result.
+- Commit: Optional Fabric client reconnect checkpoint; see git history.
 
 ### #8 — P1 · Proposal (after #9)
 - Work: Design an explicit two-device **Pass hosting** policy with one writable holder, explicitly specifying online-overlap vs. async-dropbox handoff requirements

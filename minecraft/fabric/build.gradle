@@ -58,3 +58,37 @@ tasks.register('ownerlessProbeJar', Jar) {
     destinationDirectory = layout.buildDirectory.dir('ownerless-probe')
     from sourceSets.ownerlessProbe.output
 }
+
+// Optional client-only artifact. Never nest it in the server bridge or
+// implicitly install it in a managed server runtime.
+sourceSets {
+    clientReconnect {
+        compileClasspath += sourceSets.main.compileClasspath
+    }
+    clientReconnectTest {
+        compileClasspath += sourceSets.clientReconnect.output + sourceSets.clientReconnect.compileClasspath
+    }
+}
+tasks.named('processClientReconnectResources') {
+    inputs.property 'version', project.version
+    filesMatching('fabric.mod.json') {
+        expand 'version': project.version
+    }
+}
+tasks.register('clientReconnectJar', Jar) {
+    dependsOn tasks.named('clientReconnectClasses')
+    archiveBaseName = 'swarmcraft-fabric-reconnect'
+    destinationDirectory = layout.buildDirectory.dir('client-reconnect')
+    from sourceSets.clientReconnect.output
+    from('../../LICENSE') {
+        rename { "${it}_swarmcraft-fabric-reconnect" }
+    }
+}
+tasks.register('clientReconnectCheck', JavaExec) {
+    dependsOn tasks.named('clientReconnectTestClasses')
+    // The pure policy runner does not launch Minecraft or require Loom's
+    // development launcher runtime (which is not needed to build the JAR).
+    classpath = sourceSets.clientReconnectTest.output + sourceSets.clientReconnect.output +
+            sourceSets.clientReconnect.compileClasspath
+    mainClass = 'dev.swarmcraft.reconnect.ReconnectPolicyTest'
+}
