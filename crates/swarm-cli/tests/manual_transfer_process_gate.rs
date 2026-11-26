@@ -674,8 +674,62 @@ mod hosted_live {
         );
     }
 
+    /// Optional test-only Java process uses the exact built reconnect
+    /// artifact (not a Rust reimplementation of its decoder) and a new
+    /// Minecraft status socket. No accounts or GUI are involved.
+    fn reconnect_probe(player: &PeerFixture, world: WorldId, endpoint: &str, expected: Option<(&PeerFixture, u64)>) {
+        let Some(classpath) = std::env::var_os("SWARMCRAFT_RECONNECT_PROBE_CLASSPATH") else {
+            return;
+        };
+        let config = tempfile::NamedTempFile::new_in(player._temp.path()).unwrap();
+        serde_json::to_writer(
+            config.as_file(),
+            &serde_json::json!({
+                "cli": env!("CARGO_BIN_EXE_swarmcraft"),
+                "data_dir": player.paths.root,
+                "world_id": world.to_string(),
+                "local_gateway": endpoint,
+                "auto_reconnect": false,
+            }),
+        )
+        .unwrap();
+        let (mode, authority, epoch) = expected.map_or_else(
+            || ("deny", String::from("-"), String::from("0")),
+            |(peer, epoch)| ("allow", peer.identity.peer_id().to_string(), epoch.to_string()),
+        );
+        let output = Command::new("java")
+            .arg("-cp")
+            .arg(classpath)
+            .arg("dev.swarmcraft.reconnect.LiveGatewayProbe")
+            .arg(config.path())
+            .args([mode, &authority, &epoch])
+            .output()
+            .expect("test-only reconnect probe must launch");
+        assert!(
+            output.status.success(),
+            "Java reconnect probe {mode} failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        if let Some((peer, epoch)) = expected {
+            assert_eq!(result["outcome"], "minecraft_status");
+            assert_eq!(result["world"], world.to_string());
+            assert_eq!(result["gateway"], endpoint);
+            assert_eq!(result["authority"], peer.identity.peer_id().to_string());
+            assert_eq!(result["epoch"], epoch);
+            assert!(result["fence"].as_u64().is_some_and(|fence| fence > 0));
+            assert!(result["snapshot"].as_str().is_some_and(|hash| hash.len() == 64));
+            assert!(result["version"].as_str().is_some_and(|version| version.contains("26.1.2")));
+            println!("JAVA_RECONNECT_STATUS_PASS epoch={epoch}");
+        } else {
+            assert_eq!(result, serde_json::json!({"outcome": "refused"}));
+            println!("JAVA_RECONNECT_REFUSAL_PASS");
+        }
+    }
+
     #[test]
-    #[ignore = "requires official managed Minecraft and candidate Fabric artifact; run explicitly in hosted live CI"]
+    #[ignore = "requires official managed Minecraft and candidate Fabric artifact; run explicitly on a disposable local lab"]
     fn real_minecraft_gateway_handoff_and_recovery() {
         assert!(hosting_capacity_for_process_test(), "hosted live gate must have enough memory; never skip");
         assert!(std::env::var_os("SWARMCRAFT_FABRIC_MOD_JAR").is_some(), "candidate Fabric artifact is mandatory");
@@ -706,6 +760,7 @@ mod hosted_live {
         });
         let endpoint = verified_route(&carol, world, &alice, 1, &peers);
         minecraft_status(&endpoint);
+        reconnect_probe(&carol, world, &endpoint, Some((&alice, 1)));
         assert!(!carol.paths.root.join("runtime").join(world.to_hex()).exists());
         // libtest writes the test name without a trailing newline under
         // --nocapture. Emit a standalone exact marker for the CI gate.
@@ -718,6 +773,7 @@ mod hosted_live {
         let successor = verified_route(&carol, world, &bob, 2, &peers);
         assert_eq!(successor, endpoint, "player's permanent loopback address changed");
         minecraft_status(&successor);
+        reconnect_probe(&carol, world, &endpoint, Some((&bob, 2)));
         assert_eq!(fs::read(bob.paths.root.join(&relative)).unwrap(), b"real Fabric save before signed handoff\n");
         println!("\nHOSTED_LIVE_GATEWAY_HANDOFF_PASS");
 
@@ -742,6 +798,7 @@ mod hosted_live {
         let recovered = verified_route(&carol, world, &alice, 3, &peers);
         assert_eq!(recovered, endpoint);
         minecraft_status(&recovered);
+        reconnect_probe(&carol, world, &endpoint, Some((&alice, 3)));
         assert_eq!(fs::read(alice.paths.root.join(&relative)).unwrap(), b"real Fabric save before signed handoff\n");
         let epoch = alice.storage.load_epoch_record(world).unwrap();
         assert_eq!(epoch.mode, EpochMode::Recovery);
@@ -757,6 +814,7 @@ mod hosted_live {
         });
         let report = swarm_cli::host_readiness::load_host_readiness_report(&alice.paths, world).unwrap();
         assert!(!report.safe_to_shutdown, "offline voter has not acknowledged the sleep boundary");
+        reconnect_probe(&carol, world, &endpoint, None);
         println!("\nHOSTED_LIVE_GATEWAY_RECOVERY_PASS");
     }
 }

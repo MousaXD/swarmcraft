@@ -132,7 +132,25 @@ def assert_denied_gateway(port: int) -> None:
             raise AssertionError(f"unverified game gateway returned unexpected bytes: {received!r}")
 
 
-def smoke(binary: Path) -> None:
+def reconnect_refusal(binary: Path, data: Path, world: str, port: int, classpath: str | None) -> None:
+    if classpath is None:
+        return
+    # Actual packaged reconnect policy, no fake route document. The
+    # harness must not open a Minecraft socket when the CLI denies.
+    with tempfile.NamedTemporaryFile(mode="w", dir=data, suffix=".json", encoding="utf8") as config:
+        json.dump({"cli": str(binary), "data_dir": str(data), "world_id": world,
+                   "local_gateway": f"127.0.0.1:{port}", "auto_reconnect": False}, config)
+        config.flush()
+        result = subprocess.run(
+            ["java", "-cp", classpath, "dev.swarmcraft.reconnect.LiveGatewayProbe",
+             config.name, "deny", "-", "0"],
+            text=True, capture_output=True, timeout=30, check=False,
+        )
+        assert json.loads(expect(result, 0, "Java reconnect refusal")) == {"outcome": "refused"}
+    print("JAVA_RECONNECT_REFUSAL_PASS", flush=True)
+
+
+def smoke(binary: Path, reconnect_classpath: str | None = None) -> None:
     with tempfile.TemporaryDirectory(prefix="swarmcraft-sabathon-p0-") as data_str:
         data = Path(data_str)
         process = None
@@ -155,6 +173,7 @@ def smoke(binary: Path) -> None:
                 1, "status without a live daemon",
             )
             expect(run_cli(binary, data, "world", "game-route-select", world), 1, "selection without a live daemon")
+            reconnect_refusal(binary, data, world, port, reconnect_classpath)
 
             process, log = daemon(binary, data, data / "daemon-first.log")
             await_daemon(binary, data, world, process)
@@ -177,6 +196,13 @@ def smoke(binary: Path) -> None:
             assert_unavailable(
                 expect(run_cli(binary, data, "world", "game-route-status", world, "--json"), 0, "fresh status"), world,
             )
+            reconnect_refusal(binary, data, world, port, reconnect_classpath)
+            if reconnect_classpath is not None:
+                # No raw connection attempted even though the listener
+                # exists. The later deliberate TCP denial is separate.
+                status = json.loads(expect(run_cli(binary, data, "world", "game-route-status", world, "--json"),
+                                           0, "no reconnect stream attempted"))
+                assert status.get("recent_session") is None, "Java probe opened an unauthorized connection"
             assert_denied_gateway(port)
             assert_unavailable(
                 expect(run_cli(binary, data, "world", "game-route-status", world, "--json"), 0, "failed session diagnosis"),
@@ -192,9 +218,15 @@ def smoke(binary: Path) -> None:
                 run_cli(binary, data, "world", "game-route-status", world, "--json"),
                 1, "status after the live daemon stopped",
             )
+            reconnect_refusal(binary, data, world, port, reconnect_classpath)
             process, log = daemon(binary, data, data / "daemon-restarted.log")
             await_daemon(binary, data, world, process)
             expect(run_cli(binary, data, "world", "game-route-select", world), 0, "reselect same reserved gateway")
+            reconnect_refusal(binary, data, world, port, reconnect_classpath)
+            if reconnect_classpath is not None:
+                status = json.loads(expect(run_cli(binary, data, "world", "game-route-status", world, "--json"),
+                                           0, "no restarted reconnect stream attempted"))
+                assert status.get("recent_session") is None, "Java probe opened a stale route after restart"
             assert_denied_gateway(port)
             assert_unavailable(
                 expect(run_cli(binary, data, "world", "game-route-status", world, "--json"), 0, "post-restart status"), world,
@@ -210,11 +242,13 @@ def smoke(binary: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cli", type=Path, default=ROOT / "target/debug/swarmcraft")
+    parser.add_argument("--reconnect-probe-classpath", default=os.environ.get("SWARMCRAFT_RECONNECT_PROBE_CLASSPATH"),
+                        help="optional test-only Java probe classpath from clientReconnectProbeClasspath")
     args = parser.parse_args()
     binary = args.cli.resolve()
     if not binary.is_file() or not os.access(binary, os.X_OK):
         parser.error(f"build actual SwarmCraft CLI first: {binary}")
-    smoke(binary)
+    smoke(binary, args.reconnect_probe_classpath)
     return 0
 
 

@@ -92,3 +92,33 @@ tasks.register('clientReconnectCheck', JavaExec) {
             sourceSets.clientReconnect.compileClasspath
     mainClass = 'dev.swarmcraft.reconnect.ReconnectPolicyTest'
 }
+
+// A test-only Java entrypoint for the real native gateway process gate.
+// Keep it out of the distributable client and server artifacts.
+tasks.register('clientReconnectProbeJar', Jar) {
+    dependsOn tasks.named('clientReconnectTestClasses')
+    archiveBaseName = 'swarmcraft-reconnect-live-probe-test-only'
+    destinationDirectory = layout.buildDirectory.dir('client-reconnect-test')
+    from(sourceSets.clientReconnectTest.output) {
+        include 'dev/swarmcraft/reconnect/LiveGatewayProbe.class'
+    }
+}
+tasks.register('clientReconnectProbeClasspath') {
+    dependsOn tasks.named('clientReconnectProbeJar'), tasks.named('clientReconnectJar')
+    def output = layout.buildDirectory.file('client-reconnect-test/classpath.txt')
+    outputs.file(output)
+    outputs.upToDateWhen { false } // absolute paths belong to this checkout
+    // Use exact resolved Gson from the existing Minecraft compile classpath.
+    doLast {
+        def gson = sourceSets.clientReconnect.compileClasspath.files.findAll { it.name ==~ /gson-[0-9].*\.jar/ }
+        if (gson.size() != 1) throw new GradleException('Expected exactly one Minecraft Gson JAR')
+        output.get().asFile.text = files(tasks.named('clientReconnectProbeJar').get().archiveFile,
+                tasks.named('clientReconnectJar').get().archiveFile, gson).asPath + System.lineSeparator()
+    }
+}
+
+tasks.register('runtimeChallengeCheck', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.output + sourceSets.main.output
+    mainClass = 'dev.swarmcraft.fabric.RuntimeChallengeSlotTest'
+}

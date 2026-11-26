@@ -447,6 +447,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_runtime_refusal_keeps_authenticated_session_for_fresh_challenge_and_save() {
+        let (mut session, read, mut write) = connected_test_bridge().await;
+        let client = tokio::spawn(async move {
+            let mut reader = BufReader::new(read);
+            assert_eq!(next_command(&mut reader).await, format!("RUNTIME_CHALLENGE\t42\t{}\n", encode([9; 32])));
+            write.write_all(b"ERROR\t42\tRUNTIME_UNAVAILABLE\n").await.unwrap();
+            assert_eq!(next_command(&mut reader).await, format!("RUNTIME_CHALLENGE\t43\t{}\n", encode([10; 32])));
+            write
+                .write_all(
+                    format!(
+                        "RUNTIME_READY\t43\t{}\t{}\t25567\t{}\t{}\n",
+                        encode([10; 32]),
+                        encode([3; 32]),
+                        encode("/world"),
+                        Hash32([7; 32])
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(next_command(&mut reader).await, "SAVE_BARRIER\t44\n");
+            write.write_all(b"SAVE_COMPLETE\t44\n").await.unwrap();
+        });
+        assert!(matches!(
+            session.runtime_challenge(42, [9; 32], Duration::from_secs(1)).await,
+            Err(IpcTransportError::RemoteError { request_id: 42, code }) if code == "RUNTIME_UNAVAILABLE"
+        ));
+        let reply = session.runtime_challenge(43, [10; 32], Duration::from_secs(1)).await.unwrap();
+        assert!(reply.starts_with("RUNTIME_READY\t43\t"));
+        session.save_barrier(44, Duration::from_secs(1)).await.unwrap();
+        client.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn stale_or_mismatched_runtime_reply_poison_session() {
         let (mut session, read, mut write) = connected_test_bridge().await;
         let client = tokio::spawn(async move {

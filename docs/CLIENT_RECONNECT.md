@@ -127,3 +127,67 @@ loopback port. Check readable screen layout, keyboard navigation and
 small windows. Repeat on representative native client OSes and independent
 networks. Local policy/build tests alone are not field acceptance or a
 signed release of this optional component.
+
+### Native gateway process gate (test-only)
+
+To exercise the actual compiled reconnect policy and native daemon
+before installing a licensed client, build the separate test probe:
+
+```sh
+cd minecraft/fabric
+gradle --offline clientReconnectProbeClasspath runtimeChallengeCheck
+cd ../..
+export SWARMCRAFT_RECONNECT_PROBE_CLASSPATH="$(cat minecraft/fabric/build/client-reconnect-test/classpath.txt)"
+export SWARMCRAFT_FABRIC_MOD_JAR="$PWD/minecraft/fabric/build/libs/swarmcraft-fabric-0.5.1.jar"
+python3 scripts/e2e/sabathon_local_gateway_smoke.py --cli target/debug/swarmcraft
+cargo test --locked --offline -p swarm-cli --test manual_transfer_process_gate \
+  hosted_live::real_minecraft_gateway_handoff_and_recovery -- --ignored --nocapture --test-threads=1
+```
+
+The latter gate uses official runtime downloads and two disposable
+managed server installations, plus a third player-only peer. It checks
+the actual reconnect JAR's native subprocess and strict proof decoder
+at each accepted authority epoch, then opens a new literal-loopback
+Minecraft status socket. The sleep boundary must refuse another
+connection. The separately packaged test probe is not a mod, a login
+client or a release asset. The negative smoke additionally checks
+absence of an unauthorized session attempt before and after daemon
+restart. A Minecraft status response does not prove authenticated
+game login, saved inventory, or independent physical-device acceptance.
+
+The first positive lab attempt on 26 November installed both real
+runtimes and established authenticated Fabric IPC, but failed before
+the first positive route. The server thread was approximately 5892ms
+behind, exceeding the unchanged Rust readiness RPC budget; controller
+invalidation correctly stopped the old runtime. The server bridge now
+permits just one queued readiness observation, with a 500ms terminal
+correlated `RUNTIME_UNAVAILABLE` refusal if the game thread is stalled.
+A timed-out slot remains occupied until its queued task drains; late
+success cannot produce another response, and repeated challenges do
+not accumulate work. A separate deadline executor leaves the controller
+heartbeat watchdog independent. A responsive server thread must still
+produce every positive reply with the existing permit/identity/port
+checks, and genuine IPC timeout or malformed replies still invalidate
+the authenticated Rust session. Neither the controller lease nor the
+canonical route proof deadlines were extended.
+
+The 113-assertion Java runtime-slot regression covers real timer/game
+thread interleaving, duplicate/late reply refusal, bounded queueing,
+and fresh recovery after drain. All eight Rust IPC tests pass, including
+explicit correlated refusal followed by a new challenge and save
+barrier, actual timeout invalidation and mismatched reply invalidation.
+All 89 original client-policy assertions pass. The actual Java probe
+refused all four no-daemon/unconsented/stopped/restarted scenarios,
+without opening an unauthorized socket. The corrected local real-server run passed the first two positive stages:
+initial authority epoch 1 and planned handoff to epoch 2, each with the
+actual Java decoder and native live proof followed by a fresh real
+Minecraft status exchange. The same permanent loopback address and
+saved file marker were verified. After the deliberate successor crash,
+the surviving majority certified epoch 3 and the player replica verified
+the recovered checkpoint. The remaining epoch-3 status and safe-stop
+checks are separate gates; no authenticated player login is claimed.
+The exact rebuilt server SHA-256 was
+`f57b0ed3a6101da742304aa0b9efd6ff57f65732588a7d9b814029291a34b073`;
+the optional client JAR was byte-identical to the preceding build.
+The test-only probe SHA-256 was
+`4c42e4c0ced992a42f115eb8b7e44397a5bdbbabb5acee9fd173275fdb091aa0`.

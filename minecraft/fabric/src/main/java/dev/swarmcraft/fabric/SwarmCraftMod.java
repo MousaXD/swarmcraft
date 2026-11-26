@@ -15,6 +15,8 @@ import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.HexFormat;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import net.fabricmc.api.ModInitializer;
@@ -241,6 +243,14 @@ public final class SwarmCraftMod implements ModInitializer {
         private final String runtimeInstanceNonce;
         private final AtomicBoolean closed = new AtomicBoolean();
         private final AtomicBoolean controllerFailureStarted = new AtomicBoolean();
+        private final RuntimeChallengeSlot runtimeChallenges = new RuntimeChallengeSlot();
+        // Do not run refusal I/O on the lease watchdog: its heartbeat
+        // expiry check must remain independent even if the socket stalls.
+        private final ScheduledThreadPoolExecutor challengeTimer = new ScheduledThreadPoolExecutor(1, task -> {
+            Thread thread = new Thread(task, "swarmcraft-runtime-challenge-deadline");
+            thread.setDaemon(true);
+            return thread;
+        });
         private volatile long lastControllerHeartbeatNanos;
         private Socket socket;
         private BufferedWriter writer;
@@ -253,6 +263,7 @@ public final class SwarmCraftMod implements ModInitializer {
             byte[] random = new byte[32];
             new SecureRandom().nextBytes(random);
             this.runtimeInstanceNonce = HexFormat.of().formatHex(random);
+            challengeTimer.setRemoveOnCancelPolicy(true);
         }
 
         private void start() throws IOException {
@@ -345,7 +356,7 @@ public final class SwarmCraftMod implements ModInitializer {
                 lastControllerHeartbeatNanos = System.nanoTime();
                 String requestId = fields[1];
                 String nonce = fields[2];
-                server.execute(() -> answerRuntimeChallenge(requestId, nonce));
+                queueRuntimeChallenge(requestId, nonce);
                 return;
             }
             if (fields.length != 2) {
@@ -364,7 +375,48 @@ public final class SwarmCraftMod implements ModInitializer {
             }
         }
 
-        private void answerRuntimeChallenge(String requestId, String challengeNonce) {
+        private void queueRuntimeChallenge(String requestId, String nonce) {
+            RuntimeChallengeSlot.Pending pending = runtimeChallenges.begin(requestId, System.nanoTime());
+            if (pending == null) {
+                sendRuntimeResponse(RuntimeChallengeSlot.refusal(requestId));
+                return;
+            }
+            try {
+                var deadline = challengeTimer.schedule(
+                    () -> pending.refuse(this::sendRuntimeResponse),
+                    RuntimeChallengeSlot.BUDGET_NANOS, TimeUnit.NANOSECONDS);
+                try {
+                    server.execute(() -> {
+                        try {
+                            if (!pending.completed()) {
+                                String reply = runtimeChallengeReply(requestId, nonce);
+                                pending.finish(reply, System.nanoTime(), this::sendRuntimeResponse);
+                            }
+                        } finally {
+                            deadline.cancel(false);
+                            runtimeChallenges.release(pending);
+                        }
+                    });
+                } catch (RuntimeException error) {
+                    deadline.cancel(false);
+                    pending.refuse(this::sendRuntimeResponse);
+                    runtimeChallenges.release(pending);
+                }
+            } catch (RuntimeException error) {
+                pending.refuse(this::sendRuntimeResponse);
+                runtimeChallenges.release(pending);
+            }
+        }
+
+        private void sendRuntimeResponse(String response) {
+            try {
+                send(response);
+            } catch (IOException error) {
+                controllerLost("failed to report runtime-readiness result", error);
+            }
+        }
+
+        private String runtimeChallengeReply(String requestId, String challengeNonce) {
             try {
                 PermitGuard guard = permitGuard;
                 if (closed.get() || controllerFailureStarted.get() || guard == null || !guard.hasLivePermit()) {
@@ -380,16 +432,12 @@ public final class SwarmCraftMod implements ModInitializer {
                     || serverPort <= 0 || serverPort > 65535) {
                     throw new IOException("managed Fabric runtime identity or listener is unavailable");
                 }
-                send("RUNTIME_READY\t" + requestId + "\t" + challengeNonce + "\t"
+                return "RUNTIME_READY\t" + requestId + "\t" + challengeNonce + "\t"
                     + runtimeInstanceNonce + "\t" + serverPort + "\t"
-                    + encode(Path.of(worldDirectory).toAbsolutePath().normalize().toString()) + "\t" + compatibility);
+                    + encode(Path.of(worldDirectory).toAbsolutePath().normalize().toString()) + "\t" + compatibility;
             } catch (Exception error) {
                 LOGGER.warn("Refusing SwarmCraft runtime-readiness challenge", error);
-                try {
-                    send("ERROR\t" + requestId + "\tRUNTIME_UNAVAILABLE");
-                } catch (IOException ignored) {
-                    controllerLost("failed to report runtime-readiness refusal", ignored);
-                }
+                return RuntimeChallengeSlot.refusal(requestId);
             }
         }
 
@@ -424,6 +472,7 @@ public final class SwarmCraftMod implements ModInitializer {
             if (!closed.compareAndSet(false, true)) {
                 return;
             }
+            challengeTimer.shutdownNow();
             try {
                 if (socket != null) {
                     socket.close();
