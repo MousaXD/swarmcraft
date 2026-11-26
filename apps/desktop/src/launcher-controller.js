@@ -1,7 +1,7 @@
 import { installDiscoveryLobby } from './discovery-lobby.js';
 import { discoveryUnavailable, formatDiscoveryResult, normalizeWorldId, withDiscoveryDeadline } from './discovery-diagnostics.js';
 import { providerContractInvoke } from './provider-contract-bridge.js';
-import { baselineNotice, catalogChoiceLabel, catalogSelectionState } from './runtime-catalog-policy.js';
+import { baselineNotice, catalogChoiceLabel, catalogSelectionState, fabricCatalogChoiceLabel } from './runtime-catalog-policy.js';
 const invoke = () => providerContractInvoke(window.__TAURI__?.core);
 const byId = (id) => document.getElementById(id);
 const clean = (value) => String(value ?? '').trim();
@@ -227,8 +227,10 @@ function importCatalogEntries(response, minecraftVersion = null) {
       throw new Error('Official version catalog contained an invalid or mismatched entry.');
     }
     const state = catalogSelectionState(item);
-    const available = minecraft ? item.supported && item.type === 'release' : item.stable;
-    return { value, state, available, selectable: available && state === 'pinned_baseline' };
+    const available = minecraft ? item.supported && item.type === 'release' : true;
+    const label = minecraft ? catalogChoiceLabel(value, state, available)
+      : fabricCatalogChoiceLabel(value, state, item.stable);
+    return { value, label, selectable: available && state === 'pinned_baseline' };
   });
 }
 
@@ -248,7 +250,7 @@ function buildImportSelect(source, entries, preferred = '') {
   for (const entry of entries) {
     const option = document.createElement('option');
     option.value = entry.value;
-    option.textContent = catalogChoiceLabel(entry.value, entry.state, entry.available);
+    option.textContent = entry.label;
     option.disabled = !entry.selectable;
     select.append(option);
   }

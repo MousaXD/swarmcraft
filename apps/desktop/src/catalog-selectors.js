@@ -1,4 +1,4 @@
-import { baselineNotice, catalogChoiceLabel, catalogSelectionState } from './runtime-catalog-policy.js';
+import { baselineNotice, catalogChoiceLabel, catalogSelectionState, fabricCatalogChoiceLabel } from './runtime-catalog-policy.js';
 
 function nonEmptyString(value) {
   return typeof value === 'string' && value.trim() === value && value.length > 0;
@@ -59,11 +59,9 @@ export function chooseMinecraftVersion(versions, preferred = '') {
 }
 
 export function chooseFabricLoader(versions, preferred = '') {
-  const compatible = (loader) => loader.selectionState === 'pinned_baseline' && loader.stable;
+  const compatible = (loader) => loader.selectionState === 'pinned_baseline';
   if (preferred && versions.some((loader) => loader.version === preferred && compatible(loader))) return preferred;
-  return versions.find((loader) => compatible(loader) && loader.stable)?.version
-    || versions.find(compatible)?.version
-    || '';
+  return versions.find(compatible)?.version || '';
 }
 
 function errorCode(error) {
@@ -158,7 +156,7 @@ export class CatalogSelectionState {
         version.id === this.minecraft && version.supported && version.type === 'release' && version.selectionState === 'pinned_baseline')
       && this.fabricVersions.some((loader) =>
         loader.version === this.fabricLoader && loader.minecraftVersion === this.minecraft
-        && loader.stable && loader.selectionState === 'pinned_baseline');
+        && loader.selectionState === 'pinned_baseline');
   }
 }
 
@@ -344,16 +342,15 @@ export function registerCatalogSelectors({ invoke, documentRef } = {}) {
   const renderFabric = () => {
     fabricSelect.replaceChildren();
     for (const loader of state.fabricVersions) {
-      const compatible = loader.stable && loader.selectionState === 'pinned_baseline';
-      const label = loader.stable ? loader.version : `${loader.version} (unstable)`;
+      const compatible = loader.selectionState === 'pinned_baseline';
       const option = appendOption(
         doc, fabricSelect, loader.version,
-        catalogChoiceLabel(label, loader.selectionState, loader.stable),
+        fabricCatalogChoiceLabel(loader.version, loader.selectionState, loader.stable),
       );
       option.disabled = !compatible;
     }
     fabricSelect.value = state.fabricLoader;
-    fabricSelect.disabled = !state.fabricVersions.some((loader) => loader.stable && loader.selectionState === 'pinned_baseline');
+    fabricSelect.disabled = !state.fabricVersions.some((loader) => loader.selectionState === 'pinned_baseline');
   };
 
   const loadFabric = async ({ refresh = false, preferred = '' } = {}) => {

@@ -18,4 +18,14 @@ export function catalogChoiceLabel(label, state, available = true) {
   return label + ' (incompatible adapter)';
 }
 
+// Fabric Meta's stability label can change for a historical release even
+// while its exact version remains listed. It is provider metadata, not the
+// shipped adapter's qualification decision or proof of artifact presence.
+// The native Create command still verifies both exact provider availability
+// and the pinned tuple before publishing any canonical world.
+export function fabricCatalogChoiceLabel(version, state, providerStable) {
+  const label = catalogChoiceLabel(version, state);
+  return providerStable ? label : `${label} — provider stable flag not set`;
+}
+
 export const baselineNotice = 'Pinned baseline only. Real Fabric launch, save/restore and authenticated client acceptance remain pending.';

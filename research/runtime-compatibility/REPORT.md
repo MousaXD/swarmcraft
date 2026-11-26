@@ -58,3 +58,17 @@ configured Java 25/Gradle build environment. The earlier item #35 real vanilla
 server results are separate evidence and are not credited as a Fabric or
 authenticated-client acceptance pass. No new real game launch was performed
 for this checkpoint.
+
+## Historical Fabric provider stability flags (26 November)
+
+Fabric Meta still lists the exact pinned loader `0.19.3` for Minecraft
+`26.1.2`, but the captured official catalog marks that release `stable:
+false` while `0.20.1` is marked stable. The native shipping package
+reproduced a blocked Create form despite the pinned release being present.
+Both Create and Import now distinguish provider listing/metadata from
+the backend's exact pinned qualification. The provider flag remains
+visible, but only a present, backend-annotated pinned release is
+selectable. A missing pinned release or malformed response still blocks
+selection. Newer and unsupported loaders remain disabled regardless of
+their stability flag; native exact-tuple and catalog validation are
+unchanged. This corrects release selection, not field qualification.

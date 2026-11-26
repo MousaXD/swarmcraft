@@ -9,6 +9,7 @@ import {
   normalizeFabricCatalog,
   normalizeMinecraftCatalog,
 } from '../src/catalog-selectors.js';
+import { fabricCatalogChoiceLabel } from '../src/runtime-catalog-policy.js';
 
 const minecraftResponse = {
   provider: 'mojang',
@@ -35,9 +36,29 @@ test('normal Minecraft default remains a stable release when snapshots are prese
   assert.equal(chooseMinecraftVersion(versions), '26.1.2');
 });
 
-test('Fabric default prefers an official stable loader', () => {
+test('Fabric default prefers the exact shipped baseline', () => {
   const loaders = normalizeFabricCatalog(fabricResponse, '26.1.2');
   assert.equal(chooseFabricLoader(loaders), '0.19.3');
+});
+
+test('a listed pinned Fabric release remains selectable when the provider stable flag changes', () => {
+  const response = { ...fabricResponse, versions: fabricResponse.versions.map(loader =>
+    loader.version === '0.19.3' ? { ...loader, stable: false } : loader) };
+  const loaders = normalizeFabricCatalog(response, '26.1.2');
+  const pinned = loaders.find(loader => loader.version === '0.19.3');
+  assert.equal(pinned.stable, false, 'do not rewrite provider metadata');
+  assert.equal(chooseFabricLoader(loaders, '0.20.1'), '0.19.3');
+  assert.equal(fabricCatalogChoiceLabel(pinned.version, pinned.selectionState, pinned.stable),
+    '0.19.3 (pinned baseline) — provider stable flag not set');
+  const state = new CatalogSelectionState();
+  state.setMinecraftCatalog(normalizeMinecraftCatalog(minecraftResponse));
+  state.setFabricCatalog('26.1.2', loaders);
+  assert.equal(state.ready, true);
+  state.setFabricCatalog('26.1.2', loaders.filter(loader => loader !== pinned));
+  assert.equal(state.ready, false, 'a newer provider-stable loader cannot replace a missing exact baseline');
+  assert.equal(state.fabricLoader, '');
+  assert.match(fabricCatalogChoiceLabel('0.20.0-beta.1', 'unsupported_adapter', false), /incompatible adapter/);
+  assert.throws(() => normalizeFabricCatalog({ versions: [{ ...response.versions[2], stable: null }] }, '26.1.2'), /invalid loader entry/);
 });
 
 test('changing Minecraft invalidates the prior Fabric selection before revalidation', () => {

@@ -178,7 +178,7 @@ mod tests {
             versions: vec![
                 FabricLoaderVersion { version: "0.19.2".into(), stable: true, minecraft_version: "26.1.2".into() },
                 FabricLoaderVersion { version: "0.20.1".into(), stable: true, minecraft_version: "26.1.2".into() },
-                FabricLoaderVersion { version: "0.19.3".into(), stable: true, minecraft_version: "26.1.2".into() },
+                FabricLoaderVersion { version: "0.19.3".into(), stable: false, minecraft_version: "26.1.2".into() },
             ],
         };
         let result = mark_adapter_support(catalog, |loader: &FabricLoaderVersion| {
@@ -190,5 +190,6 @@ mod tests {
         assert_eq!(encoded["versions"][1]["adapter_supported"], true);
         assert_eq!(encoded["versions"][1]["selection_state"], "adapter_compatible_unqualified");
         assert_eq!(encoded["versions"][2]["selection_state"], "pinned_baseline");
+        assert_eq!(encoded["versions"][2]["stable"], false, "retain the provider flag independently of qualification");
     }
 }

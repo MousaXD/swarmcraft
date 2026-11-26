@@ -3,6 +3,7 @@ mod base;
 pub use base::*;
 
 pub mod control;
+pub mod genesis;
 pub mod membership;
 pub mod profile;
 pub mod recovery_v2;

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hashlib
 import ipaddress
 import json
@@ -577,8 +578,12 @@ def create_world(ui, binary, profile):
     click(ui, button("createWorld", "Create world"))
     world = wait("GUI-created persisted world", lambda: world_from_list(binary, profile))
     select_world(ui, world)
-    require("Visibility: Private" in cli(binary, profile, "world", "status", world),
+    status = cli(binary, profile, "world", "status", world)
+    require("Visibility: Private" in status,
             "GUI creation did not retain private visibility")
+    require("Epoch: 1" in status.splitlines() and "Local member role: Accepted signed member" in status.splitlines(),
+            "GUI creation did not establish the signed genesis quorum and first checkpoint")
+    require(consent(binary, profile, world)["consented"] is False, "GUI creation implicitly opted in to hosting")
     require("Verified checkpoint:" in cli(binary, profile, "world", "verify", world),
             "initial signed checkpoint not verified")
     return world
@@ -641,35 +646,47 @@ def stop_network(ui, candidate):
         wait("network stop completed", lambda: read_is(ui, HEADER_READY, "Ready"))
 
 
+def udp_listener_in_use(lan_ip, port):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        try:
+            sock.bind((lan_ip, port))
+        except OSError as error:
+            if error.errno == errno.EADDRINUSE or getattr(error, "winerror", None) == 10048:
+                return True
+            raise Failure("could not verify the exact local UDP listener") from None
+    return False
+
+
 def start_invite_source(ui, binary, profile, world, lan_ip, candidate):
     stop_network(ui, candidate)
     port = free_port(socket.SOCK_DGRAM, lan_ip)
     address = f"/ip4/{lan_ip}/udp/{port}/quic-v1"
     ui.type(field("daemonListen", "Listen multiaddress"), address)
     click(ui, button("startDaemon", "Start networking"))
-    def bound():
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            try:
-                sock.bind((lan_ip, port))
-            except OSError:
-                return True
-        return False
-    wait("local GUI-started UDP listener", bound, 35)
+    wait("local GUI-started UDP listener", lambda: udp_listener_in_use(lan_ip, port), 35)
     if candidate:
         message = "Networking started."
         wait("network start completed", lambda: read_is(
             ui, text("networkServiceNotice", message, True), message, prefix=True)
             and ui.read(button("startDaemon", "Start networking"))["enabled"])
+    else:
+        wait("network start completed", lambda: read_is(ui, HEADER_READY, "Ready"))
     transport = cli(binary, profile, "transport-id")
     require(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{20,100}", transport), "invalid local transport identity")
     select_world(ui, world)
     click(ui, button("inviteWorld", "Invite"))
-    click(ui, Target("#inviteDialog summary", "Advanced bootstrap addresses", ("AXDisclosureTriangle", "AXButton")))
-    ui.type(field("bootstrapAddrs", "Bootstrap addresses"), address + "/p2p/" + transport)
+    # The launcher deliberately hides manual bootstrap overrides. Test the
+    # real automatic invitation, sourced from current daemon connectivity,
+    # rather than forcing a hidden input or constructing a token ourselves.
     click(ui, button("createInvite", "Create invite"))
     token_field = field("inviteResult", "Signed invite")
-    token = wait("signed invitation rendered", lambda: ui.read(token_field)["value"])
-    require(token.startswith("scinvite:") and len(token) <= 32768, "invalid invitation shape")
+    def signed_invitation():
+        require(not visible(ui, text("inviteError", "")), "native invite creation returned a visible error")
+        return ui.read(token_field)["value"]
+    token = wait("automatic signed invitation rendered", signed_invitation)
+    require(len(token) <= 32768 and re.fullmatch(r"scinvite:(?:[0-9a-f]{2})+", token), "invalid invitation shape")
     click(ui, button("cancelInvite", "Done"))
     return token, port
 
@@ -731,7 +748,10 @@ def run_positive(factory, binary, profile, guest, artifacts, candidate, lan_ip):
                                            CHECK, True))["checked"], "joiner requested host role without consent")
             click(joiner, button("joinWorld", "Join world"))
             del token
-            wait("GUI-joined persisted world", lambda: world_from_list(binary, guest) == world)
+            def staged_join():
+                require(not visible(joiner, text("joinError", "")), "native join returned a visible error")
+                return world_from_list(binary, guest) == world
+            wait("GUI-joined persisted world", staged_join)
             def accepted():
                 status = cli(binary, guest, "world", "status", world)
                 if "Local member role: Accepted signed member" not in status:
@@ -744,14 +764,7 @@ def run_positive(factory, binary, profile, guest, artifacts, candidate, lan_ip):
             joiner.screenshot(artifacts / "joined-world.png")
             stop_network(joiner, candidate)
         stop_network(host, candidate)
-        def released():
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                try:
-                    sock.bind((lan_ip, port))
-                    return True
-                except OSError:
-                    return False
-        wait("explicit host UDP listener released", released, 30)
+        wait("explicit host UDP listener released", lambda: not udp_listener_in_use(lan_ip, port), 30)
 
     if candidate:
         with factory(binary, profile) as ui:
@@ -761,7 +774,7 @@ def run_positive(factory, binary, profile, guest, artifacts, candidate, lan_ip):
             wait("withdrawal persisted in restarted GUI", lambda: read_is(ui, PLAYER_ONLY, "Player only — 0 MiB / 0 CPU"))
             require(consent(binary, profile, world)["consented"] is False, "withdrawal did not persist")
             stop_network(ui, candidate)
-    return {"engine": engine, "boot_create_restart": True, "real_signed_join_checkpoint": True,
+    return {"engine": engine, "boot_create_restart": True, "automatic_signed_invite": True, "real_signed_join_checkpoint": True,
             "host_consent_restart_withdraw": candidate}
 
 

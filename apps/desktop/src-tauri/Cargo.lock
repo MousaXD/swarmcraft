@@ -3629,11 +3629,13 @@ dependencies = [
 name = "swarm-storage"
 version = "0.5.1"
 dependencies = [
+ "anyhow",
  "blake3",
  "fs2",
  "postcard",
  "serde",
  "serde_json",
+ "swarm-core",
  "swarm-protocol",
  "thiserror 2.0.20",
  "tracing",

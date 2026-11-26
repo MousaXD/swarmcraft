@@ -408,7 +408,7 @@ window.__TAURI__ = { core: { invoke: async (command, args = {}) => {
       if (!args.minecraftVersion || typeof args.refresh !== 'boolean') throw new Error('fabric_loader_versions requires minecraftVersion and refresh');
       return { origin: 'network', versions: [
         { version: '0.20.1', stable: true, minecraft_version: args.minecraftVersion, adapter_supported: args.minecraftVersion === '26.1.2', selection_state: args.minecraftVersion === '26.1.2' ? 'adapter_compatible_unqualified' : 'unsupported_adapter' },
-        { version: '0.19.3', stable: true, minecraft_version: args.minecraftVersion, adapter_supported: args.minecraftVersion === '26.1.2', selection_state: args.minecraftVersion === '26.1.2' ? 'pinned_baseline' : 'unsupported_adapter' },
+        { version: '0.19.3', stable: false, minecraft_version: args.minecraftVersion, adapter_supported: args.minecraftVersion === '26.1.2', selection_state: args.minecraftVersion === '26.1.2' ? 'pinned_baseline' : 'unsupported_adapter' },
         { version: '0.19.2', stable: true, minecraft_version: args.minecraftVersion, adapter_supported: false, selection_state: 'unsupported_adapter' },
       ] };
     case 'list_worlds': return window.__swarmcraftAccessibilityFixture
@@ -736,6 +736,9 @@ const scenario = String.raw`(async () => {
   }
   for (const id of ['createLoader', 'importLoader']) {
     const options = Array.from(document.getElementById(id).options);
+    const pinned = options.find(o => o.value === '0.19.3');
+    require(pinned && !pinned.disabled && pinned.textContent.includes('pinned baseline') && pinned.textContent.includes('provider stable flag not set'), 'Listed pinned release was disabled or mislabelled: ' + id);
+    require(document.getElementById(id).value === '0.19.3', 'Pinned loader declaration not retained: ' + id);
     require(options.find(o => o.value === '0.20.1')?.disabled && options.find(o => o.value === '0.20.1').textContent.includes('not yet qualified'), 'Unqualified loader was selectable: ' + id);
     require(options.find(o => o.value === '0.19.2')?.disabled && options.find(o => o.value === '0.19.2').textContent.includes('incompatible adapter'), 'Incompatible loader was selectable: ' + id);
   }

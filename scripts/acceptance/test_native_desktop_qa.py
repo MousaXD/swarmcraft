@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import os
 from pathlib import Path
@@ -249,6 +250,44 @@ class NativeObservationTests(unittest.TestCase):
         ui.presses.clear()
         qa.open_hosting_contribution(ui)
         self.assertEqual(ui.presses, [])
+
+    def test_automatic_invitation_uses_only_visible_native_controls(self):
+        class InviteUI(self.FakeUI):
+            def __init__(self):
+                super().__init__({"#startDaemon": ("Start networking", True),
+                                  "#status": ("Ready", True),
+                                  "#inviteWorld": ("Invite", True),
+                                  "#createInvite": ("Create invite", True),
+                                  "#cancelInvite": ("Done", True)})
+                self.typed = []
+
+            def type(self, target, value):
+                self.typed.append((target.css, value))
+
+            def press(self, target):
+                super().press(target)
+                if target.css == "#createInvite":
+                    self.mapping["#inviteResult"] = ("scinvite:abcd", True)
+
+        ui = InviteUI()
+        with patch.object(qa, "stop_network"), patch.object(qa, "select_world"), \
+                patch.object(qa, "free_port", return_value=42000), \
+                patch.object(qa, "udp_listener_in_use", return_value=True), \
+                patch.object(qa, "cli", return_value="2" * 32):
+            token, port = qa.start_invite_source(ui, Path("/binary"), Path("/profile"), "fixture", "10.0.0.1", False)
+        self.assertEqual((token, port), ("scinvite:abcd", 42000))
+        self.assertEqual(ui.typed, [("#daemonListen", "/ip4/10.0.0.1/udp/42000/quic-v1")])
+        self.assertEqual(ui.presses, ["#startDaemon", "#inviteWorld", "#createInvite", "#cancelInvite"])
+
+    def test_udp_listener_probe_distinguishes_occupied_from_invalid_interface(self):
+        with patch.object(qa.socket, "socket") as socket_factory:
+            sock = socket_factory.return_value.__enter__.return_value
+            self.assertFalse(qa.udp_listener_in_use("10.0.0.1", 42000))
+            sock.bind.side_effect = OSError(errno.EADDRINUSE, "occupied")
+            self.assertTrue(qa.udp_listener_in_use("10.0.0.1", 42000))
+            sock.bind.side_effect = OSError(errno.EADDRNOTAVAIL, "not assigned")
+            with self.assertRaisesRegex(qa.Failure, "exact local UDP listener"):
+                qa.udp_listener_in_use("10.0.0.1", 42000)
 
     def test_native_webdriver_elements_can_independently_prove_failure(self):
         app = qa.WebDriver(Path("/binary"), Path("/data"), Path("/driver"), Path("/native"))

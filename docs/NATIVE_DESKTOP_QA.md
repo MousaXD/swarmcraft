@@ -163,11 +163,13 @@ in a disposable account.
 The script checks native architecture and bundle identity, exact source
 commit/tree and all installer/installed file hashes. It runs:
 
-1. Shipping boot, fresh UI list, private GUI creation and signed
-   checkpoint verification, full process close/restart, unchanged identity
-   and world, GUI invitation with private bootstrap address, real
-   player-only join from a second GUI, signed membership acceptance and
-   exact verified checkpoint on both profiles.
+1. Shipping boot, fresh UI list, private GUI creation with a signed
+   genesis epoch 1 and verified first checkpoint, no implicit hosting
+   consent, full process close/restart, unchanged identity and world,
+   automatic GUI invitation from the actual private daemon listener (no
+   hidden bootstrap override), real player-only join from a second GUI,
+   signed membership acceptance and exact verified checkpoint on both
+   profiles.
 2. Candidate repeats the shipping journey and independently verifies
    default player-only, disabled opt-in before explicit confirmation,
    GUI opt-in to 512 MiB, persisted consent after restart, GUI withdrawal,
