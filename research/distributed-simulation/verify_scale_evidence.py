@@ -18,6 +18,7 @@ from verify_player_evidence import reference_view
 from verify_placement_evidence import verify_kernel
 from worker_placement import MIB, Offer
 from placement_lab import MACHINE_RESERVE
+from scale_profile import PHASES
 
 RULESET = "swarmcraft-reference-ring/transaction-v2"
 
@@ -38,20 +39,30 @@ def expected_stats(ns):
             "unpaced_service_ticks_per_second":len(samples)*1000/sum(samples)}
 
 
-def verify_timing(row):
+def verify_timing(row,profile=False):
     ticks=row["ticks"]
     target=WINDOW_NS//PERIOD_NS
     require(1<=len(ticks)<=target,"invalid tick sample count")
     last=0
     service,latency=[],[]
     for t,r in enumerate(ticks,1):
-        fields(r,"tick","scheduled_ns","begin_ns","finish_ns","root","cut_root")
+        fields(r,"tick","scheduled_ns","begin_ns","finish_ns","root","cut_root",
+               *("phase_ns",) if profile else ())
         scheduled=(t-1)*PERIOD_NS
         require(r["tick"]==t and r["scheduled_ns"]==scheduled
                 and integer(r["begin_ns"],max(last,scheduled),WINDOW_NS-1)
                 and integer(r["finish_ns"],r["begin_ns"]+1,WINDOW_NS+10_000_000_000),
                 "invalid paced timing sequence")
         last=r["finish_ns"]
+        if profile:
+            phases=r["phase_ns"]
+            fields(phases,*PHASES)
+            elapsed=last-r["begin_ns"]
+            require(all(integer(v,0,elapsed) for v in phases.values())
+                    and sum(phases.values())==elapsed
+                    and all(phases[k]>0 for k in ("state_decode_roots","worker_tick",
+                        "worker_receipts","sqlite_durable_commit","independent_serial_replay",
+                        "client_acknowledgment","resource_guard")), "invalid exclusive phase timing")
         service.append(last-r["begin_ns"])
         latency.append(last-scheduled)
     # Stopping early is permissible only if the fixed observation window
@@ -70,7 +81,7 @@ def verify_timing(row):
     require(integer(row["coordinator_cpu_ns"],1,last),"invalid coordinator CPU time")
 
 
-def verify_run(row,scenario,repeat,count,hardware,states,roots):
+def verify_run(row,scenario,repeat,count,hardware,states,roots,profile=False):
     label,shape,agents,delay=scenario
     require((row["scenario"],row["shape"],row["agents"],row["delay_ms"],row["repeat"],row["workers"])==
             (label,shape,agents,delay,repeat,count),"wrong scenario/order")
@@ -118,7 +129,7 @@ def verify_run(row,scenario,repeat,count,hardware,states,roots):
                         "kernel network impairment not exercised")
             else:
                 require(not a and not b,"unexpected network impairment")
-    verify_timing(row)
+    verify_timing(row,profile)
     n=len(row["ticks"])
     saved=row["final"]
     world=saved["world"]
@@ -173,8 +184,13 @@ def verify_run(row,scenario,repeat,count,hardware,states,roots):
 
 
 def verify(data):
-    fields(data,"schema","classification","completed","period_ns","window_ns","repeats","hardware","runs")
-    require(data["schema"]==1 and data["classification"]==CLASSIFICATION and data["completed"] is True
+    require(isinstance(data,dict),"invalid benchmark receipt")
+    profile=data.get("schema")==2
+    fields(data,"schema","classification","completed","period_ns","window_ns","repeats","hardware","runs",
+           *("state_cache",) if profile else ())
+    require(type(data["schema"]) is int and data["schema"] in (1,2)
+            and (not profile or data["state_cache"] in ("cached","uncached"))
+            and data["classification"]==CLASSIFICATION and data["completed"] is True
             and data["period_ns"]==PERIOD_NS and data["window_ns"]==WINDOW_NS and data["repeats"]==REPEATS,
             "incomplete or misclassified benchmark")
     hw=data["hardware"]
@@ -195,10 +211,31 @@ def verify(data):
             states.append(serial_step(states[-1],t,controls={p:(d,d) for p in PLAYERS}))
         roots=[world_root(t,region_roots(state)) for t,state in enumerate(states)]
         for row,rep,count in pairs:
-            world=verify_run(row,scenario,rep,count,hw,states,roots)
+            world=verify_run(row,scenario,rep,count,hw,states,roots,profile)
             require(world not in seen_worlds,"comparison reused authority identity")
             seen_worlds.add(world)
-    return aggregate(data)
+    result=aggregate(data)
+    if profile:
+        result["state_cache"]=data["state_cache"]
+        result["phase_profile"]=aggregate_profile(data)
+    return result
+
+
+def aggregate_profile(data):
+    """Tick-weighted exclusive wall times, not overlapping stage durations."""
+    results=[]
+    for scenario in SCENARIOS:
+        for count in (1,2):
+            ticks=[tick for row in data["runs"] if row["scenario"]==scenario[0]
+                   and row["workers"]==count for tick in row["ticks"]]
+            elapsed=sum(t["finish_ns"]-t["begin_ns"] for t in ticks)
+            phases={k:sum(t["phase_ns"][k] for t in ticks) for k in PHASES}
+            require(ticks and sum(phases.values())==elapsed,"phase aggregate does not reconcile")
+            results.append({"scenario":scenario[0],"workers":count,"ticks":len(ticks),
+                            "mean_service_ms":round(elapsed/len(ticks)/1e6,3),
+                            "mean_phase_ms":{k:round(v/len(ticks)/1e6,3) for k,v in phases.items()},
+                            "phase_share_percent":{k:round(100*v/elapsed,3) for k,v in phases.items()}})
+    return results
 
 
 def aggregate(data):

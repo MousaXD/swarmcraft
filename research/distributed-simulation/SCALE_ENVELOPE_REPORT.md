@@ -2,6 +2,10 @@
 
 Date: 25 November 2026 UTC / 26 November UAE time.
 
+Follow-up: [Exact-state cache and phase profile](SCALE_PROFILE_REPORT.md)
+repeats the full matrix with the optimized reference authority;
+the original retained measurements below remain unchanged.
+
 This is a bounded, repeated performance experiment of the custom
 reference transaction runtime. It is not a Minecraft gameplay
 benchmark, independent-host certification or authorization to enable

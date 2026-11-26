@@ -1,13 +1,15 @@
 import copy
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from player_runtime import fixture
-from region_runtime import Coordinator, Rejected, region_roots, serial_step, world_root
+from region_runtime import Coordinator, Rejected, canonical, region_roots, serial_step, world_root
 from regional_authority import (Authority, FencedRuntime, FencedWorker, bind_channels, candidate_receipts,
-                                tag, wire)
+                                tag, validated_state, wire)
 from test_region_runtime import MemoryChannel
 from verify_authority_evidence import verify
 
@@ -128,6 +130,75 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(before, self.ledger.save())
         self.ledger.commit(receipts)
         self.assertEqual(self.ledger.save()["tick"], 1)
+
+    def test_state_cache_reuses_only_exact_validated_blob(self):
+        baseline = self.ledger.save()
+        with patch("regional_authority.validated_state", wraps=validated_state) as validate:
+            # The initial validated state is already cached. Mutable copies
+            # returned to callers cannot alter cached state or metadata.
+            exposed = self.ledger.read()
+            exposed["state"].clear()
+            exposed["ids"].clear()
+            exposed["grants"].clear()
+            self.assertEqual(self.ledger.save(), baseline)
+            self.assertEqual(validate.call_count, 0)
+            _, receipts = self.candidate()
+            self.ledger.commit(receipts)
+            self.assertEqual(self.ledger.read()["state"], serial_step(fixture(), 1))
+            # One complete candidate validation and one decode of the
+            # newly persisted BLOB. Further reads must reuse that BLOB.
+            calls = validate.call_count
+            self.assertGreaterEqual(calls, 2)
+            self.ledger.save()
+            self.ledger.history()
+            self.assertEqual(validate.call_count, calls)
+
+    def test_state_cache_rechecks_other_connection_mutations(self):
+        baseline = self.ledger.save()
+        with sqlite3.connect(self.path) as other:
+            original, = other.execute("SELECT state FROM world WHERE singleton=1").fetchone()
+            bad = json.loads(original)
+            bad[0][1][0] = (bad[0][1][0] + 1) % 256
+            # Same tick, metadata and committed root; the exact state
+            # changed. A cache keyed only by head would miss this.
+            other.execute("UPDATE world SET state=?", (canonical(bad),))
+            other.commit()
+            with self.assertRaisesRegex(Rejected, "invalid persisted cut"):
+                self.ledger.read()
+            other.execute("UPDATE world SET state=?", (original,))
+            other.commit()
+            self.assertEqual(self.ledger.save(), baseline)
+            # A cache hit on the unchanged state must still reject altered
+            # fencing/grant and commit metadata.
+            other.execute("UPDATE epochs SET claimed=1")
+            other.commit()
+            with self.assertRaisesRegex(Rejected, "grant history mismatch"):
+                self.ledger.read()
+            other.execute("UPDATE epochs SET claimed=0")
+            other.execute("UPDATE commits SET cut_root=?", ("0"*64,))
+            other.commit()
+            with self.assertRaisesRegex(Rejected, "commit history mismatch"):
+                self.ledger.read()
+            other.execute("UPDATE commits SET cut_root=?", (baseline["cut_root"],))
+            other.commit()
+        self.assertEqual(self.ledger.save(), baseline)
+
+    def test_state_cache_cannot_publish_uncommitted_candidate(self):
+        _, receipts = self.candidate()
+        before = self.ledger.save()
+
+        def read_then_fail():
+            # Exercise a cache miss inside the uncommitted write
+            # transaction, then roll it back. The next read MUST use
+            # the original persisted bytes, not that tentative state.
+            self.assertEqual(self.ledger._read()["tick"], 1)
+            raise RuntimeError("interrupted after tentative read")
+
+        with self.assertRaisesRegex(RuntimeError, "interrupted"):
+            self.ledger.commit(receipts, before_commit=read_then_fail)
+        self.assertEqual(self.ledger.save(), before)
+        self.ledger.commit(receipts)
+        self.assertEqual(self.ledger.read()["state"], serial_step(fixture(), 1))
 
     def test_worker_cannot_rebind_or_sign_before_commit(self):
         grants = self.ledger.read()["grants"]

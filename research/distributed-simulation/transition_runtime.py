@@ -160,15 +160,17 @@ class TransitionAuthority(Authority):
         sealed = self.db.execute("SELECT parent,inputs,result FROM batches WHERE tick=?", (tick,)).fetchone()
         require(sealed == (current["cut_root"], canonical(batch), None), "missing or changed sealed input")
         require(all(result is None for _, result in commands.values()), "duplicate command result")
-        expected = serial_step(current["state"], tick, controls=serial_controls(batch))
-        require(state == expected and candidate == world_root(tick, region_roots(expected)),
-                "candidate violates sealed player actions or reference rules")
-        positions = player_index(current["state"], set(current["players"]))
-        for p, (request, _) in commands.items():
-            result = response(current["world"], tick, cut, state, current["players"], p, request, positions[p][1])
-            self.db.execute("UPDATE commands SET response=? WHERE tick=? AND player=?",
-                            (canonical(result), tick, p))
-        self.db.execute("UPDATE batches SET result=? WHERE tick=?", (cut, tick))
+        with self.phase("independent_serial_replay"):
+            expected = serial_step(current["state"], tick, controls=serial_controls(batch))
+            require(state == expected and candidate == world_root(tick, region_roots(expected)),
+                    "candidate violates sealed player actions or reference rules")
+        with self.phase("durable_client_receipts"):
+            positions = player_index(current["state"], set(current["players"]))
+            for p, (request, _) in commands.items():
+                result = response(current["world"], tick, cut, state, current["players"], p, request, positions[p][1])
+                self.db.execute("UPDATE commands SET response=? WHERE tick=? AND player=?",
+                                (canonical(result), tick, p))
+            self.db.execute("UPDATE batches SET result=? WHERE tick=?", (cut, tick))
 
     def _audit(self, cur):
         genesis, = self.db.execute("SELECT state FROM genesis WHERE singleton=1").fetchone()
@@ -230,7 +232,8 @@ class DurableRuntime:
 
     def advance(self, *, fault=None, before_publish=None):
         try:
-            controls = self.seal()
+            with self.authority.phase("seal_inputs"):
+                controls = self.seal()
             return self.runtime.advance(controls=controls, fault=fault, before_publish=before_publish)
         except BaseException:
             self.runtime.frozen = self.runtime.coordinator.poisoned = True

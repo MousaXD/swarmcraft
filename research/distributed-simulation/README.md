@@ -85,6 +85,12 @@ accepted ticks replay correctly; zero runs satisfy the strict 20 Hz
 target. Production scaling remains unqualified; no Minecraft or
 independent physical-machine capacity is claimed.
 
+[Profiled cache follow-up](SCALE_PROFILE_REPORT.md): the same full
+24-run contract with an exact SQLite-state-byte cache and exclusive
+phase timing. Independent replay verified 1,883 durable ticks and
+3,766 client receipts. Heavy local throughput improved, but no run
+qualified at 20 Hz and degraded-link results did not improve.
+
 ## Ownerless permission lab (#65, 2026-11-26)
 
 The [permission RFC](../../docs/rfcs/ownerless-permissions.md) and retained

@@ -21,7 +21,9 @@ import time
 from network_lab import cpu_plan, duration_summary, safe_namespace
 from placement_lab import CappedLab, Scope
 from region_runtime import (CELLS, REGIONS, WIDTH, Channel, Region, canonical, fields,
-                            initial_world, integer, require)
+                            initial_world, integer, region_roots, require)
+from regional_authority import validated_state
+from scale_profile import PhaseClock
 from transition_runtime import DurableRuntime, PROTOCOL, RULESET, TransitionAuthority
 from worker_placement import Offer
 
@@ -41,6 +43,15 @@ SCENARIOS = (
 CAP_MIB = 128
 CPU_MILLICORES = 1000
 SEED = 63
+
+
+class UncachedTransitionAuthority(TransitionAuthority):
+    """Benchmark control: the original full decode/validate/hash on every read."""
+
+    def _decode_state(self, raw):
+        with self.phase("state_decode_roots"):
+            state, ids = validated_state(json.loads(raw))
+            return state, ids, region_roots(state)
 
 
 def fixture(shape, count):
@@ -174,28 +185,34 @@ class Peers:
 
     def tick(self,runtime,tick,guard):
         deadline=time.monotonic()+3
-        for row in self.entries:
-            row["channel"].send({"op":"next","tick":tick},deadline)
+        with self.ledger.phase("client_input_network"):
+            for row in self.entries:
+                row["channel"].send({"op":"next","tick":tick},deadline)
         inputs=[]
         for row in self.entries:
-            req=row["channel"].recv(deadline)
-            require(req==request(row["view"],row["player"]),"fixture command differs")
-            require(self.ledger.submit(row["player"],req)=={"op":"queued","id":req["id"],"tick":tick},
-                    "input not queued")
+            with self.ledger.phase("client_input_network"):
+                req=row["channel"].recv(deadline)
+                require(req==request(row["view"],row["player"]),"fixture command differs")
+            with self.ledger.phase("command_journal"):
+                require(self.ledger.submit(row["player"],req)=={"op":"queued","id":req["id"],"tick":tick},
+                        "input not queued")
             inputs.append(req)
         commit=runtime.advance(before_publish=guard)
         deadline=time.monotonic()+3
         receipts=[]
         for row,req in zip(self.entries,inputs):
-            response=self.ledger.submit(row["player"],req)
-            require(response["op"]=="committed" and response["view"]["tick"]==tick
-                    and response["view"]["root"]==commit["cut_root"],"uncommitted reply")
-            row["channel"].send(response,deadline)
+            with self.ledger.phase("client_receipt_lookup"):
+                response=self.ledger.submit(row["player"],req)
+                require(response["op"]=="committed" and response["view"]["tick"]==tick
+                        and response["view"]["root"]==commit["cut_root"],"uncommitted reply")
+            with self.ledger.phase("client_receipt_network"):
+                row["channel"].send(response,deadline)
             row["view"]=response["view"]
             receipts.append(response)
-        for row,response in zip(self.entries,receipts):
-            require(row["channel"].recv(deadline)=={"op":"observed","tick":tick,"hash":receipt_hash(response)},
-                    "client acknowledgment mismatch")
+        with self.ledger.phase("client_acknowledgment"):
+            for row,response in zip(self.entries,receipts):
+                require(row["channel"].recv(deadline)=={"op":"observed","tick":tick,"hash":receipt_hash(response)},
+                        "client acknowledgment mismatch")
         return commit
 
     def stop(self):
@@ -224,13 +241,16 @@ class Peers:
             row["output"].close()
 
 
-def run_case(scope,cpus,scenario,repeat,count):
+def run_case(scope,cpus,scenario,repeat,count,state_cache):
     label,shape,agents,delay=scenario
     offers=[Offer(s,1,CAP_MIB,CPU_MILLICORES) for s in range(count)]
     groups=[[r for r in range(REGIONS) if r*count//REGIONS==s] for s in range(count)]
     with tempfile.TemporaryDirectory(prefix="sc63-") as tmp:
-        ledger=TransitionAuthority.create(Path(tmp)/"world.db",secrets.token_hex(32),
-                                          fixture(shape,agents),PLAYERS,groups)
+        authority=TransitionAuthority if state_cache=="cached" else UncachedTransitionAuthority
+        ledger=authority.create(Path(tmp)/"world.db",secrets.token_hex(32),
+                                fixture(shape,agents),PLAYERS,groups)
+        profile=PhaseClock()
+        ledger.phase=profile.phase
         try:
             with FixedCappedLab(scope,offers,{s:delay for s in range(count)},cpus) as lab:
                 ping=lab.ping()
@@ -257,11 +277,14 @@ def run_case(scope,cpus,scenario,repeat,count):
                         begin=time.monotonic_ns()-start
                         if begin>=WINDOW_NS:
                             break
-                        guard()
+                        profile.begin()
+                        with ledger.phase("resource_guard"):
+                            guard()
                         accepted=peers.tick(runtime,tick,guard)
                         finish=time.monotonic_ns()-start
                         rows.append({"tick":tick,"scheduled_ns":target,"begin_ns":begin,"finish_ns":finish,
-                                     "root":accepted["runtime_root"],"cut_root":accepted["cut_root"]})
+                                     "root":accepted["runtime_root"],"cut_root":accepted["cut_root"],
+                                     "phase_ns":profile.finish(finish-begin)})
                     cpu_ns=time.process_time_ns()-cpu_start
                     require(rows,"no accepted ticks")
                     clients=peers.stop()
@@ -304,7 +327,7 @@ def run(report):
         for repeat in range(1,REPEATS+1):
             # Alternate order to reduce systematic warm/cache/host-load bias.
             for count in ((1,2) if repeat%2 else (2,1)):
-                result=run_case(scope,cpus,scenario,repeat,count)
+                result=run_case(scope,cpus,scenario,repeat,count,report["state_cache"])
                 report["runs"].append(result)
                 s=result["summary"]
                 print(f"{scenario[0]} rep={repeat} workers={count}: {s['within_window']}/{s['target_ticks']} "
@@ -317,13 +340,15 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--client",action="store_true")
     parser.add_argument("--output",type=Path)
+    parser.add_argument("--state-cache",choices=("cached","uncached"),default="cached")
     args=parser.parse_args()
     if args.client:
         client_main()
         return
     require(args.output is not None and not args.output.exists(),"new receipt path required")
     os.umask(0o077)
-    report={"schema":1,"classification":CLASSIFICATION,"completed":False,
+    report={"schema":2,"classification":CLASSIFICATION,"completed":False,
+            "state_cache":args.state_cache,
             "period_ns":PERIOD_NS,"window_ns":WINDOW_NS,"repeats":REPEATS,"runs":[]}
     with args.output.open("x") as out:
         try:

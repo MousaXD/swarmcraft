@@ -3,9 +3,11 @@ import copy
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from region_runtime import Rejected, region_roots, serial_step, world_root
 from scale_lab import PERIOD_NS, WINDOW_NS, PLAYERS, SCENARIOS, fixture, summarize
+from scale_profile import PHASES, PhaseClock
 from verify_scale_evidence import verify, verify_run, verify_timing
 
 
@@ -52,7 +54,40 @@ class TimingTests(unittest.TestCase):
         with self.assertRaises(Rejected):
             verify_timing({"ticks":rows,"summary":summarize(rows),"coordinator_cpu_ns":1})
 
+    def test_exclusive_profile_never_double_counts_nested_phases(self):
+        clock=PhaseClock()
+        clock.begin()
+        with patch("scale_profile.time.monotonic_ns",side_effect=[10,20,35,50]):
+            with clock.phase("ledger_read"):
+                with clock.phase("state_decode_roots"):
+                    pass
+        values=clock.finish(100)
+        self.assertEqual(values["ledger_read"],25)
+        self.assertEqual(values["state_decode_roots"],15)
+        self.assertEqual(values["other"],60)
+        self.assertEqual(sum(values.values()),100)
 
+    def test_profile_rejects_forged_phase_accounting(self):
+        rows=self.timed_rows(5_000_000)
+        for row in rows:
+            phases=dict.fromkeys(PHASES,1)
+            phases["other"]=5_000_000-len(PHASES)+1
+            row["phase_ns"]=phases
+        def verify_profile():
+            verify_timing({"ticks":rows,"summary":summarize(rows),"coordinator_cpu_ns":1},True)
+        verify_profile()
+        for mutate in (
+            lambda p:p.update(other=-1),
+            lambda p:p.update(worker_tick=0),
+            lambda p:p.update(other=p["other"]+1),
+            lambda p:p.update(unknown_phase=1),
+            lambda p:p.pop("ledger_read"),
+        ):
+            saved=rows[0]["phase_ns"].copy()
+            mutate(rows[0]["phase_ns"])
+            with self.assertRaises(Rejected):
+                verify_profile()
+            rows[0]["phase_ns"]=saved
 class RetainedEvidenceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -92,6 +127,17 @@ class RetainedEvidenceTests(unittest.TestCase):
         altered={**self.report,"runs":self.report["runs"][:-1]}
         with self.assertRaises(Rejected):
             verify(altered)
+
+    def test_profiled_cached_matrix(self):
+        path=Path(__file__).parent/"evidence"/"2026-11-26-scale-profile-cached.json"
+        report=json.loads(path.read_text())
+        result=verify(report)
+        self.assertEqual(result["state_cache"],"cached")
+        self.assertEqual(result["runs"],24)
+        self.assertEqual(result["accepted_ticks"],1883)
+        self.assertEqual(result["client_commands"],3766)
+        self.assertEqual(result["qualified_runs"],0)
+        self.assertEqual(len(result["phase_profile"]),12)
 
 
 if __name__=="__main__":

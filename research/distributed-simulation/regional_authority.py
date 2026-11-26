@@ -7,7 +7,7 @@ required in the same durable transaction as the global state and tick CAS.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import hmac
 import json
@@ -141,6 +141,11 @@ class Authority:
 
     def __init__(self, path):
         self.path = Path(path).resolve()
+        # One-entry cache of validated immutable state, keyed by the exact
+        # SQLite BLOB read in the current transaction (not a tick or root).
+        # Never cache metadata, grants, journal decisions, or DB transactions.
+        self._state_cache = None
+        self.phase = nullcontext  # optional benchmark-only timing context
         # mode=rw: missing authority is NOT an empty new world.
         self.db = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True,
                                   isolation_level=None, timeout=5)
@@ -212,23 +217,42 @@ class Authority:
 
     @contextmanager
     def transaction(self, write=False):
-        self.db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+        with self.phase("sqlite_begin"):
+            self.db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
         try:
             yield
-            self.db.execute("COMMIT")
+            with self.phase("sqlite_durable_commit" if write else "sqlite_read_commit"):
+                self.db.execute("COMMIT")
         except BaseException:
             if self.db.in_transaction:
                 self.db.execute("ROLLBACK")
             raise
 
+    def _decode_state(self, raw):
+        with self.phase("state_decode_roots"):
+            cached = self._state_cache
+            if cached is None or cached[0] != raw:
+                state, ids = validated_state(json.loads(raw))
+                rows = region_roots(state)
+                # read_region returns frozen Regions with nested tuples;
+                # keep only immutable objects and never share a mutable
+                # dictionary, ID list or summary list with the caller.
+                cached = (raw, tuple(state.items()), tuple(ids),
+                          tuple(tuple(row) for row in rows))
+                self._state_cache = cached
+            return dict(cached[1]), list(cached[2]), cached[3]
+
     def _read(self):
+        with self.phase("ledger_read"):
+            return self._read_current()
+
+    def _read_current(self):
         row = self.db.execute("SELECT * FROM world WHERE singleton=1").fetchone()
         require(row is not None, "missing world ledger")
         (_, world, ruleset, players, ids, resources, generation, accepted_generation, claimed,
          tick, runtime_root, cut_root, state_rows, grants_rows) = row
         players, ids, grants = json.loads(players), json.loads(ids), json.loads(grants_rows)
-        state, current_ids = validated_state(json.loads(state_rows))
-        rows = region_roots(state)
+        state, current_ids, rows = self._decode_state(state_rows)
         require(digest(world) and ruleset == self.ruleset and integer(generation, 1, MAX_GENERATION)
                 and integer(accepted_generation, 0, generation) and integer(claimed, 0, 1)
                 and integer(tick, 0, MAX_TICK) and (accepted_generation != generation or claimed == 1)
@@ -349,12 +373,16 @@ class Authority:
                     and candidate == world_root(tick, rows), "inconsistent global cut")
             cut = self.cut(current["world"], tick, candidate, current["players"])
             receipt_hash = hashlib.sha256(canonical(sorted(receipts, key=lambda r: r["body"]["session"]))).hexdigest()
-            self._record_candidate(current, state, candidate, cut)
-            self.db.execute("INSERT INTO commits VALUES(?,?,?,?,?,?)",
-                            (tick, current["generation"], candidate, cut, current["runtime_root"], receipt_hash))
-            self.db.execute("""UPDATE world SET accepted_generation=?,tick=?,runtime_root=?,cut_root=?,state=?
-                               WHERE singleton=1""",
-                            (current["generation"], tick, candidate, cut, canonical(wire(state))))
+            with self.phase("independent_candidate_validation"):
+                self._record_candidate(current, state, candidate, cut)
+            with self.phase("checkpoint_serialization"):
+                encoded_state = canonical(wire(state))
+            with self.phase("canonical_journal_write"):
+                self.db.execute("INSERT INTO commits VALUES(?,?,?,?,?,?)",
+                                (tick, current["generation"], candidate, cut, current["runtime_root"], receipt_hash))
+                self.db.execute("""UPDATE world SET accepted_generation=?,tick=?,runtime_root=?,cut_root=?,state=?
+                                   WHERE singleton=1""",
+                                (current["generation"], tick, candidate, cut, encoded_state))
             if before_commit:
                 before_commit()  # isolated crash injection only
         return {"generation": current["generation"], "tick": tick, "runtime_root": candidate,
@@ -408,19 +436,24 @@ class FencedRuntime:
     def advance(self, *, controls=None, fault=None, before_publish=None):
         require(not self.frozen, "fenced runtime frozen")
         try:
-            current = self.authority.read()
+            with self.authority.phase("runtime_preflight"):
+                current = self.authority.read()
             require(current["generation"] == self.generation and
                     [g["session"] for g in current["grants"]] == self.session_ids and
                     (current["tick"], current["runtime_root"]) ==
                     (self.coordinator.tick, self.coordinator.root), "runtime grant or cut retired")
-            candidate = self.coordinator.step(fault, controls=controls)
-            receipts = candidate_receipts(self.coordinator)
+            with self.authority.phase("worker_tick"):
+                candidate = self.coordinator.step(fault, controls=controls)
+            with self.authority.phase("worker_receipts"):
+                receipts = candidate_receipts(self.coordinator)
             require(all((r["body"]["tick"], r["body"]["runtime_root"]) ==
                         (candidate["tick"], candidate["root"]) for r in receipts),
                     "worker snapshots differ from staged candidate")
             if before_publish is not None:
-                before_publish()
-            accepted = self.authority.commit(receipts)
+                with self.authority.phase("resource_guard"):
+                    before_publish()
+            with self.authority.phase("publication_receipt_validation"):
+                accepted = self.authority.commit(receipts)
             return accepted
         except BaseException:
             self.frozen = self.coordinator.poisoned = True
