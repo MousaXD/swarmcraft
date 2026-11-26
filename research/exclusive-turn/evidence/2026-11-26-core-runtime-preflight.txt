@@ -1,0 +1,59 @@
+Offline core-artifact compatibility and level.dat preflight; baseline 8a3a17f; Linux local only.
+Actual retained stopped test world, not an independent live gameplay run.
+0c459d73decc15ca9148dcfdea93af7ff322d737dbe404f3211d13f47fc15b3a  crates/swarm-cli/src/exclusive_turn_compatibility.rs
+b85a816c826446a55654baa0a9ec585e47f9701611e5d6e6ba6b31aee8fa31a9  crates/swarm-cli/src/exclusive_turn_save.rs
+c32dd396eafefc9de07f3b7fba0041db30c66a1cc76dc2b972652f79bc3848e4  crates/swarm-cli/src/lib.rs
+d26081f8f265251d63cb153047ed7c9f67284f4eb01b11a95db72b05e15b3515  crates/swarm-cli/src/server_mods.rs
+e7343cab11715318607a13cbab97346dc5d58e097265726e15dfa6a792622857  crates/swarm-cli/tests/exclusive_turn_reference_cli.rs
+2e220fd5b78160b72760a946c55216f2f1c3178dc7012656d05d529efb603362  research/exclusive-turn/verify_core_runtime.py
+3417d5dedf1ad5c3cdc5cce26cc2214ffd603c2fbdf54a6b806e4d508a9ec220  target/debug/swarmcraft
+   Compiling swarm-cli v0.5.1 (/home/mousa/projects/my-creations/swarmcraft/swarmcraft/.worktrees/sabathon-p0-integration-20261123/crates/swarm-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 39s
+     Running tests/exclusive_turn_reference_cli.rs (target/debug/deps/exclusive_turn_reference_cli-6e8a19a91e9591be)
+
+running 1 test
+test core_runtime_pin_and_nbt_parser_refuse_malformed_or_ambiguous_inputs ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.04s
+     Running tests/exclusive_turn_reference_cli.rs (target/debug/deps/exclusive_turn_reference_cli-6e8a19a91e9591be)
+
+running 12 tests
+test authenticated_save_blob_transfer_is_exact_and_never_releases_a_turn ... ok
+test concurrent_cancel_and_commit_cannot_both_succeed ... ok
+test core_runtime_pin_and_nbt_parser_refuse_malformed_or_ambiguous_inputs ... ok
+test encrypted_handoff_partition_boundaries_and_exact_outbox_retry ... ok
+test held_runtime_preflight_requires_signed_core_pin_and_exact_save_but_never_grants_runtime ... ok
+test offline_review_derives_pins_but_never_certifies_a_current_offer_or_mutates_journals ... ok
+test offline_save_exact_capture_restore_and_corruption_refusals ... ok
+test private_lock_corruption_and_missing_staged_bytes_refuse_without_reinitializing ... ok
+test real_process_round_trip_cancellation_stale_receipts_and_lost_commit_output ... ok
+test real_writer_lock_route_and_crash_fence_survive_network_handoff ... ok
+test save_backed_release_requires_full_retention_before_and_after_commit ... ok
+test writer_lost_ack_keeps_exact_durable_checkpoint_and_rejects_stale_cas ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 66.37s
+
+   Compiling swarm-cli v0.5.1 (/home/mousa/projects/my-creations/swarmcraft/swarmcraft/.worktrees/sabathon-p0-integration-20261123/crates/swarm-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.11s
+     Running unittests src/lib.rs (target/debug/deps/swarm_cli-8a80662dd624042a)
+
+running 11 tests
+test server_mods::tests::concurrent_publication_is_idempotent_and_never_replaces_other_bytes ... ok
+test server_mods::tests::duplicate_mod_id_and_conflicting_versions_are_reported ... ok
+test server_mods::tests::exact_peer_inventory_is_compatible ... ok
+test server_mods::tests::hash_mismatch_is_reported ... ok
+test server_mods::tests::managed_runtime_components_do_not_require_user_mod_files ... ok
+test server_mods::tests::missing_required_mod_blocks_peer_runtime_compatibility ... ok
+test server_mods::tests::parses_deflated_fabric_metadata ... ok
+test server_mods::tests::rejects_invalid_jar ... ok
+test server_mods::tests::server_only_and_unknown_environments_are_classified ... ok
+test server_mods::tests::single_wrong_version_is_reported ... ok
+test server_mods::tests::valid_fabric_mod_jar_is_identified_and_hashed ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 202 filtered out; finished in 0.04s
+
+   Compiling swarm-cli v0.5.1 (/home/mousa/projects/my-creations/swarmcraft/swarmcraft/.worktrees/sabathon-p0-integration-20261123/crates/swarm-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 31.86s
+{"artifact_sha256": {"fabric-loader-0.19.3.jar": "73eed8c34bbad0320a2a3cba5346351e822f74f82b3f3c060574068474132958", "server-26.1.2.jar": "4723380bd2a0a0206719b50f2e390383afdaf82b0a76a0d573baf788e6aa3e86", "swarmcraft-fabric-0.5.1.jar": "ca9dcbb76c0cd809e552b91c36b081d1ebe140be2f75cd93acca5964311e7260"}, "candidate": {"bridge_jar_hash": "280a42bd0ddeb49d7b61e6f04d349717e52992e2615b2f1db25931c03eed58c8", "bridge_version": "0.5.1", "bundle_contents_verified": false, "canonical_authority": false, "classification": "exclusive_turn_candidate_core_runtime_pin", "compatibility": "15a95d0a538f8e58c5c8a394b64c20b2939108c6c616a580ce5a2a0dbc647406", "complete_save_semantics_verified": false, "core_jar_metadata_verified": true, "current_grant_verified": false, "declared_java_major": 25, "expected_data_version": 4790, "fabric_loader_jar_hash": "9b1dc01bd3b64a210e7218e71d0ea0d9548d891cb13d7a2ae2634ad7a404684d", "fabric_loader_version": "0.19.3", "handoff_receipt_issued": false, "independent_checkpoint_pins_verified": false, "installed_runtime_verified": false, "java_runtime_verified": false, "level_data_version_verified": false, "local_held_reference_verified": false, "minecraft_gameplay_verified": false, "minecraft_jar_hash": "ef549e6f44569a79e398a00e3e7343d4939ef969de65fc4bc949ebb7516f3b11", "minecraft_version": "26.1.2", "player_admission": false, "resource_enforcement_verified": false, "runtime_activation": false, "save_barrier_verified": false, "signed_compatibility_verified": false, "write_authority": false}, "classification": "actual_stopped_fixture_core_artifact_preflight", "held": {"bridge_jar_hash": "280a42bd0ddeb49d7b61e6f04d349717e52992e2615b2f1db25931c03eed58c8", "bridge_version": "0.5.1", "bundle_contents_verified": true, "canonical_authority": false, "classification": "exclusive_turn_held_core_runtime_preflight", "compatibility": "15a95d0a538f8e58c5c8a394b64c20b2939108c6c616a580ce5a2a0dbc647406", "complete_save_semantics_verified": false, "core_jar_metadata_verified": true, "current_grant_verified": false, "declared_java_major": 25, "epoch": 1, "expected_data_version": 4790, "fabric_loader_jar_hash": "9b1dc01bd3b64a210e7218e71d0ea0d9548d891cb13d7a2ae2634ad7a404684d", "fabric_loader_version": "0.19.3", "fence": 1, "grant": "f9e8114e45f7fd49f0637cd9fe59f09750feab3396a9887c47a3b9c4fc1d89ae", "handoff_receipt_issued": false, "independent_checkpoint_pins_verified": true, "installed_runtime_verified": false, "java_runtime_verified": false, "level_data_version": 4790, "level_data_version_verified": true, "local_held_reference_verified": true, "manifest_hash": "5d859737e1d36b1638ec0ce6b5f09b6ad596555df3c692a76114c61a361860ce", "minecraft_gameplay_verified": false, "minecraft_jar_hash": "ef549e6f44569a79e398a00e3e7343d4939ef969de65fc4bc949ebb7516f3b11", "minecraft_version": "26.1.2", "player_admission": false, "reference_commitment": "5b56da819cfc169e35b4c552e12b04d74855b1bd6ae436e86fe389defb9541be", "resource_enforcement_verified": false, "runtime_activation": false, "save_barrier_verified": false, "signed_compatibility_verified": true, "state_root": "aa6158c6e46a568834cb2076161f6ffbd747d3d925d7f893843713be82a345dd", "world_id": "scpass:362e1ae06af6c4d795c0963e1704639dd15fc1dcd998d87ee43e4ec85a1c3567", "write_authority": false}, "journals_unchanged": true, "modified_artifact_refused": true, "no_runtime_started": true, "offline": {"bridge_jar_hash": "280a42bd0ddeb49d7b61e6f04d349717e52992e2615b2f1db25931c03eed58c8", "bridge_version": "0.5.1", "bundle_contents_verified": true, "canonical_authority": false, "classification": "exclusive_turn_offline_core_runtime_preflight", "compatibility": "15a95d0a538f8e58c5c8a394b64c20b2939108c6c616a580ce5a2a0dbc647406", "complete_save_semantics_verified": false, "core_jar_metadata_verified": true, "current_grant_verified": false, "declared_java_major": 25, "expected_data_version": 4790, "fabric_loader_jar_hash": "9b1dc01bd3b64a210e7218e71d0ea0d9548d891cb13d7a2ae2634ad7a404684d", "fabric_loader_version": "0.19.3", "handoff_receipt_issued": false, "independent_checkpoint_pins_verified": true, "installed_runtime_verified": false, "java_runtime_verified": false, "level_data_version": 4790, "level_data_version_verified": true, "local_held_reference_verified": false, "manifest_hash": "5d859737e1d36b1638ec0ce6b5f09b6ad596555df3c692a76114c61a361860ce", "minecraft_gameplay_verified": false, "minecraft_jar_hash": "ef549e6f44569a79e398a00e3e7343d4939ef969de65fc4bc949ebb7516f3b11", "minecraft_version": "26.1.2", "player_admission": false, "reference_commitment": "5b56da819cfc169e35b4c552e12b04d74855b1bd6ae436e86fe389defb9541be", "resource_enforcement_verified": false, "runtime_activation": false, "save_barrier_verified": false, "signed_compatibility_verified": false, "state_root": "aa6158c6e46a568834cb2076161f6ffbd747d3d925d7f893843713be82a345dd", "write_authority": false}, "replica_refused": true, "source_entries": 49, "source_tree_sha256": "89b5c8e5c4747b0657ab868f8403b8f76adacd5c0c35a3c19cacb1ad9379ba3c"}

@@ -817,6 +817,10 @@ fn reverse_low_bits(mut value: u32, count: usize) -> u32 {
 }
 
 fn inflate_raw(input: &[u8], expected_size: usize, max_output: usize) -> Result<Vec<u8>> {
+    inflate_raw_with_consumption(input, expected_size, max_output).map(|(output, _)| output)
+}
+
+fn inflate_raw_with_consumption(input: &[u8], expected_size: usize, max_output: usize) -> Result<(Vec<u8>, usize)> {
     if expected_size > max_output {
         bail!("DEFLATE output exceeds safety limit");
     }
@@ -842,6 +846,23 @@ fn inflate_raw(input: &[u8], expected_size: usize, max_output: usize) -> Result<
     }
     if output.len() != expected_size {
         bail!("DEFLATE output length mismatch");
+    }
+    Ok((output, reader.bit.div_ceil(8)))
+}
+
+/// Single bounded Java GZIPOutputStream member, as used for level.dat.
+/// Reject optional headers, concatenation, trailing bytes and bad CRC/ISIZE.
+pub(crate) fn inflate_java_gzip(input: &[u8], max_output: usize) -> Result<Vec<u8>> {
+    if input.len() < 18 || input[..4] != [0x1f, 0x8b, 8, 0] {
+        bail!("level.dat requires a single Java gzip member without optional headers");
+    }
+    let trailer = input.len() - 8;
+    let expected_crc = read_u32(input, trailer)?;
+    let expected_size = read_u32(input, trailer + 4)? as usize;
+    let compressed = &input[10..trailer];
+    let (output, consumed) = inflate_raw_with_consumption(compressed, expected_size, max_output)?;
+    if consumed != compressed.len() || crc32(&output) != expected_crc {
+        bail!("level.dat gzip CRC or member length differs");
     }
     Ok(output)
 }

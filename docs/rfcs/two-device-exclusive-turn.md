@@ -683,3 +683,78 @@ inspection, verification and byte-exact restoration (49 entries, 30 files,
 then permissions were normalized only on a disposable copy. This does not
 prove JVM startup, save semantics, compatibility enforcement or game login.
 [Retained evidence](../../research/exclusive-turn/evidence/2026-11-26-offline-operator-review.txt).
+
+### Offline core-runtime compatibility preflight
+
+The save-backed policy can now commit a reproducible compatibility pin for
+the exact three reviewed core JARs. This is a distinct domain from the
+ordinary canonical runtime compatibility fingerprint. The preflight accepts
+only the pinned Minecraft 26.1.2 stable server's **extracted** server JAR
+(not the bundler JAR), Fabric Loader 0.19.3 JAR and this build's server-only
+SwarmCraft bridge JAR. It reads bounded ZIP metadata and hashes the exact
+bytes of each file. Paths are not part of the fingerprint. An operator must
+independently obtain and review trusted artifacts: matching embedded
+metadata is not proof of publisher provenance or executable completeness.
+
+```sh
+swarmcraft exclusive-turn save runtime-pin \
+  --minecraft-jar "$EXTRACTED_SERVER_JAR" \
+  --fabric-loader-jar "$LOADER_JAR" --bridge-jar "$BRIDGE_JAR"
+
+# Capture using the independently reviewed candidate compatibility pin;
+# then inspect/verify the full bundle before obtaining genesis approvals.
+swarmcraft exclusive-turn save verify-runtime --bundle "$BUNDLE" \
+  --expected-manifest "$MANIFEST" --expected-state-root "$STATE_ROOT" \
+  --expected-compatibility "$CORE_PIN" \
+  --minecraft-jar "$EXTRACTED_SERVER_JAR" \
+  --fabric-loader-jar "$LOADER_JAR" --bridge-jar "$BRIDGE_JAR"
+
+swarmcraft --data-dir "$HOLDER_PROFILE" exclusive-turn save verify-held-runtime \
+  --expected-world "$WORLD" --expected-grant "$GRANT" \
+  --expected-checkpoint "$COMMITMENT" \
+  --minecraft-jar "$EXTRACTED_SERVER_JAR" \
+  --fabric-loader-jar "$LOADER_JAR" --bridge-jar "$BRIDGE_JAR"
+```
+
+The last command obtains the same stable world lock used for handoff,
+checks the signed local journal and retained exact checkpoint, requires
+Held for the local device and compares the freshly derived fingerprint
+with the signed genesis compatibility. Legacy opaque compatibility pins
+are not silently upgraded. A prepared or released source and a replica
+cannot obtain a held preflight result. There is no state or authority
+mutation. It is a point-in-time local reference check, not a live lease.
+
+The exact retained `level.dat` blob is independently re-read and hashed,
+then parsed as one Java gzip member (CRC, ISIZE, no trailing/concatenated
+members) and bounded structural NBT. Only the integer at
+`root/Data/DataVersion` is accepted as version evidence, and it must be
+4790 (the exact Minecraft 26.1.2 `version.json` world version). Duplicate
+keys, noncanonical Java modified UTF-8, wrong types, nested decoys, invalid
+list/array lengths and excessive depth are denied. Each JAR is capped at
+64 MiB, compressed `level.dat` at 1 MiB, expanded NBT at 4 MiB, tag count at
+200,000 and nesting at 64. Unsupported encodings or oversized saves fail
+closed; this is not a general Minecraft save parser or a data fixer.
+
+All three reports deliberately deny installed-runtime verification, actual
+Java verification, complete save semantics, save-barrier proof, resource
+enforcement, live grant freshness, runtime activation and player admission.
+Other dependencies, launcher/JDK bytes, mods, datapacks, region/chunk
+semantics and supervised runtime lifecycle remain outside the scope of
+this narrow preflight. Format 2 reference creation, data-only capture,
+restore and transfer remain unchanged: this optional preflight alone is
+not a production launch gate. No quorum or canonical policy is modified.
+
+Local regression: all 12 exclusive-turn CLI/integration tests and all 11
+shared server-mod parser tests passed; strict CLI Clippy passed. The
+[real fixture gate](../../research/exclusive-turn/verify_core_runtime.py)
+uses a previously stopped isolated Minecraft/Fabric save (49 entries),
+copies the save while holding its Java-compatible POSIX session lock,
+normalizes permissions only on disposable copies, and checks actual
+Minecraft, loader and bridge JAR bytes. It derives the core pin, captures
+and verifies the real save, obtains both signed genesis approvals and
+initializes separate reference journals. The exact holder passed; the
+replica and a JAR with unchanged metadata but altered bytes were denied,
+and both journal digests remained unchanged. No new JVM, canonical
+world or authority was created. The retained source had a test-only
+permission-probe mod; that mod and the installed dependency closure are
+not part of this three-JAR pin. [Retained evidence](../../research/exclusive-turn/evidence/2026-11-26-core-runtime-preflight.txt).

@@ -18,6 +18,17 @@ pub struct Digests {
     expected_compatibility: Hash32,
 }
 
+#[derive(Debug, Args)]
+pub struct CoreArtifacts {
+    /// Extracted Minecraft server JAR, not the bootstrap/bundler JAR.
+    #[arg(long)]
+    minecraft_jar: PathBuf,
+    #[arg(long)]
+    fabric_loader_jar: PathBuf,
+    #[arg(long)]
+    bridge_jar: PathBuf,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum SaveCommand {
     /// Draft a new save-backed reference policy, not a playable world.
@@ -93,6 +104,29 @@ pub enum SaveCommand {
         offer: PathBuf,
         #[arg(long)]
         bundle: PathBuf,
+    },
+    /// Derive a candidate compatibility pin from three exact core JARs; does not verify a runnable installation.
+    RuntimePin {
+        #[command(flatten)]
+        artifacts: CoreArtifacts,
+    },
+    /// Check exact pinned offline save bytes, core JARs and level.dat version; no launch permission.
+    VerifyRuntime {
+        #[arg(long)]
+        bundle: PathBuf,
+        #[command(flatten)]
+        digests: Digests,
+        #[command(flatten)]
+        artifacts: CoreArtifacts,
+    },
+    /// Check the exact held reference grant/checkpoint against the core JAR pin and level.dat; no launch permission.
+    VerifyHeldRuntime {
+        #[command(flatten)]
+        pin: super::Pin,
+        #[arg(long)]
+        expected_checkpoint: Hash32,
+        #[command(flatten)]
+        artifacts: CoreArtifacts,
     },
     /// Verify the exact independently pinned manifest and every blob.
     Verify {
@@ -201,6 +235,9 @@ mod linux {
         path::{Component, Path},
         thread,
         time::{Duration, Instant},
+    };
+    use swarm_cli::exclusive_turn_compatibility::{
+        inspect_core_runtime, verify_level_version, CoreRuntimePin, MAX_CORE_JAR_BYTES, MAX_LEVEL_COMPRESSED_BYTES,
     };
     use swarm_consensus::exclusive_turn::{verify_exclusive_turn_history, verify_exclusive_turn_offer};
     use swarm_protocol::{
@@ -840,6 +877,82 @@ mod linux {
         print_document(&report_value(manifest, path, classification)?)
     }
 
+    fn core_pin(artifacts: &CoreArtifacts) -> Result<CoreRuntimePin> {
+        let read = |path: &Path| -> Result<Vec<u8>> {
+            safe_directory(path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")))?;
+            let file = source_file(path)?;
+            super::super::read_bounded(file, MAX_CORE_JAR_BYTES)
+        };
+        inspect_core_runtime(
+            &read(&artifacts.minecraft_jar)?,
+            &read(&artifacts.fabric_loader_jar)?,
+            &read(&artifacts.bridge_jar)?,
+        )
+    }
+
+    fn runtime_report(pin: &CoreRuntimePin) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "compatibility": pin.fingerprint()?.to_string(),
+            "minecraft_version": pin.minecraft_version,
+            "fabric_loader_version": pin.fabric_loader_version,
+            "bridge_version": pin.bridge_version,
+            "declared_java_major": pin.declared_java_major,
+            "expected_data_version": pin.data_version,
+            "minecraft_jar_hash": pin.minecraft_jar.to_string(),
+            "fabric_loader_jar_hash": pin.fabric_loader_jar.to_string(),
+            "bridge_jar_hash": pin.bridge_jar.to_string(),
+            "core_jar_metadata_verified": true,
+            "signed_compatibility_verified": false,
+            "independent_checkpoint_pins_verified": false,
+            "bundle_contents_verified": false,
+            "level_data_version_verified": false,
+            "local_held_reference_verified": false,
+            "current_grant_verified": false,
+            "installed_runtime_verified": false,
+            "java_runtime_verified": false,
+            "complete_save_semantics_verified": false,
+            "save_barrier_verified": false,
+            "resource_enforcement_verified": false,
+            "canonical_authority": false, "write_authority": false,
+            "runtime_activation": false, "player_admission": false,
+            "minecraft_gameplay_verified": false, "handoff_receipt_issued": false,
+        }))
+    }
+
+    fn verify_runtime_bundle(
+        bundle: &Path,
+        manifest: &Manifest,
+        artifacts: &CoreArtifacts,
+    ) -> Result<serde_json::Value> {
+        let pin = core_pin(artifacts)?;
+        ensure!(
+            manifest.compatibility == pin.fingerprint()?,
+            "core runtime artifact pin differs from save compatibility"
+        );
+        verify_bundle(bundle, manifest)?;
+        let entry = manifest.entries.iter().find(|entry| entry.path == "level.dat").context("missing level.dat")?;
+        let Kind::File { size, hash } = entry.kind else { bail!("level.dat is not a file") };
+        ensure!(size <= MAX_LEVEL_COMPRESSED_BYTES as u64, "level.dat compressed size out of bounds");
+        let bytes = super::super::read_bounded(
+            private_file(&bundle.join("blobs").join(hash.to_string()))?,
+            MAX_LEVEL_COMPRESSED_BYTES,
+        )?;
+        ensure!(
+            bytes.len() as u64 == size && Hash32::from_domain_bytes(BLOB_DOMAIN, &bytes) == hash,
+            "level.dat bytes changed after bundle verification"
+        );
+        let version = verify_level_version(&bytes, pin.data_version)?;
+        let mut result = runtime_report(&pin)?;
+        let checkpoint = manifest.checkpoint()?;
+        result["manifest_hash"] = checkpoint.manifest_hash.to_string().into();
+        result["state_root"] = checkpoint.state_root.to_string().into();
+        result["reference_commitment"] = checkpoint.reference_commitment.to_string().into();
+        result["bundle_contents_verified"] = true.into();
+        result["level_data_version"] = version.into();
+        result["level_data_version_verified"] = true.into();
+        Ok(result)
+    }
+
     #[derive(Serialize)]
     struct Scope {
         world: ExclusiveTurnWorldIdV1,
@@ -1188,6 +1301,43 @@ mod linux {
                 result["next_epoch"] = offer.offer.next_epoch.into();
                 result["next_fence"] = offer.offer.next_fence.into();
                 result["attempt"] = offer.offer.attempt.into();
+                print_document(&result)
+            }
+            SaveCommand::RuntimePin { artifacts } => {
+                let mut result = runtime_report(&core_pin(&artifacts)?)?;
+                result["classification"] = "exclusive_turn_candidate_core_runtime_pin".into();
+                print_document(&result)
+            }
+            SaveCommand::VerifyRuntime { bundle, digests, artifacts } => {
+                let manifest = load_bundle(&bundle)?;
+                manifest.check_pins(&digests)?;
+                let mut result = verify_runtime_bundle(&bundle, &manifest, &artifacts)?;
+                result["classification"] = "exclusive_turn_offline_core_runtime_preflight".into();
+                result["independent_checkpoint_pins_verified"] = true.into();
+                print_document(&result)
+            }
+            SaveCommand::VerifyHeldRuntime { pin, expected_checkpoint, artifacts } => {
+                let (store, journal, head) = opened(paths, &pin)?;
+                ensure!(
+                    head.save_backed() && journal.phase == Phase::Held && head.holder() == journal.identity,
+                    "runtime preflight requires exact held save-backed reference turn"
+                );
+                ensure!(
+                    journal.checkpoint.reference_commitment == expected_checkpoint,
+                    "local checkpoint differs from expected pin"
+                );
+                let bundle = retained_path(&store, journal.checkpoint)?;
+                let manifest = load_bundle(&bundle)?;
+                verify_exact(&bundle, journal.checkpoint, head.compatibility(), &store.state(journal.checkpoint)?)?;
+                let mut result = verify_runtime_bundle(&bundle, &manifest, &artifacts)?;
+                result["classification"] = "exclusive_turn_held_core_runtime_preflight".into();
+                result["signed_compatibility_verified"] = true.into();
+                result["independent_checkpoint_pins_verified"] = true.into();
+                result["local_held_reference_verified"] = true.into();
+                result["world_id"] = head.world().to_string().into();
+                result["grant"] = head.grant().to_string().into();
+                result["epoch"] = head.epoch().into();
+                result["fence"] = head.fence().into();
                 print_document(&result)
             }
             SaveCommand::Verify { bundle, digests } => {

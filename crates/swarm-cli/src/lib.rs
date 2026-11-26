@@ -4,6 +4,7 @@ pub mod client_profile;
 pub mod device_retirement;
 pub mod directory_moderation;
 pub mod discovery;
+pub mod exclusive_turn_compatibility;
 pub mod game_route_api;
 pub mod historical_authority;
 pub mod host_memory_cap;

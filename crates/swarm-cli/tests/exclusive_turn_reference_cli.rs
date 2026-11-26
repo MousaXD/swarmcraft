@@ -79,14 +79,20 @@ struct Fixture {
 
 impl Fixture {
     fn new_save_backed() -> (Self, PathBuf, PathBuf) {
+        Self::new_save_backed_with(b"synthetic level.dat fixture", Hash32([3; 32]))
+    }
+
+    fn new_save_backed_with(level: &[u8], compatibility: Hash32) -> (Self, PathBuf, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
         let profiles = std::array::from_fn(|i| temp.path().join(format!("device-{i}")));
         let identities =
             std::array::from_fn(|i| PeerIdentity::load_or_create(&DataPaths::from_root(&profiles[i])).unwrap());
         let source = offline_save(temp.path());
+        fs::write(source.join("level.dat"), level).unwrap();
         let bundle = temp.path().join("initial-bundle");
         let organizer = temp.path().join("organizer");
-        let captured = json(capture_save(&organizer, &source, &bundle).output().unwrap());
+        let captured =
+            json(capture_save_with_compatibility(&organizer, &source, &bundle, compatibility).output().unwrap());
         let initial = bundle.join("manifest.postcard");
         let draft = temp.path().join("save-draft.json");
         let keys = [hex::encode(identities[0].public_key()), hex::encode(identities[1].public_key())];
@@ -133,10 +139,9 @@ impl Fixture {
                 .output()
                 .unwrap()
         };
-        let blob = bundle.join("blobs").join(
-            Hash32::from_domain_bytes(b"swarmcraft/exclusive-turn/save-blob/v1\0", b"synthetic level.dat fixture")
-                .to_string(),
-        );
+        let blob = bundle
+            .join("blobs")
+            .join(Hash32::from_domain_bytes(b"swarmcraft/exclusive-turn/save-blob/v1\0", level).to_string());
         let hidden = temp.path().join("temporarily-missing-blob");
         fs::rename(&blob, &hidden).unwrap();
         rejected(approve(0), "missing blob");
@@ -1313,6 +1318,15 @@ fn save_cmd(profile: &Path, action: &str) -> Command {
 }
 
 fn capture_save(profile: &Path, source: &Path, destination: &Path) -> Command {
+    capture_save_with_compatibility(profile, source, destination, Hash32([3; 32]))
+}
+
+fn capture_save_with_compatibility(
+    profile: &Path,
+    source: &Path,
+    destination: &Path,
+    compatibility: Hash32,
+) -> Command {
     let mut command = save_cmd(profile, "capture");
     command.args([
         "--source",
@@ -1320,7 +1334,7 @@ fn capture_save(profile: &Path, source: &Path, destination: &Path) -> Command {
         "--destination",
         path(destination),
         "--compatibility",
-        &Hash32([3; 32]).to_string(),
+        &compatibility.to_string(),
         "--confirm",
     ]);
     command
@@ -1362,6 +1376,251 @@ fn assert_same_save(source: &Path, restored: &Path) {
     assert!(restored.join("DIM-1").is_dir());
     assert_eq!(fs::read(restored.join("session.lock")).unwrap(), b"");
     assert_eq!(fs::read(source.join("session.lock")).unwrap(), b"original session marker");
+}
+
+// Minimal stored ZIP and single-member gzip fixtures. These contain only
+// metadata, not executable Java classes or a playable Minecraft world.
+fn fixture_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
+}
+
+fn fixture_jar(name: &str, bytes: &[u8]) -> Vec<u8> {
+    let name = name.as_bytes();
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+    out.extend_from_slice(&20u16.to_le_bytes());
+    out.extend_from_slice(&[0; 8]);
+    out.extend_from_slice(&fixture_crc32(bytes).to_le_bytes());
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(name);
+    out.extend_from_slice(bytes);
+    let central = out.len() as u32;
+    out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+    out.extend_from_slice(&20u16.to_le_bytes());
+    out.extend_from_slice(&20u16.to_le_bytes());
+    out.extend_from_slice(&[0; 8]);
+    out.extend_from_slice(&fixture_crc32(bytes).to_le_bytes());
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    out.extend_from_slice(&[0; 12]);
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(name);
+    let length = out.len() as u32 - central;
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&length.to_le_bytes());
+    out.extend_from_slice(&central.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+fn fixture_gzip(bytes: &[u8]) -> Vec<u8> {
+    let len = u16::try_from(bytes.len()).unwrap();
+    let mut out = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 255, 1];
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&(!len).to_le_bytes());
+    out.extend_from_slice(bytes);
+    out.extend_from_slice(&fixture_crc32(bytes).to_le_bytes());
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out
+}
+
+fn version_tag(name: &[u8], version: i32) -> Vec<u8> {
+    let mut out = vec![3];
+    out.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    out.extend_from_slice(name);
+    out.extend_from_slice(&version.to_be_bytes());
+    out
+}
+
+fn fixture_level(tags: &[u8]) -> Vec<u8> {
+    let mut nbt = b"\x0a\x00\x00\x0a\x00\x04Data".to_vec();
+    nbt.extend_from_slice(tags);
+    nbt.extend_from_slice(&[0, 0]);
+    fixture_gzip(&nbt)
+}
+
+#[test]
+fn core_runtime_pin_and_nbt_parser_refuse_malformed_or_ambiguous_inputs() {
+    use swarm_cli::exclusive_turn_compatibility::{inspect_core_runtime, verify_level_version, PINNED_DATA_VERSION};
+    let mc = fixture_jar(
+        "version.json",
+        br#"{"id":"26.1.2","world_version":4790,"java_version":25,"stable":true,"series_id":"main"}"#,
+    );
+    let loader = fixture_jar(
+        "fabric.mod.json",
+        br#"{"schemaVersion":1,"id":"fabricloader","version":"0.19.3","environment":"*"}"#,
+    );
+    let bridge_metadata = format!(
+        r#"{{"schemaVersion":1,"id":"swarmcraft","version":"{}","environment":"server"}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    let bridge = fixture_jar("fabric.mod.json", bridge_metadata.as_bytes());
+    let pin = inspect_core_runtime(&mc, &loader, &bridge).unwrap();
+    let changed = fixture_jar("fabric.mod.json", format!("{bridge_metadata} ").as_bytes());
+    assert_ne!(
+        pin.fingerprint().unwrap(),
+        inspect_core_runtime(&mc, &loader, &changed).unwrap().fingerprint().unwrap()
+    );
+    assert!(inspect_core_runtime(&mc, &bridge, &loader).is_err());
+    let unsupported = fixture_jar(
+        "version.json",
+        br#"{"id":"26.1.2","world_version":4791,"java_version":25,"stable":true,"series_id":"main"}"#,
+    );
+    assert!(inspect_core_runtime(&unsupported, &loader, &bridge).is_err());
+    let client = fixture_jar("fabric.mod.json", bridge_metadata.replace("server", "client").as_bytes());
+    assert!(inspect_core_runtime(&mc, &loader, &client).is_err());
+
+    let version = version_tag(b"DataVersion", PINNED_DATA_VERSION);
+    let good = fixture_level(&version);
+    assert_eq!(verify_level_version(&good, PINNED_DATA_VERSION).unwrap(), PINNED_DATA_VERSION);
+    assert!(verify_level_version(
+        &fixture_level(&version_tag(b"DataVersion", PINNED_DATA_VERSION - 1)),
+        PINNED_DATA_VERSION
+    )
+    .is_err());
+    let mut duplicate = version.clone();
+    duplicate.extend_from_slice(&version);
+    assert!(verify_level_version(&fixture_level(&duplicate), PINNED_DATA_VERSION).is_err());
+    let mut alias = version.clone();
+    alias.extend_from_slice(&version_tag(b"\xc1\x84ataVersion", PINNED_DATA_VERSION));
+    assert!(verify_level_version(&fixture_level(&alias), PINNED_DATA_VERSION).is_err());
+    let mut decoy = b"\x0a\x00\x01X".to_vec();
+    decoy.extend_from_slice(&version);
+    decoy.push(0);
+    assert!(verify_level_version(&fixture_level(&decoy), PINNED_DATA_VERSION).is_err());
+    let mut invalid = version.clone();
+    invalid.extend_from_slice(b"\x09\x00\x01X\x01\x7f\xff\xff\xff");
+    assert!(verify_level_version(&fixture_level(&invalid), PINNED_DATA_VERSION).is_err());
+    let mut nested = version.clone();
+    for _ in 0..65 {
+        nested.extend_from_slice(b"\x0a\x00\x01X");
+    }
+    nested.extend_from_slice(&[0; 65]);
+    assert!(verify_level_version(&fixture_level(&nested), PINNED_DATA_VERSION).is_err());
+    let mut corrupt = good.clone();
+    let trailer = corrupt.len() - 8;
+    corrupt[trailer] ^= 1;
+    assert!(verify_level_version(&corrupt, PINNED_DATA_VERSION).is_err());
+    let mut trailing = good.clone();
+    trailing.extend_from_slice(&good);
+    assert!(verify_level_version(&trailing, PINNED_DATA_VERSION).is_err());
+    let mut overrun = good.clone();
+    let size = overrun.len() - 4;
+    overrun[size..].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(verify_level_version(&overrun, PINNED_DATA_VERSION).is_err());
+    assert!(verify_level_version(b"not NBT", PINNED_DATA_VERSION).is_err());
+}
+
+#[test]
+fn held_runtime_preflight_requires_signed_core_pin_and_exact_save_but_never_grants_runtime() {
+    use swarm_cli::exclusive_turn_compatibility::{inspect_core_runtime, PINNED_DATA_VERSION};
+    let mc = fixture_jar(
+        "version.json",
+        br#"{"id":"26.1.2","world_version":4790,"java_version":25,"stable":true,"series_id":"main"}"#,
+    );
+    let loader = fixture_jar(
+        "fabric.mod.json",
+        br#"{"schemaVersion":1,"id":"fabricloader","version":"0.19.3","environment":"*"}"#,
+    );
+    let bridge_metadata = format!(
+        r#"{{"schemaVersion":1,"id":"swarmcraft","version":"{}","environment":"server"}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    let bridge = fixture_jar("fabric.mod.json", bridge_metadata.as_bytes());
+    let pin = inspect_core_runtime(&mc, &loader, &bridge).unwrap().fingerprint().unwrap();
+    let level = fixture_level(&version_tag(b"DataVersion", PINNED_DATA_VERSION));
+    let (f, source, bundle) = Fixture::new_save_backed_with(&level, pin);
+    let mc_path = f.put("minecraft.jar", &mc);
+    let loader_path = f.put("loader.jar", &loader);
+    let bridge_path = f.put("bridge.jar", &bridge);
+    let reviewer = f.temp.path().join("runtime-reviewer");
+    let args = [
+        "--minecraft-jar",
+        path(&mc_path),
+        "--fabric-loader-jar",
+        path(&loader_path),
+        "--bridge-jar",
+        path(&bridge_path),
+    ];
+    let candidate = json(save_cmd(&reviewer, "runtime-pin").args(args).output().unwrap());
+    assert_eq!(candidate["compatibility"], pin.to_string());
+    assert_eq!(candidate["classification"], "exclusive_turn_candidate_core_runtime_pin");
+    assert_eq!(candidate["signed_compatibility_verified"], false);
+    assert_eq!(candidate["level_data_version_verified"], false);
+    let captured = json(save_cmd(&reviewer, "inspect").args(["--bundle", path(&bundle)]).output().unwrap());
+    let offline = json(pinned_save(&reviewer, "verify-runtime", &bundle, &captured).args(args).output().unwrap());
+    assert_eq!(offline["level_data_version"], PINNED_DATA_VERSION);
+    assert_eq!(offline["classification"], "exclusive_turn_offline_core_runtime_preflight");
+    assert_eq!(offline["signed_compatibility_verified"], false);
+    let commitment = captured["reference_commitment"].as_str().unwrap();
+    let held = |device: usize, grant: &str, checkpoint: &str| {
+        save_cmd(&f.profiles[device], "verify-held-runtime")
+            .args(["--expected-world", &f.world, "--expected-grant", grant, "--expected-checkpoint", checkpoint])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let before = [f.snapshot(0), f.snapshot(1)];
+    let verified = json(held(0, &f.initial_grant, commitment));
+    assert_eq!(verified["classification"], "exclusive_turn_held_core_runtime_preflight");
+    assert_eq!(verified["signed_compatibility_verified"], true);
+    assert_eq!(verified["local_held_reference_verified"], true);
+    assert_eq!(verified["level_data_version"], PINNED_DATA_VERSION);
+    assert_eq!(verified["grant"], f.initial_grant);
+    for value in [&candidate, &offline, &verified] {
+        for flag in [
+            "canonical_authority",
+            "write_authority",
+            "runtime_activation",
+            "player_admission",
+            "installed_runtime_verified",
+            "java_runtime_verified",
+            "complete_save_semantics_verified",
+            "save_barrier_verified",
+            "resource_enforcement_verified",
+            "current_grant_verified",
+            "handoff_receipt_issued",
+            "minecraft_gameplay_verified",
+        ] {
+            assert_eq!(value[flag], false, "{flag}");
+        }
+    }
+    rejected(held(1, &f.initial_grant, commitment), "requires exact held");
+    rejected(held(0, &Hash32([8; 32]).to_string(), commitment), "grant differs");
+    rejected(held(0, &f.initial_grant, &Hash32([8; 32]).to_string()), "checkpoint differs");
+    fs::write(&bridge_path, fixture_jar("fabric.mod.json", format!("{bridge_metadata} ").as_bytes())).unwrap();
+    rejected(held(0, &f.initial_grant, commitment), "core runtime artifact pin differs");
+    fs::write(&bridge_path, &bridge).unwrap();
+    fs::write(source.join("level.dat"), fixture_level(&version_tag(b"DataVersion", PINNED_DATA_VERSION + 1))).unwrap();
+    let wrong_bundle = f.temp.path().join("wrong-version-bundle");
+    let wrong = json(capture_save_with_compatibility(&reviewer, &source, &wrong_bundle, pin).output().unwrap());
+    rejected(
+        pinned_save(&reviewer, "verify-runtime", &wrong_bundle, &wrong).args(args).output().unwrap(),
+        "DataVersion",
+    );
+    assert_eq!([f.snapshot(0), f.snapshot(1)], before);
+    let (offer, _) = f.prepare(0, &f.initial_grant, commitment);
+    let prepared = f.snapshot(0);
+    rejected(held(0, &f.initial_grant, commitment), "requires exact held");
+    assert_eq!(f.snapshot(0), prepared);
+    success(f.mutate(0, "cancel", &f.initial_grant, &["--expected-offer", &offer.offer_hash().unwrap().to_string()]));
+    success(held(0, &f.initial_grant, commitment));
+    assert!(!reviewer.exists());
+    f.assert_no_live_storage();
 }
 
 #[test]
