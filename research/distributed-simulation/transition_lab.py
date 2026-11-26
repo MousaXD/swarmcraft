@@ -27,7 +27,9 @@ def client_main():
     line = sys.stdin.buffer.readline(4097)
     require(0 < len(line) <= 4096 and line.endswith(b"\n"), "invalid client config")
     config = json.loads(line)
-    fields(config, "port", "key", "world", "player", "request")
+    fields(config, "port", "key", "world", "player", "request", "ack_window")
+    require(type(config["ack_window"]) is int and config["ack_window"] in (10,60),
+            "invalid reference acknowledgment window")
     with socket.create_connection(("127.0.0.1", config["port"]), timeout=5) as sock:
         channel = Channel(sock, bytes.fromhex(config["key"]), coordinator=False)
         channel.send({"op": "join", "world": config["world"], "protocol": PROTOCOL}, time.monotonic() + 5)
@@ -36,15 +38,17 @@ def client_main():
                 and joined["ruleset"] == RULESET and joined["protocol"] == PROTOCOL, "wrong client view")
         channel.send(config["request"], time.monotonic() + 5)
         try:
-            reply = channel.recv(time.monotonic() + 10)
+            reply = channel.recv(time.monotonic() + config["ack_window"])
         except EOFError:
             reply = None
         print(json.dumps({"player": config["player"], "joined": joined, "reply": reply}))
 
 
 class Clients:
-    def __init__(self, authority):
+    def __init__(self, authority, *, ack_window=10):
+        require(type(ack_window) is int and ack_window in (10,60),"invalid reference acknowledgment window")
         self.authority = authority
+        self.ack_window = ack_window
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen(3)
@@ -65,7 +69,7 @@ class Clients:
         current = self.authority.save()
         process.stdin.write(canonical({"port": self.listener.getsockname()[1], "key": key.hex(),
                                        "world": current["world"], "player": player,
-                                       "request": request}) + b"\n")
+                                       "request": request, "ack_window":self.ack_window}) + b"\n")
         process.stdin.close()
         sock, peer = self.listener.accept()
         require(peer[0] == "127.0.0.1", "unexpected client peer")

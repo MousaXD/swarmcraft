@@ -39,8 +39,49 @@ def hexbytes(value, size=32):
     return bytes(value).hex()
 
 
+def sync_signing_bytes(body):
+    """Independent encoding of the v1 sync receipt's fixed arrays/u64s.
+
+    Postcard uses raw fixed u8 arrays and unsigned LEB128 for u64.
+    The Rust sender already verifies the receipt during the exchange.
+    This separate evidence check must not trust that observation alone.
+    """
+    def varint(value):
+        require(integer(value,0,2**64-1),"invalid receipt integer")
+        result = bytearray()
+        while value >= 128:
+            result.append((value & 127)|128)
+            value >>= 7
+        result.append(value)
+        return bytes(result)
+    return (b"swarmcraft/ownerless-decision/durable-sync-receipt/v1\0"
+            + b"".join(bytes.fromhex(hexbytes(body[k])) for k in ("world","base","head"))
+            + varint(body["sequence"]) + varint(body["fence"])
+            + b"".join(bytes.fromhex(hexbytes(body[k])) for k in ("checkpoint","recipient")))
+
+
+def verify_sync_signatures(data):
+    """Verify retained durable sync acknowledgments with OpenSSL Ed25519."""
+    if data["schema"] != 3:
+        return
+    with tempfile.TemporaryDirectory(prefix="sc68-sync-signatures-") as tmp:
+        root = Path(tmp)
+        for row in data["certified_cuts"]:
+            for observation in row.get("network",{}).get("sync",[]):
+                receipt = observation["result"]["receipt"]
+                key = data["participant_keys"][observation["recipient_slot"]]
+                # RFC 8410 SubjectPublicKeyInfo for an Ed25519 public key.
+                (root/"key.der").write_bytes(bytes.fromhex("302a300506032b6570032100"+key))
+                (root/"message").write_bytes(sync_signing_bytes(receipt["body"]))
+                (root/"signature").write_bytes(bytes.fromhex(hexbytes(receipt["signature"],64)))
+                run = subprocess.run(["openssl","pkeyutl","-verify","-pubin","-keyform","DER",
+                    "-inkey",str(root/"key.der"),"-rawin","-in",str(root/"message"),
+                    "-sigfile",str(root/"signature")],capture_output=True,timeout=5)
+                require(run.returncode == 0,"invalid durable sync receipt signature")
+
+
 def verify_observations(data):
-    require(type(data["schema"]) is int and data["schema"] in (1, 2) and data["classification"] == CLASSIFICATION
+    require(type(data["schema"]) is int and data["schema"] in (1, 2, 3) and data["classification"] == CLASSIFICATION
             and data["physical_machines"] == 1 and data["live_minecraft_players"] == 0
             and data["canonical_minecraft_authority"] is False and data["runtime_activation"] is False
             and data["actual_kernel_caps"] is True and data["all_workers_exited"] is True
@@ -104,6 +145,59 @@ def verify_observations(data):
                 and head["runtime_activation"] is False and head["live_quorum_verified"] is False
                 and head["player_admission"] is False and head["v1_canonical_world_created"] is False
                 and digest(head["head"]) and digest(head["checkpoint"]), "wrong reference head")
+        if data["schema"] == 3 and seq in (6,10,13):
+            network = row["network"]
+            base = heads[seq-1]
+            remote = 0 if seq == 6 else 2
+            voters = [0,1] if seq == 6 else [1,2]
+            def listener(obs,classification,slot,field,target):
+                import re
+                require(set(obs) == {"classification","address","validator","world_id",field,"runtime_activation"}
+                        and obs["classification"] == classification and obs["validator"] == "scpeer:"+ids[keys[slot]]
+                        and obs["world_id"] == data["world_id"] and obs[field] == target
+                        and obs["runtime_activation"] is False
+                        and re.fullmatch(r"127\.0\.0\.1:[1-9][0-9]{0,4}",obs["address"]) is not None
+                        and int(obs["address"].rsplit(":",1)[1]) <= 65535,"wrong encrypted listener context")
+            expected_fields = {"collector_slot","voter_slots","reviews","vote_listener","sync","pre_sync_client_access_refused"}
+            if seq == 10:
+                expected_fields.add("minority_attempt")
+            require(set(network) == expected_fields and network["collector_slot"] == 1
+                    and same(network["voter_slots"],voters)
+                    and network["pre_sync_client_access_refused"] is True,
+                    "wrong encrypted certification observations")
+            require(same(network["reviews"],[{"slot":slot,"base":base["head"],"proposal":head["head"],
+                    "base_checkpoint":base["checkpoint"],"candidate_checkpoint":head["checkpoint"],
+                    "replayed_root":row["checkpoint"]["runtime_root"]} for slot in voters]),
+                    "wrong validator checkpoint review")
+            listener(network["vote_listener"],"ownerless_reference_decision_listener",remote,"proposal",head["head"])
+            recipients = [0,2] if seq == 6 else [2]
+            require(same([r["recipient_slot"] for r in network["sync"]],recipients),"missing exact sync recipient")
+            for sync in network["sync"]:
+                slot, result = sync["recipient_slot"], sync["result"]
+                listener(sync["listener"],"ownerless_reference_sync_listener",slot,"head",head["head"])
+                require(set(result) == {"classification","receipt","live_quorum_verified","runtime_activation",
+                    "write_authority","canonical_authority","player_admission","worker_admission"}
+                    and result["classification"] == "ownerless_reference_checkpoint_synced"
+                    and all(v is False for k,v in result.items() if k not in ("classification","receipt")),
+                    "wrong durable sync classification")
+                receipt = result["receipt"]
+                require(set(receipt) == {"body","signature"},"wrong sync receipt fields")
+                expected = {"world":list(bytes.fromhex(world)),"base":list(bytes.fromhex(base["head"])),
+                    "head":list(bytes.fromhex(head["head"])),"sequence":seq,"fence":fence,
+                    "checkpoint":list(bytes.fromhex(head["checkpoint"])),"recipient":list(bytes.fromhex(ids[keys[slot]]))}
+                require(same(receipt["body"],expected),"wrong signed sync receipt context")
+                hexbytes(receipt["signature"],64)
+            if seq == 10:
+                failure = network["minority_attempt"]
+                require(set(failure) == {"refusal","collector_status","remote_status","client_access_refused"}
+                        and failure["refusal"] == "missing current validator majority"
+                        and failure["client_access_refused"] is True,"minority collection did not refuse")
+                for slot,name,pending in ((1,"collector_status",head["head"]),(2,"remote_status",None)):
+                    expected = {**base,"local_identity":"scpeer:"+ids[keys[slot]],"local_validator":True,
+                                "pending_proposal":pending}
+                    require(same(failure[name],expected),"wrong minority durable lock observation")
+        else:
+            require("network" not in row,"unexpected network certification claim")
 
     # Role proof logs are observations of the actual CLI verifier. The full
     # authority history below is cryptographically reverified separately.
@@ -168,7 +262,7 @@ def verify_observations(data):
                 and stage["base_head"] == heads[base]["head"] and stage["accepted_head"] == heads[accepted]["head"]
                 and stage["worker_cleanup"] is True and stage["all_worker_privilege_requests_refused"] is True,
                 "wrong stage observations")
-        if data["schema"] == 2:
+        if data["schema"] >= 2:
             require(stage.get("uncertified_client_access_refused") is True,
                     "missing uncertified-client refusal")
             checks = stage.get("publication_checks")
@@ -184,6 +278,11 @@ def verify_observations(data):
                             "canonical_authority":False,"write_authority":False,
                             "worker_admission":False,"freshness_lease":False}
                 require(same(check,expected),"publication check differs from exact certified cut")
+            if data["schema"] == 3:
+                require(stage.get("workers_retired_before_certification") is True,
+                        "worker scope not retired before certification")
+            else:
+                require("workers_retired_before_certification" not in stage,"unexpected early retirement claim")
         else:
             require("publication_checks" not in stage and "uncertified_client_access_refused" not in stage,
                     "guarded publication observations require schema 2")
@@ -274,6 +373,7 @@ def verify_observations(data):
 
 def verify(data, cli):
     result = verify_observations(data)
+    verify_sync_signatures(data)
     cli = str(Path(cli).resolve())
     with tempfile.TemporaryDirectory(prefix="sc68-verify-") as directory:
         root = Path(directory)

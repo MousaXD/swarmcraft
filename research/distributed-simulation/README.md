@@ -150,6 +150,15 @@ per-player publication checks and four client receipts, with all
 three stages refusing uncertified client access. No live quorum,
 canonical Minecraft publication or freshness lease is asserted.
 
+The schema-3 encrypted checkpoint follow-up connects the guarded
+publication path to actual CLI Noise vote collection and signed durable
+sync receipts. All three checkpoint decisions and four sync signatures
+verify, including a refused minority collection, exact locked retry and
+pre-sync publication refusal. Workers retire before certification; the
+bounded reference client acknowledgment window is not a 20 Hz result.
+Creation and other governance decisions remain offline, and the trusted
+controller owns all validator profiles.
+
 ## Original R0 evidence (2026-11-08)
 
 

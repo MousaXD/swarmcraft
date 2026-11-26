@@ -181,6 +181,90 @@ SWARMCRAFT_TEST_CLI="$PWD/target/debug/swarmcraft" \
   python3 -m unittest discover -s research/distributed-simulation -p 'test_*.py' -v
 ```
 
+## Encrypted checkpoint certification follow-up
+
+Schema 3 connects the guarded reference client boundary to the
+existing authenticated Noise vote collection and durable checkpoint
+sync protocol. The three checkpoint decisions no longer use offline
+vote files or offline acceptance. The trusted local fixture still
+uses offline creation, role changes, and recovery decisions; it owns
+all of the disposable validator identities. This experiment does not
+constitute independent operator review or global consensus availability.
+
+For each checkpoint, the controller obtains each selected validator's
+exact retained base via its own signed journal and exports that
+validator's verified history. Independently replay the next state
+from that prior checkpoint and the new sealed input batch: preserve
+the earlier journal and genesis exactly, enforce command identity,
+parent and tick, recompute every agent transition and exact root,
+and compare the resulting command receipts. No worker receipt or
+coordinator state is used as the review's simulation input. The
+controller derives and pins the same proposal from each validator's
+own history, and starts an explicitly reviewed one-shot vote listener.
+The collector is the selected surviving validator (slot 1), not an
+organizer or a privileged founder. The actual CLI persists and
+collects the required votes over mutually authenticated encrypted
+loopback TCP and verifies and accepts the exact certificate locally.
+
+Publication remains withheld after the collector's local commit.
+All other active profiles receive the same certified cut through
+encrypted `serve-sync` / `push-sync`, and the sender verifies their
+exact signed durable acceptance receipts. Only after these operations
+finish and all active journals match may the client gate advance its
+pin and perform its usual independent exact-cut check. A failed
+operation never falls back to offline assembly or acceptance. The
+surviving-quorum stage additionally attempts collection against an
+unavailable private endpoint before starting the voter; the collector
+must keep its exact pending vote and accepted base, the remote
+validator must remain unchanged, and the client must still be denied
+the staged cut. Only the same reviewed candidate is retried.
+
+Workers complete and retire before the slower governance exchange.
+Their resource scopes are released and their runtime instance is
+frozen; no idle worker timeout or generation ownership check is
+relaxed. The first attempt at this experiment exceeded the previous
+ten-second client and twelve-second worker receive windows. The
+corrected experiment gives only the combined reference clients an
+explicit bounded 60-second acknowledgment wait (ordinary reference
+clients retain ten seconds). This is a stop-and-certify research
+session, not a sustained 20 Hz service measurement. The failure
+does not justify extending worker authorization or granting a lease.
+
+Schema 3 records the local replay observations, exact listener pins,
+signed sync receipts, failed minority collection status, pre-sync
+publication refusal and early worker retirement. The independent
+verifier also verifies the actual Ed25519 sync signatures using the
+version-1 receipt encoding and OpenSSL 3 (`pkeyutl`); signed creation,
+history and checkpoint commitments still use the existing Rust
+read-only verifier. Previous schema 1 and 2 observations remain
+supported without attributing networked certification to them.
+Use the same delegated reproduction command above with a new output
+path. Neither local certification nor these historical receipts
+are proof of current global quorum, actual Minecraft account
+authentication, or canonical runtime write authority.
+
+The retained [schema-3 evidence](evidence/2026-11-26-combined-networked-cut.json)
+has SHA-256 `34169bcaa750c9cb259d0c97233fa8265353db241170bf922462b1a1ecc1e8d0`.
+The corrected delegated namespace experiment exited 0, with all
+worker scopes released and exact artifact hashes matching. Independent
+verification checked 13 signed decisions, three encrypted checkpoint
+collections, six local validator replay observations, four exact signed
+durable sync receipts, four client receipts, four worker processes and
+nine role observations. The intermediate majority failure preserved the
+collector's pending target and the remote's unchanged accepted base,
+and no staged or pre-sync client publication was permitted. The
+departed founder was not contacted after the first tick. This does not
+qualify sustained service, independent ownership or real Minecraft. All 137 research regression tests passed, including real-CLI
+journal checks and the new evidence/receipt mutation tests. Workflow,
+release-version and diff checks passed. The shared ordinary client path
+also passed the existing #61 actual crash/replay experiment with its
+unchanged ten-second default: [retained regression evidence](evidence/2026-11-26-transition-networked-cut-regression.json),
+SHA-256 `536b1b65bca7f8e9719bdcda622137f964f30d7c265a722c91937222b709da25`.
+Four accepted ticks, eight unique commands, 14 client sessions, eight
+crossings, two real writer SIGKILL faults, two replay refusals and two
+recovered receipts independently verify. No Rust implementation was
+changed; the network experiment used the previously verified binary.
+
 Run on Linux with mapped user/network namespace support and a delegated
 user systemd scope (from the repository root, with the tested CLI built):
 

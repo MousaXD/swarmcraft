@@ -9,12 +9,14 @@ No real-account login, independently owned machine, or live quorum lease.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import secrets
+import selectors
 import socket
 import subprocess
 import tempfile
@@ -24,10 +26,12 @@ from network_lab import cpu_plan, safe_namespace
 from ownerless_permission import PolicyChannel, authority_for, parts, rpc, verify_profile
 from placement_lab import CappedLab, Scope
 from player_runtime import fixture, player_index
-from region_runtime import Rejected, canonical, digest, region_roots, require, world_root
-from regional_authority import candidate_receipts, wire
+from region_runtime import (Rejected, canonical, digest, fields, integer, region_roots, require,
+                            serial_step, world_root)
+from regional_authority import candidate_receipts, validated_state, wire
 from transition_lab import Clients
-from transition_runtime import DurableRuntime, TransitionAuthority, checked_batch, transition_view
+from transition_runtime import (DurableRuntime, TransitionAuthority, checked_batch, checked_command,
+                                response, transition_view)
 from worker_placement import Offer, assess, evaluate, region_load
 
 CLASSIFICATION = "LOCAL_COMBINED_CFT_REFERENCE_SESSION_NOT_MINECRAFT_NOT_MULTI_HOST"
@@ -107,6 +111,70 @@ def committed_snapshot(ledger, mapping, current):
                  "batches": [b for b in journal["batches"] if b["tick"] <= current["tick"]],
                  "commands": [c for c in journal["commands"] if c["request"]["tick"] <= current["tick"]]}
     return snapshot(mapping, current["state"], current["tick"], committed)
+
+
+def review_checkpoint(binding, mapping, prior, candidate):
+    """Replay the exact new cut from a validator's retained certified bytes.
+
+    The previous checkpoint has already passed signed-history verification.
+    This review uses no regional receipt, coordinator state or worker code.
+    It is invoked by the trusted local fixture before each network vote,
+    not a general validator-side sandbox for arbitrary Minecraft saves.
+    """
+    keys = ("format","player_keys","players","tick","runtime_root","regions","transaction_journal")
+    fields(prior,*keys)
+    fields(candidate,*keys)
+    for cut in (prior,candidate):
+        require(cut["format"] == "sc68-reference-checkpoint-v1"
+                and cut["player_keys"] == list(mapping) and cut["players"] == [0,1],
+                "checkpoint identity mapping differs")
+        fields(cut["transaction_journal"],"genesis","batches","commands")
+    require(integer(prior["tick"],0,999_999),"invalid review base tick")
+    tick = prior["tick"] + 1
+    require(integer(candidate["tick"],tick,tick),"review requires exactly one next tick")
+    before, _ = validated_state(prior["regions"])
+    require(prior["runtime_root"] == world_root(tick-1,region_roots(before)),
+            "review base root differs")
+    world = parts(binding)[0]
+    cut = combined_authority(binding).cut
+    parent = cut(world,tick-1,prior["runtime_root"],[0,1])
+    old, new = prior["transaction_journal"], candidate["transaction_journal"]
+    require(canonical(old["genesis"]) == canonical(new["genesis"])
+            and len(old["batches"]) == tick-1 and len(new["batches"]) == tick
+            and canonical(new["batches"][:-1]) == canonical(old["batches"])
+            and canonical(new["commands"][:len(old["commands"])]) == canonical(old["commands"]),
+            "review checkpoint journal is not an exact extension")
+    batch = new["batches"][-1]
+    fields(batch,"tick","parent","batch","result")
+    require(integer(batch["tick"],tick,tick) and batch["parent"] == parent,
+            "review wrong sealed parent")
+    commands = new["commands"][len(old["commands"]):]
+    ids = {r["request"]["id"] for r in old["commands"]}
+    expected_batch = [[0,0,0,None],[1,0,0,None]]
+    previous_player = -1
+    for row in commands:
+        fields(row,"player","request","response")
+        player, request = row["player"], row["request"]
+        checked_command(player,request,world,[0,1])
+        require(player > previous_player and request["id"] not in ids
+                and request["tick"] == tick and request["parent"] == parent,
+                "review duplicate or stale command")
+        previous_player = player
+        ids.add(request["id"])
+        expected_batch[player] = [player,request["direction"],request["action"],request["id"]]
+    require(canonical(batch["batch"]) == canonical(expected_batch),"review input batch differs")
+    next_state = serial_step(before,tick,controls={p:(d,a) for p,d,a,_ in expected_batch})
+    root = world_root(tick,region_roots(next_state))
+    result = cut(world,tick,root,[0,1])
+    require(batch["result"] == result and candidate["runtime_root"] == root
+            and canonical(candidate["regions"]) == canonical(wire(next_state)),
+            "review replay differs from candidate")
+    positions = player_index(before,{0,1})
+    for row in commands:
+        player, request = row["player"], row["request"]
+        require(canonical(row["response"]) == canonical(response(world,tick,result,next_state,[0,1],
+                    player,request,positions[player][1])), "review committed receipt differs")
+    return root
 
 
 class CertifiedClientGate:
@@ -305,6 +373,37 @@ class Quorum:
         require(result.returncode == 0, "CLI failed: " + result.stderr.decode(errors="replace"))
         return json.loads(result.stdout) if parse else result.stdout
 
+    def peer_id(self, slot):
+        matches = [v["peer_id"] for v in self.head["validators"] if v["public_key"] == self.keys[slot]]
+        require(len(matches) == 1 and slot not in self.offline, "invalid active validator")
+        return matches[0]
+
+    @contextmanager
+    def listener(self, slot, classification, *args, pins):
+        """Bounded actual CLI process, exact readiness, no leaked listeners."""
+        peer_id = self.peer_id(slot)
+        command = [self.cli,"--data-dir",str(self.profiles[slot]),"ownerless","authority","decision",*map(str,args)]
+        process = subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout,selectors.EVENT_READ)
+                require(selector.select(timeout=10),"decision listener readiness timeout")
+            line = process.stdout.readline(65537)
+            require(0 < len(line) <= 65536 and line.endswith(b"\n"),"missing decision listener readiness")
+            ready = json.loads(line)
+            require(ready["classification"] == classification and ready["validator"] == peer_id
+                    and ready["world_id"] == self.world and ready["runtime_activation"] is False
+                    and all(ready[k] == v for k,v in pins.items()),"decision listener context differs")
+            require(re.fullmatch(r"127\.0\.0\.1:[1-9][0-9]{0,4}",ready["address"]) is not None
+                    and int(ready["address"].rsplit(":",1)[1]) <= 65535,"unexpected listener endpoint")
+            yield ready
+            out, err = process.communicate(timeout=15)
+            require(process.returncode == 0 and not out,"decision listener failed: "+err.decode(errors="replace"))
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+
     def auth(self, peer, *args, **kw):
         return self.call(peer, "ownerless", "authority", *args, **kw)
 
@@ -369,6 +468,105 @@ class Quorum:
             self.check_head(self.auth(i, "accept", "--history", new, *self.context(), "--checkpoint", file))
         self.records.append({"label": label, "head": accepted, "voter_slots": voters.copy(),
                              "checkpoint": json.loads(file.read_bytes())})
+        return accepted
+
+    def certify_network_checkpoint(self,label,candidate,*,before_retry=None,before_sync=None):
+        """Exact reviewed encrypted collection, followed by durable sync.
+
+        Never falls back to offline votes or acceptance after a failure.
+        The fixture owns all profiles; this is not independent operator trust.
+        """
+        old = self.head
+        seq = old["sequence"]+1
+        voters = self.active[:2]
+        collector = 1
+        require(collector in voters and len(voters)==2,"no configured reference collector majority")
+        remote, = [i for i in voters if i != collector]
+        file = self.write(f"checkpoint-{seq}.bin",canonical(candidate))
+        commitment = self.state_hash(file)
+        proposal = self.proposal(["--checkpoint",file])
+        target = proposal["proposal_hash"]
+        p = self.write_json(f"proposal-{seq}.json",proposal)
+        # Each validator reads its OWN durable prior bytes and accepted
+        # history. Derive the reviewed proposal independently from these.
+        reviews = []
+        for slot in voters:
+            copied = self.root/f"review-{seq}-{slot}.bin"
+            copy = self.auth(slot,"recovery-copy",*self.context(),"--output",copied)
+            require(copy["checkpoint"] == old["checkpoint"] and copy["write_authority"] is False
+                    and copied.read_bytes() == self.checkpoint.read_bytes(),"review local certified base differs")
+            root = review_checkpoint(self.binding,self.mapping,json.loads(copied.read_bytes()),
+                                     json.loads(file.read_bytes()))
+            history = self.auth(slot,"export-history","--expected-world",self.world)
+            local_history = self.write_json(f"review-history-{seq}-{slot}.json",history)
+            local_review = self.auth(None,"propose","--history",local_history,*self.context(),"--checkpoint",file)
+            require(canonical(local_review) == canonical(proposal),"validator review differs")
+            self.write_json(f"review-proposal-{seq}-{slot}.json",local_review)
+            reviews.append({"slot":slot,"base":old["head"],"proposal":target,
+                            "base_checkpoint":old["checkpoint"],"candidate_checkpoint":commitment,
+                            "replayed_root":root})
+        review = [*self.context(),"--proposal",p,"--expected-proposal",target,"--confirm"]
+        network = {"collector_slot":collector,"voter_slots":voters,"reviews":reviews,
+                   "vote_listener":None,"sync":[]}
+        if before_retry is not None:
+            # Keep a private port bound but not listening so no remote
+            # vote can be obtained. The exact candidate is retained.
+            with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as unavailable:
+                unavailable.bind(("127.0.0.1",0))
+                addr = "127.0.0.1:"+str(unavailable.getsockname()[1])
+                failure = self.auth(collector,"decision","collect",*review,"--checkpoint",file,
+                                    "--peer",self.peer_id(remote)+"@"+addr,
+                                    reject="missing current validator majority")
+            locked = self.auth(collector,"status","--expected-world",self.world)
+            self.check_head(locked)
+            require(locked["pending_proposal"] == target,"failed collection lost exact vote lock")
+            unchanged = self.auth(remote,"status","--expected-world",self.world)
+            self.check_head(unchanged)
+            require(unchanged["pending_proposal"] is None,"unreachable voter changed")
+            before_retry()
+            network["minority_attempt"] = {"refusal":failure,"collector_status":locked,
+                                           "remote_status":unchanged,"client_access_refused":True}
+        remote_review = [*self.context(),"--proposal",self.root/f"review-proposal-{seq}-{remote}.json",
+                         "--expected-proposal",target,"--confirm"]
+        with self.listener(remote,"ownerless_reference_decision_listener","serve-vote",*remote_review,
+                           "--from",self.peer_id(collector),"--bind","127.0.0.1:0",
+                           pins={"proposal":target}) as ready:
+            history = self.auth(collector,"decision","collect",*review,"--checkpoint",file,
+                                "--peer",self.peer_id(remote)+"@"+ready["address"])
+        network["vote_listener"] = ready
+        new = self.write_json(f"history-{seq}.json",history)
+        accepted = self.inspect(new)
+        require(accepted["sequence"] == seq and accepted["head"] == target
+                and accepted["checkpoint"] == commitment and accepted["world_id"] == self.world
+                and accepted["reference_fence"] == old["reference_fence"],"network certified cut differs")
+        # The collector already committed; peers have not necessarily
+        # accepted. Do not move the client-facing pin before reconciliation.
+        local = self.auth(collector,"status","--expected-world",self.world)
+        require(local["head"] == target and local["pending_proposal"] is None,"collector did not durably accept")
+        if before_sync is not None:
+            before_sync()
+            network["pre_sync_client_access_refused"] = True
+        sync = ["--expected-world",self.world,"--expected-base",old["head"],"--expected-head",target,"--confirm"]
+        for slot in self.active:
+            if slot == collector:
+                continue
+            with self.listener(slot,"ownerless_reference_sync_listener","serve-sync",*sync,
+                               "--from",self.peer_id(collector),"--bind","127.0.0.1:0",
+                               pins={"head":target}) as ready:
+                result = self.auth(collector,"decision","push-sync",*sync,
+                                   "--peer",self.peer_id(slot)+"@"+ready["address"])
+            require(result["classification"] == "ownerless_reference_checkpoint_synced"
+                    and all(result[k] is False for k in ("live_quorum_verified","runtime_activation","write_authority",
+                        "canonical_authority","player_admission","worker_admission")),
+                    "sync receipt claimed live authority")
+            network["sync"].append({"recipient_slot":slot,"listener":ready,"result":result})
+        self.head,self.history,self.checkpoint = accepted,new,file
+        for slot in self.active:
+            status = self.auth(slot,"status","--expected-world",self.world)
+            self.check_head(status)
+            require(status["pending_proposal"] is None,"replica retains unresolved vote")
+        self.records.append({"label":label,"head":accepted,"voter_slots":voters.copy(),
+                             "checkpoint":json.loads(file.read_bytes()),"network":network})
         return accepted
 
     def player(self, label, subject, allow=True):
@@ -488,7 +686,9 @@ def run(cli, scope, cpus, temp, report):
             evidence["pre_kernel"] = [lab.observe(i) for i in range(len(offers))]
             scope.recheck(evidence["pre_kernel"])
             gate = CertifiedClientGate(ledger, quorum, [p for p,_ in players])
-            with Clients(gate) as clients:
+            # This bounded reference ACK wait includes certificate
+            # collection and dissemination; not a tick service target.
+            with Clients(gate,ack_window=60) as clients:
                 for player,_ in players:
                     request = {"op":"act","world":before["world"],"id":secrets.token_hex(32),
                                "tick":before["tick"]+1,"parent":before["cut_root"],
@@ -499,28 +699,42 @@ def run(cli, scope, cpus, temp, report):
                 runtime.advance()
                 # Prove the actual client boundary refuses a local FULL
                 # commit until the independent authority accepts it.
-                for item in clients.sessions:
-                    for attempt in (lambda: gate.view(item["player"]),
-                                    lambda: gate.submit(item["player"], item["request"]),
-                                    lambda: gate.committed_receipts([(item["player"], item["request"])])):
-                        try:
-                            attempt()
-                        except Rejected as error:
-                            require(str(error) == "uncertified staged tick", "wrong publication refusal")
-                        else:
-                            raise Rejected("uncertified client data escaped")
+                def refuse_staged():
+                    for item in clients.sessions:
+                        for attempt in (lambda: gate.view(item["player"]),
+                                        lambda: gate.submit(item["player"], item["request"]),
+                                        lambda: gate.committed_receipts([(item["player"], item["request"])])):
+                            try:
+                                attempt()
+                            except Rejected as error:
+                                require(str(error) == "uncertified staged tick", "wrong publication refusal")
+                            else:
+                                raise Rejected("uncertified client data escaped")
+                refuse_staged()
                 evidence["uncertified_client_access_refused"] = True
                 evidence["post_kernel"] = [lab.observe(i) for i in range(len(offers))]
                 scope.recheck(evidence["post_kernel"])
                 retired_receipts = candidate_receipts(runtime.runtime.coordinator)
                 candidate = observed_snapshot(ledger,quorum.mapping)
+                # Workers have completed tentative execution. Retire
+                # them before the slow governance path instead of
+                # keeping idle computation sessions alive or extending
+                # their deadlines. No further tick may use these grants.
+                lab.close()
+                require(not scope.active and not scope.poisoned
+                        and all(p.returncode == 0 for p in lab.processes),
+                        "workers not retired before checkpoint certification")
+                runtime.runtime.frozen = runtime.runtime.coordinator.poisoned = True
+                evidence["workers_retired_before_certification"] = True
                 # The transaction ledger is local staging, NOT a global head.
                 # Only the exact replay-checked checkpoint certified by the
                 # surviving majority may be acknowledged to clients.
                 prior_head = quorum.head["head"]
                 require(quorum.state_hash(quorum.checkpoint) == quorum.head["checkpoint"],
                         "previous certified bytes missing")
-                accepted = quorum.certify(label+"-checkpoint",["checkpoint"],candidate)
+                accepted = quorum.certify_network_checkpoint(label+"-checkpoint",candidate,
+                    before_retry=refuse_staged if label=="surviving_quorum_scale_out" else None,
+                    before_sync=refuse_staged)
                 require(accepted["head"] != prior_head, "no certified extension")
                 quorum.assert_state(candidate)
                 evidence["accepted_head"] = accepted["head"]
@@ -592,7 +806,7 @@ def main():
     coordinator,cpus,affinity = cpu_plan()
     scope = Scope(affinity)
     os.sched_setaffinity(0,{coordinator})
-    report = {"schema":2,"classification":CLASSIFICATION,"physical_machines":1,"live_minecraft_players":0,
+    report = {"schema":3,"classification":CLASSIFICATION,"physical_machines":1,"live_minecraft_players":0,
               "canonical_minecraft_authority":False,"runtime_activation":False,"actual_kernel_caps":True,
               "artifact_manifest":artifact_manifest(a.cli),"stages":[]}
     try:
