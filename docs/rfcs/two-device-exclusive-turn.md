@@ -940,7 +940,9 @@ swarmcraft --data-dir "$PROFILE" exclusive-turn runtime probe-java \
 ```
 
 Before any child can spawn, the signed intent changes to the distinct
-`java_probe_may_have_spawned_v1` variant. The consent lock spans durable
+`java_probe_may_have_spawned_v2` variant. It embeds the exact machine/boot,
+controller birth identity, PID/cgroup/mount namespaces, dedicated cgroup
+identity and admitted CPU/memory/consent revision. The consent lock spans durable
 publication, synchronous spawn and process birth-identity capture. Both
 local and account-wide process ownership records precede execution, and
 the kernel limits apply before Java exec. The fixed source-file Java
@@ -958,10 +960,10 @@ point-in-time qualification, never an authorization for a later launch.
 The old unlaunched clearance cannot retire a possibly-spawned intent.
 Errors, hard kills, ambiguous publication or withdrawal after the
 possibly-spawned transition leave the reference operations fenced, even
-when a process guard later proves the direct child gone. This milestone
-does not yet provide an explicit interrupted-probe recovery command; a
-new live adapter must not infer safety from an absent PID or a released
-kernel lock. No Minecraft server, world restore, game socket, Fabric
+when a process guard later proves the direct child gone. The exact cgroup
+is retained for recovery rather than deleted automatically by process
+record cleanup. On successful qualification the signed intent is retired
+before the empty leaf is removed. No Minecraft server, world restore, game socket, Fabric
 readiness/permit, save barrier, or player admission is created. This
 executes reviewed Java bytes under resource limits, not a sandbox against
 malicious code or a publisher signature check.
@@ -981,3 +983,55 @@ quiescence and exact record retirement. A second probe withdrew consent
 before opening the gate and reaped the child. The 13 CLI regressions,
 212 library tests, targeted state-machine test and strict Clippy passed.
 [Retained evidence](../../research/exclusive-turn/evidence/2026-11-26-java-probe.txt).
+
+### Explicit interrupted Java probe recovery
+
+This command does not repeat qualification, spawn a process, kill an
+unknown PID or authorize hosting. It is a denial-only retirement operation
+for the exact V2 probe intent, after the operator independently reviews
+the current local revision, grant, checkpoint and intent ID:
+
+```sh
+swarmcraft --data-dir "$PROFILE" exclusive-turn runtime recover-java-probe \
+  --expected-world "$WORLD" --expected-grant "$GRANT" \
+  --expected-checkpoint "$COMMITMENT" --expected-revision "$REVISION" \
+  --expected-intent "$INTENT" --confirm
+```
+
+The caller holds the world journal, consent, profile, memory and account
+locks through signed retirement. Existing local and account process
+records must match the signed controller and cgroup identities; an
+unrelated or legacy record is never removed. On the original boot, the
+recorded namespaces must match, the original controller and any recorded
+Java birth identities must be dead, and the exact recorded cgroup must
+still exist with its admitted policy intact. The kernel must successfully
+remove the empty, nonrecursive cgroup directory. This is stronger than an
+empty population sample: a delayed pre-exec write to the retired cgroup
+cannot attach another child. Missing or substituted cgroups, unknown
+processes, populated descendants, or indeterminate state refuse recovery.
+No reset is performed based only on a released lock or absent PID.
+
+On a different verified boot of the same recorded machine, earlier-boot
+processes cannot survive. Matching records can be retired without
+touching any new-boot cgroup at the old pathname. This uses the existing
+local machine-ID trust model; cloned/maliciously substituted machine
+identities are not covered. A successful recovery consumes consent even
+if it had already been revoked, clears the exact intent and reports
+quiescence, **not** successful Java qualification. A future probe requires
+a fresh explicit opt-in. V1 possibly-spawned states lack the signed kernel
+pin and remain fenced rather than being silently upgraded. A missing
+same-boot leaf (including systemd scope cleanup or a crash after cgroup
+removal but before signed retirement) still requires a verified reboot;
+no availability fallback weakens the proof. The command is not a live
+Minecraft recovery or save-barrier implementation.
+
+The delegated kernel fixture killed the real test controller before child
+PID publication, denied recovery while the surviving child occupied the
+exact cgroup, then retired the group after the child exited naturally.
+A pre-opened pre-exec attachment descriptor could not attach after rmdir.
+Unrelated ownership records, stale namespace identity and missing same-boot
+leaf all denied. The exact-pin serialization and consent state tests, all
+13 exclusive-turn integration tests, 213 CLI library tests and strict
+Clippy passed. The actual Java process fixture also passed with the new
+retained-leaf cleanup ordering. A physical reboot was not performed.
+[Retained evidence](../../research/exclusive-turn/evidence/2026-11-26-probe-recovery.txt).

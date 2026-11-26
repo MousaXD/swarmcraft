@@ -116,6 +116,7 @@ pub(crate) struct MemoryCapIdentity {
 pub(crate) struct HostMemoryCap {
     identity: MemoryCapIdentity,
     claimed_by_record: bool,
+    retained_by_probe_intent: bool,
 }
 
 impl HostMemoryCap {
@@ -144,6 +145,12 @@ impl HostMemoryCap {
     }
 
     pub(crate) fn claim_by_record(&mut self) {
+        self.claimed_by_record = true;
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn retain_for_probe_recovery(&mut self) {
+        self.retained_by_probe_intent = true;
         self.claimed_by_record = true;
     }
 
@@ -178,7 +185,7 @@ impl HostMemoryCap {
     /// Remove only after both durable records were retired and the exact
     /// cgroup was proven empty. Never kill an unknown residual process.
     pub(crate) fn release_after_record_cleanup(&mut self) {
-        self.claimed_by_record = false;
+        self.claimed_by_record = self.retained_by_probe_intent;
     }
 }
 
@@ -194,6 +201,32 @@ impl Drop for HostMemoryCap {
 }
 
 impl MemoryCapIdentity {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn verify_probe_budget(&self, heap_mib: u64, cpu_millicores: u64, revision: u64) -> Result<()> {
+        validate_cpu_request(cpu_millicores)?;
+        anyhow::ensure!(
+            revision > 0
+                && self.limit_bytes == cap_bytes(heap_mib)?
+                && self.cpu.as_ref()
+                    == Some(&CpuLimit {
+                        millicores: cpu_millicores,
+                        admitted_heap_mib: heap_mib,
+                        consent_revision: revision
+                    }),
+            "probe recovery cgroup budget differs from signed consent"
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn remove_empty_probe_leaf(&self) -> Result<()> {
+        linux::remove_empty_probe_leaf(self)
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn configure_probe_test_command(&self, command: &mut Command) -> Result<()> {
+        linux::configure_command(self, command)
+    }
     pub(crate) fn populated(&self) -> Result<bool> {
         #[cfg(target_os = "linux")]
         {
@@ -551,7 +584,7 @@ mod linux {
             // No Java may execute before these settings and attachment are
             // verified. Never mutate the parent's resource configuration.
             verify_limits(&identity)?;
-            Ok(HostMemoryCap { identity, claimed_by_record: false })
+            Ok(HostMemoryCap { identity, claimed_by_record: false, retained_by_probe_intent: false })
         })();
         if result.is_err() {
             // rmdir on cgroupfs refuses populated groups; never kill tasks.
@@ -603,6 +636,17 @@ mod linux {
             1 => Ok(true),
             _ => bail!("invalid cgroup population state"),
         }
+    }
+
+    pub(super) fn remove_empty_probe_leaf(identity: &MemoryCapIdentity) -> Result<()> {
+        // Require the original cgroup identity and kernel policy; never
+        // infer quiescence from a missing or substituted pathname. The
+        // kernel's nonrecursive rmdir is also the barrier against a child
+        // that has forked but has not yet attached through its pre-exec FD.
+        verify_limits(identity)?;
+        ensure!(!populated(identity)?, "probe cgroup still contains processes");
+        fs::remove_dir(&identity.path).context("cannot retire exact empty probe cgroup; recovery remains fenced")?;
+        Ok(())
     }
 
     pub(super) fn configure_command(identity: &MemoryCapIdentity, command: &mut Command) -> Result<()> {

@@ -187,6 +187,15 @@ pub(crate) fn reserve_reference_capacity(paths: &DataPaths) -> Result<(File, Fil
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn lock_reference_probe_recovery(paths: &DataPaths) -> Result<(File, File, MachineHostingReservation)> {
+    let profile = hosting_profile_guard(paths)?;
+    let memory = open_lock(&control_path(paths).join("hosting-active-memory.lock"))?;
+    memory.try_lock_exclusive().context("another hosting admission is active in this profile")?;
+    let machine = MachineHostingReservation::acquire_for_probe_recovery()?;
+    Ok((profile, memory, machine))
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn reference_runtime_memory_pressure() -> Result<bool> {
     let memory = memory_snapshot()?;
     Ok(memory.available_mib < os_headroom_mib(memory.physical_mib))

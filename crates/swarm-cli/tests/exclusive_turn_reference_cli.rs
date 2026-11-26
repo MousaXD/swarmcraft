@@ -1699,6 +1699,22 @@ fn runtime_intent_fences_handoff_across_process_exit_and_revocation_consumes_con
     rejected(probe("1", intent), "revision differs");
     rejected(probe("2", &Hash32([9; 32]).to_string()), "exact unlaunched pin");
     rejected(probe("2", intent), "explicit CPU cap requires a delegated Linux memory and CPU cgroup");
+    rejected(
+        run(
+            0,
+            "recover-java-probe",
+            &[
+                "--expected-revision",
+                "2",
+                "--expected-checkpoint",
+                checkpoint,
+                "--expected-intent",
+                intent,
+                "--confirm",
+            ],
+        ),
+        "unlaunched intent is not a recoverable Java probe",
+    );
     assert_eq!(fs::read(&state_path).unwrap(), reserved_bytes);
     assert!(!f.store(0).join("probe-process.json").exists());
     for flag in [

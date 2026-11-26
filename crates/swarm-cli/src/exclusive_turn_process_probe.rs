@@ -10,7 +10,7 @@ use crate::{
         linux::{uid, validate_ancestors},
         MachineHostingReservation,
     },
-    runtime_process_guard::RuntimeProcessGuard,
+    runtime_process_guard::{ProbeRecoveryPin, RuntimeProcessGuard},
 };
 use anyhow::{ensure, Context, Result};
 use serde::Serialize;
@@ -60,6 +60,29 @@ pub struct ProbeReport {
     pub process_and_descendants_quiescent: bool,
 }
 
+/// Keeps account/profile exclusion through the caller's signed retirement.
+pub struct ProbeRecovery {
+    _profile: File,
+    _memory: File,
+    _machine: MachineHostingReservation,
+    method: &'static str,
+}
+
+impl ProbeRecovery {
+    pub fn method(&self) -> &'static str {
+        self.method
+    }
+
+    /// Requires an authenticated exact signed probe intent and the stable
+    /// reference-world lock. This never grants capacity for another spawn.
+    pub fn retire(paths: &DataPaths, directory: &Path, pin: &ProbeRecoveryPin) -> Result<Self> {
+        let (profile, memory, machine) = hosting_budget::lock_reference_probe_recovery(paths)?;
+        validate_ancestors(directory)?;
+        let method = pin.recover(&directory.join("probe-process.json"), &machine.record_path)?;
+        Ok(Self { _profile: profile, _memory: memory, _machine: machine, method })
+    }
+}
+
 impl ProbeAdmission {
     pub fn prepare(
         paths: &DataPaths,
@@ -94,6 +117,23 @@ impl ProbeAdmission {
             cpu_millicores,
             consent_revision,
         })
+    }
+
+    /// Capture the exact pre-spawn kernel context and retain that leaf even
+    /// if the direct child is later reaped on an error path. The caller
+    /// signs and fsyncs this pin before invoking start.
+    pub fn prepare_recovery_pin(&mut self) -> Result<ProbeRecoveryPin> {
+        let cap = self.cap.as_mut().context("probe admission already consumed")?;
+        let pin = ProbeRecoveryPin::capture(cap.identity())?;
+        pin.verify_budget(self.heap_mib, self.cpu_millicores, self.consent_revision)?;
+        cap.retain_for_probe_recovery();
+        Ok(pin)
+    }
+
+    /// Only after the successful probe has returned quiescence evidence
+    /// and the caller has durably retired its exact signed intent.
+    pub fn cleanup_completed_leaf(&self, pin: &ProbeRecoveryPin) -> Result<()> {
+        pin.retire_completed_leaf()
     }
 
     /// The caller must have published a possibly-spawned intent and must
@@ -343,6 +383,7 @@ mod tests {
         };
         let mut admission = make();
         let shared = admission.machine.record_path.clone();
+        let recovery_pin = admission.prepare_recovery_pin().unwrap();
         let running = admission.start_checked(&directory).unwrap();
         assert!(directory.join("probe-process.json").exists() && shared.exists());
         assert!(
@@ -355,6 +396,10 @@ mod tests {
         assert!(matches!(report.process_cpu, ProcessCpuReport::LinuxCgroupActive { limit_millicores: 500, .. }));
         assert!(matches!(report.process_memory, ProcessMemoryReport::LinuxCgroupActive { limit_mib: 1536, .. }));
         assert!(!directory.join("probe-process.json").exists() && !shared.exists());
+        // Successful completion keeps the exact empty leaf until the
+        // caller's signed intent retirement; the fixture models that step.
+        admission.cleanup_completed_leaf(&recovery_pin).unwrap();
+        assert!(admission.cleanup_completed_leaf(&recovery_pin).is_err());
         println!("actual isolated Java process: {}", serde_json::to_string(&report).unwrap());
         drop(admission);
         // Withdrawal before releasing the child's stdin gate: kill/reap

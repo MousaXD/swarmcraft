@@ -58,6 +58,17 @@ pub enum RuntimeCommand {
         #[arg(long)]
         package: PathBuf,
     },
+    /// Retire an interrupted isolated Java probe only with exact kernel quiescence or verified reboot.
+    RecoverJavaProbe {
+        #[command(flatten)]
+        review: Reviewed,
+        #[arg(long)]
+        expected_checkpoint: Hash32,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        expected_intent: Hash32,
+    },
     /// Withdraw exact local consent without taking the world journal lock. An intent stays fenced.
     Revoke {
         #[command(flatten)]
@@ -93,6 +104,7 @@ mod linux {
         fs::{self, File, OpenOptions},
         path::Path,
     };
+    use swarm_cli::runtime_process_guard::ProbeRecoveryPin;
     use swarm_core::{random_nonce, PeerIdentity};
     use swarm_protocol::{ExclusiveTurnCheckpointV1, PeerId};
 
@@ -168,6 +180,7 @@ mod linux {
         // Distinct persistent variant: never accepted by the unlaunched
         // clear path, including by an older decoder.
         JavaProbeMayHaveSpawnedV1,
+        JavaProbeMayHaveSpawnedV2(ProbeRecoveryPin),
     }
 
     impl IntentKind {
@@ -175,7 +188,12 @@ mod linux {
             match self {
                 Self::UnlaunchedNoProcessV1 => "unlaunched_no_process_v1",
                 Self::JavaProbeMayHaveSpawnedV1 => "java_probe_may_have_spawned_v1",
+                Self::JavaProbeMayHaveSpawnedV2(_) => "java_probe_may_have_spawned_v2",
             }
+        }
+
+        fn is_probe(&self) -> bool {
+            !matches!(self, Self::UnlaunchedNoProcessV1)
         }
     }
 
@@ -219,6 +237,9 @@ mod linux {
             if let Some(intent) = &self.intent {
                 ensure!(intent.nonce != [0; 32], "invalid runtime intent nonce");
                 intent.consent.validate(world, peer)?;
+                if let IntentKind::JavaProbeMayHaveSpawnedV2(pin) = &intent.kind {
+                    pin.verify_budget(intent.consent.heap_mib, intent.consent.cpu_millicores, intent.consent.revision)?;
+                }
                 ensure!(intent.consent.revision < self.revision, "runtime intent precedes its consent");
                 ensure!(
                     self.consent.as_ref().is_none_or(|consent| consent == &intent.consent),
@@ -275,11 +296,21 @@ mod linux {
             Ok(&intent.consent)
         }
 
-        fn begin_probe(&mut self, scope: &Scope, expected: u64, expected_intent: Hash32) -> Result<Hash32> {
-            self.unlaunched_consent(scope, expected, expected_intent)?;
+        fn begin_probe(
+            &mut self,
+            scope: &Scope,
+            expected: u64,
+            expected_intent: Hash32,
+            kind: IntentKind,
+        ) -> Result<Hash32> {
+            let consent = self.unlaunched_consent(scope, expected, expected_intent)?;
+            ensure!(kind.is_probe(), "cannot begin a non-probe intent");
+            if let IntentKind::JavaProbeMayHaveSpawnedV2(pin) = &kind {
+                pin.verify_budget(consent.heap_mib, consent.cpu_millicores, consent.revision)?;
+            }
             self.next(expected)?;
             let intent = self.intent.as_mut().context("runtime intent disappeared")?;
-            intent.kind = IntentKind::JavaProbeMayHaveSpawnedV1;
+            intent.kind = kind;
             intent.id()
         }
 
@@ -287,7 +318,7 @@ mod linux {
             ensure!(self.revision == expected, "runtime consent or local revision changed during Java qualification");
             let intent = self.intent.as_ref().context("Java probe intent disappeared")?;
             ensure!(
-                intent.kind == IntentKind::JavaProbeMayHaveSpawnedV1
+                intent.kind.is_probe()
                     && intent.id()? == expected_intent
                     && &intent.consent.scope == scope
                     && self.consent.as_ref() == Some(&intent.consent),
@@ -300,6 +331,30 @@ mod linux {
         // public clear command never retires a possibly-spawned intent.
         fn finish_probe(&mut self, scope: &Scope, expected: u64, expected_intent: Hash32) -> Result<()> {
             self.check_probe(scope, expected, expected_intent)?;
+            self.next(expected)?;
+            self.intent = None;
+            self.consent = None;
+            Ok(())
+        }
+
+        fn recovery_pin(&self, scope: &Scope, expected: u64, expected_intent: Hash32) -> Result<&ProbeRecoveryPin> {
+            ensure!(self.revision == expected, "runtime local revision differs from expected pin");
+            let intent = self.intent.as_ref().context("no unresolved runtime intent")?;
+            ensure!(
+                &intent.consent.scope == scope && intent.id()? == expected_intent,
+                "runtime intent differs from exact recovery pin"
+            );
+            match &intent.kind {
+                IntentKind::JavaProbeMayHaveSpawnedV2(pin) => Ok(pin),
+                IntentKind::JavaProbeMayHaveSpawnedV1 => {
+                    anyhow::bail!("legacy possibly-spawned probe lacks a signed kernel recovery pin; recovery refused")
+                }
+                IntentKind::UnlaunchedNoProcessV1 => anyhow::bail!("unlaunched intent is not a recoverable Java probe"),
+            }
+        }
+
+        fn finish_recovery(&mut self, scope: &Scope, expected: u64, expected_intent: Hash32) -> Result<()> {
+            self.recovery_pin(scope, expected, expected_intent)?;
             self.next(expected)?;
             self.intent = None;
             self.consent = None;
@@ -362,13 +417,14 @@ mod linux {
             state.opt_in(scope.clone(), 0, 512, 500).unwrap();
             state.reserve(&scope, 1).unwrap();
             let unlaunched = state.intent.as_ref().unwrap().id().unwrap();
-            assert!(state.begin_probe(&scope, 1, unlaunched).is_err());
-            let probe = state.begin_probe(&scope, 2, unlaunched).unwrap();
+            assert!(state.begin_probe(&scope, 1, unlaunched, IntentKind::JavaProbeMayHaveSpawnedV1).is_err());
+            let probe = state.begin_probe(&scope, 2, unlaunched, IntentKind::JavaProbeMayHaveSpawnedV1).unwrap();
             assert_ne!(unlaunched, probe);
             state.validate(world, peer).unwrap();
             assert!(state.clear(&scope, 3, probe).is_err());
             assert!(state.clear(&scope, 3, unlaunched).is_err());
-            assert!(state.begin_probe(&scope, 3, probe).is_err());
+            assert!(state.begin_probe(&scope, 3, probe, IntentKind::JavaProbeMayHaveSpawnedV1).is_err());
+            assert!(state.recovery_pin(&scope, 3, probe).is_err());
             state.check_probe(&scope, 3, probe).unwrap();
             let mut withdrawn = state.clone();
             withdrawn.revoke(scope.grant, 3).unwrap();
@@ -379,6 +435,62 @@ mod linux {
             state.finish_probe(&scope, 3, probe).unwrap();
             assert_eq!(state.revision, 4);
             assert!(state.intent.is_none() && state.consent.is_none());
+        }
+
+        #[test]
+        fn recovery_v2_is_exact_and_consumes_revoked_consent_after_kernel_proof() {
+            // Pure state-machine fixture. The separate delegated Linux test
+            // exercises the actual process/cgroup proof, not these values.
+            let recovery: ProbeRecoveryPin = serde_json::from_value(serde_json::json!({
+                "controller_pid": 123, "cgroup_namespace": 4, "mount_namespace": 5,
+                "linux": {"machine_id": "ab".repeat(16), "boot_id": "12345678-1234-1234-1234-123456789abc",
+                    "pid_namespace": 6, "controller_start_ticks": 7, "java_start_ticks": null,
+                    "cgroup": {"path": "/sys/fs/cgroup/example/swarmcraft-jvm-fixture", "device": 8, "inode": 9,
+                        "limit_bytes": 1536u64 * 1024 * 1024, "high_bytes": 1449551462u64,
+                        "cpu": {"millicores": 500, "admitted_heap_mib": 512, "consent_revision": 1}}}
+            }))
+            .unwrap();
+            let identity = PeerIdentity::generate();
+            let world: ExclusiveTurnWorldIdV1 = format!("scpass:{}", Hash32([1; 32])).parse().unwrap();
+            let peer = identity.peer_id();
+            let scope = Scope {
+                world,
+                holder: peer,
+                grant: Hash32([2; 32]),
+                epoch: 1,
+                fence: 1,
+                checkpoint: ExclusiveTurnCheckpointV1 {
+                    manifest_hash: Hash32([3; 32]),
+                    state_root: Hash32([4; 32]),
+                    reference_commitment: Hash32([5; 32]),
+                },
+                compatibility: Hash32([6; 32]),
+            };
+            let mut state = State::empty(world, peer);
+            state.opt_in(scope.clone(), 0, 512, 500).unwrap();
+            state.reserve(&scope, 1).unwrap();
+            let unlaunched = state.intent.as_ref().unwrap().id().unwrap();
+            assert!(state.recovery_pin(&scope, 2, unlaunched).is_err());
+            let probe = state
+                .begin_probe(&scope, 2, unlaunched, IntentKind::JavaProbeMayHaveSpawnedV2(recovery.clone()))
+                .unwrap();
+            state.validate(world, peer).unwrap();
+            let signed =
+                SignedState { signature: identity.sign(&signing_bytes(&state).unwrap()), state: state.clone() };
+            let bytes = postcard::to_allocvec(&signed).unwrap();
+            let decoded: SignedState = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(postcard::to_allocvec(&decoded).unwrap(), bytes);
+            assert_eq!(decoded.state.recovery_pin(&scope, 3, probe).unwrap(), &recovery);
+            assert!(state.clear(&scope, 3, probe).is_err());
+            state.revoke(scope.grant, 3).unwrap();
+            assert!(state.recovery_pin(&scope, 3, probe).is_err());
+            assert!(state.recovery_pin(&scope, 4, unlaunched).is_err());
+            assert!(state.finish_probe(&scope, 4, probe).is_err());
+            assert_eq!(state.recovery_pin(&scope, 4, probe).unwrap(), &recovery);
+            state.finish_recovery(&scope, 4, probe).unwrap();
+            assert_eq!(state.revision, 5);
+            assert!(state.intent.is_none() && state.consent.is_none());
+            assert!(state.finish_recovery(&scope, 5, probe).is_err());
         }
     }
 
@@ -494,8 +606,9 @@ mod linux {
         "intent_kind": intent.map(|i|i.kind.name()),
             "reference_operations_fenced": intent.is_some(),
             "capacity_verified": false, "resource_enforcement_verified": false,
-            "process_spawned": if intent.is_some_and(|i| i.kind == IntentKind::JavaProbeMayHaveSpawnedV1) { serde_json::Value::Null } else { false.into() },
-            "unresolved_possibly_spawned_intent": intent.is_some_and(|i| i.kind == IntentKind::JavaProbeMayHaveSpawnedV1),
+            "process_spawned": if intent.is_some_and(|i| i.kind.is_probe()) { serde_json::Value::Null } else { false.into() },
+            "unresolved_possibly_spawned_intent": intent.is_some_and(|i| i.kind.is_probe()),
+            "kernel_recovery_pin_available": intent.is_some_and(|i| matches!(i.kind, IntentKind::JavaProbeMayHaveSpawnedV2(_))),
             "save_barrier_verified": false, "canonical_authority": false, "write_authority": false,
             "runtime_activation": false, "player_admission": false, "minecraft_gameplay_verified": false,
         }))
@@ -610,7 +723,14 @@ mod linux {
                 let lock = lock_existing(&store.dir)?;
                 let mut state =
                     load(&store.dir, head.world(), &store.identity)?.context("runtime local state disappeared")?;
-                let probe = state.begin_probe(&scope, expected_revision, expected_intent)?;
+                state.unlaunched_consent(&scope, expected_revision, expected_intent)?;
+                let recovery_pin = admission.prepare_recovery_pin()?;
+                let probe = state.begin_probe(
+                    &scope,
+                    expected_revision,
+                    expected_intent,
+                    IntentKind::JavaProbeMayHaveSpawnedV2(recovery_pin.clone()),
+                )?;
                 // Publish and fsync the possibly-spawned state BEFORE any
                 // child or its ownership record. Hold consent lock across
                 // the synchronous spawn and exact child identity capture.
@@ -629,6 +749,7 @@ mod linux {
                     load(&store.dir, head.world(), &store.identity)?.context("runtime local state disappeared")?;
                 current.finish_probe(&scope, revision, probe)?;
                 persist(&store.dir, &store.identity, &current, true)?;
+                let cleanup = admission.cleanup_completed_leaf(&recovery_pin);
                 drop(lock);
                 drop(admission);
                 let mut result = report(&current, Some(&scope))?;
@@ -637,7 +758,34 @@ mod linux {
                 result["capacity_verified"] = true.into();
                 result["resource_enforcement_verified"] = true.into();
                 result["process_spawned"] = true.into();
+                result["empty_cgroup_retired"] = cleanup.is_ok().into();
+                if let Err(error) = cleanup {
+                    result["empty_cgroup_cleanup_error"] = format!("{error:#}").into();
+                }
                 result["java_probe"] = serde_json::to_value(evidence)?;
+                print_document(&result)
+            }
+            RuntimeCommand::RecoverJavaProbe { review, expected_checkpoint, expected_revision, expected_intent } => {
+                review.confirm()?;
+                let (store, journal, head) = opened(paths, &review.pin)?;
+                let scope = Scope::held(&journal, &head, expected_checkpoint)?;
+                let lock = lock_existing(&store.dir)?;
+                let mut state =
+                    load(&store.dir, head.world(), &store.identity)?.context("local runtime intent state is absent")?;
+                let pin = state.recovery_pin(&scope, expected_revision, expected_intent)?.clone();
+                let recovery = swarm_cli::exclusive_turn_process_probe::ProbeRecovery::retire(paths, &store.dir, &pin)?;
+                state.finish_recovery(&scope, expected_revision, expected_intent)?;
+                persist(&store.dir, &store.identity, &state, true)?;
+                let method = recovery.method();
+                drop(recovery);
+                drop(lock);
+                let mut result = report(&state, Some(&scope))?;
+                result["classification"] = "exclusive_turn_interrupted_java_probe_recovered".into();
+                result["retired_probe_intent_id"] = expected_intent.to_string().into();
+                result["recovery_method"] = method.into();
+                result["process_and_descendants_quiescent"] = true.into();
+                result["prior_process_spawn_verified"] = false.into();
+                result["qualification_succeeded"] = false.into();
                 print_document(&result)
             }
             RuntimeCommand::Clear { review, expected_checkpoint, expected_revision, expected_intent } => {

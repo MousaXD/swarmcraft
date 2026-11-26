@@ -42,6 +42,126 @@ struct LinuxRuntimeIdentity {
     cgroup: Option<MemoryCapIdentity>,
 }
 
+/// Captured before a probe may fork, then embedded in its signed local
+/// intent. The cgroup is retained until that intent is durably retired.
+/// This is not a generic process reset token or an authority permit.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProbeRecoveryPin {
+    controller_pid: u32,
+    linux: LinuxRuntimeIdentity,
+    cgroup_namespace: u64,
+    mount_namespace: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl ProbeRecoveryPin {
+    pub(crate) fn capture(cap: &MemoryCapIdentity) -> Result<Self> {
+        let controller_pid = std::process::id();
+        let mut linux = linux_process::current_identity(controller_pid)?;
+        anyhow::ensure!(!cap.populated()?, "probe cgroup is already populated");
+        linux.cgroup = Some(cap.clone());
+        let (cgroup_namespace, mount_namespace) = linux_process::cgroup_context()?;
+        Ok(Self { controller_pid, linux, cgroup_namespace, mount_namespace })
+    }
+
+    pub fn verify_budget(&self, heap_mib: u64, cpu_millicores: u64, revision: u64) -> Result<()> {
+        anyhow::ensure!(
+            self.controller_pid != 0
+                && self.linux.controller_start_ticks > 0
+                && self.linux.java_start_ticks.is_none()
+                && self.linux.pid_namespace > 0
+                && self.cgroup_namespace > 0
+                && self.mount_namespace > 0,
+            "invalid probe recovery identity"
+        );
+        anyhow::ensure!(
+            self.linux.machine_id.len() == 32
+                && self.linux.machine_id.bytes().all(|b| b.is_ascii_hexdigit())
+                && linux_process::valid_boot_id(&self.linux.boot_id),
+            "invalid probe recovery machine or boot identity"
+        );
+        self.cap()?.verify_probe_budget(heap_mib, cpu_millicores, revision)
+    }
+
+    fn cap(&self) -> Result<&MemoryCapIdentity> {
+        self.linux.cgroup.as_ref().context("signed probe recovery cgroup missing")
+    }
+
+    fn verify_record(&self, record: &RuntimeProcessRecord) -> Result<()> {
+        let linux = record.linux.as_ref().context("unrelated or legacy process ownership record")?;
+        anyhow::ensure!(
+            record.version == LINUX_RECORD_VERSION
+                && record.controller_pid == self.controller_pid
+                && linux.machine_id == self.linux.machine_id
+                && linux.boot_id == self.linux.boot_id
+                && linux.pid_namespace == self.linux.pid_namespace
+                && linux.controller_start_ticks == self.linux.controller_start_ticks
+                && linux.cgroup.as_ref() == Some(self.cap()?)
+                && record.java_pid.is_some() == linux.java_start_ticks.is_some(),
+            "process ownership record differs from signed probe recovery pin"
+        );
+        Ok(())
+    }
+
+    /// Called only after successful in-process completion, all children
+    /// reaped, both records retired, and signed intent clearance persisted.
+    pub(crate) fn retire_completed_leaf(&self) -> Result<()> {
+        self.cap()?.remove_empty_probe_leaf()
+    }
+
+    /// The caller holds the stable world/profile/account locks throughout
+    /// this operation and through signed intent retirement. Never kills a
+    /// residual process or removes an unrelated ownership record.
+    pub(crate) fn recover(&self, local: &Path, shared: &Path) -> Result<&'static str> {
+        let (machine, boot, namespace) = linux_process::context()?;
+        anyhow::ensure!(machine == self.linux.machine_id, "probe recovery belongs to another machine");
+        let records = [read_record(local)?, read_record(shared)?];
+        for record in records.iter().flatten() {
+            self.verify_record(record)?;
+        }
+        let method = if boot == self.linux.boot_id {
+            anyhow::ensure!(
+                namespace == self.linux.pid_namespace
+                    && linux_process::cgroup_context()? == (self.cgroup_namespace, self.mount_namespace),
+                "cannot recover a probe across Linux PID/cgroup/mount namespaces"
+            );
+            anyhow::ensure!(
+                !linux_process::controller_live(self.controller_pid, &self.linux)?,
+                "original probe controller is still alive"
+            );
+            for record in records.iter().flatten() {
+                if let Some(pid) = record.java_pid {
+                    let identity = record.linux.as_ref().context("recorded probe identity missing")?;
+                    anyhow::ensure!(
+                        !linux_process::read_process(pid)?
+                            .is_some_and(|stat| Some(stat.start_ticks) == identity.java_start_ticks
+                                && !matches!(stat.state, b'Z' | b'X' | b'x')),
+                        "recorded probe Java process is still alive"
+                    );
+                }
+            }
+            // Do not treat absent path, controller death or an empty sample
+            // as sufficient. Kernel rmdir must retire the exact cgroup, so
+            // a delayed pre-exec attachment cannot create a late process.
+            self.cap()?.remove_empty_probe_leaf()?;
+            "exact_empty_cgroup_retired"
+        } else {
+            // Same machine, different actual kernel boot: no earlier-boot
+            // process can survive. Never touch the old cgroup pathname,
+            // which may have been recreated in the new boot.
+            "verified_machine_reboot"
+        };
+        if records[0].is_some() {
+            remove_record(local)?;
+        }
+        if records[1].is_some() {
+            remove_record(shared)?;
+        }
+        Ok(method)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ownership {
     Quiescent,
@@ -420,7 +540,7 @@ mod linux_process {
 
     pub(super) struct ProcStat {
         pub(super) start_ticks: u64,
-        state: u8,
+        pub(super) state: u8,
     }
 
     fn parse_stat(value: &str, pid: u32) -> Result<ProcStat> {
@@ -453,7 +573,7 @@ mod linux_process {
         }
     }
 
-    fn valid_boot_id(value: &str) -> bool {
+    pub(super) fn valid_boot_id(value: &str) -> bool {
         value.len() == 36
             && value.bytes().enumerate().all(|(index, byte)| {
                 if matches!(index, 8 | 13 | 18 | 23) {
@@ -464,7 +584,7 @@ mod linux_process {
             })
     }
 
-    fn context() -> Result<(String, String, u64)> {
+    pub(super) fn context() -> Result<(String, String, u64)> {
         use std::os::unix::fs::MetadataExt;
         let machine = fs::read_to_string("/etc/machine-id").context("Linux machine identity unavailable")?;
         let machine = machine.trim().to_owned();
@@ -478,6 +598,15 @@ mod linux_process {
         let namespace = fs::metadata("/proc/self/ns/pid").context("Linux PID namespace unavailable")?.ino();
         anyhow::ensure!(namespace != 0, "invalid Linux PID namespace");
         Ok((machine, boot, namespace))
+    }
+
+    pub(super) fn cgroup_context() -> Result<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        crate::hosting_budget::require_visible_cgroup_v2_mount(&fs::read_to_string("/proc/self/mountinfo")?)?;
+        let cgroup = fs::metadata("/proc/self/ns/cgroup")?.ino();
+        let mount = fs::metadata("/proc/self/ns/mnt")?.ino();
+        anyhow::ensure!(cgroup > 0 && mount > 0, "invalid Linux cgroup/mount namespace");
+        Ok((cgroup, mount))
     }
 
     pub(super) fn current_identity(controller_pid: u32) -> Result<LinuxRuntimeIdentity> {
@@ -763,6 +892,113 @@ mod tests {
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn probe_recovery_crash_worker() {
+        // Isolated test controller. No production environment override.
+        let Some(root) = std::env::var_os("SWARMCRAFT_TEST_PROBE_CRASH_ROOT") else { return };
+        let root = PathBuf::from(root);
+        let reservation = MachineHostingReservation::acquire_at(&root.join("account")).unwrap();
+        let mut cap = HostMemoryCap::prepare(512, Some(500), 1).unwrap().expect("delegated cgroup required");
+        let pin = ProbeRecoveryPin::capture(cap.identity()).unwrap();
+        cap.retain_for_probe_recovery();
+        fs::write(root.join("pin.postcard"), postcard::to_allocvec(&pin).unwrap()).unwrap();
+        let guard =
+            RuntimeProcessGuard::begin_at(root.join("probe-process.json"), Some(&reservation), Some(cap)).unwrap();
+        let mut command = std::process::Command::new("/bin/sleep");
+        command.arg("12");
+        guard.memory_cap().unwrap().configure_command(&mut command).unwrap();
+        let child = TestChild(command.spawn().unwrap());
+        guard.memory_cap().unwrap().verify_child(child.0.id()).unwrap();
+        // Deliberately do not record the child PID: crash in the ambiguous
+        // fork-to-record interval. Child exits by itself after a short bound.
+        fs::write(root.join("ready"), b"ready").unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires disposable delegated Linux CPU/memory scope"]
+    fn interrupted_probe_recovery_requires_exact_empty_kernel_leaf_and_rejects_late_attachment() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::{
+            process::{Command, Stdio},
+            time::{Duration, Instant},
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let account = root.join("account");
+        let local = root.join("probe-process.json");
+        let shared = account.join("runtime-process.json");
+        let mut controller = TestChild(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "runtime_process_guard::tests::probe_recovery_crash_worker", "--nocapture"])
+                .env("SWARMCRAFT_TEST_PROBE_CRASH_ROOT", root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !root.join("ready").exists() {
+            assert!(controller.0.try_wait().unwrap().is_none(), "probe controller exited before publication");
+            assert!(Instant::now() < deadline, "probe controller readiness timed out");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let bytes = fs::read(root.join("pin.postcard")).unwrap();
+        let pin: ProbeRecoveryPin = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(postcard::to_allocvec(&pin).unwrap(), bytes);
+        pin.verify_budget(512, 500, 1).unwrap();
+        assert!(pin.verify_budget(512, 750, 1).is_err());
+        assert!(pin.verify_budget(512, 500, 2).is_err());
+        assert!(MachineHostingReservation::lock_test_probe_recovery(&account).is_err(), "live account lock bypassed");
+        assert!(read_record(&local).unwrap().unwrap().java_pid.is_none());
+        assert!(read_record(&shared).unwrap().unwrap().java_pid.is_none());
+        let local_before = fs::read(&local).unwrap();
+        let shared_before = fs::read(&shared).unwrap();
+        controller.0.kill().unwrap();
+        assert_eq!(controller.0.wait().unwrap().signal(), Some(libc::SIGKILL));
+        assert!(
+            MachineHostingReservation::acquire_at(&account).is_err(),
+            "normal admission accepted ambiguous pending ownership"
+        );
+        let lock = MachineHostingReservation::lock_test_probe_recovery(&account).unwrap();
+        assert!(pin.cap().unwrap().populated().unwrap(), "test child did not survive controller");
+        let error = pin.recover(&local, &shared).unwrap_err();
+        assert!(format!("{error:#}").contains("probe cgroup still contains processes"));
+        assert_eq!(fs::read(&local).unwrap(), local_before);
+        assert_eq!(fs::read(&shared).unwrap(), shared_before);
+        println!(
+            "SIGKILL with unpublished child PID: populated cgroup and both pending records retained; recovery refused"
+        );
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while pin.cap().unwrap().populated().unwrap() {
+            assert!(Instant::now() < deadline, "test child did not exit");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let mut wrong = pin.clone();
+        wrong.mount_namespace ^= 1;
+        assert!(wrong.recover(&local, &shared).is_err());
+        atomic_write(&shared, &RuntimeProcessRecord::pending().unwrap()).unwrap();
+        assert!(pin.recover(&local, &shared).is_err(), "unrelated account record was accepted");
+        assert_eq!(fs::read(&local).unwrap(), local_before);
+        assert!(!pin.cap().unwrap().populated().unwrap());
+        fs::write(&shared, &shared_before).unwrap();
+        let mut delayed = Command::new("/bin/true");
+        pin.cap().unwrap().configure_probe_test_command(&mut delayed).unwrap();
+        assert_eq!(pin.recover(&local, &shared).unwrap(), "exact_empty_cgroup_retired");
+        assert!(!local.exists() && !shared.exists());
+        assert!(delayed.spawn().is_err(), "retired cgroup accepted a delayed pre-exec attachment");
+        assert!(pin.recover(&local, &shared).is_err(), "missing same-boot cgroup was treated as proof");
+        drop(lock);
+        assert!(MachineHostingReservation::acquire_at(&account).is_ok());
+        println!(
+            "exact empty leaf retired; stale namespace, unrelated record, missing leaf and delayed attachment refused"
+        );
     }
 
     #[cfg(target_os = "linux")]

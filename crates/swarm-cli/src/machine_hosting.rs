@@ -15,16 +15,7 @@ impl MachineHostingReservation {
     pub(crate) fn acquire() -> Result<Option<Self>> {
         #[cfg(target_os = "linux")]
         {
-            let home = linux::account_home()?;
-            // A shared/network home cannot establish a machine-local
-            // reservation. Fail closed rather than silently using XDG/HOME
-            // or a different temporary lock that other launches may miss.
-            linux::require_local_persistent_fs(&home)?;
-            let directory = home.join(".swarmcraft-machine-hosting-v1");
-            linux::validate_ancestors(&directory)?;
-            swarm_core::create_private_dir_all(&directory)?;
-            linux::validate_ancestors(&directory)?;
-            linux::require_local_persistent_fs(&directory)?;
+            let directory = Self::account_directory()?;
             Self::acquire_at(&directory).map(Some)
         }
         #[cfg(not(target_os = "linux"))]
@@ -34,7 +25,41 @@ impl MachineHostingReservation {
     }
 
     #[cfg(target_os = "linux")]
+    fn account_directory() -> Result<PathBuf> {
+        let home = linux::account_home()?;
+        // Never silently fall back to HOME/XDG or a different temporary lock.
+        linux::require_local_persistent_fs(&home)?;
+        let directory = home.join(".swarmcraft-machine-hosting-v1");
+        linux::validate_ancestors(&directory)?;
+        swarm_core::create_private_dir_all(&directory)?;
+        linux::validate_ancestors(&directory)?;
+        linux::require_local_persistent_fs(&directory)?;
+        Ok(directory)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn acquire_for_probe_recovery() -> Result<Self> {
+        // Denial-only lock acquisition. Do not clear a generic pending or
+        // unrelated process record: recovery must match its signed pin.
+        Self::lock_at(&Self::account_directory()?)
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn lock_test_probe_recovery(directory: &std::path::Path) -> Result<Self> {
+        Self::lock_at(directory)
+    }
+
+    #[cfg(target_os = "linux")]
     pub(crate) fn acquire_at(directory: &std::path::Path) -> Result<Self> {
+        use anyhow::Context;
+        let reservation = Self::lock_at(directory)?;
+        crate::runtime_process_guard::clear_quiescent_record(&reservation.record_path)
+            .context("account-wide hosting reservation has unresolved previous runtime ownership")?;
+        Ok(reservation)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn lock_at(directory: &std::path::Path) -> Result<Self> {
         use anyhow::{ensure, Context};
         use fs2::FileExt;
         use std::{
@@ -63,10 +88,6 @@ impl MachineHostingReservation {
             "another Minecraft hosting reservation is active for this Linux account (possibly another data root)",
         )?;
         let record_path = directory.join("runtime-process.json");
-        // A crashed owner can leave its Java child alive even though the
-        // file lock was released. Never use the lock alone as capacity proof.
-        crate::runtime_process_guard::clear_quiescent_record(&record_path)
-            .context("account-wide hosting reservation has unresolved previous runtime ownership")?;
         Ok(Self { record_path, _lock: lock })
     }
 }
