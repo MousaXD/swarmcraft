@@ -1,0 +1,50 @@
+Offline operator review; baseline eb0390e; local Linux only.
+53eddf98e5109c018b3cfee1ede602068c559e9ed5d6b92375af830490e3f4bb  crates/swarm-cli/src/exclusive_turn_reference.rs
+215c7baed7bb43354506d3d94bc0741703308b6757dfe84631cdd601350b536c  crates/swarm-cli/src/exclusive_turn_save.rs
+0923a8e4238d97741be5edc5e7a4b494343c08407e8261cf7c5a0ee388bcca79  crates/swarm-cli/tests/exclusive_turn_reference_cli.rs
+09f3f12529b855335f55ba4caf555aed6b6a45eb308a338f44fd43d75808fdf0  target/debug/swarmcraft
+   Compiling swarm-cli v0.5.1 (/home/mousa/projects/my-creations/swarmcraft/swarmcraft/.worktrees/sabathon-p0-integration-20261123/crates/swarm-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 46s
+     Running tests/exclusive_turn_reference_cli.rs (target/debug/deps/exclusive_turn_reference_cli-6e8a19a91e9591be)
+
+running 1 test
+test offline_review_derives_pins_but_never_certifies_a_current_offer_or_mutates_journals ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 19.26s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.53s
+     Running tests/exclusive_turn_reference_cli.rs (target/debug/deps/exclusive_turn_reference_cli-6e8a19a91e9591be)
+
+running 10 tests
+test authenticated_save_blob_transfer_is_exact_and_never_releases_a_turn ... ok
+test concurrent_cancel_and_commit_cannot_both_succeed ... ok
+test encrypted_handoff_partition_boundaries_and_exact_outbox_retry ... ok
+test offline_review_derives_pins_but_never_certifies_a_current_offer_or_mutates_journals ... ok
+test offline_save_exact_capture_restore_and_corruption_refusals ... ok
+test private_lock_corruption_and_missing_staged_bytes_refuse_without_reinitializing ... ok
+test real_process_round_trip_cancellation_stale_receipts_and_lost_commit_output ... ok
+test real_writer_lock_route_and_crash_fence_survive_network_handoff ... ok
+test save_backed_release_requires_full_retention_before_and_after_commit ... ok
+test writer_lost_ack_keeps_exact_durable_checkpoint_and_rejects_stale_cas ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 96.52s
+
+   Compiling swarm-cli v0.5.1 (/home/mousa/projects/my-creations/swarmcraft/swarmcraft/.worktrees/sabathon-p0-integration-20261123/crates/swarm-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 39.97s
+Actual prior stopped Minecraft/Fabric save fixture; no JVM launched.
+Initial unmodified permissions correctly denied; normalized disposable copy only.
+source server log sha256: 6a0b6860bacfe021847ad67fe85675e8fdd0baaa4ce6654e4b907a41fc5bd091
+recorded final shutdown lines:
+[02:56:57] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[02:56:58] [Server thread/INFO]: Stopping server
+[02:57:00] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+artifact sha256: {"ownerless-permission-probe-test-only-0.5.1.jar": "851860b4eec35d98060a5169ef56516046485214c4c943e0bfa31744f0252125", "server-26.1.2.jar": "4723380bd2a0a0206719b50f2e390383afdaf82b0a76a0d573baf788e6aa3e86", "server.jar": "cd47e7c38328f64768fd17af8fcd8b22496b40b63d4ffee81e71ae059fedcb42", "swarmcraft-fabric-0.5.1.jar": "ca9dcbb76c0cd809e552b91c36b081d1ebe140be2f75cd93acca5964311e7260"}
+research-only compatibility pin: 9e4a747bfc3d7a07db2f1671ac9c9644ea5e789de71547fe05b4d0feddb47b53
+independently matched tree: 49 entries excluding session.lock, 30 regular files
+canonical SHA-256 tree manifest: 0f9b19bcee3f2c4c255bea8eea914a19e58ca7bddc8a89414c2c1687be064491
+source session.lock unchanged; restored session.lock empty; no profile created
+capture {"canonical_authority": false, "classification": "exclusive_turn_save_data_captured", "compatibility": "9e4a747bfc3d7a07db2f1671ac9c9644ea5e789de71547fe05b4d0feddb47b53", "entries": 49, "handoff_receipt_issued": false, "manifest_hash": "553f5be3a89cd3635a853778650e266039f6061763702127dff726e69c72e974", "minecraft_gameplay_verified": false, "player_admission": false, "reference_commitment": "f5bb6e8b2be2048ee528eb890c1f2bf9d41617a42bf01876273df5c07d2daa26", "runtime_activation": false, "state_root": "aa6158c6e46a568834cb2076161f6ffbd747d3d925d7f893843713be82a345dd", "total_bytes": 2203046, "unique_blobs": 18, "write_authority": false}
+inspect {"base_history_pins_verified": false, "bundle_contents_verified": true, "bundle_matches_signed_offer": false, "canonical_authority": false, "classification": "exclusive_turn_save_candidate_review", "compatibility": "9e4a747bfc3d7a07db2f1671ac9c9644ea5e789de71547fe05b4d0feddb47b53", "current_grant_verified": false, "current_offer_verified": false, "entries": 49, "handoff_receipt_issued": false, "manifest_hash": "553f5be3a89cd3635a853778650e266039f6061763702127dff726e69c72e974", "minecraft_gameplay_verified": false, "player_admission": false, "reference_commitment": "f5bb6e8b2be2048ee528eb890c1f2bf9d41617a42bf01876273df5c07d2daa26", "runtime_activation": false, "signed_offer_verified": false, "state_root": "aa6158c6e46a568834cb2076161f6ffbd747d3d925d7f893843713be82a345dd", "total_bytes": 2203046, "unique_blobs": 18, "write_authority": false}
+verify {"canonical_authority": false, "classification": "exclusive_turn_save_data_verified", "compatibility": "9e4a747bfc3d7a07db2f1671ac9c9644ea5e789de71547fe05b4d0feddb47b53", "entries": 49, "handoff_receipt_issued": false, "manifest_hash": "553f5be3a89cd3635a853778650e266039f6061763702127dff726e69c72e974", "minecraft_gameplay_verified": false, "player_admission": false, "reference_commitment": "f5bb6e8b2be2048ee528eb890c1f2bf9d41617a42bf01876273df5c07d2daa26", "runtime_activation": false, "state_root": "aa6158c6e46a568834cb2076161f6ffbd747d3d925d7f893843713be82a345dd", "total_bytes": 2203046, "unique_blobs": 18, "write_authority": false}
+restore {"canonical_authority": false, "classification": "exclusive_turn_save_data_restored", "compatibility": "9e4a747bfc3d7a07db2f1671ac9c9644ea5e789de71547fe05b4d0feddb47b53", "entries": 49, "handoff_receipt_issued": false, "manifest_hash": "553f5be3a89cd3635a853778650e266039f6061763702127dff726e69c72e974", "minecraft_gameplay_verified": false, "player_admission": false, "reference_commitment": "f5bb6e8b2be2048ee528eb890c1f2bf9d41617a42bf01876273df5c07d2daa26", "runtime_activation": false, "state_root": "aa6158c6e46a568834cb2076161f6ffbd747d3d925d7f893843713be82a345dd", "total_bytes": 2203046, "unique_blobs": 18, "write_authority": false}
+PASS: actual stopped save data round trip only; no real game login or runtime authority

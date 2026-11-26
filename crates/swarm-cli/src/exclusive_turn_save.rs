@@ -78,6 +78,22 @@ pub enum SaveCommand {
         #[arg(long)]
         confirm: bool,
     },
+    /// Derive candidate review pins from a complete bundle; not an independent authenticity check.
+    Inspect {
+        #[arg(long)]
+        bundle: PathBuf,
+    },
+    /// Review a signed save offer against an exact historical base and complete bundle, without staging or granting a turn.
+    InspectOffer {
+        #[command(flatten)]
+        pin: super::Pin,
+        #[arg(long)]
+        history: PathBuf,
+        #[arg(long)]
+        offer: PathBuf,
+        #[arg(long)]
+        bundle: PathBuf,
+    },
     /// Verify the exact independently pinned manifest and every blob.
     Verify {
         #[arg(long)]
@@ -164,8 +180,8 @@ pub(super) fn retain_bundle(
 #[cfg(target_os = "linux")]
 mod linux {
     use super::super::{
-        check_dir, create_dir, draft_genesis, initialize_reference, open_regular, opened, print_document, private_file,
-        read_document, replace_checkpoint, report as journal_report, sign_approval, sync_dir, Phase,
+        check_dir, create_dir, draft_genesis, initialize_reference, open_regular, opened, pin_grant, print_document,
+        private_file, read_document, replace_checkpoint, report as journal_report, sign_approval, sync_dir, Phase,
     };
     use super::*;
     use crate::reference_channel::{authenticate, private_ip, remaining, Channel};
@@ -186,7 +202,7 @@ mod linux {
         thread,
         time::{Duration, Instant},
     };
-    use swarm_consensus::exclusive_turn::verify_exclusive_turn_offer;
+    use swarm_consensus::exclusive_turn::{verify_exclusive_turn_history, verify_exclusive_turn_offer};
     use swarm_protocol::{
         exclusive_turn_reference_commitment, ExclusiveTurnGenesisV1, ExclusiveTurnHistoryV1,
         EXCLUSIVE_TURN_SAVE_FORMAT_V2, MAX_EXCLUSIVE_TURN_REFERENCE_BYTES,
@@ -808,9 +824,9 @@ mod linux {
         publication.finish()
     }
 
-    fn report(manifest: &Manifest, path: &Path, classification: &str) -> Result<()> {
+    fn report_value(manifest: &Manifest, path: &Path, classification: &str) -> Result<serde_json::Value> {
         let checkpoint = manifest.checkpoint()?;
-        print_document(&serde_json::json!({
+        Ok(serde_json::json!({
             "classification": classification, "path": path, "manifest_hash": checkpoint.manifest_hash.to_string(),
             "state_root": checkpoint.state_root.to_string(), "reference_commitment": checkpoint.reference_commitment.to_string(),
             "compatibility": manifest.compatibility.to_string(), "entries": manifest.entries.len(),
@@ -818,6 +834,10 @@ mod linux {
             "canonical_authority": false, "write_authority": false, "runtime_activation": false,
             "player_admission": false, "handoff_receipt_issued": false, "minecraft_gameplay_verified": false,
         }))
+    }
+
+    fn report(manifest: &Manifest, path: &Path, classification: &str) -> Result<()> {
+        print_document(&report_value(manifest, path, classification)?)
     }
 
     #[derive(Serialize)]
@@ -1127,6 +1147,48 @@ mod linux {
                 ensure!(confirm, "explicit --confirm required for offline save capture");
                 let (manifest, destination) = capture(&source, &destination, compatibility)?;
                 report(&manifest, &destination, "exclusive_turn_save_data_captured")
+            }
+            SaveCommand::Inspect { bundle } => {
+                let manifest = load_bundle(&bundle)?;
+                verify_bundle(&bundle, &manifest)?;
+                let mut result = report_value(&manifest, &bundle, "exclusive_turn_save_candidate_review")?;
+                result["bundle_contents_verified"] = true.into();
+                result["base_history_pins_verified"] = false.into();
+                result["bundle_matches_signed_offer"] = false.into();
+                result["signed_offer_verified"] = false.into();
+                result["current_grant_verified"] = false.into();
+                result["current_offer_verified"] = false.into();
+                print_document(&result)
+            }
+            SaveCommand::InspectOffer { pin, history, offer, bundle } => {
+                let history = read_document(&history)?;
+                let head = verify_exclusive_turn_history(pin.expected_world, &history)?;
+                pin_grant(&head, pin.expected_grant)?;
+                ensure!(head.save_backed(), "offer review requires a save-backed reference history");
+                let offer: ExclusiveTurnSignedOfferV1 = read_document(&offer)?;
+                verify_exclusive_turn_offer(&head, &offer)?;
+                let manifest = load_bundle(&bundle)?;
+                manifest.check_offer(&offer)?;
+                verify_bundle(&bundle, &manifest)?;
+                let mut result = report_value(&manifest, &bundle, "exclusive_turn_signed_save_offer_review")?;
+                result["bundle_contents_verified"] = true.into();
+                result["base_history_pins_verified"] = true.into();
+                result["bundle_matches_signed_offer"] = true.into();
+                result["signed_offer_verified"] = true.into();
+                // An offline history cannot prove that this offer was not canceled or superseded.
+                result["current_grant_verified"] = false.into();
+                result["current_offer_verified"] = false.into();
+                result["world_id"] = head.world().to_string().into();
+                result["base_grant"] = head.grant().to_string().into();
+                result["offer_hash"] = offer.offer_hash()?.to_string().into();
+                result["source"] = offer.offer.source.to_string().into();
+                result["recipient"] = offer.offer.recipient.to_string().into();
+                result["base_epoch"] = offer.offer.base_epoch.into();
+                result["base_fence"] = offer.offer.base_fence.into();
+                result["next_epoch"] = offer.offer.next_epoch.into();
+                result["next_fence"] = offer.offer.next_fence.into();
+                result["attempt"] = offer.offer.attempt.into();
+                print_document(&result)
             }
             SaveCommand::Verify { bundle, digests } => {
                 let manifest = load_bundle(&bundle)?;

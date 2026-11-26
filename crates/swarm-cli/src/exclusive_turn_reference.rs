@@ -102,6 +102,11 @@ pub enum ExclusiveTurnCommand {
         #[command(flatten)]
         state: ReferenceCheckpoint,
     },
+    /// Derive review pins from an unsigned draft; no approval, retained bytes or authority is implied.
+    InspectDraft {
+        #[arg(long)]
+        draft: PathBuf,
+    },
     /// Approve the independently reviewed draft and exact initial opaque bytes.
     Approve {
         #[arg(long)]
@@ -840,6 +845,30 @@ pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
                 initial_checkpoint,
             )?;
             print_document(&genesis)
+        }
+        InspectDraft { draft } => {
+            let genesis: ExclusiveTurnGenesisV1 = read_document(&draft)?;
+            validate_exclusive_turn_genesis(&genesis)?;
+            print_document(&serde_json::json!({
+                "classification": "exclusive_turn_unsigned_draft_review",
+                "world_id": genesis.world_id()?.to_string(),
+                "initial_grant": genesis.initial_grant_hash()?.to_string(),
+                "format_version": genesis.format_version,
+                "save_backed_reference": genesis.save_backed(),
+                "initial_holder": genesis.initial_holder.to_string(),
+                "devices": genesis.devices.iter().map(|d| serde_json::json!({
+                    "peer_id": d.peer_id.to_string(),
+                    "public_key": hex::encode(d.public_key),
+                })).collect::<Vec<_>>(),
+                "compatibility": genesis.compatibility.to_string(),
+                "initial_checkpoint": genesis.initial_checkpoint,
+                "approvals_verified": false,
+                "local_save_data_verified": false,
+                "canonical_authority": false,
+                "write_authority": false,
+                "runtime_activation": false,
+                "player_admission": false,
+            }))
         }
         Approve { draft, expected_world, checkpoint, confirm } => {
             ensure!(confirm, "explicit --confirm required for reviewed genesis approval");

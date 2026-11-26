@@ -1365,6 +1365,138 @@ fn assert_same_save(source: &Path, restored: &Path) {
 }
 
 #[test]
+fn offline_review_derives_pins_but_never_certifies_a_current_offer_or_mutates_journals() {
+    let (f, source, bundle) = Fixture::new_save_backed();
+    let reviewer = f.temp.path().join("offline-reviewer");
+    let draft_path = f.temp.path().join("save-draft.json");
+    let draft: ExclusiveTurnGenesisV1 = serde_json::from_slice(&fs::read(&draft_path).unwrap()).unwrap();
+    let draft_review = json(invoke(&reviewer, &["inspect-draft", "--draft", path(&draft_path)]));
+    assert_eq!(draft_review["classification"], "exclusive_turn_unsigned_draft_review");
+    assert_eq!(draft_review["world_id"], f.world);
+    assert_eq!(draft_review["initial_grant"], f.initial_grant);
+    assert_eq!(draft_review["save_backed_reference"], true);
+    assert_eq!(draft_review["initial_holder"], f.identities[0].peer_id().to_string());
+    assert_eq!(draft_review["initial_checkpoint"], serde_json::to_value(draft.initial_checkpoint).unwrap());
+    for (i, device) in draft.devices.iter().enumerate() {
+        assert_eq!(draft_review["devices"][i]["peer_id"], device.peer_id.to_string());
+        assert_eq!(draft_review["devices"][i]["public_key"], hex::encode(device.public_key));
+    }
+    for flag in [
+        "approvals_verified",
+        "local_save_data_verified",
+        "canonical_authority",
+        "write_authority",
+        "runtime_activation",
+        "player_admission",
+    ] {
+        assert_eq!(draft_review[flag], false, "{flag}");
+    }
+    let mut invalid = draft.clone();
+    invalid.devices[1] = invalid.devices[0];
+    let invalid_path = f.put("invalid-draft.json", &serde_json::to_vec(&invalid).unwrap());
+    rejected(invoke(&reviewer, &["inspect-draft", "--draft", path(&invalid_path)]), "invalid genesis");
+
+    let inspect = |bundle: &Path| save_cmd(&reviewer, "inspect").args(["--bundle", path(bundle)]).output().unwrap();
+    let candidate = json(inspect(&bundle));
+    assert_save_flags(&candidate, "exclusive_turn_save_candidate_review");
+    assert_eq!(candidate["bundle_contents_verified"], true);
+    for flag in [
+        "base_history_pins_verified",
+        "bundle_matches_signed_offer",
+        "signed_offer_verified",
+        "current_grant_verified",
+        "current_offer_verified",
+    ] {
+        assert_eq!(candidate[flag], false, "{flag}");
+    }
+    assert_eq!(candidate["reference_commitment"], draft.initial_checkpoint.reference_commitment.to_string());
+    assert_eq!(candidate["manifest_hash"], draft.initial_checkpoint.manifest_hash.to_string());
+    assert_eq!(candidate["state_root"], draft.initial_checkpoint.state_root.to_string());
+    assert_eq!(candidate["compatibility"], draft.compatibility.to_string());
+    let initial = candidate["reference_commitment"].as_str().unwrap();
+    let (offer, bytes) = f.prepare(0, &f.initial_grant, initial);
+    let offer_path = f.put("review-offer.json", &bytes);
+    let offer_hash = offer.offer_hash().unwrap().to_string();
+    let inspect_offer = |world: &str, grant: &str, history: &Path, offer: &Path, bundle: &Path| {
+        save_cmd(&reviewer, "inspect-offer")
+            .args([
+                "--expected-world",
+                world,
+                "--expected-grant",
+                grant,
+                "--history",
+                path(history),
+                "--offer",
+                path(offer),
+                "--bundle",
+                path(bundle),
+            ])
+            .output()
+            .unwrap()
+    };
+    let review = || inspect_offer(&f.world, &f.initial_grant, &f.history, &offer_path, &bundle);
+    let before = [f.snapshot(0), f.snapshot(1)];
+    let verified = json(review());
+    assert_save_flags(&verified, "exclusive_turn_signed_save_offer_review");
+    for flag in [
+        "bundle_contents_verified",
+        "base_history_pins_verified",
+        "bundle_matches_signed_offer",
+        "signed_offer_verified",
+    ] {
+        assert_eq!(verified[flag], true, "{flag}");
+    }
+    assert_eq!(verified["current_grant_verified"], false);
+    assert_eq!(verified["current_offer_verified"], false);
+    assert_eq!(verified["world_id"], f.world);
+    assert_eq!(verified["base_grant"], f.initial_grant);
+    assert_eq!(verified["offer_hash"], offer_hash);
+    assert_eq!(verified["source"], offer.offer.source.to_string());
+    assert_eq!(verified["recipient"], offer.offer.recipient.to_string());
+    assert_eq!(verified["base_epoch"], 1);
+    assert_eq!(verified["next_epoch"], 2);
+    assert_eq!(verified["base_fence"], 1);
+    assert_eq!(verified["next_fence"], 2);
+    assert_eq!(verified["attempt"], offer.offer.attempt);
+
+    rejected(inspect_offer(&f.world, &Hash32([77; 32]).to_string(), &f.history, &offer_path, &bundle), "grant differs");
+    let mut forged = offer.clone();
+    forged.signature[0] ^= 1;
+    let forged_path = f.put("forged-review-offer.json", &serde_json::to_vec(&forged).unwrap());
+    rejected(inspect_offer(&f.world, &f.initial_grant, &f.history, &forged_path, &bundle), "signature");
+    let mut history: ExclusiveTurnHistoryV1 = serde_json::from_slice(&fs::read(&f.history).unwrap()).unwrap();
+    history.creation.approvals[0].signature[0] ^= 1;
+    let forged_history = f.put("forged-review-history.json", &serde_json::to_vec(&history).unwrap());
+    rejected(inspect_offer(&f.world, &f.initial_grant, &forged_history, &offer_path, &bundle), "signature");
+    fs::write(source.join("level.dat"), b"a different candidate save").unwrap();
+    let different_bundle = f.temp.path().join("different-review-bundle");
+    success(capture_save(&reviewer, &source, &different_bundle).output().unwrap());
+    rejected(
+        inspect_offer(&f.world, &f.initial_grant, &f.history, &offer_path, &different_bundle),
+        "does not match exact signed offer",
+    );
+    let blob = bundle.join("blobs").join(
+        Hash32::from_domain_bytes(b"swarmcraft/exclusive-turn/save-blob/v1\0", b"synthetic level.dat fixture")
+            .to_string(),
+    );
+    let hidden = f.temp.path().join("missing-review-blob");
+    fs::rename(&blob, &hidden).unwrap();
+    rejected(inspect(&bundle), "missing blob");
+    rejected(review(), "missing blob");
+    fs::rename(&hidden, &blob).unwrap();
+    assert_eq!([f.snapshot(0), f.snapshot(1)], before);
+
+    // Offline signature review cannot distinguish a canceled offer from a live one.
+    success(f.mutate(0, "cancel", &f.initial_grant, &["--expected-offer", &offer_hash]));
+    let canceled = [f.snapshot(0), f.snapshot(1)];
+    let historical = json(review());
+    assert_eq!(historical, verified);
+    assert_eq!([f.snapshot(0), f.snapshot(1)], canceled);
+    assert!(!reviewer.exists());
+    f.assert_no_live_storage();
+}
+
+#[test]
 fn offline_save_exact_capture_restore_and_corruption_refusals() {
     use std::os::fd::AsRawFd;
     let temp = tempfile::tempdir().unwrap();

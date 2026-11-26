@@ -219,9 +219,9 @@ and nonprivate files, and deny reinitialization of missing state. No
 canonical world or runtime is created. This is file-based reference
 transport, NOT proof of online overlap, actual process quiescence, a
 Minecraft save, a licensed player session or actual host partition safety.
-A human-readable draft/record pin inspector, real runtime/route fencing
-and production creation policy remain to be implemented and independently
-reviewed before activation.
+Real runtime/route fencing and production creation policy remain to be
+implemented and independently reviewed before activation. See the offline
+review commands below for deriving draft and signed offer pins.
 
 ### Authenticated reference handoff
 
@@ -638,3 +638,48 @@ The final CLI library regression passed 210 enabled tests in 28.09s
 (three delegated cgroup tests ignored). Strict all-target/all-feature
 protocol, consensus and CLI Clippy, formatting, workflow and release
 checks passed. [Retained output and source/artifact pins](../../research/exclusive-turn/evidence/2026-11-26-save-backed-policy.txt).
+
+### Offline operator review
+
+The reference workflow no longer requires an external Rust program to
+derive the exact world and grant from the draft. Use the following commands
+on either device or on a separate review machine:
+
+```sh
+swarmcraft exclusive-turn inspect-draft --draft "$DRAFT"
+swarmcraft exclusive-turn save inspect --bundle "$BUNDLE"
+swarmcraft exclusive-turn save inspect-offer \
+  --expected-world "$WORLD" --expected-grant "$BASE" \
+  --history "$BASE_HISTORY" --offer "$OFFER" --bundle "$BUNDLE"
+```
+
+The first command validates the unsigned genesis shape and strong device
+keys and derives the candidate world, initial grant, fixed public keys,
+initial holder, compatibility and checkpoint pins. It does not verify any
+approval or retained save. Review the independently obtained device keys
+and expected compatibility before using those pins. The second command
+validates the complete canonical manifest and every blob, but its derived
+digests are candidates, not independently authenticated commitments.
+
+The third command verifies both genesis approvals and all signed releases
+through the independently pinned world and exact base grant; it requires a
+save-backed history, verifies the source signature, exact ancestry, roles,
+epoch, fence and attempt, and checks every blob against the signed offer's
+checkpoint and compatibility. Its output includes the exact signed offer
+hash. A valid historical offer can have been canceled or superseded; the
+report deliberately sets `current_grant_verified` and
+`current_offer_verified` to false. It never stages data, signs a receipt,
+opens a profile, changes journal state, grants runtime authority or proves
+live reachability. Bundle verification may sync the input files and
+directories, as in the existing `save verify` command. The Linux-only
+save commands retain the original bounds and private-file checks.
+
+All ten CLI integration tests passed, including the new offline review
+regression (forged draft/offer/history, wrong grant, mismatching bundle,
+missing blob and canceled historical offer). Strict CLI Clippy passed.
+An actual previously stopped Minecraft/Fabric fixture also passed capture,
+inspection, verification and byte-exact restoration (49 entries, 30 files,
+2,203,046 bytes); the original group-writable paths were correctly refused,
+then permissions were normalized only on a disposable copy. This does not
+prove JVM startup, save semantics, compatibility enforcement or game login.
+[Retained evidence](../../research/exclusive-turn/evidence/2026-11-26-offline-operator-review.txt).
