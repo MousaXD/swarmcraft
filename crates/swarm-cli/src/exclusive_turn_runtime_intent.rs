@@ -21,6 +21,11 @@ pub enum RuntimeCommand {
         #[command(flatten)]
         pin: Pin,
     },
+    /// Inspect the exact signed unresolved intent while the world journal is busy. Never verifies current authority.
+    InspectIntent {
+        #[command(flatten)]
+        pin: Pin,
+    },
     /// Opt in to one exact local reference grant, save and runtime package.
     Consent {
         #[command(flatten)]
@@ -1183,6 +1188,30 @@ mod linux {
                     .unwrap_or_else(|| State::empty(head.world(), journal.identity));
                 let scope = Scope::held(&journal, &head, journal.checkpoint.reference_commitment).ok();
                 print_document(&report(&state, scope.as_ref())?)
+            }
+            RuntimeCommand::InspectIntent { pin } => {
+                // Denial-only observation uses the same short lock as revoke.
+                // Do not acquire or read the mutable world journal, infer a
+                // current holder, or create any missing identity/sidecar.
+                let peer = identity(paths)?;
+                let directory = dir(paths, pin.expected_world)?;
+                check_dir(&paths.root.join(super::super::STORE))?;
+                check_dir(&directory)?;
+                let lock = lock_existing(&directory)?;
+                let state =
+                    load(&directory, pin.expected_world, &peer)?.context("local runtime intent state is absent")?;
+                let intent = state.intent.as_ref().context("no unresolved runtime intent")?;
+                ensure!(
+                    intent.consent.scope.grant == pin.expected_grant,
+                    "signed runtime intent grant differs from expected pin"
+                );
+                let mut result = report(&state, None)?;
+                result["classification"] = "exclusive_turn_signed_intent_observation_only".into();
+                result["signed_intent_verified"] = true.into();
+                result["current_journal_checked"] = false.into();
+                result["current_grant_verified"] = false.into();
+                drop(lock);
+                print_document(&result)
             }
             RuntimeCommand::Consent { review, expected_checkpoint, expected_revision, heap_mib, cpu_millicores } => {
                 review.confirm()?;

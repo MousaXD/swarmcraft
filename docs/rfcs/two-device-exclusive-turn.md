@@ -1207,3 +1207,31 @@ remains unqualified on this resource-constrained workstation. Normal budget
 checks remain unchanged. The durable transaction and real worker were tested
 separately, not as a live player session or canonical runtime adapter.
 See [retained evidence](../../research/exclusive-turn/evidence/2026-11-26-fabric-transaction.txt).
+
+### Concurrent intent observation and real interruption gate
+
+`runtime inspect-intent --expected-world WORLD --expected-grant GRANT`
+observes only the authenticated local sidecar under the short consent lock;
+it does not read the current journal or verify current grant authority. It
+returns the exact intent ID and revision for separately reviewed withdrawal
+or recovery. Busy consent lock, wrong grant and missing/retired intent deny.
+No process start, state mutation or authority is available through inspection.
+
+The reproducible fixture `research/exclusive-turn/qualify_fabric_lifecycle.py`
+now accepts `--public-command complete|revoke|kill|memory-refusal`. It uses
+the normal CLI inside a disposable delegated scope, with explicit EULA and
+review pins. The memory refusal uses a real 4 GiB scope limit, not a mocked
+memory measurement. The public refusal gate passed without changing the
+reserved sidecar, starting any process or creating any runtime generation;
+explicit unlaunched clearance consumed consent and restored the old save.
+
+`--interrupted-worker` separately exercises the actual production CLI worker
+under a test-only outer admission with a disposable account record. After
+actual Java spawn, SIGKILL of the owned controller left a live namespace and
+both process records. New admission and recovery refused until all tasks
+exited, then the exact empty cgroup was removed, both records retired, and a
+missing-leaf retry refused. Both signed reference journals and the source
+fixture were unchanged; exact original save restored. The uncertain work
+and stage are retained for review. This is not the full public command or
+an authenticated live player session; normal admission is unchanged.
+See [retained evidence](../../research/exclusive-turn/evidence/2026-11-26-fabric-interruption.txt).

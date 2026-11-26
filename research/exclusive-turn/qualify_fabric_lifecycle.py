@@ -119,13 +119,24 @@ def marker_count(world):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("cli", "library-test-binary", "server-fixture", "toolchain-fixture"):
+    for name in ("cli", "server-fixture", "toolchain-fixture"):
         parser.add_argument(f"--{name}", required=True, type=Path)
+    parser.add_argument("--library-test-binary", type=Path)
     parser.add_argument("--confirm-disposable-test-artifacts-and-eula", required=True, action="store_true")
-    parser.add_argument("--gated-worker", action="store_true", help="Exercise production namespace worker and start gate with test-only outer admission; no console mutation")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--gated-worker", action="store_true", help="Exercise production namespace worker and start gate with test-only outer admission; no console mutation")
+    mode.add_argument("--interrupted-worker", action="store_true", help="Hard-kill a disposable controller after actual Java spawn and verify exact kernel retirement")
+    mode.add_argument("--public-command", choices=("complete", "revoke", "kill", "memory-refusal"),
+                      help="Exercise the public signed transaction with normal admission; memory-refusal uses a constrained disposable scope")
+    parser.add_argument("--heap-mib", type=int, default=1024, help="Heap for the public command (default 1024 MiB)")
     args = parser.parse_args()
+    if args.public_command is None and args.library_test_binary is None:
+        parser.error("--library-test-binary is required for test-worker modes")
+    if args.public_command == "memory-refusal" and args.heap_mib != 1024:
+        parser.error("the deterministic memory-refusal scenario uses the default 1024 MiB heap")
     os.umask(0o077)
-    cli, binary = args.cli.resolve(strict=True), args.library_test_binary.resolve(strict=True)
+    cli = args.cli.resolve(strict=True)
+    binary = args.library_test_binary.resolve(strict=True) if args.library_test_binary else None
     server, toolchain = args.server_fixture.resolve(strict=True), args.toolchain_fixture.resolve(strict=True)
     repo = Path(__file__).resolve().parents[2]
     root = Path(tempfile.mkdtemp(prefix="sc8-fabric-lifecycle-"))
@@ -196,6 +207,68 @@ def main():
             save(profile, "init", *base, "--history", history, "--bundle", initial_bundle, "--confirm")
         journals = [p / "exclusive-turn-reference" / world.removeprefix("scpass:") / "journal.postcard" for p in profiles]
         before = [digest(j) for j in journals]
+        if args.public_command:
+            unit = f"swarmcraft-memory-cap-test-fabric-{uuid.uuid4().hex}"
+            gate = ["systemd-run", "--user", "--scope", "--quiet", f"--unit={unit}", "-p", "Delegate=yes"]
+            if args.public_command == "memory-refusal":
+                # Real narrower kernel limit, never a fake memory sample or
+                # production admission override. 4 GiB cannot cover the
+                # requested 1024 MiB heap plus the unchanged reserves.
+                gate += ["-p", "MemoryMax=4096M"]
+            gate += ["env", "SWARMCRAFT_TEST_CPU_DELEGATION=1", "PYTHONDONTWRITEBYTECODE=1",
+                     "bash", str(repo / "scripts/e2e/linux_cgroup_memory_gate.sh"),
+                     "python3", str(repo / "research/exclusive-turn/public_fabric_transaction_gate.py"),
+                     "--cli", str(cli), "--root", str(root), "--profile", str(profiles[0]), "--package", str(package),
+                     "--world", world, "--grant", grant, "--checkpoint", checkpoint,
+                     "--heap-mib", str(args.heap_mib), "--scenario", args.public_command]
+            print(f"Running public Fabric transaction ({args.public_command}): {root}", flush=True)
+            try:
+                subprocess.run(gate, cwd=repo, check=True, timeout=660)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                # Only this randomly named disposable scope. Its durable
+                # account record, if any, must not be removed manually.
+                subprocess.run(["systemctl", "--user", "stop", f"{unit}.scope"], check=False, timeout=30)
+                raise
+            public = json.loads((root / "public-qualification.json").read_text())
+            require(digest(journals[1]) == before[1], "qualification changed nonholder journal")
+            status = json.loads(ref(profiles[0], "status", "--expected-world", world))
+            require(status["grant"] == grant and status["reference_epoch"] == status["reference_fence"] == 1
+                    and status["local_phase"] == "held", "qualification changed reference grant")
+            target = (public["published_checkpoint"]["reference_commitment"]
+                      if args.public_command == "complete" else status["local_checkpoint"]["reference_commitment"])
+            # JSON checkpoint hashes may be byte arrays; the CLI pin is hex.
+            if isinstance(target, list):
+                target = bytes(target).hex()
+            if args.public_command != "complete":
+                require(target == checkpoint, "interruption or memory refusal changed held checkpoint")
+            restored = root / "public-restored"
+            save(profiles[0], "restore-held", *base, "--expected-checkpoint", target, "--destination", restored, "--confirm")
+            if args.public_command != "complete":
+                require(tree(restored) == source_tree, "old checkpoint did not restore exactly")
+            else:
+                require(marker_count(restored) == 0, "unexpected console mutation")
+                # Independently recapture the actual held save, rather than
+                # trusting only the successful transaction response.
+                recaptured = json.loads(save(reviewer, "capture", "--source", restored, "--destination", root / "recaptured",
+                                               "--compatibility", pin, "--confirm"))
+                require(recaptured["reference_commitment"] == target, "published save did not independently recapture exactly")
+            for profile in profiles:
+                require(not any((profile / "worlds").iterdir()) and not (profile / "runtime").exists(), "canonical runtime created")
+                control = profile / "control"
+                if control.exists():
+                    require(all(p.is_file() and p.name in ("hosting-replica-only.lock", "hosting-active-memory.lock")
+                                for p in control.iterdir()), "unexpected canonical control data")
+            require(tree(server / "world") == source_tree, "retained source fixture changed")
+            print(json.dumps({"classification": "public_fabric_transaction_gate", "scenario": args.public_command,
+                              "public_result": public, "exact_held_restore": True, "grant_unchanged": True,
+                              "nonholder_unchanged": True, "source_fixture_unchanged": True,
+                              "canonical_authority": False, "runtime_activation": False, "player_admission": False},
+                             sort_keys=True), flush=True)
+            if args.public_command in ("kill", "revoke"):
+                print(f"Retained interrupted disposable workspace for review: {root}", flush=True)
+            else:
+                shutil.rmtree(root)
+            return
         lab = root / "lab"
         lab.mkdir()
         (lab / "runtime").mkdir()
@@ -204,8 +277,12 @@ def main():
         require(tree(restored) == source_tree, "initial held save restoration differs")
         save(profiles[1], "restore-held", *base, "--expected-checkpoint", checkpoint, "--destination", lab / "not-holder", "--confirm", refusal="requires exact held")
         unit = f"swarmcraft-memory-cap-test-fabric-{uuid.uuid4().hex}"
-        gate_test = ("exclusive_turn_process_probe::fabric::tests::actual_gated_fabric_worker_has_no_player_route_and_retires_exact_process_boundary"
-                     if args.gated_worker else "exclusive_turn_fabric_lab::real_fabric_lifecycle_isolated_under_exact_package_and_cgroup")
+        if args.interrupted_worker:
+            gate_test = "exclusive_turn_process_probe::fabric::tests::actual_interrupted_fabric_controller_requires_exact_kernel_recovery"
+        elif args.gated_worker:
+            gate_test = "exclusive_turn_process_probe::fabric::tests::actual_gated_fabric_worker_has_no_player_route_and_retires_exact_process_boundary"
+        else:
+            gate_test = "exclusive_turn_fabric_lab::real_fabric_lifecycle_isolated_under_exact_package_and_cgroup"
         gate = ["systemd-run", "--user", "--scope", "--quiet", f"--unit={unit}", "-p", "Delegate=yes", "env",
                 "SWARMCRAFT_TEST_CPU_DELEGATION=1", f"SC8_LAB_ROOT={lab}", f"SC8_LAB_PACKAGE={package}",
                 f"SC8_LAB_COMPATIBILITY={pin}", f"SC8_LAB_CLI={cli}", "bash", str(repo / "scripts/e2e/linux_cgroup_memory_gate.sh"), str(binary),
@@ -218,6 +295,23 @@ def main():
             # Only the unique fixture-owned scope; never erase account records.
             subprocess.run(["systemctl", "--user", "stop", f"{unit}.scope"], check=False, timeout=30)
             raise
+        if args.interrupted_worker:
+            interruption = json.loads((lab / "fabric-interruption.json").read_text())
+            require(all(interruption.get(flag) is True for flag in ("real_java_spawn_observed", "controller_sigkill",
+                    "surviving_runtime_refused", "exact_empty_cgroup_retired", "both_records_retired",
+                    "missing_leaf_refused", "workspace_retained")), "actual interruption proof incomplete")
+            require(interruption["checkpoint_published"] is False and interruption["canonical_authority"] is False,
+                    "interrupted fixture published authority or save")
+            require(before == [digest(j) for j in journals], "interrupted worker changed signed reference journal")
+            preserved = root / "original-checkpoint-restored"
+            save(profiles[0], "restore-held", *base, "--expected-checkpoint", checkpoint, "--destination", preserved, "--confirm")
+            require(tree(preserved) == source_tree == tree(server / "world"), "old checkpoint or source fixture changed")
+            print(json.dumps({"classification": "isolated_fabric_controller_crash_gate", "kernel_recovery": interruption,
+                              "signed_journals_unchanged": True, "old_checkpoint_restored": True,
+                              "source_fixture_unchanged": True, "canonical_authority": False, "player_admission": False},
+                             sort_keys=True), flush=True)
+            print(f"Retained interrupted disposable workspace for review: {root}", flush=True)
+            return
         lifecycle = json.loads((lab / "fabric-lifecycle.json").read_text())
         supervision = json.loads((lab / "fabric-supervision.json").read_text())
         require(all(lifecycle.get(key) is True for key in ("authenticated_world_info", "missing_permit_readiness_refused", "active_session_lock_verified", "save_barrier_acknowledged", "shutdown_barrier_acknowledged", "clean_java_exit", "offline_session_lock_verified")), "actual lifecycle evidence incomplete")

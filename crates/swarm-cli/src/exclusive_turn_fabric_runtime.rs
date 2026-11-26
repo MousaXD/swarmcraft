@@ -600,6 +600,139 @@ pub(crate) fn run_worker(test_marker: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test-only controller with a disposable account reservation. It runs
+    /// the exact production namespace worker, but must not touch the user's
+    /// real account record or pretend to have full game/client headroom.
+    #[test]
+    fn interrupted_fabric_controller() {
+        if std::env::var_os("SC8_TEST_INTERRUPTED_CONTROLLER").is_none() {
+            return;
+        }
+        let root = env_path("SC8_LAB_ROOT").unwrap().canonicalize().unwrap();
+        let package = env_path("SC8_LAB_PACKAGE").unwrap();
+        let cli = env_path("SC8_LAB_CLI").unwrap().canonicalize().unwrap();
+        let compatibility: Hash32 = std::env::var("SC8_LAB_COMPATIBILITY").unwrap().parse().unwrap();
+        let paths = DataPaths::from_root(root.join("crash-profile"));
+        let profile = hosting_budget::hosting_profile_guard(&paths).unwrap();
+        let memory = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(paths.root.join("control/hosting-active-memory.lock"))
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&memory).unwrap();
+        let machine = MachineHostingReservation::acquire_at(&root.join("crash-account")).unwrap();
+        let stage = StagedRuntimePackage::stage(&package, &root, compatibility).unwrap();
+        let workspace = FabricWorkspace::create(&root).unwrap();
+        fs::rename(root.join("runtime/world"), workspace.world()).unwrap();
+        let pin = workspace.pin().unwrap();
+        let cap = HostMemoryCap::prepare(1024, Some(2000), 1).unwrap().unwrap();
+        write_new(&root.join("crash-cap.postcard"), &postcard::to_allocvec(cap.identity()).unwrap()).unwrap();
+        let mut admission = ProbeAdmission {
+            _profile: profile,
+            _memory: memory,
+            machine,
+            cap: Some(cap),
+            stage,
+            recovery_pin_prepared: false,
+            heap_mib: 1024,
+            cpu_millicores: 2000,
+            consent_revision: 1,
+        };
+        admission.verify_fabric_launch_package().unwrap();
+        let recovery = admission.prepare_recovery_pin().unwrap();
+        write_new(&root.join("crash-pin.postcard"), &postcard::to_allocvec(&recovery).unwrap()).unwrap();
+        write_new(&root.join("crash-workspace"), pin.name().as_bytes()).unwrap();
+        let _running = admission.start_fabric_checked(&root, &workspace, &pin, compatibility, &cli).unwrap();
+        write_new(&root.join("crash-ready"), b"actual Java spawn acknowledged").unwrap();
+        // Parent owns this controller child handle. Do not execute normal
+        // Drop or publish a checkpoint before the actual controller death.
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires disposable reviewed Fabric package, real CLI worker and delegated scope"]
+    fn actual_interrupted_fabric_controller_requires_exact_kernel_recovery() {
+        use crate::host_memory_cap::MemoryCapIdentity;
+        use std::os::unix::process::ExitStatusExt;
+        let root = env_path("SC8_LAB_ROOT").unwrap().canonicalize().unwrap();
+        let account = root.join("crash-account");
+        let local = root.join("fabric-process.json");
+        let shared = account.join("runtime-process.json");
+        let mut controller = ProbeChild(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "exclusive_turn_process_probe::fabric::tests::interrupted_fabric_controller",
+                    "--nocapture",
+                ])
+                .env("SC8_TEST_INTERRUPTED_CONTROLLER", "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(180);
+        while !root.join("crash-ready").is_file() {
+            assert!(controller.0.try_wait().unwrap().is_none(), "fixture controller exited before Java spawn");
+            assert!(Instant::now() < deadline, "fixture controller spawn timed out");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pin: ProbeRecoveryPin = postcard::from_bytes(&fs::read(root.join("crash-pin.postcard")).unwrap()).unwrap();
+        let cap: MemoryCapIdentity = postcard::from_bytes(&fs::read(root.join("crash-cap.postcard")).unwrap()).unwrap();
+        pin.verify_budget(1024, 2000, 1).unwrap();
+        cap.verify_probe_budget(1024, 2000, 1).unwrap();
+        assert!(cap.populated().unwrap(), "actual runtime did not start");
+        let before_local = fs::read(&local).unwrap();
+        let before_shared = fs::read(&shared).unwrap();
+        assert_eq!(before_local, before_shared);
+        assert!(
+            MachineHostingReservation::lock_test_probe_recovery(&account).is_err(),
+            "active controller lock escaped"
+        );
+        controller.0.kill().unwrap();
+        assert_eq!(controller.0.wait().unwrap().signal(), Some(libc::SIGKILL));
+        assert!(cap.populated().unwrap(), "real namespace exited before crash recovery could be tested");
+        assert!(
+            MachineHostingReservation::acquire_at(&account).is_err(),
+            "normal admission accepted surviving runtime"
+        );
+        let lock = MachineHostingReservation::lock_test_probe_recovery(&account).unwrap();
+        let error = pin.recover(&local, &shared).unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(
+            detail.contains("process is still alive") || detail.contains("cgroup still contains processes"),
+            "unexpected refusal: {detail}"
+        );
+        assert_eq!(fs::read(&local).unwrap(), before_local);
+        assert_eq!(fs::read(&shared).unwrap(), before_shared);
+        let deadline = Instant::now() + Duration::from_secs(180);
+        while cap.populated().unwrap() {
+            assert!(Instant::now() < deadline, "actual interrupted namespace did not exit");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(pin.recover(&local, &shared).unwrap(), "exact_empty_cgroup_retired");
+        assert!(!local.exists() && !shared.exists());
+        assert!(cap.populated().is_err(), "exact leaf was not retired");
+        assert!(pin.recover(&local, &shared).is_err(), "missing same-boot leaf was accepted");
+        drop(lock);
+        assert!(MachineHostingReservation::acquire_at(&account).is_ok());
+        let name = fs::read_to_string(root.join("crash-workspace")).unwrap();
+        let workspace = root.join(&name);
+        assert!(workspace.join("sandbox/runtime/world").is_dir() && !workspace.join("completed-bundle").exists());
+        let result = json!({"classification":"actual_interrupted_fabric_fixture_kernel_recovery",
+            "real_java_spawn_observed":true,"controller_sigkill":true,"surviving_runtime_refused":true,
+            "exact_empty_cgroup_retired":true,"both_records_retired":true,"missing_leaf_refused":true,
+            "workspace_retained":true,"checkpoint_published":false,"canonical_authority":false,
+            "player_admission":false,"full_public_admission_tested":false});
+        write_new(&root.join("fabric-interruption.json"), &serde_json::to_vec(&result).unwrap()).unwrap();
+        println!("{result}");
+    }
     #[test]
     #[ignore = "requires disposable reviewed Fabric package, real CLI worker and delegated scope"]
     fn actual_gated_fabric_worker_has_no_player_route_and_retires_exact_process_boundary() {

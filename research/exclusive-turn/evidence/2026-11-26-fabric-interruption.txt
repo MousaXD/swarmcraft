@@ -1,0 +1,51 @@
+Sabathon #8: signed intent inspection, real public admission refusal, and real isolated Fabric controller interruption
+Baseline d535836; all execution local, no CI.
+The full public completion/revocation/kill scenarios are implemented but not qualified under normal admission. The interrupted-worker fixture uses separate disposable account records and test-only outer admission, while the actual worker is the production CLI executable.
+
+--- sc8-public-inspection-test.log ---
+   Compiling swarm-cli v0.5.1 (/home/mousa/projects/my-creations/swarmcraft/swarmcraft/.worktrees/sabathon-p0-integration-20261123/crates/swarm-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 16s
+     Running tests/exclusive_turn_reference_cli.rs (target/debug/deps/exclusive_turn_reference_cli-6e8a19a91e9591be)
+
+running 1 test
+test runtime_intent_fences_handoff_across_process_exit_and_revocation_consumes_consent ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 7.07s
+
+
+--- sc8-public-inspection-clippy.log ---
+   Compiling swarm-cli v0.5.1 (/home/mousa/projects/my-creations/swarmcraft/swarmcraft/.worktrees/sabathon-p0-integration-20261123/crates/swarm-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 10s
+
+--- sc8-public-inspection-build.log ---
+   Compiling swarm-cli v0.5.1 (/home/mousa/projects/my-creations/swarmcraft/swarmcraft/.worktrees/sabathon-p0-integration-20261123/crates/swarm-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 32.67s
+
+--- sc8-public-memory-refusal.log ---
+Running public Fabric transaction (memory-refusal): /tmp/sc8-fabric-lifecycle-xkd7kg0m
+{"canonical_authority": false, "classification": "public_fabric_memory_admission_refused", "consent_consumed_by_clear": true, "full_success_verified": false, "minecraft_gameplay_verified": false, "no_process_or_workspace": true, "normal_admission_tested": true, "old_checkpoint_preserved": true, "player_admission": false, "reason": "Error: insufficient hosting memory: selected heap 1024 MiB plus native JVM, Minecraft client, daemon and OS reserves requires 4352 MiB; device has 4096 MiB physical, 3751 MiB currently available", "runtime_activation": false, "signed_reservation_preserved": true, "write_authority": false}
+{"canonical_authority": false, "classification": "public_fabric_transaction_gate", "exact_held_restore": true, "grant_unchanged": true, "nonholder_unchanged": true, "player_admission": false, "public_result": {"canonical_authority": false, "classification": "public_fabric_memory_admission_refused", "consent_consumed_by_clear": true, "full_success_verified": false, "minecraft_gameplay_verified": false, "no_process_or_workspace": true, "normal_admission_tested": true, "old_checkpoint_preserved": true, "player_admission": false, "reason": "Error: insufficient hosting memory: selected heap 1024 MiB plus native JVM, Minecraft client, daemon and OS reserves requires 4352 MiB; device has 4096 MiB physical, 3751 MiB currently available", "runtime_activation": false, "signed_reservation_preserved": true, "write_authority": false}, "runtime_activation": false, "scenario": "memory-refusal", "source_fixture_unchanged": true}
+
+--- sc8-interrupted-worker-build.log ---
+   Compiling swarm-cli v0.5.1 (/home/mousa/projects/my-creations/swarmcraft/swarmcraft/.worktrees/sabathon-p0-integration-20261123/crates/swarm-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 30.37s
+  Executable unittests src/lib.rs (target/debug/deps/swarm_cli-8a80662dd624042a)
+
+--- sc8-interrupted-worker-real.log ---
+Running disposable Fabric lifecycle fixture: /tmp/sc8-fabric-lifecycle-0uk8p52q/lab
+
+running 1 test
+test exclusive_turn_process_probe::fabric::tests::actual_interrupted_fabric_controller_requires_exact_kernel_recovery ... {"both_records_retired":true,"canonical_authority":false,"checkpoint_published":false,"classification":"actual_interrupted_fabric_fixture_kernel_recovery","controller_sigkill":true,"exact_empty_cgroup_retired":true,"full_public_admission_tested":false,"missing_leaf_refused":true,"player_admission":false,"real_java_spawn_observed":true,"surviving_runtime_refused":true,"workspace_retained":true}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 224 filtered out; finished in 88.84s
+
+{"canonical_authority": false, "classification": "isolated_fabric_controller_crash_gate", "kernel_recovery": {"both_records_retired": true, "canonical_authority": false, "checkpoint_published": false, "classification": "actual_interrupted_fabric_fixture_kernel_recovery", "controller_sigkill": true, "exact_empty_cgroup_retired": true, "full_public_admission_tested": false, "missing_leaf_refused": true, "player_admission": false, "real_java_spawn_observed": true, "surviving_runtime_refused": true, "workspace_retained": true}, "old_checkpoint_restored": true, "player_admission": false, "signed_journals_unchanged": true, "source_fixture_unchanged": true}
+Retained interrupted disposable workspace for review: /tmp/sc8-fabric-lifecycle-0uk8p52q
+
+Source digests:
+fec8b47dcd057343185a9444b827c0795bd349f7a4b1904ab83654d8e760e31b  crates/swarm-cli/src/exclusive_turn_fabric_runtime.rs
+e1a8c98ac7ac8ad90c58d3f27efec337dba09ba421cb5aca97fa3d3580d98367  crates/swarm-cli/src/exclusive_turn_runtime_intent.rs
+0611b0c1b45263ec44b24df7e832ff1f1e2796ae7f6999cb08cb40e494e66237  crates/swarm-cli/tests/exclusive_turn_reference_cli.rs
+865878ed4c02640ea4f80381cb02274a5238b7c3dced5efa7b029192ae1d1dbf  research/exclusive-turn/qualify_fabric_lifecycle.py
+01b646bf5da67c0bbc5f3477059db481e13e5b30b3adeb340b96d609e44323a4  research/exclusive-turn/public_fabric_transaction_gate.py

@@ -1916,18 +1916,58 @@ fn runtime_intent_fences_handoff_across_process_exit_and_revocation_consumes_con
     // The denial-only revocation must succeed even when the world lock is held.
     let world_lock = File::open(f.store(0).join("journal.lock")).unwrap();
     FileExt::try_lock_exclusive(&world_lock).unwrap();
+    let observed = json(run(0, "inspect-intent", &[]));
+    assert_eq!(observed["classification"], "exclusive_turn_signed_intent_observation_only");
+    assert_eq!(observed["intent_id"], intent);
+    assert_eq!(observed["revision"], "2");
+    assert_eq!(observed["signed_intent_verified"], true);
+    for flag in [
+        "current_journal_checked",
+        "current_grant_verified",
+        "canonical_authority",
+        "runtime_activation",
+        "player_admission",
+    ] {
+        assert_eq!(observed[flag], false, "{flag}");
+    }
+    rejected(
+        cmd(
+            &f.profiles[0],
+            &[
+                "runtime",
+                "inspect-intent",
+                "--expected-world",
+                &f.world,
+                "--expected-grant",
+                &Hash32([9; 32]).to_string(),
+            ],
+        )
+        .output()
+        .unwrap(),
+        "signed runtime intent grant differs",
+    );
+    let sidecar_lock = File::open(f.store(0).join("runtime-local.lock")).unwrap();
+    FileExt::try_lock_exclusive(&sidecar_lock).unwrap();
+    rejected(run(0, "inspect-intent", &[]), "runtime local state busy");
+    drop(sidecar_lock);
+    assert_eq!(fs::read(&state_path).unwrap(), reserved_bytes);
     rejected(run(0, "revoke", &["--expected-revision", "1", "--confirm"]), "revision differs");
     let revoked = json(run(0, "revoke", &["--expected-revision", "2", "--confirm"]));
     assert_eq!(revoked["revision"], "3");
     assert!(revoked["consent"].is_null());
     assert_eq!(revoked["intent_id"], intent);
     assert_eq!(revoked["reference_operations_fenced"], true);
+    let observed = json(run(0, "inspect-intent", &[]));
+    assert_eq!(observed["revision"], "3");
+    assert_eq!(observed["intent_id"], intent);
+    assert!(observed["consent"].is_null());
     drop(world_lock);
     assert_eq!(f.snapshot(0), journal);
     rejected(clear("2", intent), "revision differs");
     let cleared = json(clear("3", intent));
     assert_eq!(cleared["revision"], "4");
     assert!(cleared["intent_id"].is_null() && cleared["consent"].is_null());
+    rejected(run(0, "inspect-intent", &[]), "no unresolved runtime intent");
     rejected(reserve("4", checkpoint), "consent is absent or withdrawn");
     // Missing or corrupted sidecar and legacy envelope rollback all deny.
     let retained = fs::read(&state_path).unwrap();
