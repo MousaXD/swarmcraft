@@ -216,6 +216,10 @@ class TransitionAuthority(Authority):
         """Validate the exact queued batch, including fused new inputs."""
         pass
 
+    def _before_certified_access(self, current, head):
+        """Optional local publication barrier, inside the client's transaction."""
+        pass
+
     def seal_next(self, generation, tick, root, *, inputs=None):
         with self.transaction(write=True):
             cur = self._read()

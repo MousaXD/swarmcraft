@@ -1,5 +1,7 @@
 """Signed role proofs and durable local lifecycle regressions."""
 import os
+import signal
+import socket
 from pathlib import Path
 import tempfile
 import time
@@ -7,7 +9,8 @@ import unittest
 
 from combined_ownerless_lab import (CertifiedClientGate, FULL, Quorum, artifact_manifest,
                                     combined_authority, observed_snapshot)
-from managed_ownerless import managed_authority, restore_managed_staging
+from managed_certification import expected_head, resume_managed_certification
+from managed_ownerless import certify_managed_checkpoint, managed_authority, restore_managed_staging
 from ownerless_permission import PolicyChannel, PolicyWorker, parts
 from player_runtime import fixture
 from recovery_runtime import RecoveryAuthority
@@ -248,10 +251,11 @@ class ManagedTests(unittest.TestCase):
         self.a.configure(offers())
         runtime = self.start()
         first = self.command("a")
+        first_gate = CertifiedClientGate(self.a,self.q,[1])
         self.a.submit(1,first)
         runtime.advance()
         self.drain()
-        self.q.certify("first",["checkpoint"],self.a.certification_candidate())
+        certify_managed_checkpoint(self.a,self.q,first_gate,"first")
         before = self.a.save()
         runtime = self.start()
         second = self.command("b")
@@ -314,6 +318,137 @@ class ManagedTests(unittest.TestCase):
             self.a.db.execute("DELETE FROM command_authorizations")
         with self.assertRaisesRegex(Rejected,"orphaned managed command authorization"):
             self.Authority(self.path)
+
+    def staged(self):
+        self.q.depart()
+        self.q.certify("recover",["--recover"])
+        self.a.configure(offers())
+        runtime = self.start()
+        req = self.command("a")
+        gate = CertifiedClientGate(self.a,self.q,[1])
+        gate.submit(1,req)
+        runtime.advance()
+        self.drain()
+        return gate,req
+
+    def interrupt(self,phase):
+        # The child owns a freshly opened SQLite connection; parent
+        # controller memory and fixture head never observe its progress.
+        self.a.close()
+        pid = os.fork()
+        if pid==0:
+            try:
+                ledger = self.Authority(self.path)
+                gate = CertifiedClientGate(ledger,self.q,[1])
+                def kill():
+                    os.kill(os.getpid(),signal.SIGKILL)
+                certify_managed_checkpoint(ledger,self.q,gate,"interrupted",
+                    **({"before_retry":kill} if phase=="vote" else {"before_sync":kill}))
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+            os._exit(1)
+        _,status = os.waitpid(pid,0)
+        self.a = self.Authority(self.path)
+        self.assertTrue(os.WIFSIGNALED(status),status)
+        self.assertEqual(os.WTERMSIG(status),signal.SIGKILL)
+        raw,done = self.a.db.execute("SELECT plan,completion FROM managed_certifications").fetchone()
+        self.assertIsNone(done)
+        import json
+        return json.loads(raw)
+
+    def test_pending_vote_survives_process_kill_and_exact_retry(self):
+        gate,req = self.staged()
+        plan = self.interrupt("vote")
+        target = plan["proposal"]["proposal_hash"]
+        before = [self.q.auth(i,"status","--expected-world",self.q.world) for i in self.q.active]
+        self.assertEqual([s["pending_proposal"] for s in before],[target,None])
+        cold = CertifiedClientGate(self.a,self.q,[1])
+        with self.assertRaisesRegex(Rejected,"reconciliation incomplete"):
+            cold.committed_receipts([(1,req)])
+        with self.assertRaisesRegex(Rejected,"reconciliation incomplete"):
+            self.a.prepare_certification("replacement")
+        with self.assertRaisesRegex(Rejected,"target pin differs"):
+            resume_managed_certification(self.a,self.q,expected_target="0"*64)
+        with self.assertRaisesRegex(Rejected,"new votes forbidden"):
+            resume_managed_certification(self.a,self.q,expected_target=target,recover_only=True)
+        self.assertEqual(before,[self.q.auth(i,"status","--expected-world",self.q.world) for i in self.q.active])
+        result = resume_managed_certification(self.a,self.q,expected_target=target)
+        self.assertEqual(result["mode"],"retry_exact_vote")
+        self.assertEqual(result["head"],expected_head(plan))
+        self.assertEqual(result["before"],before)
+        fresh = CertifiedClientGate(self.a,self.q,[1])
+        receipt, = fresh.committed_receipts([(1,req)])
+        self.assertEqual(receipt["view"]["tick"],1)
+        self.a.close()
+        self.a = self.Authority(self.path)
+        again = resume_managed_certification(self.a,self.q,expected_target=target)
+        self.assertEqual(again["mode"],"already_reconciled")
+        self.assertEqual(again["completion"],result["completion"])
+        self.assertEqual(CertifiedClientGate(self.a,self.q,[1]).committed_receipts([(1,req)]),[receipt])
+
+    def test_accepted_certificate_survives_kill_and_withdrawal_without_new_votes(self):
+        gate,req = self.staged()
+        plan = self.interrupt("accepted")
+        target = plan["proposal"]["proposal_hash"]
+        before = [self.q.auth(i,"status","--expected-world",self.q.world) for i in self.q.active]
+        self.assertEqual([s["head"] for s in before],[target,plan["base"]["head"]])
+        self.assertEqual(before[1]["pending_proposal"],target)
+        self.a.configure(offers(3,0,0))
+        self.assertFalse(self.a.certification_intent(target)[2])
+        # Even a controller that knows the accepted target cannot expose
+        # the staged result while the local dissemination barrier is open.
+        self.q.head = expected_head(plan)
+        with self.assertRaisesRegex(Rejected,"reconciliation incomplete"):
+            CertifiedClientGate(self.a,self.q,[1]).committed_receipts([(1,req)])
+        self.q.head = plan["base"]
+        def blocked():
+            with self.assertRaisesRegex(Rejected,"reconciliation incomplete"):
+                CertifiedClientGate(self.a,self.q,[1]).committed_receipts([(1,req)])
+        result = resume_managed_certification(self.a,self.q,expected_target=target,before_sync=blocked)
+        self.assertEqual(result["mode"],"accepted_certificate")
+        self.assertEqual(result["before"],before)
+        self.assertEqual(self.a.status()["offers"][0]["process_memory_mib"],0)
+        self.assertEqual(self.a.begin_probe(),[])
+        receipt, = CertifiedClientGate(self.a,self.q,[1]).committed_receipts([(1,req)])
+        self.assertEqual(receipt["view"]["tick"],1)
+        self.a.close()
+        self.a = self.Authority(self.path)
+        self.assertEqual(CertifiedClientGate(self.a,self.q,[1]).committed_receipts([(1,req)]),[receipt])
+
+    def test_withdrawn_minority_cannot_cast_new_vote_or_restore(self):
+        gate,req = self.staged()
+        plan = self.interrupt("vote")
+        target = plan["proposal"]["proposal_hash"]
+        self.a.configure(offers(3,0,0))
+        before = [self.q.auth(i,"status","--expected-world",self.q.world) for i in self.q.active]
+        with self.assertRaisesRegex(Rejected,"new votes forbidden"):
+            resume_managed_certification(self.a,self.q,expected_target=target)
+        self.assertEqual(before,[self.q.auth(i,"status","--expected-world",self.q.world) for i in self.q.active])
+        with self.assertRaisesRegex(Rejected,"reconciliation incomplete|pending"):
+            self.restore("forbidden.db")
+        self.assertFalse((self.root/"forbidden.db").exists())
+        self.assertIsNone(self.a.certification_intent(target)[1])
+        self.assertEqual(self.a.begin_probe(),[])
+
+    def test_existing_majority_recovers_after_withdrawal_without_new_votes(self):
+        gate,req = self.staged()
+        plan = self.interrupt("vote")
+        target = plan["proposal"]["proposal_hash"]
+        # Persist a second matching reviewed vote before withdrawal.
+        p = self.q.write_json("existing-remote-proposal.json",plan["proposal"])
+        c = self.q.write_json("existing-remote-candidate.bin",plan["candidate"])
+        self.q.auth(2,"vote","--expected-world",self.q.world,
+                    "--expected-head",plan["base"]["head"],"--proposal",p,
+                    "--expected-proposal",target,"--checkpoint",c,"--confirm")
+        self.a.configure(offers(3,0,0))
+        before = [self.q.auth(i,"status","--expected-world",self.q.world) for i in self.q.active]
+        self.assertEqual([s["pending_proposal"] for s in before],[target,target])
+        result = resume_managed_certification(self.a,self.q,expected_target=target,recover_only=True)
+        self.assertEqual(result["mode"],"recover_existing_evidence")
+        self.assertEqual(result["before"],before)
+        self.assertEqual(self.a.begin_probe(),[])
+        self.assertEqual(CertifiedClientGate(self.a,self.q,[1]).committed_receipts([(1,req)])[0]["view"]["tick"],1)
 
 
 if __name__=="__main__":

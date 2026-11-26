@@ -14,7 +14,7 @@ from certified_restore_lab import refuse
 from combined_ownerless_lab import (CappedPolicyLab, CertifiedClientGate, FULL, Quorum,
                                     artifact_manifest, observed_snapshot, sha)
 from managed_ownerless import certify_managed_checkpoint, managed_authority, restore_managed_staging
-from managed_ownerless_lab import EXTRA_ARTIFACTS, SUBJECTS, choices
+from managed_ownerless_lab import CERTIFICATION_ARTIFACTS, EXTRA_ARTIFACTS, SUBJECTS, choices, certifications
 from network_lab import cpu_plan, safe_namespace
 from ownerless_permission import PolicyChannel, parts
 from placement_lab import Scope
@@ -131,6 +131,7 @@ def run(cli,scope,cpus,root,report):
         pin = ledger.restoration_pin()
         old_events = ledger.events()
         old_history = ledger.history()
+        old_certifications = certifications(ledger)
     finally:
         ledger.close()
     source_hash = sha(source.read_bytes())
@@ -155,16 +156,18 @@ def run(cli,scope,cpus,root,report):
                                                      "no exact certified command receipt")
         report["abandoned_id_refusal"] = refuse(lambda:gate.submit(1,old_request),"abandoned managed command ID")
         require(restored.events()[:-1]==old_events,"restore lost lifecycle history")
+        require(certifications(restored)==old_certifications,"restore lost certification provenance")
         report.update(restoration=restoration,source_pin=pin,source_sha256=source_hash,
                       source_history=old_history,source_events=old_events,
                       restored_history=restored.history(),restored_events=restored.events(),
                       restored_checkpoint=observed_snapshot(restored,q.mapping),quarantine=quarantine,
                       restored_status=status,restored_authorizations=authorizations(restored),
+                      source_certifications=old_certifications,restored_certifications=certifications(restored),
                       recovered_client=replay)
         restored.configure(choices(4,80,0,750))
         step("replacement",restored,-1,True)
         report.update(final=restored.save(),final_journal=restored.audit(),final_events=restored.events(),
-                      final_authorizations=authorizations(restored))
+                      final_authorizations=authorizations(restored),certifications=certifications(restored))
     finally:
         restored.close()
     require(sha(source.read_bytes())==source_hash and sha(q.founder_path.read_bytes())==q.founder_digest,
@@ -186,8 +189,8 @@ def main():
     scope = Scope(affinity)
     os.sched_setaffinity(0,{coordinator})
     manifest = artifact_manifest(args.cli)
-    manifest.update({name:sha((Path(__file__).parent/name).read_bytes()) for name in ARTIFACTS})
-    report = {"schema":1,"classification":CLASSIFICATION,"physical_machines":1,"live_minecraft_players":0,
+    manifest.update({name:sha((Path(__file__).parent/name).read_bytes()) for name in (*ARTIFACTS,*CERTIFICATION_ARTIFACTS)})
+    report = {"schema":2,"classification":CLASSIFICATION,"physical_machines":1,"live_minecraft_players":0,
               "runtime_activation":False,"canonical_minecraft_authority":False,"actual_kernel_caps":True,
               "artifact_manifest":manifest}
     try:

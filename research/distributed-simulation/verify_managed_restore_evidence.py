@@ -10,12 +10,14 @@ import tempfile
 from combined_ownerless_lab import (ARTIFACTS as BASE_ARTIFACTS, FALSE_FLAGS, combined_authority,
                                     compatibility_for, restoration_source_pin, review_checkpoint, sha, snapshot)
 from managed_restore_lab import ARTIFACTS, CLASSIFICATION, SUBJECTS
+from managed_ownerless_lab import CERTIFICATION_ARTIFACTS
 from ownerless_permission import parts, verify_profile
 from player_runtime import fixture
 from region_runtime import canonical, digest, integer, require
 from regional_authority import validated_state, wire
 from transition_runtime import transition_view
 from verify_combined_ownerless_evidence import hexbytes, same, verify_sync_signatures
+from verify_managed_ownerless_evidence import verify_certification_records
 from worker_placement import Offer, Sample, choose, region_load
 
 LABELS = ["genesis","invite_survivor","allow_worker","surviving_recovery","first-checkpoint",
@@ -23,7 +25,7 @@ LABELS = ["genesis","invite_survivor","allow_worker","surviving_recovery","first
 
 
 def verify_observations(data):
-    require(type(data["schema"]) is int and data["schema"]==1
+    require(type(data["schema"]) is int and data["schema"] in (1,2)
             and data["classification"]==CLASSIFICATION and data["physical_machines"]==1
             and data["live_minecraft_players"]==0 and data["runtime_activation"] is False
             and data["canonical_minecraft_authority"] is False
@@ -31,7 +33,8 @@ def verify_observations(data):
             "wrong managed restore classification")
     world,policy,compatibility = parts(data["binding"])
     require(data["world_id"]=="scownerless:"+world and same(data["slot_subjects"],list(SUBJECTS))
-            and set(data["artifact_manifest"])==set(BASE_ARTIFACTS)|set(ARTIFACTS)|{"rust-cli"}
+            and set(data["artifact_manifest"])==set(BASE_ARTIFACTS)|set(ARTIFACTS)|{"rust-cli"}|
+                (set(CERTIFICATION_ARTIFACTS) if data["schema"]==2 else set())
             and all(digest(v) for v in data["artifact_manifest"].values())
             and compatibility_for(data["artifact_manifest"])==compatibility,"wrong managed restore artifact pin")
     keys = data["participant_keys"]
@@ -265,6 +268,13 @@ def verify_observations(data):
             and data["discarded_receipt_refusal"]=="no exact certified command receipt"
             and data["abandoned_id_refusal"]=="abandoned managed command ID"
             and data["certification_refusal"]=="managed consent changed before certification","wrong restored client replay")
+    if data["schema"]==2:
+        verify_certification_records(data,[(1,4,data["stages"][0]),(3,7,data["stages"][2])])
+        require(data["source_certifications"]==data["restored_certifications"]==data["certifications"][:1],
+                "managed restore certification lineage differs")
+    else:
+        require(not any(k in data for k in ("source_certifications","restored_certifications","certifications")),
+                "unexpected legacy certification records")
     return {"certified_ticks":2,"abandoned_ticks":1,"restored_tick":1,"workers":3,
             "recovered_receipts":1,"tombstoned_commands":1,"signed_decisions":7,"signed_sync_receipts":2}
 

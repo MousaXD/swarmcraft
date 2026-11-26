@@ -424,6 +424,7 @@ class CertifiedClientGate:
         require(type(player) is int and player in self.players and player in current["players"],
                 "reference client not authorized for this session")
         require(current["world"] == self.save()["world"], "reference client world changed")
+        self.ledger._before_certified_access(current,head)
         candidate = committed_snapshot(self.ledger, list(self.mapping), current)
         with tempfile.TemporaryDirectory(prefix="sc68-cut-check-") as tmp:
             path = Path(tmp)/"exact-cut.bin"
@@ -676,7 +677,8 @@ class Quorum:
                              "checkpoint": json.loads(file.read_bytes())})
         return accepted
 
-    def certify_network_checkpoint(self,label,candidate,*,before_retry=None,before_sync=None):
+    def certify_network_checkpoint(self,label,candidate,*,before_retry=None,before_sync=None,expected_proposal=None,
+                                   before_collect=None):
         """Exact reviewed encrypted collection, followed by durable sync.
 
         Never falls back to offline votes or acceptance after a failure.
@@ -692,6 +694,8 @@ class Quorum:
         commitment = self.state_hash(file)
         proposal = self.proposal(["--checkpoint",file])
         target = proposal["proposal_hash"]
+        require(expected_proposal is None or canonical(proposal)==canonical(expected_proposal),
+                "network proposal differs from durable certification intent")
         p = self.write_json(f"proposal-{seq}.json",proposal)
         # Each validator reads its OWN durable prior bytes and accepted
         # history. Derive the reviewed proposal independently from these.
@@ -720,6 +724,8 @@ class Quorum:
             with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as unavailable:
                 unavailable.bind(("127.0.0.1",0))
                 addr = "127.0.0.1:"+str(unavailable.getsockname()[1])
+                if before_collect is not None:
+                    before_collect()
                 failure = self.auth(collector,"decision","collect",*review,"--checkpoint",file,
                                     "--peer",self.peer_id(remote)+"@"+addr,
                                     reject="missing current validator majority")
@@ -737,6 +743,8 @@ class Quorum:
         with self.listener(remote,"ownerless_reference_decision_listener","serve-vote",*remote_review,
                            "--from",self.peer_id(collector),"--bind","127.0.0.1:0",
                            pins={"proposal":target}) as ready:
+            if before_collect is not None:
+                before_collect()
             history = self.auth(collector,"decision","collect",*review,"--checkpoint",file,
                                 "--peer",self.peer_id(remote)+"@"+ready["address"])
         network["vote_listener"] = ready

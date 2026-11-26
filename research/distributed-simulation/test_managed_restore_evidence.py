@@ -21,6 +21,25 @@ class ManagedRestoreEvidenceTests(unittest.TestCase):
              "recovered_receipts":1,"tombstoned_commands":1,"signed_decisions":7,"signed_sync_receipts":2})
         verify_sync_signatures({**self.data,"schema":3})
 
+    def test_v3_certification_lineage_and_mutations(self):
+        data = json.loads((Path(__file__).parent/"evidence"/
+                           "2026-11-26-managed-v3-restore-regression.json").read_bytes())
+        self.assertEqual(verify_observations(data),verify_observations(self.data))
+        verify_sync_signatures({**data,"schema":3})
+        for mutate in (
+            lambda r:r["certifications"][1]["plan"].update(generation=3),
+            lambda r:r["certifications"][1]["plan"]["proposal"].update(proposal_hash="a"*64),
+            lambda r:r["certifications"][1]["plan"]["active"].pop(),
+            lambda r:r["certifications"][1]["completion"]["sync"].clear(),
+            lambda r:r["certifications"][0]["completion"]["sync"][0]["result"]["receipt"]["signature"].__setitem__(0,0),
+            lambda r:r["restored_certifications"].clear(),
+            lambda r:r["artifact_manifest"].pop("managed_certification.py"),
+        ):
+            altered = copy.deepcopy(data)
+            mutate(altered)
+            with self.assertRaises(Rejected):
+                verify_observations(altered)
+
     def test_refuse_mutated_managed_restore(self):
         for mutate in (
             lambda r:r.update(runtime_activation=True),

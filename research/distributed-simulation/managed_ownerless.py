@@ -42,9 +42,9 @@ def managed_authority(quorum, slot_subjects):
 
     class Managed(Combined, RecoveryAuthority):
         app_id = 0x53433639
-        # Research-only schema. Refuse v1 rather than manufacture
-        # authorization provenance for previously queued commands.
-        schema = 2
+        # Research-only schema. Do not manufacture authorization or
+        # dissemination provenance for older managed databases.
+        schema = 3
         ruleset = "swarmcraft-reference-managed-ownerless/v1/"+binding
 
         @classmethod
@@ -60,6 +60,8 @@ def managed_authority(quorum, slot_subjects):
                         sequence INTEGER NOT NULL, head TEXT NOT NULL, player_key TEXT NOT NULL)""")
             db.execute("""CREATE TABLE managed_restores(generation INTEGER PRIMARY KEY, record BLOB NOT NULL)""")
             db.execute("""CREATE TABLE abandoned_commands(request_id TEXT PRIMARY KEY, generation INTEGER NOT NULL)""")
+            db.execute("""CREATE TABLE managed_certifications(scope INTEGER PRIMARY KEY,
+                        plan BLOB NOT NULL, completion BLOB)""")
 
         def __init__(self,path,*,read_only=False):
             self._owner = secrets.token_hex(32)
@@ -73,6 +75,7 @@ def managed_authority(quorum, slot_subjects):
                     if state["scope"]:
                         self._scope_record(state)
                     self._audit_authorizations()
+                    self._audit_certifications()
             except BaseException:
                 self.close()
                 raise
@@ -189,6 +192,7 @@ def managed_authority(quorum, slot_subjects):
             # Validate the canonical command/duplicate semantics first;
             # both the queue and its authorization row share the same txn.
             checked_command(player,request,current["world"],current["players"])
+            self._before_certified_access(current,quorum.head)
             require(self.db.execute("SELECT 1 FROM abandoned_commands WHERE request_id=?",
                                    (request["id"],)).fetchone() is None,"abandoned managed command ID")
             existing = self.db.execute("SELECT response FROM commands WHERE request_id=?",
@@ -211,6 +215,7 @@ def managed_authority(quorum, slot_subjects):
                     self._authorized_command(player,request,history)
 
         def _before_probe(self,current,state,slots):
+            self._before_certified_access(current,quorum.head)
             require(current["tick"]<999999 and current["players"]==[0,1],"invalid managed tick or roster")
             head = dict(quorum.head)
             self._head_check(head)
@@ -369,26 +374,133 @@ def managed_authority(quorum, slot_subjects):
                 self.db.execute("UPDATE managed_scopes SET released=1 WHERE scope=?",(state["scope"],))
                 self._guard = None
 
+        def _require_reconciled(self):
+            require(self.db.execute("SELECT 1 FROM managed_certifications WHERE completion IS NULL").fetchone()
+                    is None,"managed certification reconciliation incomplete")
+
+        def _before_certified_access(self,current,head):
+            self._require_reconciled()
+            if current["tick"]==0:
+                return
+            # An accepted Rust checkpoint alone is insufficient for the
+            # managed path. Require the exact completed local intent
+            # even if a caller obtained a certificate outside this path.
+            candidate = canonical(committed_snapshot(self,quorum.mapping,current))
+            matches = []
+            for raw,done in self.db.execute("SELECT plan,completion FROM managed_certifications WHERE completion IS NOT NULL"):
+                plan,completion = json.loads(raw),json.loads(done)
+                if canonical(plan["candidate"])==candidate and completion["head"]["checkpoint"]==head["checkpoint"]:
+                    matches.append(plan)
+            require(len(matches)==1,"managed certified cut lacks reconciled intent")
+
+        def _staged_candidate(self,current,state):
+            require(state["phase"]=="paused","managed scope cleanup not released")
+            record = self._scope_record(state)
+            require(record["released"] and record["staged"] is not None,"no released managed staged cut")
+            require(record["staged"]=={"tick":current["tick"],"root":current["runtime_root"],
+                        "cut":current["cut_root"],"generation":current["generation"]},
+                    "managed staged cut differs")
+            return record,committed_snapshot(self,quorum.mapping,current)
+
+        def _certification_candidate_locked(self,current,state):
+            self._require_reconciled()
+            require(state["phase"]=="paused","managed scope cleanup not released")
+            record = self._scope_record(state)
+            require(record["released"] and record["staged"] is not None,"no released managed staged cut")
+            require(record["offers"]==[asdict(o) for o in state["offers"]],
+                    "managed consent changed before certification")
+            require(not set(state["blocked"]) & {p["slot"] for p in record["proofs"]},
+                    "managed blocked worker before certification")
+            record,candidate = self._staged_candidate(current,state)
+            self._head_check(record["base"]["head"])
+            parent = self.db.execute("SELECT cut_root FROM commits WHERE tick=?",(current["tick"]-1,)).fetchone()[0]
+            commands,_ = self._commands(current,current["tick"],parent)
+            self._check_pending(current,commands)
+            return record,candidate
+
         def certification_candidate(self):
             """Read-only handoff of exactly one staged cut after cleanup."""
             with self.transaction():
                 current = self._read()
+                return self._certification_candidate_locked(current,self._contribution(current))[1]
+
+        def _audit_certifications(self):
+            from managed_certification import check_plan, check_completion, verify_completed_documents
+            unresolved = []
+            for scope,raw,done in self.db.execute("SELECT * FROM managed_certifications ORDER BY scope"):
+                plan = json.loads(raw)
+                require(raw==canonical(plan) and plan["scope"]==scope
+                        and self.db.execute("SELECT 1 FROM managed_scopes WHERE scope=?",(scope,)).fetchone(),
+                        "invalid managed certification record")
+                check_plan(quorum,plan,check_active=False)
+                if done is None:
+                    unresolved.append(plan)
+                else:
+                    completion = json.loads(done)
+                    require(done==canonical(completion),"invalid managed certification completion")
+                    check_completion(quorum,plan,completion,verify_signatures=True)
+                    verify_completed_documents(quorum,plan,completion)
+            require(len(unresolved)<=1,"multiple unresolved managed certifications")
+            if unresolved:
+                current = self._read()
                 state = self._contribution(current)
-                require(state["phase"]=="paused","managed scope cleanup not released")
-                record = self._scope_record(state)
-                require(record["released"] and record["staged"] is not None,"no released managed staged cut")
-                require(record["offers"]==[asdict(o) for o in state["offers"]],
-                        "managed consent changed before certification")
-                require(record["staged"]=={"tick":current["tick"],"root":current["runtime_root"],
-                            "cut":current["cut_root"],"generation":current["generation"]},
-                        "managed staged cut differs")
-                self._head_check(record["base"]["head"])
-                # The staged commands are not yet certified, even though
-                # local SQLite has written their responses.
-                parent = self.db.execute("SELECT cut_root FROM commits WHERE tick=?",(current["tick"]-1,)).fetchone()[0]
-                commands,_ = self._commands(current,current["tick"],parent)
-                self._check_pending(current,commands)
-                return committed_snapshot(self,quorum.mapping,current)
+                self._check_intent_stage(current,state,unresolved[0])
+
+        def _check_intent_stage(self,current,state,plan):
+            record,candidate = self._staged_candidate(current,state)
+            require(plan["scope"]==state["scope"] and plan["generation"]==current["generation"]
+                    and plan["base"]==record["base"]["head"]
+                    and canonical(plan["candidate"])==canonical(candidate),
+                    "managed certification intent differs from staged cut")
+            return record
+
+        def prepare_certification(self,label):
+            from managed_certification import build_plan
+            with self.transaction(write=True):
+                current = self._read()
+                state = self._contribution(current)
+                record,candidate = self._certification_candidate_locked(current,state)
+                require(self.db.execute("SELECT 1 FROM managed_certifications WHERE scope=?",(state["scope"],)).fetchone()
+                        is None,"managed scope already has certification intent")
+                plan = build_plan(quorum,label,state["scope"],current["generation"],record["base"]["head"],
+                                  candidate,[asdict(o) for o in state["offers"]],state["blocked"])
+                self._head_check(plan["base"])
+                self.db.execute("INSERT INTO managed_certifications VALUES(?,?,NULL)",(state["scope"],canonical(plan)))
+                return plan
+
+        def certification_intent(self,expected_target):
+            from managed_certification import check_plan
+            with self.transaction():
+                current = self._read()
+                state = self._contribution(current)
+                row = self.db.execute("SELECT plan,completion FROM managed_certifications WHERE scope=?",
+                                      (state["scope"],)).fetchone()
+                require(row is not None,"no managed certification intent")
+                plan = json.loads(row[0])
+                check_plan(quorum,plan)
+                require(plan["proposal"]["proposal_hash"]==expected_target,"managed certification target pin differs")
+                self._check_intent_stage(current,state,plan)
+                unchanged = (plan["offers"]==[asdict(o) for o in state["offers"]] and
+                             plan["blocked"]==state["blocked"])
+                return plan,None if row[1] is None else json.loads(row[1]),unchanged
+
+        def finish_certification(self,plan,completion):
+            from managed_certification import check_completion, check_replicas
+            with self.transaction(write=True):
+                current = self._read()
+                state = self._contribution(current)
+                self._check_intent_stage(current,state,plan)
+                row = self.db.execute("SELECT plan,completion FROM managed_certifications WHERE scope=?",
+                                      (state["scope"],)).fetchone()
+                require(row is not None and row[0]==canonical(plan),"managed certification intent changed")
+                check_completion(quorum,plan,completion,verify_signatures=True)
+                check_replicas(quorum,plan,completion["head"])
+                if row[1] is None:
+                    self.db.execute("UPDATE managed_certifications SET completion=? WHERE scope=?",
+                                    (canonical(completion),state["scope"]))
+                else:
+                    require(row[1]==canonical(completion),"managed certification completion differs")
+
 
         def _restoration_pin_locked(self,current):
             state = self._contribution(current)
@@ -400,7 +512,8 @@ def managed_authority(quorum, slot_subjects):
             for table,order in (("managed_config","singleton"),("contribution","singleton"),
                                 ("lifecycle","seq"),("managed_scopes","scope"),
                                 ("command_authorizations","request_id"),
-                                ("managed_restores","generation"),("abandoned_commands","request_id")):
+                                ("managed_restores","generation"),("abandoned_commands","request_id"),
+                                ("managed_certifications","scope")):
                 metadata[table] = [[v.hex() if isinstance(v,bytes) else v for v in row]
                                    for row in self.db.execute(f"SELECT * FROM {table} ORDER BY {order}")]
             return {"source":restoration_source_pin(current),
@@ -432,6 +545,7 @@ def restore_managed_staging(quorum,slot_subjects,source,destination,*,expected_p
         pin = original._restoration_pin_locked(current)
         require(canonical(pin)==canonical(expected_pin),"managed restoration consent or journal pin changed")
         state = original._contribution(current)
+        original._require_reconciled()
         require(state["phase"]=="paused" and not state["probes"] and not state["assignment"]
                 and original.db.execute("SELECT COUNT(*) FROM managed_scopes WHERE released<>1").fetchone()[0]==0,
                 "managed restoration requires released scope")
@@ -449,6 +563,10 @@ def restore_managed_staging(quorum,slot_subjects,source,destination,*,expected_p
         retained = original.db.execute("""SELECT a.* FROM command_authorizations a
                     JOIN commands c ON c.request_id=a.request_id WHERE c.tick<=? ORDER BY c.tick,c.player""",(tick,)).fetchall()
         restored.db.executemany("INSERT INTO command_authorizations VALUES(?,?,?,?,?,?)",retained)
+        for scope,plan,completion in original.db.execute("SELECT * FROM managed_certifications ORDER BY scope"):
+            require(completion is not None and json.loads(plan)["candidate"]["tick"]<=tick,
+                    "cannot discard a reconciled managed certificate")
+            restored.db.execute("INSERT INTO managed_certifications VALUES(?,?,?)",(scope,plan,completion))
         abandoned = [row[0] for row in original.db.execute("SELECT request_id FROM commands WHERE tick>? ORDER BY tick,player",(tick,))]
         record = {"source_pin":pin,"accepted_head":head["head"],"restored_tick":tick,
                   "quarantine_generation":generation,"abandoned_request_ids":abandoned}
@@ -466,10 +584,18 @@ def restore_managed_staging(quorum,slot_subjects,source,destination,*,expected_p
             restore_extra=copy_extra,allow_pending=True)
 
 
-def certify_managed_checkpoint(ledger,quorum,gate,label,*,before_sync=None):
+def certify_managed_checkpoint(ledger,quorum,gate,label,*,before_retry=None,before_sync=None):
     """No offline fallback; release only the audited, drained staged cut."""
     require(isinstance(gate,CertifiedClientGate) and gate.ledger is ledger and gate.quorum is quorum,
             "managed publication gate differs")
-    candidate = ledger.certification_candidate()
-    accepted = quorum.certify_network_checkpoint(label,candidate,before_sync=before_sync)
+    plan = ledger.prepare_certification(label)
+    # The intent is durable before any request can cast a vote.
+    from managed_certification import completion_from_quorum
+    def before_collect():
+        pinned,done,unchanged = ledger.certification_intent(plan["proposal"]["proposal_hash"])
+        require(pinned==plan and done is None and unchanged,
+                "managed consent or intent changed before collection; new votes forbidden")
+    accepted = quorum.certify_network_checkpoint(label,plan["candidate"],before_retry=before_retry,
+                    before_sync=before_sync,expected_proposal=plan["proposal"],before_collect=before_collect)
+    ledger.finish_certification(plan,completion_from_quorum(quorum,plan,accepted))
     return accepted,gate.publish(accepted)

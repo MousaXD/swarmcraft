@@ -26,12 +26,18 @@ from worker_placement import Offer, choose, region_load
 
 CLASSIFICATION = "LOCAL_MANAGED_OWNERLESS_CONTRIBUTION_NOT_MINECRAFT_NOT_MULTI_HOST"
 EXTRA_ARTIFACTS = ("managed_ownerless.py","managed_ownerless_lab.py","recovery_runtime.py","certified_restore_lab.py")
+CERTIFICATION_ARTIFACTS = ("managed_certification.py","verify_combined_ownerless_evidence.py")
 SUBJECTS = (3,4,None,None)
 
 
 def choices(revision,a,b,cpu=1000):
     return [Offer(0,revision,a,cpu if a else 0),Offer(1,revision,b,cpu if b else 0),
             Offer(2,1,0,0),Offer(3,1,0,0)]
+
+
+def certifications(ledger):
+    return [{"scope":scope,"plan":json.loads(plan),"completion":json.loads(done) if done is not None else None}
+            for scope,plan,done in ledger.db.execute("SELECT * FROM managed_certifications ORDER BY scope")]
 
 
 def run(cli,scope,cpus,root,report):
@@ -181,6 +187,7 @@ def run(cli,scope,cpus,root,report):
         ledger.configure(choices(5,80,0,750))
         stage("recovered",[0])
         report.update(stages=stages,events=ledger.events(),final=ledger.save(),final_journal=ledger.audit(),
+                      certifications=certifications(ledger),
                       certified_cuts=q.records,history=json.loads(q.history.read_bytes()),
                       founder_journal_unchanged=sha(q.founder_path.read_bytes())==q.founder_digest,
                       all_scopes_released=not scope.active and not scope.poisoned,
@@ -202,8 +209,8 @@ def main():
     scope = Scope(affinity)
     os.sched_setaffinity(0,{coordinator})
     manifest = artifact_manifest(args.cli)
-    manifest.update({name:sha((Path(__file__).parent/name).read_bytes()) for name in EXTRA_ARTIFACTS})
-    report = {"schema":1,"classification":CLASSIFICATION,"physical_machines":1,"live_minecraft_players":0,
+    manifest.update({name:sha((Path(__file__).parent/name).read_bytes()) for name in (*EXTRA_ARTIFACTS,*CERTIFICATION_ARTIFACTS)})
+    report = {"schema":2,"classification":CLASSIFICATION,"physical_machines":1,"live_minecraft_players":0,
               "runtime_activation":False,"canonical_minecraft_authority":False,"actual_kernel_caps":True,
               "artifact_manifest":manifest}
     try:

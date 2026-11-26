@@ -7,10 +7,12 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from types import SimpleNamespace
 
 from combined_ownerless_lab import (ARTIFACTS, FALSE_FLAGS, combined_authority, compatibility_for,
                                     review_checkpoint, snapshot)
-from managed_ownerless_lab import CLASSIFICATION, EXTRA_ARTIFACTS, SUBJECTS
+from managed_certification import check_completion, check_plan
+from managed_ownerless_lab import CERTIFICATION_ARTIFACTS, CLASSIFICATION, EXTRA_ARTIFACTS, SUBJECTS
 from ownerless_permission import parts, verify_profile
 from player_runtime import fixture
 from region_runtime import canonical, digest, integer, require
@@ -26,8 +28,33 @@ EVENTS = ["consent_changed","begin_probe","admitted","claimed","staged_cut_fence
           "begin_probe","admitted","claimed","staged_cut_fenced","released"]
 
 
+def verify_certification_records(data,expected):
+    """Bind durable intent/completion rows to independently verified cuts."""
+    records,history = data["certified_cuts"],data["history"]
+    q = SimpleNamespace(world=data["world_id"],binding=data["binding"],keys=data["participant_keys"],
+                        mapping=[data["participant_keys"][0],data["participant_keys"][5]])
+    require(len(data["certifications"])==len(expected),"managed certification record count differs")
+    for row,(scope,seq,stage) in zip(data["certifications"],expected):
+        plan,done = row["plan"],row["completion"]
+        require(row["scope"]==plan["scope"]==scope and plan["generation"]==stage["after"]["generation"]
+                and plan["base"]==records[seq-1]["head"] and plan["base_checkpoint"]==records[seq-1]["checkpoint"]
+                and plan["candidate"]==records[seq]["checkpoint"] and plan["label"]==records[seq]["label"]
+                and plan["offers"]==stage["scope_record"]["offers"]
+                and plan["blocked"]==stage["released"]["blocked"]
+                and plan["voters"]==records[seq]["voter_slots"]
+                and [p["slot"] for p in plan["active"]]==[1,2]
+                and plan["base_history"]=={"creation":history["creation"],"records":history["records"][:seq-1]}
+                and plan["proposal"]=={"proposal_hash":records[seq]["head"]["head"],
+                                       "proposal":history["records"][seq-1]["proposal"]}
+                and done=={"head":records[seq]["head"],"history":{"creation":history["creation"],
+                        "records":history["records"][:seq]},"sync":records[seq]["network"]["sync"]},
+                "managed certification evidence differs from retained cut")
+        check_plan(q,plan,check_active=False)
+        check_completion(q,plan,done,verify_signatures=True)
+
+
 def verify_observations(data):
-    require(type(data["schema"]) is int and data["schema"]==1 and data["classification"]==CLASSIFICATION
+    require(type(data["schema"]) is int and data["schema"] in (1,2) and data["classification"]==CLASSIFICATION
             and data["physical_machines"]==1 and data["live_minecraft_players"]==0
             and data["runtime_activation"] is False and data["canonical_minecraft_authority"] is False
             and all(data[k] is True for k in ("actual_kernel_caps","founder_journal_unchanged",
@@ -35,7 +62,8 @@ def verify_observations(data):
             "wrong managed classification")
     world,policy,compatibility = parts(data["binding"])
     require(data["world_id"]=="scownerless:"+world and same(data["slot_subjects"],list(SUBJECTS))
-            and set(data["artifact_manifest"])==set(ARTIFACTS)|set(EXTRA_ARTIFACTS)|{"rust-cli"}
+            and set(data["artifact_manifest"])==set(ARTIFACTS)|set(EXTRA_ARTIFACTS)|{"rust-cli"}|
+                (set(CERTIFICATION_ARTIFACTS) if data["schema"]==2 else set())
             and all(digest(v) for v in data["artifact_manifest"].values())
             and compatibility_for(data["artifact_manifest"])==compatibility,"wrong managed artifact pin")
     keys = data["participant_keys"]
@@ -267,6 +295,10 @@ def verify_observations(data):
         event("released",recovered["released"]),
     ]
     require(same(data["events"],expected_events),"durable lifecycle event differs from observed state")
+    if data["schema"]==2:
+        verify_certification_records(data,[(1,5,data["stages"][0]),(3,7,data["stages"][2])])
+    else:
+        require("certifications" not in data,"unexpected legacy certification records")
     return {"certified_ticks":2,"withdrawn_ticks":1,"worker_processes":5,"scopes":3,
             "signed_decisions":7,"signed_sync_receipts":2,"role_proofs":8}
 

@@ -623,10 +623,71 @@ vote. It cannot abandon a signed pending proposal by clearing
 votes or fabricate a local provenance prefix from opaque checkpoint
 bytes. The local SQLite and Rust journal checks do not provide
 distributed atomicity, a global freshness lease, or automatic
-canonical authority. Restart-safe exact certification after a
-collector accepts a candidate or persists a vote but fails before
-sync remains a separate integration requirement. Production
-ownerless Minecraft gameplay remains disabled.
+canonical authority. Production ownerless Minecraft gameplay remains
+disabled.
+
+### Restart-safe exact managed certification (schema v3)
+
+`managed_certification.py` integrates the existing encrypted Rust
+decision protocol with a durable managed SQLite publication barrier.
+Before requesting any vote, a FULL transaction records the released
+scope and generation, exact accepted base history and checkpoint,
+independently replayed staged candidate, reviewed successor proposal,
+explicit validator peer set, offers and blocked slots. The normal
+collection must match that intent and check unchanged consent again
+immediately before initiating a vote exchange. The intent cannot be
+replaced, abandoned by restoration, or used to start a new scope.
+A non-genesis managed client view, input or receipt requires the exact
+completed local intent in addition to the existing Rust signed-cut and
+invitation checks. Obtaining a Rust certificate by another route is
+not sufficient for managed publication.
+
+After interruption, the controller reopens the database and supplies
+the exact target hash. It checks the stored staged cut and independently
+verifies the signed base, candidate commitment and reconstructed
+proposal, then checks every pinned active replica against the exact
+base or target. Conflicting pending votes, other heads, or a changed
+configured peer set fail closed. The same reviewed proposal may be
+collected again with unchanged consent. Changed offers or blocked slots,
+or explicit recovery-only mode, prohibit initiating new votes; only
+existing matching signed votes or an already accepted certificate
+can complete the interrupted decision. A lone pending vote after
+withdrawal remains locked and cannot authorize a new tick or a restore.
+Independent governance may still proceed outside this trusted controller;
+this local consent check is not an atomic cross-host cancellation.
+
+An already accepted target is never voted on again. The controller
+reuses its signed history, synchronizes the exact checkpoint with all
+pinned active peers over authenticated encrypted TCP, verifies their
+signed durable receipts, and checks their current journals. Only then
+does a FULL transaction record completion. Reopen verifies the stored
+signed documents and Ed25519 receipts; an already completed exact
+request is idempotent. A lost volatile controller head is reconstructed
+only after reconciliation; a fresh eligible client can recover the
+exact original result without repeating the simulation or clearing a
+vote. Local withdrawal revisions and blocked-worker state are never
+rolled back. Restoration preserves completed certification provenance.
+Older managed database schemas are explicitly refused; the retained
+schema-1 observation files remain independently verifiable.
+
+The regression uses real disposable signed Rust journals and actual
+SIGKILL of the controller after a durable minority vote and after
+local certificate acceptance before dissemination. Worker simulation
+in those process-fault tests uses memory channels. The independent
+managed real-worker labs now emit schema-2 observation files including
+the exact durable intent and completion rows and artifact pins for the
+new implementation; the restore verifier checks that completed rows
+survive the non-destructive prefix restore. Retained schema-2 restore evidence: `evidence/2026-11-26-managed-v3-restore-regression.json` (SHA-256 `a64fe8cc9846b7fddcde99736f0bb3c7e1cf38c8566ac6c7f5765caad5107eb6`). The isolated run and independent CLI verifier passed: three workers, seven signed decisions, two certified ticks, one abandoned tick, one recovered receipt, two signed sync receipts, and byte-exact completed certification provenance across restore. Artifact hashes matched; all scopes released. Legacy and new evidence mutation tests passed. No production canonical
+authority, globally synchronized consent, independent-validator
+process ownership, or Minecraft runtime activation is inferred.
+
+The first targeted test run refused collection because an in-memory
+tuple differed from its canonical persisted JSON list; normalization
+fixed the comparison. Subsequent process-kill scenarios and the full
+158-test research suite passed. The additional retained schema-v3
+mutation test passed separately, together with the original managed
+evidence tests (five in that invocation). Workflow policy, release
+version and diff checks passed.
 
 Run on Linux with mapped user/network namespace support and a delegated
 user systemd scope (from the repository root, with the tested CLI built):

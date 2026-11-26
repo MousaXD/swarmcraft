@@ -192,6 +192,17 @@ with the source unchanged. Version-1 managed databases are refused
 rather than assigned invented authorization records; the trusted
 reference controller still supplies identities and cleanup proof.
 
+The managed-schema-v3 follow-up records an exact reviewed certification
+intent before voting and blocks managed client publication until all
+pinned active validators have durably synchronized the target. On
+restart, only that exact proposal may be retried; changed consent
+permits recovery from existing signed evidence but not initiating new
+votes. A pending minority cannot be reset or abandoned by restoration.
+Completed signed histories and sync receipts are reverified on reopen
+and preserved by non-destructive restoration. The process-kill tests
+use real Rust signed journals and encrypted decision exchanges, but
+not a live distributed Minecraft runtime.
+
 ## Original R0 evidence (2026-11-08)
 
 
