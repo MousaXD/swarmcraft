@@ -538,6 +538,39 @@ impl Store {
         self.state(head.checkpoint())?;
         Ok((journal, head))
     }
+
+    // Both heads must have been independently verified against their
+    // respective histories while this store's stable lock is held for the
+    // local journal. Never use an observation or a network acknowledgment.
+    fn accept_verified(
+        &self,
+        journal: &mut Journal,
+        prior: &VerifiedOwnerlessHead,
+        new: OwnerlessAuthorityHistoryV1,
+        head: &VerifiedOwnerlessHead,
+        bytes: &[u8],
+    ) -> Result<()> {
+        ensure!(
+            ownerless_history_extends(&journal.history, &new),
+            "ownerless history rollback or conflicting accepted ancestry"
+        );
+        ensure!(
+            ownerless_checkpoint_commitment(bytes)? == head.checkpoint(),
+            "reference checkpoint commitment mismatch"
+        );
+        encoded(&new, MAX_OWNERLESS_HISTORY_BYTES - 1)?;
+        if head.sequence() != prior.sequence() {
+            self.retain(head.checkpoint(), bytes)?;
+            journal.history = new;
+            journal.pending = None;
+            self.save(journal, true)?;
+        } else {
+            // Same-head witness changes cannot resolve a pending vote.
+            ensure!(head == prior, "ownerless head identity differs");
+            ensure!(self.state(head.checkpoint())? == bytes, "stored ownerless checkpoint differs");
+        }
+        Ok(())
+    }
 }
 
 pub fn run(paths: &DataPaths, command: AuthorityCommand) -> Result<()> {
@@ -639,20 +672,7 @@ pub fn run(paths: &DataPaths, command: AuthorityCommand) -> Result<()> {
             let bytes = checkpoint(&file_state, head.checkpoint())?;
             let store = Store::open(paths, expected_world)?;
             let (mut journal, prior) = store.load(expected_world)?;
-            ensure!(
-                ownerless_history_extends(&journal.history, &new),
-                "ownerless history rollback or conflicting accepted ancestry"
-            );
-            if head.sequence() != prior.sequence() {
-                store.retain(head.checkpoint(), &bytes)?;
-                journal.history = new;
-                journal.pending = None;
-                store.save(&journal, true)?;
-            } else {
-                // A different valid witness subset for the same head is not
-                // a new decision and MUST NOT clear a pending vote.
-                ensure!(head.hash() == prior.hash(), "ownerless head identity differs");
-            }
+            store.accept_verified(&mut journal, &prior, new, &head, &bytes)?;
             print(&report(&head, Some(&journal)), MAX_OWNERLESS_DOCUMENT_BYTES)
         }
         Status { expected_world } => {

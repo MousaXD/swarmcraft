@@ -80,7 +80,88 @@ The emitted vote is the existing signed reference-vote format. Existing
 offline certificate assembly still verifies distinct signers, current
 majority, joint proposed majority and every entrant's approval. Existing
 history acceptance validates the exact checkpoint and accepted ancestry.
-The transport itself neither assembles nor publishes a certificate.
+Individual vote requests neither assemble nor publish a certificate.
+
+## Certified collection and checkpoint reconciliation
+
+`decision collect` uses the same reviewed proposal, current accepted
+parent, and candidate checkpoint as `request-vote`. It checks the explicit
+distinct validator/endpoint list before persisting the collector's own
+vote. The configured identities must be sufficient for the old majority,
+and, for a joint transition, the new majority and every entrant.
+The collector must remain in the proposed roster. This deliberately
+excludes a departing collector; the existing individual vote/assembly
+workflow remains available.
+
+After the collector durably votes, it requests the remote votes in
+parallel. All requests share a seven-second network deadline within a
+ten-second collection window, reserving time for local verification and
+durable publication. Only the exact pinned validator's verified vote is
+counted. The existing certificate verifier checks the actual signer set,
+including joint approval. The collector reopens its journal, rechecks
+the reviewed proposal and exact parent, and atomically accepts the
+certified history and exact checkpoint locally. A missing quorum leaves
+the local and remote vote locks in place; it never resets a vote. A
+retry of the same proposal can recover the same durable votes. If the
+collector already accepted that exact decision, it exports the retained
+history after validating the parent, reviewed proposal and exact
+checkpoint, without contacting peers or mutating the journal. A
+different or newer local head is not retargeted automatically.
+
+With the target validators listening using the preceding `serve-vote`
+command (each independently reviewing the proposal):
+
+```sh
+swarmcraft --data-dir /private/validator-a ownerless authority decision collect \
+  --expected-world "$WORLD" --expected-head "$BASE" \
+  --proposal reviewed.json --expected-proposal "$TARGET" \
+  --checkpoint candidate.bin --peer "$VALIDATOR_B@$ADDRESS" \
+  --confirm > certified-history.json
+```
+
+This output is the ordinary signed history format. Local acceptance is
+not a distributed commit notification. For dissemination, both parties
+explicitly pin the same world, accepted base, target, and peer. The
+sender must be a validator in the base and target rosters; the recipient
+must be in the target roster (including a certified entrant). A sender
+that was not a member at the recipient's base is intentionally
+unsupported by this bounded reference protocol. The sender must have
+already accepted the exact target locally. The recipient must have an
+existing verified journal at the exact base or exact target. No network
+initialization, unapproved enrollment, or automatic head discovery.
+
+```sh
+swarmcraft --data-dir /private/validator-b ownerless authority decision serve-sync \
+  --expected-world "$WORLD" --expected-base "$BASE" --expected-head "$TARGET" \
+  --from "$VALIDATOR_A" --bind 127.0.0.1:0 --confirm
+
+swarmcraft --data-dir /private/validator-a ownerless authority decision push-sync \
+  --expected-world "$WORLD" --expected-base "$BASE" --expected-head "$TARGET" \
+  --peer "$VALIDATOR_B@$ADDRESS" --confirm
+```
+
+Sync uses a separate Noise prologue domain from voting, and binds the
+world, exact base, target, sender and recipient. After authentication,
+the sender rechecks its local accepted target and eligibility under
+the stable journal lock and sends only the bounded signed history
+(4 MiB maximum) and exact checkpoint (1 MiB maximum). The receiver
+verifies the entire history, pinned ancestry, sequence, fences, policy,
+compatibility, and both peers' roster eligibility. It reopens its own
+stable lock, refuses rollback or a conflicting accepted chain, verifies
+the checkpoint commitment, and uses the same durable acceptance
+operation as the offline CLI. It signs the receipt only after
+publication, binding world, base, target, sequence, fence, checkpoint
+and recipient. The sender checks the exact receipt and signature.
+The signed body uses the protocol's binary hash/ID JSON serialization.
+
+The recipient can restart and accept a certified multi-decision suffix
+from its exact base. Loss of the receipt after publication does not roll
+back the receiver. A retry at the exact accepted target verifies the
+checkpoint and signs the same receipt without replacing the journal
+or clearing a vote for a later proposal. A sender or recipient that
+has advanced past the target refuses the stale operation. The receipt
+is a historical reference publication acknowledgment, not a freshness
+lease, proof of future availability, or a canonical game permit.
 
 ## Local verification (26 November 2026)
 
@@ -118,13 +199,46 @@ flock /tmp/swarmcraft-sabathon-cargo.lock -c \
 
 ## Acceptance boundary
 
+### Certified collection/sync verification (26 November 2026)
+
+The expanded local run passed all 16 authority CLI and two creation CLI
+integration tests, including two new real TCP/process scenarios. The
+first test run reached signed receipt checks but failed two assertions
+that compared protocol-serialized hashes with their display strings;
+the corrected typed assertions passed without changing the wire format
+or signature checks.
+
+- Duplicate voters/endpoints fail before a vote is locked. A missing
+  majority leaves the exact durable pending proposal; a conflicting
+  retry is refused. The next invocation obtains a valid majority even
+  with a silent optional endpoint. The founder's journal remains
+  unchanged. The accepted certificate can be exported again without
+  any remote connection or local journal mutation.
+- Altered encrypted checkpoint data leaves the receiver's pending
+  journal byte-identical. A lost real signed sync receipt leaves the
+  certified checkpoint accepted. After restart, an exact same-target
+  retry returns a verified receipt and preserves a later pending vote.
+- Joint collection refuses a missing entrant before locking the local
+  vote, requires the actual joint certificate, and publishes the
+  new fence. The sender refuses removed and unrelated recipients.
+  A newly admitted validator receives the certified target and votes
+  in the new roster. A surviving validator that missed the first
+  transition accepts the full two-decision suffix from its pinned
+  genesis; stale targets are then refused.
+
+Both new scenarios assert no ordinary live world/control/runtime
+records are created. The results qualify the explicit isolated
+reference workflow only, not physical independent hosts.
+
 The CFT threat model, bounded history and trusted profile/disk
 assumptions remain unchanged. An OS-level key/profile clone or complete
 disk rollback is outside those assumptions. This application binding
 of Noise requires independent protocol review before production use.
-There is no automatic proposer selection, certificate dissemination,
-restart-safe distributed certificate reconciliation, canonical Minecraft
-publication, or game authorization. An unavailable majority or split
+There is no automatic proposer selection, persistent dissemination
+service, automatic certificate recovery from other peers after permanent
+collector loss, canonical Minecraft publication, or game authorization.
+The explicit collection and synchronization commands do not establish
+the globally latest head. An unavailable majority or split
 pending votes can halt decisions. A signed vote is not a lease, an
 attestation of rules-compliant execution, or a write permit. Production
 ownerless and distributed gameplay remain disabled.

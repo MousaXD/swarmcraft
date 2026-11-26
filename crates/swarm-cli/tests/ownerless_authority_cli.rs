@@ -926,6 +926,130 @@ impl Fixture {
             ],
         )
     }
+
+    fn decision_collect(
+        &self,
+        proposer: usize,
+        head: &str,
+        p: &(PathBuf, String),
+        state: &Path,
+        peers: &[(usize, &str)],
+    ) -> Output {
+        let endpoints: Vec<_> = peers.iter().map(|(i, a)| format!("{}@{}", self.identities[*i].peer_id(), a)).collect();
+        let mut args = vec![
+            "decision",
+            "collect",
+            "--expected-world",
+            &self.world,
+            "--expected-head",
+            head,
+            "--proposal",
+            s(&p.0),
+            "--expected-proposal",
+            &p.1,
+            "--checkpoint",
+            s(state),
+            "--confirm",
+        ];
+        for endpoint in &endpoints {
+            args.extend(["--peer", endpoint]);
+        }
+        invoke(&self.profiles[proposer], &args)
+    }
+
+    fn sync_serve(&self, recipient: usize, sender: usize, base: &str, head: &str) -> Command {
+        cmd(
+            &self.profiles[recipient],
+            &[
+                "decision",
+                "serve-sync",
+                "--expected-world",
+                &self.world,
+                "--expected-base",
+                base,
+                "--expected-head",
+                head,
+                "--from",
+                &self.identities[sender].peer_id().to_string(),
+                "--bind",
+                "127.0.0.1:0",
+                "--confirm",
+            ],
+        )
+    }
+
+    fn sync_listener(&self, recipient: usize, sender: usize, base: &str, head: &str) -> ObservationListener {
+        use std::io::BufRead;
+        let child = self
+            .sync_serve(recipient, sender, base, head)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut listener = ObservationListener { child: Some(child), address: String::new() };
+        let mut line = String::new();
+        std::io::BufReader::new(listener.child.as_mut().unwrap().stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(!line.is_empty(), "sync listener failed before readiness");
+        let ready: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(ready["classification"], "ownerless_reference_sync_listener");
+        assert_eq!(ready["validator"], self.identities[recipient].peer_id().to_string());
+        assert_eq!(ready["head"], head);
+        assert_eq!(ready["runtime_activation"], false);
+        listener.address = ready["address"].as_str().unwrap().to_owned();
+        listener
+    }
+
+    fn sync_push(&self, sender: usize, recipient: usize, base: &str, head: &str, addr: &str) -> Output {
+        invoke(
+            &self.profiles[sender],
+            &[
+                "decision",
+                "push-sync",
+                "--expected-world",
+                &self.world,
+                "--expected-base",
+                base,
+                "--expected-head",
+                head,
+                "--peer",
+                &format!("{}@{}", self.identities[recipient].peer_id(), addr),
+                "--confirm",
+            ],
+        )
+    }
+
+    fn check_sync_receipt(&self, report: &Value, recipient: usize, base: &str, head: &str, seq: u64, fence: u64) {
+        assert_eq!(report["classification"], "ownerless_reference_checkpoint_synced");
+        let body = &report["receipt"]["body"];
+        assert_eq!(
+            body["world"],
+            serde_json::to_value(self.world.parse::<swarm_protocol::OwnerlessWorldIdV1>().unwrap()).unwrap()
+        );
+        assert_eq!(body["base"], serde_json::to_value(base.parse::<Hash32>().unwrap()).unwrap());
+        assert_eq!(body["head"], serde_json::to_value(head.parse::<Hash32>().unwrap()).unwrap());
+        assert_eq!(body["recipient"], serde_json::to_value(self.identities[recipient].peer_id()).unwrap());
+        assert_eq!(body["sequence"], seq);
+        assert_eq!(body["fence"], fence);
+        assert_eq!(
+            body["checkpoint"],
+            serde_json::to_value(
+                json(self.status(recipient))["checkpoint"].as_str().unwrap().parse::<Hash32>().unwrap()
+            )
+            .unwrap()
+        );
+        for key in [
+            "live_quorum_verified",
+            "runtime_activation",
+            "write_authority",
+            "canonical_authority",
+            "player_admission",
+            "worker_admission",
+        ] {
+            assert_eq!(report[key], false);
+        }
+    }
 }
 
 // Inspect the actual framed TCP exchange without access to its ephemeral keys.
@@ -1089,6 +1213,134 @@ fn encrypted_decision_joint_roster_requires_entrant_vote() {
     success(listener.finish());
     let history = f.certified(&f.genesis, &f.initial_head, &p, &[&v1, &v2, &v3], "joint-history.json");
     f.sync(&[1, 2, 3], &history, &p.1, &f.initial, 1, 2);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn encrypted_collection_and_sync_survive_lost_votes_and_receipts() {
+    use std::{net::TcpListener, thread};
+    let f = Fixture::new();
+    let founder = fs::read(f.journal(0)).unwrap();
+    let state = f.state("collect.bin", b"exact network-certified candidate");
+    let p = f.propose(&f.genesis, &f.initial_head, "collect.json", &["--checkpoint", s(&state)]);
+    let local_before = fs::read(f.journal(1)).unwrap();
+    let remote_before = fs::read(f.journal(2)).unwrap();
+    let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = unused.local_addr().unwrap().to_string();
+    rejected(f.decision_collect(1, &f.initial_head, &p, &state, &[(2, &addr), (2, &addr)]), "duplicate");
+    assert_eq!(fs::read(f.journal(1)).unwrap(), local_before);
+    drop(unused);
+    // An unreachable majority locks the local vote but never accepts a head.
+    rejected(f.decision_collect(1, &f.initial_head, &p, &state, &[(2, &addr)]), "missing current validator majority");
+    let status = json(f.status(1));
+    assert_eq!(status["head"], f.initial_head);
+    assert_eq!(status["pending_proposal"], p.1);
+    assert_eq!(fs::read(f.journal(2)).unwrap(), remote_before);
+    let conflict = f.propose(&f.genesis, &f.initial_head, "collect-conflict.json", &["--recover"]);
+    rejected(f.decision_collect(1, &f.initial_head, &conflict, &f.initial, &[(2, &addr)]), "already locked");
+    let listener = f.decision_listener(2, 1, &f.initial_head, &p);
+    // An optional validator's silent endpoint must not consume the final
+    // local verification/commit budget when a real majority responds.
+    let stalled = TcpListener::bind("127.0.0.1:0").unwrap();
+    let stalled_addr = stalled.local_addr().unwrap().to_string();
+    let accepted =
+        success(f.decision_collect(1, &f.initial_head, &p, &state, &[(2, &listener.address), (0, &stalled_addr)]));
+    drop(stalled);
+    success(listener.finish());
+    let h = f.path("collected.json");
+    fs::write(&h, &accepted).unwrap();
+    assert_eq!(json(f.status(1))["head"], p.1);
+    assert_eq!(json(f.status(1))["pending_proposal"], Value::Null);
+    assert_eq!(json(f.status(2))["pending_proposal"], p.1);
+    let committed = fs::read(f.journal(1)).unwrap();
+    // No peer reachable; exact local certificate recovery is idempotent.
+    assert_eq!(success(f.decision_collect(1, &f.initial_head, &p, &state, &[(2, &addr)])), accepted);
+    assert_eq!(fs::read(f.journal(1)).unwrap(), committed);
+    let remote_pending = fs::read(f.journal(2)).unwrap();
+    // Corrupt checkpoint data during sync: the receiving journal must not change.
+    let listener = f.sync_listener(2, 1, &f.initial_head, &p.1);
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_addr = proxy.local_addr().unwrap().to_string();
+    let target = listener.address.clone();
+    let relay = thread::spawn(move || decision_proxy(proxy, target, 1, true, false));
+    assert!(!f.sync_push(1, 2, &f.initial_head, &p.1, &proxy_addr).status.success());
+    assert!(!listener.finish().status.success());
+    relay.join().unwrap();
+    assert_eq!(fs::read(f.journal(2)).unwrap(), remote_pending);
+    // Lose the real durable publication receipt; retry from the same base.
+    let listener = f.sync_listener(2, 1, &f.initial_head, &p.1);
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_addr = proxy.local_addr().unwrap().to_string();
+    let target = listener.address.clone();
+    let relay = thread::spawn(move || decision_proxy(proxy, target, 1, false, true));
+    assert!(!f.sync_push(1, 2, &f.initial_head, &p.1, &proxy_addr).status.success());
+    success(listener.finish());
+    relay.join().unwrap();
+    assert_eq!(json(f.status(2))["head"], p.1);
+    assert_eq!(json(f.status(2))["pending_proposal"], Value::Null);
+    let next = f.propose(&h, &p.1, "next-recover.json", &["--recover"]);
+    f.vote(2, &p.1, &next, &state, "next-pending.json");
+    let remote_committed = fs::read(f.journal(2)).unwrap();
+    let listener = f.sync_listener(2, 1, &f.initial_head, &p.1);
+    let receipt = json(f.sync_push(1, 2, &f.initial_head, &p.1, &listener.address));
+    success(listener.finish());
+    f.check_sync_receipt(&receipt, 2, &f.initial_head, &p.1, 1, 1);
+    assert_eq!(fs::read(f.journal(2)).unwrap(), remote_committed);
+    assert_eq!(json(f.status(2))["pending_proposal"], next.1);
+    assert_eq!(fs::read(f.journal(0)).unwrap(), founder);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn encrypted_collection_and_sync_enforce_joint_membership_and_exact_history() {
+    let f = Fixture::new();
+    let keys: Vec<_> = [1, 2, 3].iter().map(|&i| hex::encode(f.identities[i].public_key())).collect();
+    let p = f.propose(
+        &f.genesis,
+        &f.initial_head,
+        "joint-net.json",
+        &["--validator-key", &keys[0], "--validator-key", &keys[1], "--validator-key", &keys[2]],
+    );
+    let before = fs::read(f.journal(1)).unwrap();
+    rejected(
+        f.decision_collect(1, &f.initial_head, &p, &f.initial, &[(2, "127.0.0.1:1")]),
+        "missing configured entrant",
+    );
+    assert_eq!(fs::read(f.journal(1)).unwrap(), before);
+    let b = f.decision_listener(2, 1, &f.initial_head, &p);
+    let entrant = f.decision_listener(3, 1, &f.initial_head, &p);
+    let h = f.path("joint-net-history.json");
+    fs::write(
+        &h,
+        success(f.decision_collect(1, &f.initial_head, &p, &f.initial, &[(2, &b.address), (3, &entrant.address)])),
+    )
+    .unwrap();
+    success(b.finish());
+    success(entrant.finish());
+    assert_eq!(json(f.status(1))["reference_fence"], 2);
+    // Neither the departed founder nor an unrelated observer can receive
+    // a certified checkpoint from the new accepted roster.
+    for recipient in [0, 4] {
+        rejected(f.sync_push(1, recipient, &f.initial_head, &p.1, "127.0.0.1:1"), "recipient not in target roster");
+    }
+    let listener = f.sync_listener(3, 1, &f.initial_head, &p.1);
+    let receipt = json(f.sync_push(1, 3, &f.initial_head, &p.1, &listener.address));
+    success(listener.finish());
+    f.check_sync_receipt(&receipt, 3, &f.initial_head, &p.1, 1, 2);
+    // Advance using the newly enrolled validator; peer 2 remains at genesis
+    // with the joint vote pending until the full certified suffix arrives.
+    let state = f.state("post-joint.bin", b"new accepted roster checkpoint");
+    let p2 = f.propose(&h, &p.1, "post-joint.json", &["--checkpoint", s(&state)]);
+    let listener = f.decision_listener(3, 1, &p.1, &p2);
+    success(f.decision_collect(1, &p.1, &p2, &state, &[(3, &listener.address)]));
+    success(listener.finish());
+    let listener = f.sync_listener(2, 1, &f.initial_head, &p2.1);
+    let receipt = json(f.sync_push(1, 2, &f.initial_head, &p2.1, &listener.address));
+    success(listener.finish());
+    f.check_sync_receipt(&receipt, 2, &f.initial_head, &p2.1, 2, 2);
+    assert_eq!(json(f.status(2))["pending_proposal"], Value::Null);
+    rejected(f.sync_serve(2, 1, &f.initial_head, &p.1).output().unwrap(), "local head is not pinned base or target");
+    rejected(f.sync_push(1, 3, &f.initial_head, &p.1, "127.0.0.1:1"), "local head is not pinned base or target");
     f.assert_no_live_storage();
 }
 

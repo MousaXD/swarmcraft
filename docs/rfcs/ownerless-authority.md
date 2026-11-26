@@ -77,7 +77,9 @@ canonical authority. The separate [network observation follow-up](ownerless-netw
 provides nonce-bound private TCP head observations, not live authority.
 The [encrypted reference decision exchange](ownerless-network-decision.md)
 transports explicitly reviewed proposals, candidate bytes and durable votes;
-it does not disseminate certificates or activate gameplay. Different locked minority proposals can stall permanently;
+it also provides explicit bounded quorum collection, local certified
+publication, and encrypted checkpoint/history synchronization with
+restart-safe receipts. It does not activate gameplay. Different locked minority proposals can stall permanently;
 the design fails closed rather than resetting votes to manufacture progress.
 
 A minority cannot certify another head or recovery fence. It can export
