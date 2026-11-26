@@ -25,3 +25,5 @@ pub mod ownerless_authority;
 pub mod ownerless_participation;
 
 pub mod ownerless_observation;
+
+pub mod exclusive_turn;

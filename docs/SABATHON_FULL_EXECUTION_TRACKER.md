@@ -95,7 +95,8 @@ Implementation completion: count only items whose full implementation criteria a
 - State: **IN PROGRESS**
 - Source: docs/rfcs/two-device-exclusive-turn.md; crates/swarm-consensus/src/exclusive_turn_model.rs (test only)
 - Evidence: Reviewed-in-source proposal selects online overlap, durable irreversible release, exact checkpoint receipts, no timeout takeover, and new-world recovery for lost grants. Five test-only model regressions and bounded search of 3,165 independent two-journal states passed. Full consensus suite 51 tests and strict Clippy passed.
-- Remaining / next action: Independent design/threat-model review; real versioned signed records, atomic journal/outbox, process/route fencing and creation-time opt-in. Keep default quorum and old peers unchanged. This model is not an active runtime policy.
+- Signed reference contract: versioned scpass identity with two exact genesis approvals, strong Ed25519 device keys, separate source offer, target receipt and committed-release signatures, strict grant ancestry and per-source attempt floors, bounded canonical decoding, conflict and rollback refusal. Five cryptographic regressions plus codec coverage; 139 protocol/consensus tests passed and strict Clippy passed. No runtime integration.
+- Remaining / next action: Independent design/threat-model review; owner-only atomic journal/outbox and actual process tests, process/route fencing and creation-time opt-in. Keep default quorum and old peers unchanged. This model is not an active runtime policy.
 - External dependency: Independent review and two-device actual partition/gameplay acceptance; no safe automatic crash takeover without an independent anchor.
 - Commit: See 25 November exclusive-turn design checkpoint.
 

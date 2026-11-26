@@ -126,3 +126,42 @@ policy. Then prove on two independent devices that the default quorum
 rules are unchanged and the exclusive-turn world has at most one writer
 under actual partition/crash/restart. Until those gates pass, recommend
 the existing headless third replica rather than shipping an override.
+
+### Signed reference contract (26 November 2026)
+
+The new `swarm-protocol/src/exclusive_turn.rs` and
+`swarm-consensus/src/exclusive_turn.rs` implement the separate version-1
+cryptographic record contract. The explicit `scpass:` identity commits to
+two canonically ordered distinct strong Ed25519 device keys, the initial
+holder, creation nonce, compatibility and initial checkpoint. Format 1
+means the fixed online-overlap policy; initial epoch/fence are both 1.
+Both devices approve the exact pinned genesis. No conversion from V1 or
+ownerless identities exists.
+
+Each signed offer binds the exact prior grant, both generations, source,
+recipient, monotonically increasing per-source attempt, compatibility and
+checkpoint. A separately domain-signed recipient receipt names the exact
+signed offer; the source signs the entire offer and receipt to commit a
+release. The next grant commits to the complete signed release. Verification
+requires both actual device signatures, exact identity and predecessor,
+strict key validation, and checked counter advancement. Both source attempt
+floors survive reverse transfers. Histories are bounded to 128 releases and
+256 KiB canonical postcard bytes; decoding rejects trailing or noncanonical
+encoding and incorrect signature lengths. Reconciliation verifies both
+histories and requires exact prefix ancestry, refusing valid conflicting
+CFT-violating chains rather than electing a winner.
+
+The reference checkpoint binds nonzero manifest and state-root claims plus
+an exact content commitment for 1 MiB or smaller opaque bytes. It is NOT a
+Minecraft snapshot verifier; these fields and the reference payload must
+never become an ordinary canonical grant or a live launch permit. The
+record verifier proves only signed history. In particular, a malicious or
+rolled-back source could sign conflicting releases; durable non-equivocation
+and actual process quiescence are separate mandatory layers.
+
+Five real-signature integration tests plus canonical history-codec coverage
+passed; the full protocol/consensus run passed 139 tests, strict all-target
+all-feature Clippy, formatting and workflow/release policy checks. No CI
+was used. The next step is the isolated owner-only atomic reference journal
+with cancel, exact receipt, irreversible release/outbox and restart-safe
+acceptance; live process/route fencing and installed clients remain disabled.
