@@ -1,6 +1,8 @@
 //! Explicit, bounded reference decision exchange. Never a game route or permit.
 //! Noise NN supplies ephemeral transport keys; both application identities
 //! authenticate the exact handshake transcript before any decision data flows.
+#[path = "ownerless_head_discovery.rs"]
+mod discovery;
 #[path = "ownerless_decision_recovery.rs"]
 mod recovery;
 
@@ -71,6 +73,18 @@ pub struct SyncReview {
     confirm: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct DiscoveryReview {
+    #[arg(long)]
+    expected_world: OwnerlessWorldIdV1,
+    /// Exact locally accepted ancestor; no unreviewed peer or world discovery.
+    #[arg(long)]
+    expected_base: Hash32,
+    /// Allow reconciliation of a verified certified descendant, not new voting.
+    #[arg(long)]
+    confirm: bool,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum DecisionCommand {
     /// Serve exactly one explicitly approved remote vote request.
@@ -131,6 +145,22 @@ pub enum DecisionCommand {
     Recover {
         #[command(flatten)]
         review: Review,
+        #[arg(long = "peer", required = true)]
+        peers: Vec<String>,
+    },
+    /// Serve an accepted certified head to one pinned base-roster validator.
+    ServeHead {
+        #[command(flatten)]
+        review: DiscoveryReview,
+        #[arg(long)]
+        from: PeerId,
+        #[arg(long)]
+        bind: SocketAddr,
+    },
+    /// Discover and accept a verified certified descendant without knowing its target hash.
+    PullHead {
+        #[command(flatten)]
+        review: DiscoveryReview,
         #[arg(long = "peer", required = true)]
         peers: Vec<String>,
     },
@@ -710,5 +740,7 @@ pub(super) fn run(paths: &DataPaths, command: DecisionCommand) -> Result<()> {
         DecisionCommand::PushSync { review, peer } => push_sync(paths, &review, &peer),
         DecisionCommand::ServeRecovery { review, from, bind } => recovery::serve(paths, &review, from, bind),
         DecisionCommand::Recover { review, peers } => recovery::recover(paths, &review, &peers),
+        DecisionCommand::ServeHead { review, from, bind } => discovery::serve(paths, &review, from, bind),
+        DecisionCommand::PullHead { review, peers } => discovery::pull(paths, &review, &peers),
     }
 }

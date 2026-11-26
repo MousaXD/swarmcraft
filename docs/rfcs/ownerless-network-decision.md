@@ -221,6 +221,89 @@ vote is provided. If too few votes or no valid certificate survive,
 the operation fails closed. Subsequent dissemination uses the existing
 certified sync command.
 
+## Certified-head discovery and pull reconciliation
+
+The preceding recovery and push-sync operations require the exact
+target hash. A surviving validator that has missed certified decisions
+can instead pull a complete accepted descendant without knowing that
+target or possessing its proposal file. Both operators explicitly pin
+the existing world and the requester's accepted base. Both peers must
+be members of that base and of the history's accepted target, with
+the same verified keys. New entrants not yet present at the base and
+retired validators are intentionally unsupported by this discovery
+path. Neither authentication nor a network response enrolls a peer.
+
+```sh
+swarmcraft --data-dir /private/validator-b ownerless authority decision serve-head \
+  --expected-world "$WORLD" --expected-base "$BASE" \
+  --from "$VALIDATOR_A" --bind 127.0.0.1:0 --confirm
+
+swarmcraft --data-dir /private/validator-a ownerless authority decision pull-head \
+  --expected-world "$WORLD" --expected-base "$BASE" \
+  --peer "$VALIDATOR_B@$ADDRESS" --confirm
+```
+
+The requester can configure multiple distinct base-roster identities
+and explicit private endpoints (at most 14 remote validators). No
+broadcast, DNS peer lookup, public address or discovery of unknown
+worlds is performed. The one-shot listener and transport retain the
+same framing, bounds and deadlines as decision exchange. This protocol
+uses its own Noise prologue domain, binds the exact world, base and
+both peer identities, and uses an explicit zero target field to
+distinguish discovery from voting and pinned synchronization.
+
+The responder checks its signed journal, accepted checkpoint and
+both peers' eligibility before listening. After mutual authentication
+it reloads those records under the stable world lock. It may serve
+a newer accepted descendant, but refuses a peer retired before that
+second check. The lock remains held through the bounded encrypted
+transfer of the full history (4 MiB maximum) and exact checkpoint
+(1 MiB maximum). Pending votes, candidate bytes and private keys are
+never served. The responder changes no journal and receives no
+durable acceptance acknowledgment.
+
+The requester collects in parallel within one shared seven-second
+network window and ten-second total operation budget. It independently
+verifies each complete authenticated reply: the creation certificate,
+every decision, current and joint quorum, entrant approval, exact
+local base ancestry, both identities in the target roster and exact
+checkpoint commitment. Unavailable or incomplete transport attempts
+are reported; a complete authenticated invalid/conflicting reply
+refuses the operation. Among verified replies the requester accepts
+only a compatible chain: same-sequence responses must describe the
+same head and bytes, and any shorter history must extend into the
+longer one. Different valid witness subsets do not create a fork.
+Conflicting certified histories fail closed rather than selecting a
+winner by length, number of responses or arrival order.
+
+Before durable acceptance, the requester reopens the stable world
+lock and verifies that its accepted base and identity are unchanged.
+The existing acceptance operation retains the exact checkpoint and
+publishes the certified journal with its normal fsync discipline.
+A certified extension can resolve the pending vote; a same-head
+response cannot. No vote is ever signed or reset. If publication
+succeeded but output was lost, inspect the local status and explicitly
+pin that accepted base on the next pull. An expired operation may
+return failure even after durable acceptance; it never rolls back.
+
+The output identifies the locally accepted head, whether it advanced,
+which configured identities supplied complete verified replies and
+which attempts were unavailable. A single surviving certificate can
+establish a historical accepted descendant; neither the response count
+nor the longest compatible returned chain establishes the globally
+latest head or a currently reachable quorum. A removed requester
+cannot learn its removal via a compliant responder that refuses to
+disclose the target. It must not use an older accepted head as a
+freshness lease. The requester must already have a verified journal;
+there is no network initialization, runtime activation, canonical
+write authority, worker admission or player admission.
+
+This is bounded explicit discovery, not a persistent background
+recovery service. It does not discover an uncertified unknown
+proposal or reconstruct its pending votes; that still requires the
+reviewed recovery protocol above. It remains subject to the CFT
+and trusted profile/storage assumptions and independent review.
+
 ## Local verification (26 November 2026)
 
 Fourteen authority CLI and two creation CLI scenarios passed on Linux,
@@ -320,14 +403,33 @@ scenarios. The collector's absence is modeled by no further process
 or network access to its profile; this is not independent-host failure
 qualification.
 
+### Certified-head discovery verification (26 November 2026)
+
+All 24 authority and two creation CLI integration scenarios passed,
+including five new actual TCP/process discovery tests. The longest
+compatible certified descendant was accepted without a target hash;
+a subsequent same-head pull preserved the later pending vote byte for
+byte. An unavailable optional endpoint did not prevent acceptance
+of a surviving certificate. Wrong identities, duplicate endpoints,
+retirement during handshake, and independently signed conflicting
+histories were refused. The conflict fixture deliberately violates
+honest CFT voting assumptions; it is not a Byzantine-consensus claim.
+A full 1 MiB checkpoint was transmitted in encrypted chunks, its
+plaintext marker was absent from the captured framed exchange, and
+corruption of the final ciphertext left the receiving journal intact.
+A local acceptance and successor vote during an in-flight pull were
+preserved, with the stale pull refused. No live world, control, or
+runtime records were created. Strict all-target/all-feature CLI Clippy,
+formatting, workflow-policy and release-version checks passed locally.
+
 The CFT threat model, bounded history and trusted profile/disk
 assumptions remain unchanged. An OS-level key/profile clone or complete
 disk rollback is outside those assumptions. This application binding
 of Noise requires independent protocol review before production use.
 There is no automatic proposer selection, persistent dissemination
 or recovery service, canonical Minecraft publication, or game authorization.
-The explicit collection, recovery and synchronization commands do not establish
-the globally latest head. An unavailable majority or split
+The explicit collection, recovery, synchronization and discovery commands
+do not establish the globally latest head. An unavailable majority or split
 pending votes can halt decisions. A signed vote is not a lease, an
 attestation of rules-compliant execution, or a write permit. Production
 ownerless and distributed gameplay remain disabled.

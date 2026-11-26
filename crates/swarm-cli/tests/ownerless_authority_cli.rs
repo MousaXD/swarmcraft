@@ -1564,6 +1564,362 @@ fn encrypted_recovery_requires_joint_majority_and_every_entrant() {
     f.assert_no_live_storage();
 }
 
+impl Fixture {
+    fn head_serve(&self, responder: usize, requester: usize, base: &str) -> Command {
+        cmd(
+            &self.profiles[responder],
+            &[
+                "decision",
+                "serve-head",
+                "--expected-world",
+                &self.world,
+                "--expected-base",
+                base,
+                "--from",
+                &self.identities[requester].peer_id().to_string(),
+                "--bind",
+                "127.0.0.1:0",
+                "--confirm",
+            ],
+        )
+    }
+
+    fn head_listener(&self, responder: usize, requester: usize, base: &str) -> ObservationListener {
+        use std::io::BufRead;
+        let child =
+            self.head_serve(responder, requester, base).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let mut listener = ObservationListener { child: Some(child), address: String::new() };
+        let mut line = String::new();
+        std::io::BufReader::new(listener.child.as_mut().unwrap().stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(!line.is_empty(), "certified head listener failed before readiness");
+        let ready: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(ready["classification"], "ownerless_reference_head_listener");
+        assert_eq!(ready["validator"], self.identities[responder].peer_id().to_string());
+        assert_eq!(ready["base"], base);
+        assert_eq!(ready["runtime_activation"], false);
+        listener.address = ready["address"].as_str().unwrap().to_owned();
+        listener
+    }
+
+    fn pull_head_cmd(&self, requester: usize, base: &str, peers: &[(usize, &str)]) -> Command {
+        let mut command = cmd(
+            &self.profiles[requester],
+            &["decision", "pull-head", "--expected-world", &self.world, "--expected-base", base, "--confirm"],
+        );
+        for (peer, addr) in peers {
+            command.args(["--peer", &format!("{}@{}", self.identities[*peer].peer_id(), addr)]);
+        }
+        command
+    }
+
+    fn pull_head(&self, requester: usize, base: &str, peers: &[(usize, &str)]) -> Output {
+        self.pull_head_cmd(requester, base, peers).output().unwrap()
+    }
+
+    fn check_pulled_head(&self, result: &Value, base: &str, head: &str, sequence: u64, advanced: bool) {
+        assert_eq!(result["classification"], "ownerless_reference_head_pulled");
+        assert_eq!(result["base"], base);
+        assert_eq!(result["head"], head);
+        assert_eq!(result["sequence"], sequence);
+        assert_eq!(result["advanced"], advanced);
+        for key in [
+            "live_quorum_verified",
+            "globally_latest_verified",
+            "runtime_activation",
+            "canonical_authority",
+            "write_authority",
+            "player_admission",
+            "worker_admission",
+            "v1_canonical_world_created",
+        ] {
+            assert_eq!(result[key], false, "{key}");
+        }
+    }
+}
+
+#[test]
+fn encrypted_head_discovery_selects_certified_suffix_and_preserves_same_head_vote() {
+    let f = Fixture::new();
+    let state1 = f.state("discovery-first.bin", b"first certified discovery checkpoint");
+    let p1 = f.propose(&f.genesis, &f.initial_head, "discovery-first.json", &["--checkpoint", s(&state1)]);
+    let conflict = f.propose(&f.genesis, &f.initial_head, "discovery-pending.json", &["--recover"]);
+    f.vote(2, &f.initial_head, &conflict, &f.initial, "discovery-pending-vote.json");
+    let a = f.vote(0, &f.initial_head, &p1, &state1, "discovery-first-a.json");
+    let b = f.vote(1, &f.initial_head, &p1, &state1, "discovery-first-b.json");
+    let h1 = f.certified(&f.genesis, &f.initial_head, &p1, &[&a, &b], "discovery-h1.json");
+    f.sync(&[0, 1], &h1, &p1.1, &state1, 1, 1);
+    let state2 = f.state("discovery-second.bin", b"second certified discovery checkpoint");
+    let p2 = f.propose(&h1, &p1.1, "discovery-second.json", &["--checkpoint", s(&state2)]);
+    let a = f.vote(0, &p1.1, &p2, &state2, "discovery-second-a.json");
+    let b = f.vote(1, &p1.1, &p2, &state2, "discovery-second-b.json");
+    let h2 = f.certified(&h1, &p1.1, &p2, &[&a, &b], "discovery-h2.json");
+    f.sync(&[1], &h2, &p2.1, &state2, 2, 1);
+    let founder = fs::read(f.journal(0)).unwrap();
+    let survivor = fs::read(f.journal(1)).unwrap();
+    let pending = fs::read(f.journal(2)).unwrap();
+    let a = f.head_listener(0, 2, &f.initial_head);
+    let b = f.head_listener(1, 2, &f.initial_head);
+    // No target hash or proposal file provided. Both heads are certified,
+    // but only the longest compatible suffix should be installed.
+    let result = json(f.pull_head(2, &f.initial_head, &[(0, &a.address), (1, &b.address)]));
+    success(a.finish());
+    success(b.finish());
+    f.check_pulled_head(&result, &f.initial_head, &p2.1, 2, true);
+    assert_eq!(result["responded"].as_array().unwrap().len(), 2);
+    assert_eq!(result["pending_proposal"], Value::Null);
+    assert_ne!(fs::read(f.journal(2)).unwrap(), pending);
+    let copy = f.path("discovered-checkpoint.bin");
+    success(invoke(
+        &f.profiles[2],
+        &["recovery-copy", "--expected-world", &f.world, "--expected-head", &p2.1, "--output", s(&copy)],
+    ));
+    assert_eq!(fs::read(&copy).unwrap(), fs::read(&state2).unwrap());
+    let next = f.propose(&h2, &p2.1, "discovery-next.json", &["--recover"]);
+    f.vote(2, &p2.1, &next, &state2, "discovery-next-vote.json");
+    let committed = fs::read(f.journal(2)).unwrap();
+    rejected(f.pull_head(2, &f.initial_head, &[(1, "127.0.0.1:1")]), "differs from expected pin");
+    let b = f.head_listener(1, 2, &p2.1);
+    let result = json(f.pull_head(2, &p2.1, &[(1, &b.address)]));
+    success(b.finish());
+    f.check_pulled_head(&result, &p2.1, &p2.1, 2, false);
+    assert_eq!(result["pending_proposal"], next.1);
+    assert_eq!(fs::read(f.journal(2)).unwrap(), committed);
+    assert_eq!(fs::read(f.journal(0)).unwrap(), founder);
+    assert_eq!(fs::read(f.journal(1)).unwrap(), survivor);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn encrypted_head_discovery_refuses_wrong_identity_and_retirement_during_handshake() {
+    let f = Fixture::new();
+    let before = fs::read(f.journal(2)).unwrap();
+    rejected(f.pull_head(2, &f.initial_head, &[(1, "127.0.0.1:1"), (1, "127.0.0.1:2")]), "duplicate");
+    rejected(f.pull_head(2, &f.initial_head, &[(0, "127.0.0.1:1"), (1, "127.0.0.1:1")]), "duplicate");
+    rejected(f.pull_head(2, &f.initial_head, &[(3, "127.0.0.1:1")]), "current validator");
+    rejected(f.pull_head(3, &f.initial_head, &[(1, "127.0.0.1:1")]), "current validator");
+    rejected(f.head_serve(1, 3, &f.initial_head).output().unwrap(), "current validator");
+    let listener = f.head_listener(1, 2, &f.initial_head);
+    rejected(f.pull_head(2, &f.initial_head, &[(0, &listener.address)]), "no verified certified head response");
+    assert!(!listener.finish().status.success());
+    // A once-eligible requester is retired while the listener is ready.
+    let listener = f.head_listener(1, 2, &f.initial_head);
+    let keys: Vec<_> = [0, 1, 3].iter().map(|&i| hex::encode(f.identities[i].public_key())).collect();
+    let joint = f.propose(
+        &f.genesis,
+        &f.initial_head,
+        "discovery-joint.json",
+        &["--validator-key", &keys[0], "--validator-key", &keys[1], "--validator-key", &keys[2]],
+    );
+    let a = f.vote(0, &f.initial_head, &joint, &f.initial, "discovery-joint-a.json");
+    let b = f.vote(1, &f.initial_head, &joint, &f.initial, "discovery-joint-b.json");
+    let c = f.vote(3, &f.initial_head, &joint, &f.initial, "discovery-joint-c.json");
+    let h = f.certified(&f.genesis, &f.initial_head, &joint, &[&a, &b, &c], "discovery-joint-history.json");
+    f.sync(&[1, 3], &h, &joint.1, &f.initial, 1, 2);
+    rejected(f.pull_head(2, &f.initial_head, &[(1, &listener.address)]), "no verified certified head response");
+    rejected(listener.finish(), "retired or not in target roster");
+    rejected(f.head_serve(1, 2, &f.initial_head).output().unwrap(), "retired or not in target roster");
+    rejected(f.head_serve(3, 0, &f.initial_head).output().unwrap(), "current validator");
+    assert_eq!(fs::read(f.journal(2)).unwrap(), before);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn encrypted_head_discovery_refuses_conflicting_certified_chains() {
+    use swarm_protocol::{
+        OwnerlessAuthorityCertificateV1, OwnerlessAuthorityHistoryV1, OwnerlessAuthorityProposalV1,
+        OwnerlessAuthorityVoteV1,
+    };
+    let f = Fixture::new();
+    let state = f.state("discovery-fork.bin", b"test only conflicting certified checkpoint");
+    let a = f.propose(&f.genesis, &f.initial_head, "discovery-fork-a.json", &["--checkpoint", s(&state)]);
+    let b = f.propose(&f.genesis, &f.initial_head, "discovery-fork-b.json", &["--recover"]);
+    // Deliberately bypass the honest-voter journal ONLY in this adversarial
+    // fixture. Conflicting majority certificates cannot be produced by
+    // compliant durable voting, but valid signatures alone cannot rule
+    // out a cloned/compromised profile. Pull must not choose either chain.
+    for (i, proposal, bytes) in [(0, &a, &state), (1, &b, &f.initial)] {
+        let document: Value = serde_json::from_slice(&fs::read(&proposal.0).unwrap()).unwrap();
+        let p: OwnerlessAuthorityProposalV1 = serde_json::from_value(document["proposal"].clone()).unwrap();
+        let mut votes: Vec<_> = [0, 1]
+            .iter()
+            .map(|&v| {
+                let signer = &f.identities[v];
+                let validator = signer.peer_id();
+                OwnerlessAuthorityVoteV1 {
+                    proposal_hash: p.proposal_hash().unwrap(),
+                    validator,
+                    signature: signer.sign(&p.vote_bytes(validator).unwrap()),
+                }
+            })
+            .collect();
+        votes.sort_by_key(|v| v.validator);
+        let mut history: OwnerlessAuthorityHistoryV1 = serde_json::from_slice(&fs::read(&f.genesis).unwrap()).unwrap();
+        history.records.push(OwnerlessAuthorityCertificateV1 { proposal: p, votes });
+        let path = f.path(&format!("discovery-conflict-{i}.json"));
+        fs::write(&path, serde_json::to_vec(&history).unwrap()).unwrap();
+        success(f.accept(i, &path, &proposal.1, bytes));
+    }
+    let before = fs::read(f.journal(2)).unwrap();
+    let a = f.head_listener(0, 2, &f.initial_head);
+    let b = f.head_listener(1, 2, &f.initial_head);
+    rejected(
+        f.pull_head(2, &f.initial_head, &[(0, &a.address), (1, &b.address)]),
+        "conflicting certified discovery heads",
+    );
+    success(a.finish());
+    success(b.finish());
+    assert_eq!(fs::read(f.journal(2)).unwrap(), before);
+    f.assert_no_live_storage();
+}
+
+// Forward the actual framed Noise exchange without possessing either
+// identity or any transport key. The fixture's history is one chunk.
+fn discovery_proxy(
+    listener: std::net::TcpListener,
+    target: String,
+    checkpoint_chunks: usize,
+    corrupt: bool,
+    before_last: impl FnOnce(),
+) -> Vec<u8> {
+    use std::{
+        io::{Read, Write},
+        net::TcpStream,
+        time::Duration,
+    };
+    fn frame(from: &mut TcpStream, captured: &mut Vec<u8>) -> (Vec<u8>, Vec<u8>) {
+        let mut header = vec![0; 4];
+        from.read_exact(&mut header).unwrap();
+        let size = u32::from_be_bytes(header.as_slice().try_into().unwrap()) as usize;
+        assert!((1..=32784).contains(&size));
+        let mut bytes = vec![0; size];
+        from.read_exact(&mut bytes).unwrap();
+        captured.extend_from_slice(&header);
+        captured.extend_from_slice(&bytes);
+        (header, bytes)
+    }
+    fn relay(from: &mut TcpStream, to: &mut TcpStream, captured: &mut Vec<u8>) {
+        let (header, bytes) = frame(from, captured);
+        to.write_all(&header).unwrap();
+        to.write_all(&bytes).unwrap();
+    }
+    let (mut client, _) = listener.accept().unwrap();
+    let mut server = TcpStream::connect(target).unwrap();
+    for stream in [&client, &server] {
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+        stream.set_nodelay(true).unwrap();
+    }
+    let mut capture = Vec::new();
+    relay(&mut client, &mut server, &mut capture); // Noise first message
+    relay(&mut server, &mut client, &mut capture); // Noise second message
+    relay(&mut server, &mut client, &mut capture); // responder auth
+    relay(&mut client, &mut server, &mut capture); // initiator auth
+    for _ in 0..3 {
+        relay(&mut server, &mut client, &mut capture); // history length/data, checkpoint length
+    }
+    for _ in 1..checkpoint_chunks {
+        relay(&mut server, &mut client, &mut capture);
+    }
+    let (header, mut bytes) = frame(&mut server, &mut capture);
+    before_last();
+    if corrupt {
+        bytes[0] ^= 1;
+    }
+    client.write_all(&header).unwrap();
+    client.write_all(&bytes).unwrap();
+    capture
+}
+
+#[test]
+fn encrypted_head_discovery_rejects_corruption_and_concurrent_local_advance() {
+    use std::{net::TcpListener, sync::mpsc, thread, time::Duration};
+    let f = Fixture::new();
+    let marker = b"private discovery checkpoint plaintext sentinel";
+    let mut contents = vec![42; swarm_protocol::MAX_OWNERLESS_CHECKPOINT_BYTES];
+    contents[..marker.len()].copy_from_slice(marker);
+    let state = f.state("discovery-max.bin", &contents);
+    let p = f.propose(&f.genesis, &f.initial_head, "discovery-max.json", &["--checkpoint", s(&state)]);
+    let a = f.vote(0, &f.initial_head, &p, &state, "discovery-max-a.json");
+    let b = f.vote(1, &f.initial_head, &p, &state, "discovery-max-b.json");
+    let history = f.certified(&f.genesis, &f.initial_head, &p, &[&a, &b], "discovery-max-history.json");
+    assert!(fs::metadata(&history).unwrap().len() < 32768);
+    f.sync(&[1], &history, &p.1, &state, 1, 1);
+    let before = fs::read(f.journal(2)).unwrap();
+    let responder = fs::read(f.journal(1)).unwrap();
+    let founder = fs::read(f.journal(0)).unwrap();
+    let listener = f.head_listener(1, 2, &f.initial_head);
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = proxy.local_addr().unwrap().to_string();
+    let target = listener.address.clone();
+    let relay = thread::spawn(move || discovery_proxy(proxy, target, 32, true, || {}));
+    rejected(f.pull_head(2, &f.initial_head, &[(1, &address)]), "no verified certified head response");
+    // The responder only sent historical bytes; it cannot claim that the
+    // recipient accepted them, even if its own transport writes succeeded.
+    success(listener.finish());
+    let capture = relay.join().unwrap();
+    assert!(!capture.windows(marker.len()).any(|window| window == marker));
+    assert_eq!(fs::read(f.journal(2)).unwrap(), before);
+
+    let listener = f.head_listener(1, 2, &f.initial_head);
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = proxy.local_addr().unwrap().to_string();
+    let target = listener.address.clone();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let relay = thread::spawn(move || {
+        discovery_proxy(proxy, target, 32, false, || {
+            ready_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        })
+    });
+    let mut command = f.pull_head_cmd(2, &f.initial_head, &[(1, &address)]);
+    let requester = thread::spawn(move || command.output().unwrap());
+    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    // Complete the same certified decision locally while the remote
+    // checkpoint's final frame is withheld. A stale pull must not
+    // replace that local journal or a pending vote for its successor.
+    f.sync(&[2], &history, &p.1, &state, 1, 1);
+    let next = f.propose(&history, &p.1, "discovery-race-next.json", &["--recover"]);
+    f.vote(2, &p.1, &next, &state, "discovery-race-next-vote.json");
+    let committed = fs::read(f.journal(2)).unwrap();
+    release_tx.send(()).unwrap();
+    relay.join().unwrap();
+    rejected(requester.join().unwrap(), "discovery requester base or identity changed");
+    success(listener.finish());
+    assert_eq!(fs::read(f.journal(2)).unwrap(), committed);
+    assert_eq!(fs::read(f.journal(1)).unwrap(), responder);
+    assert_eq!(fs::read(f.journal(0)).unwrap(), founder);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn encrypted_head_discovery_accepts_surviving_certificate_with_silent_optional_peer() {
+    use std::net::TcpListener;
+    let f = Fixture::new();
+    let p = f.propose(&f.genesis, &f.initial_head, "discovery-survivor.json", &["--recover"]);
+    let a = f.vote(0, &f.initial_head, &p, &f.initial, "discovery-survivor-a.json");
+    let b = f.vote(1, &f.initial_head, &p, &f.initial, "discovery-survivor-b.json");
+    let h = f.certified(&f.genesis, &f.initial_head, &p, &[&a, &b], "discovery-survivor-history.json");
+    f.sync(&[1], &h, &p.1, &f.initial, 1, 2);
+    let founder = fs::read(f.journal(0)).unwrap();
+    let survivor = fs::read(f.journal(1)).unwrap();
+    let b = f.head_listener(1, 2, &f.initial_head);
+    let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = silent.local_addr().unwrap().to_string();
+    let result = json(f.pull_head(2, &f.initial_head, &[(0, &address), (1, &b.address)]));
+    drop(silent);
+    success(b.finish());
+    f.check_pulled_head(&result, &f.initial_head, &p.1, 1, true);
+    assert_eq!(result["reference_fence"], 2);
+    assert_eq!(result["responded"], serde_json::json!([f.identities[1].peer_id().to_string()]));
+    assert_eq!(result["unavailable"], serde_json::json!([f.identities[0].peer_id().to_string()]));
+    assert_eq!(fs::read(f.journal(0)).unwrap(), founder);
+    assert_eq!(fs::read(f.journal(1)).unwrap(), survivor);
+    f.assert_no_live_storage();
+}
+
 impl ObservationListener {
     fn finish(mut self) -> Output {
         self.child.take().unwrap().wait_with_output().unwrap()
