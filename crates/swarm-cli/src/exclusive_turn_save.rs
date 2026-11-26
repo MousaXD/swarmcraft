@@ -206,6 +206,8 @@ pub(super) fn run(paths: &DataPaths, command: SaveCommand) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+pub(super) use linux::verify_held_package;
+#[cfg(target_os = "linux")]
 pub(super) use linux::{retain_bundle, verify_offer_bundle, verify_retained};
 
 #[cfg(not(target_os = "linux"))]
@@ -982,6 +984,22 @@ mod linux {
         verify_level_bundle(bundle, manifest, package.core.data_version, package_report(&package)?)
     }
 
+    pub(in super::super) fn verify_held_package(
+        store: &Store,
+        journal: &super::super::Journal,
+        head: &swarm_consensus::exclusive_turn::VerifiedExclusiveTurnHead,
+        package: &Path,
+    ) -> Result<serde_json::Value> {
+        ensure!(
+            head.save_backed() && journal.phase == Phase::Held && head.holder() == journal.identity,
+            "runtime package preflight requires exact held save-backed reference turn"
+        );
+        let bundle = retained_path(store, journal.checkpoint)?;
+        let manifest =
+            verify_exact(&bundle, journal.checkpoint, head.compatibility(), &store.state(journal.checkpoint)?)?;
+        verify_package_bundle(&bundle, &manifest, package)
+    }
+
     fn verify_level_bundle(
         bundle: &Path,
         manifest: &Manifest,
@@ -1421,10 +1439,7 @@ mod linux {
                     journal.checkpoint.reference_commitment == expected_checkpoint,
                     "local checkpoint differs from expected pin"
                 );
-                let bundle = retained_path(&store, journal.checkpoint)?;
-                let manifest = load_bundle(&bundle)?;
-                verify_exact(&bundle, journal.checkpoint, head.compatibility(), &store.state(journal.checkpoint)?)?;
-                let mut result = verify_package_bundle(&bundle, &manifest, &package)?;
+                let mut result = verify_held_package(&store, &journal, &head, &package)?;
                 result["classification"] = "exclusive_turn_held_runtime_package_preflight".into();
                 result["signed_compatibility_verified"] = true.into();
                 result["independent_checkpoint_pins_verified"] = true.into();

@@ -17,6 +17,8 @@ use swarm_protocol::*;
 
 #[path = "exclusive_turn_network.rs"]
 mod network;
+#[path = "exclusive_turn_runtime_intent.rs"]
+mod runtime_intent;
 #[path = "exclusive_turn_save.rs"]
 mod save;
 #[path = "exclusive_turn_writer.rs"]
@@ -76,6 +78,11 @@ impl ReferenceCheckpoint {
 
 #[derive(Debug, Subcommand)]
 pub enum ExclusiveTurnCommand {
+    /// Explicit local runtime consent and durable unlaunched intent; no process or game authority.
+    Runtime {
+        #[command(subcommand)]
+        command: runtime_intent::RuntimeCommand,
+    },
     /// Verify and transfer offline save bytes; never grants Minecraft authority.
     Save {
         #[command(subcommand)]
@@ -419,6 +426,14 @@ impl Store {
     }
 
     fn open(paths: &DataPaths, world: ExclusiveTurnWorldIdV1) -> Result<Self> {
+        let store = Self::open_for_runtime_intent(paths, world)?;
+        runtime_intent::refuse_unresolved(&store, world)?;
+        Ok(store)
+    }
+
+    // Only the isolated runtime-intent commands may open a fenced journal.
+    // They never mutate the reference history or start a process.
+    fn open_for_runtime_intent(paths: &DataPaths, world: ExclusiveTurnWorldIdV1) -> Result<Self> {
         let identity = identity(paths)?;
         let dir = dir(paths, world)?;
         check_dir(&paths.root.join(STORE))?;
@@ -470,7 +485,8 @@ impl Store {
 
     fn validate(&self, journal: &Journal, world: ExclusiveTurnWorldIdV1) -> Result<VerifiedExclusiveTurnHead> {
         ensure!(
-            journal.format == EXCLUSIVE_TURN_FORMAT_V1 && journal.identity == self.identity.peer_id(),
+            matches!(journal.format, EXCLUSIVE_TURN_FORMAT_V1 | runtime_intent::FENCED_JOURNAL_FORMAT)
+                && journal.identity == self.identity.peer_id(),
             "exclusive-turn journal identity or version mismatch"
         );
         let head = verify_exclusive_turn_history(world, &journal.history)?;
@@ -541,6 +557,7 @@ impl Store {
         let key = VerifyingKey::from_bytes(&self.identity.public_key())?;
         key.verify_strict(&signing_bytes(&signed.journal)?, &Signature::from_slice(&signed.signature)?)
             .context("exclusive-turn journal signature invalid")?;
+        runtime_intent::check_journal_format(self, world, signed.journal.format)?;
         let head = self.validate(&signed.journal, world)?;
         Ok((signed.journal, head))
     }
@@ -832,6 +849,7 @@ fn initialize_reference(
 pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
     use ExclusiveTurnCommand::*;
     match command {
+        Runtime { command } => runtime_intent::run(paths, command),
         Save { command } => save::run(paths, command),
         Writer { command } => writer::run(paths, command),
         Network { command } => network::run(paths, command),

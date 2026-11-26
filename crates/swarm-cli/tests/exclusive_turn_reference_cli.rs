@@ -1392,35 +1392,47 @@ fn fixture_crc32(bytes: &[u8]) -> u32 {
 }
 
 fn fixture_jar(name: &str, bytes: &[u8]) -> Vec<u8> {
-    let name = name.as_bytes();
+    fixture_jar_entries(&[(name, bytes)])
+}
+
+fn fixture_jar_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&[0; 8]);
-    out.extend_from_slice(&fixture_crc32(bytes).to_le_bytes());
-    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(name);
-    out.extend_from_slice(bytes);
+    let mut offsets = Vec::new();
+    for (name, bytes) in entries {
+        let name = name.as_bytes();
+        offsets.push(out.len() as u32);
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        out.extend_from_slice(&20u16.to_le_bytes());
+        out.extend_from_slice(&[0; 8]);
+        out.extend_from_slice(&fixture_crc32(bytes).to_le_bytes());
+        out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(name);
+        out.extend_from_slice(bytes);
+    }
     let central = out.len() as u32;
-    out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&[0; 8]);
-    out.extend_from_slice(&fixture_crc32(bytes).to_le_bytes());
-    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&[0; 12]);
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(name);
+    for ((name, bytes), offset) in entries.iter().zip(offsets) {
+        let name = name.as_bytes();
+        out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        out.extend_from_slice(&20u16.to_le_bytes());
+        out.extend_from_slice(&20u16.to_le_bytes());
+        out.extend_from_slice(&[0; 8]);
+        out.extend_from_slice(&fixture_crc32(bytes).to_le_bytes());
+        out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&[0; 12]);
+        out.extend_from_slice(&offset.to_le_bytes());
+        out.extend_from_slice(name);
+    }
     let length = out.len() as u32 - central;
     out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
     out.extend_from_slice(&[0; 4]);
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
+    let count = entries.len() as u16;
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
     out.extend_from_slice(&length.to_le_bytes());
     out.extend_from_slice(&central.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
@@ -1451,6 +1463,344 @@ fn fixture_level(tags: &[u8]) -> Vec<u8> {
     nbt.extend_from_slice(tags);
     nbt.extend_from_slice(&[0, 0]);
     fixture_gzip(&nbt)
+}
+
+// Small non-executable package for lifecycle/CAS tests; the real runtime
+// package was independently exercised in verify_runtime_package.py.
+fn runtime_package_fixture(root: &Path) {
+    use sha2::{Digest, Sha256};
+    let put = |name: &str, bytes: &[u8]| {
+        let file = root.join(name);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, bytes).unwrap();
+    };
+    let sha = |bytes: &[u8]| hex::encode(Sha256::digest(bytes));
+    let minecraft = fixture_jar(
+        "version.json",
+        br#"{"id":"26.1.2","world_version":4790,"java_version":25,"stable":true,"series_id":"main"}"#,
+    );
+    put("versions/26.1.2/server-26.1.2.jar", &minecraft);
+    let dep = b"fixture minecraft library";
+    put("libraries/fixture.jar", dep);
+    let versions = format!("{}\t26.1.2\t26.1.2/server-26.1.2.jar", sha(&minecraft));
+    let libs = format!("{}\tfixture:fixture:1\tfixture.jar", sha(dep));
+    put(
+        "server.jar",
+        &fixture_jar_entries(&[
+            ("META-INF/main-class", b"net.minecraft.server.Main"),
+            ("META-INF/versions.list", versions.as_bytes()),
+            ("META-INF/libraries.list", libs.as_bytes()),
+        ]),
+    );
+    let loader = fixture_jar(
+        "fabric.mod.json",
+        br#"{"schemaVersion":1,"id":"fabricloader","version":"0.19.3","environment":"*"}"#,
+    );
+    put("fabric-libraries/fabric-loader-0.19.3.jar", &loader);
+    let mut records =
+        vec![serde_json::json!({"name":"net.fabricmc:fabric-loader:0.19.3","url":"https://maven.fabricmc.net/"})];
+    for (group, artifact) in [
+        ("org.ow2.asm", "asm"),
+        ("org.ow2.asm", "asm-analysis"),
+        ("org.ow2.asm", "asm-commons"),
+        ("org.ow2.asm", "asm-tree"),
+        ("org.ow2.asm", "asm-util"),
+        ("net.fabricmc", "sponge-mixin"),
+    ] {
+        let bytes = artifact.as_bytes();
+        put(&format!("fabric-libraries/{artifact}-1.jar"), bytes);
+        records.push(serde_json::json!({"name":format!("{group}:{artifact}:1"),"url":"https://maven.fabricmc.net/","sha256":sha(bytes),"size":bytes.len()}));
+    }
+    put("fabric-profile.json", &serde_json::to_vec(&serde_json::json!({"id":"fabric-loader-0.19.3-26.1.2","inheritsFrom":"26.1.2","mainClass":"net.fabricmc.loader.impl.launch.knot.KnotServer","libraries":records})).unwrap());
+    let api = fixture_jar("fabric.mod.json", br#"{"schemaVersion":1,"id":"fabric-api","version":"0.155.2+26.1.2"}"#);
+    let bridge = format!(
+        r#"{{"schemaVersion":1,"id":"swarmcraft","version":"{}","environment":"server","jars":[{{"file":"META-INF/jars/fabric-api-fixture.jar"}}]}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    put(
+        "mods/swarmcraft-fabric.jar",
+        &fixture_jar_entries(&[("fabric.mod.json", bridge.as_bytes()), ("META-INF/jars/fabric-api-fixture.jar", &api)]),
+    );
+    put(
+        "java/release",
+        format!("JAVA_VERSION=\"25.0.5.1\"\nOS_NAME=\"Linux\"\nOS_ARCH=\"{}\"\n", std::env::consts::ARCH).as_bytes(),
+    );
+    for name in ["java/bin/java", "java/lib/modules", "java/lib/libjava.so", "java/lib/server/libjvm.so"] {
+        put(name, b"non-executable fixture bytes");
+    }
+    fs::set_permissions(root.join("java/bin/java"), fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn runtime_intent_fences_handoff_across_process_exit_and_revocation_consumes_consent() {
+    let package_root = tempfile::tempdir().unwrap();
+    let package = package_root.path().join("package");
+    runtime_package_fixture(&package);
+    let pin = swarm_cli::exclusive_turn_runtime_package::inspect_runtime_package(&package).unwrap().fingerprint;
+    let level = fixture_level(&version_tag(b"DataVersion", 4790));
+    let (f, source, bundle) = Fixture::new_save_backed_with(&level, pin);
+    let captured = json(save_cmd(&f.profiles[0], "inspect").args(["--bundle", path(&bundle)]).output().unwrap());
+    let checkpoint = captured["reference_commitment"].as_str().unwrap();
+    let run = |device: usize, action: &str, args: &[&str]| {
+        cmd(
+            &f.profiles[device],
+            &["runtime", action, "--expected-world", &f.world, "--expected-grant", &f.initial_grant],
+        )
+        .args(args)
+        .output()
+        .unwrap()
+    };
+    let consent = |device, revision: &str, checkpoint: &str, heap: &str, cpu: &str| {
+        run(
+            device,
+            "consent",
+            &[
+                "--expected-revision",
+                revision,
+                "--expected-checkpoint",
+                checkpoint,
+                "--heap-mib",
+                heap,
+                "--cpu-millicores",
+                cpu,
+                "--confirm",
+            ],
+        )
+    };
+    let reserve = |revision: &str, checkpoint: &str| {
+        run(
+            0,
+            "reserve",
+            &[
+                "--expected-revision",
+                revision,
+                "--expected-checkpoint",
+                checkpoint,
+                "--package",
+                path(&package),
+                "--confirm",
+            ],
+        )
+    };
+    let initial = json(run(0, "status", &[]));
+    assert_eq!(initial["revision"], "0");
+    assert!(initial["consent"].is_null());
+    rejected(reserve("0", checkpoint), "consent state is absent");
+    rejected(consent(1, "0", checkpoint, "512", "500"), "requires exact held");
+    rejected(consent(0, "0", checkpoint, "511", "500"), "heap consent out of bounds");
+    rejected(consent(0, "0", checkpoint, "512", "0"), "CPU limit");
+    assert!(!f.store(0).join("runtime-local.postcard").exists());
+    let legacy = f.snapshot(0);
+    let enabled = json(consent(0, "0", checkpoint, "512", "500"));
+    assert_eq!(enabled["revision"], "1");
+    assert_eq!(enabled["consent_matches_current_held_scope"], true);
+    assert_eq!(enabled["consent"]["scope"]["compatibility"], pin.to_string());
+    let journal = f.snapshot(0);
+    assert_ne!(legacy, journal);
+    assert_eq!(journal[0], 2, "local envelope must be incompatible with legacy CLI");
+    let state_path = f.store(0).join("runtime-local.postcard");
+    let state = fs::read(&state_path).unwrap();
+    rejected(consent(0, "0", checkpoint, "512", "500"), "revision differs");
+    let java = package.join("java/bin/java");
+    let bytes = fs::read(&java).unwrap();
+    fs::write(&java, b"different bytes").unwrap();
+    rejected(reserve("1", checkpoint), "runtime package pin differs");
+    fs::write(&java, bytes).unwrap();
+    assert_eq!(fs::read(&state_path).unwrap(), state);
+    // Crash after publication but before the controller can return its
+    // acknowledgment. A filled pipe blocks stdout without a production
+    // fault-injection switch or a timing-only SIGKILL before publication.
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::process::ExitStatusExt;
+    let mut pipe = [-1; 2];
+    // SAFETY: two writable descriptors, then transferred to owned Files.
+    assert_eq!(unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+    let _reader = unsafe { File::from_raw_fd(pipe[0]) };
+    let mut writer = unsafe { File::from_raw_fd(pipe[1]) };
+    let capacity = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETPIPE_SZ) };
+    assert!(capacity > 0);
+    writer.write_all(&vec![0; capacity as usize]).unwrap();
+    let mut server = Server(Some(
+        cmd(
+            &f.profiles[0],
+            &[
+                "runtime",
+                "reserve",
+                "--expected-world",
+                &f.world,
+                "--expected-grant",
+                &f.initial_grant,
+                "--expected-revision",
+                "1",
+                "--expected-checkpoint",
+                checkpoint,
+                "--package",
+                path(&package),
+                "--confirm",
+            ],
+        )
+        .stdout(Stdio::from(writer))
+        .spawn()
+        .unwrap(),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(server.0.as_mut().unwrap().try_wait().unwrap().is_none(), "reserve exited before crash injection");
+        if fs::read(&state_path).unwrap() != state {
+            break;
+        }
+        assert!(Instant::now() < deadline, "intent was not published");
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Publication releases the independent consent lock before writing
+    // stdout. Even a blocked acknowledgment cannot pin the opt-out lock.
+    let local_lock = File::open(f.store(0).join("runtime-local.lock")).unwrap();
+    loop {
+        assert!(server.0.as_mut().unwrap().try_wait().unwrap().is_none());
+        if FileExt::try_lock_exclusive(&local_lock).is_ok() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "blocked acknowledgment held consent lock");
+        thread::sleep(Duration::from_millis(10));
+    }
+    drop(local_lock);
+    assert_eq!(server.kill().status.signal(), Some(libc::SIGKILL));
+    let reserved = json(run(0, "status", &[]));
+    let intent = reserved["intent_id"].as_str().unwrap();
+    assert_eq!(reserved["revision"], "2");
+    assert_eq!(reserved["reference_operations_fenced"], true);
+    assert_eq!(reserved["intent_kind"], "unlaunched_no_process_v1");
+    for flag in [
+        "capacity_verified",
+        "resource_enforcement_verified",
+        "process_spawned",
+        "save_barrier_verified",
+        "canonical_authority",
+        "write_authority",
+        "runtime_activation",
+        "player_admission",
+        "minecraft_gameplay_verified",
+    ] {
+        assert_eq!(reserved[flag], false, "{flag}");
+    }
+    rejected(reserve("1", checkpoint), "unresolved runtime intent");
+    rejected(consent(0, "2", checkpoint, "512", "500"), "unresolved runtime intent");
+    rejected(
+        f.mutate(0, "prepare", &f.initial_grant, &["--expected-checkpoint", checkpoint]),
+        "unresolved durable runtime intent",
+    );
+    rejected(invoke(&f.profiles[0], &["status", "--expected-world", &f.world]), "unresolved durable runtime intent");
+    let restore = f.temp.path().join("fenced-restore");
+    rejected(
+        save_cmd(&f.profiles[0], "restore-held")
+            .args([
+                "--expected-world",
+                &f.world,
+                "--expected-grant",
+                &f.initial_grant,
+                "--expected-checkpoint",
+                checkpoint,
+                "--destination",
+                path(&restore),
+                "--confirm",
+            ])
+            .output()
+            .unwrap(),
+        "unresolved durable runtime intent",
+    );
+    assert!(!restore.exists());
+    let clear = |revision: &str, id: &str| {
+        run(
+            0,
+            "clear",
+            &[
+                "--expected-revision",
+                revision,
+                "--expected-checkpoint",
+                checkpoint,
+                "--expected-intent",
+                id,
+                "--confirm",
+            ],
+        )
+    };
+    rejected(clear("2", &Hash32([8; 32]).to_string()), "exact unlaunched pin");
+    // The denial-only revocation must succeed even when the world lock is held.
+    let world_lock = File::open(f.store(0).join("journal.lock")).unwrap();
+    FileExt::try_lock_exclusive(&world_lock).unwrap();
+    rejected(run(0, "revoke", &["--expected-revision", "1", "--confirm"]), "revision differs");
+    let revoked = json(run(0, "revoke", &["--expected-revision", "2", "--confirm"]));
+    assert_eq!(revoked["revision"], "3");
+    assert!(revoked["consent"].is_null());
+    assert_eq!(revoked["intent_id"], intent);
+    assert_eq!(revoked["reference_operations_fenced"], true);
+    drop(world_lock);
+    assert_eq!(f.snapshot(0), journal);
+    rejected(clear("2", intent), "revision differs");
+    let cleared = json(clear("3", intent));
+    assert_eq!(cleared["revision"], "4");
+    assert!(cleared["intent_id"].is_null() && cleared["consent"].is_null());
+    rejected(reserve("4", checkpoint), "consent is absent or withdrawn");
+    // Missing or corrupted sidecar and legacy envelope rollback all deny.
+    let retained = fs::read(&state_path).unwrap();
+    fs::remove_file(&state_path).unwrap();
+    rejected(
+        f.mutate(0, "prepare", &f.initial_grant, &["--expected-checkpoint", checkpoint]),
+        "incomplete durable runtime intent state",
+    );
+    fs::write(&state_path, &retained).unwrap();
+    fs::set_permissions(&state_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let lock_path = f.store(0).join("runtime-local.lock");
+    let hidden_lock = f.temp.path().join("temporarily-hidden-runtime-lock");
+    let hidden_state = f.temp.path().join("temporarily-hidden-runtime-state");
+    fs::rename(&lock_path, &hidden_lock).unwrap();
+    fs::rename(&state_path, &hidden_state).unwrap();
+    rejected(
+        f.mutate(0, "prepare", &f.initial_grant, &["--expected-checkpoint", checkpoint]),
+        "journal format and sidecar disagree",
+    );
+    fs::rename(&hidden_lock, &lock_path).unwrap();
+    fs::rename(&hidden_state, &state_path).unwrap();
+    let mut corrupt = retained.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    fs::write(&state_path, corrupt).unwrap();
+    rejected(
+        f.mutate(0, "prepare", &f.initial_grant, &["--expected-checkpoint", checkpoint]),
+        "runtime intent state signature invalid",
+    );
+    fs::write(&state_path, &retained).unwrap();
+    fs::write(f.journal(0), legacy).unwrap();
+    rejected(
+        f.mutate(0, "prepare", &f.initial_grant, &["--expected-checkpoint", checkpoint]),
+        "journal format and sidecar disagree",
+    );
+    fs::write(f.journal(0), &journal).unwrap();
+    let (offer, _) = f.prepare(0, &f.initial_grant, checkpoint);
+    success(f.mutate(0, "cancel", &f.initial_grant, &["--expected-offer", &offer.offer_hash().unwrap().to_string()]));
+    // Consent cannot follow a changed save even under the same grant.
+    success(consent(0, "4", checkpoint, "512", "500"));
+    fs::write(source.join("playerdata/empty.dat"), b"new save bytes").unwrap();
+    let next_bundle = f.temp.path().join("new-intent-save");
+    let next = json(capture_save_with_compatibility(&f.profiles[0], &source, &next_bundle, pin).output().unwrap());
+    success(
+        save_cmd(&f.profiles[0], "checkpoint")
+            .args([
+                "--expected-world",
+                &f.world,
+                "--expected-grant",
+                &f.initial_grant,
+                "--expected-checkpoint",
+                checkpoint,
+                "--bundle",
+                path(&next_bundle),
+                "--confirm",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(json(run(0, "status", &[]))["consent_matches_current_held_scope"], false);
+    rejected(reserve("5", next["reference_commitment"].as_str().unwrap()), "consent does not match exact held");
+    f.assert_no_live_storage();
 }
 
 #[test]

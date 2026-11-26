@@ -844,3 +844,77 @@ unchanged. The source save was copied under its Java-compatible session
 lock. This does not establish a real launch with the staged package or
 verify the source save was originally produced by precisely that mod set.
 [Retained evidence](../../research/exclusive-turn/evidence/2026-11-26-runtime-package-preflight.txt).
+
+### Durable local runtime consent and unlaunched intent
+
+This is a denial-only prerequisite to a future supervised runtime adapter,
+not a Minecraft launch command. Existing reference worlds remain unchanged
+until the holder explicitly opts in for an exact signed world, grant, epoch,
+fence, retained checkpoint, and runtime package compatibility. The local
+account chooses positive bounded heap MiB and CPU millicores; no resource
+availability or enforcement is implied by storing those preferences.
+
+```sh
+swarmcraft --data-dir "$PROFILE" exclusive-turn runtime status \
+  --expected-world "$WORLD" --expected-grant "$GRANT"
+swarmcraft --data-dir "$PROFILE" exclusive-turn runtime consent \
+  --expected-world "$WORLD" --expected-grant "$GRANT" \
+  --expected-checkpoint "$COMMITMENT" --expected-revision 0 \
+  --heap-mib 512 --cpu-millicores 500 --confirm
+swarmcraft --data-dir "$PROFILE" exclusive-turn runtime reserve \
+  --expected-world "$WORLD" --expected-grant "$GRANT" \
+  --expected-checkpoint "$COMMITMENT" --expected-revision 1 \
+  --package "$PACKAGE" --confirm
+```
+
+The local state is bounded, canonical, owner-only, identity-signed and
+atomically replaced with file/directory synchronization. First opt-in
+upgrades the **local** journal envelope from format 1 to 2, independent
+of genesis or wire formats. Older binaries reject this envelope rather
+than ignoring the new fence. The upgraded journal and sidecar must both
+exist and validate; an interrupted upgrade, missing pair, corrupted
+signature or inconsistent envelope fails closed rather than resetting
+consent or inferring an absent intent. This intentionally sacrifices
+availability if either durable file is lost. It does not provide protection
+against malicious same-account rollback of a complete older profile.
+
+`reserve` holds the stable journal lock and verifies the exact retained
+save and entire package again, then rechecks the current consent revision
+under a separate local state lock before publishing the unique intent.
+An unresolved intent denies all ordinary reference journal operations,
+including preparation, handoff, checkpoint update and held-save restore,
+even after the reserving process exits. The remote replica is not granted
+any authority by this local record. `runtime status` is the explicit
+review path. No JVM, game route, canonical world or permit is created.
+
+The revocation command needs only the exact local consent grant and
+current local revision, and does not take the world journal lock; it can
+therefore withdraw consent during a later supervisor's ownership window.
+The consent lock is released before any CLI acknowledgment is written, so
+a blocked output stream cannot retain the opt-out lock. Withdrawal does
+**not** retire the unresolved intent or permit handoff.
+This reference implementation clears only the explicitly typed
+`unlaunched_no_process_v1` record, which by construction cannot have
+spawned a child. The operator must independently pin the exact intent ID,
+checkpoint, grant and current revision. Clearing consumes the old consent;
+any new intent needs another explicit opt-in.
+
+```sh
+# Use the revision actually observed from runtime status, not a cached one.
+swarmcraft --data-dir "$PROFILE" exclusive-turn runtime revoke \
+  --expected-world "$WORLD" --expected-grant "$GRANT" \
+  --expected-revision "$REVISION" --confirm
+swarmcraft --data-dir "$PROFILE" exclusive-turn runtime clear \
+  --expected-world "$WORLD" --expected-grant "$GRANT" \
+  --expected-checkpoint "$COMMITMENT" --expected-revision "$NEW_REVISION" \
+  --expected-intent "$INTENT" --confirm
+```
+
+The revision is reported as a decimal string. No elapsed timeout,
+restarting the application, lost acknowledgment or consent withdrawal
+can implicitly clear a fence. A changed grant/checkpoint cannot reuse
+old consent. A future launch-capable implementation must introduce a
+distinct durable process-ownership state, coordinate with the account-wide
+runtime reservation and kernel memory/CPU limits, and never reuse the
+unlaunched clear path for a possibly spawned process. Save-barrier and
+descendant-quiescence evidence must precede any live-to-offline handoff.

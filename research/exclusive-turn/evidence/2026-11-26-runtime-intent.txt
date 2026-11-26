@@ -1,0 +1,30 @@
+Durable denial-only exclusive-turn runtime intent; baseline 847d028; local Linux only.
+No JVM, kernel resource admission or game authority.
+4f6e4e3cde9e56a48390a7981e98da8ee37617a5bb355438031ee9a961a82b3a  crates/swarm-cli/src/exclusive_turn_reference.rs
+989aa0d29a107582db97494e4a69c85e333c267963f9805595ecd84cd4f3a1ab  crates/swarm-cli/src/exclusive_turn_runtime_intent.rs
+ed43dfc94a934414bd1fe8fe11b6ebf52910109a4ae2a4f42ab09de6322777db  crates/swarm-cli/src/exclusive_turn_save.rs
+a7bcc19493f5629967f731e964af96b4922141ccf57b248f04cdb861169900aa  crates/swarm-cli/tests/exclusive_turn_reference_cli.rs
+ada0dc45b6929c3b8ac4b117b54301b129614a1a691ea3782dfa2e7abd56d8e1  target/debug/swarmcraft
+   Compiling swarm-cli v0.5.1 (/home/mousa/projects/my-creations/swarmcraft/swarmcraft/.worktrees/sabathon-p0-integration-20261123/crates/swarm-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 30s
+     Running tests/exclusive_turn_reference_cli.rs (target/debug/deps/exclusive_turn_reference_cli-6e8a19a91e9591be)
+
+running 13 tests
+test authenticated_save_blob_transfer_is_exact_and_never_releases_a_turn ... ok
+test concurrent_cancel_and_commit_cannot_both_succeed ... ok
+test core_runtime_pin_and_nbt_parser_refuse_malformed_or_ambiguous_inputs ... ok
+test encrypted_handoff_partition_boundaries_and_exact_outbox_retry ... ok
+test held_runtime_preflight_requires_signed_core_pin_and_exact_save_but_never_grants_runtime ... ok
+test offline_review_derives_pins_but_never_certifies_a_current_offer_or_mutates_journals ... ok
+test offline_save_exact_capture_restore_and_corruption_refusals ... ok
+test private_lock_corruption_and_missing_staged_bytes_refuse_without_reinitializing ... ok
+test real_process_round_trip_cancellation_stale_receipts_and_lost_commit_output ... ok
+test real_writer_lock_route_and_crash_fence_survive_network_handoff ... ok
+test runtime_intent_fences_handoff_across_process_exit_and_revocation_consumes_consent ... ok
+test save_backed_release_requires_full_retention_before_and_after_commit ... ok
+test writer_lost_ack_keeps_exact_durable_checkpoint_and_rejects_stale_cas ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 65.20s
+
+   Compiling swarm-cli v0.5.1 (/home/mousa/projects/my-creations/swarmcraft/swarmcraft/.worktrees/sabathon-p0-integration-20261123/crates/swarm-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 40.99s
