@@ -3,6 +3,7 @@ mod exclusive_turn_reference;
 mod invite;
 mod ownerless_authority;
 mod ownerless_creation;
+mod reference_channel;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};

@@ -2,13 +2,13 @@
 //! Mutual application-key authentication protects the signed content; there
 //! is no transport encryption, remote attestation, or production routing.
 use super::{encoded, pin, print, Journal, Store};
-use anyhow::{bail, ensure, Context, Result};
+use crate::reference_channel::{private_ip, read_all, remaining, write_all};
+use anyhow::{ensure, Context, Result};
 use clap::Subcommand;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
     collections::BTreeSet,
-    io::{Read, Write},
-    net::{IpAddr, SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream},
     thread,
     time::{Duration, Instant},
 };
@@ -55,47 +55,6 @@ pub enum ObservationCommand {
         #[arg(long)]
         confirm: bool,
     },
-}
-
-pub(super) fn private_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
-        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local(),
-    }
-}
-
-pub(super) fn remaining(deadline: Instant) -> Result<Duration> {
-    let left = deadline.saturating_duration_since(Instant::now());
-    ensure!(!left.is_zero(), "ownerless observation deadline expired");
-    Ok(left)
-}
-
-pub(super) fn read_all(stream: &mut TcpStream, mut bytes: &mut [u8], deadline: Instant) -> Result<()> {
-    while !bytes.is_empty() {
-        stream.set_read_timeout(Some(remaining(deadline)?))?;
-        match stream.read(bytes) {
-            Ok(0) => bail!("truncated observation frame"),
-            Ok(n) => bytes = &mut bytes[n..],
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e.into()),
-        }
-    }
-    remaining(deadline)?;
-    Ok(())
-}
-
-pub(super) fn write_all(stream: &mut TcpStream, mut bytes: &[u8], deadline: Instant) -> Result<()> {
-    while !bytes.is_empty() {
-        stream.set_write_timeout(Some(remaining(deadline)?))?;
-        match stream.write(bytes) {
-            Ok(0) => bail!("observation frame write failed"),
-            Ok(n) => bytes = &bytes[n..],
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e.into()),
-        }
-    }
-    remaining(deadline)?;
-    Ok(())
 }
 
 fn receive<T: DeserializeOwned>(stream: &mut TcpStream, deadline: Instant) -> Result<T> {

@@ -15,6 +15,9 @@ use swarm_consensus::exclusive_turn::*;
 use swarm_core::{random_nonce, DataPaths, PeerIdentity};
 use swarm_protocol::*;
 
+#[path = "exclusive_turn_network.rs"]
+mod network;
+
 const STORE: &str = "exclusive-turn-reference";
 const JOURNAL_LIMIT: usize = 512 * 1024;
 const DOCUMENT_LIMIT: usize = 1024 * 1024;
@@ -69,6 +72,11 @@ impl ReferenceCheckpoint {
 
 #[derive(Debug, Subcommand)]
 pub enum ExclusiveTurnCommand {
+    /// Authenticated private reference handoff, not a Minecraft runtime transfer.
+    Network {
+        #[command(subcommand)]
+        command: network::NetworkCommand,
+    },
     /// Draft a separate fixed two-device reference identity; not a playable world.
     Draft {
         #[arg(long = "device-key", num_args = 1, required = true)]
@@ -257,6 +265,7 @@ fn print_document<T: Serialize>(value: &T) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&bytes)?;
     stdout.write_all(b"\n")?;
+    stdout.flush()?;
     Ok(())
 }
 
@@ -558,9 +567,116 @@ fn opened(paths: &DataPaths, pin: &Pin) -> Result<(Store, Journal, VerifiedExclu
     Ok((store, journal, head))
 }
 
+// The file and encrypted transport workflows share exactly the same durable transitions.
+fn stage_reference(
+    store: &Store,
+    journal: &mut Journal,
+    head: &VerifiedExclusiveTurnHead,
+    offer: ExclusiveTurnSignedOfferV1,
+    expected_offer: Hash32,
+    bytes: &[u8],
+) -> Result<ExclusiveTurnReceiptV1> {
+    ensure!(
+        matches!(journal.phase, Phase::Replica | Phase::Released),
+        "local reference phase cannot stage incoming offer"
+    );
+    verify_exclusive_turn_offer(head, &offer)?;
+    ensure!(
+        offer.offer_hash()? == expected_offer && offer.offer.recipient == journal.identity,
+        "incoming offer or recipient differs from expected pin"
+    );
+    offer.offer.checkpoint.verify_reference_bytes(bytes)?;
+    if let Some(staged) = &journal.staged {
+        if staged.offer == offer {
+            ensure!(store.state(offer.offer.checkpoint)? == bytes, "staged reference bytes differ");
+            return Ok(staged.receipt.clone());
+        }
+        ensure!(
+            offer.offer.attempt > staged.offer.offer.attempt,
+            "incoming offer is stale or conflicts with retained receipt"
+        );
+    }
+    store.retain(offer.offer.checkpoint, bytes)?;
+    let mut receipt = ExclusiveTurnReceiptV1 {
+        world_id: head.world(),
+        offer_hash: expected_offer,
+        recipient: journal.identity,
+        signature: vec![],
+    };
+    receipt.signature = store.identity.sign(&receipt.signing_bytes()?);
+    journal.staged = Some(Staged { offer, receipt: receipt.clone() });
+    store.save(head.world(), journal, true)?;
+    Ok(receipt)
+}
+
+fn commit_reference(
+    store: &Store,
+    journal: &mut Journal,
+    head: &VerifiedExclusiveTurnHead,
+    receipt: ExclusiveTurnReceiptV1,
+    expected_offer: Hash32,
+) -> Result<ExclusiveTurnReleaseV1> {
+    let Phase::Prepared(offer) = &journal.phase else { bail!("no prepared reference offer to commit") };
+    ensure!(offer.offer_hash()? == expected_offer, "prepared offer differs from expected pin");
+    verify_exclusive_turn_receipt(head, offer, &receipt)?;
+    let mut release = ExclusiveTurnReleaseV1 { offer: offer.as_ref().clone(), receipt, signature: vec![] };
+    release.signature = store.identity.sign(&release.signing_bytes()?);
+    let next = apply_exclusive_turn_release(head, &release)?;
+    journal.history.releases.push(release.clone());
+    journal.phase = Phase::Released;
+    journal.checkpoint = next.checkpoint();
+    // The one atomic signed replacement is both permanent local
+    // relinquishment and exact outgoing release journal. No output
+    // before file and directory synchronization completes.
+    let durable = store.save(head.world(), journal, true)?;
+    ensure!(durable == next, "durable reference grant mismatch");
+    Ok(release)
+}
+
+fn accept_reference(
+    store: &Store,
+    journal: &mut Journal,
+    head: &VerifiedExclusiveTurnHead,
+    release: ExclusiveTurnReleaseV1,
+    expected_base: Hash32,
+    expected_release: Hash32,
+) -> Result<VerifiedExclusiveTurnHead> {
+    ensure!(release.grant_hash()? == expected_release, "committed release differs from expected pin");
+    if head.grant() == expected_release {
+        // Exact retry must not restore a prepared/retired turn or
+        // overwrite a newer local reference checkpoint.
+        ensure!(
+            journal.phase == Phase::Held
+                && journal.history.releases.last() == Some(&release)
+                && release.offer.offer.parent_grant == expected_base
+                && journal.checkpoint == head.checkpoint(),
+            "release retry cannot restore a changed or nonheld reference turn"
+        );
+        return Ok(head.clone());
+    }
+    pin_grant(head, expected_base)?;
+    ensure!(matches!(journal.phase, Phase::Replica | Phase::Released), "local reference phase cannot accept release");
+    let staged = journal.staged.as_ref().context("matching durable checkpoint receipt is absent")?;
+    ensure!(
+        staged.offer == release.offer
+            && staged.receipt == release.receipt
+            && release.offer.offer.recipient == journal.identity,
+        "release does not match exact retained recipient receipt"
+    );
+    let next = apply_exclusive_turn_release(head, &release)?;
+    journal.history.releases.push(release);
+    journal.phase = Phase::Held;
+    journal.checkpoint = next.checkpoint();
+    journal.staged = None;
+    let durable = store.save(head.world(), journal, true)?;
+    ensure!(durable == next, "durable reference grant mismatch");
+    Ok(next)
+}
+
 pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
     use ExclusiveTurnCommand::*;
     match command {
+        Network { command } => network::run(paths, command),
         Draft { device_keys, initial_holder, compatibility, state } => {
             ensure!(device_keys.len() == 2, "exactly two device keys required");
             let mut devices = Vec::new();
@@ -706,59 +822,15 @@ pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
         Stage { review, offer, expected_offer, checkpoint } => {
             review.confirm()?;
             let (store, mut journal, head) = opened(paths, &review.pin)?;
-            ensure!(
-                matches!(journal.phase, Phase::Replica | Phase::Released),
-                "local reference phase cannot stage incoming offer"
-            );
-            let offer: ExclusiveTurnSignedOfferV1 = read_document(&offer)?;
-            verify_exclusive_turn_offer(&head, &offer)?;
-            ensure!(
-                offer.offer_hash()? == expected_offer && offer.offer.recipient == journal.identity,
-                "incoming offer or recipient differs from expected pin"
-            );
+            let offer = read_document(&offer)?;
             let bytes = read_bytes(&checkpoint, MAX_EXCLUSIVE_TURN_REFERENCE_BYTES)?;
-            offer.offer.checkpoint.verify_reference_bytes(&bytes)?;
-            if let Some(staged) = &journal.staged {
-                if staged.offer == offer {
-                    ensure!(store.state(offer.offer.checkpoint)? == bytes, "staged reference bytes differ");
-                    return print_document(&staged.receipt);
-                }
-                ensure!(
-                    offer.offer.attempt > staged.offer.offer.attempt,
-                    "incoming offer is stale or conflicts with retained receipt"
-                );
-            }
-            store.retain(offer.offer.checkpoint, &bytes)?;
-            let mut receipt = ExclusiveTurnReceiptV1 {
-                world_id: head.world(),
-                offer_hash: expected_offer,
-                recipient: journal.identity,
-                signature: vec![],
-            };
-            receipt.signature = store.identity.sign(&receipt.signing_bytes()?);
-            journal.staged = Some(Staged { offer, receipt: receipt.clone() });
-            store.save(head.world(), &journal, true)?;
-            print_document(&receipt)
+            print_document(&stage_reference(&store, &mut journal, &head, offer, expected_offer, &bytes)?)
         }
         Commit { review, receipt, expected_offer } => {
             review.confirm()?;
             let (store, mut journal, head) = opened(paths, &review.pin)?;
-            let Phase::Prepared(offer) = &journal.phase else { bail!("no prepared reference offer to commit") };
-            ensure!(offer.offer_hash()? == expected_offer, "prepared offer differs from expected pin");
-            let receipt: ExclusiveTurnReceiptV1 = read_document(&receipt)?;
-            verify_exclusive_turn_receipt(&head, offer, &receipt)?;
-            let mut release = ExclusiveTurnReleaseV1 { offer: offer.as_ref().clone(), receipt, signature: vec![] };
-            release.signature = store.identity.sign(&release.signing_bytes()?);
-            let next = apply_exclusive_turn_release(&head, &release)?;
-            journal.history.releases.push(release.clone());
-            journal.phase = Phase::Released;
-            journal.checkpoint = next.checkpoint();
-            // The one atomic signed replacement is both permanent local
-            // relinquishment and exact outgoing release journal. No output
-            // before file and directory synchronization completes.
-            let durable = store.save(head.world(), &journal, true)?;
-            ensure!(durable == next, "durable reference grant mismatch");
-            print_document(&release)
+            let receipt = read_document(&receipt)?;
+            print_document(&commit_reference(&store, &mut journal, &head, receipt, expected_offer)?)
         }
         ExportRelease { pin } => {
             let (_store, journal, _) = opened(paths, &pin)?;
@@ -771,38 +843,8 @@ pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
             let store = Store::open(paths, world)?;
             let (mut journal, head) = store.load(world)?;
             let release: ExclusiveTurnReleaseV1 = read_document(&release)?;
-            ensure!(release.grant_hash()? == expected_release, "committed release differs from expected pin");
-            if head.grant() == expected_release {
-                // Exact retry must not restore a prepared/retired turn or
-                // overwrite a newer local reference checkpoint.
-                ensure!(
-                    journal.phase == Phase::Held
-                        && journal.history.releases.last() == Some(&release)
-                        && release.offer.offer.parent_grant == review.pin.expected_grant
-                        && journal.checkpoint == head.checkpoint(),
-                    "release retry cannot restore a changed or nonheld reference turn"
-                );
-                return print_document(&report(&head, Some(&journal)));
-            }
-            pin_grant(&head, review.pin.expected_grant)?;
-            ensure!(
-                matches!(journal.phase, Phase::Replica | Phase::Released),
-                "local reference phase cannot accept release"
-            );
-            let staged = journal.staged.as_ref().context("matching durable checkpoint receipt is absent")?;
-            ensure!(
-                staged.offer == release.offer
-                    && staged.receipt == release.receipt
-                    && release.offer.offer.recipient == journal.identity,
-                "release does not match exact retained recipient receipt"
-            );
-            let next = apply_exclusive_turn_release(&head, &release)?;
-            journal.history.releases.push(release);
-            journal.phase = Phase::Held;
-            journal.checkpoint = next.checkpoint();
-            journal.staged = None;
-            let durable = store.save(world, &journal, true)?;
-            ensure!(durable == next, "durable reference grant mismatch");
+            let next =
+                accept_reference(&store, &mut journal, &head, release, review.pin.expected_grant, expected_release)?;
             print_document(&report(&next, Some(&journal)))
         }
     }

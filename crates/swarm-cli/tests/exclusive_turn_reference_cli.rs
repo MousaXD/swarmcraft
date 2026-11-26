@@ -6,9 +6,13 @@ use fs2::FileExt;
 use serde_json::Value;
 use std::{
     fs::{self, File},
+    io::{BufRead, BufReader, Read, Write},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     os::unix::fs::{symlink, PermissionsExt},
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 use swarm_core::{DataPaths, PeerIdentity};
 use swarm_protocol::*;
@@ -559,5 +563,354 @@ fn concurrent_cancel_and_commit_cannot_both_succeed() {
     }
     report(&f.status(1), "replica", 1);
     assert_eq!(f.status(1)["reference_holder"], f.identities[0].peer_id().to_string());
+    f.assert_no_live_storage();
+}
+
+// Own only these disposable child processes; kill/reap on an assertion panic.
+struct Server(Option<Child>);
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Server {
+    fn finish(mut self) -> Output {
+        self.0.take().unwrap().wait_with_output().unwrap()
+    }
+}
+
+impl Fixture {
+    fn network(&self, i: usize, action: &str, base: &str, offer: &str) -> Command {
+        cmd(
+            &self.profiles[i],
+            &[
+                "network",
+                action,
+                "--expected-world",
+                &self.world,
+                "--expected-grant",
+                base,
+                "--expected-offer",
+                offer,
+                "--confirm",
+            ],
+        )
+    }
+
+    fn serve(&self, target: usize, base: &str, offer: &str, approved: &Path) -> (Server, SocketAddr) {
+        let source = 1 - target;
+        let child = self
+            .network(target, "serve-handoff", base, offer)
+            .args([
+                "--offer",
+                path(approved),
+                "--from",
+                &self.identities[source].peer_id().to_string(),
+                "--bind",
+                "127.0.0.1:0",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut server = Server(Some(child));
+        let mut line = String::new();
+        BufReader::new(server.0.as_mut().unwrap().stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+        assert!(!line.is_empty(), "listener did not announce readiness: {:?}", server.0.as_mut().unwrap().try_wait());
+        let ready: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(ready["classification"], "exclusive_turn_reference_handoff_listener");
+        assert_eq!(ready["world_id"], self.world);
+        assert_eq!(ready["base"], base);
+        assert_eq!(ready["offer"], offer);
+        assert_eq!(ready["recipient"], self.identities[target].peer_id().to_string());
+        assert_eq!(ready["runtime_activation"], false);
+        let address: SocketAddr = ready["address"].as_str().unwrap().parse().unwrap();
+        assert!(address.ip().is_loopback());
+        (server, address)
+    }
+
+    fn send_handoff(&self, source: usize, base: &str, offer: &str, address: SocketAddr) -> Output {
+        self.network(source, "handoff", base, offer)
+            .args(["--peer", &format!("{}@{address}", self.identities[1 - source].peer_id())])
+            .output()
+            .unwrap()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WireFault {
+    /// Flip the encrypted checkpoint frame; no valid stage receipt exists.
+    CorruptCheckpoint,
+    /// The target has staged the checkpoint, but the receipt never reaches source.
+    LoseReceipt,
+    /// Source has committed its release, but the target receives none of it.
+    LoseRelease,
+    /// Target has durably accepted, but source receives no final acknowledgment.
+    LoseAcceptance,
+}
+
+fn frame(stream: &mut TcpStream) -> Vec<u8> {
+    let mut len = [0; 4];
+    stream.read_exact(&mut len).unwrap();
+    let size = u32::from_be_bytes(len) as usize;
+    assert!((1..=32784).contains(&size), "bounded encrypted frame");
+    let mut result = vec![0; size + 4];
+    result[..4].copy_from_slice(&len);
+    stream.read_exact(&mut result[4..]).unwrap();
+    result
+}
+
+fn forward(from: &mut TcpStream, to: &mut TcpStream) {
+    to.write_all(&frame(from)).unwrap();
+}
+
+// This proxy knows ONLY the bounded encrypted frame schedule. It never has
+// either private key, plaintext or Noise session state, and does not inject
+// any test hook into production code. Both sides are real TCP CLI processes.
+fn fault_proxy(target: SocketAddr, fault: WireFault) -> (SocketAddr, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut source = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "proxy client did not connect");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        let mut dest = TcpStream::connect_timeout(&target, Duration::from_secs(5)).unwrap();
+        for stream in [&source, &dest] {
+            stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+            stream.set_write_timeout(Some(Duration::from_secs(15))).unwrap();
+            stream.set_nodelay(true).unwrap();
+        }
+        forward(&mut source, &mut dest); // initiator Noise handshake
+        forward(&mut dest, &mut source); // responder Noise handshake
+        forward(&mut dest, &mut source); // encrypted responder authentication
+        forward(&mut source, &mut dest); // encrypted initiator authentication
+        forward(&mut source, &mut dest); // offer length
+        forward(&mut source, &mut dest); // signed offer
+        forward(&mut source, &mut dest); // checkpoint length
+        let mut checkpoint = frame(&mut source); // one small checkpoint chunk
+        assert!(!checkpoint.windows(b"opaque reference bytes".len()).any(|w| w == b"opaque reference bytes"));
+        if matches!(fault, WireFault::CorruptCheckpoint) {
+            *checkpoint.last_mut().unwrap() ^= 1;
+            dest.write_all(&checkpoint).unwrap();
+        } else {
+            dest.write_all(&checkpoint).unwrap();
+            let receipt_length = frame(&mut dest);
+            let receipt = frame(&mut dest); // target has persisted receipt
+            if !matches!(fault, WireFault::LoseReceipt) {
+                source.write_all(&receipt_length).unwrap();
+                source.write_all(&receipt).unwrap();
+                let release_length = frame(&mut source); // source has relinquished
+                let release = frame(&mut source);
+                if !matches!(fault, WireFault::LoseRelease) {
+                    dest.write_all(&release_length).unwrap();
+                    dest.write_all(&release).unwrap();
+                    let _ack_length = frame(&mut dest); // recipient already accepted
+                    let _ack = frame(&mut dest);
+                    assert!(matches!(fault, WireFault::LoseAcceptance));
+                }
+            }
+        }
+        let _ = source.shutdown(Shutdown::Both);
+        let _ = dest.shutdown(Shutdown::Both);
+    });
+    (address, handle)
+}
+
+fn confirmed(
+    output: Output,
+    f: &Fixture,
+    offer: &ExclusiveTurnSignedOfferV1,
+    grant: &str,
+    epoch: u64,
+    recipient: usize,
+) -> Value {
+    use ed25519_dalek::{Signature, VerifyingKey};
+    let result = json(output);
+    assert_eq!(result["classification"], "exclusive_turn_reference_handoff_confirmed");
+    assert_eq!(result["world_id"], f.world);
+    assert_eq!(result["base"], offer.offer.parent_grant.to_string());
+    assert_eq!(result["offer"], offer.offer_hash().unwrap().to_string());
+    assert_eq!(result["grant"], grant);
+    assert_eq!(result["recipient"], f.identities[recipient].peer_id().to_string());
+    assert_eq!(result["reference_epoch"], epoch);
+    assert_eq!(result["reference_fence"], epoch);
+    for flag in ["canonical_authority", "write_authority", "runtime_activation", "player_admission"] {
+        assert_eq!(result[flag], false);
+    }
+    // Independently verify the actual recipient receipt's exact canonical
+    // postcard input, not merely its presence or the source process exit.
+    let release: ExclusiveTurnReleaseV1 = serde_json::from_slice(&f.export(1 - recipient, grant)).unwrap();
+    #[derive(serde::Serialize)]
+    struct AckBody {
+        world: ExclusiveTurnWorldIdV1,
+        base: Hash32,
+        offer: Hash32,
+        grant: Hash32,
+        recipient: PeerId,
+        epoch: u64,
+        fence: u64,
+        checkpoint: ExclusiveTurnCheckpointV1,
+    }
+    let body = AckBody {
+        world: offer.offer.world_id,
+        base: offer.offer.parent_grant,
+        offer: offer.offer_hash().unwrap(),
+        grant: release.grant_hash().unwrap(),
+        recipient: offer.offer.recipient,
+        epoch,
+        fence: epoch,
+        checkpoint: offer.offer.checkpoint,
+    };
+    let expected = serde_json::to_value(&body).unwrap();
+    assert_eq!(result["receipt"]["body"], expected);
+    let mut bytes = b"swarmcraft/exclusive-turn/reference-durable-acceptance/v1\0".to_vec();
+    bytes.extend(postcard::to_allocvec(&body).unwrap());
+    let signature: Vec<u8> = serde_json::from_value(result["receipt"]["signature"].clone()).unwrap();
+    VerifyingKey::from_bytes(&f.identities[recipient].public_key())
+        .unwrap()
+        .verify_strict(&bytes, &Signature::from_slice(&signature).unwrap())
+        .unwrap();
+    result
+}
+
+#[test]
+fn encrypted_handoff_partition_boundaries_and_exact_outbox_retry() {
+    let f = Fixture::new();
+    let initial = exclusive_turn_reference_commitment(&fs::read(&f.initial).unwrap()).unwrap().to_string();
+    let (first, first_bytes) = f.prepare(0, &f.initial_grant, &initial);
+    let first_hash = first.offer_hash().unwrap().to_string();
+    let first_file = f.put("network-first.json", &first_bytes);
+    // Public and wildcard sockets and outsiders are refused before listening.
+    for bind in ["0.0.0.0:0", "8.8.8.8:0"] {
+        rejected(
+            f.network(1, "serve-handoff", &f.initial_grant, &first_hash)
+                .args(["--offer", path(&first_file), "--from", &f.identities[0].peer_id().to_string(), "--bind", bind])
+                .output()
+                .unwrap(),
+            "explicit private",
+        );
+    }
+    rejected(
+        f.network(0, "handoff", &f.initial_grant, &first_hash)
+            .args(["--peer", &format!("{}@127.0.0.1:1", f.identities[2].peer_id())])
+            .output()
+            .unwrap(),
+        "not the other fixed device",
+    );
+    let source_before = f.snapshot(0);
+    let target_before = f.snapshot(1);
+    let unavailable = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = unavailable.local_addr().unwrap();
+    // Keep an actual socket reserved but not listening after dropping it;
+    // a different local process cannot authenticate as the expected peer.
+    drop(unavailable);
+    let out = f.send_handoff(0, &f.initial_grant, &first_hash, address);
+    assert!(!out.status.success());
+    assert_eq!(f.snapshot(0), source_before);
+
+    let (server, target) = f.serve(1, &f.initial_grant, &first_hash, &first_file);
+    let (address, proxy) = fault_proxy(target, WireFault::CorruptCheckpoint);
+    assert!(!f.send_handoff(0, &f.initial_grant, &first_hash, address).status.success());
+    proxy.join().unwrap();
+    assert!(!server.finish().status.success());
+    assert_eq!(f.snapshot(0), source_before);
+    assert_eq!(f.snapshot(1), target_before);
+    let (server, target) = f.serve(1, &f.initial_grant, &first_hash, &first_file);
+    let (address, proxy) = fault_proxy(target, WireFault::LoseReceipt);
+    assert!(!f.send_handoff(0, &f.initial_grant, &first_hash, address).status.success());
+    proxy.join().unwrap();
+    assert!(!server.finish().status.success());
+    assert_eq!(f.snapshot(0), source_before);
+    assert_eq!(f.status(1)["staged_offer"], first_hash);
+    report(&f.status(1), "replica", 1);
+    report(&json(f.mutate(0, "cancel", &f.initial_grant, &["--expected-offer", &first_hash])), "held", 1);
+    let (second, second_bytes) = f.prepare(0, &f.initial_grant, &initial);
+    let second_hash = second.offer_hash().unwrap().to_string();
+    let second_file = f.put("network-second.json", &second_bytes);
+    assert_eq!(second.offer.attempt, 2);
+    // An actual live listener pinned to the canceled offer cannot talk to
+    // the new offer: the Noise prologue differs and no journal mutates.
+    let before = [f.snapshot(0), f.snapshot(1)];
+    let (server, address) = f.serve(1, &f.initial_grant, &first_hash, &first_file);
+    assert!(!f.send_handoff(0, &f.initial_grant, &second_hash, address).status.success());
+    assert!(!server.finish().status.success());
+    assert_eq!([f.snapshot(0), f.snapshot(1)], before);
+
+    let (server, target) = f.serve(1, &f.initial_grant, &second_hash, &second_file);
+    let (address, proxy) = fault_proxy(target, WireFault::LoseRelease);
+    let failed = f.send_handoff(0, &f.initial_grant, &second_hash, address);
+    rejected(failed, "source relinquished");
+    proxy.join().unwrap();
+    assert!(!server.finish().status.success());
+    let released = f.status(0);
+    report(&released, "released", 2);
+    report(&f.status(1), "replica", 1);
+    let grant = released["grant"].as_str().unwrap().to_owned();
+    let outbox = f.export(0, &grant);
+    let source_released = f.snapshot(0);
+    rejected(f.mutate(0, "cancel", &grant, &["--expected-offer", &second_hash]), "no cancelable");
+    let (server, target) = f.serve(1, &f.initial_grant, &second_hash, &second_file);
+    let (address, proxy) = fault_proxy(target, WireFault::LoseAcceptance);
+    rejected(f.send_handoff(0, &f.initial_grant, &second_hash, address), "source relinquished");
+    proxy.join().unwrap();
+    assert!(server.finish().status.success());
+    assert_eq!(f.snapshot(0), source_released);
+    report(&f.status(1), "held", 2);
+    assert_eq!(f.status(1)["grant"], grant);
+    let target_accepted = f.snapshot(1);
+    let (server, target) = f.serve(1, &f.initial_grant, &second_hash, &second_file);
+    confirmed(f.send_handoff(0, &f.initial_grant, &second_hash, target), &f, &second, &grant, 2, 1);
+    success(server.finish());
+    assert_eq!(f.snapshot(0), source_released);
+    assert_eq!(f.snapshot(1), target_accepted);
+    assert_eq!(f.export(0, &grant), outbox);
+    // Reverse transfer crosses multiple encrypted 32 KiB frames. No
+    // recipient-side file copy is used for the actual checkpoint bytes.
+    let large = (0..70_123).map(|n| (n % 251) as u8).collect::<Vec<_>>();
+    let checkpoint = f.put("network-large.bin", &large);
+    let commitment = exclusive_turn_reference_commitment(&large).unwrap();
+    f.checkpoint(1, &grant, &initial, &checkpoint);
+    rejected(
+        f.network(1, "serve-handoff", &f.initial_grant, &second_hash)
+            .args([
+                "--offer",
+                path(&second_file),
+                "--from",
+                &f.identities[0].peer_id().to_string(),
+                "--bind",
+                "127.0.0.1:0",
+            ])
+            .output()
+            .unwrap(),
+        "cannot restore",
+    );
+    let (reverse, reverse_bytes) = f.prepare(1, &grant, &commitment.to_string());
+    let reverse_hash = reverse.offer_hash().unwrap().to_string();
+    let reverse_file = f.put("network-reverse.json", &reverse_bytes);
+    let (server, target) = f.serve(0, &grant, &reverse_hash, &reverse_file);
+    let output = f.send_handoff(1, &grant, &reverse_hash, target);
+    success(server.finish());
+    let current = f.status(0);
+    let new_grant = current["grant"].as_str().unwrap();
+    confirmed(output, &f, &reverse, new_grant, 3, 0);
+    report(&current, "held", 3);
+    report(&f.status(1), "released", 3);
+    assert_eq!(fs::read(f.state(0, commitment)).unwrap(), large);
+    let (third, _) = f.prepare(0, new_grant, &commitment.to_string());
+    assert_eq!(third.offer.attempt, 3);
     f.assert_no_live_storage();
 }

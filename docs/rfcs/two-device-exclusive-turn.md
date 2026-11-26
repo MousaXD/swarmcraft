@@ -219,6 +219,99 @@ and nonprivate files, and deny reinitialization of missing state. No
 canonical world or runtime is created. This is file-based reference
 transport, NOT proof of online overlap, actual process quiescence, a
 Minecraft save, a licensed player session or actual host partition safety.
-A human-readable draft/record pin inspector, authenticated transport,
-real runtime/route fencing and production creation policy remain to be
-implemented and independently reviewed before activation.
+A human-readable draft/record pin inspector, real runtime/route fencing
+and production creation policy remain to be implemented and independently
+reviewed before activation.
+
+### Authenticated reference handoff
+
+The two new `exclusive-turn network` commands use the existing bounded
+Noise NN / ChaChaPoly transport primitives with separate exclusive-turn
+prologue and transcript-signature domains. The prologue commits to the
+exact world, prior grant, reviewed signed offer hash, source and recipient.
+Both Ed25519 device identities are pinned to the independently verified
+fixed roster. The responder approves a local copy of the signed offer,
+not a proposal selected by a remote peer. No application data is
+exchanged until the channel has authenticated both identities.
+
+After the ordinary reference journal initialization and source
+`prepare`, review the offer and its expected hash on both devices.
+The source's status reports its prepared offer hash; the recipient must
+obtain that pin and review the signed offer independently. Run:
+
+```sh
+# Recipient (existing profile, locally reviewed offer document)
+swarmcraft --data-dir "$RECIPIENT_PROFILE" exclusive-turn network serve-handoff \
+  --expected-world "$WORLD" --expected-grant "$BASE" \
+  --expected-offer "$OFFER_HASH" --offer "$REVIEWED_OFFER" \
+  --from "$SOURCE_PEER" --bind 127.0.0.1:0 --confirm
+
+# Source (same independently reviewed world/base/offer, explicit endpoint)
+swarmcraft --data-dir "$SOURCE_PROFILE" exclusive-turn network handoff \
+  --expected-world "$WORLD" --expected-grant "$BASE" \
+  --expected-offer "$OFFER_HASH" \
+  --peer "$RECIPIENT_PEER@$LISTENER_ADDRESS" --confirm
+```
+
+The loopback example is for separate local test profiles; on two hosts
+use an explicit private LAN listener and its actual private address.
+Wildcard/public sockets and non-roster peers are refused. The one-shot
+listener waits at most 15 seconds for one connection; a session has one
+15-second monotonic I/O deadline (local durable I/O is not preempted).
+Messages are bounded to 16 KiB canonical postcard records and at most
+1 MiB of opaque checkpoint bytes in 32 KiB encrypted chunks.
+The listener releases its local lock while waiting for the connection,
+then reopens and rechecks the pinned state and holds the stable lock
+through the session. The source holds its lock throughout the exchange.
+
+1. The source sends its exact already-prepared signed offer and retained
+   opaque checkpoint bytes. The target checks its locally reviewed
+   offer and bytes, then durably stages the same receipt using the
+   file-based workflow's shared transition.
+2. The source verifies the receipt and atomically commits the exact
+   release to its durable journal before sending it. There is no
+   cancellation or reacquisition after that commit, even if the
+   connection fails and the recipient has not accepted.
+3. The target verifies the release against its exact staged receipt,
+   durably accepts it, and only then signs a separate acknowledgment
+   binding world, base, offer, grant, recipient, epoch, fence and
+   checkpoint. The source checks every field and the recipient's
+   signature. That acknowledgment is historical reference evidence,
+   not a lease or proof of Minecraft runtime authority.
+4. If receipt delivery fails before source commitment, the source is
+   still prepared; it may explicitly cancel that exact attempt or retry.
+   If the release or acknowledgment is lost after commitment, rerun both
+   commands with the **same original base and offer pins**. The source
+   reads only its exact still-current released outbox. A recipient that
+   already accepted may acknowledge the identical release only while
+   the accepted turn and checkpoint remain unchanged and held. A
+   changed, prepared or later retired turn refuses old retries. No
+   timeout resets any durable decision. Loss of the target can leave
+   the original reference world unavailable.
+
+The real local process regression uses a TCP frame proxy with no private
+keys or plaintext access. It corrupts an encrypted checkpoint, drops a
+durably staged receipt, drops the committed release after source
+relinquishment, and drops the target's acceptance acknowledgment.
+It verifies byte-identical journals on rejected operations and retries,
+explicit cancellation before release only, different Noise prologues
+after cancel/reprepare, exact signed acknowledgment, and reverse
+transfer of 70,123 bytes across multiple encrypted frames. It rejects
+public/wildcard listeners, an outsider, an unavailable endpoint and an
+old retry after target checkpoint change. All four exclusive-turn CLI
+tests passed (20.69 seconds). Strict all-target/all-feature CLI Clippy
+passed. The shared transport regression initially passed 28 of 29
+ownerless authority tests; the stalled-peer observation safely expired
+its original deadline. That exact case passed on a separate rerun in
+5.11 seconds, and both ownerless creation tests passed. No timeout or
+quorum condition changed. [Retained output and source/artifact pins](../../research/exclusive-turn/evidence/2026-11-26-authenticated-handoff.txt).
+The reference processes created no ordinary
+world, runtime, control or permit state.
+
+This is real authenticated TCP between disposable profiles on one Linux
+machine, not physical network-partition qualification. The separate
+file-based reference commands remain available for inspecting journal
+behavior but cannot prove online overlap. Neither transport establishes
+actual Minecraft checkpoint verification, quiescence, generation fencing,
+game-stream closure, resource consent, installed clients or production
+activation. Ordinary quorum worlds are unchanged.

@@ -1,0 +1,104 @@
+Local Linux authenticated reference TCP handoff, 26 November 2026
+Baseline adec16a0b908401ea8c5735fdf2e09ede9bcebde; exact source and executable pins below identify tested changes.
+Scope: opaque reference state on disposable profiles; not Minecraft authority or physical field acceptance.
+SHA-256 source/artifact pins:
+880e17f95f37cfe79f6b493cfc3d49f948abfab1d5f77fda57963d708424f7d3  crates/swarm-cli/src/exclusive_turn_reference.rs
+1fa53be9b2b04048dd3f939d1391f043f9107293c3c9e6c85dbc1e11fd6671c3  crates/swarm-cli/src/exclusive_turn_network.rs
+36f6f2475771d5e3dced6ca8218544de79b4ffe3e8bc8a5419233a742fbb2625  crates/swarm-cli/src/reference_channel.rs
+9a2d187a2ab7a5a25c0c9ffccfe9a2c9fdc4fb5f3f047366de9758052fb9e84e  crates/swarm-cli/src/ownerless_decision.rs
+49c7a63ac3359f5befadf0e9fbcd25ff1bff620471d433f741ea2cde0dd8100c  crates/swarm-cli/src/ownerless_observation.rs
+375853095dd7460bc461d2e5f0210cfefa6d4f787d8701aa35245b92dd6b43ad  crates/swarm-cli/src/main.rs
+cd4b4a226de1488c3ce2f63fb46e274d35748f7ecf8b25a17e199a7c695ba6ca  crates/swarm-cli/tests/exclusive_turn_reference_cli.rs
+9306f206b6a22005a4a44d216b7992c8726579e07cf267f2d576274a67075660  target/debug/swarmcraft
+ca4595ca9730b1f0d831716c1aa1fd85e9e731ded8946f8c3dbe30adf48f0f0c  target/debug/deps/exclusive_turn_reference_cli-6e8a19a91e9591be
+8d83b13a4cdc64f83b3fd66a4ed815a8e094ae9afe08fdd5c55d728a61e92d06  target/debug/deps/ownerless_authority_cli-1dfb796da2276e3b
+785b64012d45f8104209e2e644e947cf710c1b7d54401845c8a4f88f86cafc02  target/debug/deps/ownerless_creation_cli-2eb596200c427f5e
+
+exclusive-turn CLI original full log SHA-256: 814bc82b1e00676c0dd0455729d808e03d0ecdd4c14e7b7a6a2923a66c4c9771
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 04s
+     Running tests/exclusive_turn_reference_cli.rs (target/debug/deps/exclusive_turn_reference_cli-6e8a19a91e9591be)
+
+running 4 tests
+test concurrent_cancel_and_commit_cannot_both_succeed ... ok
+test encrypted_handoff_partition_boundaries_and_exact_outbox_retry ... ok
+test private_lock_corruption_and_missing_staged_bytes_refuse_without_reinitializing ... ok
+test real_process_round_trip_cancellation_stale_receipts_and_lost_commit_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.69s
+
+
+strict Clippy original full log SHA-256: 1e006310cdfe63dec200c71a52a2f00817acd9ae92b79a59aefd3df94464ec3f
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 22.41s
+
+ownerless initial regression original full log SHA-256: f0c34b458c6464e78014f022dcdafd6927c2a791102df698cedf9455bdcba33b
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.01s
+     Running tests/ownerless_authority_cli.rs (target/debug/deps/ownerless_authority_cli-1dfb796da2276e3b)
+
+running 29 tests
+test actual_tcp_observation_bounds_endpoints_frames_and_stalled_peer ... FAILED
+test actual_tcp_observation_rechecks_pending_and_retired_heads_after_listen ... ok
+test actual_tcp_observation_survives_founder_absence_and_rejects_replay ... ok
+test concurrent_votes_and_lost_output_cannot_unlock_or_equivocate ... ok
+test corrupted_missing_linked_journals_and_checkpoint_bytes_fail_closed ... ok
+test encrypted_collection_and_sync_enforce_joint_membership_and_exact_history ... ok
+test encrypted_collection_and_sync_survive_lost_votes_and_receipts ... ok
+test encrypted_decision_joint_roster_requires_entrant_vote ... ok
+test encrypted_decision_pins_both_identities_and_rechecks_head ... ok
+test encrypted_decision_vote_loss_restart_and_exact_checkpoint ... ok
+test encrypted_head_discovery_accepts_surviving_certificate_with_silent_optional_peer ... ok
+test encrypted_head_discovery_refuses_conflicting_certified_chains ... ok
+test encrypted_head_discovery_refuses_wrong_identity_and_retirement_during_handshake ... ok
+test encrypted_head_discovery_rejects_corruption_and_concurrent_local_advance ... ok
+test encrypted_head_discovery_selects_certified_suffix_and_preserves_same_head_vote ... ok
+test encrypted_recovery_accepts_surviving_certificate_without_fresh_votes ... ok
+test encrypted_recovery_reconstructs_certificate_after_collector_loss ... ok
+test encrypted_recovery_requires_joint_majority_and_every_entrant ... ok
+test founder_offline_majority_recovery_joint_replacement_and_minority_copy ... ok
+test invite_only_player_and_worker_roles_are_independent_and_revocable ... ok
+test participation_challenge_is_single_use_across_processes_and_output_failure ... ok
+test persistent_head_reconciliation_advances_dynamic_base_and_resumes_after_kill ... ok
+test persistent_head_reconciliation_retries_unavailable_and_stale_responder ... ok
+test persistent_head_reconciliation_stops_on_retirement_and_excludes_removed_peers ... ok
+test public_authenticated_play_never_enrolls_workers_or_validators ... ok
+test reference_publication_adapter_rejects_public_reference_mode ... ok
+test reference_publication_requires_exact_durable_cut_fence_and_private_eligibility ... ok
+test retained_network_observation_signatures_match_recovered_checkpoint ... ok
+test same_head_witness_changes_do_not_unlock_but_certified_extension_resolves_pending_vote ... ok
+
+failures:
+
+---- actual_tcp_observation_bounds_endpoints_frames_and_stalled_peer stdout ----
+
+thread 'actual_tcp_observation_bounds_endpoints_frames_and_stalled_peer' (1120253) panicked at crates/swarm-cli/tests/ownerless_authority_cli.rs:25:5:
+Error: ownerless observation deadline expired
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    actual_tcp_observation_bounds_endpoints_frames_and_stalled_peer
+
+test result: FAILED. 28 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 238.58s
+
+error: test failed, to rerun pass `-p swarm-cli --test ownerless_authority_cli`
+
+observation retry and creation original full log SHA-256: 8a3424be58fda8888632db36634d813e5e08a268bb4c3afabbc633d8316f2ad9
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.96s
+     Running tests/ownerless_authority_cli.rs (target/debug/deps/ownerless_authority_cli-1dfb796da2276e3b)
+
+running 1 test
+test actual_tcp_observation_bounds_endpoints_frames_and_stalled_peer ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 28 filtered out; finished in 5.11s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running tests/ownerless_creation_cli.rs (target/debug/deps/ownerless_creation_cli-2eb596200c427f5e)
+
+running 2 tests
+test independent_signers_create_verified_offline_candidate_without_world_or_permit ... ok
+test ordinary_world_creation_remains_unchanged ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.04s
+
+
+The first ownerless regression refused a stalled-peer observation after the unchanged deadline; the exact failing test passed on a separate rerun (5.11s). No timing threshold was modified. All other 28 authority tests passed on the original run; both creation tests passed. No hosted CI.
