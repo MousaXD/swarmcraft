@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import hmac
 import json
 from pathlib import Path
 import sqlite3
@@ -10,7 +11,7 @@ from unittest.mock import patch
 from player_runtime import fixture
 from region_runtime import Coordinator, Rejected, canonical, region_roots, serial_step, world_root
 from regional_authority import (Authority, FencedRuntime, FencedWorker, bind_channels, candidate_receipts,
-                                tag, validated_state, wire)
+                                encoded_receipt, encoded_receipt_hash, tag, tag_encoded, validated_state, wire)
 from test_region_runtime import MemoryChannel
 from verify_authority_evidence import verify
 
@@ -174,6 +175,27 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(reopened.history(), self.ledger.history())
         finally:
             reopened.close()
+
+    def test_receipt_encoding_reuse_matches_original_mac_and_canonical_hash(self):
+        _, receipts = self.candidate()
+        grants = {g["session"]:g for g in self.ledger.read()["grants"]}
+        for receipt in receipts:
+            body = receipt["body"]
+            raw = canonical(body)
+            key = grants[body["session"]]["key"]
+            old = hmac.digest(bytes.fromhex(key),b"sc60-region-receipt-v1\0"+raw,"sha256").hex()
+            self.assertEqual(tag_encoded(key,raw),old)
+            self.assertEqual(tag(key,body),old)
+            for outer in (receipt,{**receipt,"binding":"sc65v1:test","policy_mac":"a"*64}):
+                self.assertEqual(encoded_receipt(outer,body,raw),canonical(outer))
+                # A policy adapter that supplies a different body object
+                # must not accidentally substitute its authenticated bytes.
+                self.assertEqual(encoded_receipt(outer,copy.deepcopy(body),b"not-the-body"),canonical(outer))
+        pairs = [(r["body"]["session"],encoded_receipt(r,r["body"],canonical(r["body"])))
+                 for r in reversed(receipts)]
+        expected = hashlib.sha256(canonical(sorted(receipts,key=lambda r:r["body"]["session"]))).hexdigest()
+        self.assertEqual(encoded_receipt_hash(pairs),expected)
+
 
     def test_reparse_control_and_candidate_cache_invalidation(self):
         from region_runtime import REGIONS, read_region

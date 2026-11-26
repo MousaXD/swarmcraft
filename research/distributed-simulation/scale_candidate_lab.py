@@ -21,6 +21,7 @@ from verify_scale_evidence import cut
 CLASSIFICATION = "LOCAL_SQLITE_CANDIDATE_COST_NOT_DISTRIBUTED_GAMEPLAY"
 COUNTS = (256, 8192)
 MODES = tuple(itertools.product(("reparse", "reuse"), ("trace", "boundary")))
+PUBLICATION_MODES = ("legacy", "optimized")
 REPEATS = 2
 WARMUP = 2
 SAMPLES = 10
@@ -37,6 +38,13 @@ def cases():
             # Reverse order on the second repetition, reducing order bias.
             for candidate, observer in MODES if repeat == 0 else reversed(MODES):
                 yield count, repeat, candidate, observer
+
+
+def publication_cases():
+    for count in COUNTS:
+        for repeat in range(REPEATS):
+            for mode in PUBLICATION_MODES if repeat == 0 else reversed(PUBLICATION_MODES):
+                yield count, repeat, "reuse", "boundary", mode
 
 
 def reference(count, repeat):
@@ -71,13 +79,14 @@ def reference(count, repeat):
     return world, states, roots, cuts, inputs, receipts, journal
 
 
-def run_case(count, repeat, candidate, observer):
+def run_case(count, repeat, candidate, observer, publication_mode=None):
     world, states, roots, cuts, inputs, replies, journal = reference(count, repeat)
     with tempfile.TemporaryDirectory(prefix="sc63-cost-") as temp:
         path = Path(temp)/"world.db"
         ledger = TransitionAuthority.create(path,world,states[0],PLAYERS,GROUPS)
         try:
             ledger.reuse_validated_candidate = candidate == "reuse"
+            ledger.optimize_publication = publication_mode == "optimized"
             grants = ledger.claim(1,0,roots[0])["grants"]
             clock = PhaseClock()
             ledger.phase = clock.phase
@@ -126,25 +135,32 @@ def run_case(count, repeat, candidate, observer):
                     "reopened history differs")
         finally:
             reopened.close()
-    return {"agents":count,"repeat":repeat,"candidate_mode":candidate,"observer":observer,
-            "world":world,"samples":samples,"journal_hash":sha(observed_journal),
-            "final_state_hash":sha(saved["regions"])}
+    result = {"agents":count,"repeat":repeat,"candidate_mode":candidate,"observer":observer,
+              "world":world,"samples":samples,"journal_hash":sha(observed_journal),
+              "final_state_hash":sha(saved["regions"])}
+    if publication_mode is not None:
+        result["publication_mode"] = publication_mode
+    return result
 
 
 def verify(report):
     fields(report,"schema","classification","cpu","warmup","samples","runs")
-    require(type(report["schema"]) is int and report["schema"] == 1
+    require(type(report["schema"]) is int and report["schema"] in (1,2)
             and report["classification"] == CLASSIFICATION and report["warmup"] == WARMUP
             and report["samples"] == SAMPLES and integer(report["cpu"],0,65535),
             "invalid candidate cost classification")
-    expected = list(cases())
+    publication = report["schema"] == 2
+    expected = list(publication_cases() if publication else cases())
     require(len(report["runs"]) == len(expected),"incomplete paired matrix")
     refs = {}
     for row, case in zip(report["runs"],expected):
         fields(row,"agents","repeat","candidate_mode","observer","world","samples",
-               "journal_hash","final_state_hash")
-        count, repeat, candidate, observer = case
-        require((row["agents"],row["repeat"],row["candidate_mode"],row["observer"]) == case,
+               "journal_hash","final_state_hash", *("publication_mode",) if publication else ())
+        count, repeat, candidate, observer = case[:4]
+        observed = (row["agents"],row["repeat"],row["candidate_mode"],row["observer"])
+        if publication:
+            observed += (row["publication_mode"],)
+        require(observed == case,
                 "wrong paired case")
         if (count,repeat) not in refs:
             world,states,roots,cuts,_,_,journal = reference(count,repeat)
@@ -171,10 +187,14 @@ def verify(report):
 
 def summarize(report):
     results = []
+    publication = report["schema"] == 2
+    modes = [("reuse","boundary",m) for m in PUBLICATION_MODES] if publication else [
+        (candidate,observer,None) for candidate,observer in MODES]
     for count in COUNTS:
-        for candidate,observer in MODES:
+        for candidate,observer,mode in modes:
             rows = [s for r in report["runs"] if
-                    (r["agents"],r["candidate_mode"],r["observer"]) == (count,candidate,observer)
+                    (r["agents"],r["candidate_mode"],r["observer"],r.get("publication_mode")) ==
+                    (count,candidate,observer,mode)
                     for s in r["samples"]]
             results.append({"agents":count,"candidate_mode":candidate,"observer":observer,
                             "samples":len(rows),
@@ -182,6 +202,8 @@ def summarize(report):
                             "median_cpu_ms":round(statistics.median(s["cpu_ns"] for s in rows)/1e6,3),
                             "mean_phase_ms":{k:round(statistics.mean(s["phase_ns"][k] for s in rows)/1e6,3)
                                              for k in PHASES}})
+            if publication:
+                results[-1]["publication_mode"] = mode
     return results
 
 
@@ -190,6 +212,7 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--output",type=Path)
     group.add_argument("--verify",type=Path)
+    parser.add_argument("--experiment",choices=("candidate","publication"),default="candidate")
     args = parser.parse_args()
     if args.verify:
         report = verify(json.loads(args.verify.read_text()))
@@ -200,9 +223,10 @@ def main():
         cpu = min(affinity)
         try:
             os.sched_setaffinity(0,{cpu})
-            report = {"schema":1,"classification":CLASSIFICATION,"cpu":cpu,
+            publication = args.experiment == "publication"
+            report = {"schema":2 if publication else 1,"classification":CLASSIFICATION,"cpu":cpu,
                       "warmup":WARMUP,"samples":SAMPLES,"runs":[]}
-            for case in cases():
+            for case in publication_cases() if publication else cases():
                 report["runs"].append(run_case(*case))
             verify(report)
             with args.output.open("x") as out:

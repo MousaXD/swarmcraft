@@ -3,6 +3,7 @@ import copy
 import json
 from pathlib import Path
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -295,6 +296,39 @@ die()
                     self.a.commit(candidate_receipts(coordinator))
                 self.assertEqual(self.a.save(), before)
                 self.assertEqual(self.a.audit(), journal)
+
+    def test_optimized_publication_is_byte_identical_to_legacy_and_cold_audit(self):
+        from unittest.mock import patch
+        from region_runtime import serial_transaction_step
+        inputs = [(0,self.request("b")), (1,self.request("c",direction=-1,action=-1))]
+        runtime = DurableRuntime(self.a,channels())
+        coordinator = runtime.runtime.coordinator
+        coordinator.step(controls=runtime.seal(inputs=inputs))
+        receipts = candidate_receipts(coordinator)
+        other = Path(self.temp.name)/"legacy-publication.db"
+        db = sqlite3.connect(other)
+        try:
+            self.a.db.backup(db)
+        finally:
+            db.close()
+        control = TransitionAuthority(other)
+        try:
+            control.optimize_publication = False
+            expected = control.commit(receipts)
+            with patch("transition_runtime.serial_transaction_step",wraps=serial_transaction_step) as replay:
+                self.assertEqual(self.a.commit(list(reversed(receipts))),expected)
+                replay.assert_called_once()
+            self.assertEqual(self.a.save(),control.save())
+            self.assertEqual(self.a.history(),control.history())
+            self.assertEqual(self.a.committed_receipts(inputs),control.committed_receipts(inputs))
+            self.assertEqual(self.a.audit(),control.audit())
+            self.assertEqual(self.a.db.execute("SELECT state FROM world").fetchone(),
+                             control.db.execute("SELECT state FROM world").fetchone())
+        finally:
+            control.close()
+        self.a.close()
+        self.a = TransitionAuthority(self.path)
+        self.assertEqual(self.a.save()["tick"],1)
 
     def test_legacy_authority_cannot_open_transaction_database(self):
         with self.assertRaises(Rejected):

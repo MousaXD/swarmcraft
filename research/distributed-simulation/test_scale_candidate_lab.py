@@ -5,7 +5,7 @@ from pathlib import Path
 import unittest
 
 from region_runtime import Rejected
-from scale_candidate_lab import COUNTS, MODES, REPEATS, SAMPLES, summarize, verify
+from scale_candidate_lab import COUNTS, MODES, PUBLICATION_MODES, REPEATS, SAMPLES, summarize, verify
 
 
 class CandidateCostEvidenceTests(unittest.TestCase):
@@ -33,6 +33,26 @@ class CandidateCostEvidenceTests(unittest.TestCase):
             mutate(report)
             with self.assertRaises(Rejected):
                 verify(report)
+
+    def test_publication_mode_paired_evidence(self):
+        path = Path(__file__).parent / "evidence" / "2026-11-26-scale-publication-cost.json"
+        report = json.loads(path.read_text())
+        self.assertEqual(report["schema"],2)
+        result = summarize(verify(report))
+        self.assertEqual(len(report["runs"]),8)
+        self.assertEqual(len(result),len(COUNTS)*len(PUBLICATION_MODES))
+        self.assertTrue(all(r["samples"] == REPEATS*SAMPLES for r in result))
+        for mutate in (
+            lambda d: d["runs"].pop(),
+            lambda d: d["runs"][0].update(publication_mode="optimized"),
+            lambda d: d["runs"][0].update(observer="trace"),
+            lambda d: d["runs"][0].update(journal_hash="0"*64),
+            lambda d: d["runs"][0]["samples"][0].update(cut="0"*64),
+        ):
+            altered = copy.deepcopy(report)
+            mutate(altered)
+            with self.assertRaises(Rejected):
+                verify(altered)
 
 
 if __name__ == "__main__":

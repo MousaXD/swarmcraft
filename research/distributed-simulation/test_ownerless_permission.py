@@ -1,11 +1,12 @@
 import copy
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
 
 from ownerless_permission import POLICY_HASH, PolicyWorker, PolicyChannel, authority_for, parts
 from player_runtime import fixture
-from region_runtime import Rejected
+from region_runtime import Rejected, canonical
 from regional_authority import Authority, FencedRuntime, candidate_receipts, new_grants
 from test_region_runtime import MemoryChannel
 
@@ -55,7 +56,10 @@ class OwnerlessTests(unittest.TestCase):
                     with self.assertRaises(Rejected):
                         ledger.commit(altered)
                     self.assertEqual(ledger.save(),before)
-                self.assertEqual(ledger.commit(receipts)["tick"],1)
+                accepted=ledger.commit(receipts)
+                self.assertEqual(accepted["tick"],1)
+                self.assertEqual(accepted["receipt_hash"],hashlib.sha256(canonical(
+                    sorted(receipts,key=lambda r:r["body"]["session"]))).hexdigest())
                 with self.assertRaises(Rejected):
                     ledger.commit(receipts)
                 self.assertEqual(ledger.save()["tick"],1)

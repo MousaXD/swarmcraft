@@ -20,7 +20,7 @@ import time
 from player_runtime import MAX_PLAYERS, RULESET, cut_digest
 from region_runtime import (KEY_BYTES, MAX_AGENTS, MAX_TICK, REGIONS, Coordinator, Worker,
                             canonical, digest, fields, integer, read_region,
-                            region_roots, require, sequence, totals, world_root)
+                            region_roots, region_roots_bulk, require, sequence, totals, world_root)
 
 SCHEMA = 1
 APP_ID = 0x53433630
@@ -71,6 +71,36 @@ def checked_grant(grant):
 def tag(key, body):
     return hmac.digest(bytes.fromhex(key), b"sc60-region-receipt-v1\0" + canonical(body),
                        "sha256").hex()
+
+
+def tag_encoded(key, encoded):
+    h = hmac.new(bytes.fromhex(key), b"sc60-region-receipt-v1\0", "sha256")
+    h.update(encoded)
+    return h.hexdigest()
+
+
+def encoded_receipt(receipt, body, encoded_body):
+    """Reuse authenticated bytes in the exact canonical receipt envelope.
+
+    Policy adapters may add fields or return an inner receipt. Preserve
+    every original field in its canonical order; reuse only the body
+    object actually authenticated. The caller never supplies these bytes.
+    """
+    return b"{" + b",".join(
+        canonical(key) + b":" +
+        (encoded_body if key == "body" and receipt[key] is body else canonical(receipt[key]))
+        for key in sorted(receipt)) + b"}"
+
+
+def encoded_receipt_hash(receipts):
+    """SHA-256 of the original canonical sorted receipt array."""
+    h = hashlib.sha256(b"[")
+    for index, (_, encoded) in enumerate(sorted(receipts)):
+        if index:
+            h.update(b",")
+        h.update(encoded)
+    h.update(b"]")
+    return h.hexdigest()
 
 
 def new_grants(world, generation, tick, root, groups):
@@ -139,6 +169,10 @@ class Authority:
     schema = SCHEMA
     ruleset = RULESET
     reuse_validated_candidate = True
+    optimize_publication = True
+
+    def _publication_roots(self, state):
+        return region_roots_bulk(state) if self.optimize_publication else region_roots(state)
 
     @staticmethod
     def cut(world, tick, root, players):
@@ -370,9 +404,10 @@ class Authority:
             require(current["claimed"] and tick <= MAX_TICK, "unclaimed generation or tick exhausted")
             grants = {g["session"]: g for g in current["grants"]}
             seen, regions = set(), {}
+            encoded_receipts = []
             candidate = None
-            for receipt in sequence(receipts, len(grants), 4):
-                receipt = self._validate_receipt(current, receipt)
+            for original in sequence(receipts, len(grants), 4):
+                receipt = self._validate_receipt(current, original)
                 fields(receipt, "body", "mac")
                 body = receipt["body"]
                 fields(body, "world", "generation", "session", "tick", "parent_root", "runtime_root", "regions")
@@ -384,8 +419,14 @@ class Authority:
                         integer(body["generation"], current["generation"], current["generation"])
                         and integer(body["tick"], tick, tick)
                         and body["parent_root"] == current["runtime_root"]
-                        and digest(body["runtime_root"]) and digest(receipt["mac"])
-                        and hmac.compare_digest(receipt["mac"], tag(grant["key"], body)),
+                        and digest(body["runtime_root"]) and digest(receipt["mac"]),
+                        "invalid or stale regional receipt")
+                if self.optimize_publication:
+                    encoded_body = canonical(body)
+                    expected_mac = tag_encoded(grant["key"], encoded_body)
+                else:
+                    expected_mac = tag(grant["key"], body)
+                require(hmac.compare_digest(receipt["mac"], expected_mac),
                         "invalid or stale regional receipt")
                 owned = [read_region(row) for row in sequence(body["regions"], maximum=REGIONS)]
                 require([r.rid for r in owned] == grant["regions"], "receipt outside exclusive grant")
@@ -394,6 +435,9 @@ class Authority:
                 seen.add(session)
                 require(candidate is None or candidate == body["runtime_root"], "conflicting cut")
                 candidate = body["runtime_root"]
+                if self.optimize_publication:
+                    encoded_receipts.append((original["body"]["session"],
+                                             encoded_receipt(original, body, encoded_body)))
             require(seen == set(grants), "incomplete current receipt set")
             # Every region above was decoded exactly once from a receipt
             # authenticated against its current exclusive grant. Repeating
@@ -404,11 +448,12 @@ class Authority:
                 state, ids = _assembled_state([regions[r] for r in sorted(regions)])
             else:
                 state, ids = validated_state(wire(regions))
-            rows = region_roots(state)
+            rows = self._publication_roots(state)
             require(ids == current["ids"] and totals(rows)[1] == current["resources"]
                     and candidate == world_root(tick, rows), "inconsistent global cut")
             cut = self.cut(current["world"], tick, candidate, current["players"])
-            receipt_hash = hashlib.sha256(canonical(sorted(receipts, key=lambda r: r["body"]["session"]))).hexdigest()
+            receipt_hash = (encoded_receipt_hash(encoded_receipts) if self.optimize_publication else
+                            hashlib.sha256(canonical(sorted(receipts, key=lambda r: r["body"]["session"]))).hexdigest())
             with self.phase("independent_candidate_validation"):
                 self._record_candidate(current, dict(state), candidate, cut)
             with self.phase("checkpoint_serialization"):

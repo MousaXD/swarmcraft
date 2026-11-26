@@ -159,7 +159,7 @@ systemd-run --user --scope --quiet \
   unshare --user --map-root-user --net \
   python3 research/distributed-simulation/scale_lab.py \
   --state-cache "$mode" --input-mode individual \
-  --candidate-mode reparse --transaction-counts trace --worker-exchange separate \
+  --candidate-mode reparse --transaction-counts trace --worker-exchange separate --publication-mode legacy \
   --output "/tmp/sc63-$mode-new.json"
 cd research/distributed-simulation
 python3 verify_scale_evidence.py "/tmp/sc63-$mode-new.json"

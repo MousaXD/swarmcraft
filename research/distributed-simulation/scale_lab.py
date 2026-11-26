@@ -249,7 +249,7 @@ class Peers:
             row["output"].close()
 
 
-def run_case(scope,cpus,scenario,repeat,count,state_cache,input_mode,candidate_mode,transaction_counts,worker_exchange):
+def run_case(scope,cpus,scenario,repeat,count,state_cache,input_mode,candidate_mode,transaction_counts,worker_exchange,publication_mode):
     label,shape,agents,delay=scenario
     offers=[Offer(s,1,CAP_MIB,CPU_MILLICORES) for s in range(count)]
     groups=[[r for r in range(REGIONS) if r*count//REGIONS==s] for s in range(count)]
@@ -258,6 +258,7 @@ def run_case(scope,cpus,scenario,repeat,count,state_cache,input_mode,candidate_m
         ledger=authority.create(Path(tmp)/"world.db",secrets.token_hex(32),
                                 fixture(shape,agents),PLAYERS,groups)
         ledger.reuse_validated_candidate=candidate_mode=="reuse"
+        ledger.optimize_publication=publication_mode=="optimized"
         profile=PhaseClock()
         ledger.phase=profile.phase
         if transaction_counts=="trace":
@@ -349,7 +350,8 @@ def run(report):
             # Alternate order to reduce systematic warm/cache/host-load bias.
             for count in ((1,2) if repeat%2 else (2,1)):
                 result=run_case(scope,cpus,scenario,repeat,count,report["state_cache"],report["input_mode"],
-                                report["candidate_mode"],report["transaction_counts"],report["worker_exchange"])
+                                report["candidate_mode"],report["transaction_counts"],report["worker_exchange"],
+                                report["publication_mode"])
                 report["runs"].append(result)
                 s=result["summary"]
                 print(f"{scenario[0]} rep={repeat} workers={count}: {s['within_window']}/{s['target_ticks']} "
@@ -367,16 +369,18 @@ def main():
     parser.add_argument("--candidate-mode",choices=("reuse","reparse"),default="reuse")
     parser.add_argument("--transaction-counts",choices=("boundary","trace"),default="boundary")
     parser.add_argument("--worker-exchange",choices=("fused","separate"),default="fused")
+    parser.add_argument("--publication-mode",choices=("optimized","legacy"),default="optimized")
     args=parser.parse_args()
     if args.client:
         client_main()
         return
     require(args.output is not None and not args.output.exists(),"new receipt path required")
     os.umask(0o077)
-    report={"schema":5,"classification":CLASSIFICATION,"completed":False,
+    report={"schema":6,"classification":CLASSIFICATION,"completed":False,
             "state_cache":args.state_cache,"input_mode":args.input_mode,
             "candidate_mode":args.candidate_mode,"transaction_counts":args.transaction_counts,
             "worker_exchange":args.worker_exchange,
+            "publication_mode":args.publication_mode,
             "period_ns":PERIOD_NS,"window_ns":WINDOW_NS,"repeats":REPEATS,"runs":[]}
     with args.output.open("x") as out:
         try:

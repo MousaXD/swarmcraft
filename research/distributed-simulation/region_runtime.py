@@ -10,6 +10,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 import hashlib
 import hmac
+from itertools import chain
 import json
 import random
 import resource
@@ -149,6 +150,34 @@ def region_roots(regions):
     return [region_summary(regions[rid]) for rid in sorted(regions)]
 
 
+# The offline reference above intentionally retains its scalar encoding.
+# The publication path can feed the same binary encoding to SHA-256 in
+# bounded blocks, avoiding one struct.pack and bytearray append per agent.
+_ROOT_AGENT_BLOCK = 512
+_ROOT_HEADER = struct.Struct(">II")
+_ROOT_BANKS = struct.Struct(">" + "I" * WIDTH)
+_ROOT_AGENTS = struct.Struct(">" + "I" * (_ROOT_AGENT_BLOCK * 3))
+
+
+def region_summary_bulk(region):
+    """Identical region commitment over already validated immutable state."""
+    count = len(region.agents)
+    h = hashlib.sha256(_ROOT_HEADER.pack(region.rid, count))
+    h.update(bytes(region.signals))
+    h.update(_ROOT_BANKS.pack(*region.banks))
+    for start in range(0, count, _ROOT_AGENT_BLOCK):
+        flat = tuple(chain.from_iterable(region.agents[start:start + _ROOT_AGENT_BLOCK]))
+        h.update(_ROOT_AGENTS.pack(*flat) if len(flat) == _ROOT_AGENT_BLOCK * 3
+                 else struct.pack(">" + "I" * len(flat), *flat))
+    return [region.rid, h.hexdigest(), count,
+            sum(region.banks) + sum(a[2] for a in region.agents),
+            region.signals[0], region.signals[-1]]
+
+
+def region_roots_bulk(regions):
+    return [region_summary_bulk(regions[rid]) for rid in sorted(regions)]
+
+
 def movement(i, tick):
     return 1 if (i + tick) % 2 == 0 else -1
 
@@ -215,6 +244,59 @@ def serial_step(regions, tick, counters=None, *, controls=None):
     if counters is not None:
         counters["region_agents"] = crossings
         counters["region_resources"] = sum(pos % WIDTH == WIDTH - 1 for pos in moves)
+    return {
+        rid: Region(rid, tuple(signals[rid * WIDTH:(rid + 1) * WIDTH]),
+                    tuple(banks[rid * WIDTH:(rid + 1) * WIDTH]), tuple(next_agents[rid]))
+        for rid in range(REGIONS)
+    }
+
+
+def serial_transaction_step(regions, tick, controls):
+    """Independent whole-world replay specialized for sealed transaction inputs.
+
+    Neither worker proposals nor candidate state enter this computation.
+    The scalar serial_step remains the independent audit/evidence oracle.
+    Here controls are the checked (direction, inventory action) pairs
+    reconstructed from the local durable command journal.
+    """
+    require(all(integer(p, 0, MAX_AGENTS - 1) and isinstance(action, tuple)
+                and len(action) == 2 and all(integer(v, -1, 1) for v in action)
+                for p, action in controls.items()), "invalid replay controls")
+    old_signals = [s for rid in range(REGIONS) for s in regions[rid].signals]
+    banks = [v for rid in range(REGIONS) for v in regions[rid].banks]
+    agents = sorted(a for region in regions.values() for a in region.agents)
+    next_agents = [[] for _ in range(REGIONS)]
+    occupancy = [0] * CELLS
+    for i, pos, inventory in agents:
+        occupancy[pos] += 1
+        control = controls.get(i)
+        if control is None:
+            phase = i + tick
+            direction = 1 if phase % 2 == 0 else -1
+            if phase % 5 == 0 and banks[pos]:
+                banks[pos] -= 1
+                inventory += 1
+            if phase % 7 == 0 and inventory:
+                banks[pos] += 1
+                inventory -= 1
+        else:
+            direction, action = control
+            if action == 1 and banks[pos] and inventory < MAX_BANK:
+                banks[pos] -= 1
+                inventory += 1
+            elif action == -1 and inventory and banks[pos] < MAX_BANK:
+                banks[pos] += 1
+                inventory -= 1
+        destination = (pos + direction) % CELLS
+        next_agents[destination // WIDTH].append((i, destination, inventory))
+    signals = [(2 * old_signals[pos] + old_signals[(pos - 1) % CELLS]
+                + old_signals[(pos + 1) % CELLS] + occupancy[pos]) & 255 for pos in range(CELLS)]
+    # Select the same debit cells directly by their congruence class.
+    # Capture the complete debit set before applying any credits.
+    moves = [pos for pos in range((-tick) % 4, CELLS, 4) if banks[pos]]
+    for pos in moves:
+        banks[pos] -= 1
+        banks[(pos + 1) % CELLS] += 1
     return {
         rid: Region(rid, tuple(signals[rid * WIDTH:(rid + 1) * WIDTH]),
                     tuple(banks[rid * WIDTH:(rid + 1) * WIDTH]), tuple(next_agents[rid]))

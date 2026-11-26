@@ -6,14 +6,16 @@ and network-namespace evidence; these tests do not claim that evidence.
 import copy
 import hashlib
 import hmac
+import random
 import socket
 import struct
 import time
 import unittest
 
-from region_runtime import (CELLS, MAX_FRAME, REGIONS, WIDTH, Channel, Coordinator, Region,
+from region_runtime import (CELLS, MAX_AGENTS, MAX_BANK, MAX_FRAME, REGIONS, WIDTH, Channel, Coordinator, Region,
                             Rejected, Worker, canonical, check_event, deliver, initial_world,
-                            region_roots, serial_step, totals, world_root)
+                            region_roots, region_summary, region_summary_bulk, serial_step,
+                            serial_transaction_step, totals, world_root)
 
 
 class MemoryChannel:
@@ -35,6 +37,42 @@ class MemoryChannel:
 
 
 class RegionRulesTests(unittest.TestCase):
+    def test_bulk_root_matches_scalar_encoding_at_block_boundaries(self):
+        for count in (0,1,511,512,513,1025,MAX_AGENTS):
+            region = Region(7, tuple((i*31)%256 for i in range(WIDTH)),
+                            tuple(MAX_BANK if i%2 else 0 for i in range(WIDTH)),
+                            tuple((i,7*WIDTH+i%WIDTH,MAX_BANK if i%2 else 0)
+                                  for i in range(count)))
+            self.assertEqual(region_summary_bulk(region),region_summary(region))
+
+    def test_specialized_transaction_replay_matches_scalar_oracle(self):
+        rng = random.Random(6306)
+        for shape in ("spread","clustered","boundary"):
+            for count in (1,256,8192):
+                state = initial_world(shape,count,seed=6306)
+                for tick in range(1,9):
+                    controls = {p:(rng.randrange(-1,2),rng.randrange(-1,2))
+                                for p in rng.sample(range(count),min(16,count))}
+                    expected = serial_step(state,tick,controls=controls)
+                    actual = serial_transaction_step(dict(reversed(list(state.items()))),tick,controls)
+                    self.assertEqual(actual,expected)
+                    state = expected
+
+    def test_transaction_replay_handles_same_cell_contention_and_saturation(self):
+        state = {r:Region(r,(255,)*WIDTH,(0,)*WIDTH,()) for r in range(REGIONS)}
+        # All selected players share the last cell and execute in ID
+        # order. A debit can fund the next credit; the wrap is global.
+        state[7] = Region(7,(255,)*WIDTH,(0,)*(WIDTH-1)+(1,),
+                          ((0,CELLS-1,MAX_BANK),(1,CELLS-1,0),(2,CELLS-1,3),(3,CELLS-1,0)))
+        for tick in range(1,9):
+            controls = {0:(1,1),1:(-1,1),2:(0,-1),3:(1,1)}
+            expected = serial_step(state,tick,controls=controls)
+            self.assertEqual(serial_transaction_step(state,tick,controls),expected)
+            state = expected
+        for invalid in ({True:(0,0)},{0:(True,0)},{0:1},{0:(0,2)},{0:(0,)}):
+            with self.assertRaises(Rejected):
+                serial_transaction_step(state,9,invalid)
+
     def test_full_reference_parity_all_partitions_and_shapes(self):
         for shape in ("spread", "clustered", "boundary"):
             initial = initial_world(shape, 512, seed=345)

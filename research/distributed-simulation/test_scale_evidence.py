@@ -234,6 +234,24 @@ class RetainedEvidenceTests(unittest.TestCase):
             with self.assertRaises(Rejected):
                 verify(bad)
 
+    def test_optimized_publication_matrix(self):
+        path=Path(__file__).parent/"evidence"/"2026-11-26-scale-publication.json"
+        report=json.loads(path.read_text())
+        result=verify(report)
+        self.assertEqual(result["publication_mode"],"optimized")
+        self.assertEqual(result["worker_exchange"],"fused")
+        self.assertEqual(result["runs"],24)
+        self.assertEqual(result["accepted_ticks"],3052)
+        self.assertEqual(result["within_window_ticks"],3036)
+        self.assertEqual(result["client_commands"],6104)
+        self.assertEqual(result["qualified_runs"],5)
+        self.assertEqual(result["worker_frames"],[13683,13683])
+        self.assertEqual(result["transactions"],{"write":6104,"read":6104,"commit":12208,"rollback":0})
+        for altered in ({**report,"publication_mode":"unknown"},
+                        {key:value for key,value in report.items() if key!="publication_mode"}):
+            with self.assertRaises(Rejected):
+                verify(altered)
+
 
 if __name__=="__main__":
     unittest.main()

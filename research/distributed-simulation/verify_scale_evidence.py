@@ -212,21 +212,24 @@ def verify_run(row,scenario,repeat,count,hardware,states,roots,profile=False,inp
 
 def verify(data):
     require(isinstance(data,dict),"invalid benchmark receipt")
-    profile=data.get("schema") in (2,3,4,5)
-    batched_schema=data.get("schema") in (3,4,5)
-    candidate_schema=data.get("schema") in (4,5)
-    exchange_schema=data.get("schema")==5
+    profile=data.get("schema") in (2,3,4,5,6)
+    batched_schema=data.get("schema") in (3,4,5,6)
+    candidate_schema=data.get("schema") in (4,5,6)
+    exchange_schema=data.get("schema") in (5,6)
+    publication_schema=data.get("schema")==6
     fields(data,"schema","classification","completed","period_ns","window_ns","repeats","hardware","runs",
            *("state_cache",) if profile else (),
            *("input_mode",) if batched_schema else (),
            *("candidate_mode","transaction_counts") if candidate_schema else (),
-           *("worker_exchange",) if exchange_schema else ())
-    require(type(data["schema"]) is int and data["schema"] in (1,2,3,4,5)
+           *("worker_exchange",) if exchange_schema else (),
+           *("publication_mode",) if publication_schema else ())
+    require(type(data["schema"]) is int and data["schema"] in (1,2,3,4,5,6)
             and (not profile or data["state_cache"] in ("cached","uncached"))
             and (not batched_schema or data["input_mode"] in ("batched","individual"))
             and (not candidate_schema or (data["candidate_mode"] in ("reuse","reparse")
                  and data["transaction_counts"] in ("boundary","trace")))
             and (not exchange_schema or data["worker_exchange"] in ("fused","separate"))
+            and (not publication_schema or data["publication_mode"] in ("legacy","optimized"))
             and data["classification"]==CLASSIFICATION and data["completed"] is True
             and data["period_ns"]==PERIOD_NS and data["window_ns"]==WINDOW_NS and data["repeats"]==REPEATS,
             "incomplete or misclassified benchmark")
@@ -267,6 +270,8 @@ def verify(data):
         result["worker_exchange"]=data["worker_exchange"]
         result["worker_frames"]=[sum(pair[d] for r in data["runs"] for pair in r["worker_frame_counts"])
                                  for d in range(2)]
+    if publication_schema:
+        result["publication_mode"]=data["publication_mode"]
     return result
 
 

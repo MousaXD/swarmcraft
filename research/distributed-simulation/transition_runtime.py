@@ -11,7 +11,8 @@ import json
 
 from player_runtime import MAX_PLAYERS, player_index, player_view
 from region_runtime import (MAX_AGENTS, MAX_TICK, WIDTH, canonical, digest,
-                            fields, integer, region_roots, require, sequence, serial_step, world_root)
+                            fields, integer, region_roots, require, sequence, serial_step,
+                            serial_transaction_step, world_root)
 from regional_authority import Authority, FencedRuntime, validated_state, wire
 
 RULESET = "swarmcraft-reference-ring/transaction-v2"
@@ -241,8 +242,10 @@ class TransitionAuthority(Authority):
         require(sealed == (current["cut_root"], canonical(batch), None), "missing or changed sealed input")
         require(all(result is None for _, result in commands.values()), "duplicate command result")
         with self.phase("independent_serial_replay"):
-            expected = serial_step(current["state"], tick, controls=serial_controls(batch))
-            require(state == expected and candidate == world_root(tick, region_roots(expected)),
+            controls = serial_controls(batch)
+            expected = (serial_transaction_step(current["state"], tick, controls)
+                        if self.optimize_publication else serial_step(current["state"], tick, controls=controls))
+            require(state == expected and candidate == world_root(tick, self._publication_roots(expected)),
                     "candidate violates sealed player actions or reference rules")
         with self.phase("durable_client_receipts"):
             positions = player_index(current["state"], set(current["players"]))

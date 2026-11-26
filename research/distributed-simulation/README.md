@@ -115,6 +115,14 @@ the historical separate path, but local/near cases regressed during
 elevated host load, and zero runs met every deadline. The full
 service and physical/actual Minecraft gates remain open.
 
+[Exact receipt and replay follow-up](SCALE_PUBLICATION_REPORT.md):
+byte-identical authenticated receipt hashing, bounded-block region
+commitments, and specialized independent transaction replay. Paired
+SQLite publication cost improves at 8,192 agents; full 24-run replay
+verifies 3,052 ticks and 6,104 receipts with five strict local runs.
+Heavy and WAN cases remain unqualified; no sustainable capacity gain
+or physical/actual Minecraft qualification.
+
 ## Ownerless permission lab (#65, 2026-11-26)
 
 The [permission RFC](../../docs/rfcs/ownerless-permissions.md) and retained
