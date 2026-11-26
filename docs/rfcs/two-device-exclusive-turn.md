@@ -1089,3 +1089,42 @@ CLI integration tests, 213 library tests and strict Clippy passed. The
 staging regression detected source/staged divergence and substituted
 directory identity; the real probe also verified consent withdrawal and
 quiescent cleanup. [Retained evidence](../../research/exclusive-turn/evidence/2026-11-26-staged-runtime.txt).
+
+### Real isolated Fabric lifecycle and subsequent offline reference handoff
+
+The test-only `exclusive_turn_fabric_lab` module (excluded from production
+binaries) and `research/exclusive-turn/qualify_fabric_lifecycle.py` exercise
+the reviewed actual runtime against a disposable restored test save. The
+outer controller shares the account/profile exclusion and mandatory cgroup
+limits; the directly supervised child is a namespace wrapper, with all
+inner controller/JVM descendants in that cgroup. A fresh mapped-user, PID
+and loopback-only network namespace is verified before launch. No host game
+listener, canonical world, authority permit, or authenticated player exists.
+The shipped Fabric bridge still requires its authority guard, and a real
+nonce-bound readiness challenge returns `RUNTIME_UNAVAILABLE`.
+
+The authenticated Rust IPC session validates exact world path, version and
+compatibility, verifies Minecraft's active POSIX session lock, executes a
+disposable console scoreboard mutation, obtains `SAVE_COMPLETE` and
+`READY_FOR_SHUTDOWN`, and waits for successful JVM exit and released session
+lock. The outer supervisor requires exact empty-cgroup evidence and complete
+staged-package re-verification before retiring process records and the stage.
+The separate Python gate structurally parses the bounded gzip scoreboard NBT
+for the exact marker, checks both signed journals were unchanged during the
+lab, and only then captures a new offline bundle and performs the existing
+authenticated reference handoff. The old holder cannot restore, the new
+holder restores byte-for-byte with the marker intact, and the retained source
+fixture stays unchanged.
+
+The actual local run passed with Minecraft 26.1.2, Fabric Loader 0.19.3,
+Java 25, 1,024 MiB heap, 2,000 millicores, 2,048 MiB memory cap, and a
+2,203,163-byte final save. The lifecycle took 11.446s; the complete outer
+process gate took 77.78s including package verification. All 214 enabled
+CLI library tests and strict Clippy passed.
+[Retained evidence](../../research/exclusive-turn/evidence/2026-11-26-fabric-lifecycle.txt).
+
+This is a cooperative test with explicitly supplied artifacts and EULA
+confirmation, not a production launch path. It deliberately separates the
+real isolated lifecycle from the subsequent offline signed checkpoint
+publication; it does not prove an atomic live-to-offline adapter, durable
+mutation recovery, live permit fencing, gameplay, or physical partitions.

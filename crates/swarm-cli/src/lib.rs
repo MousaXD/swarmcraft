@@ -5,6 +5,8 @@ pub mod device_retirement;
 pub mod directory_moderation;
 pub mod discovery;
 pub mod exclusive_turn_compatibility;
+#[cfg(all(test, target_os = "linux"))]
+mod exclusive_turn_fabric_lab;
 #[cfg(target_os = "linux")]
 pub mod exclusive_turn_process_probe;
 #[cfg(target_os = "linux")]
