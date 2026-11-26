@@ -1781,6 +1781,65 @@ fn runtime_intent_fences_handoff_across_process_exit_and_revocation_consumes_con
     rejected(probe("1", intent), "revision differs");
     rejected(probe("2", &Hash32([9; 32]).to_string()), "exact unlaunched pin");
     rejected(probe("2", intent), "explicit CPU cap requires a delegated Linux memory and CPU cgroup");
+    let qualify = |accept_eula: bool| {
+        let mut command = cmd(&f.profiles[0], &["runtime", "qualify-fabric"]);
+        command.args([
+            "--expected-world",
+            &f.world,
+            "--expected-grant",
+            &f.initial_grant,
+            "--expected-revision",
+            "2",
+            "--expected-checkpoint",
+            checkpoint,
+            "--expected-intent",
+            intent,
+            "--package",
+            path(&package),
+            "--confirm",
+        ]);
+        if accept_eula {
+            command.arg("--accept-minecraft-eula");
+        }
+        command.env_remove("SWARMCRAFT_HOST_CGROUP_ROOT").output().unwrap()
+    };
+    rejected(qualify(false), "explicit --accept-minecraft-eula required");
+    rejected(qualify(true), "explicit CPU cap requires a delegated Linux memory and CPU cgroup");
+    rejected(
+        run(
+            0,
+            "resume-fabric-checkpoint",
+            &[
+                "--expected-revision",
+                "2",
+                "--expected-checkpoint",
+                checkpoint,
+                "--expected-target",
+                checkpoint,
+                "--expected-intent",
+                intent,
+                "--confirm",
+            ],
+        ),
+        "no signed quiescent Fabric checkpoint transaction",
+    );
+    rejected(
+        run(
+            0,
+            "discard-interrupted-fabric",
+            &[
+                "--expected-revision",
+                "2",
+                "--expected-checkpoint",
+                checkpoint,
+                "--expected-intent",
+                intent,
+                "--acknowledge-unconfirmed-save",
+                "--confirm",
+            ],
+        ),
+        "only an interrupted Fabric process intent may be discarded",
+    );
     rejected(
         run(
             0,

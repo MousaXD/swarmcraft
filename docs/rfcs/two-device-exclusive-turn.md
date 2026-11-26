@@ -1128,3 +1128,82 @@ confirmation, not a production launch path. It deliberately separates the
 real isolated lifecycle from the subsequent offline signed checkpoint
 publication; it does not prove an atomic live-to-offline adapter, durable
 mutation recovery, live permit fencing, gameplay, or physical partitions.
+
+### Fenced isolated Fabric qualification and resumable checkpoint publication
+
+`exclusive-turn runtime qualify-fabric` is an explicitly reviewed local
+qualification command, **not a playable hosting policy**. It requires the
+exact held save-backed grant/checkpoint, a one-shot signed consent and
+reserved intent, the exact reviewed package, `--confirm`, and explicit
+`--accept-minecraft-eula`. It uses the full production memory-headroom and
+delegated CPU/memory admission checks, not the disposable fixture allowance.
+The reference journal lock spans the entire operation. A new private
+workspace receives the exact held save; the separate read-only package
+generation is never reused. The signed `fabric_may_have_spawned_v1` intent
+binds the original scope, exact staged package and workspace/world directory
+identities, and kernel recovery pin before any process may start. The
+namespace wrapper is recorded under the account/profile reservation before
+its start gate is released; the signed consent lock spans the actual Java
+spawn acknowledgment. Consent is rechecked throughout completion and again
+before checkpoint publication. A separate mapped-user/PID/loopback-only
+network namespace provides no host player route. The existing Fabric guard
+remains enabled, no permit is issued, and readiness must refuse. No test
+console mutation is available through the production worker.
+
+After authenticated save/shutdown replies, successful process exit, released
+Java session lock, exact empty cgroup and complete staged package recheck,
+the supervisor captures and verifies the stopped save into a separate
+bundle. It verifies the pinned level data version, durably retains every
+blob and the exact manifest bytes, and retires the empty cgroup. Only then
+can it sign `fabric_checkpoint_pending_v1`, consuming the one-shot consent.
+The signed pending state binds the original held scope, exact target
+checkpoint and digest of the observed lifecycle evidence. Ordinary
+reference operations remain fenced throughout the journal compare-and-swap
+and sidecar retirement; the signed grant, epoch and fence are unchanged.
+
+If interrupted after the pending record is durable,
+`runtime resume-fabric-checkpoint` requires the independently reviewed old
+checkpoint, exact target, grant, revision, intent ID and `--confirm`. It
+rechecks all retained target bytes and accepts only the original checkpoint
+or the exact target already durably installed. It never starts Java or
+re-enables consent. A missing blob, unrelated process record, wrong grant,
+wrong target, or ambiguous state refuses. If the final acknowledgment is
+lost after sidecar retirement, inspect the current journal and runtime
+status; a stale resume request cannot mutate the journal again.
+
+If the earlier possibly-spawned state remains,
+`runtime discard-interrupted-fabric` is separate from Java probe recovery
+and requires `--acknowledge-unconfirmed-save` as well as exact pins and
+confirmation. It preserves the old checkpoint and retains the uncertain
+workspace/stage for review, and can clear the fence only with the exact
+kernel empty-leaf proof or verified same-machine reboot. A crash after
+empty-leaf removal but before pending-state publication remains blocked
+until a verified reboot; no missing-leaf shortcut is allowed. A resumed
+transaction also leaves retained files for explicit review, rather than
+deleting a potentially substituted workspace.
+
+This is still a cooperative local trust model: same-UID hostile package
+execution or a full rollback of identity and journals is outside the
+proof. The isolated command does not implement live player admission,
+production exclusive-turn permits, game stream fencing, a full two-device
+Minecraft session, or automatic crash takeover.
+
+### Local qualification evidence (26 November)
+
+The signed transaction state tests covered both pre-CAS and post-CAS
+restart boundaries, missing retained blobs, incorrect pins and unresolved
+process records. The actual CLI namespace worker, under disposable test-only
+outer admission, authenticated the reviewed Fabric/Minecraft runtime,
+refused readiness without a permit, acknowledged save and shutdown, and
+reaped all descendants. The real lifecycle took 11.896 seconds; the delegated
+gate took 75.83 seconds. A subsequent offline signed handoff restored the
+exact 2,203,059-byte save at epoch 2 without console marker mutation.
+The original fixture remained unchanged. The pinned server manifest initially
+exceeded the generic metadata limit; the corrected launch-only 4 MiB limit
+admits its 2,449,876 bytes while retaining classpath and metadata validation.
+
+The complete public command under normal game/client/OS memory admission
+remains unqualified on this resource-constrained workstation. Normal budget
+checks remain unchanged. The durable transaction and real worker were tested
+separately, not as a live player session or canonical runtime adapter.
+See [retained evidence](../../research/exclusive-turn/evidence/2026-11-26-fabric-transaction.txt).

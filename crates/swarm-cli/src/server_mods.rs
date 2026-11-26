@@ -577,6 +577,17 @@ pub(crate) fn read_zip_entry(bytes: &[u8], wanted: &str) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn read_zip_entry_bounded(bytes: &[u8], wanted: &str, max_output: usize) -> Result<Vec<u8>> {
+    read_optional_zip_entry_bounded(bytes, wanted, max_output)?
+        .ok_or_else(|| anyhow!("JAR does not contain root {wanted}"))
+}
+
+/// Absence is distinct from malformed ZIP metadata, duplicate entries, or
+/// invalid compressed content. A caller must not treat those as absence.
+pub(crate) fn read_optional_zip_entry_bounded(
+    bytes: &[u8],
+    wanted: &str,
+    max_output: usize,
+) -> Result<Option<Vec<u8>>> {
     let eocd = find_eocd(bytes)?;
     if read_u16(bytes, eocd + 4)? != 0 || read_u16(bytes, eocd + 6)? != 0 {
         bail!("multi-disk ZIP/JAR files are unsupported");
@@ -622,6 +633,14 @@ pub(crate) fn read_zip_entry_bounded(bytes: &[u8], wanted: &str, max_output: usi
         let name_start = cursor + 46;
         let name_end = name_start.checked_add(name_len).context("ZIP file name overflows")?;
         let name_bytes = bytes.get(name_start..name_end).context("truncated ZIP file name")?;
+        // Java's JAR metadata lookup can accept case aliases. Never treat
+        // a noncanonical spelling as proof that launch metadata is absent.
+        if matches!(wanted, "META-INF/MANIFEST.MF" | "META-INF/INDEX.LIST")
+            && name_bytes.eq_ignore_ascii_case(wanted.as_bytes())
+            && name_bytes != wanted.as_bytes()
+        {
+            bail!("JAR contains noncanonical case alias for {wanted}");
+        }
         if name_bytes == wanted.as_bytes() {
             if found.is_some() {
                 bail!("JAR contains duplicate {wanted} entries");
@@ -643,11 +662,11 @@ pub(crate) fn read_zip_entry_bounded(bytes: &[u8], wanted: &str, max_output: usi
         }
     }
     ensure_zip(cursor == central_end, "ZIP central directory length differs")?;
-    let entry = found.ok_or_else(|| anyhow!("JAR does not contain root {wanted}"))?;
+    let Some(entry) = found else { return Ok(None) };
     if entry.compressed_size > MAX_METADATA_COMPRESSED_BYTES.max(max_output) || entry.uncompressed_size > max_output {
         bail!("JAR entry exceeds safety limits");
     }
-    extract_zip_entry(bytes, &entry, wanted, max_output)
+    extract_zip_entry(bytes, &entry, wanted, max_output).map(Some)
 }
 
 fn ensure_zip(valid: bool, message: &str) -> Result<()> {
@@ -1059,6 +1078,20 @@ pub(crate) mod tests {
             artifact_hash: Hash32([hash_byte; 32]).to_hex(),
             environment: ModEnvironment::Server,
             component_kind: component_kind(id),
+        }
+    }
+
+    #[test]
+    fn optional_launch_metadata_rejects_case_aliases_and_malformed_archives() {
+        for canonical in ["META-INF/MANIFEST.MF", "META-INF/INDEX.LIST"] {
+            let content = b"metadata";
+            let canonical_jar = stored_jar(canonical, content);
+            assert_eq!(read_optional_zip_entry_bounded(&canonical_jar, canonical, 64).unwrap(), Some(content.to_vec()));
+            let alias_jar = stored_jar(&canonical.to_ascii_lowercase(), content);
+            assert!(read_optional_zip_entry_bounded(&alias_jar, canonical, 64).is_err());
+            let absent_jar = stored_jar("unrelated.txt", content);
+            assert!(read_optional_zip_entry_bounded(&absent_jar, canonical, 64).unwrap().is_none());
+            assert!(read_optional_zip_entry_bounded(b"not a jar", canonical, 64).is_err());
         }
     }
 

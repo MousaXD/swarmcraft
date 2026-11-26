@@ -205,8 +205,12 @@ pub(super) fn run(paths: &DataPaths, command: SaveCommand) -> Result<()> {
     linux::run(paths, command)
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(super) use linux::capture_test_bundle;
 #[cfg(target_os = "linux")]
 pub(super) use linux::verify_held_package;
+#[cfg(target_os = "linux")]
+pub(super) use linux::{capture_runtime_checkpoint, restore_runtime_checkpoint};
 #[cfg(target_os = "linux")]
 pub(super) use linux::{retain_bundle, verify_offer_bundle, verify_retained};
 
@@ -843,6 +847,16 @@ mod linux {
         Ok((manifest, publication.finish()?))
     }
 
+    #[cfg(test)]
+    pub(in super::super) fn capture_test_bundle(
+        source: &Path,
+        destination: &Path,
+        compatibility: Hash32,
+    ) -> Result<(ExclusiveTurnCheckpointV1, Vec<u8>)> {
+        let (manifest, _) = capture(source, destination, compatibility)?;
+        Ok((manifest.checkpoint()?, manifest.encode()?))
+    }
+
     fn restore(bundle: &Path, destination: &Path, manifest: &Manifest) -> Result<PathBuf> {
         verify_bundle(bundle, manifest)?;
         let parent =
@@ -998,6 +1012,45 @@ mod linux {
         let manifest =
             verify_exact(&bundle, journal.checkpoint, head.compatibility(), &store.state(journal.checkpoint)?)?;
         verify_package_bundle(&bundle, &manifest, package)
+    }
+
+    /// Internal runtime adapter only. The caller owns the held world journal
+    /// lock and creates the exact private, never-reused work directory.
+    pub(in super::super) fn restore_runtime_checkpoint(
+        store: &Store,
+        journal: &super::super::Journal,
+        head: &swarm_consensus::exclusive_turn::VerifiedExclusiveTurnHead,
+        destination: &Path,
+    ) -> Result<()> {
+        ensure!(
+            head.save_backed() && journal.phase == Phase::Held && head.holder() == journal.identity,
+            "runtime restoration requires exact held save-backed reference turn"
+        );
+        let bundle = retained_path(store, journal.checkpoint)?;
+        let manifest =
+            verify_exact(&bundle, journal.checkpoint, head.compatibility(), &store.state(journal.checkpoint)?)?;
+        restore(&bundle, destination, &manifest)?;
+        Ok(())
+    }
+
+    /// Capture only after the adapter has independently proved the shutdown
+    /// barrier, process exit, and descendant quiescence. Still requires the
+    /// actual POSIX session lock and exact stopped-tree verification.
+    /// Retain both the full data and manifest bytes BEFORE any signed pending
+    /// publication can reference the target. Never modifies the journal.
+    pub(in super::super) fn capture_runtime_checkpoint(
+        store: &Store,
+        source: &Path,
+        destination: &Path,
+        compatibility: Hash32,
+    ) -> Result<ExclusiveTurnCheckpointV1> {
+        let (manifest, bundle) = capture(source, destination, compatibility)?;
+        verify_level_bundle(&bundle, &manifest, 4790, serde_json::json!({}))?;
+        let checkpoint = manifest.checkpoint()?;
+        let bytes = manifest.encode()?;
+        retain_bundle(store, &bundle, checkpoint, compatibility, &bytes)?;
+        store.retain(checkpoint, &bytes)?;
+        Ok(checkpoint)
     }
 
     fn verify_level_bundle(

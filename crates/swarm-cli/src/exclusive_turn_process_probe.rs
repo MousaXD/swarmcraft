@@ -28,6 +28,9 @@ use std::{
 use swarm_core::DataPaths;
 use swarm_protocol::Hash32;
 
+#[path = "exclusive_turn_fabric_runtime.rs"]
+pub mod fabric;
+
 const OUTPUT_LIMIT: u64 = 64 * 1024;
 const PROBE_CLASSES: usize = 20;
 const PROBE_SOURCE: &[u8] = br#"import java.net.URL;
@@ -177,9 +180,19 @@ impl ProbeRecovery {
     /// Requires an authenticated exact signed probe intent and the stable
     /// reference-world lock. This never grants capacity for another spawn.
     pub fn retire(paths: &DataPaths, directory: &Path, pin: &ProbeRecoveryPin) -> Result<Self> {
+        Self::retire_record(paths, directory, pin, "probe-process.json")
+    }
+
+    /// Separate recovery path: a Fabric interruption can never be cleared
+    /// using Java probe completion or the unlaunched-intent command.
+    pub fn retire_fabric(paths: &DataPaths, directory: &Path, pin: &ProbeRecoveryPin) -> Result<Self> {
+        Self::retire_record(paths, directory, pin, "fabric-process.json")
+    }
+
+    fn retire_record(paths: &DataPaths, directory: &Path, pin: &ProbeRecoveryPin, record: &str) -> Result<Self> {
         let (profile, memory, machine) = hosting_budget::lock_reference_probe_recovery(paths)?;
         validate_ancestors(directory)?;
-        let method = pin.recover(&directory.join("probe-process.json"), &machine.record_path)?;
+        let method = pin.recover(&directory.join(record), &machine.record_path)?;
         Ok(Self { _profile: profile, _memory: memory, _machine: machine, method })
     }
 }
@@ -237,8 +250,9 @@ impl ProbeAdmission {
         self.stage.pin()
     }
 
-    /// Only after the successful probe has returned quiescence evidence
-    /// and the caller has durably retired its exact signed intent.
+    /// Only after successful in-process quiescence and record retirement.
+    /// Java probes clear their signed intent first; Fabric keeps the intent
+    /// fenced until the retained checkpoint transaction is durable.
     pub fn cleanup_completed_leaf(&self, pin: &ProbeRecoveryPin) -> Result<()> {
         pin.retire_completed_leaf()
     }

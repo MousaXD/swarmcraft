@@ -4,7 +4,7 @@
 use crate::{
     exclusive_turn_compatibility::{inspect_core_runtime, CoreRuntimePin, MAX_CORE_JAR_BYTES},
     machine_hosting::linux::{uid, validate_ancestors},
-    server_mods::{read_zip_entry, read_zip_entry_bounded},
+    server_mods::{read_optional_zip_entry_bounded, read_zip_entry, read_zip_entry_bounded},
 };
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,9 @@ const MAX_ENTRIES: usize = 4096;
 const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_METADATA: usize = 1024 * 1024;
+// The pinned 26.1.2 server has a 2,449,876-byte signed manifest.
+// Keep the larger limit specific to launch manifests.
+const MAX_LAUNCH_MANIFEST: usize = 4 * 1024 * 1024;
 const MINECRAFT: &str = "versions/26.1.2/server-26.1.2.jar";
 const LOADER: &str = "fabric-libraries/fabric-loader-0.19.3.jar";
 const BRIDGE: &str = "mods/swarmcraft-fabric.jar";
@@ -249,6 +252,30 @@ impl StagedRuntimePackage {
             .collect()
     }
 
+    /// Before actual Fabric execution, reject JVM classpath expansion out
+    /// of the inventoried package. Malformed ZIPs are not missing metadata.
+    pub fn verify_launch_classpath(&self) -> Result<()> {
+        self.verify_unchanged()?;
+        for name in self.probe_classpath() {
+            let jar = self.inventory.read(&self.root, name, MAX_CORE_JAR_BYTES)?;
+            if let Some(manifest) = read_optional_zip_entry_bounded(&jar, "META-INF/MANIFEST.MF", MAX_LAUNCH_MANIFEST)
+                .with_context(|| format!("cannot inspect launch manifest: {name}"))?
+            {
+                verify_manifest_classpath(&manifest).with_context(|| format!("invalid launch manifest: {name}"))?;
+            }
+            if let Some(index) = read_optional_zip_entry_bounded(&jar, "META-INF/INDEX.LIST", 65536)
+                .with_context(|| format!("cannot inspect launch jar index: {name}"))?
+            {
+                verify_self_index(
+                    &index,
+                    Path::new(name).file_name().and_then(|n| n.to_str()).context("invalid jar path")?,
+                )
+                .with_context(|| format!("invalid launch jar index: {name}"))?;
+            }
+        }
+        self.verify_unchanged()
+    }
+
     pub fn verify_unchanged(&self) -> Result<()> {
         self.pin.verify_root(&self.root)?;
         self.inventory.stable(&self.root)?;
@@ -277,6 +304,44 @@ impl StagedRuntimePackage {
         self.retained = true;
         Ok(())
     }
+}
+
+fn verify_manifest_classpath(bytes: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(bytes)?.replace("\r\n", "\n").replace('\r', "\n");
+    // Java manifest attribute names are case insensitive. Reject the
+    // attribute anywhere (including non-main sections), even if empty.
+    for line in text.lines() {
+        if let Some((name, _)) = line.split_once(':') {
+            ensure!(!name.trim().eq_ignore_ascii_case("class-path"), "manifest classpath expansion refused");
+        }
+    }
+    Ok(())
+}
+
+fn verify_self_index(bytes: &[u8], jar: &str) -> Result<()> {
+    let text = std::str::from_utf8(bytes)?.replace("\r\n", "\n");
+    let mut lines = text.split('\n');
+    ensure!(
+        lines.next() == Some("JarIndex-Version: 1.0") && lines.next() == Some("") && lines.next() == Some(jar),
+        "external or invalid jar index"
+    );
+    let mut ended = false;
+    for line in lines {
+        if line.is_empty() {
+            ended = true;
+            continue;
+        }
+        ensure!(
+            !ended
+                && !line.ends_with(".jar")
+                && line.split('/').all(|p| !p.is_empty()
+                    && p != "."
+                    && p != ".."
+                    && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"_$+.-".contains(&b))),
+            "external or invalid jar index entry"
+        );
+    }
+    Ok(())
 }
 
 impl Drop for StagedRuntimePackage {
@@ -734,6 +799,23 @@ fn inspect_inventory(root: &Path, inventory: &Inventory) -> Result<RuntimePackag
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn launch_classpath_metadata_refuses_expansion() {
+        assert!(verify_manifest_classpath(b"Manifest-Version: 1.0\r\nMain-Class: Example\r\n\r\n").is_ok());
+        for raw in
+            [b"Class-Path: ../foreign.jar\n".as_slice(), b"cLaSs-PaTh: \r\n", b"Name: a\nClass-Path: external.jar\n"]
+        {
+            assert!(verify_manifest_classpath(raw).is_err());
+        }
+        assert!(verify_self_index(b"JarIndex-Version: 1.0\n\nnetty.jar\nio/netty\nMETA-INF\n\n", "netty.jar").is_ok());
+        for raw in [
+            b"JarIndex-Version: 1.0\n\nother.jar\n".as_slice(),
+            b"JarIndex-Version: 1.0\n\nnetty.jar\nio/netty\n\nother.jar\n",
+            b"JarIndex-Version: 1.0\n\nnetty.jar\n../escape\n",
+        ] {
+            assert!(verify_self_index(raw, "netty.jar").is_err());
+        }
+    }
     #[test]
     fn dependency_records_reject_unsafe_and_ambiguous_paths() {
         let hash = "ab".repeat(32);

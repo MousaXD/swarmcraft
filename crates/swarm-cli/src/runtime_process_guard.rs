@@ -105,7 +105,8 @@ impl ProbeRecoveryPin {
     }
 
     /// Called only after successful in-process completion, all children
-    /// reaped, both records retired, and signed intent clearance persisted.
+    /// reaped and both records retired. The caller must keep the signed
+    /// intent fenced until clearance or checkpoint publication is durable.
     pub(crate) fn retire_completed_leaf(&self) -> Result<()> {
         self.cap()?.remove_empty_probe_leaf()
     }

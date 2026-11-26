@@ -122,6 +122,7 @@ def main():
     for name in ("cli", "library-test-binary", "server-fixture", "toolchain-fixture"):
         parser.add_argument(f"--{name}", required=True, type=Path)
     parser.add_argument("--confirm-disposable-test-artifacts-and-eula", required=True, action="store_true")
+    parser.add_argument("--gated-worker", action="store_true", help="Exercise production namespace worker and start gate with test-only outer admission; no console mutation")
     args = parser.parse_args()
     os.umask(0o077)
     cli, binary = args.cli.resolve(strict=True), args.library_test_binary.resolve(strict=True)
@@ -203,10 +204,12 @@ def main():
         require(tree(restored) == source_tree, "initial held save restoration differs")
         save(profiles[1], "restore-held", *base, "--expected-checkpoint", checkpoint, "--destination", lab / "not-holder", "--confirm", refusal="requires exact held")
         unit = f"swarmcraft-memory-cap-test-fabric-{uuid.uuid4().hex}"
+        gate_test = ("exclusive_turn_process_probe::fabric::tests::actual_gated_fabric_worker_has_no_player_route_and_retires_exact_process_boundary"
+                     if args.gated_worker else "exclusive_turn_fabric_lab::real_fabric_lifecycle_isolated_under_exact_package_and_cgroup")
         gate = ["systemd-run", "--user", "--scope", "--quiet", f"--unit={unit}", "-p", "Delegate=yes", "env",
                 "SWARMCRAFT_TEST_CPU_DELEGATION=1", f"SC8_LAB_ROOT={lab}", f"SC8_LAB_PACKAGE={package}",
-                f"SC8_LAB_COMPATIBILITY={pin}", "bash", str(repo / "scripts/e2e/linux_cgroup_memory_gate.sh"), str(binary),
-                "--exact", "exclusive_turn_fabric_lab::real_fabric_lifecycle_isolated_under_exact_package_and_cgroup",
+                f"SC8_LAB_COMPATIBILITY={pin}", f"SC8_LAB_CLI={cli}", "bash", str(repo / "scripts/e2e/linux_cgroup_memory_gate.sh"), str(binary),
+                "--exact", gate_test,
                 "--ignored", "--nocapture", "--test-threads=1"]
         print(f"Running disposable Fabric lifecycle fixture: {lab}", flush=True)
         try:
@@ -219,7 +222,9 @@ def main():
         supervision = json.loads((lab / "fabric-supervision.json").read_text())
         require(all(lifecycle.get(key) is True for key in ("authenticated_world_info", "missing_permit_readiness_refused", "active_session_lock_verified", "save_barrier_acknowledged", "shutdown_barrier_acknowledged", "clean_java_exit", "offline_session_lock_verified")), "actual lifecycle evidence incomplete")
         require(all(supervision.get(key) is True for key in ("exact_staged_package_reverified", "process_and_descendants_quiescent", "ownership_records_retired")), "kernel supervision evidence incomplete")
-        require(marker_count(restored) == 1, "actual scoreboard marker missing or ambiguous after shutdown")
+        expected_marker = 0 if args.gated_worker else 1
+        require(lifecycle["test_marker"] is (not args.gated_worker), "incorrect isolated worker mode")
+        require(marker_count(restored) == expected_marker, "unexpected scoreboard marker after shutdown")
         require(before == [digest(j) for j in journals], "disposable lifecycle changed signed reference history")
         # Only now capture and publish the real changed offline save. This
         # test intentionally does not claim a single atomic runtime adapter.
@@ -248,13 +253,14 @@ def main():
         save(profiles[0], "restore-held", *new_base, "--expected-checkpoint", changed, "--destination", root / "released-restore", "--confirm", refusal="requires exact held")
         recipient = root / "recipient-restored"
         save(profiles[1], "restore-held", *new_base, "--expected-checkpoint", changed, "--destination", recipient, "--confirm")
-        require(tree(recipient) == tree(restored) and marker_count(recipient) == 1, "recipient exact saved scoreboard differs")
+        require(tree(recipient) == tree(restored) and marker_count(recipient) == expected_marker, "recipient exact saved scoreboard differs")
         require(tree(server / "world") == source_tree, "retained source fixture changed")
         for profile in profiles:
             require(not any((profile / "worlds").iterdir()) and not (profile / "control").exists() and not (profile / "runtime").exists(), "canonical world or live profile runtime created")
         print(json.dumps({"classification": "isolated_real_fabric_shutdown_then_offline_signed_handoff", "lifecycle": lifecycle,
                           "supervision": supervision, "initial_commitment": checkpoint, "final_commitment": changed,
-                          "final_save_bytes": final["total_bytes"], "marker": {"name": "sc8_checkpoint", "objective": "sc8marker", "score": 2601},
+                          "final_save_bytes": final["total_bytes"], "marker": None if args.gated_worker else {"name": "sc8_checkpoint", "objective": "sc8marker", "score": 2601},
+                          "gated_production_worker": args.gated_worker, "production_full_admission_tested": False,
                           "recipient_exact_restore": True, "source_released": True, "recipient_reference_held": True,
                           "reference_epoch": 2, "source_fixture_unchanged": True, "canonical_authority": False,
                           "runtime_activation": False, "player_admission": False, "minecraft_gameplay_verified": False}, sort_keys=True), flush=True)

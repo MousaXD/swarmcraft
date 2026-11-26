@@ -499,6 +499,15 @@ enum WorldCommand {
 }
 
 fn main() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(swarm_cli::exclusive_turn_process_probe::fabric::WORKER_ARGUMENT))
+    {
+        // Not a public runtime launcher. The worker only runs in a mapped
+        // PID-1, loopback-only namespace behind the parent's start gate.
+        anyhow::ensure!(std::env::args_os().count() == 2, "invalid isolated Fabric worker invocation");
+        return swarm_cli::exclusive_turn_process_probe::fabric::worker_entry();
+    }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with_target(false)

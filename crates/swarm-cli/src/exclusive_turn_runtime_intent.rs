@@ -1,5 +1,5 @@
-//! Local runtime intent and isolated Java qualification. No Minecraft
-//! launch, save mutation or canonical authority is reachable here.
+//! Local runtime intent and isolated Java/Fabric qualification. No playable
+//! runtime, canonical authority, or player route is reachable here.
 //! Ordinary reference operations refuse an unresolved durable intent even
 //! after the controller exits or its journal lock is released.
 use super::{Pin, Reviewed, Store};
@@ -69,6 +69,49 @@ pub enum RuntimeCommand {
         #[arg(long)]
         expected_intent: Hash32,
     },
+    /// Run a bounded, network-isolated Fabric save/shutdown qualification; no players or hosting permit.
+    QualifyFabric {
+        #[command(flatten)]
+        review: Reviewed,
+        #[arg(long)]
+        expected_checkpoint: Hash32,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        expected_intent: Hash32,
+        #[arg(long)]
+        package: PathBuf,
+        /// Explicit acceptance of the Minecraft EULA for this isolated execution.
+        #[arg(long)]
+        accept_minecraft_eula: bool,
+    },
+    /// Resume only an already signed, quiescent and fully retained checkpoint transaction.
+    ResumeFabricCheckpoint {
+        #[command(flatten)]
+        review: Reviewed,
+        #[arg(long)]
+        expected_checkpoint: Hash32,
+        #[arg(long)]
+        expected_target: Hash32,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        expected_intent: Hash32,
+    },
+    /// Retire an interrupted Fabric qualification without publishing unconfirmed writes.
+    DiscardInterruptedFabric {
+        #[command(flatten)]
+        review: Reviewed,
+        #[arg(long)]
+        expected_checkpoint: Hash32,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        expected_intent: Hash32,
+        /// Acknowledge that only the old signed checkpoint remains authoritative in the reference journal.
+        #[arg(long)]
+        acknowledge_unconfirmed_save: bool,
+    },
     /// Withdraw exact local consent without taking the world journal lock. An intent stays fenced.
     Revoke {
         #[command(flatten)]
@@ -104,7 +147,14 @@ mod linux {
         fs::{self, File, OpenOptions},
         path::Path,
     };
-    use swarm_cli::{exclusive_turn_runtime_package::StagedPackagePin, runtime_process_guard::ProbeRecoveryPin};
+    use swarm_cli::{
+        exclusive_turn_process_probe::{
+            fabric::{FabricWorkspace, FabricWorkspacePin},
+            ProbeAdmission, ProbeRecovery,
+        },
+        exclusive_turn_runtime_package::StagedPackagePin,
+        runtime_process_guard::ProbeRecoveryPin,
+    };
     use swarm_core::{random_nonce, PeerIdentity};
     use swarm_protocol::{ExclusiveTurnCheckpointV1, PeerId};
 
@@ -181,7 +231,22 @@ mod linux {
         // clear path, including by an older decoder.
         JavaProbeMayHaveSpawnedV1,
         JavaProbeMayHaveSpawnedV2(ProbeRecoveryPin),
-        JavaProbeMayHaveSpawnedV3 { recovery: ProbeRecoveryPin, stage: StagedPackagePin },
+        JavaProbeMayHaveSpawnedV3 {
+            recovery: ProbeRecoveryPin,
+            stage: StagedPackagePin,
+        },
+        // Append-only discriminants: older decoders must fail closed.
+        FabricMayHaveSpawnedV1 {
+            recovery: ProbeRecoveryPin,
+            stage: StagedPackagePin,
+            workspace: FabricWorkspacePin,
+        },
+        FabricCheckpointPendingV1 {
+            stage: StagedPackagePin,
+            workspace: FabricWorkspacePin,
+            target: ExclusiveTurnCheckpointV1,
+            evidence: Hash32,
+        },
     }
 
     impl IntentKind {
@@ -191,11 +256,22 @@ mod linux {
                 Self::JavaProbeMayHaveSpawnedV1 => "java_probe_may_have_spawned_v1",
                 Self::JavaProbeMayHaveSpawnedV2(_) => "java_probe_may_have_spawned_v2",
                 Self::JavaProbeMayHaveSpawnedV3 { .. } => "java_probe_may_have_spawned_v3",
+                Self::FabricMayHaveSpawnedV1 { .. } => "fabric_may_have_spawned_v1",
+                Self::FabricCheckpointPendingV1 { .. } => "fabric_checkpoint_pending_v1",
             }
         }
 
         fn is_probe(&self) -> bool {
-            !matches!(self, Self::UnlaunchedNoProcessV1)
+            matches!(
+                self,
+                Self::JavaProbeMayHaveSpawnedV1
+                    | Self::JavaProbeMayHaveSpawnedV2(_)
+                    | Self::JavaProbeMayHaveSpawnedV3 { .. }
+            )
+        }
+
+        fn may_have_spawned(&self) -> bool {
+            self.is_probe() || matches!(self, Self::FabricMayHaveSpawnedV1 { .. })
         }
 
         fn recovery(&self) -> Option<&ProbeRecoveryPin> {
@@ -209,7 +285,18 @@ mod linux {
 
         fn stage(&self) -> Option<&StagedPackagePin> {
             match self {
-                Self::JavaProbeMayHaveSpawnedV3 { stage, .. } => Some(stage),
+                Self::JavaProbeMayHaveSpawnedV3 { stage, .. }
+                | Self::FabricMayHaveSpawnedV1 { stage, .. }
+                | Self::FabricCheckpointPendingV1 { stage, .. } => Some(stage),
+                _ => None,
+            }
+        }
+
+        fn workspace(&self) -> Option<&FabricWorkspacePin> {
+            match self {
+                Self::FabricMayHaveSpawnedV1 { workspace, .. } | Self::FabricCheckpointPendingV1 { workspace, .. } => {
+                    Some(workspace)
+                }
                 _ => None,
             }
         }
@@ -218,8 +305,23 @@ mod linux {
             if let Some(pin) = self.recovery() {
                 pin.verify_budget(consent.heap_mib, consent.cpu_millicores, consent.revision)?;
             }
+            if let Self::FabricMayHaveSpawnedV1 { recovery, .. } = self {
+                recovery.verify_budget(consent.heap_mib, consent.cpu_millicores, consent.revision)?;
+            }
             if let Some(stage) = self.stage() {
                 stage.verify_compatibility(consent.scope.compatibility)?;
+            }
+            if let Some(workspace) = self.workspace() {
+                workspace.validate()?;
+            }
+            if let Self::FabricCheckpointPendingV1 { target, evidence, .. } = self {
+                target.validate()?;
+                ensure!(*evidence != Hash32::default(), "missing isolated Fabric lifecycle evidence digest");
+                ensure!(
+                    target.reference_commitment != consent.scope.checkpoint.reference_commitment
+                        || *target == consent.scope.checkpoint,
+                    "checkpoint claims differ for the same retained bytes"
+                );
             }
             Ok(())
         }
@@ -271,6 +373,9 @@ mod linux {
                     self.consent.as_ref().is_none_or(|consent| consent == &intent.consent),
                     "runtime intent and consent disagree"
                 );
+                if matches!(intent.kind, IntentKind::FabricCheckpointPendingV1 { .. }) {
+                    ensure!(self.consent.is_none(), "pending Fabric checkpoint must consume runtime consent");
+                }
             } else if let Some(consent) = &self.consent {
                 ensure!(consent.revision == self.revision, "unreserved consent revision differs from local state");
             }
@@ -338,6 +443,134 @@ mod linux {
             intent.id()
         }
 
+        fn begin_fabric(
+            &mut self,
+            scope: &Scope,
+            expected: u64,
+            expected_intent: Hash32,
+            kind: IntentKind,
+        ) -> Result<Hash32> {
+            let consent = self.unlaunched_consent(scope, expected, expected_intent)?;
+            ensure!(matches!(kind, IntentKind::FabricMayHaveSpawnedV1 { .. }), "invalid Fabric process intent kind");
+            kind.validate(consent)?;
+            self.next(expected)?;
+            let intent = self.intent.as_mut().context("runtime intent disappeared")?;
+            intent.kind = kind;
+            intent.id()
+        }
+
+        fn exact_intent(&self, scope: &Scope, expected: u64, expected_intent: Hash32) -> Result<&Intent> {
+            ensure!(self.revision == expected, "runtime local revision differs from expected pin");
+            let intent = self.intent.as_ref().context("no unresolved runtime intent")?;
+            ensure!(
+                intent.id()? == expected_intent && &intent.consent.scope == scope,
+                "runtime intent differs from exact pin"
+            );
+            Ok(intent)
+        }
+
+        fn check_fabric(&self, scope: &Scope, expected: u64, expected_intent: Hash32) -> Result<()> {
+            let intent = self.exact_intent(scope, expected, expected_intent)?;
+            ensure!(
+                matches!(intent.kind, IntentKind::FabricMayHaveSpawnedV1 { .. })
+                    && self.consent.as_ref() == Some(&intent.consent),
+                "isolated Fabric lost exact local consent or process intent"
+            );
+            Ok(())
+        }
+
+        // Only the in-process supervisor may call after actual authenticated
+        // shutdown, exact empty cgroup retirement and durable capture.
+        fn prepare_fabric_checkpoint(
+            &mut self,
+            scope: &Scope,
+            expected: u64,
+            expected_intent: Hash32,
+            target: ExclusiveTurnCheckpointV1,
+            evidence: Hash32,
+        ) -> Result<Hash32> {
+            self.check_fabric(scope, expected, expected_intent)?;
+            let intent = self.intent.as_ref().context("Fabric process intent disappeared")?;
+            let IntentKind::FabricMayHaveSpawnedV1 { stage, workspace, .. } = &intent.kind else { unreachable!() };
+            let kind = IntentKind::FabricCheckpointPendingV1 {
+                stage: stage.clone(),
+                workspace: workspace.clone(),
+                target,
+                evidence,
+            };
+            kind.validate(&intent.consent)?;
+            self.next(expected)?;
+            self.consent = None;
+            let intent = self.intent.as_mut().context("Fabric process intent disappeared")?;
+            intent.kind = kind;
+            intent.id()
+        }
+
+        fn pending_checkpoint(
+            &self,
+            current: &Scope,
+            expected_base: Hash32,
+            expected_target: Hash32,
+            expected: u64,
+            expected_intent: Hash32,
+        ) -> Result<(Scope, ExclusiveTurnCheckpointV1, Hash32)> {
+            ensure!(self.revision == expected, "runtime local revision differs from expected pin");
+            let intent = self.intent.as_ref().context("no unresolved runtime intent")?;
+            let IntentKind::FabricCheckpointPendingV1 { target, evidence, .. } = &intent.kind else {
+                anyhow::bail!("no signed quiescent Fabric checkpoint transaction")
+            };
+            let base = &intent.consent.scope;
+            let mut current_generation = current.clone();
+            current_generation.checkpoint = base.checkpoint;
+            ensure!(
+                &current_generation == base
+                    && intent.id()? == expected_intent
+                    && base.checkpoint.reference_commitment == expected_base
+                    && target.reference_commitment == expected_target
+                    && (current.checkpoint == base.checkpoint || current.checkpoint == *target)
+                    && self.consent.is_none(),
+                "pending Fabric checkpoint differs from exact base, target, grant or revision"
+            );
+            Ok((base.clone(), *target, *evidence))
+        }
+
+        fn finish_pending_checkpoint(
+            &mut self,
+            current: &Scope,
+            expected_base: Hash32,
+            expected_target: Hash32,
+            expected: u64,
+            expected_intent: Hash32,
+        ) -> Result<()> {
+            let (_, target, _) =
+                self.pending_checkpoint(current, expected_base, expected_target, expected, expected_intent)?;
+            ensure!(current.checkpoint == target, "pending Fabric checkpoint has not been published");
+            self.next(expected)?;
+            self.intent = None;
+            Ok(())
+        }
+
+        fn fabric_recovery_pin(
+            &self,
+            scope: &Scope,
+            expected: u64,
+            expected_intent: Hash32,
+        ) -> Result<&ProbeRecoveryPin> {
+            let intent = self.exact_intent(scope, expected, expected_intent)?;
+            match &intent.kind {
+                IntentKind::FabricMayHaveSpawnedV1 { recovery, .. } => Ok(recovery),
+                _ => anyhow::bail!("only an interrupted Fabric process intent may be discarded"),
+            }
+        }
+
+        fn finish_fabric_discard(&mut self, scope: &Scope, expected: u64, expected_intent: Hash32) -> Result<()> {
+            self.fabric_recovery_pin(scope, expected, expected_intent)?;
+            self.next(expected)?;
+            self.intent = None;
+            self.consent = None;
+            Ok(())
+        }
+
         fn check_probe(&self, scope: &Scope, expected: u64, expected_intent: Hash32) -> Result<()> {
             ensure!(self.revision == expected, "runtime consent or local revision changed during Java qualification");
             let intent = self.intent.as_ref().context("Java probe intent disappeared")?;
@@ -375,6 +608,7 @@ mod linux {
                     anyhow::bail!("legacy possibly-spawned probe lacks a signed kernel recovery pin; recovery refused")
                 }
                 IntentKind::UnlaunchedNoProcessV1 => anyhow::bail!("unlaunched intent is not a recoverable Java probe"),
+                _ => anyhow::bail!("Fabric intent is not a recoverable Java probe"),
             }
         }
 
@@ -559,6 +793,212 @@ mod linux {
             assert!(state.intent.is_none() && state.consent.is_none());
             assert!(state.finish_recovery(&scope, 5, probe).is_err());
         }
+
+        fn fixture_fabric_kind(scope: &Scope) -> IntentKind {
+            // Pure signed-state fixture: no claim of actual kernel proof.
+            let recovery:ProbeRecoveryPin=serde_json::from_value(serde_json::json!({
+                "controller_pid":123,"cgroup_namespace":4,"mount_namespace":5,
+                "linux":{"machine_id":"ab".repeat(16),"boot_id":"12345678-1234-1234-1234-123456789abc","pid_namespace":6,"controller_start_ticks":7,"java_start_ticks":null,
+                    "cgroup":{"path":"/sys/fs/cgroup/example/swarmcraft-jvm-fixture","device":8,"inode":9,"limit_bytes":1536u64*1024*1024,"high_bytes":1449551462u64,"cpu":{"millicores":500,"admitted_heap_mib":512,"consent_revision":1}}}
+            })).unwrap();
+            let stage=serde_json::from_value(serde_json::json!({"name":format!("runtime-stage-{}","ab".repeat(32)),"device":1,"inode":2,"compatibility":scope.compatibility})).unwrap();
+            let workspace=serde_json::from_value(serde_json::json!({"name":format!("fabric-work-{}","bc".repeat(32)),"device":1,"inode":3,"world_device":1,"world_inode":4})).unwrap();
+            IntentKind::FabricMayHaveSpawnedV1 { recovery, stage, workspace }
+        }
+
+        #[test]
+        fn signed_fabric_transaction_resumes_on_either_side_of_journal_cas() {
+            use super::super::super::{
+                create_dir, draft_genesis, replace_checkpoint, save, ExclusiveTurnApprovalV1, ExclusiveTurnCreationV1,
+                ExclusiveTurnHistoryV1,
+            };
+            for after_cas in [false, true] {
+                let tmp = tempfile::tempdir().unwrap();
+                let paths = DataPaths::from_root(tmp.path().join("profile"));
+                let local = PeerIdentity::load_or_create(&paths).unwrap();
+                let remote = PeerIdentity::generate();
+                let compatibility = Hash32([6; 32]);
+                let source = tmp.path().join("world");
+                create_dir(&source).unwrap();
+                // Minimal valid gzip NBT, Data/DataVersion = 4790.
+                let level = hex::decode(
+                    "1f8b0800000000000203e36260e0626071492c496466e0065161a945c599f9790c0c42db181800d16c62f11e000000",
+                )
+                .unwrap();
+                publish(&source.join("level.dat"), &level, false).unwrap();
+                publish(&source.join("session.lock"), b"", false).unwrap();
+                publish(&source.join("marker"), b"old", false).unwrap();
+                let initial_bundle = tmp.path().join("initial-bundle");
+                let (initial, bytes) = save::capture_test_bundle(&source, &initial_bundle, compatibility).unwrap();
+                let genesis = draft_genesis(
+                    swarm_protocol::EXCLUSIVE_TURN_SAVE_FORMAT_V2,
+                    vec![hex::encode(local.public_key()), hex::encode(remote.public_key())],
+                    local.peer_id(),
+                    compatibility,
+                    initial,
+                )
+                .unwrap();
+                let world = genesis.world_id().unwrap();
+                let grant = genesis.initial_grant_hash().unwrap();
+                let mut approvals = [&local, &remote].map(|key| ExclusiveTurnApprovalV1 {
+                    world_id: world,
+                    device: key.peer_id(),
+                    signature: key.sign(&genesis.approval_bytes(key.peer_id()).unwrap()),
+                });
+                approvals.sort_by_key(|a| a.device);
+                let history = ExclusiveTurnHistoryV1 {
+                    creation: ExclusiveTurnCreationV1 { genesis, approvals },
+                    releases: Vec::new(),
+                };
+                let peer = local.peer_id();
+                let store = Store::create(&paths, world, local).unwrap();
+                create_dir(&store.dir.join("save-bundles")).unwrap();
+                save::retain_bundle(&store, &initial_bundle, initial, compatibility, &bytes).unwrap();
+                store.retain(initial, &bytes).unwrap();
+                let mut journal = Journal {
+                    format: FENCED_JOURNAL_FORMAT,
+                    identity: peer,
+                    history,
+                    phase: Phase::Held,
+                    attempt: 0,
+                    checkpoint: initial,
+                    staged: None,
+                };
+                let head = store.save(world, &journal, false).unwrap();
+                let scope = Scope::held(&journal, &head, initial.reference_commitment).unwrap();
+                let mut state = State::empty(world, peer);
+                state.opt_in(scope.clone(), 0, 512, 500).unwrap();
+                let consent_lock = create_lock(&store.dir).unwrap();
+                persist(&store.dir, &store.identity, &state, false).unwrap();
+                state.reserve(&scope, 1).unwrap();
+                let reserved = state.intent.as_ref().unwrap().id().unwrap();
+                let running = state.begin_fabric(&scope, 2, reserved, fixture_fabric_kind(&scope)).unwrap();
+                persist(&store.dir, &store.identity, &state, true).unwrap();
+                assert!(state.finish_probe(&scope, 3, running).is_err());
+                assert!(state.recovery_pin(&scope, 3, running).is_err());
+                assert!(state.clear(&scope, 3, running).is_err());
+                let mut revoked = state.clone();
+                revoked.revoke(grant, 3).unwrap();
+                assert!(revoked.check_fabric(&scope, 4, running).is_err());
+                assert!(revoked.prepare_fabric_checkpoint(&scope, 4, running, initial, Hash32([8; 32])).is_err());
+                assert!(revoked.fabric_recovery_pin(&scope, 4, running).is_ok());
+                publish(&source.join("marker"), b"new", true).unwrap();
+                let target =
+                    save::capture_runtime_checkpoint(&store, &source, &tmp.path().join("target-bundle"), compatibility)
+                        .unwrap();
+                assert_ne!(initial, target);
+                assert!(state.prepare_fabric_checkpoint(&scope, 3, running, target, Hash32::default()).is_err());
+                let pending = state.prepare_fabric_checkpoint(&scope, 3, running, target, Hash32([8; 32])).unwrap();
+                assert_ne!(pending, running);
+                persist(&store.dir, &store.identity, &state, true).unwrap();
+                assert!(state.consent.is_none());
+                assert!(state
+                    .finish_pending_checkpoint(
+                        &scope,
+                        initial.reference_commitment,
+                        target.reference_commitment,
+                        4,
+                        pending
+                    )
+                    .is_err());
+                assert!(state.fabric_recovery_pin(&scope, 4, pending).is_err());
+                assert!(state.clear(&scope, 4, pending).is_err());
+                assert!(state.opt_in(scope.clone(), 4, 512, 500).is_err());
+                if after_cas {
+                    let bytes = store.verify_checkpoint(&head, target).unwrap();
+                    replace_checkpoint(&store, &mut journal, &head, initial.reference_commitment, target, &bytes)
+                        .unwrap();
+                }
+                drop(consent_lock);
+                drop(store);
+                // Simulate a fresh process after either durable boundary.
+                assert!(Store::open(&paths, world).is_err(), "pending sidecar failed to fence ordinary commands");
+                let store = Store::open_for_runtime_intent(&paths, world).unwrap();
+                let (mut journal, head) = store.load(world).unwrap();
+                let _lock = lock_existing(&store.dir).unwrap();
+                let mut state = load(&store.dir, world, &store.identity).unwrap().unwrap();
+                assert_eq!(journal.checkpoint, if after_cas { target } else { initial });
+                assert!(publish_pending(
+                    &store,
+                    &mut journal,
+                    &head,
+                    &mut state,
+                    initial.reference_commitment,
+                    target.reference_commitment,
+                    3,
+                    pending
+                )
+                .is_err());
+                assert!(publish_pending(
+                    &store,
+                    &mut journal,
+                    &head,
+                    &mut state,
+                    initial.reference_commitment,
+                    Hash32([9; 32]),
+                    4,
+                    pending
+                )
+                .is_err());
+                let record = store.dir.join("fabric-process.json");
+                publish(&record, b"unresolved", false).unwrap();
+                assert!(publish_pending(
+                    &store,
+                    &mut journal,
+                    &head,
+                    &mut state,
+                    initial.reference_commitment,
+                    target.reference_commitment,
+                    4,
+                    pending
+                )
+                .is_err());
+                fs::remove_file(record).unwrap();
+                // Even a correctly signed pending transaction cannot publish
+                // if one of its retained target blobs has disappeared.
+                let blobs = store.dir.join("save-bundles").join(target.reference_commitment.to_string()).join("blobs");
+                let blob = fs::read_dir(blobs).unwrap().next().unwrap().unwrap().path();
+                let removed = tmp.path().join("removed-blob");
+                fs::rename(&blob, &removed).unwrap();
+                assert!(publish_pending(
+                    &store,
+                    &mut journal,
+                    &head,
+                    &mut state,
+                    initial.reference_commitment,
+                    target.reference_commitment,
+                    4,
+                    pending
+                )
+                .is_err());
+                fs::rename(&removed, &blob).unwrap();
+                assert_eq!(
+                    publish_pending(
+                        &store,
+                        &mut journal,
+                        &head,
+                        &mut state,
+                        initial.reference_commitment,
+                        target.reference_commitment,
+                        4,
+                        pending
+                    )
+                    .unwrap(),
+                    Hash32([8; 32])
+                );
+                assert_eq!(state.revision, 5);
+                assert!(state.intent.is_none() && state.consent.is_none());
+                drop(_lock);
+                drop(store);
+                let store = Store::open(&paths, world).unwrap();
+                let (journal, head) = store.load(world).unwrap();
+                assert_eq!(journal.checkpoint, target);
+                assert_eq!(head.grant(), grant);
+                assert_eq!(head.epoch(), 1);
+                assert_eq!(head.fence(), 1);
+                assert_eq!(head.checkpoint(), initial);
+            }
+        }
     }
 
     #[derive(Serialize, Deserialize)]
@@ -673,10 +1113,12 @@ mod linux {
         "intent_kind": intent.map(|i|i.kind.name()),
             "reference_operations_fenced": intent.is_some(),
             "capacity_verified": false, "resource_enforcement_verified": false,
-            "process_spawned": if intent.is_some_and(|i| i.kind.is_probe()) { serde_json::Value::Null } else { false.into() },
-            "unresolved_possibly_spawned_intent": intent.is_some_and(|i| i.kind.is_probe()),
-            "kernel_recovery_pin_available": intent.is_some_and(|i| i.kind.recovery().is_some()),
+            "process_spawned": if intent.is_some_and(|i| i.kind.may_have_spawned()) { serde_json::Value::Null } else { intent.is_some_and(|i| matches!(i.kind,IntentKind::FabricCheckpointPendingV1{..})).into() },
+            "unresolved_possibly_spawned_intent": intent.is_some_and(|i| i.kind.may_have_spawned()),
+            "kernel_recovery_pin_available": intent.is_some_and(|i| i.kind.recovery().is_some() || matches!(i.kind,IntentKind::FabricMayHaveSpawnedV1{..})),
             "staged_generation": intent.and_then(|i| i.kind.stage()).map(StagedPackagePin::name),
+            "fabric_workspace":intent.and_then(|i|i.kind.workspace()).map(FabricWorkspacePin::name),
+            "pending_fabric_checkpoint": intent.and_then(|i| match &i.kind { IntentKind::FabricCheckpointPendingV1{target,..}=>Some(*target),_=>None }),
             "save_barrier_verified": false, "canonical_authority": false, "write_authority": false,
             "runtime_activation": false, "player_admission": false, "minecraft_gameplay_verified": false,
         }))
@@ -687,6 +1129,50 @@ mod linux {
         let (journal, head) = store.load(pin.expected_world)?;
         pin_grant(&head, pin.expected_grant)?;
         Ok((store, journal, head))
+    }
+
+    /// Crash-safe two-record publication. The signed pending state remains
+    /// fenced across the journal CAS and retirement, even if either fsync
+    /// reports an ambiguous failure. Resumption never executes Java again.
+    // Keep every independently reviewed transaction pin explicit at the call site.
+    #[allow(clippy::too_many_arguments)]
+    fn publish_pending(
+        store: &Store,
+        journal: &mut Journal,
+        head: &VerifiedExclusiveTurnHead,
+        state: &mut State,
+        expected_base: Hash32,
+        expected_target: Hash32,
+        expected_revision: u64,
+        expected_intent: Hash32,
+    ) -> Result<Hash32> {
+        let current = Scope::held(journal, head, journal.checkpoint.reference_commitment)?;
+        let (base, target, evidence) =
+            state.pending_checkpoint(&current, expected_base, expected_target, expected_revision, expected_intent)?;
+        ensure!(
+            !exists(&store.dir.join("fabric-process.json"))?,
+            "Fabric process ownership record remains; checkpoint publication refused"
+        );
+        // Never infer target retention from the signed state alone.
+        let bytes = store.verify_checkpoint(head, target)?;
+        if journal.checkpoint == base.checkpoint {
+            super::super::replace_checkpoint(store, journal, head, expected_base, target, &bytes)?;
+        } else {
+            ensure!(journal.checkpoint == target, "pending Fabric journal differs from exact target");
+            // load() already verified the current record and synchronized
+            // its directory; re-verify the target bytes before retirement.
+            store.verify_checkpoint(head, target)?;
+        }
+        let published = Scope::held(journal, head, expected_target)?;
+        state.finish_pending_checkpoint(
+            &published,
+            expected_base,
+            expected_target,
+            expected_revision,
+            expected_intent,
+        )?;
+        persist(&store.dir, &store.identity, state, true)?;
+        Ok(evidence)
     }
 
     pub(in super::super) fn run(paths: &DataPaths, command: RuntimeCommand) -> Result<()> {
@@ -868,6 +1354,199 @@ mod linux {
                 // A recovered stage may have been mutated or substituted.
                 // Never delete/reuse it solely because its process is gone.
                 result["retained_stage_for_review"] = serde_json::to_value(retained_stage)?;
+                print_document(&result)
+            }
+            RuntimeCommand::QualifyFabric {
+                review,
+                expected_checkpoint,
+                expected_revision,
+                expected_intent,
+                package,
+                accept_minecraft_eula,
+            } => {
+                review.confirm()?;
+                ensure!(
+                    accept_minecraft_eula,
+                    "explicit --accept-minecraft-eula required for isolated Fabric execution"
+                );
+                let (store, mut journal, head) = opened(paths, &review.pin)?;
+                let scope = Scope::held(&journal, &head, expected_checkpoint)?;
+                let consent = {
+                    let _lock = lock_existing(&store.dir)?;
+                    let state =
+                        load(&store.dir, head.world(), &store.identity)?.context("runtime local state is absent")?;
+                    state.unlaunched_consent(&scope, expected_revision, expected_intent)?.clone()
+                };
+                super::super::save::verify_held_package(&store, &journal, &head, &package)?;
+                let mut admission = ProbeAdmission::prepare(
+                    paths,
+                    &package,
+                    &store.dir,
+                    scope.compatibility,
+                    consent.heap_mib,
+                    consent.cpu_millicores,
+                    consent.revision,
+                )?;
+                admission.verify_fabric_launch_package()?;
+                let workspace = FabricWorkspace::create(&store.dir)?;
+                super::super::save::restore_runtime_checkpoint(&store, &journal, &head, &workspace.world())?;
+                let workspace_pin = workspace.pin()?;
+                let lock = lock_existing(&store.dir)?;
+                let mut state =
+                    load(&store.dir, head.world(), &store.identity)?.context("runtime local state disappeared")?;
+                state.unlaunched_consent(&scope, expected_revision, expected_intent)?;
+                let recovery = admission.prepare_recovery_pin()?;
+                let running_intent = state.begin_fabric(
+                    &scope,
+                    expected_revision,
+                    expected_intent,
+                    IntentKind::FabricMayHaveSpawnedV1 {
+                        recovery: recovery.clone(),
+                        stage: admission.staged_pin().clone(),
+                        workspace: workspace_pin.clone(),
+                    },
+                )?;
+                persist(&store.dir, &store.identity, &state, true)?;
+                let running_revision = state.revision;
+                let running = admission.start_fabric(&store.dir, &workspace, &workspace_pin, scope.compatibility)?;
+                drop(lock);
+                let check = || {
+                    load(&store.dir, head.world(), &store.identity)?
+                        .context("runtime local state disappeared")?
+                        .check_fabric(&scope, running_revision, running_intent)
+                };
+                let completed = running.complete(check)?;
+                workspace.verify(&workspace_pin)?;
+                // No publication before the authenticated shutdown, process
+                // exit and exact saved-tree capture. Keep all fences held.
+                let target = super::super::save::capture_runtime_checkpoint(
+                    &store,
+                    &workspace.world(),
+                    &workspace.bundle(),
+                    scope.compatibility,
+                )?;
+                workspace.verify(&workspace_pin)?;
+                let lock = lock_existing(&store.dir)?;
+                let mut current =
+                    load(&store.dir, head.world(), &store.identity)?.context("runtime local state disappeared")?;
+                current.check_fabric(&scope, running_revision, running_intent)?;
+                // Retire the exact empty kernel leaf BEFORE signing the
+                // pending checkpoint. No delayed child can attach later.
+                admission.cleanup_completed_leaf(&recovery)?;
+                let pending = current.prepare_fabric_checkpoint(
+                    &scope,
+                    running_revision,
+                    running_intent,
+                    target,
+                    completed.evidence_digest,
+                )?;
+                persist(&store.dir, &store.identity, &current, true)?;
+                let pending_revision = current.revision;
+                publish_pending(
+                    &store,
+                    &mut journal,
+                    &head,
+                    &mut current,
+                    expected_checkpoint,
+                    target.reference_commitment,
+                    pending_revision,
+                    pending,
+                )?;
+                let stage_cleanup = admission.cleanup_completed_stage();
+                let work_cleanup = workspace.cleanup(&workspace_pin);
+                drop(lock);
+                drop(admission);
+                let mut result = report(&current, Some(&Scope::held(&journal, &head, target.reference_commitment)?))?;
+                result["classification"] = "exclusive_turn_isolated_fabric_checkpoint_published".into();
+                result["prior_checkpoint"] = expected_checkpoint.to_string().into();
+                result["published_checkpoint"] = serde_json::to_value(target)?;
+                result["fabric_intent_id"] = running_intent.to_string().into();
+                result["checkpoint_transaction_id"] = pending.to_string().into();
+                result["save_barrier_verified"] = true.into();
+                result["resource_enforcement_verified"] = true.into();
+                result["capacity_verified"] = true.into();
+                result["process_spawned"] = true.into();
+                result["process_and_descendants_quiescent"] = true.into();
+                result["empty_cgroup_retired"] = true.into();
+                result["fabric_lifecycle"] = serde_json::to_value(completed)?;
+                result["staged_generation_retired"] = stage_cleanup.is_ok().into();
+                result["fabric_workspace_retired"] = work_cleanup.is_ok().into();
+                if let Err(e) = stage_cleanup {
+                    result["stage_cleanup_error"] = format!("{e:#}").into();
+                }
+                if let Err(e) = work_cleanup {
+                    result["workspace_cleanup_error"] = format!("{e:#}").into();
+                }
+                print_document(&result)
+            }
+            RuntimeCommand::ResumeFabricCheckpoint {
+                review,
+                expected_checkpoint,
+                expected_target,
+                expected_revision,
+                expected_intent,
+            } => {
+                review.confirm()?;
+                let (store, mut journal, head) = opened(paths, &review.pin)?;
+                let lock = lock_existing(&store.dir)?;
+                let mut state =
+                    load(&store.dir, head.world(), &store.identity)?.context("runtime local state is absent")?;
+                let stage = state.intent.as_ref().and_then(|i| i.kind.stage()).map(|s| s.name().to_owned());
+                let workspace = state.intent.as_ref().and_then(|i| i.kind.workspace()).map(|s| s.name().to_owned());
+                let evidence = publish_pending(
+                    &store,
+                    &mut journal,
+                    &head,
+                    &mut state,
+                    expected_checkpoint,
+                    expected_target,
+                    expected_revision,
+                    expected_intent,
+                )?;
+                drop(lock);
+                let mut result = report(&state, Some(&Scope::held(&journal, &head, expected_target)?))?;
+                result["classification"] = "exclusive_turn_pending_fabric_checkpoint_published".into();
+                result["published_checkpoint"] = serde_json::to_value(journal.checkpoint)?;
+                result["prior_lifecycle_evidence_digest"] = evidence.to_string().into();
+                result["retired_checkpoint_transaction_id"] = expected_intent.to_string().into();
+                result["retained_stage_for_review"] = serde_json::to_value(stage)?;
+                result["retained_workspace_for_review"] = serde_json::to_value(workspace)?;
+                print_document(&result)
+            }
+            RuntimeCommand::DiscardInterruptedFabric {
+                review,
+                expected_checkpoint,
+                expected_revision,
+                expected_intent,
+                acknowledge_unconfirmed_save,
+            } => {
+                review.confirm()?;
+                ensure!(
+                    acknowledge_unconfirmed_save,
+                    "explicit --acknowledge-unconfirmed-save required; uncertain writes are not published"
+                );
+                let (store, journal, head) = opened(paths, &review.pin)?;
+                let scope = Scope::held(&journal, &head, expected_checkpoint)?;
+                let lock = lock_existing(&store.dir)?;
+                let mut state =
+                    load(&store.dir, head.world(), &store.identity)?.context("runtime local state is absent")?;
+                let pin = state.fabric_recovery_pin(&scope, expected_revision, expected_intent)?.clone();
+                let stage = state.intent.as_ref().and_then(|i| i.kind.stage()).map(|s| s.name().to_owned());
+                let workspace = state.intent.as_ref().and_then(|i| i.kind.workspace()).map(|s| s.name().to_owned());
+                let recovery = ProbeRecovery::retire_fabric(paths, &store.dir, &pin)?;
+                state.finish_fabric_discard(&scope, expected_revision, expected_intent)?;
+                persist(&store.dir, &store.identity, &state, true)?;
+                let method = recovery.method();
+                drop(recovery);
+                drop(lock);
+                let mut result = report(&state, Some(&scope))?;
+                result["classification"] = "exclusive_turn_interrupted_fabric_discarded".into();
+                result["recovery_method"] = method.into();
+                result["process_and_descendants_quiescent"] = true.into();
+                result["unconfirmed_writes_published"] = false.into();
+                result["old_checkpoint_preserved"] = true.into();
+                result["retained_stage_for_review"] = serde_json::to_value(stage)?;
+                result["retained_workspace_for_review"] = serde_json::to_value(workspace)?;
                 print_document(&result)
             }
             RuntimeCommand::Clear { review, expected_checkpoint, expected_revision, expected_intent } => {

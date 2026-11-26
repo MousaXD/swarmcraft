@@ -1,0 +1,49 @@
+Sabathon #8: signed isolated Fabric checkpoint transaction
+Baseline: daa3f13. Local validation only; no GitHub Actions.
+
+State-machine tests: 3 passed, 1.03s.
+Exclusive-turn integration tests: 14 passed, 40.80s.
+CLI library: 215 passed, 7 ignored, 28.32s.
+Additional JAR metadata case-alias regression: passed.
+Final package regression tests: 3 passed.
+Strict all-target/all-feature Clippy: passed, 55.20s.
+Final CLI build: passed, 49.29s.
+
+The first real test refused launch preflight before Java started: the
+Minecraft 26.1.2 signed manifest contains 2,449,876 uncompressed bytes.
+A launch-specific bounded 4 MiB manifest limit resolves this while preserving
+the generic metadata bound, external classpath, index and case-alias checks.
+
+Final actual gated-worker test: 1 passed, 75.83s.
+Minecraft 26.1.2, Fabric Loader 0.19.3, Java 25.
+Actual lifecycle: 11.896s. Heap: 1024 MiB. CPU: 2000 millicores.
+Kernel memory limit: 2048 MiB. Private network namespace: verified.
+Authenticated world info, missing-permit readiness refusal, active Java
+session lock, save barrier, shutdown barrier, successful process exit,
+released session lock and complete descendant quiescence: verified.
+Exact staged package reverified; ownership records and empty leaf retired.
+Actual production CLI worker executed with no console marker mutation.
+Offline captured save: 2,203,059 bytes; exact recipient restore at epoch 2.
+Original fixture unchanged. Old holder released; recipient held.
+
+Limitations: state-machine and actual worker tests are separate; full public
+qualify-fabric success under ordinary memory admission is not yet verified.
+The fixture uses test-only outer admission. Normal resource checks remain.
+No live hosting permit, canonical authority or authenticated player session.
+No physical multi-device acceptance or independent source audit claimed.
+
+Final source and executable digests:
+140c6ad5bbfa2fe0d28bfc45114f324576622a100688e852beb2818e00b7b7ee  crates/swarm-cli/src/exclusive_turn_fabric_runtime.rs
+6ec70d0d989fdeb11423535f72534618183781fd586d4fdbdcd5a8517801bf8c  crates/swarm-cli/src/exclusive_turn_runtime_intent.rs
+332230f7a994d5e310a6ef13de7f41261ab59596fa9a6e16dd846d867f9ce112  crates/swarm-cli/src/exclusive_turn_runtime_package.rs
+7b6ed1ab4751fed456649c2c225ef9b20daf3bdd8263b201035c51128264e492  crates/swarm-cli/src/exclusive_turn_process_probe.rs
+f52a80c5879384d7b8aa6c3887ca85157c0a83c7b56983d05b1401b381efd49e  crates/swarm-cli/src/exclusive_turn_save.rs
+b869785670c021ceab8232e2d41443b4173b02b895fda028a1d13d8deac134ae  crates/swarm-cli/src/exclusive_turn_reference.rs
+85027a53345abd9cb11a3c5ae456d99c886f8d1a54c722264a1d55b83d93f9a2  crates/swarm-cli/src/server_mods.rs
+2c4026e540ff1bf35d0112d70c767f829f6cd8b7621af2e862c4c3030adadd3b  crates/swarm-cli/src/runtime_process_guard.rs
+1dcf542f801adc52e966f3f8ba7796a4d55ea033f003b440c669584fca19bf96  crates/swarm-cli/src/main.rs
+8fc455b7b2378e93b8f291911e0b7c91a19d68283b0f4705daffc8ae3f5fb5f7  crates/swarm-cli/src/exclusive_turn_fabric_lab.rs
+cc5fefa802692de016d15d15f85884b9bb24a77706d6db7e98849894eb3590bd  crates/swarm-cli/tests/exclusive_turn_reference_cli.rs
+57a937a168e3ee9bf243c155126124bcd5df2380a562b84b687a94f0dfc5d8c9  research/exclusive-turn/qualify_fabric_lifecycle.py
+e2ad4492d9a1cb49642ec52d48e659788ef7371251bdcd00ccd6a6398f021232  target/debug/swarmcraft
+3d024bd9686612625e2a9918362fe412778d6603e0d5a2f93f4daa282b1eb6ad  target/debug/deps/swarm_cli-8a80662dd624042a

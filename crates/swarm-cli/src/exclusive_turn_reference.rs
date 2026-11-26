@@ -1,6 +1,7 @@
 //! Isolated, Linux-only durable reference workflow for Sabathon #8.
-//! No normal world storage, Minecraft runtime, game route, permit, or hosting
-//! consent is opened or created. The reference checkpoint is opaque test data.
+//! No normal world storage, live game route, canonical permit, or production
+//! hosting consent is opened or created. Isolated qualification may run Java
+//! and Fabric against an exact private reference save.
 use anyhow::{bail, ensure, Context, Result};
 use clap::{Args, Subcommand};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -432,7 +433,8 @@ impl Store {
     }
 
     // Only the isolated runtime-intent commands may open a fenced journal.
-    // They never mutate the reference history or start a process.
+    // Only signed isolated qualification may execute or publish a retained
+    // reference checkpoint; no canonical authority is available here.
     fn open_for_runtime_intent(paths: &DataPaths, world: ExclusiveTurnWorldIdV1) -> Result<Self> {
         let identity = identity(paths)?;
         let dir = dir(paths, world)?;
